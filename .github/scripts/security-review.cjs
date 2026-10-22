@@ -162,6 +162,20 @@ async function evaluate(github, owner, repo, pr) {
 
 async function run({ github, context, core }) {
   const { owner, repo } = context.repo;
+  // A status-write failure is only actionable for the pull request this run is
+  // about. Failing the whole run for a different pull request turned one stale
+  // commit into a red `review` check on every other PR (the scheduled
+  // reconciliation evaluates them all).
+  const triggering = new Set();
+  if (context.payload?.pull_request?.head?.sha) {
+    triggering.add(context.payload.pull_request.head.sha);
+  }
+  if (context.payload?.workflow_run?.head_sha) {
+    triggering.add(context.payload.workflow_run.head_sha);
+  }
+  for (const linked of context.payload?.workflow_run?.pull_requests || []) {
+    if (linked?.head?.sha) triggering.add(linked.head.sha);
+  }
   const groups = new Map();
   try {
     const prs = await github.paginate(github.rest.pulls.list, { owner, repo, state: 'open', per_page: 100 });
@@ -202,10 +216,24 @@ async function run({ github, context, core }) {
     try {
       // An event means something that feeds the verdict may just have changed
       // (a label, a review, the PR body), so the old verdict is marked pending
-      // while it is rechecked. The five-minute reconciliation changes nothing by
-      // itself, so it only needs `pending` on a commit that has no status yet.
+      // while it is rechecked. Only the triggering PR can have changed; every
+      // other open PR is just being reconciled by this run, like the
+      // five-minute schedule. Marking all of them pending burns two statuses per
+      // PR per event and can freeze a SHA at `pending` once GitHub's 1000-status
+      // cap is reached.
+      //
+      // Issues events have no PR SHA. A security label change there can still
+      // flip any PR referencing the issue, so invalidate all existing verdicts
+      // for that case; other issue edits cannot change a PR's verdict.
+      const changesSecurityIssueLabel =
+        context.eventName === 'issues' &&
+        ['labeled', 'unlabeled'].includes(context.payload?.action) &&
+        securityLabels([context.payload?.label].filter(Boolean));
+      const onlyIfMissingPending =
+        !changesSecurityIssueLabel &&
+        (context.eventName === 'schedule' || !triggering.has(sha));
       await publish('pending', 'Checking security scope and required approval',
-        { onlyIfMissing: context.eventName === 'schedule' });
+        { onlyIfMissing: onlyIfMissingPending });
       const results = [];
       for (const pr of group) {
         const { data: snapshot } = await github.rest.pulls.get({ owner, repo, pull_number: pr.number });
@@ -223,9 +251,11 @@ async function run({ github, context, core }) {
       } catch (statusError) {
         // A failed status write must not skip the remaining commits — but it
         // leaves this commit carrying whatever verdict it already had, which
-        // may now be wrong. Keep going, and fail the run so the gap is visible.
+        // may now be wrong. Keep going; fail the run only when the gap is on
+        // the pull request this run is about, so one stale commit cannot break
+        // every other PR's check.
         core.warning(`Security review status for ${sha}: ${statusError.message}`);
-        unwritten.push(sha);
+        if (triggering.has(sha)) unwritten.push(sha);
       }
     }
   }

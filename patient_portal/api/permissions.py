@@ -115,6 +115,7 @@ _READ_SCOPES = frozenset(('patient/*.read', 'user/*.read'))
 _WRITE_SCOPES = frozenset(('patient/*.write', 'user/*.write'))
 _ETL_WRITE_SCOPE = 'system/etl.write'
 _ETL_WRITE_METHODS = frozenset(('POST', 'PUT', 'PATCH'))
+_ETL_DELETE_SCOPE = 'system/etl.delete'
 # Vocabulary/concept data is reference (system) data, not patient data, so a
 # service consumer may read it with a system/reference scope in addition to the
 # patient/user read scopes. See healthkey-ai/promop#344.
@@ -228,6 +229,27 @@ def _has_legacy_etl_write_grant(request) -> bool:
     )
 
 
+def _has_etl_delete_grant(request) -> bool:
+    """Whether a service credential holds the ETL clinical row delete capability.
+
+    Method-blind on purpose: the bulk delete is a POST. Only the classes below
+    decide which verbs and endpoints it reaches.
+    """
+    return (
+        is_service_token(request)
+        and _ETL_DELETE_SCOPE in service_token_scopes(request).split()
+    )
+
+
+class EtlDeletePermission(ScopedTokenPermission):
+    """Clinical row bulk delete: the ETL delete capability or the base rules."""
+
+    def has_permission(self, request, view):
+        return _has_etl_delete_grant(request) or super().has_permission(
+            request, view
+        )
+
+
 class EtlWritePermission(ScopedTokenPermission):
     """Allow the legacy ETL capability on an explicitly approved endpoint."""
 
@@ -317,9 +339,11 @@ class GenomicsCrudPermission(ScopedTokenPermission):
 
 
 class EtlPatientCrudPermission(PatientCrudPermission):
-    """Patient CRUD rules plus the narrowly placed legacy ETL capability."""
+    """Patient CRUD rules plus the narrowly placed ETL capabilities."""
 
     def has_permission(self, request, view):
+        if request.method.upper() == 'DELETE' and _has_etl_delete_grant(request):
+            return True
         return _has_legacy_etl_write_grant(request) or super().has_permission(
             request, view
         )

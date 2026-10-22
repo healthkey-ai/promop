@@ -322,8 +322,11 @@ def test_provision_rejects_actor_claims_and_non_etl_tokens():
 
 @pytest.mark.django_db
 @override_settings(SERVICE_AUTH_TOKENS=GRANTS, SERVICE_AUTH_TOKEN='')
-def test_provision_leaves_a_claimed_address_alone():
-    """Re-minting beside it would fork; adopting it would hand over an account."""
+def test_provision_conflicts_on_a_claimed_address():
+    """Adopting it hands over an account; minting beside it strands the import.
+
+    So neither, and the caller is told which person holds the address (#1913).
+    """
     client = APIClient()
     client.credentials(HTTP_AUTHORIZATION='Bearer etl-test-secret')
     owner = Identity.objects.create(issuer='https://issuer.example', sub='held')
@@ -333,8 +336,45 @@ def test_provision_leaves_a_claimed_address_alone():
     response = client.post('/api/persons/provision/',
                            {'email': 'held@example.com'}, format='json')
 
-    assert response.status_code == 201
-    assert response.data['person_id'] != held.person_id
+    assert response.status_code == 409, response.data
+    assert response.data['person_id'] == held.person_id
+    assert response.data['claimed'] is True
+    assert Person.objects.count() == 1
+
+
+@pytest.mark.django_db
+@override_settings(SERVICE_AUTH_TOKENS=GRANTS, SERVICE_AUTH_TOKEN='')
+def test_provision_conflicts_on_an_ambiguous_address():
+    """Two persons for one address; a third would make it worse every run."""
+    client = APIClient()
+    client.credentials(HTTP_AUTHORIZATION='Bearer etl-test-secret')
+    Person.objects.create(person_id=990002, email='two@example.com')
+    Person.objects.create(person_id=990003, email='TWO@example.com')
+
+    response = client.post('/api/persons/provision/',
+                           {'email': 'two@example.com'}, format='json')
+
+    assert response.status_code == 409, response.data
+    assert response.data['person_ids'] == [990002, 990003]
+    assert Person.objects.count() == 2
+
+
+@pytest.mark.django_db
+@override_settings(SERVICE_AUTH_TOKENS=GRANTS, SERVICE_AUTH_TOKEN='')
+def test_provision_still_reuses_an_unclaimed_address():
+    """The conflicts must not cost the idempotency the importer relies on."""
+    client = APIClient()
+    client.credentials(HTTP_AUTHORIZATION='Bearer etl-test-secret')
+    first = client.post('/api/persons/provision/',
+                        {'email': 'again@example.com'}, format='json')
+
+    second = client.post('/api/persons/provision/',
+                         {'email': 'again@example.com'}, format='json')
+
+    assert (first.status_code, second.status_code) == (201, 200), second.data
+    assert second.data['person_id'] == first.data['person_id']
+    assert second.data['created'] is False
+    assert Person.objects.count() == 1
 
 
 @pytest.mark.django_db

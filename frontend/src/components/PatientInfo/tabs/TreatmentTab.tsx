@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
-import { Pencil, Plus } from 'lucide-react';
+import { Pencil, Plus, Trash2 } from 'lucide-react';
 import { useWritableFields, invalidateWritableFieldsCache } from '@/hooks/useWritableFields';
-import { listTherapyRegimens, type EditableTherapyLine } from '@/api/therapyLines';
+import { listTherapyRegimens, retractTherapyLine, type EditableTherapyLine } from '@/api/therapyLines';
 import type { TherapyRegimen } from '@/types/therapy';
 import ClinicalField from '../ClinicalField';
 import Section from '../Section';
@@ -16,6 +16,9 @@ interface Props {
   /** Receives the re-derived record after a line is authored. Without it the tab
    *  still writes correctly but shows stale values until the next refetch. */
   onRecordRefreshed?: (patientInfo: Record<string, unknown>) => void;
+  /** The host's write gate. A federated host may mount the widget read-only, and
+   *  offering an authoring button there would only produce a refused write. */
+  readOnly?: boolean;
 }
 
 type TherapyDialogState =
@@ -56,7 +59,7 @@ function diseaseToDiseaseCode(
   return TYPE_TO_CODE[diseaseType];
 }
 
-export default function TreatmentTab({ formData, onChange, diseaseType, onRecordRefreshed }: Props) {
+export default function TreatmentTab({ formData, onChange, diseaseType, onRecordRefreshed, readOnly = false }: Props) {
   // person_id rides in the record the tab already receives, so neither the
   // descriptor nor authoring needs an extra prop threaded through both hosts.
   const personId = Number(formData?.person_id ?? formData?.person ?? 0) || null;
@@ -65,6 +68,27 @@ export default function TreatmentTab({ formData, onChange, diseaseType, onRecord
   // asking and whose record it is, not only on whether the field is mapped.
   const { descriptors } = useWritableFields(personId ?? undefined);
   const [dialogState, setDialogState] = useState<TherapyDialogState | null>(null);
+  const [retracting, setRetracting] = useState<number | null>(null);
+  const [retractError, setRetractError] = useState('');
+
+  /** Withdraw the claim that a line happened. Different from clearing its drugs,
+   *  which keeps the line and leaves its composition unknown. */
+  const retract = async (line: EditableTherapyLine) => {
+    if (typeof line.episode_id !== 'number') return;
+    const label = line.regimen || `line ${line.line}`;
+    if (!window.confirm(`Remove ${label} from the treatment history? This records that the line did not happen.`)) return;
+    setRetractError('');
+    setRetracting(line.episode_id);
+    try {
+      const result = await retractTherapyLine(line.episode_id);
+      invalidateWritableFieldsCache();
+      onRecordRefreshed?.(result.patient_info);
+    } catch {
+      setRetractError('Could not remove the line. Reopen this tab to retry.');
+    } finally {
+      setRetracting(null);
+    }
+  };
 
   const [supportiveDialog, setSupportiveDialog] = useState<{ course?: SupportiveTherapyCourse } | null>(null);
   const supportiveCourses = (formData.supportive_therapy_courses ?? []) as SupportiveTherapyCourse[];
@@ -125,13 +149,15 @@ export default function TreatmentTab({ formData, onChange, diseaseType, onRecord
     <div>
       {personId !== null && (
         <div className="mb-5 space-y-3">
-          <button
-            onClick={() => setDialogState({ mode: 'add' })}
-            className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-sm font-medium hover:bg-muted"
-          >
-            <Plus size={14} />
-            Add therapy line
-          </button>
+          {!readOnly && (
+            <button
+              onClick={() => setDialogState({ mode: 'add' })}
+              className="inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-sm font-medium hover:bg-muted"
+            >
+              <Plus size={14} />
+              Add therapy line
+            </button>
+          )}
           {therapyLines.length > 0 && (
             <ul className="divide-y divide-border rounded-md border border-border">
               {therapyLines.map((line) => (
@@ -141,7 +167,10 @@ export default function TreatmentTab({ formData, onChange, diseaseType, onRecord
                 >
                   <div className="min-w-0 flex-1">
                     <p className="font-medium text-portal-text-primary">
-                      Line {line.line}: {line.regimen || 'Unnamed regimen'}
+                      Line {line.line}:{' '}
+                      {line.composition_known === false
+                        ? (line.regimen && line.regimen !== 'Unknown' ? line.regimen : 'Drugs unknown')
+                        : (line.regimen || 'Unnamed regimen')}
                       {line.intent && (
                         <span className="ml-2 font-normal text-portal-text-secondary">
                           {line.intent}
@@ -161,7 +190,7 @@ export default function TreatmentTab({ formData, onChange, diseaseType, onRecord
                       )}
                     </p>
                   </div>
-                  <button
+                  {!readOnly && <button
                     type="button"
                     disabled={typeof line.episode_id !== 'number'}
                     onClick={() => setDialogState({ mode: 'edit', line })}
@@ -169,7 +198,16 @@ export default function TreatmentTab({ formData, onChange, diseaseType, onRecord
                   >
                     <Pencil size={13} />
                     Edit
-                  </button>
+                  </button>}
+                  {!readOnly && <button
+                    type="button"
+                    disabled={typeof line.episode_id !== 'number' || retracting === line.episode_id}
+                    onClick={() => void retract(line)}
+                    className="ml-2 inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1.5 text-xs font-medium text-red-700 hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    <Trash2 size={13} />
+                    Remove
+                  </button>}
                 </li>
               ))}
             </ul>
@@ -201,8 +239,10 @@ export default function TreatmentTab({ formData, onChange, diseaseType, onRecord
         </div>
       </Section>
 
+      {retractError && <p role="alert" className="mb-3 text-sm text-red-700">{retractError}</p>}
+
       <Section title="Supportive Therapy">
-        {personId !== null && <button type="button" onClick={() => setSupportiveDialog({})}
+        {personId !== null && !readOnly && <button type="button" onClick={() => setSupportiveDialog({})}
           className="mb-3 inline-flex items-center gap-1.5 rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted">
           <Plus size={14} /> Add supportive therapy
         </button>}
@@ -212,11 +252,11 @@ export default function TreatmentTab({ formData, onChange, diseaseType, onRecord
               <p className="font-medium">{course.regimen_title}{course.intent && <span className="ml-2 font-normal">{course.intent}</span>}</p>
               <p className="text-xs text-muted-foreground">{course.start_date || 'No start date'} to {course.end_date || 'present'}{course.discontinuation_reason && ` · Reason: ${course.discontinuation_reason}`}</p>
             </div>
-            <button type="button" aria-label={`Edit ${course.regimen_title}`} onClick={() => setSupportiveDialog({ course })} className="rounded-md border px-2.5 py-1.5">Edit</button>
+            {!readOnly && <button type="button" aria-label={`Edit ${course.regimen_title}`} onClick={() => setSupportiveDialog({ course })} className="rounded-md border px-2.5 py-1.5">Edit</button>}
           </li>)}
         </ul> : <p className="text-sm text-muted-foreground">{String(formData.supportive_therapies || 'No supportive therapies recorded.')}</p>}
       </Section>
-      {supportiveDialog && personId !== null && <SupportiveTherapyDialog
+      {supportiveDialog && personId !== null && !readOnly && <SupportiveTherapyDialog
         personId={personId} diseaseCode={diseaseCode} course={supportiveDialog.course}
         onClose={() => setSupportiveDialog(null)} onSaved={(info) => onRecordRefreshed?.(info)}
       />}

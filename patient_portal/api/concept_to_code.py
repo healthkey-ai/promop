@@ -1,7 +1,7 @@
 """Concept-first review using the existing SCCM approval semantics."""
 from uuid import UUID
 
-from django.db import transaction
+from django.db import OperationalError, transaction
 from django.db.models import Count, F, Q
 from django.shortcuts import get_object_or_404
 from rest_framework.decorators import api_view, permission_classes
@@ -9,7 +9,7 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from omop_core.models import FieldConceptMapping, SourceCodeConceptMapping, SuggestRun
+from omop_core.models import ConceptMappingPriority, FieldConceptMapping, SourceCodeConceptMapping, SuggestRun
 from omop_core.services.concept_to_code import (
     browse_concepts, concept_payload, eligible_sources, source_payload, standard_destinations,
 )
@@ -17,6 +17,9 @@ from omop_core.services.source_vocabularies import DOMAIN_TO_TABLE, VOCABULARY_O
 from omop_core.services.suggest_jobs import get_dispatcher, InlineDispatcher
 
 PAGE_SIZE = 50
+# The concept list may show more per page, so a curator can drag a concept
+# from what would be a later page into the priority order (#1914).
+CONCEPT_PAGE_SIZES = (50, 100, 250, 500)
 
 
 def _authorize(user):
@@ -25,7 +28,7 @@ def _authorize(user):
         raise PermissionDenied('Professional access required.')
 
 
-def _paginate(queryset, params):
+def _paginate(queryset, params, page_size=PAGE_SIZE):
     try:
         page = int(params.get('page', 1))
         if page < 1:
@@ -33,9 +36,9 @@ def _paginate(queryset, params):
     except (TypeError, ValueError):
         raise ValidationError({'page': 'Enter a positive whole number.'})
     count = queryset.count()
-    page = min(page, max(1, (count + PAGE_SIZE - 1) // PAGE_SIZE))
-    return queryset[(page - 1) * PAGE_SIZE:page * PAGE_SIZE], {
-        'page': page, 'page_size': PAGE_SIZE, 'total': count,
+    page = min(page, max(1, (count + page_size - 1) // page_size))
+    return queryset[(page - 1) * page_size:page * page_size], {
+        'page': page, 'page_size': page_size, 'total': count,
     }
 
 
@@ -50,8 +53,14 @@ def concept_to_code_list(request):
         raise ValidationError({'domain': 'Unknown clinical table.'})
     if params.get('status') and params['status'] not in ('approved', 'proposed'):
         raise ValidationError({'status': 'Choose approved or proposed.'})
+    try:
+        page_size = int(params.get('page_size', PAGE_SIZE))
+    except (TypeError, ValueError):
+        page_size = 0
+    if page_size not in CONCEPT_PAGE_SIZES:
+        raise ValidationError({'page_size': f'Choose one of {", ".join(map(str, CONCEPT_PAGE_SIZES))}.'})
     concepts, fields, annotations = browse_concepts(params)
-    page, paging = _paginate(concepts, params)
+    page, paging = _paginate(concepts, params, page_size)
     page = list(page.annotate(**annotations))
     field_map = {}
     for field in fields.filter(concept_id__in=[concept.pk for concept in page]).order_by('field_name'):
@@ -65,8 +74,33 @@ def concept_to_code_list(request):
         **paging, 'domains': list(domains),
         'results': [{**concept_payload(concept), 'fields': field_map.get(concept.pk, []),
                      'sccm_counts': {key: getattr(concept, key) for key in ('approved', 'proposed', 'rejected')},
-                     'seen': concept.seen} for concept in page],
+                     'seen': concept.seen, 'priority': concept.priority} for concept in page],
+        'prioritized': ConceptMappingPriority.objects.count(),
     })
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def concept_to_code_priority(request):
+    """Rank one concept at a position, or unrank it with position null (#1914).
+
+    One concept per request, so a move from a filtered or paged view needs no
+    knowledge of the rest of the list: the server renumbers it.
+    """
+    from omop_core.services import concept_priority
+    _authorize(request.user)
+    data = request.data
+    if not isinstance(data, dict):
+        raise ValidationError({'detail': 'Supply a JSON object.'})
+    concept_id, position = data.get('concept_id'), data.get('position', 'missing')
+    if type(concept_id) is not int or concept_id <= 0:
+        raise ValidationError({'concept_id': 'Supply a positive integer concept ID.'})
+    if position is not None and (type(position) is not int or position < 1):
+        raise ValidationError({'position': 'Supply a position of 1 or more, or null to unrank.'})
+    concept = get_object_or_404(standard_destinations(), pk=concept_id)
+    placed = concept_priority.move(concept, position, request.user)
+    return Response({'concept_id': concept.pk, 'position': placed,
+                     'prioritized': ConceptMappingPriority.objects.count()})
 
 
 @api_view(['GET'])
@@ -99,6 +133,109 @@ def concept_to_code_detail(request, concept_id):
     page, paging = _paginate(rows.select_related('target_concept').order_by(*ordering), request.query_params)
     return Response({**paging, **counts, 'concept': concept_payload(concept),
                      'results': [source_payload(row) for row in page]})
+
+
+SOURCE_EXAMPLE_LIMIT = 3
+# Candidate inventory rows read before access filtering. A curator who can see
+# few of the patients holding a common code may get fewer than the limit; the
+# bound keeps the per-patient access checks below from growing with the code.
+SOURCE_EXAMPLE_SCAN = 50
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def concept_to_code_source_examples(request):
+    """Up to three patients whose ETL inventory carries this exact source code.
+
+    Each example is that patient's `PatientSourceCode` row: the Source Metadata
+    a curator checks before approving a mapping (#1911). Read-only. Patient
+    source data has the same audience as the patient Source Codes tab --
+    administrators -- and each patient passes the same check as opening their
+    record, so a curator never sees a patient they could not open.
+    """
+    from omop_core.authorization import can_access_patient
+    from omop_core.models import PatientSourceCode
+    from omop_core.services.access import get_admin_orgs
+    from patient_portal.api.permissions import get_request_org
+    from patient_portal.api.views import _is_admin_actor
+
+    _authorize(request.user)
+    if not _is_admin_actor(request):
+        raise PermissionDenied('Only administrators can view patient source metadata.')
+    params = request.query_params
+    vocabulary = str(params.get('source_vocabulary_id') or '').strip()
+    code = str(params.get('source_code') or '').strip()
+    if not code:
+        raise ValidationError({'source_code': 'Supply the source code.'})
+    omop_table = str(params.get('omop_table') or '').strip()
+    if omop_table and omop_table not in DOMAIN_TO_TABLE.values():
+        raise ValidationError({'omop_table': 'Unknown clinical table.'})
+
+    # The ETL posts the system URI it received; mappings store the canonical id.
+    aliases = [vocabulary, *[alias for alias, canonical in VOCABULARY_OID_ALIASES.items()
+                             if canonical == vocabulary]]
+    rows = PatientSourceCode.objects.filter(
+        source_vocabulary_id__in=aliases, source_value=code,
+        person__patient_record__isnull=False,
+    )
+    if omop_table:
+        rows = rows.filter(Q(omop_table=omop_table) | Q(omop_table=''))
+    rows = rows.order_by('-occurrence_count', '-last_seen', 'pk').values(
+        'person_id', 'person__patient_record__organization_id', 'omop_table', 'occurrence_count',
+        'source_unit', 'source_unit_override', 'example_quantity', 'example_quantity_override',
+        'source_metadata', 'last_seen',
+    )[:SOURCE_EXAMPLE_SCAN]
+
+    org = get_request_org(request)
+    staff = bool(getattr(request.user, 'is_staff', False))
+    admin_org_ids = None if staff or org is not None else set(
+        get_admin_orgs(request.user).values_list('id', flat=True))
+
+    def visible(row):
+        organization_id = row['person__patient_record__organization_id']
+        if org is not None:
+            return organization_id == org.pk
+        if staff:
+            return True
+        return organization_id in admin_org_ids or can_access_patient(request.user, row['person_id'])
+
+    examples, seen = [], set()
+    for row in rows:
+        if row['person_id'] in seen or not visible(row):
+            continue
+        seen.add(row['person_id'])
+        examples.append({
+            'person_id': row['person_id'], 'omop_table': row['omop_table'],
+            'occurrence_count': row['occurrence_count'],
+            'source_unit': (row['source_unit_override'] if row['source_unit_override'] is not None
+                            else row['source_unit']),
+            'example_quantity': (row['example_quantity_override'] if row['example_quantity_override'] is not None
+                                 else row['example_quantity']),
+            'source_metadata': row['source_metadata'] or {},
+            'last_seen': row['last_seen'].isoformat() if row['last_seen'] else None,
+        })
+        if len(examples) == SOURCE_EXAMPLE_LIMIT:
+            break
+    return Response({'examples': examples})
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def concept_to_code_estimate(request, concept_id):
+    """How many source codes Suggest could find for one concept, before running it."""
+    from omop_core.mapping.reverse_suggestions import estimate_source_count
+    _authorize(request.user)
+    concept = get_object_or_404(standard_destinations(), pk=concept_id)
+    strategies = [s for s in request.query_params.get('strategies', 'umls,lexical').split(',') if s]
+    if not strategies or any(s not in ('umls', 'lexical') for s in strategies):
+        raise ValidationError({'strategies': 'Choose umls, lexical, or both.'})
+    include_zero = request.query_params.get('include_zero_seen', '0') == '1'
+    try:
+        estimate = estimate_source_count(concept, strategies=strategies, include_zero_seen=include_zero)
+    except (TimeoutError, OperationalError):
+        # Even the approximation outran its budget; the page says so.
+        return Response({'total': None, 'timed_out': True})
+    return Response({**estimate, 'timed_out': False})
 
 
 @api_view(['POST'])
@@ -217,8 +354,7 @@ def concept_to_code_propose(request, concept_id):
 def concept_to_code_apply(request, concept_id, mapping_id):
     """One reviewed source per transaction, with an exact revision precondition."""
     from patient_portal.api.views import (
-        _can_approve_mappings, _check_mapping_lock, _unit_confirmation_response,
-        _upsert_source_code_mapping, MappingLocked,
+        _check_mapping_lock, _upsert_source_code_mapping, MappingLocked,
     )
     _authorize(request.user)
     if not isinstance(request.data, dict):
@@ -239,12 +375,6 @@ def concept_to_code_apply(request, concept_id, mapping_id):
     selected_status = request.data.get('status', 'proposed')
     if selected_status not in ('proposed', 'approved'):
         raise ValidationError({'status': 'Choose proposed or approved.'})
-    unit_warning = (
-        _unit_confirmation_response(row, concept, request.data)
-        if _can_approve_mappings(request.user) else None
-    )
-    if unit_warning is not None:
-        return unit_warning
     row, repoint = _upsert_source_code_mapping(concept, {
         'status': selected_status, 'domain_id': concept.domain_id, 'omop_table': table,
         'destination_vocabulary_id': concept.vocabulary_id,

@@ -22,9 +22,11 @@ from django.db.models import Field, Model, Q
 from omop_core.models import (
     Concept,
     ConceptClass,
+    ConceptMappingPriority,
     DiseaseTherapyRegimen,
     Domain,
     MappingDestinationCandidate,
+    SourceCodeAxisVariant,
     SourceCodeConceptMapping,
     TherapyComponentClassLink,
     TherapyOutcome,
@@ -75,6 +77,7 @@ class ReferencePayload(TypedDict):
     tables: dict[str, Iterable[ReferenceRow]]
     curation: dict[str, Any]
     candidates: Iterable[ReferenceRow]
+    axis_variants: Iterable[ReferenceRow]
 
 
 @dataclass(frozen=True)
@@ -107,6 +110,9 @@ def copied_tables() -> list[ReferenceTable]:
         ReferenceTable(DiseaseTherapyRegimen, ('disease', 'round', 'regimen')),
         ReferenceTable(TherapyOutcome, ('code',)),
         ReferenceTable(_lab_marker(), ('loinc_code',)),
+        # Curator priority (#1914), matched on the concept's natural key. A
+        # concept not loaded here is skipped with a warning.
+        ReferenceTable(ConceptMappingPriority, ('concept',)),
     ]
 
 
@@ -121,6 +127,8 @@ def _lab_marker() -> type[Model]:
 CANDIDATES = ReferenceTable(
     MappingDestinationCandidate, ('mapping', 'target_vocabulary_id', 'target_concept_code'),
 )
+# After the code mappings too: each variant belongs to one.
+AXIS_VARIANTS = ReferenceTable(SourceCodeAxisVariant, ('mapping', 'axis_key'))
 
 
 @cache
@@ -151,6 +159,7 @@ def read_reference(using: str, stream: bool = False) -> ReferencePayload:
         'tables': {t.label: rows(t) for t in copied_tables()},
         'curation': read_payload(using, tables=CURATION_TABLES, stream=stream),
         'candidates': rows(CANDIDATES),
+        'axis_variants': rows(AXIS_VARIANTS),
     }
 
 
@@ -168,6 +177,7 @@ def apply_reference(payload: ReferencePayload, prune: bool = False, dry_run: boo
                 _apply_table(table, payload['tables'][table.label], stats)
             _merge(stats, apply_payload(payload['curation'], tables=CURATION_TABLES, prune=prune))
             _apply_table(CANDIDATES, payload['candidates'], stats)
+            _apply_table(AXIS_VARIANTS, payload.get('axis_variants', []), stats)
             if dry_run:
                 raise _Rollback
     except _Rollback:
@@ -176,8 +186,8 @@ def apply_reference(payload: ReferencePayload, prune: bool = False, dry_run: boo
 
 
 def _foreign_keys(model: type[Model]) -> list[Field]:
-    """Concrete many-to-one fields of model."""
-    return [f for f in model._meta.concrete_fields if f.many_to_one]
+    """Concrete many-to-one and one-to-one fields of model: every link a row carries."""
+    return [f for f in model._meta.concrete_fields if f.many_to_one or f.one_to_one]
 
 
 def _read_table(table: ReferenceTable, using: str) -> Iterator[ReferenceRow]:

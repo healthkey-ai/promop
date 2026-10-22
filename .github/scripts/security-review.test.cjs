@@ -84,7 +84,7 @@ test('either a file, PR label, or linked issue label requires review', async () 
 
 test('API errors publish failure, never a passing status', async () => {
   const { github, statuses } = fixture({ broken: true });
-  await run({ github, context: { repo: { owner: 'healthkey-ai', repo: 'promop' }, serverUrl: 'https://github.com', runId: 1, eventName: 'pull_request_target' }, core: { warning() {}, setFailed() {} } });
+  await run({ github, context: { repo: { owner: 'healthkey-ai', repo: 'promop' }, serverUrl: 'https://github.com', runId: 1, eventName: 'pull_request_target', payload: { pull_request: { head: { sha: 'current' } } } }, core: { warning() {}, setFailed() {} } });
   assert.deepEqual(statuses.map(status => status.state), ['pending', 'failure']);
 });
 
@@ -101,7 +101,7 @@ test('an ordinary PR cannot overwrite a security failure on a shared head', asyn
   const security = { ...current, number: 8, labels: [{ name: 'security' }] };
   github.rest.pulls.list = async () => [security, current];
   github.rest.pulls.get = async p => ({ data: p.pull_number === 8 ? security : current });
-  await run({ github, context: { repo: { owner: 'healthkey-ai', repo: 'promop' }, serverUrl: 'https://github.com', runId: 1, eventName: 'pull_request_target' }, core: { warning() {}, setFailed() {} } });
+  await run({ github, context: { repo: { owner: 'healthkey-ai', repo: 'promop' }, serverUrl: 'https://github.com', runId: 1, eventName: 'pull_request_target', payload: { pull_request: { head: { sha: 'current' } } } }, core: { warning() {}, setFailed() {} } });
   assert.deepEqual(statuses.map(status => status.state), ['pending', 'failure']);
 });
 
@@ -109,7 +109,7 @@ test('a PR changed during evaluation cannot receive a passing status', async () 
   const { github, current, statuses } = fixture();
   let reads = 0;
   github.rest.pulls.get = async () => ({ data: { ...current, updated_at: ++reads === 1 ? 'now' : 'later' } });
-  await run({ github, context: { repo: { owner: 'healthkey-ai', repo: 'promop' }, serverUrl: 'https://github.com', runId: 1, eventName: 'pull_request_target' }, core: { warning() {}, setFailed() {} } });
+  await run({ github, context: { repo: { owner: 'healthkey-ai', repo: 'promop' }, serverUrl: 'https://github.com', runId: 1, eventName: 'pull_request_target', payload: { pull_request: { head: { sha: 'current' } } } }, core: { warning() {}, setFailed() {} } });
   assert.deepEqual(statuses.map(status => status.state), ['pending', 'failure']);
 });
 
@@ -239,8 +239,40 @@ test('a scheduled run rewrites nothing when the verdict is unchanged', async () 
 test('an event marks an existing verdict pending while it is rechecked', async () => {
   const existing = [{ context: 'Security review', state: 'success', description: 'No security-sensitive files or security-labelled PR/issues' }];
   const { github, statuses } = fixture({ labels: [{ name: 'security' }], existingStatuses: existing });
-  await run({ github, context: { repo: { owner: 'healthkey-ai', repo: 'promop' }, serverUrl: 'https://github.com', runId: 1, eventName: 'pull_request_target' }, core: { warning() {}, setFailed() {} } });
+  await run({ github, context: { repo: { owner: 'healthkey-ai', repo: 'promop' }, serverUrl: 'https://github.com', runId: 1, eventName: 'pull_request_target', payload: { pull_request: { head: { sha: 'current' } } } }, core: { warning() {}, setFailed() {} } });
   assert.deepEqual(statuses.map(status => status.state), ['pending', 'failure']);
+});
+
+test('a non-triggering PR with an existing verdict is not marked pending', async () => {
+  const existing = [{ context: 'Security review', state: 'success', description: 'No security-sensitive files or security-labelled PR/issues' }];
+  const { github, statuses } = fixture({ existingStatuses: existing });
+  const ours = { ...pr, number: 7, labels: [], title: 'Update', body: '', changed_files: 0, updated_at: 'now', base: { ref: 'dev' }, head: { sha: 'sha-ours' } };
+  const other = { ...ours, number: 8, head: { sha: 'sha-other' } };
+  github.rest.pulls.list = async () => [ours, other];
+  github.rest.pulls.get = async ({ pull_number }) => ({ data: pull_number === 7 ? ours : other });
+
+  await run({ github, context: { repo: { owner: 'healthkey-ai', repo: 'promop' }, serverUrl: 'https://github.com', runId: 1, eventName: 'pull_request_target', payload: { pull_request: { head: { sha: 'sha-ours' } } } }, core: { warning() {}, setFailed() {} } });
+
+  assert.deepEqual(statuses.map(status => [status.sha, status.state]), [
+    ['sha-ours', 'pending'],
+    ['sha-ours', 'success'],
+  ]);
+});
+
+test('a security issue-label change invalidates existing verdicts', async () => {
+  const existing = [{ context: 'Security review', state: 'success', description: 'No security-sensitive files or security-labelled PR/issues' }];
+  for (const action of ['labeled', 'unlabeled']) {
+    const { github, statuses } = fixture({ existingStatuses: existing });
+    await run({ github, context: { repo: { owner: 'healthkey-ai', repo: 'promop' }, serverUrl: 'https://github.com', runId: 1, eventName: 'issues', payload: { action, label: { name: 'security' }, issue: { number: 141, labels: action === 'labeled' ? [{ name: 'security' }] : [] } } }, core: { warning() {}, setFailed() {} } });
+    assert.deepEqual(statuses.map(status => status.state), ['pending', 'success'], action);
+  }
+});
+
+test('a non-security issue-label change does not mark verdicts pending', async () => {
+  const existing = [{ context: 'Security review', state: 'success', description: 'No security-sensitive files or security-labelled PR/issues' }];
+  const { github, statuses } = fixture({ existingStatuses: existing });
+  await run({ github, context: { repo: { owner: 'healthkey-ai', repo: 'promop' }, serverUrl: 'https://github.com', runId: 1, eventName: 'issues', payload: { action: 'labeled', label: { name: 'documentation' }, issue: { number: 141, labels: [{ name: 'documentation' }] } } }, core: { warning() {}, setFailed() {} } });
+  assert.deepEqual(statuses, []);
 });
 
 test('a scheduled run publishes a changed verdict over an existing status', async () => {
@@ -270,7 +302,7 @@ test('a status write that fails for one commit does not skip the next', async ()
     statuses.push(status);
   };
   const warnings = [];
-  await run({ github, context: { repo: { owner: 'healthkey-ai', repo: 'promop' }, serverUrl: 'https://github.com', runId: 1, eventName: 'pull_request_target' }, core: { warning: message => warnings.push(message), setFailed() {} } });
+  await run({ github, context: { repo: { owner: 'healthkey-ai', repo: 'promop' }, serverUrl: 'https://github.com', runId: 1, eventName: 'pull_request_target', payload: { pull_request: { head: { sha: 'sha-two' } } } }, core: { warning: message => warnings.push(message), setFailed() {} } });
   assert.deepEqual(statuses.map(status => [status.sha, status.state]), [['sha-two', 'pending'], ['sha-two', 'failure']]);
   assert.ok(warnings.some(message => message.includes('sha-one')));
 });
@@ -279,8 +311,52 @@ test('an unpublishable status fails the run rather than leaving it green', async
   const { github } = fixture({ labels: [{ name: 'security' }] });
   github.rest.repos.listCommitStatusesForRef = async () => { throw new Error('502 Bad Gateway'); };
   const failures = [];
-  await run({ github, context: { repo: { owner: 'healthkey-ai', repo: 'promop' }, serverUrl: 'https://github.com', runId: 1, eventName: 'pull_request_target' }, core: { warning() {}, setFailed: message => failures.push(message) } });
+  await run({ github, context: { repo: { owner: 'healthkey-ai', repo: 'promop' }, serverUrl: 'https://github.com', runId: 1, eventName: 'pull_request_target', payload: { pull_request: { head: { sha: 'current' } } } }, core: { warning() {}, setFailed: message => failures.push(message) } });
   assert.match(failures[0], /Could not publish a security review status/);
+});
+
+test('an unpublishable status on another pull request does not fail this run', async () => {
+  const { github, statuses } = fixture({ labels: [{ name: 'security' }] });
+  const ours = { ...pr, number: 7, labels: [{ name: 'security' }], title: 'Update', body: '', changed_files: 0, updated_at: 'now', base: { ref: 'dev' }, head: { sha: 'sha-ours' } };
+  const stale = { ...ours, number: 8, head: { sha: 'sha-stale' } };
+  github.rest.pulls.list = async () => [ours, stale];
+  github.rest.pulls.get = async ({ pull_number }) => ({ data: pull_number === 7 ? ours : stale });
+  github.rest.repos.createCommitStatus = async (status) => {
+    if (status.sha === 'sha-stale') {
+      const error = new Error('Validation Failed');
+      error.status = 422;
+      throw error;
+    }
+    statuses.push(status);
+  };
+  const failures = [];
+  const warnings = [];
+  await run({ github, context: { repo: { owner: 'healthkey-ai', repo: 'promop' }, serverUrl: 'https://github.com', runId: 1, eventName: 'pull_request_target', payload: { pull_request: { head: { sha: 'sha-ours' } } } }, core: { warning: message => warnings.push(message), setFailed: message => failures.push(message) } });
+  assert.deepEqual(failures, []);
+  assert.deepEqual(statuses.map(status => [status.sha, status.state]), [['sha-ours', 'pending'], ['sha-ours', 'failure']]);
+  assert.ok(warnings.some(message => message.includes('sha-stale')));
+});
+
+test('a scheduled reconciliation warns about a stale commit without failing', async () => {
+  const { github, statuses } = fixture({ labels: [{ name: 'security' }] });
+  const ours = { ...pr, number: 7, labels: [{ name: 'security' }], title: 'Update', body: '', changed_files: 0, updated_at: 'now', base: { ref: 'dev' }, head: { sha: 'sha-ours' } };
+  const stale = { ...ours, number: 8, head: { sha: 'sha-stale' } };
+  github.rest.pulls.list = async () => [ours, stale];
+  github.rest.pulls.get = async ({ pull_number }) => ({ data: pull_number === 7 ? ours : stale });
+  github.rest.repos.createCommitStatus = async (status) => {
+    if (status.sha === 'sha-stale') {
+      const error = new Error('Validation Failed');
+      error.status = 422;
+      throw error;
+    }
+    statuses.push(status);
+  };
+  const failures = [];
+  const warnings = [];
+  await run({ github, context: { repo: { owner: 'healthkey-ai', repo: 'promop' }, serverUrl: 'https://github.com', runId: 1, eventName: 'schedule' }, core: { warning: message => warnings.push(message), setFailed: message => failures.push(message) } });
+  assert.deepEqual(failures, []);
+  assert.deepEqual(statuses.map(status => [status.sha, status.state]), [['sha-ours', 'pending'], ['sha-ours', 'failure']]);
+  assert.ok(warnings.some(message => message.includes('sha-stale')));
 });
 
 test('a reference to an issue that does not exist cannot pin a PR at failure', async () => {

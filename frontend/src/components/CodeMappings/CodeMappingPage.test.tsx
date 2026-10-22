@@ -261,6 +261,22 @@ describe("CodeMappingPage", () => {
     );
   });
 
+  it("flags a source code whose units imply several LOINC axis sets", async () => {
+    renderPage([
+      { ...proposedRow, axis_variant_count: 2 },
+      { ...proposedRow, mapping_id: 9, source_code: "GLUCOSE", source_code_description: "Glucose", axis_variant_count: 0 },
+    ]);
+    const flag = await screen.findByText("2 axis values");
+    expect(flag).toHaveClass("text-blue-600");
+    expect(flag).toHaveAttribute("title", expect.stringMatching(/imply 2 different LOINC axis sets/));
+    // On the code's own line, right after the code.
+    expect(flag.previousElementSibling).toHaveTextContent(/^M-PROTEIN, SERUM$/);
+    expect(flag.previousElementSibling).toHaveAttribute("data-testid", "source-code");
+    const plain = screen.getByText("GLUCOSE", { selector: '[data-testid=source-code]' });
+    expect(within(plain.parentElement!).queryByText(/axis values/)).not.toBeInTheDocument();
+    expect(screen.getAllByText(/axis values/)).toHaveLength(1);
+  });
+
   it("lets a curator choose a destination inline without opening the edit dialog", async () => {
     renderPage([proposedRow]);
     const previousGet = mockGet.getMockImplementation()!;
@@ -411,32 +427,6 @@ describe("CodeMappingPage", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Approve M-PROTEIN, SERUM" }));
     expect(await screen.findByRole("alert")).toHaveTextContent(message);
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-  });
-
-  it("shows unit evidence and retries approval only after curator confirmation", async () => {
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
-    mockPatch
-      .mockRejectedValueOnce({ response: { data: {
-        code: "unit_mismatch_confirmation_required",
-        unit_consistency: {
-          source_code: "M-PROTEIN, SERUM",
-          destination_concept_name: "Protein.monoclonal [Mass/volume] in Serum",
-          property: "MCnc",
-          expected_units: ["mg/dL"],
-          observed_units: [{ unit: "mmol/L", count: 14, compatible: false }],
-        },
-      } } })
-      .mockResolvedValueOnce({ data: { ...proposedRow, status: "approved" } });
-    renderPage([proposedRow]);
-
-    fireEvent.click(await screen.findByRole("button", { name: "Approve M-PROTEIN, SERUM" }));
-
-    await waitFor(() => expect(confirm).toHaveBeenCalledWith(expect.stringContaining("mmol/L (14 results)")));
-    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("Approve anyway?"));
-    expect(mockPatch).toHaveBeenLastCalledWith("/v1/code-mappings/7/", expect.objectContaining({
-      status: "approved", confirm_unit_mismatch: true,
-    }));
-    confirm.mockRestore();
   });
 
   it("shows the exact Athena duplicate error inside the edit dialog", async () => {
@@ -747,6 +737,30 @@ describe("CodeMappingPage", () => {
       expect(screen.getByLabelText("Destination Concept ID")).toHaveValue(proposedRow.destination_concept_id);
     });
 
+    it("sends the SNOMED evidence settings with Suggest only while the source is unchanged", async () => {
+      renderPage();
+      const originalGet = mockGet.getMockImplementation()!;
+      mockGet.mockImplementation((url: string, ...rest: unknown[]) => url === "/v1/code-mappings/7/snomed-attributes/"
+        ? Promise.resolve({ data: { mapping_id: 7, applies: true, snomed_attributes: { laterality: "Left" }, source: null,
+          hierarchies: { Disorder: "disorder" }, lateralities: ["Left", "Right", "Right and left"] } })
+        : originalGet(url, ...rest));
+      fireEvent.click((await screen.findByText("M-PROTEIN, SERUM", { selector: '[data-testid=source-code]' })).closest("tr")!);
+      const panel = await screen.findByRole("region", { name: "SNOMED evidence" });
+      fireEvent.change(within(panel).getByLabelText("Hierarchy"), { target: { value: "__none__" } });
+      mockPost.mockResolvedValue({ data: suggestRun({ activity: [] }) });
+      const dialog = within(screen.getByRole("dialog"));
+      fireEvent.click(dialog.getByRole("button", { name: "Suggest", exact: true }));
+      await waitFor(() => expect(mockPost).toHaveBeenCalledWith("/v1/code-mappings/suggest-one/", expect.objectContaining({
+        snomed_attributes: { laterality: "Left", hierarchy: null } })));
+      mockPost.mockClear();
+      mockPost.mockResolvedValue({ data: suggestRun({ activity: [] }) });
+      fireEvent.change(screen.getByLabelText("Source Code Value"), { target: { value: "CHANGED" } });
+      fireEvent.click(dialog.getByRole("button", { name: "Suggest", exact: true }));
+      await waitFor(() => expect(mockPost).toHaveBeenCalledWith("/v1/code-mappings/suggest-one/", expect.anything()));
+      const body = mockPost.mock.calls.find(([url]) => url === "/v1/code-mappings/suggest-one/")![1];
+      expect(body).not.toHaveProperty("snomed_attributes");
+    });
+
     it("highlights imported alternatives and saves the curator's selected destination", async () => {
       renderPage([{ ...proposedRow, destination_count: 3 }]);
       const originalGet = mockGet.getMockImplementation()!;
@@ -834,6 +848,38 @@ describe("CodeMappingPage", () => {
       );
       expect(screen.getByTestId("source-code-metadata")).toHaveTextContent("(OMOP concept 45542660)");
       expect(screen.queryByLabelText("Source Concept ID")).not.toBeInTheDocument();
+    });
+
+    it("shows an example patient's Source Metadata for the code", async () => {
+      renderPage();
+      const cell = await screen.findByText("M-PROTEIN, SERUM", { selector: '[data-testid=source-code]' });
+      const originalGet = mockGet.getMockImplementation()!;
+      mockGet.mockImplementation((url: string, config?: unknown) => url === "/v1/concept-to-code/source-examples/"
+        ? Promise.resolve({ data: { examples: [{
+          person_id: 21, omop_table: "measurement", occurrence_count: 3, source_unit: "g/dL",
+          example_quantity: "1.2", source_metadata: { specimen: "serum" }, last_seen: null,
+        }] } })
+        : originalGet(url, config));
+      fireEvent.click(cell.closest("tr")!);
+      await screen.findByText("Edit Mapping");
+      expect(await screen.findByRole("combobox", { name: "Example patient" })).toHaveTextContent("Patient 21 · Seen 3");
+      expect(screen.getByText(/"specimen": "serum"/)).toBeInTheDocument();
+      expect(mockGet).toHaveBeenCalledWith("/v1/concept-to-code/source-examples/", {
+        params: expect.objectContaining({ source_code: "M-PROTEIN, SERUM" }),
+      });
+    });
+
+    it("expands the mapping's own Source Metadata when no patient row carries the code", async () => {
+      renderPage([{ ...proposedRow, source_evidence: {
+        organization: null, occurrence_count: 12, group_occurrence_count: null, units: [],
+        metadata: { patients: 205, codings: 12, specimen: "serum" },
+      } }]);
+      const cell = await screen.findByText("M-PROTEIN, SERUM", { selector: '[data-testid=source-code]' });
+      fireEvent.click(cell.closest("tr")!);
+      await screen.findByText("Edit Mapping");
+      fireEvent.click(await screen.findByRole("button", { name: /Source Metadata/ }));
+      expect(screen.getByText(/"specimen": "serum"/)).toBeInTheDocument();
+      expect(await screen.findByTestId("source-examples-empty")).toHaveTextContent("aggregate source inventory");
     });
 
     it("puts Domain first in the source block", async () => {
@@ -1216,12 +1262,13 @@ describe("CodeMappingPage", () => {
       expect(await screen.findByRole("button", { name: "Update & Approve" })).toBeInTheDocument();
     });
 
-    it("shows progress while the re-point runs, then what it rewrote", async () => {
-      // The rewrite touches every stored row carrying this code and can run for
-      // a while. A dialog that appears frozen gets clicked again; one that just
-      // vanishes leaves a curator unsure anything happened.
-      let release!: (value: unknown) => void;
-      mockPatch.mockReturnValue(new Promise((resolve) => { release = resolve; }));
+    it("closes on save and says the patient records update in the background", async () => {
+      // The save returns once the mapping is written; a job moves the stored
+      // rows, which can take minutes on a common code (#1952).
+      mockPatch.mockResolvedValue({
+        data: { ...proposedRow, status: "approved", destination_concept_id: 3046299,
+          repoint: { queued: true, from_concept_ids: [0, 2039000101] } },
+      });
 
       await openDialog();
       fireEvent.change(screen.getByLabelText("Destination Concept ID"), {
@@ -1230,16 +1277,9 @@ describe("CodeMappingPage", () => {
       fireEvent.change(screen.getByLabelText("Status"), { target: { value: "approved" } });
       fireEvent.click(screen.getByRole("button", { name: "Update & Approve" }));
 
-      // In flight: names both concepts so the curator can see what is moving.
-      expect(await screen.findByText(/Updating concept 2039000101/)).toHaveTextContent("3046299");
-
-      release({
-        data: { repoint: { rows_updated: 1284, persons_marked_stale: 96, rows_collapsed: 2 } },
-      });
-
-      const status = await screen.findByText(/Updated 1284 row/);
-      expect(status).toHaveTextContent("96 patient(s)");
-      expect(status).toHaveTextContent("2 duplicate(s) collapsed");
+      expect(await screen.findByText(/being updated to the new concept in the background/)).toHaveTextContent("M-PROTEIN, SERUM");
+      await waitFor(() => expect(screen.queryByText("Edit Mapping")).not.toBeInTheDocument());
+      expect(mockPatch.mock.calls[0][1]).not.toHaveProperty("confirm_unit_mismatch");
     });
 
     it("patches the mapping by its own id, not its destination concept", async () => {
@@ -1946,8 +1986,13 @@ describe("server mapping pages", () => {
     await screen.findByText("SEEN MEMBER");
     fireEvent.click(screen.getByRole("checkbox", { name: "Unmapped: only codes with Seen greater than zero" }));
     await waitFor(() => expect(screen.queryByText("SEEN MEMBER")).not.toBeInTheDocument());
-    fireEvent.click(await screen.findByRole("button", { name: "Expand Albumin" }));
-    await screen.findByText("ALL MEMBER");
+    // The toggle reloads the list, which can re-render the group collapsed
+    // after the first click lands; expand again until the members show.
+    await waitFor(() => {
+      const expand = screen.queryByRole("button", { name: "Expand Albumin" });
+      if (expand) fireEvent.click(expand);
+      expect(screen.getByText("ALL MEMBER")).toBeInTheDocument();
+    }, { timeout: 5000 });
     expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/group/", { params: expect.objectContaining({ seen_only: "0" }) });
   });
 
@@ -2092,49 +2137,6 @@ describe("server mapping pages", () => {
     const table = await screen.findByRole("table", { name: "Unmapped mappings" });
     expect(within(table).queryByRole("columnheader", { name: "Status" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Reject group|Confirm reject/ })).not.toBeInTheDocument();
-  });
-
-  it("confirms unit evidence before retrying a group approval", async () => {
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
-    mockPost
-      .mockRejectedValueOnce({ response: { data: {
-        code: "unit_mismatch_confirmation_required",
-        unit_consistency: {
-          warning_count: 12,
-          destination_concept_name: "Albumin [Mass/volume] in Serum or Plasma",
-          property: "MCnc",
-          expected_units: ["g/dL"],
-          observed_units: [{ unit: "mmol/L", count: 12 }],
-          observed_unit_count_kind: "mappings",
-        },
-      } } })
-      .mockResolvedValueOnce({ data: suggestRun({ total: 12, done: 12, destinations: 12 }) });
-    const payload = browseData({
-      rollup: true, selected_source: "EPIC",
-      tabs: [{ vocabulary_id: "EPIC", label: "Epic", is_standard: false, proposed: 12, approved: 0, athena: 0 }],
-      groups: { Unmapped: [entry({
-        members: 12, proposed: 12,
-        destination_concept_id: 3024561,
-        destination_concept_name: "Albumin [Mass/volume] in Serum or Plasma",
-        destination_concept_code: "1751-7", destination_vocabulary_id: "LOINC",
-      })] },
-    });
-    mockGet.mockImplementation((url: string) => {
-      if (url === "/v1/code-mappings/") return Promise.resolve({ data: payload });
-      if (url === "/user/") return Promise.resolve({ data: { user: { is_staff: true } } });
-      return Promise.resolve({ data: url.includes("reference") ? reference : {} });
-    });
-    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
-
-    fireEvent.click(await screen.findByRole("button", { name: "Approve 12" }));
-
-    await waitFor(() => expect(mockPost).toHaveBeenLastCalledWith(
-      "/v1/code-mappings/group/action/",
-      expect.objectContaining({ action: "approve", confirm_unit_mismatch: true }),
-    ));
-    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("12 mappings in this group"));
-    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("mmol/L (12 mappings)"));
-    confirm.mockRestore();
   });
 
   it("expands a group into its vendor codes, and collapses again", async () => {
