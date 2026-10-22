@@ -10,6 +10,7 @@ import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import type { AxiosInstance } from 'axios';
 import { QueryClient } from '@tanstack/react-query';
 import PatientInfo from './PatientInfo';
+import { patientFormForClient } from './patientFormRuntime';
 import { __resetWritableFieldsCache } from '@/hooks/useWritableFields';
 import { resetClinicalTransport } from '@/api/clinicalTransport';
 
@@ -22,6 +23,7 @@ vi.mock('@/hooks/useLabMeasurements', () => ({
 }));
 
 const DESCRIPTORS = {
+  email: { kind: 'direct', writable: true, target: 'patient_record', control: 'email' },
   anc_thousand_per_ul: {
     kind: 'direct', writable: true, target: 'patient_record',
     value_kind: 'number',
@@ -94,6 +96,7 @@ beforeEach(() => {
         data: {
           patient_info: merged,
           patient_name: 'Alishia Tawny Howell',
+          write: { applied: Object.keys(body as Record<string, unknown>), rejected: {} },
         },
       });
     }),
@@ -120,7 +123,7 @@ async function openLabsTab() {
 async function editAndSave(displayValue: string, next: string) {
   vi.useFakeTimers({ shouldAdvanceTime: true });
   fireEvent.change(screen.getByDisplayValue(displayValue), { target: { value: next } });
-  await act(async () => { vi.advanceTimersByTime(2100); });
+  await act(async () => { await vi.advanceTimersByTimeAsync(500); });
 }
 
 describe('federated PatientInfo save', () => {
@@ -141,9 +144,9 @@ describe('federated PatientInfo save', () => {
     await editAndSave('3.1', '5.5');
 
     await waitFor(() =>
-      expect(patches.some(([u]) => u.includes('/patient-info/me/'))).toBe(true),
+      expect(patches.some(([u]) => u === '/api/v1/patient-records/261/')).toBe(true),
     );
-    const [, body] = patches.find(([u]) => u.includes('/patient-info/me/'))!;
+    const [, body] = patches.find(([u]) => u === '/api/v1/patient-records/261/')!;
     expect(body).toMatchObject({ anc_thousand_per_ul: 5.5 });
     // No separate OMOP endpoint post
     expect(posts).toEqual([]);
@@ -155,7 +158,7 @@ describe('federated PatientInfo save', () => {
     await editAndSave('3.1', '5.5');
 
     await waitFor(() =>
-      expect(patches.some(([u]) => u.includes('/patient-info/me/'))).toBe(true),
+      expect(patches.some(([u]) => u === '/api/v1/patient-records/261/')).toBe(true),
     );
     // No measurement/observation POST should happen
     expect(posts).toEqual([]);
@@ -166,9 +169,9 @@ describe('federated PatientInfo save', () => {
     await editAndSave('howell@example.org', 'a.howell@example.org');
 
     await waitFor(() =>
-      expect(patches.some(([u]) => u.includes('/patient-info/me/'))).toBe(true),
+      expect(patches.some(([u]) => u === '/api/v1/patient-records/261/')).toBe(true),
     );
-    const [, body] = patches.find(([u]) => u.includes('/patient-info/me/'))!;
+    const [, body] = patches.find(([u]) => u === '/api/v1/patient-records/261/')!;
     expect(body).not.toHaveProperty('absolute_neutrophile_count');
   });
 
@@ -177,9 +180,9 @@ describe('federated PatientInfo save', () => {
     await editAndSave('howell@example.org', 'a.howell@example.org');
 
     await waitFor(() =>
-      expect(patches.some(([u]) => u.includes('/patient-info/me/'))).toBe(true),
+      expect(patches.some(([u]) => u === '/api/v1/patient-records/261/')).toBe(true),
     );
-    const [, body] = patches.find(([u]) => u.includes('/patient-info/me/'))!;
+    const [, body] = patches.find(([u]) => u === '/api/v1/patient-records/261/')!;
     for (const f of ['id', 'created_at', 'updated_at', 'derivation_version']) {
       expect(body).not.toHaveProperty(f);
     }
@@ -190,9 +193,9 @@ describe('federated PatientInfo save', () => {
     await editAndSave('howell@example.org', 'a.howell@example.org');
 
     await waitFor(() =>
-      expect(patches.some(([u]) => u.includes('/patient-info/me/'))).toBe(true),
+      expect(patches.some(([u]) => u === '/api/v1/patient-records/261/')).toBe(true),
     );
-    const [, body] = patches.find(([u]) => u.includes('/patient-info/me/'))!;
+    const [, body] = patches.find(([u]) => u === '/api/v1/patient-records/261/')!;
     expect(body).toEqual({ email: 'a.howell@example.org' });
   });
 
@@ -201,7 +204,7 @@ describe('federated PatientInfo save', () => {
     await editAndSave('howell@example.org', 'a.howell@example.org');
 
     await waitFor(() =>
-      expect(patches.some(([u]) => u.includes('/patient-info/me/'))).toBe(true),
+      expect(patches.some(([u]) => u === '/api/v1/patient-records/261/')).toBe(true),
     );
     expect(screen.getByDisplayValue('a.howell@example.org')).toBeInTheDocument();
   });
@@ -213,17 +216,18 @@ describe('federated PatientInfo save', () => {
       target: { value: 'a.howell@example.org' },
     });
     await act(async () => {
-      qc.setQueryData(['patient-info', 'me'], {
-        patient_info: { ...PATIENT_INFO, anc_thousand_per_ul: 4.2 },
-        user: { name: 'Alishia Howell', email: 'howell@example.org' },
-        patient_name: 'Alishia Tawny Howell',
-      });
+      (client.get as ReturnType<typeof vi.fn>).mockImplementation((url: string) => Promise.resolve({
+        data: url.includes('writable-fields') ? DESCRIPTORS : {
+          patient_info: { ...PATIENT_INFO, anc_thousand_per_ul: 4.2 }, patient_name: 'Alishia Tawny Howell',
+        },
+      }));
+      await patientFormForClient(client, '/api').load();
     });
     expect(screen.getByDisplayValue('a.howell@example.org')).toBeInTheDocument();
     fireEvent.change(screen.getByDisplayValue('a.howell@example.org'), {
       target: { value: 'b.howell@example.org' },
     });
-    await act(async () => { vi.advanceTimersByTime(2100); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
     await waitFor(() => expect(patches).toHaveLength(1));
     expect(patches[0][1]).toEqual({ email: 'b.howell@example.org' });
   });
@@ -243,10 +247,9 @@ describe('federated PatientInfo save', () => {
       return Promise.resolve({ data: [] });
     });
 
-    await renderAndLoad();
-    await editAndSave('howell@example.org', 'a.howell@example.org');
-
-    expect(patches.filter(([u]) => u.includes('/patient-info/me/'))).toEqual([]);
+    render(<PatientInfo apiClient={client} apiBasePath="/api" queryClient={qc} />);
+    await screen.findByRole('alert');
+    expect(patches).toEqual([]);
     expect(posts).toEqual([]);
   });
 });

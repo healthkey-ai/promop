@@ -1,6 +1,7 @@
 import type { AxiosInstance } from "axios";
 import type { QueryClient } from "@tanstack/react-query";
 import type { LabsThemeTokens } from "./types";
+import type { PatientFormResult } from './patientFormStore';
 
 export interface PatientInfoProps {
   apiClient: AxiosInstance;
@@ -16,7 +17,7 @@ export interface PatientInfoProps {
    *  page title of their own (see ht-one's clinical routes) pass false, so the
    *  screen does not show two. */
   showHeading?: boolean;
-  onPatientUpdated?: (data: unknown) => void;
+  onPatientUpdated?: (data: PatientFormResult) => unknown;
 }
 
 export interface PatientInfoData {

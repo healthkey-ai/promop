@@ -399,6 +399,7 @@ CORS_EXPOSE_HEADERS = (
 )
 CORS_ALLOW_HEADERS = (
     *default_headers,
+    'x-patient-form',  # opt-in acknowledged shared form writes
     'x-provenance-source',
     'x-provenance-user-id',
     # A shared Personal Health Record is read with its link's token in this

@@ -5566,6 +5566,30 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
     so anything added there widens a frozen API. New actions belong here.
     """
 
+    def partial_update(self, request, pk=None):
+        # The shared field form opts into explicit per-field acknowledgements.
+        # Other v1 clients keep their existing full-record serializer contract.
+        if request.headers.get('X-Patient-Form') != '1':
+            return super().partial_update(request, pk=pk)
+        from omop_core.services.patient_form import apply_patient_form_patch
+        person, record, error = self._resolve_patient_with_auth(request, pk)
+        if error is not None:
+            return error
+        if not _caller_may_write_patient(request, person.person_id):
+            return Response({'detail': 'You have read-only access to this patient.'}, status=403)
+        if not isinstance(request.data, dict) or not request.data:
+            return Response({'detail': 'Provide a non-empty object of field edits.'}, status=400)
+        try:
+            record, result = apply_patient_form_patch(person, request.data)
+        except ValueError as exc:
+            return Response({'detail': str(exc)}, status=400)
+        if not result.applied:
+            return Response({'detail': 'No fields were saved.', 'rejected': result.rejected}, status=400)
+        return Response({'patient_info': PatientRecordSerializer(record, context={'request': request}).data,
+                         'patient_name': _rendered_patient_name(person),
+                         'write': {'applied': result.applied, 'rejected': result.rejected,
+                                   'deferred_profile': sorted(result.profile)}})
+
     @action(detail=False, methods=['get'], url_path='writable-fields')
     def writable_fields(self, request: Request) -> Response:
         """Which PatientRecord fields a client may edit and their OMOP projection.
@@ -5588,7 +5612,11 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
         """
         from omop_core.services.write_descriptor import build_writable_field_descriptor
 
+        from omop_core.services.patient_form import patient_form_descriptors
+        shared_form = request.headers.get('X-Patient-Form') == '1'
         descriptor = build_writable_field_descriptor()
+        if shared_form:
+            descriptor = patient_form_descriptors(descriptor)
 
         raw_person = request.query_params.get('person_id')
         if raw_person is None:
@@ -5603,6 +5631,9 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
             )
 
         if _caller_may_write_patient(request, person_id):
+            if shared_form:
+                record = PatientRecord.objects.filter(person_id=person_id).first()
+                descriptor = patient_form_descriptors(descriptor, record=record)
             return Response(descriptor)
 
         # Read-only for this caller: keep every entry, so the client still knows
