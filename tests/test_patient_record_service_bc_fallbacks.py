@@ -229,6 +229,29 @@ def test_unsupported_chemistry_unit_does_not_fall_back_to_an_older_result():
     assert record.serum_creatinine_level is None
 
 
+def test_bone_lesions_uses_the_newest_fact_and_preserves_unknown():
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    MeasurementFactory(
+        person=person,
+        measurement_concept=ConceptFactory(concept_code='24646-7'),
+        measurement_source_value='24646-7',
+        measurement_date=date(2025, 1, 1),
+        value_as_string='Present',
+    )
+    ObservationFactory(
+        person=person,
+        observation_concept=ConceptFactory(concept_code='24646-7'),
+        observation_source_value='24646-7',
+        observation_date=date(2025, 2, 1),
+        value_as_string='Unknown',
+    )
+
+    record = refresh_patient_record(person)
+
+    assert record.bone_lesions is None
+
+
 def test_result_dates_come_from_the_selected_source_rows():
     person = PersonFactory()
     PatientRecordFactory(person=person)
@@ -236,6 +259,7 @@ def test_result_dates_come_from_the_selected_source_rows():
         ('51435-6', 2.4, date(2025, 1, 1)),
         ('36916-5', 1.87, date(2025, 2, 1)),
         ('33944-0', 0.92, date(2025, 2, 1)),
+        ('48378-4', 2.03, date(2025, 3, 1)),
     ):
         MeasurementFactory(
             person=person,
@@ -251,7 +275,7 @@ def test_result_dates_come_from_the_selected_source_rows():
     assert record.result_dates['monoclonal_protein_serum'] == '2025-01-01'
     assert record.result_dates['kappa_flc'] == '2025-02-01'
     assert record.result_dates['lambda_flc'] == '2025-02-01'
-    assert record.result_dates['free_light_chain_ratio'] == '2025-02-01'
+    assert record.result_dates['free_light_chain_ratio'] == '2025-03-01'
 
 
 def test_total_bilirubin_populates_the_widget_alias():

@@ -94,7 +94,7 @@ def _receptor_signal(value) -> int | None:
 
 # Bump this whenever aggregation or computation logic changes in any section
 # extractor or in _compute_derived_fields.  See DERIVATION_CHANGELOG.md.
-DERIVATION_VERSION = 7
+DERIVATION_VERSION = 8
 
 # Fields that are entirely derived from OMOP tables and must be reset before
 # each refresh so deletions are reflected (not just additions).
@@ -684,21 +684,21 @@ def _build_snapshot(person: Person) -> OmopSnapshot:
 
 
 def _get_result_dates(snapshot: OmopSnapshot) -> dict:
-    """Return {field: ISO date} for the newest fact that supplied each value.
+    """Return {field: ISO date} for the fact that supplied the displayed value.
 
     This is provenance, not an editable result date: the date comes from the
-    selected Measurement/Observation row. A field with no dated source is
-    omitted rather than stamped with today or derived_at.
+    same row the extractor selected. Non-numeric rows and unsupported FLC/WBC
+    units are skipped (and block older rows where the extractor blocks), so a
+    date never points at a fact that did not produce the value.
     """
     dates = {}
+    blocked = set()
 
     def put(field, value):
-        if field and value:
+        if field and value and field not in blocked:
             dates.setdefault(field, value.isoformat())
 
     for m in snapshot.measurements:
-        if m.value_as_number is None and not m.value_as_string:
-            continue
         code = _measurement_code(m)
         field = _LOINC_LAB_FIELDS.get(code, (None, None))[0]
         if field is None:
@@ -709,7 +709,49 @@ def _get_result_dates(snapshot: OmopSnapshot) -> dict:
             )
         if m.measurement_source_value == '24646-7':
             field = 'bone_lesions'
+        if not field or field in blocked:
+            continue
+        if field != 'bone_lesions' and m.value_as_number is None:
+            continue
+        if field in _FLC_FIELDS and flc_to_canonical(
+            m.value_as_number, m.unit_source_value,
+        ) is None:
+            blocked.add(field)
+            continue
+        if code == '6690-2' and wbc_to_canonical(
+            m.value_as_number, m.unit_source_value,
+        ) is None:
+            blocked.add(field)
+            continue
         put(field, m.measurement_date)
+
+    # Stage derivation prefers R-ISS over ISS, then a FHIR Condition.stage
+    # observation. Mirror that selection instead of taking the newest date.
+    def _stage_row(loinc_code):
+        return (
+            next((m for m in snapshot.measurements
+                  if getattr(m.measurement_concept, 'concept_code', None) == loinc_code), None)
+            or next((m for m in snapshot.measurements
+                     if m.measurement_source_value == loinc_code), None)
+            or next((o for o in snapshot.observations
+                     if getattr(o.observation_concept, 'concept_code', None) == loinc_code), None)
+            or next((o for o in snapshot.observations
+                     if o.observation_source_value == loinc_code), None)
+        )
+
+    for code in ('21908-9-riss', '21908-9'):
+        row = _stage_row(code)
+        if row is not None:
+            put('stage', getattr(row, 'measurement_date', None) or getattr(row, 'observation_date', None))
+            break
+    else:
+        row = next(
+            (o for o in snapshot.observations
+             if o.observation_source_value == FHIR_CONDITION_STAGE_SOURCE_VALUE),
+            None,
+        )
+        if row is not None:
+            put('stage', row.observation_date)
 
     mm_observation_fields = {
         '24646-7': 'bone_lesions',
@@ -717,20 +759,9 @@ def _get_result_dates(snapshot: OmopSnapshot) -> dict:
         '89599-5': 'meets_crab',
     }
     for o in snapshot.observations:
-        code = getattr(o.observation_concept, 'concept_code', None)
-        if code in {'21908-9', '21908-9-riss'}:
-            put('stage', o.observation_date)
         put(mm_observation_fields.get(o.observation_source_value), o.observation_date)
 
-    # The ratio is derived from the same-event kappa/lambda pair; its date is
-    # the later of the two selected source dates.
-    kappa_date = dates.get('kappa_flc')
-    lambda_date = dates.get('lambda_flc')
-    if kappa_date and lambda_date:
-        dates['free_light_chain_ratio'] = max(kappa_date, lambda_date)
-
     return dates
-
 
 def refresh_patient_record(person: Person) -> PatientRecord:
     """Derive and upsert PatientRecord from OMOP tables for a given person.
@@ -2844,41 +2875,42 @@ def _get_mm_specific_data(person: Person, snapshot: OmopSnapshot = None) -> dict
         '89599-5': 'meets_crab',              # CRAB criteria met (boolean)
     }
 
-    mm_measurements = sorted(
-        (m for m in snapshot.measurements
-         if m.measurement_source_value in MM_LOINC_CODES),
-        key=lambda m: m.measurement_date or date.min,
-    )
     def _coerce_mm_boolean(number_value, string_value):
         if number_value is not None:
             return bool(number_value)
-        if string_value:
-            return string_value.lower() in ('true', '1', 'yes', 'present')
+        if string_value is not None:
+            text = str(string_value).strip().lower()
+            if text in ('true', '1', 'yes', 'present'):
+                return True
+            if text in ('false', '0', 'no', 'absent'):
+                return False
         return None
 
-    def _set_mm_field(field, bool_val):
-        if bool_val is None or field in data:
-            return
+    mm_rows = []
+    for m in snapshot.measurements:
+        field = MM_LOINC_CODES.get(m.measurement_source_value)
+        if field:
+            mm_rows.append((
+                m.measurement_date or date.min, 1, m.measurement_id or 0, field,
+                _coerce_mm_boolean(m.value_as_number, m.value_as_string),
+            ))
+    for o in snapshot.observations:
+        field = MM_LOINC_CODES.get(o.observation_source_value)
+        if field:
+            mm_rows.append((
+                o.observation_date or date.min, 0, o.observation_id or 0, field,
+                _coerce_mm_boolean(o.value_as_number, o.value_as_string),
+            ))
+
+    # Newest fact wins across BOTH tables, including an explicit unknown. A
+    # widget write dated later must not be shadowed by an older imported row.
+    for _day, _priority, _pk, field, bool_val in sorted(mm_rows, reverse=True):
+        if field in data:
+            continue
         if field == 'bone_lesions':
-            data[field] = 'Present' if bool_val else 'Absent'
+            data[field] = 'Present' if bool_val else 'Absent' if bool_val is False else None
         else:
             data[field] = bool_val
-
-    for m in mm_measurements:
-        field = MM_LOINC_CODES.get(m.measurement_source_value)
-        _set_mm_field(field, _coerce_mm_boolean(m.value_as_number, m.value_as_string))
-
-    # Observation rows should supplement missing fields, not only act as an
-    # all-or-nothing fallback, because some environments split MM facts across
-    # Measurement and Observation tables.
-    mm_obs = sorted(
-        (o for o in snapshot.observations
-         if o.observation_source_value in MM_LOINC_CODES),
-        key=lambda o: o.observation_date or date.min,
-    )
-    for o in mm_obs:
-        field = MM_LOINC_CODES.get(o.observation_source_value)
-        _set_mm_field(field, _coerce_mm_boolean(o.value_as_number, o.value_as_string))
 
     # ── meets_slim: derived from plasma cells and FLC ratio in OMOP ─────────
     # SLiM = Sixty (plasma cells ≥60%), Light chain ratio ≥100, or MRI lesions
