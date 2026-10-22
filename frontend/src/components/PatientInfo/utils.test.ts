@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { deriveTnbcStatus, diseaseTypeFor, genderCode, normalizeGender, receptorSign, stringsToOptions } from './utils';
+import { deriveTnbcStatus, diseaseTypeFor, formatResultDate, genderCode, normalizeGender, receptorSign, stringsToOptions } from './utils';
 
 describe('stringsToOptions', () => {
   it('turns strings into value/label pairs', () => {
@@ -12,6 +12,13 @@ describe('stringsToOptions', () => {
   it('preserves explicit option objects so a code can carry a richer label', () => {
     const options = [{ value: '20', label: 'Grade 2 (6–15 centroblasts/HPF)' }];
     expect(stringsToOptions(options)).toEqual(options);
+  });
+});
+
+describe('formatResultDate', () => {
+  it('formats an ISO source date for display without changing its meaning', () => {
+    expect(formatResultDate('2026-10-22')).toBe('22.10.2026');
+    expect(formatResultDate('')).toBe('');
   });
 });
 

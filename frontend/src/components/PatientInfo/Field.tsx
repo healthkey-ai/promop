@@ -7,7 +7,7 @@ import BooleanControl from './controls/BooleanControl';
 import MultiSelectControl from './controls/MultiSelectControl';
 import DateControl from './controls/DateControl';
 import TextNumberControl from './controls/TextNumberControl';
-import { stringsToOptions, type OptionInput } from './utils';
+import { formatResultDate, stringsToOptions, type OptionInput } from './utils';
 
 interface FieldProps {
   label: string;
@@ -20,6 +20,7 @@ interface FieldProps {
   readOnly?: boolean;
   vocabSource?: VocabSource | null;
   fullWidth?: boolean;
+  resultDate?: string;
 }
 
 export default function Field({
@@ -32,6 +33,7 @@ export default function Field({
   disabled,
   readOnly,
   vocabSource,
+  resultDate,
 }: FieldProps) {
   // A field the server has no write path for (email/computed/unmapped/…) is shown read-only
   // rather than editable, so a user never edits a value that silently would not save. Null
@@ -172,6 +174,7 @@ export default function Field({
         {vocabSource && <VocabularyTooltip name={vocabSource.name} url={vocabSource.url} />}
       </div>
       {control}
+      {resultDate && <p className="text-xs text-portal-text-secondary">Result date {formatResultDate(resultDate)}</p>}
       {reasonHint && <p className="text-xs text-portal-text-secondary">{reasonHint}</p>}
     </div>
   );

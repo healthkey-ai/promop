@@ -5,6 +5,12 @@ export function prettyLabel(key: string) {
     .replace(/^./, (s) => s.toUpperCase());
 }
 
+export function formatResultDate(value: unknown): string {
+  const raw = String(value ?? '').trim();
+  const match = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return match ? `${match[3]}.${match[2]}.${match[1]}` : raw;
+}
+
 export type DiseaseType = 'breast' | 'lymphoma' | 'mcl' | 'myeloma' | 'cll' | 'other';
 
 // Mantle-cell must win over the broad lymphoma match, otherwise an MCL record

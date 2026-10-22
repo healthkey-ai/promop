@@ -237,15 +237,16 @@ function MyelomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onChan
   const sctTypes = sctTypeOptions.length ? sctTypeOptions : STEM_CELL_TRANSPLANT_OPTIONS;
   const sctEligibility = sctEligibilityOptions.length ? sctEligibilityOptions : SCT_ELIGIBILITY_OPTIONS;
   const myelomaTypes = myelomaTypeOptions.length ? myelomaTypeOptions : MYELOMA_TYPE_OPTIONS;
+  const resultDates = (formData?.result_dates ?? {}) as Record<string, string>;
 
   return (
     <>
       <Section title="Disease Characteristics">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
           <Field label="M-Protein Type" name="myeloma_type" type="select" value={formData?.myeloma_type} options={myelomaTypes} onChange={onChange} vocabSource={myelomaTypeSource} />
-          <Field label="Recorded ISS / R-ISS Stage" name="stage" type="select" value={formData?.stage} options={ISS_STAGE_OPTIONS} disabled={/^R-ISS\b/i.test(String(formData?.stage ?? ''))} onChange={onChange} />
+          <Field label="Recorded ISS / R-ISS Stage" name="stage" type="select" value={formData?.stage} options={ISS_STAGE_OPTIONS} resultDate={resultDates.stage} disabled={/^R-ISS\b/i.test(String(formData?.stage ?? ''))} onChange={onChange} />
           <Field label="Progression Status" name="progression" type="select" value={formData?.progression} options={MM_PROGRESSION_OPTIONS} onChange={onChange} vocabSource={progressionSource} />
-          <Field label="Measurable Disease (IMWG)" name="measurable_disease_imwg" type="boolean" value={formData?.measurable_disease_imwg} onChange={onChange} />
+          <Field label="Measurable Disease (IMWG)" name="measurable_disease_imwg" type="boolean" value={formData?.measurable_disease_imwg} onChange={onChange} readOnly />
           <Field label="MRD Status" name="mrd_status" type="select" value={formData?.mrd_status} options={MRD_STATUS_OPTIONS} onChange={onChange} />
           <Field label="Meets CRAB Criteria" name="meets_crab" type="boolean" value={formData?.meets_crab} onChange={onChange} readOnly />
           <Field label="Meets SLiM Criteria" name="meets_slim" type="boolean" value={formData?.meets_slim} onChange={onChange} readOnly />
@@ -261,11 +262,11 @@ function MyelomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onChan
 
       <Section title="Myeloma Markers">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <Field label="Serum M-Protein (g/dL)" name="monoclonal_protein_serum" type="number" value={formData?.monoclonal_protein_serum} onChange={onChange} />
-          <Field label="Urine M-Protein (mg/24h)" name="monoclonal_protein_urine" type="number" value={formData?.monoclonal_protein_urine} onChange={onChange} />
-          <Field label="Kappa Free Light Chains" name="kappa_flc" type="number" value={formData?.kappa_flc} onChange={onChange} />
-          <Field label="Lambda Free Light Chains" name="lambda_flc" type="number" value={formData?.lambda_flc} onChange={onChange} />
-          <Field label="Kappa/Lambda Ratio" name="free_light_chain_ratio" type="number" value={formData?.free_light_chain_ratio} onChange={onChange} />
+          <Field label="Serum M-Protein (g/dL)" name="monoclonal_protein_serum" type="number" value={formData?.monoclonal_protein_serum} resultDate={resultDates.monoclonal_protein_serum} onChange={onChange} />
+          <Field label="Urine M-Protein (mg/24h)" name="monoclonal_protein_urine" type="number" value={formData?.monoclonal_protein_urine} resultDate={resultDates.monoclonal_protein_urine} onChange={onChange} />
+          <Field label="Kappa Free Light Chains" name="kappa_flc" type="number" value={formData?.kappa_flc} resultDate={resultDates.kappa_flc} onChange={onChange} />
+          <Field label="Lambda Free Light Chains" name="lambda_flc" type="number" value={formData?.lambda_flc} resultDate={resultDates.lambda_flc} onChange={onChange} />
+          <Field label="Kappa/Lambda Ratio" name="free_light_chain_ratio" type="number" value={formData?.free_light_chain_ratio} resultDate={resultDates.free_light_chain_ratio} onChange={onChange} />
           <Field label="Beta-2 Microglobulin (mg/L)" name="beta2_microglobulin" type="number" value={formData?.beta2_microglobulin} onChange={onChange} />
           <Field label="LDH Level (U/L)" name="ldh_level" type="number" value={formData?.ldh_level} onChange={onChange} />
         </div>
@@ -274,7 +275,7 @@ function MyelomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onChan
       <Section title="Complications">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
           <Field label="Bone Lesions" name="bone_lesions" type="select" value={formData?.bone_lesions} options={BONE_LESIONS_OPTIONS} onChange={onChange} />
-          <Field label="Bone Marrow Plasma Cells (%)" name="clonal_plasma_cells" type="number" value={formData?.clonal_plasma_cells} onChange={onChange} />
+          <Field label="Bone Marrow Plasma Cells (%)" name="clonal_plasma_cells" type="number" value={formData?.clonal_plasma_cells} resultDate={resultDates.clonal_plasma_cells} onChange={onChange} />
         </div>
       </Section>
 

@@ -140,6 +140,14 @@ describe('MyelomaSection — labels and marker fields', () => {
     expect(screen.getByDisplayValue('0.92')).toBeInTheDocument();
     expect(screen.getByText('Kappa/Lambda Ratio')).toBeInTheDocument();
   });
+
+  it('renders the source result date below a dated marker', () => {
+    renderMyeloma({
+      kappa_flc: 1.87,
+      result_dates: { kappa_flc: '2026-10-22' },
+    });
+    expect(screen.getByText('Result date 22.10.2026')).toBeInTheDocument();
+  });
 });
 
 describe('MyelomaSection — SCT fields', () => {
