@@ -2418,6 +2418,47 @@ class MappingSuggestionReview(models.Model):
         db_table = 'mapping_suggestion_review'
 
 
+class RelevanceSignal(models.Model):
+    """A concept an extractor kept meeting for a disease outside its relevance set (#1942).
+
+    Aggregate only: how many documents of the period mentioned the concept,
+    never which patient or document. A curator accepts or rejects it; accepted
+    concepts join the disease's set at the ``curated`` tier
+    (``omop_core.services.disease_relevance``). A later period's signal for a
+    pair already decided inherits that decision, so a rejection stays rejected.
+    """
+    STATUS_CHOICES = [
+        ('proposed', 'Proposed'),
+        ('accepted', 'Accepted'),
+        ('rejected', 'Rejected'),
+    ]
+
+    source = models.CharField(max_length=100, help_text='The service that reported it.')
+    disease = models.CharField(max_length=10)
+    # A snapshot id, like MappingSuggestionReview: a vocabulary reload must not
+    # cascade into or block the curation record.
+    concept_id = models.BigIntegerField()
+    period = models.CharField(max_length=32, help_text='The reporting window, e.g. 2026-10.')
+    document_count = models.PositiveIntegerField()
+    document_total = models.PositiveIntegerField(null=True, blank=True)
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='proposed')
+    reviewer = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='+',
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'relevance_signal'
+        constraints = [
+            models.UniqueConstraint(fields=['source', 'disease', 'concept_id', 'period'],
+                                    name='uniq_relevance_signal'),
+        ]
+        indexes = [models.Index(fields=['disease', 'status'])]
+
+
 class MappingDestinationCandidate(models.Model):
     """An imported alternative; it does not change the chosen clinical mapping."""
 

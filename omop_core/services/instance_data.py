@@ -49,6 +49,8 @@ SYSTEM: frozenset[str] = frozenset({
     'omop_core.SuggestEmbeddingSnapshot', 'omop_core.SuggestRun',
     # Historical model-quality feedback for this instance, not a live mapping.
     'omop_core.CodeMappingUpload', 'omop_core.MappingSuggestionReview',
+    # Counts from this instance's own documents, and its curators' decisions on them.
+    'omop_core.RelevanceSignal',
     # Derived from concept + concept_synonym; rebuilt locally, never copied.
     # AI explanations are regenerated on demand, and their item ids would not
     # point at the same rows on another instance.
