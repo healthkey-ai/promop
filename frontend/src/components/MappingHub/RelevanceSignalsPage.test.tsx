@@ -3,9 +3,11 @@ import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import RelevanceSignalsPage from "./RelevanceSignalsPage";
 
-const mocks = vi.hoisted(() => ({ get: vi.fn(), patch: vi.fn(), user: { is_staff: true, is_org_admin: false } }));
+const mocks = vi.hoisted(() => ({ get: vi.fn(), patch: vi.fn() }));
 vi.mock("@/api/axios", () => ({ default: mocks }));
-vi.mock("@/hooks/useAuth", () => ({ useAuth: () => ({ currentUser: mocks.user }) }));
+const ADMIN = { can_accept: true, can_reject: true };
+const DOCTOR = { can_accept: false, can_reject: true };
+const ANALYST = { can_accept: false, can_reject: false };
 
 const signal = (overrides: Record<string, unknown>) => ({
   id: 1, source: "cdew", disease: "MM", concept_id: 4123456, concept_name: "Bone marrow aspirate",
@@ -18,8 +20,7 @@ function renderPage(path = "/relevance-signals") {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mocks.user = { is_staff: true, is_org_admin: false };
-  mocks.get.mockResolvedValue({ data: { results: [
+  mocks.get.mockResolvedValue({ data: { permissions: ADMIN, results: [
     signal({}),
     signal({ id: 2, period: "2026-10", document_count: 41, document_total: 120 }),
     signal({ id: 3, disease: "BC", concept_id: 77, concept_name: "Mammogram", document_count: 9, document_total: null }),
@@ -58,18 +59,34 @@ describe("Relevance signals", () => {
   });
 
   it("lets a decided pair return to proposed", async () => {
-    mocks.get.mockResolvedValue({ data: { results: [signal({ status: "rejected" })] } });
+    mocks.get.mockResolvedValue({ data: { permissions: ADMIN, results: [signal({ status: "rejected" })] } });
     renderPage("/relevance-signals?status=rejected");
     fireEvent.click(await screen.findByRole("button", { name: "Return Bone marrow aspirate for MM to proposed" }));
     await waitFor(() => expect(mocks.patch).toHaveBeenCalledWith("/v1/relevance/signals/1/", { status: "proposed" }));
   });
 
-  it("is read-only for curators who cannot approve", async () => {
-    mocks.user = { is_staff: false, is_org_admin: false };
+  it("is read-only for analysts", async () => {
+    mocks.get.mockResolvedValue({ data: { permissions: ANALYST, results: [signal({})] } });
     renderPage();
-    await screen.findByText("Mammogram");
+    await screen.findByText("Bone marrow aspirate");
+    expect(screen.queryByRole("button", { name: /Accept|Reject|Return/ })).not.toBeInTheDocument();
+    expect(screen.getByText(/You can view the queue/)).toBeInTheDocument();
+  });
+
+  it("lets a doctor reject and reopen, but not accept or reopen an accepted pair", async () => {
+    mocks.get.mockResolvedValue({ data: { permissions: DOCTOR, results: [signal({})] } });
+    const { unmount } = renderPage();
+    expect(await screen.findByRole("button", { name: "Reject Bone marrow aspirate for MM" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Accept/ })).not.toBeInTheDocument();
-    expect(screen.getByText(/Only staff and organization admins/)).toBeInTheDocument();
+    unmount();
+    mocks.get.mockResolvedValue({ data: { permissions: DOCTOR, results: [signal({ status: "rejected" })] } });
+    const second = renderPage("/relevance-signals?status=rejected");
+    expect(await screen.findByRole("button", { name: /Return .* to proposed/ })).toBeInTheDocument();
+    second.unmount();
+    mocks.get.mockResolvedValue({ data: { permissions: DOCTOR, results: [signal({ status: "accepted" })] } });
+    renderPage("/relevance-signals?status=accepted");
+    await screen.findByText("Bone marrow aspirate");
+    expect(screen.queryByRole("button", { name: /Return/ })).not.toBeInTheDocument();
   });
 
   it("says when the queue is empty", async () => {

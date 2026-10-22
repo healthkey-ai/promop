@@ -4,6 +4,7 @@ See ``omop_core.services.disease_relevance`` for what a set contains, and
 ``docs/disease_relevance.md`` for the service contract.
 """
 from django.db import transaction
+from django.db.models import Q
 from django.http import HttpResponseNotModified
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
@@ -146,6 +147,22 @@ class _SignalSerializer(serializers.Serializer):
         return attrs
 
 
+def signal_rights(user):
+    """Who may decide signals, following the mapping pages' roles.
+
+    Org admins and staff accept and reject. A doctor may reject, or return a
+    rejected signal to proposed, as a doctor may reject a proposed mapping.
+    An analyst, a curator in training, only views the queue.
+    """
+    from omop_core.models import GroupAccess
+    from patient_portal.api.views import _can_approve_mappings
+    if _can_approve_mappings(user):
+        return {'can_accept': True, 'can_reject': True}
+    doctor = GroupAccess.objects.filter(identity=user, role='doctor').filter(
+        Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now())).exists()
+    return {'can_accept': False, 'can_reject': doctor}
+
+
 def _signal_payload(signal):
     return {
         'id': signal.id, 'source': signal.source, 'disease': signal.disease,
@@ -226,7 +243,8 @@ def relevance_signals(request):
     names = dict(Concept.objects.filter(concept_id__in={s.concept_id for s in signals})
                  .values_list('concept_id', 'concept_name'))
     return Response({'results': [{**_signal_payload(s), 'concept_name': names.get(s.concept_id)}
-                                 for s in signals]})
+                                 for s in signals],
+                     'permissions': signal_rights(request.user)})
 
 
 @extend_schema(
@@ -237,13 +255,19 @@ def relevance_signals(request):
 @api_view(['PATCH'])
 @permission_classes([ScopedTokenPermission])
 def relevance_signal_review(request, signal_id):
-    from patient_portal.api.views import _can_approve_mappings
-    if is_service_token(request) or not _can_approve_mappings(request.user):
-        raise PermissionDenied('Accepting a relevance signal needs approval rights.')
+    if is_service_token(request):
+        raise PermissionDenied('Services report signals; curators decide them.')
+    rights = signal_rights(request.user)
+    if not (rights['can_accept'] or rights['can_reject']):
+        raise PermissionDenied('Your role can view the queue but not decide signals.')
     choice = request.data.get('status')
     if choice not in ('proposed', 'accepted', 'rejected'):
         raise ValidationError({'status': 'Choose proposed, accepted or rejected.'})
     signal = get_object_or_404(RelevanceSignal, pk=signal_id)
+    # As on the mapping pages: a doctor may reject or reopen what is not yet
+    # in the set, but adding to it, or undoing an addition, is an approval.
+    if not rights['can_accept'] and 'accepted' in (choice, signal.status):
+        raise PermissionDenied('Only org admins and staff can accept a signal or change an accepted one.')
     reviewed = None if choice == 'proposed' else timezone.now()
     reviewer = None if choice == 'proposed' else request.user
     # The decision is about the (disease, concept) pair, so it applies to

@@ -1,6 +1,5 @@
 import PageTitle from "@/components/Branding/PageTitle";
 import api from "@/api/axios";
-import { useAuth } from "@/hooks/useAuth";
 import { useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 
@@ -28,6 +27,11 @@ const DISEASES: [string, string][] = [
   ["CLL", "Chronic lymphocytic leukemia"], ["MCL", "Mantle cell lymphoma"],
 ];
 const STATUSES: [Status, string][] = [["proposed", "Proposed"], ["accepted", "Accepted"], ["rejected", "Rejected"]];
+
+interface Rights {
+  can_accept: boolean;
+  can_reject: boolean;
+}
 
 interface Pair {
   key: string;
@@ -64,8 +68,8 @@ const share = (signal: Signal) => signal.document_total
   : "";
 
 export default function RelevanceSignalsPage() {
-  const { currentUser } = useAuth();
-  const canApprove = !!(currentUser?.is_staff || currentUser?.is_org_admin);
+  // The server decides who may do what; it mirrors the mapping pages' roles.
+  const [rights, setRights] = useState<Rights>({ can_accept: false, can_reject: false });
   const [searchParams, setSearchParams] = useSearchParams();
   const status = (searchParams.get("status") as Status) || "proposed";
   const disease = searchParams.get("disease") || "";
@@ -76,10 +80,14 @@ export default function RelevanceSignalsPage() {
 
   useEffect(() => {
     let active = true;
-    void api.get<{ results: Signal[] }>("/v1/relevance/signals/", {
+    void api.get<{ results: Signal[]; permissions?: Rights }>("/v1/relevance/signals/", {
       params: { status, ...(disease ? { disease } : {}) },
     }).then(({ data }) => {
-      if (active) { setSignals(data.results); setError(""); }
+      if (active) {
+        setSignals(data.results);
+        setRights(data.permissions ?? { can_accept: false, can_reject: false });
+        setError("");
+      }
     }).catch(() => {
       if (active) { setSignals([]); setError("Could not load relevance signals."); }
     });
@@ -132,7 +140,9 @@ export default function RelevanceSignalsPage() {
       </label>
     </div>
 
-    {!canApprove && <p className="mt-3 text-sm text-slate-600">Only staff and organization admins can accept or reject signals.</p>}
+    {signals !== null && !rights.can_accept && <p className="mt-3 text-sm text-slate-600">{rights.can_reject
+      ? "Doctors can reject a signal or return a rejected one to proposed. Only organization admins can accept."
+      : "You can view the queue. Organization admins accept and reject signals; doctors can reject them."}</p>}
     {error && <p role="alert" className="mt-4 text-sm text-red-700">{error}</p>}
     {signals === null && <p role="status" className="mt-5 text-sm text-slate-600">Loading signals…</p>}
     {signals !== null && pairs.length === 0 && !error && <p className="mt-5 rounded border border-slate-200 bg-white p-4 text-sm text-slate-700">
@@ -155,19 +165,18 @@ export default function RelevanceSignalsPage() {
             <span className="block text-xs text-slate-500">{pair.latest.period}</span></td>
           <td className="px-3 py-2">{pair.periods}</td>
           <td className="px-3 py-2">{pair.sources.join(", ")}</td>
-          <td className="px-3 py-2 text-right">{canApprove && (pair.status === "proposed"
-            ? <span className="inline-flex gap-2">
-                <button type="button" disabled={saving === pair.key} onClick={() => void decide(pair, "accepted")}
-                  aria-label={`Accept ${pair.concept_name ?? pair.concept_id} for ${pair.disease}`}
-                  className="rounded bg-green-700 px-3 py-1 text-xs font-medium text-white hover:bg-green-800 disabled:opacity-50">Accept</button>
-                <button type="button" disabled={saving === pair.key} onClick={() => void decide(pair, "rejected")}
-                  aria-label={`Reject ${pair.concept_name ?? pair.concept_id} for ${pair.disease}`}
-                  className="rounded border border-slate-300 px-3 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-50">Reject</button>
-              </span>
-            : <button type="button" disabled={saving === pair.key} onClick={() => void decide(pair, "proposed")}
+          <td className="px-3 py-2 text-right"><span className="inline-flex justify-end gap-2">
+            {pair.status === "proposed" && rights.can_accept && <button type="button" disabled={saving === pair.key}
+              onClick={() => void decide(pair, "accepted")} aria-label={`Accept ${pair.concept_name ?? pair.concept_id} for ${pair.disease}`}
+              className="rounded bg-green-700 px-3 py-1 text-xs font-medium text-white hover:bg-green-800 disabled:opacity-50">Accept</button>}
+            {pair.status === "proposed" && rights.can_reject && <button type="button" disabled={saving === pair.key}
+              onClick={() => void decide(pair, "rejected")} aria-label={`Reject ${pair.concept_name ?? pair.concept_id} for ${pair.disease}`}
+              className="rounded border border-slate-300 px-3 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100 disabled:opacity-50">Reject</button>}
+            {pair.status !== "proposed" && (pair.status === "accepted" ? rights.can_accept : rights.can_reject) &&
+              <button type="button" disabled={saving === pair.key} onClick={() => void decide(pair, "proposed")}
                 aria-label={`Return ${pair.concept_name ?? pair.concept_id} for ${pair.disease} to proposed`}
-                className="text-xs text-sky-700 underline disabled:text-slate-400">Return to proposed</button>)}
-          </td>
+                className="text-xs text-sky-700 underline disabled:text-slate-400">Return to proposed</button>}
+          </span></td>
         </tr>)}</tbody>
       </table>
     </div>}

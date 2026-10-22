@@ -105,10 +105,18 @@ Curators work the queue on **Mapping Administration → Disease Relevance**
 (`/relevance-signals`). The page shows one row per disease and concept, with the
 latest period's counts. Behind it:
 
-- `GET /api/v1/relevance/signals/?status=proposed&disease=MM`, for any
-  professional role;
-- `PATCH /api/v1/relevance/signals/<id>/ {"status": "accepted" | "rejected" | "proposed"}`,
-  for staff and org admins, the same people who can approve field mappings.
+- `GET /api/v1/relevance/signals/?status=proposed&disease=MM` returns the
+  queue and the caller's `permissions` (`can_accept`, `can_reject`).
+- `PATCH /api/v1/relevance/signals/<id>/ {"status": "accepted" | "rejected" | "proposed"}`
+  records a decision.
+
+Roles follow the field and code mapping pages:
+
+| Role | Can |
+|---|---|
+| Staff, `org_admin` | Accept, reject, and return any decision to proposed. |
+| `doctor` | Reject a proposed signal, and return a rejected one to proposed. Cannot accept, or change an accepted one, just as a doctor cannot approve a mapping. |
+| `analyst` (curator in training) | View the queue only. |
 
 A decision applies to the `(disease, concept)` pair. Every period's report of
 that pair takes it, and so does any later report. Once rejected, a concept stays
