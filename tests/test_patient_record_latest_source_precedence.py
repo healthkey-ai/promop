@@ -747,4 +747,5 @@ def test_refresh_persists_latest_values_and_version_16():
     assert record.hiv_status is False
     assert record.no_hiv_status is True
     assert record.binet_stage == 'C'
-    assert record.derivation_version == 16
+    from omop_core.services.patient_record_service import DERIVATION_VERSION
+    assert record.derivation_version == DERIVATION_VERSION
