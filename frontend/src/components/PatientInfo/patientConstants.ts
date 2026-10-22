@@ -130,10 +130,11 @@ export const FL_TUMOR_GRADE_OPTIONS: { value: string; label: string }[] = [
   { value: '3', label: 'Grade 3 (includes 3a/3b; not otherwise specified)' },
 ];
 export const MYELOMA_TYPE_OPTIONS = [
-  'IgG Kappa', 'IgG Lambda', 'IgA Kappa', 'IgA Lambda',
-  'IgD Kappa', 'IgD Lambda', 'IgE Kappa', 'IgE Lambda',
-  'IgM Kappa', 'IgM Lambda',
-  'Light Chain Only (Kappa)', 'Light Chain Only (Lambda)',
+  'IgA', 'IgG', 'IgD', 'IgE', 'IgM',
+  'IgG kappa', 'IgG lambda', 'IgA kappa', 'IgA lambda',
+  'IgD kappa', 'IgD lambda', 'IgE kappa', 'IgE lambda',
+  'IgM kappa', 'IgM lambda',
+  'Light chain only (kappa)', 'Light chain only (lambda)',
   'Non-secretory', 'Biclonal',
 ];
 // The demo widget writes the human-readable Stage labels, while generated

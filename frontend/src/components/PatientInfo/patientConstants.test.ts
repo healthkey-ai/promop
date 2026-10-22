@@ -7,6 +7,7 @@ import {
   FL_TUMOR_GRADE_OPTIONS,
   GELF_OPTIONS,
   HER2_OPTIONS,
+  MYELOMA_TYPE_OPTIONS,
   ISS_STAGE_OPTIONS,
   PR_OPTIONS,
   LYMPHOMA_HISTOLOGIC_TYPE_OPTIONS,
@@ -33,6 +34,10 @@ describe('disease option lists', () => {
         expect.objectContaining({ value: 'R-ISS II' }),
       ]),
     );
+  });
+
+  it('offers the M-protein values used by the standalone PROMOP picker', () => {
+    expect(MYELOMA_TYPE_OPTIONS).toEqual(expect.arrayContaining(['IgA', 'IgG kappa', 'IgA lambda']));
   });
 
   it('offers the word receptor values imported records may store', () => {
