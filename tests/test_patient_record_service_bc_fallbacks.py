@@ -229,6 +229,31 @@ def test_unsupported_chemistry_unit_does_not_fall_back_to_an_older_result():
     assert record.serum_creatinine_level is None
 
 
+def test_result_dates_come_from_the_selected_source_rows():
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    for code, value, day in (
+        ('51435-6', 2.4, date(2025, 1, 1)),
+        ('36916-5', 1.87, date(2025, 2, 1)),
+        ('33944-0', 0.92, date(2025, 2, 1)),
+    ):
+        MeasurementFactory(
+            person=person,
+            measurement_concept=ConceptFactory(concept_code=code),
+            measurement_source_value=code,
+            measurement_date=day,
+            value_as_number=value,
+            unit_source_value='mg/L' if code != '51435-6' else 'g/dL',
+        )
+
+    record = refresh_patient_record(person)
+
+    assert record.result_dates['monoclonal_protein_serum'] == '2025-01-01'
+    assert record.result_dates['kappa_flc'] == '2025-02-01'
+    assert record.result_dates['lambda_flc'] == '2025-02-01'
+    assert record.result_dates['free_light_chain_ratio'] == '2025-02-01'
+
+
 def test_total_bilirubin_populates_the_widget_alias():
     person = PersonFactory()
     PatientRecordFactory(person=person)

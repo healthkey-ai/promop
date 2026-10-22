@@ -99,6 +99,8 @@ DERIVATION_VERSION = 7
 # Fields that are entirely derived from OMOP tables and must be reset before
 # each refresh so deletions are reflected (not just additions).
 _OMOP_DERIVED_FIELDS = [
+    # Per-field source dates for the values shown in the profile.
+    'result_dates',
     # Demographics. patient_age is a pure function of the birth date, so a value
     # left over from an earlier derivation is stale by construction and has to be
     # cleared. date_of_birth is deliberately not cleared: a manually supplied
@@ -564,7 +566,7 @@ def _clear_derived_fields(patient_info: PatientRecord) -> None:
     """Reset all OMOP-derived fields to None so deletions are reflected."""
     for field in _OMOP_DERIVED_FIELDS:
         if hasattr(patient_info, field):
-            default = [] if field in (
+            default = {} if field == 'result_dates' else [] if field in (
                 'prior_procedures', 'later_therapies', 'genetic_mutations', 'later_therapy_ids',
                 'first_line_component_ids', 'second_line_component_ids',
                 'later_component_ids', 'therapy_component_ids',
@@ -681,6 +683,55 @@ def _build_snapshot(person: Person) -> OmopSnapshot:
     )
 
 
+def _get_result_dates(snapshot: OmopSnapshot) -> dict:
+    """Return {field: ISO date} for the newest fact that supplied each value.
+
+    This is provenance, not an editable result date: the date comes from the
+    selected Measurement/Observation row. A field with no dated source is
+    omitted rather than stamped with today or derived_at.
+    """
+    dates = {}
+
+    def put(field, value):
+        if field and value:
+            dates.setdefault(field, value.isoformat())
+
+    for m in snapshot.measurements:
+        if m.value_as_number is None and not m.value_as_string:
+            continue
+        code = _measurement_code(m)
+        field = _LOINC_LAB_FIELDS.get(code, (None, None))[0]
+        if field is None:
+            field = _SOURCE_VALUE_LAB_FIELDS.get(m.measurement_source_value)
+        if field is None and m.measurement_concept:
+            field = _LEGACY_LAB_CONCEPT_FIELDS.get(
+                (m.measurement_concept.concept_name or '').casefold().strip()
+            )
+        if m.measurement_source_value == '24646-7':
+            field = 'bone_lesions'
+        put(field, m.measurement_date)
+
+    mm_observation_fields = {
+        '24646-7': 'bone_lesions',
+        '47082-2': 'plasma_cell_leukemia',
+        '89599-5': 'meets_crab',
+    }
+    for o in snapshot.observations:
+        code = getattr(o.observation_concept, 'concept_code', None)
+        if code in {'21908-9', '21908-9-riss'}:
+            put('stage', o.observation_date)
+        put(mm_observation_fields.get(o.observation_source_value), o.observation_date)
+
+    # The ratio is derived from the same-event kappa/lambda pair; its date is
+    # the later of the two selected source dates.
+    kappa_date = dates.get('kappa_flc')
+    lambda_date = dates.get('lambda_flc')
+    if kappa_date and lambda_date:
+        dates['free_light_chain_ratio'] = max(kappa_date, lambda_date)
+
+    return dates
+
+
 def refresh_patient_record(person: Person) -> PatientRecord:
     """Derive and upsert PatientRecord from OMOP tables for a given person.
 
@@ -731,6 +782,8 @@ def refresh_patient_record(person: Person) -> PatientRecord:
         ]:
             for field, value in section_fn(person, snapshot).items():
                 setattr(patient_info, field, value)
+
+        patient_info.result_dates = _get_result_dates(snapshot)
 
         _compute_derived_fields(patient_info)
 

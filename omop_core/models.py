@@ -2650,6 +2650,13 @@ class PatientRecord(models.Model):
         null=True, blank=True,
         help_text="Timestamp when this row was last derived from OMOP tables",
     )
+    result_dates = models.JSONField(
+        default=dict, blank=True,
+        help_text=(
+            "Per-field date of the source OMOP fact that supplied the displayed "
+            "value. Derived, read-only, and not a substitute for a new result's date."
+        ),
+    )
     user_edited_fields = models.JSONField(
         default=list, blank=True,
         help_text=(
