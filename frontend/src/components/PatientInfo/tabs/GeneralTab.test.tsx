@@ -6,7 +6,7 @@
  * writable and the rest are refused for three different reasons, so this is the
  * tab where "render what the server says" has to mean more than one thing.
  */
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import GeneralTab from './GeneralTab';
 import { __resetWritableFieldsCache } from '@/hooks/useWritableFields';
@@ -80,22 +80,24 @@ function renderTab(
   showCoordinates = true,
   patientMode = false,
 ) {
-  return render(
-    <GeneralTab
-      formData={formData}
-      onChange={onChange}
-      editedName="Alishia Howell"
-      onNameChange={vi.fn()}
-      onZipcodeChange={vi.fn()}
-      showCoordinates={showCoordinates}
-      patientMode={patientMode}
-    />,
-  );
+  return act(async () => {
+    render(
+      <GeneralTab
+        formData={formData}
+        onChange={onChange}
+        editedName="Alishia Howell"
+        onNameChange={vi.fn()}
+        onZipcodeChange={vi.fn()}
+        showCoordinates={showCoordinates}
+        patientMode={patientMode}
+      />,
+    );
+  });
 }
 
 describe('GeneralTab', () => {
   it('fetches the descriptor', async () => {
-    renderTab();
+    await renderTab();
     await waitFor(() =>
       expect(mockGet).toHaveBeenCalledWith(
         '/v1/patient-records/writable-fields/',
@@ -107,7 +109,7 @@ describe('GeneralTab', () => {
   it('offers a result date for a measurement but not for a Person attribute', async () => {
     // A measurement is an event and needs a date. Gender is not, and offering
     // one would suggest the record keeps a history of it.
-    renderTab({ weight: 70, gender: 'Female' });
+    await renderTab({ weight: 70, gender: 'Female' });
     await waitFor(() => expect(mockGet).toHaveBeenCalled());
 
     const dates = screen.getAllByLabelText('Result date');
@@ -125,7 +127,7 @@ describe('GeneralTab', () => {
     // Gender carries curated options from the descriptor, and GeneralTab passes
     // no local list of its own -- the server's set is the only source. Which set
     // wins when both exist is covered in ClinicalField.test.tsx.
-    renderTab({ gender: 'Female' });
+    await renderTab({ gender: 'Female' });
     await waitFor(() => expect(mockGet).toHaveBeenCalled());
 
     expect(screen.getByText('Female')).toBeInTheDocument();
@@ -134,7 +136,7 @@ describe('GeneralTab', () => {
 
   it('renders date of birth as an editable calendar control', async () => {
     const onChange = vi.fn();
-    renderTab({ date_of_birth: '1970-01-01' }, onChange);
+    await renderTab({ date_of_birth: '1970-01-01' }, onChange);
     await waitFor(() => expect(mockGet).toHaveBeenCalled());
 
     const input = screen.getByText('Date of Birth').parentElement?.parentElement
@@ -149,7 +151,7 @@ describe('GeneralTab', () => {
   });
 
   it('explains a computed field rather than offering it', async () => {
-    renderTab({ bmi: 24.2, height: 170, weight: 70 });
+    await renderTab({ bmi: 24.2, height: 170, weight: 70 });
     await waitFor(() => expect(mockGet).toHaveBeenCalled());
 
     expect(screen.getByTestId('reason-bmi')).toHaveTextContent(/computed from/i);
@@ -158,7 +160,7 @@ describe('GeneralTab', () => {
   it('keeps disease attributes on the Disease tab rather than duplicating editors', async () => {
     // Twelve of the thirty are unmapped. They were selects and text boxes that
     // returned 405 on every save.
-    renderTab({ disease: 'Multiple Myeloma', stage: 'III', histologic_type: 'Plasma cell myeloma', hiv_status: false });
+    await renderTab({ disease: 'Multiple Myeloma', stage: 'III', histologic_type: 'Plasma cell myeloma', hiv_status: false });
     await waitFor(() => expect(mockGet).toHaveBeenCalled());
 
     expect(screen.queryByLabelText('Disease')).not.toBeInTheDocument();
@@ -170,7 +172,7 @@ describe('GeneralTab', () => {
   it('leaves the age display alone', async () => {
     // Not a PatientRecord column at all — worked out in the browser from the
     // date of birth.
-    renderTab({ date_of_birth: '1970-06-15' });
+    await renderTab({ date_of_birth: '1970-06-15' });
     await waitFor(() => expect(mockGet).toHaveBeenCalled());
 
     expect(screen.getByText(/calculated from the date of birth/i)).toBeInTheDocument();
@@ -179,7 +181,7 @@ describe('GeneralTab', () => {
   it('keeps the patient name and zip controls, which are not descriptor fields', async () => {
     // patient_name is applied to Person before the serializer sees it, and the
     // zip control auto-fills city and region.
-    renderTab({ postal_code: '02114' });
+    await renderTab({ postal_code: '02114' });
     await waitFor(() => expect(mockGet).toHaveBeenCalled());
 
     expect(screen.getByDisplayValue('Alishia Howell')).toBeInTheDocument();
@@ -190,7 +192,7 @@ describe('GeneralTab', () => {
     // Offering an edit the server will refuse is worse than showing a value that
     // cannot yet change.
     mockGet.mockRejectedValue(new Error('offline'));
-    renderTab({ weight: 70, gender: 'Female' });
+    await renderTab({ weight: 70, gender: 'Female' });
 
     await waitFor(() => expect(mockGet).toHaveBeenCalled());
     await waitFor(() =>
@@ -199,7 +201,7 @@ describe('GeneralTab', () => {
   });
 
   it('keeps every section it had before the conversion', async () => {
-    renderTab();
+    await renderTab();
     await waitFor(() => expect(mockGet).toHaveBeenCalled());
 
     for (const title of ['Patient Details', 'Location', 'Race & Ethnicity',
@@ -210,7 +212,7 @@ describe('GeneralTab', () => {
   });
 
   it('puts death date at the bottom of the tab', async () => {
-    renderTab({ death_date: '2025-02-01' });
+    await renderTab({ death_date: '2025-02-01' });
     await waitFor(() => expect(mockGet).toHaveBeenCalled());
 
     const deathDate = screen.getByText('Death Date').parentElement?.parentElement
@@ -254,7 +256,7 @@ describe('GeneralTab — previously unreachable Person fields', () => {
   });
 
   it('renders each of them, and none read-only', async () => {
-    renderTab({ phone_number: '617-555-0100', facility_name: 'Dana-Farber' });
+    await renderTab({ phone_number: '617-555-0100', facility_name: 'Dana-Farber' });
     await waitFor(() => expect(mockGet).toHaveBeenCalled());
 
     for (const name of Object.keys(PERSON_FIELDS)) {
@@ -265,7 +267,7 @@ describe('GeneralTab — previously unreachable Person fields', () => {
   });
 
   it('gives clinician validation its own section', async () => {
-    renderTab({ validated_by: 'Dr Chen' });
+    await renderTab({ validated_by: 'Dr Chen' });
     await waitFor(() => expect(mockGet).toHaveBeenCalled());
 
     expect(screen.getByText('Clinician Validation')).toBeInTheDocument();
@@ -273,7 +275,7 @@ describe('GeneralTab — previously unreachable Person fields', () => {
   });
 
   it('hides clinician validation from the patient-facing view', async () => {
-    renderTab({ validated_by: 'Dr Chen' }, vi.fn(), true, true);
+    await renderTab({ validated_by: 'Dr Chen' }, vi.fn(), true, true);
     await waitFor(() => expect(mockGet).toHaveBeenCalled());
 
     expect(screen.queryByText('Clinician Validation')).not.toBeInTheDocument();
@@ -283,7 +285,7 @@ describe('GeneralTab — previously unreachable Person fields', () => {
   it('offers no result date for a Person attribute', async () => {
     // None of these is an event; a result date would imply a history the record
     // does not keep.
-    renderTab({ latitude: 42.36 });
+    await renderTab({ latitude: 42.36 });
     await waitFor(() => expect(mockGet).toHaveBeenCalled());
 
     expect(screen.queryAllByLabelText('Result date')).toHaveLength(0);
@@ -291,7 +293,7 @@ describe('GeneralTab — previously unreachable Person fields', () => {
 });
 
 it('allows correcting the death date', async () => {
-  renderTab({ death_date: '2025-02-01' });
+  await renderTab({ death_date: '2025-02-01' });
   await waitFor(() => expect(screen.getByText('Death Date').parentElement?.parentElement?.querySelector('input')).toBeEnabled());
   expect(screen.getByText('Death Date').parentElement?.parentElement?.querySelector('input')).toHaveValue('2025-02-01');
 });
@@ -311,7 +313,7 @@ describe('GeneralTab — coordinates', () => {
   });
 
   it('offers the coordinate inputs by default', async () => {
-    renderTab({ city: 'Boston', person_id: 991 });
+    await renderTab({ city: 'Boston', person_id: 991 });
     expect(await screen.findByText(/^latitude$/i)).toBeInTheDocument();
     expect(screen.getByText(/^longitude$/i)).toBeInTheDocument();
   });
@@ -319,7 +321,7 @@ describe('GeneralTab — coordinates', () => {
   it('hides precise coordinates when the host withholds them', async () => {
     // A federated host that does not send latitude/longitude must not offer a
     // field whose save it would refuse.
-    renderTab({ city: 'Boston', person_id: 992 }, vi.fn(), false);
+    await renderTab({ city: 'Boston', person_id: 992 }, vi.fn(), false);
     expect(await screen.findByText(/^city$/i)).toBeInTheDocument();
     expect(screen.queryByText(/^latitude$/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/^longitude$/i)).not.toBeInTheDocument();
