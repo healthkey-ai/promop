@@ -1367,12 +1367,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 recompute_patient_record_fields(patient_info, changed_fields=profile_projected)
                 patient_info.refresh_from_db()
 
-            # The answer is authored, not derived, so an API write is the evidence
-            # the repair and the audit look for (#1988). Only sync when this
-            # request touched the answer or its categories; an unrelated edit must
-            # not renew a standing confirmation.
-            if {'no_pre_existing_conditions', 'preexisting_conditions'} & set(
-                    serializer.validated_data):
+            # Full-form autosave echoes are not confirmations (#1988). Only an
+            # actual change of the answer may create/renew its provenance.
+            # Category edits can withdraw it, but cannot authenticate an old True.
+            if ('no_pre_existing_conditions' in direct_fields
+                    or ('preexisting_conditions' in direct_fields
+                        and patient_info.no_pre_existing_conditions is not True)):
                 from omop_core.services.pre_existing_conditions import (
                     sync_no_preexisting_conditions,
                 )
@@ -5589,6 +5589,24 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
     The legacy /api/patient-info/ prefix registers PatientRecordViewSet itself,
     so anything added there widens a frozen API. New actions belong here.
     """
+
+    @action(detail=True, methods=['post'], url_path='preexisting-conditions-answer',
+            permission_classes=[PatientCrudPermission, PatientSelfScopePermission])
+    def preexisting_conditions_answer(self, request, pk=None):
+        person, record, error = self._resolve_patient_with_auth(request, pk)
+        if error is not None:
+            return error
+        if not _caller_may_write_patient(request, person.person_id):
+            return Response({'detail': 'You have read-only access to this patient.'}, status=403)
+        if not is_machine_request(request) and not getattr(request.user, 'is_staff', False):
+            from omop_core.authorization import can_write_patient
+            if not can_write_patient(request.user, person.person_id):
+                return Response({'detail': 'You have read-only access to this patient.'}, status=403)
+        from .preexisting_conditions import write_answer
+        source = ('host-explicit' if is_machine_request(request)
+                  else f'{_attestation_source(request, person)}-explicit')
+        return write_answer(request, record, source=source,
+                            revision_writer=_write_record_revisions)
 
     @action(detail=False, methods=['get'], url_path='writable-fields')
     def writable_fields(self, request: Request) -> Response:

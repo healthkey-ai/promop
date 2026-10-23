@@ -16,9 +16,9 @@ so a repair cannot run against a cohort that moved underneath it.
 Classification, in priority order:
 
 ``contradiction``    True beside recorded categories. #1988 B: the list wins.
-``authored_true``    True and a person stated it: an attestation, the latest revision
-                     is True, or a pending ``user_edited_fields`` entry. Keep it.
-``rewritten_true``   A revision wrote False/empty and the current value is True again.
+``authored_true``    True with a dedicated explicit-answer attestation. Keep it.
+                     Legacy attestations, revisions and pending edits are not proof.
+``rewritten_true``   A revision wrote False and the current value is True again.
                      The formula most likely rewrote it, but that is inference.
 ``unattributed_true``True with no evidence who wrote it. Neither proven formula output
                      nor proven authoring -- the policy decision, not a guess.
@@ -40,7 +40,9 @@ from django.db import connection, transaction
 from omop_core.models import (
     FieldFormula, PatientRecord, PreexistingConditionsAttestation, RecordRevision,
 )
-from omop_core.services.pre_existing_conditions import condition_categories
+from omop_core.services.pre_existing_conditions import (
+    EXPLICIT_ATTESTATION_SOURCES, condition_categories,
+)
 
 FLAG_FIELD = 'no_pre_existing_conditions'
 CATEGORY_FIELD = 'preexisting_conditions'
@@ -119,12 +121,10 @@ def classify(flag, categories, revisions=(), pending_edit=False, attested=False)
         return 'explicit_false'
     if flag is None:
         return 'unanswered'
-    if attested or pending_edit:
+    if attested:
         return 'authored_true'
     if revisions:
         latest = _as_bool(revisions[-1]['new'])
-        if latest is True:
-            return 'authored_true'
         if latest is False:
             # Something wrote "not none" and the current value is True again: the most
             # likely writer is the formula, but it is an inference, not a fact.
@@ -132,17 +132,13 @@ def classify(flag, categories, revisions=(), pending_edit=False, attested=False)
     return 'unattributed_true'
 
 
-def _record_line(pk, flag, categories, revisions, pending_edit, attested):
+def _record_line(pk, flag, categories, revisions, pending_edit, attestation):
     """A canonical, hashable description of one record's data and evidence."""
-    return '|'.join((
-        str(pk),
-        '' if flag is None else str(flag).lower(),
-        ','.join(sorted(categories)),
-        str(len(revisions)),
-        '' if not revisions else str(revisions[-1]['new'] or ''),
-        '1' if pending_edit else '0',
-        '1' if attested else '0',
-    ))
+    return json.dumps({
+        'id': pk, 'flag': flag, 'categories_raw': categories,
+        'flag_history': revisions, 'pending_edit': pending_edit,
+        'attestation': attestation,
+    }, sort_keys=True, separators=(',', ':'))
 
 
 class Command(BaseCommand):
@@ -210,7 +206,7 @@ class Command(BaseCommand):
         if connection.vendor != 'postgresql':
             return
         with connection.cursor() as cursor:
-            cursor.execute('SET TRANSACTION READ ONLY')
+            cursor.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY')
 
     def _collect(self, summary_only):
         queryset = (
@@ -221,8 +217,11 @@ class Command(BaseCommand):
                          'user_edited_fields', 'derivation_version', 'derived_at')
         )
         history = _flag_revisions()
-        attested_person_ids = set(
-            PreexistingConditionsAttestation.objects.values_list('person_id', flat=True))
+        attestations = {
+            person_id: {'source': source, 'confirmed_at': confirmed_at.isoformat()}
+            for person_id, source, confirmed_at in PreexistingConditionsAttestation.objects
+            .values_list('person_id', 'source', 'confirmed_at')
+        }
 
         records = []
         totals = 0
@@ -238,14 +237,15 @@ class Command(BaseCommand):
             categories = condition_categories(categories_raw)
             revisions = history.get(pk, [])
             pending_edit = isinstance(edited, list) and FLAG_FIELD in edited
-            attested = person_id in attested_person_ids
+            attestation = attestations.get(person_id)
+            attested = bool(attestation and attestation['source'] in EXPLICIT_ATTESTATION_SOURCES)
             classification = classify(
                 flag, categories_raw, revisions, pending_edit, attested)
             totals += 1
 
             hashed.update(
-                (_record_line(pk, flag, categories, revisions, pending_edit,
-                              attested) + '\n').encode('utf-8'))
+                (_record_line(pk, flag, categories_raw, revisions, pending_edit,
+                              attestation) + '\n').encode('utf-8'))
 
             state = _category_state(categories_raw)
             by_classification[classification] += 1
@@ -271,6 +271,7 @@ class Command(BaseCommand):
                     'flag_revisions': len(revisions),
                     'pending_edit': pending_edit,
                     'attested': attested,
+                    'attestation': attestation,
                 })
 
         return {
@@ -290,8 +291,8 @@ class Command(BaseCommand):
             },
             'records': records,
             'manifest_sha256': hashed.hexdigest(),
-            'manifest_scope': ('per record: pk|flag|categories|flag_revision_count|'
-                               'latest_flag_revision_new_value|pending_edit|attested'),
+            'manifest_version': 2,
+            'manifest_scope': 'canonical JSON per record: id, flag, raw categories, flag history, pending edit, attestation',
         }
 
     def _formula_state(self):

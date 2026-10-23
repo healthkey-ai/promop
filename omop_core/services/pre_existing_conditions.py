@@ -14,6 +14,12 @@ from django.utils import timezone
 
 from omop_core.models import Person, PreexistingConditionsAttestation
 
+# Only the dedicated deliberate-answer action writes these. Legacy generic
+# attestations may have been produced by full-form autosave echoes.
+EXPLICIT_ATTESTATION_SOURCES = frozenset({
+    'patient-explicit', 'clinician-explicit', 'host-explicit',
+})
+
 
 def condition_categories(value):
     """The recorded category codes, ignoring anything that is not a distinct code."""

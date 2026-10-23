@@ -109,6 +109,65 @@ def test_a_patch_of_the_answer_creates_the_attestation(editor):
     assert attestation.source == 'clinician'
 
 
+def test_autosave_echo_does_not_attest_a_legacy_true(editor):
+    record, client = editor
+    record.no_pre_existing_conditions = True
+    record.save(update_fields=['no_pre_existing_conditions'])
+
+    response = client.patch(f'/api/patient-info/{record.person_id}/', {
+        'no_pre_existing_conditions': True,
+        'preexisting_conditions': [],
+        'ecog_performance_status': 1,
+    }, format='json')
+
+    assert response.status_code == 200, response.data
+    assert not PreexistingConditionsAttestation.objects.filter(person=record.person).exists()
+
+
+def test_category_echo_alone_does_not_attest_a_legacy_true(editor):
+    record, client = editor
+    record.no_pre_existing_conditions = True
+    record.save(update_fields=['no_pre_existing_conditions'])
+
+    response = client.patch(f'/api/patient-info/{record.person_id}/', {
+        'preexisting_conditions': [],
+    }, format='json')
+
+    assert response.status_code == 200, response.data
+    assert not PreexistingConditionsAttestation.objects.filter(person=record.person).exists()
+
+
+def test_changing_empty_category_representation_does_not_attest_legacy_true(editor):
+    record, client = editor
+    record.no_pre_existing_conditions = True
+    record.preexisting_conditions = None
+    record.save(update_fields=['no_pre_existing_conditions', 'preexisting_conditions'])
+
+    response = client.patch(f'/api/patient-info/{record.person_id}/', {
+        'preexisting_conditions': [],
+    }, format='json')
+
+    assert response.status_code == 200, response.data
+    assert not PreexistingConditionsAttestation.objects.filter(person=record.person).exists()
+
+
+def test_echo_does_not_renew_existing_attestation(editor):
+    record, client = editor
+    attestation = attest_no_preexisting_conditions(record.person)
+    original = timezone.now() - timezone.timedelta(days=30)
+    PreexistingConditionsAttestation.objects.filter(pk=attestation.pk).update(
+        confirmed_at=original)
+
+    response = client.patch(f'/api/patient-info/{record.person_id}/', {
+        'no_pre_existing_conditions': True,
+        'preexisting_conditions': [],
+    }, format='json')
+
+    assert response.status_code == 200, response.data
+    attestation.refresh_from_db()
+    assert attestation.confirmed_at == original
+
+
 def test_clearing_the_answer_withdraws_the_attestation(editor):
     record, client = editor
     attest_no_preexisting_conditions(record.person)

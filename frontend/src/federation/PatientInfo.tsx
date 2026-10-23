@@ -3,6 +3,7 @@ import { Check, AlertCircle } from "lucide-react";
 
 import { PatientInfoProvider } from "./PatientInfoProvider";
 import { usePatientInfoMe, usePatchPatientInfo } from "./patientInfoHooks";
+import { useCommitConditionsAnswer } from './patientInfoApi';
 import type { PatientInfoProps } from "./patientInfoTypes";
 import { fetchWritableFields, LIFECYCLE, type FieldDescriptors } from "@/hooks/useWritableFields";
 // Profile fields now write through PatientRecord PATCH alongside clinical fields.
@@ -79,6 +80,7 @@ function PatientInfoSkeleton() {
 function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading = true }: Pick<PatientInfoProps, "readOnly" | "federated" | "onPatientUpdated" | "showHeading">) {
   const { data, isLoading, isError, error } = usePatientInfoMe();
   const patchMutation = usePatchPatientInfo();
+  const commitConditionsAnswer = useCommitConditionsAnswer();
 
   const initialInfo = useMemo(() => {
     if (!data) return {};
@@ -183,6 +185,7 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
 
       if (personId) {
         for (const [f, v] of Object.entries(info)) {
+          if (f === 'no_pre_existing_conditions' || f === 'preexisting_conditions') continue;
           if (f === "patient_name" || LIFECYCLE.has(f) || v === baseline[f]) continue;
           const desc = descriptors[f];
           if (desc?.writable && desc.target === 'patient_record') {
@@ -420,11 +423,22 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
           {activeTab === 0 && (
             <GeneralTab
               showCoordinates={!federated}
+              conditionsReadOnly={readOnly}
               formData={editedInfo}
               onChange={handleFieldChange}
               editedName={editedName}
               onNameChange={handleNameChange}
               onZipcodeChange={handleZipcodeChange}
+              onConditionsSaved={async (answer) => {
+                for (const field of Object.keys(answer)) dirtyFieldsRef.current.delete(field);
+                serverInfoRef.current = { ...serverInfoRef.current, ...answer };
+                if (pendingDataRef.current) {
+                  pendingDataRef.current = { ...pendingDataRef.current, ...answer };
+                }
+                editedInfoRef.current = { ...editedInfoRef.current, ...answer };
+                setEditedInfo(previous => ({ ...previous, ...answer }));
+                await commitConditionsAnswer(answer);
+              }}
             />
           )}
           {activeTab === diseaseIdx && (

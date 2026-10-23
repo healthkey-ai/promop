@@ -1,10 +1,22 @@
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { AxiosInstance } from "axios";
 import type { PatientInfoData } from "./patientInfoTypes";
+import type { ConditionsAnswer } from '@/components/PatientInfo/PreexistingConditionsAnswer';
 
 const KEYS = {
   me: ["patient-info", "me"] as const,
 };
+
+/** A dedicated answer write must also advance the shared GET/PATCH cache. */
+export function useCommitConditionsAnswer() {
+  const queryClient = useQueryClient();
+  return async (answer: ConditionsAnswer) => {
+    await queryClient.cancelQueries({ queryKey: KEYS.me });
+    queryClient.setQueryData(KEYS.me, (old: PatientInfoData | undefined) => old ? {
+      ...old, patient_info: { ...old.patient_info, ...answer },
+    } : old);
+  };
+}
 
 export function usePatientInfoMe(apiClient?: AxiosInstance, apiBasePath = "") {
   return useQuery({
@@ -29,7 +41,7 @@ export function usePatchPatientInfo(apiClient?: AxiosInstance, apiBasePath = "")
       );
       return resp.data;
     },
-    onSuccess: (result: Record<string, unknown>) => {
+    onSuccess: (result: Record<string, unknown>, payload: Record<string, unknown>) => {
       // Update the cache with the PATCH response fields rather than invalidating.
       // Invalidating would trigger a refetch that returns the DB state — which can
       // differ from the user's selection when OMOP post-save signals run between
@@ -46,6 +58,11 @@ export function usePatchPatientInfo(apiClient?: AxiosInstance, apiBasePath = "")
         if (!old) return old;
         const pi = result.patient_info as Record<string, unknown> | undefined;
         const merged = pi ? { ...old.patient_info, ...pi } : old.patient_info;
+        // Answers have their own write action. A late unrelated autosave result
+        // must not resurrect the state from before that explicit write.
+        for (const field of ['no_pre_existing_conditions', 'preexisting_conditions'] as const) {
+          if (!(field in payload) && field in old.patient_info) merged[field] = old.patient_info[field];
+        }
         return {
           ...old,
           patient_info: merged,

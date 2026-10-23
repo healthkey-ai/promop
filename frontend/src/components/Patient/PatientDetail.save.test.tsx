@@ -39,6 +39,7 @@ vi.mock('@/hooks/useLabMeasurements', () => ({
 import api from '@/api/axios';
 
 const DESCRIPTORS = {
+  preexisting_conditions: { kind: 'direct', writable: true, target: 'patient_record' },
   date_of_birth: {
     kind: 'direct', writable: true, target: 'patient_record',
     projection_target: 'person', value_kind: 'date',
@@ -68,6 +69,8 @@ const DESCRIPTORS = {
 };
 
 const PATIENT = {
+  no_pre_existing_conditions: true,
+  preexisting_conditions: [],
   person_id: 261,
   patient_name: 'Alishia Tawny Howell',
   date_of_birth: '1970-01-01',
@@ -123,6 +126,26 @@ function patchBody() {
 }
 
 describe('PatientDetail save — the edit, not the record', () => {
+  it('keeps explicit withdrawal out of pending autosave while preserving other edits', async () => {
+    (api.post as ReturnType<typeof vi.fn>).mockResolvedValue({ data: {
+      no_pre_existing_conditions: null, preexisting_conditions: [],
+    } });
+    await renderAndLoad();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Withdraw answer' })).toBeEnabled());
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    fireEvent.change(screen.getByDisplayValue('howell@example.org'), { target: { value: 'new@example.org' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Withdraw answer' }));
+    await waitFor(() => expect(screen.getByText(/Not answered/)).toBeInTheDocument());
+    await act(async () => { vi.advanceTimersByTime(2100); });
+    await waitFor(() => expect(patchBody()).toMatchObject({ email: 'new@example.org' }));
+    expect(patchBody()).not.toHaveProperty('no_pre_existing_conditions');
+    expect(patchBody()).not.toHaveProperty('preexisting_conditions');
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm no pre-existing conditions' }));
+    await waitFor(() => expect(api.post).toHaveBeenLastCalledWith(
+      '/v1/patient-records/261/preexisting-conditions-answer/', {
+        action: 'confirm_none', expected_flag: null, expected_categories: [],
+      }));
+  });
   it('routes a date-of-birth correction through the PatientRecord PATCH', async () => {
     await renderAndLoad();
     await editAndSave('1970-01-01', '1971-02-03');
