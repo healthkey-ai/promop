@@ -1,5 +1,4 @@
 import functools
-from dataclasses import dataclass
 from collections import defaultdict
 from typing import Any, Callable, ContextManager
 
@@ -144,8 +143,9 @@ from .permissions import (
     get_request_org, is_service_token, is_machine_request,
 )
 from .providers.base import TokenClaims
+from .therapy_line_import import TherapyLineImportSerializer, import_therapy_lines
 from .provenance_org import (
-    PROVENANCE_ORG_HEADER, header_organization, raise_on_foreign_attribution,
+    PROVENANCE_ORG_HEADER, ProvenanceContext, header_organization, raise_on_foreign_attribution,
     resolve_explicit_organization,
 )
 from .serializers import (
@@ -442,19 +442,6 @@ def _extract_provenance(request):
         source_user_id = f"{request.user.issuer}|{request.user.sub}"
     modification_reason = body.get('modification_reason')
     return source, source_user_id, modification_reason
-
-
-@dataclass(frozen=True)
-class ProvenanceContext:
-    source: str | None
-    source_user_id: str
-    reason: str | None
-    organization: Organization | None
-    explicit: bool
-
-    @property
-    def match_organization(self) -> Organization | None:
-        return self.organization if self.explicit else None
 
 
 _PROVENANCE_CONTEXT_ATTR = '_promop_provenance_context'
@@ -14663,3 +14650,17 @@ class TherapyLineViewSet(_PackagedTherapyLineViewSet):
 
     def patient_info_payload(self, record):
         return PatientRecordSerializer(record).data
+
+    # The class permission refuses system/etl.write because the editor POST is a patient write
+    @action(detail=False, methods=['post'], url_path='bulk_upsert',
+            permission_classes=[EtlWritePermission])
+    def bulk_upsert(self, request: Request) -> Response:
+        """Upsert one person's lines of therapy from an ETL feed."""
+        serializer = TherapyLineImportSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        person = serializer.validated_data['person']
+        _authorize_person_write(request, person)
+        return import_therapy_lines(
+            person, serializer.validated_data['lines'],
+            _provenance_context(request, header=True), _skip_refresh_requested(request),
+        )

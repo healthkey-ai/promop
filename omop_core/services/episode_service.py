@@ -18,10 +18,11 @@ per line of therapy per person. Previously the FHIR/enrich paths keyed on
 """
 import logging
 from datetime import date
+from typing import Any, Iterable, Mapping
 from time import sleep as _sleep
 from django.db import transaction
 
-from omop_core.models import Concept, Observation
+from omop_core.models import Concept, Observation, Person
 from omop_core.services.pk import next_pk
 from omop_core.services.mappings import (
     CONCEPT_EHR_TYPE,
@@ -30,8 +31,9 @@ from omop_core.services.mappings import (
 )
 from omop_oncology.models import Episode, EpisodeEvent
 from omop_core.services.therapy_transactions import (
-    lock_therapy_patients, run_therapy_write,
+    TherapyLineRejected, lock_therapy_patients, run_therapy_write,
 )
+from omop_core.signals import suppress_patient_record_refresh
 
 logger = logging.getLogger('audit')
 
@@ -308,7 +310,7 @@ def retract_therapy_line(person, episode):
     from omop_oncology.models import TherapyLineAssertion
 
     if episode is None or episode.person_id != person.pk:
-        raise ValueError('The therapy line must belong to this patient.')
+        raise TherapyLineRejected('The therapy line must belong to this patient.')
     assertion, _ = TherapyLineAssertion.objects.get_or_create(
         episode=episode, defaults={'source': 'authoring'},
     )
@@ -344,10 +346,10 @@ def _line_parent(person, disease, episode):
     if slug and disease_key(slug) == disease_key(primary_disease_slug(person)):
         return disease_episode(person, slug), True  # None without the vocabulary: stays unparented
     if not slug or disease_key(slug) not in disease_keys_on_record(person):
-        raise ValueError(f'This record has no diagnosis of {disease!r} to file a line of therapy under.')
+        raise TherapyLineRejected(f'This record has no diagnosis of {disease!r} to file a line of therapy under.')
     parent = disease_episode(person, slug)
     if parent is None:
-        raise ValueError(
+        raise TherapyLineRejected(
             'A line of therapy for a second cancer needs the Episode vocabulary '
             '(Disease First Occurrence, 32528) loaded.'
         )
@@ -507,6 +509,36 @@ def author_therapy_line(person, *, line_number, drugs=_UNSET, **kwargs):
     )
 
 
+def author_therapy_lines(
+    person: Person, lines: Iterable[Mapping[str, Any]], *, asserted_by: str = 'authoring',
+) -> list[TherapyLineEpisodeResult] | None:
+    """Author several lines of one person as one all-or-nothing write.
+
+    Each entry holds ``author_therapy_line`` kwargs without ``person``.
+    Returns None and writes nothing when the Treatment Regimen concept is not loaded.
+    """
+    # Copied once so every retry replays the same input
+    lines = [dict(line) for line in lines]
+
+    # A lock conflict retries the whole batch so a retry never applies half of it
+    def once() -> list[TherapyLineEpisodeResult] | None:
+        with suppress_patient_record_refresh():
+            lock_therapy_patients([person.pk])
+            results = []
+            for index, line in enumerate(lines):
+                try:
+                    result = _author_therapy_line_inner(person, asserted_by=asserted_by, **line)
+                except TherapyLineRejected as exc:
+                    raise TherapyLineRejected(exc.message, index=index) from exc
+                if result.episode is None:
+                    transaction.set_rollback(True)
+                    return None
+                results.append(result)
+            return results
+
+    return run_therapy_write(once, backoff=_sleep)
+
+
 def _author_therapy_line_once(
     person,
     *,
@@ -522,6 +554,7 @@ def _author_therapy_line_once(
     replace=False,
     disease=None,
     episode=None,
+    asserted_by='authoring',
 ):
     """Record a line of therapy: its drug exposures, its Episode, and the links.
 
@@ -569,12 +602,12 @@ def _author_therapy_line_once(
         disease: the cancer the line treats (name or slug); None = primary.
         episode: the line being edited, updated in place rather than re-found
             by number (which another cancer's line may share).
+        asserted_by: source recorded on the TherapyLineAssertion
+            ('authoring' for the editor, 'import' for an ETL feed).
 
     Returns a TherapyLineEpisodeResult with two extra attributes attached:
     ``drug_exposure_ids`` and ``drugs_created``.
     """
-    from omop_core.signals import suppress_patient_record_refresh
-
     with suppress_patient_record_refresh():
         # Match the projection-before-person order of patient edits. Serializing
         # all authoring for one person also protects the find/create line key.
@@ -593,6 +626,7 @@ def _author_therapy_line_once(
             replace=replace,
             disease=disease,
             episode=episode,
+            asserted_by=asserted_by,
         )
         if result.episode is None:
             transaction.set_rollback(True)
@@ -614,6 +648,7 @@ def _author_therapy_line_inner(
     replace=False,
     disease=None,
     episode=None,
+    asserted_by='authoring',
 ):
     from omop_core.models import DrugExposure
     from omop_oncology.models import TherapyLineExposure
@@ -622,9 +657,9 @@ def _author_therapy_line_inner(
         return TherapyLineEpisodeResult(None, False, [])
     ehr_type = _concept(CONCEPT_EHR_TYPE)
     if ehr_type is None or _concept(CONCEPT_DRUG_EXPOSURE_FIELD) is None:
-        raise ValueError('The EHR type and drug-exposure field vocabulary must be loaded.')
+        raise TherapyLineRejected('The EHR type and drug-exposure field vocabulary must be loaded.')
     if not isinstance(line_number, int) or line_number < 1:
-        raise ValueError('line_number must be a positive integer.')
+        raise TherapyLineRejected('line_number must be a positive integer.')
 
     if episode is not None:
         try:
@@ -633,7 +668,7 @@ def _author_therapy_line_inner(
                 episode_number=line_number,
             )
         except Episode.DoesNotExist as exc:
-            raise ValueError('The therapy line must belong to this person and line number.') from exc
+            raise TherapyLineRejected('The therapy line must belong to this person and line number.') from exc
     else:
         parent, primary = _line_parent(person, disease, None)
         episode = _find_line(person, line_number, parent, primary)
@@ -643,7 +678,7 @@ def _author_therapy_line_inner(
     start = (episode.episode_start_date if episode else None) if start_date is _UNSET else start_date
     end = (episode.episode_end_date if episode else None) if end_date is _UNSET else end_date
     if start and end and end < start:
-        raise ValueError('end_date cannot precede start_date.')
+        raise TherapyLineRejected('end_date cannot precede start_date.')
     if source_value is _UNSET:
         source_value = episode.episode_source_value if episode else None
     if regimen_concept_id is _UNSET:
@@ -651,10 +686,10 @@ def _author_therapy_line_inner(
         object_regimen = episode.episode_object_concept if episode else None
     else:
         if regimen_concept_id is not None and regimen_concept_id <= 0:
-            raise ValueError(f'Unknown regimen concept_id {regimen_concept_id}')
+            raise TherapyLineRejected(f'Unknown regimen concept_id {regimen_concept_id}')
         regimen = _concept(regimen_concept_id) if regimen_concept_id else None
         if regimen_concept_id and regimen is None:
-            raise ValueError(f'Unknown regimen concept_id {regimen_concept_id}')
+            raise TherapyLineRejected(f'Unknown regimen concept_id {regimen_concept_id}')
         if regimen is None and episode is not None and (
             episode.episode_source_concept_id or episode.episode_object_concept_id not in (
                 None, 0, CONCEPT_EHR_TYPE, CONCEPT_TREATMENT_REGIMEN,
@@ -662,7 +697,7 @@ def _author_therapy_line_inner(
         ):
             # Unknown-regimen assertions need #1924's explicit representation.
             # Until then refuse, rather than silently retain A or invent a code.
-            raise ValueError('Clearing a regimen requires the unknown-regimen assertion workflow.')
+            raise TherapyLineRejected('Clearing a regimen requires the unknown-regimen assertion workflow.')
         object_regimen = regimen
 
     linked = list(DrugExposure.objects.filter(
@@ -678,21 +713,21 @@ def _author_therapy_line_inner(
         concept_id = drug.get('concept_id') if isinstance(drug, dict) else drug
         concept = _concept(concept_id)
         if concept is None or concept_id <= 0:
-            raise ValueError(f'Unknown drug concept_id {concept_id}')
+            raise TherapyLineRejected(f'Unknown drug concept_id {concept_id}')
         values = drug if isinstance(drug, dict) else {'concept_id': drug}
         ref = values.get('drug_exposure_id')
         if ref is not None and (not isinstance(ref, int) or isinstance(ref, bool) or ref <= 0):
-            raise ValueError('drug_exposure_id must be a positive integer.')
+            raise TherapyLineRejected('drug_exposure_id must be a positive integer.')
         raw = values.get('source_value')
         raw = (raw or concept.concept_name or '')[:50]
         key = ('id', ref) if ref is not None else ('source', raw)
         if key in validated and (ref is not None or validated[key][0] != values):
-            raise ValueError(f'Duplicate drug source_value {raw!r}; use distinct administration IDs.')
+            raise TherapyLineRejected(f'Duplicate drug source_value {raw!r}; use distinct administration IDs.')
         validated[key] = (values, concept, raw)
     if not start:
-        raise ValueError('A therapy line requires a known start_date; no date is fabricated.')
+        raise TherapyLineRejected('A therapy line requires a known start_date; no date is fabricated.')
     if start > date.today():
-        raise ValueError('A future therapy line is planned, not received treatment.')
+        raise TherapyLineRejected('A future therapy line is planned, not received treatment.')
 
     # Establish the line before exposures. Any later failure rolls back this
     # whole service call, including direct (non-HTTP) callers.
@@ -704,9 +739,10 @@ def _author_therapy_line_inner(
         disease=disease, episode=episode,
         replace_events=replace and composition_supplied,
         replace_metadata=replace,
+        asserted_by=asserted_by,
     )
     if result.episode is None:
-        raise ValueError('The treatment-regimen vocabulary disappeared during authoring.')
+        raise TherapyLineRejected('The treatment-regimen vocabulary disappeared during authoring.')
     line = result.episode
     if not composition_supplied:
         # A line interval is not every administration's interval. Preserve exact
@@ -733,7 +769,7 @@ def _author_therapy_line_inner(
         if ref is not None:
             existing = next((de for de in linked if de.pk == ref), None)
             if existing is None:
-                raise ValueError('drug_exposure_id must identify an active drug already linked to this line.')
+                raise TherapyLineRejected('drug_exposure_id must identify an active drug already linked to this line.')
         else:
             candidates = [de for de in linked if de.drug_source_value == raw]
             if not candidates:
@@ -741,11 +777,11 @@ def _author_therapy_line_inner(
                     TherapyLineExposure.objects.filter(episode=line, source_value=raw)
                     .select_related('drug_exposure')]
             if len(candidates) > 1:
-                raise ValueError('Ambiguous drug source_value; supply drug_exposure_id for each administration.')
+                raise TherapyLineRejected('Ambiguous drug source_value; supply drug_exposure_id for each administration.')
             existing = candidates[0] if candidates else None
         if existing is not None:
             if existing.pk in used_ids:
-                raise ValueError('Duplicate drug_exposure_id in the submitted composition.')
+                raise TherapyLineRejected('Duplicate drug_exposure_id in the submitted composition.')
             used_ids.add(existing.pk)
             if ref is not None:
                 raw = values.get('source_value', existing.drug_source_value)
@@ -756,14 +792,14 @@ def _author_therapy_line_inner(
         drug_start = values.get('start_date', existing.drug_exposure_start_date if existing else start)
         drug_end = values.get('end_date', existing.drug_exposure_end_date if existing else end)
         if not drug_start or (drug_end and drug_end < drug_start):
-            raise ValueError('Drug dates require a known start_date and end_date cannot precede it.')
+            raise TherapyLineRejected('Drug dates require a known start_date and end_date cannot precede it.')
         if drug_start > date.today():
-            raise ValueError('A future drug administration is planned, not received treatment.')
+            raise TherapyLineRejected('A future drug administration is planned, not received treatment.')
         shared = existing is not None and EpisodeEvent.objects.filter(
             event_id=existing.pk, episode_event_field_concept_id=CONCEPT_DRUG_EXPOSURE_FIELD,
         ).exclude(episode_id=line.pk).exists()
         if existing is not None and existing.person_id != person.pk:
-            raise ValueError('Exposure ownership does not match the patient.')
+            raise TherapyLineRejected('Exposure ownership does not match the patient.')
         if existing is not None and (existing.drug_concept_id == concept.pk
                        and existing.drug_source_value == raw
                        and existing.drug_exposure_start_date == drug_start
@@ -801,6 +837,7 @@ def _author_therapy_line_inner(
     links = upsert_therapy_line_episode(
         person, line_number=line_number, episode=line, source_value=line.episode_source_value,
         drug_exposure_ids=exposure_ids, replace_events=replace,
+        asserted_by=asserted_by,
     )
     if replace:
         for owned in TherapyLineExposure.objects.filter(episode=line).exclude(
@@ -811,7 +848,7 @@ def _author_therapy_line_inner(
                 event_id=old.pk, episode_event_field_concept_id=CONCEPT_DRUG_EXPOSURE_FIELD,
             ).exclude(episode_id=line.pk).exists()
             if old.person_id != person.pk:
-                raise ValueError('Exposure ownership does not match the patient.')
+                raise TherapyLineRejected('Exposure ownership does not match the patient.')
             if not shared and not old.is_erroneous:
                 old.is_erroneous = True
                 old.erroneous_reason = 'Superseded by an explicit therapy-line edit.'
