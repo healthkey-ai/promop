@@ -21,6 +21,7 @@ def test_source_edit_rejected_without_sdk(monkeypatch, field, value):
     assert field in exc.value.detail
 
 
+@pytest.mark.django_db
 def test_null_get_echo_is_not_an_authored_write():
     serializer = PatientRecordSerializer(instance=PatientRecord(), partial=True)
     assert serializer.to_internal_value({'prothrombin_time_uln': None}) == {}
