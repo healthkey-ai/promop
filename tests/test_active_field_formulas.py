@@ -56,3 +56,75 @@ def test_unknown_viral_status_keeps_inverse_projection_unknown():
     assert recompute_formula_field(formula) >= 1
     record.refresh_from_db()
     assert record.no_hiv_status is None
+
+
+def test_a_deactivated_pre_existing_formula_leaves_the_flag_unknown():
+    """The shipped formula is off, so an unassessed list stays unknown (#1988)."""
+    record = PatientRecordFactory(preexisting_conditions=[], no_pre_existing_conditions=None)
+    FieldFormula.objects.create(
+        field_name='no_pre_existing_conditions',
+        formula='@count(preexisting_conditions) == 0',
+        is_active=False,
+    )
+
+    _compute_derived_fields(record)
+
+    record.refresh_from_db()
+    assert record.no_pre_existing_conditions is None
+
+
+def test_the_same_formula_active_reproduces_the_defect():
+    """Guards the regression above: the expression it replaced did assert "none"."""
+    record = PatientRecordFactory(preexisting_conditions=[], no_pre_existing_conditions=None)
+    formula = FieldFormula.objects.create(
+        field_name='no_pre_existing_conditions',
+        formula='@count(preexisting_conditions) == 0',
+        is_active=True,
+    )
+
+    assert recompute_formula_field(formula) >= 1
+
+    record.refresh_from_db()
+    assert record.no_pre_existing_conditions is True
+
+
+def test_the_shipped_migration_deactivates_the_formula():
+    from importlib import import_module
+
+    from django.apps import apps as django_apps
+
+    migration = import_module(
+        'omop_core.migrations.0304_deactivate_pre_existing_condition_formula')
+    formula = FieldFormula.objects.create(
+        field_name='no_pre_existing_conditions',
+        formula='@count(preexisting_conditions) == 0',
+        is_active=True,
+    )
+
+    migration.deactivate(django_apps, None)
+
+    formula.refresh_from_db()
+    assert formula.is_active is False
+
+
+def test_the_shipped_curation_keeps_the_formula_inactive():
+    """A curation re-import must not re-enable it (#1988)."""
+    import json
+    import pathlib
+
+    fixture = pathlib.Path(__file__).resolve().parents[1] / 'omop_core' / 'data' / 'field_curation_v1.json'
+    data = json.loads(fixture.read_text())
+
+    def formulas(node):
+        if isinstance(node, dict):
+            if node.get('field_name') == 'no_pre_existing_conditions' and 'formula' in node:
+                yield node
+            for value in node.values():
+                yield from formulas(value)
+        elif isinstance(node, list):
+            for value in node:
+                yield from formulas(value)
+
+    shipped = list(formulas(data))
+    assert shipped, 'the curation fixture no longer carries the pre-existing-conditions formula'
+    assert all(entry['is_active'] is False for entry in shipped)

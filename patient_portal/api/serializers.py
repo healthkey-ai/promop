@@ -1747,15 +1747,29 @@ class FieldFormulaSerializer(serializers.ModelSerializer):
             created_by=request.user if request else None,
         )
 
+    def validate(self, attrs):
+        # A partial update does not carry `field_name`, so `validate_field_name` never
+        # runs for it: `PATCH {"is_active": true}` would silently re-enable a formula for
+        # a field that is no longer application-computed -- exactly how
+        # `no_pre_existing_conditions` would come back after #1988. Deactivation stays
+        # allowed so a stale row can always be switched off.
+        if self.instance is not None and attrs.get('is_active') is not False:
+            self._assert_computable(attrs.get('field_name', self.instance.field_name))
+        return attrs
+
     def validate_field_name(self, value):
+        self._assert_computable(value)
+        return value
+
+    @staticmethod
+    def _assert_computable(field_name):
         from omop_core.services.field_descriptor import _COMPUTED_FIELDS
-        if value not in _COMPUTED_FIELDS and not CustomPatientField.objects.filter(
-            field_name=value, mode='computed',
+        if field_name not in _COMPUTED_FIELDS and not CustomPatientField.objects.filter(
+            field_name=field_name, mode='computed',
         ).exists():
             raise serializers.ValidationError(
-                f"'{value}' is not an application-computed PatientRecord field."
+                {'field_name': f"'{field_name}' is not an application-computed PatientRecord field."}
             )
-        return value
 
     def validate_formula(self, value):
         from omop_core.services.formula_evaluator import validate_formula
