@@ -11,13 +11,24 @@ import { Linter } from 'eslint';
 import tsParser from '@typescript-eslint/parser';
 import { describe, it, expect } from 'vitest';
 // @ts-expect-error -- plain JS build script, no declarations
-import { extractAll, render, OUTPUT, TAB_DIR, TAB_FILES } from '../../../../scripts/tab-layout.mjs';
+import { extractAll, extractTabLayout, render, OUTPUT, TAB_DIR, TAB_FILES } from '../../../../scripts/tab-layout.mjs';
 // @ts-expect-error -- plain JS lint rule, no declarations
 import rule, { __resetTabFieldState, __tabFieldsByFile } from '../../../../eslint-rules/no-duplicate-tab-field.js';
 import { ASSEMBLED_FIELDS, DISEASE_COMPONENTS } from './patientReport';
 import { TAB_LAYOUT } from './tabLayout.generated';
 
 describe('tab layout', () => {
+  it('retains pre-existing conditions when its dedicated answer control replaces ClinicalField', () => {
+    const sections = extractTabLayout(`
+      function GeneralTab() {
+        return <Section title="Medical History"><PreexistingConditionsAnswer /></Section>;
+      }
+    `);
+    expect(sections[0].fields).toContainEqual(['Pre-existing Conditions', 'preexisting_conditions']);
+    expect(TAB_LAYOUT.GeneralTab.find((section) => section.title === 'Medical History')?.fields)
+      .toContainEqual(['Pre-existing Conditions', 'preexisting_conditions']);
+  });
+
   it('is current: run `node scripts/tab-layout.mjs` after changing a tab', () => {
     expect(readFileSync(OUTPUT, 'utf8')).toBe(render(extractAll()));
   });

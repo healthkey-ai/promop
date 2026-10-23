@@ -14,7 +14,8 @@
  * It reads the AST, not text, for the reason `eslint-rules/no-duplicate-tab-field.js`
  * gives, and it recognises the same three shapes that rule does:
  * `<ClinicalField label="…" name="…">`, `field('Label', 'name', …)` and
- * `section('Title', TABLE)` over `[['Label', 'name'], …]` rows.
+ * `section('Title', TABLE)` over `[['Label', 'name'], …]` rows. The dedicated
+ * pre-existing-conditions answer control also retains its category field.
  */
 import { readFileSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
@@ -99,6 +100,11 @@ export function extractTabLayout(source) {
     }
     if (node.type === 'JSXOpeningElement' && node.name.name === 'ClinicalField') {
       add(current, attr(node, 'label'), attr(node, 'name'));
+    }
+    if (node.type === 'JSXOpeningElement' && node.name.name === 'PreexistingConditionsAnswer') {
+      // The deliberate-answer control replaced ClinicalField, not the data the
+      // PDF must print. Preserve its category value in the same tab section.
+      add(current, 'Pre-existing Conditions', 'preexisting_conditions');
     }
     if (node.type === 'CallExpression' && node.callee.type === 'Identifier') {
       const [first, second] = node.arguments;
