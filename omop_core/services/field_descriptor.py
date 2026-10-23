@@ -114,7 +114,7 @@ _COMPUTED_FIELDS = frozenset({
     'active_infection_status', 'active_malignancies',
     'no_active_infection_status', 'no_hiv_status', 'no_hepatitis_b_status',
     'no_hepatitis_c_status', 'no_other_active_malignancies',
-    'no_pregnancy_or_lactation_status',
+    'no_pre_existing_conditions', 'no_pregnancy_or_lactation_status',
     'no_mental_health_disorder_status',
     'no_tobacco_use_status', 'no_substance_use_status',
     'no_geographic_exposure_risk',
@@ -327,6 +327,7 @@ _TAB_BLOOD = frozenset({
 })
 
 _TAB_LABS = frozenset({
+    'prothrombin_time_uln', 'activated_partial_thromboplastin_time_uln',
     # Moved from _TAB_BLOOD with the sections that render them (#955).
     'sodium_meq_l', 'potassium_meq_l', 'calcium_mg_dl', 'magnesium_mg_dl',
     'troponin_ng_ml', 'bnp_pg_ml', 'glucose_mg_dl', 'hba1c_percent', 'ldh_u_l',
@@ -349,6 +350,7 @@ _TAB_LABS = frozenset({
 })
 
 _TAB_BEHAVIOR = frozenset({
+    'able_to_swallow_tablets_capsules',
     'smoking_status', 'pack_years', 'alcohol_use', 'drinks_per_week',
     'exercise_frequency', 'exercise_minutes_per_week', 'diet_type',
     'sleep_hours_per_night', 'sleep_quality', 'stress_level', 'social_support',

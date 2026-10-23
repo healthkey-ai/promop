@@ -493,6 +493,39 @@ class PatientRecordSerializer(serializers.ModelSerializer):
 
     def to_internal_value(self, data):
         """Accept the historical misspelling on writes during API migration."""
+        from django.core.exceptions import ValidationError as ModelValidationError
+        from omop_core.services.clinical_input_contract import (
+            CLINICAL_INPUT_FIELDS, capabilities, uses_dedicated_writer, validated_values,
+        )
+        self._clinical_input_fields = {
+            field for field in CLINICAL_INPUT_FIELDS if field in data and uses_dedicated_writer(field)
+        }
+        if self._clinical_input_fields:
+            if self.instance is None:
+                raise serializers.ValidationError({
+                    field: 'Create the authorized patient record before authoring clinical inputs.'
+                    for field in self._clinical_input_fields
+                })
+            try:
+                cleaned = validated_values({field: data[field] for field in self._clinical_input_fields})
+            except ModelValidationError as exc:
+                raise serializers.ValidationError(
+                    exc.message_dict if hasattr(exc, 'message_dict') else {'non_field_errors': exc.messages}) from None
+            data = data.copy()
+            # Native autosave sends its entire GET representation. Equal echoes
+            # without pending intent are not source-write commands or approvals.
+            for field in list(cleaned):
+                if (cleaned[field] == getattr(self.instance, field)
+                        and field not in (self.instance.user_edited_fields or [])):
+                    data.pop(field)
+                    cleaned.pop(field)
+                    self._clinical_input_fields.remove(field)
+            available = capabilities()
+            errors = {field: available[field]['reason'] for field in self._clinical_input_fields
+                      if not available[field]['writable']}
+            if errors:
+                raise serializers.ValidationError(errors)
+            data.update(cleaned)
         if 'cytogenic_markers' in data:
             legacy_value = data.get('cytogenic_markers')
             data = data.copy()
@@ -560,6 +593,39 @@ class PatientRecordSerializer(serializers.ModelSerializer):
     validate_refractory_status = validate_treatment_refractory_status
 
     def update(self, instance, validated_data):
+        from django.core.exceptions import ValidationError as ModelValidationError
+        from django.db import transaction
+        from omop_core.services.clinical_input_contract import uses_dedicated_writer, write_clinical_inputs
+
+        clinical_fields = set(getattr(self, '_clinical_input_fields', ())) | {
+            field for field in validated_data if uses_dedicated_writer(field)
+        }
+        clinical = {field: validated_data.pop(field) for field in clinical_fields if field in validated_data}
+        self._clinical_input_fields = set(clinical)
+        with transaction.atomic():
+            locked = PatientRecord.objects.select_for_update().get(pk=instance.pk)
+            body_units = {
+                field: (unit if validated_data[field] != getattr(locked, field)
+                        else getattr(locked, f'{field}_units'))
+                for field, unit in (('weight', 'kg'), ('height', 'cm'))
+                if field in validated_data
+            }
+            if clinical:
+                try:
+                    write_clinical_inputs(instance.person, clinical)
+                except ModelValidationError as exc:
+                    raise serializers.ValidationError(
+                        exc.message_dict if hasattr(exc, 'message_dict') else {'non_field_errors': exc.messages}) from None
+            instance.refresh_from_db()
+            # Refresh happens before ordinary edits, so it cannot silently erase
+            # another field from this PATCH before the view records pending intent.
+            for field, unit in body_units.items():
+                # Match the view's actual-value edit rule. An unchanged 180 lb
+                # echo is still pounds, not an implicit conversion to 180 kg.
+                setattr(instance, f'{field}_units', unit)
+            return self._update_nonclinical(instance, validated_data)
+
+    def _update_nonclinical(self, instance, validated_data):
         overrides = dict(instance.therapy_overrides or {})
         for field in ('relapse_count', 'treatment_refractory_status'):
             if field in validated_data:
@@ -788,25 +854,6 @@ class PatientRecordSerializer(serializers.ModelSerializer):
                 "dlbcl_transformation_date and post_transformation_outcome "
                 "require transformed_to_dlbcl to be true."
             )
-
-        # "No pre-existing conditions" and recorded categories are contradictory;
-        # the write is rejected so the client chooses instead of the server guessing
-        # (#1988). A partial update falls back to the stored counterpart.
-        from omop_core.services.pre_existing_conditions import (
-            contradicts_no_pre_existing_conditions,
-        )
-        conditions_flag = data.get(
-            'no_pre_existing_conditions',
-            getattr(self.instance, 'no_pre_existing_conditions', None))
-        categories = data.get(
-            'preexisting_conditions',
-            getattr(self.instance, 'preexisting_conditions', None))
-        if contradicts_no_pre_existing_conditions(conditions_flag, categories):
-            raise serializers.ValidationError({
-                'no_pre_existing_conditions':
-                    'Recorded pre-existing condition categories contradict '
-                    '"no pre-existing conditions"; clear one of them.',
-            })
         return data
 
     def validate_stem_cell_transplant_history(self, value):
@@ -1408,6 +1455,10 @@ class FieldConceptMappingSerializer(serializers.ModelSerializer):
         and find the field still read-only with nothing saying why.
         """
         from omop_core.services.write_descriptor import mapping_table_is_writable
+        from omop_core.services.clinical_input_contract import NEW_INPUT_FIELDS, capabilities
+
+        if obj.field_name in NEW_INPUT_FIELDS or (obj.field_name == 'sct_date' and obj.concept_id == 0):
+            return capabilities(mappings={obj.field_name: obj})[obj.field_name]['writable']
 
         return bool(
             obj.status == 'approved'
@@ -1766,29 +1817,15 @@ class FieldFormulaSerializer(serializers.ModelSerializer):
             created_by=request.user if request else None,
         )
 
-    def validate(self, attrs):
-        # A partial update does not carry `field_name`, so `validate_field_name` never
-        # runs for it: `PATCH {"is_active": true}` would silently re-enable a formula for
-        # a field that is no longer application-computed -- exactly how
-        # `no_pre_existing_conditions` would come back after #1988. Deactivation stays
-        # allowed so a stale row can always be switched off.
-        if self.instance is not None and attrs.get('is_active') is not False:
-            self._assert_computable(attrs.get('field_name', self.instance.field_name))
-        return attrs
-
     def validate_field_name(self, value):
-        self._assert_computable(value)
-        return value
-
-    @staticmethod
-    def _assert_computable(field_name):
         from omop_core.services.field_descriptor import _COMPUTED_FIELDS
-        if field_name not in _COMPUTED_FIELDS and not CustomPatientField.objects.filter(
-            field_name=field_name, mode='computed',
+        if value not in _COMPUTED_FIELDS and not CustomPatientField.objects.filter(
+            field_name=value, mode='computed',
         ).exists():
             raise serializers.ValidationError(
-                {'field_name': f"'{field_name}' is not an application-computed PatientRecord field."}
+                f"'{value}' is not an application-computed PatientRecord field."
             )
+        return value
 
     def validate_formula(self, value):
         from omop_core.services.formula_evaluator import validate_formula
