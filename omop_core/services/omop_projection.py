@@ -309,6 +309,12 @@ def project_single_value(person, field_name, value, projection, *, acknowledge_e
                 person=person, is_erroneous=False,
                 **{concept_field: concept_id, src_field: source_value, date_field: today},
             )
+            # Reusing an older same-author row behind another author's newer
+            # fact acknowledges a correction that refresh will immediately undo.
+            # Only the current same-day fact is eligible for in-place reuse.
+            current_pk = candidates.order_by('-' + pk_field).values_list(pk_field, flat=True).first()
+            if current_pk is not None:
+                candidates = candidates.filter(pk=current_pk)
             if type_concept_id is not None:
                 candidates = candidates.filter(**{type_field: type_concept_id})
             elif fact_type != PATIENT_SELF_REPORT_TYPE:
@@ -349,6 +355,8 @@ def project_single_value(person, field_name, value, projection, *, acknowledge_e
                 instance.unit_source_value = projection.get('unit') or None
                 instance.unit_concept_id = projection.get('unit_concept_id') or None
             if existing and not note_changed and all(getattr(instance, f) == v for f, v in previous.items()):
+                if acknowledge_existing and patient_user_id:
+                    _record_patient_provenance(instance, patient_user_id)
                 return acknowledge_existing
             instance._skip_patient_record_refresh = True
             instance.save()
