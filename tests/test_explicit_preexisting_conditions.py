@@ -46,7 +46,7 @@ def test_verified_representative_is_not_attributed_as_a_clinician(editor, tmp_pa
     record, client = editor
     proxy = Identity.objects.create_user(email='explicit-proxy@example.test')
     PersonalRepresentative.objects.create(
-        representative=proxy, person=record.person,
+        representative=proxy, person_id=record.person_id,
         relationship='caregiver', verification_status='VERIFIED',
     )
     client.force_authenticate(proxy)
