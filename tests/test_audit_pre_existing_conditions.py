@@ -68,6 +68,20 @@ def test_every_evidence_shape_gets_its_own_classification(tmp_path):
     assert rows[unattributed.id]['classification'] == 'unattributed_true'
 
 
+def test_an_attestation_is_evidence_of_an_authored_answer(tmp_path):
+    from omop_core.models import PreexistingConditionsAttestation
+    from django.utils import timezone
+
+    record = _record(True, [])
+    PreexistingConditionsAttestation.objects.create(
+        person=record.person, confirmed_at=timezone.now())
+
+    rows = _by_id(_audit(tmp_path))
+
+    assert rows[record.id]['classification'] == 'authored_true'
+    assert rows[record.id]['attested'] is True
+
+
 def test_a_false_answer_is_never_treated_as_a_formula_output(tmp_path):
     """The retired formula only produced True or None, so False must be kept."""
     false_answer = _record(False, [])
@@ -117,7 +131,7 @@ def test_the_manifest_hash_is_recomputable_from_the_records(tmp_path):
     record = _record(True, [])
     payload = _audit(tmp_path)
 
-    line = f'{record.id}|true||0||0\n'
+    line = f'{record.id}|true||0||0|0\n'
     assert hashlib.sha256(line.encode()).hexdigest() == payload['manifest_sha256']
 
 
