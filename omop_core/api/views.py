@@ -200,7 +200,10 @@ class TherapyHistoryCompletenessViewSet(viewsets.ViewSet):
     permission_classes = [IsAuthenticated]
 
     def patient_write_denied(self, request, person):
-        return None
+        # A host's therapy-line override does not secure this separate viewset.
+        # Require its explicit authorization implementation before any mutation.
+        return Response({'detail': 'The host must authorize therapy-history confirmation.'},
+                        status=status.HTTP_403_FORBIDDEN)
 
     def patient_info_payload(self, record):
         return None
