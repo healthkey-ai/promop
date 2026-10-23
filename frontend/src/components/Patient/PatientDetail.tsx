@@ -482,6 +482,7 @@ export default function PatientDetail({
       const patchFields: Record<string, unknown> = {};
 
       for (const [f, v] of Object.entries(info)) {
+        if (f === 'no_pre_existing_conditions' || f === 'preexisting_conditions') continue;
         if (LIFECYCLE.has(f) || v === baseline[f]) continue;
         const desc = descriptors[f];
         if (desc?.writable && desc.target === 'patient_record') {
@@ -940,6 +941,20 @@ export default function PatientDetail({
                       onNameChange={handleNameChange}
                       onZipcodeChange={handleZipcodeChange}
                       patientMode={patientMode}
+                      onConditionsSaved={(answer) => {
+                        saveRevisionRef.current += 1;
+                        for (const [field, value] of Object.entries(answer)) {
+                          dirtyFieldsRef.current.delete(field);
+                          confirmedWritesRef.current[field] = value;
+                        }
+                        patientInfoRef.current = { ...patientInfoRef.current, ...answer };
+                        if (pendingDataRef.current) {
+                          pendingDataRef.current.info = { ...pendingDataRef.current.info, ...answer };
+                        }
+                        setPatientInfo(previous => ({ ...previous, ...answer }));
+                        setEditedInfo(previous => ({ ...previous, ...answer }));
+                        editedInfoRef.current = { ...editedInfoRef.current, ...answer };
+                      }}
                     />
                   </>
                 )}
