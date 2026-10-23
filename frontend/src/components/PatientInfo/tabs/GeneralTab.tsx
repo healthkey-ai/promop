@@ -6,6 +6,7 @@ import TreatingInstitutionField from '../TreatingInstitutionField';
 import Section from '../Section';
 import { Input } from '@/components/shadcn/input';
 import { today } from '@/api/clinicalFacts';
+import PreexistingConditionsAnswer, { type ConditionsAnswer } from '../PreexistingConditionsAnswer';
 import {
   COUNTRY_OPTIONS, US_STATES,
   ECOG_OPTIONS, KARNOFSKY_OPTIONS,
@@ -22,6 +23,8 @@ interface Props {
   /** Precise coordinates are matched from the host's own address data; a federated
    *  host that withholds them must not be offered inputs whose save it refuses. */
   showCoordinates?: boolean;
+  onConditionsSaved?: (answer: ConditionsAnswer) => void | Promise<void>;
+  conditionsReadOnly?: boolean;
 }
 
 /**
@@ -46,6 +49,8 @@ export default function GeneralTab({
   formData, onChange, editedName, onNameChange, onZipcodeChange,
   patientMode = false,
   showCoordinates = true,
+  onConditionsSaved,
+  conditionsReadOnly = false,
 }: Props) {
   // Ask about *this* patient: whether a field may be edited depends on who is
   // asking and whose record it is, not only on whether the field is mapped.
@@ -190,7 +195,14 @@ export default function GeneralTab({
       <Section title="Medical History" description="Pre-existing conditions and clinical status.">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
           <div className="sm:col-span-2">
-            {field('Pre-existing Conditions', 'preexisting_conditions', 'text')}
+            {personId && onConditionsSaved ? <PreexistingConditionsAnswer
+              key={JSON.stringify([personId, formData.no_pre_existing_conditions, formData.preexisting_conditions])}
+              personId={personId}
+              flag={formData.no_pre_existing_conditions}
+              categories={formData.preexisting_conditions}
+              readOnly={conditionsReadOnly || loading || descriptors.preexisting_conditions?.writable !== true}
+              onSaved={onConditionsSaved}
+            /> : <p className="text-sm">Pre-existing conditions require the explicit answer editor.</p>}
           </div>
           {field('Peripheral Neuropathy Grade', 'peripheral_neuropathy_grade', 'number')}
           {field('No Other Active Malignancies', 'no_other_active_malignancies', 'boolean')}

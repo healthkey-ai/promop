@@ -62,24 +62,29 @@ def test_every_evidence_shape_gets_its_own_classification(tmp_path):
     assert rows[unanswered.id]['classification'] == 'unanswered'
     assert rows[false_answer.id]['classification'] == 'explicit_false'
     assert rows[contradiction.id]['classification'] == 'contradiction'
-    assert rows[authored.id]['classification'] == 'authored_true'
+    assert rows[authored.id]['classification'] == 'unattributed_true'
     assert rows[rewritten.id]['classification'] == 'rewritten_true'
-    assert rows[pending.id]['classification'] == 'authored_true'
+    assert rows[pending.id]['classification'] == 'unattributed_true'
     assert rows[unattributed.id]['classification'] == 'unattributed_true'
 
 
-def test_an_attestation_is_evidence_of_an_authored_answer(tmp_path):
+@pytest.mark.parametrize('source,expected', [
+    ('patient', 'unattributed_true'), ('clinician', 'unattributed_true'),
+    ('patient-explicit', 'authored_true'), ('clinician-explicit', 'authored_true'),
+    ('host-explicit', 'authored_true'),
+])
+def test_only_explicit_attestation_is_evidence_of_an_authored_answer(tmp_path, source, expected):
     from omop_core.models import PreexistingConditionsAttestation
     from django.utils import timezone
 
     record = _record(True, [])
     PreexistingConditionsAttestation.objects.create(
-        person=record.person, confirmed_at=timezone.now())
+        person=record.person, confirmed_at=timezone.now(), source=source)
 
     rows = _by_id(_audit(tmp_path))
 
-    assert rows[record.id]['classification'] == 'authored_true'
-    assert rows[record.id]['attested'] is True
+    assert rows[record.id]['classification'] == expected
+    assert rows[record.id]['attested'] is (expected == 'authored_true')
 
 
 def test_a_false_answer_is_never_treated_as_a_formula_output(tmp_path):
@@ -131,8 +136,34 @@ def test_the_manifest_hash_is_recomputable_from_the_records(tmp_path):
     record = _record(True, [])
     payload = _audit(tmp_path)
 
-    line = f'{record.id}|true||0||0|0\n'
+    line = json.dumps({
+        'id': record.id, 'flag': True, 'categories_raw': [],
+        'flag_history': [], 'pending_edit': False, 'attestation': None,
+    }, sort_keys=True, separators=(',', ':')) + '\n'
+    assert payload['manifest_version'] == 2
     assert hashlib.sha256(line.encode()).hexdigest() == payload['manifest_sha256']
+
+
+def test_manifest_pins_raw_categories_and_attestation_metadata(tmp_path):
+    from django.utils import timezone
+    from omop_core.models import PreexistingConditionsAttestation
+
+    record = _record(True, None)
+    missing = _audit(tmp_path / 'missing.json')['manifest_sha256']
+    record.preexisting_conditions = []
+    record.save(update_fields=['preexisting_conditions'])
+    empty = _audit(tmp_path / 'empty.json')['manifest_sha256']
+    assert empty != missing
+    row = PreexistingConditionsAttestation.objects.create(
+        person=record.person, source='patient', confirmed_at=timezone.now())
+    legacy = _audit(tmp_path / 'legacy.json')['manifest_sha256']
+    row.source = 'patient-explicit'
+    row.save(update_fields=['source'])
+    explicit = _audit(tmp_path / 'explicit.json')['manifest_sha256']
+    assert explicit != legacy
+    row.confirmed_at += timezone.timedelta(seconds=1)
+    row.save(update_fields=['confirmed_at'])
+    assert _audit(tmp_path / 'renewed.json')['manifest_sha256'] != explicit
 
 
 def test_summary_only_omits_rows_but_keeps_the_hash(tmp_path):
