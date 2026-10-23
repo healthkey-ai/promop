@@ -1290,6 +1290,10 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     setattr(patient_info, f'{field}_units', unit)
             serializer.save()
 
+            # These edits already passed the dedicated source writer and fresh
+            # readback. Never mark them pending or send them to same-day upsert.
+            direct_fields.difference_update(getattr(serializer, '_clinical_input_fields', ()))
+
             # Demographics were popped before the serializer (GenderField is
             # read-only and translates 'Female' → 'F'). Write the DB code to
             # PatientRecord and the raw display text to Person.
@@ -7969,11 +7973,23 @@ class _OmopBulkCreateMixin:
         if any(pk_errors):
             return Response(pk_errors, status=status.HTTP_400_BAD_REQUEST)
 
-        # many=True yields positionally-aligned per-index error dicts, so the
-        # operator can tell which of N rows to fix.
+        # Preserve this bounded endpoint's positionally-aligned error contract.
+        # DRF 3.18 defaults to sparse index dictionaries; leave that global
+        # default and list-level errors intact, expanding only valid row indices
+        # after the batch-size guard above has limited the allocation.
         serializer = self.get_serializer(data=rows, many=True)
         _prefetch_bulk_related(serializer, rows)
-        serializer.is_valid(raise_exception=True)
+        try:
+            serializer.is_valid(raise_exception=True)
+        except ValidationError as exc:
+            errors = exc.detail
+            if isinstance(errors, dict) and errors and all(
+                type(index) is int and 0 <= index < len(rows) for index in errors
+            ):
+                raise ValidationError([
+                    errors.get(index, {}) for index in range(len(rows))
+                ]) from exc
+            raise
         validated = serializer.validated_data
 
         if not validated:
