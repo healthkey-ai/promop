@@ -9,6 +9,7 @@ from decimal import Decimal, InvalidOperation
 
 from django.core.exceptions import ValidationError
 from django.db import transaction
+from django.utils import timezone
 
 
 CLINICAL_INPUT_CONTRACT_VERSION = 2
@@ -90,7 +91,7 @@ def uses_dedicated_writer(field):
     return False
 
 
-def validated_values(changes):
+def validated_values(changes, *, for_write=True):
     from omop_core.models import PatientRecord
 
     if set(changes) - CLINICAL_INPUT_FIELDS:
@@ -122,6 +123,9 @@ def validated_values(changes):
             cleaned[field] = PatientRecord._meta.get_field(field).clean(value, None)
         except ValidationError as exc:
             raise ValidationError({field: exc.messages}) from None
+        if (for_write and kind == 'date' and cleaned[field] is not None
+                and cleaned[field] > timezone.localdate()):
+            raise ValidationError({field: 'SCT date cannot be in the future.'})
     return cleaned
 
 
@@ -212,7 +216,7 @@ def _decode_fact(field, fact):
     if kind == 'number':
         if fact.value_as_number is None or fact.value_as_string not in (None, ''):
             raise ValidationError('Expected only a numeric answer.')
-        return validated_values({field: fact.value_as_number})[field]
+        return validated_values({field: fact.value_as_number}, for_write=False)[field]
     if fact.value_as_number is not None:
         raise ValidationError('Unexpected numeric answer.')
     if kind == 'boolean':
@@ -222,7 +226,7 @@ def _decode_fact(field, fact):
         return raw == 'true'
     if not fact.value_as_string:
         raise ValidationError('Missing date answer.')
-    return validated_values({field: fact.value_as_string})[field]
+    return validated_values({field: fact.value_as_string}, for_write=False)[field]
 
 
 def _source_index(snapshot):

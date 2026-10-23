@@ -40,6 +40,7 @@ def approve(field, **overrides):
 
 
 def fact(person, field, value=None, **overrides):
+    from omop_core.services.pk import next_pk
     source, kind, unit = RECIPES[field]
     values = dict(person=person, observation_concept_id=0,
                   observation_type_concept_id=32865, observation_date=date.today(),
@@ -47,9 +48,14 @@ def fact(person, field, value=None, **overrides):
                   value_as_number=value if kind == 'number' else None,
                   value_as_string=value if kind != 'number' else None)
     values.update(overrides)
+    explicit, alias = values.get('observation_id'), values.pop('pk', None)
+    if explicit is not None and alias is not None and explicit != alias:
+        raise ValueError('Conflicting primary keys in fact fixture.')
+    if explicit is None:
+        values['observation_id'] = alias if alias is not None else next_pk(Observation, 'observation_id')
     row = ObservationFactory.build(**values)
     row._skip_patient_record_refresh = True
-    row.save()
+    row.save(force_insert=True)
     return row
 
 
@@ -137,6 +143,55 @@ def test_future_fact_rolls_back_write(patient):
     assert Observation.objects.filter(person=patient).count() == 1
 
 
+@pytest.mark.parametrize('future_kind', ['tomorrow', 'far_future'])
+@pytest.mark.parametrize('clear_first', [False, True])
+def test_sdk_rejects_future_sct_date_without_partial_batch_writes(patient, future_kind, clear_first):
+    from django.utils.timezone import localdate
+    future = localdate() + timedelta(days=1) if future_kind == 'tomorrow' else date(2099, 1, 1)
+    approve('sct_date')
+    approve(BOOL)
+    if clear_first:
+        write_clinical_inputs(patient, {BOOL: True})
+    with pytest.raises(ValidationError, match='SCT date cannot be in the future'):
+        write_clinical_inputs(patient, {BOOL: None if clear_first else False, 'sct_date': future})
+    assert Observation.objects.filter(person=patient).count() == int(clear_first)
+    record = PatientRecord.objects.get(person=patient)
+    assert record.sct_date is None
+    assert getattr(record, BOOL) is (True if clear_first else None)
+
+
+def test_historical_future_sct_read_is_not_changed_by_write_date_validation(patient):
+    approve('sct_date')
+    fact(patient, 'sct_date', '2099-01-01')
+    assert refresh_patient_record(patient).sct_date == date(2099, 1, 1)
+    with pytest.raises(ValidationError, match='SCT date cannot be in the future'):
+        write_clinical_inputs(patient, {'sct_date': date(2099, 1, 1)})
+    assert Observation.objects.filter(person=patient).count() == 1
+
+
+@pytest.mark.parametrize('raw', ['not-a-date', '2099-01-01 trailing text'])
+def test_read_date_policy_bypass_still_rejects_invalid_date_syntax(patient, raw):
+    fact(patient, 'sct_date', raw)
+    assert refresh_patient_record(patient).sct_date is None
+
+
+@pytest.mark.parametrize('days_ago', [0, 1, None])
+def test_sdk_accepts_current_past_and_cleared_sct_dates(patient, days_ago):
+    from django.utils.timezone import localdate
+    approve('sct_date')
+    value = None if days_ago is None else localdate() - timedelta(days=days_ago)
+    assert write_clinical_inputs(patient, {'sct_date': value}).sct_date == value
+
+
+def test_sct_write_limit_uses_localdate_not_fact_event_date(patient, monkeypatch):
+    approve('sct_date')
+    monkeypatch.setattr('django.utils.timezone.localdate', lambda: date(2026, 1, 1))
+    for event_date in (date(2025, 1, 1), date(2099, 1, 1)):
+        with pytest.raises(ValidationError, match='SCT date cannot be in the future'):
+            write_clinical_inputs(patient, {'sct_date': date(2026, 1, 2)}, today=event_date)
+    assert not Observation.objects.filter(person=patient).exists()
+
+
 def test_conflicting_pending_value_cannot_mask_failed_roundtrip(patient):
     approve(RATIO)
     PatientRecord.objects.filter(person=patient).update(
@@ -154,6 +209,19 @@ def test_approval_does_not_backfill_pending_values_as_self_report(patient):
     from omop_core.services.omop_projection import project_field_to_omop
     assert project_field_to_omop(mapping) == 0
     assert not Observation.objects.filter(person=patient).exists()
+
+
+def test_built_source_fixture_cannot_overwrite_an_existing_runtime_fact(patient):
+    approve(BOOL)
+    write_clinical_inputs(patient, {BOOL: True})
+    original = Observation.objects.get(person=patient)
+    before = Observation.objects.filter(pk=original.pk).values().get()
+    # Local override forces the original process-sequence collision; real IDs
+    # must still come from the runtime allocator before a built fact is saved.
+    added = fact(patient, BOOL, 'false', __sequence=original.pk - 1)
+    assert added.pk != original.pk
+    assert Observation.objects.filter(person=patient).count() == 2
+    assert Observation.objects.filter(pk=original.pk).values().get() == before
 
 
 def test_legacy_sct_mapping_is_not_sdk_permission(patient):

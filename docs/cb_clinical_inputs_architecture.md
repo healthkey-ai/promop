@@ -48,6 +48,9 @@ rolls back facts and projection changes. Mixed batches in the generic applier
 also run inside one transaction. Native PATCH performs the clinical refresh
 before saving other submitted projection edits, so it cannot erase those edits
 before the ordinary pending/projection lifecycle handles them.
+New SDK SCT writes enforce the native API's existing future-date limit using
+`timezone.localdate()`. Reading historical source dates does not apply that
+write-only limit; date syntax, provenance and payload-shape checks still apply.
 Body-measurement echoes preserve their original value/unit pair across that
 refresh. Only actual value edits receive the native API's existing kg/cm policy;
 unchanged pounds/inches/metres are never silently relabeled or converted.
