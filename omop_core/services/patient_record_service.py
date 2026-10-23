@@ -1091,6 +1091,15 @@ def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fiel
     This does not advance derived_at/version: those describe the last full
     OMOP refresh, not the last edit of PatientRecord's own values.
     """
+    from omop_core.services.pre_existing_conditions import (
+        contradicts_no_pre_existing_conditions,
+    )
+    # The category list is the evidence; an explicit "no conditions" answer cannot
+    # stand beside it (#1988). Invalidate the answer rather than delete the list.
+    if contradicts_no_pre_existing_conditions(
+        patient_info.no_pre_existing_conditions, patient_info.preexisting_conditions,
+    ):
+        patient_info.no_pre_existing_conditions = None
     if 'date_of_birth' in changed_fields:
         # PatientRecord.save recalculates age when a DOB exists, but it must be
         # explicitly cleared first when the date and Person birth components

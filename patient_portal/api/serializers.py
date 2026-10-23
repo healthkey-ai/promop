@@ -788,6 +788,25 @@ class PatientRecordSerializer(serializers.ModelSerializer):
                 "dlbcl_transformation_date and post_transformation_outcome "
                 "require transformed_to_dlbcl to be true."
             )
+
+        # "No pre-existing conditions" and recorded categories are contradictory;
+        # the write is rejected so the client chooses instead of the server guessing
+        # (#1988). A partial update falls back to the stored counterpart.
+        from omop_core.services.pre_existing_conditions import (
+            contradicts_no_pre_existing_conditions,
+        )
+        conditions_flag = data.get(
+            'no_pre_existing_conditions',
+            getattr(self.instance, 'no_pre_existing_conditions', None))
+        categories = data.get(
+            'preexisting_conditions',
+            getattr(self.instance, 'preexisting_conditions', None))
+        if contradicts_no_pre_existing_conditions(conditions_flag, categories):
+            raise serializers.ValidationError({
+                'no_pre_existing_conditions':
+                    'Recorded pre-existing condition categories contradict '
+                    '"no pre-existing conditions"; clear one of them.',
+            })
         return data
 
     def validate_stem_cell_transplant_history(self, value):
