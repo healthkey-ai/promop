@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { clinicalClient, clinicalUrl } from '@/api/clinicalTransport';
 import { useVocabulary } from '@/hooks/useVocabulary';
 
@@ -22,8 +22,27 @@ export default function PreexistingConditionsAnswer({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
-  const hasCategories = categories != null && JSON.stringify(categories) !== '[]';
-  const malformed = categories != null && !Array.isArray(categories);
+  const [loaded, setLoaded] = useState<ConditionsAnswer | null>(null);
+  const needsSnapshot = flag === undefined;
+  const answerFlag = needsSnapshot ? loaded?.no_pre_existing_conditions : flag;
+  const answerCategories = needsSnapshot ? loaded?.preexisting_conditions : categories;
+  const ready = !needsSnapshot || loaded !== null;
+  useEffect(() => {
+    if (!needsSnapshot) return;
+    let cancelled = false;
+    clinicalClient().get<ConditionsAnswer>(clinicalUrl(
+      `/v1/patient-records/${personId}/preexisting-conditions-answer/`,
+    )).then(({ data }) => {
+      if (cancelled) return;
+      setLoaded(data);
+      setSelected(Array.isArray(data.preexisting_conditions) ? data.preexisting_conditions : []);
+    }).catch(() => {
+      if (!cancelled) setError('Could not load the current answer. Reload before confirming.');
+    });
+    return () => { cancelled = true; };
+  }, [needsSnapshot, personId]);
+  const hasCategories = answerCategories != null && JSON.stringify(answerCategories) !== '[]';
+  const malformed = answerCategories != null && !Array.isArray(answerCategories);
   const unknownCodes = selected.filter(code => !options.some(option => option.value === code));
 
   const save = async (action: 'confirm_none' | 'withdraw' | 'set_categories') => {
@@ -34,8 +53,8 @@ export default function PreexistingConditionsAnswer({
       const { data } = await clinicalClient().post<ConditionsAnswer>(
         clinicalUrl(`/v1/patient-records/${personId}/preexisting-conditions-answer/`), {
           action,
-          expected_flag: flag ?? null,
-          expected_categories: categories ?? null,
+          expected_flag: answerFlag ?? null,
+          expected_categories: answerCategories ?? null,
           ...(action === 'set_categories' ? { categories: selected } : {}),
         });
       await onSaved(data);
@@ -49,12 +68,12 @@ export default function PreexistingConditionsAnswer({
     }
   };
 
-  return <fieldset disabled={readOnly || busy} className="space-y-3">
+  return <fieldset disabled={readOnly || busy || !ready} className="space-y-3">
     <legend className="text-sm font-medium">Pre-existing Conditions</legend>
     <p className="text-sm">
-      {hasCategories ? 'Recorded categories are listed below.' : flag === true
+      {!ready ? 'Loading the current answer…' : hasCategories ? 'Recorded categories are listed below.' : answerFlag === true
         ? 'Stored answer: no pre-existing conditions. Use Confirm to explicitly reaffirm it.'
-        : flag === false ? 'Stored answer: conditions reported; categories not yet recorded.'
+        : answerFlag === false ? 'Stored answer: conditions reported; categories not yet recorded.'
         : 'Not answered. An empty list does not mean no conditions.'}
     </p>
     {malformed && <p role="alert">Categories need review. Confirmation is unavailable.</p>}

@@ -112,6 +112,18 @@ def test_snapshot_and_deliberate_action_are_required(editor):
     assert not PreexistingConditionsAttestation.objects.exists()
 
 
+def test_snapshot_get_is_read_only_and_v1_only(editor):
+    record, client = editor
+    response = client.get(
+        f'/api/v1/patient-records/{record.person_id}/preexisting-conditions-answer/')
+    assert response.status_code == 200
+    assert response.data == {'no_pre_existing_conditions': True, 'preexisting_conditions': []}
+    assert not PreexistingConditionsAttestation.objects.exists()
+    from django.urls import resolve
+    legacy = resolve(f'/api/patient-info/{record.person_id}/preexisting-conditions-answer/')
+    assert getattr(legacy.func, 'actions', {}).get('get') != 'preexisting_conditions_answer'
+
+
 def test_analyst_cannot_confirm(editor):
     from omop_core.models import GroupAccess
     record, client = editor

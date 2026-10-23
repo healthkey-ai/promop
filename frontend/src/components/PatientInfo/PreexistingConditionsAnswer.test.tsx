@@ -3,15 +3,16 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import PreexistingConditionsAnswer from './PreexistingConditionsAnswer';
 
 const post = vi.fn();
+const get = vi.fn();
 vi.mock('@/api/clinicalTransport', () => ({
-  clinicalClient: () => ({ post }),
+  clinicalClient: () => ({ post, get }),
   clinicalUrl: (path: string) => `/host${path}`,
 }));
 vi.mock('@/hooks/useVocabulary', () => ({
   useVocabulary: () => ({ loading: false, options: [{ value: 'infections', label: 'Infections' }] }),
 }));
 
-beforeEach(() => { post.mockReset(); });
+beforeEach(() => { post.mockReset(); get.mockReset(); });
 
 function editor(flag: boolean | null = true, categories: string[] = [], readOnly = false) {
   const saved = vi.fn();
@@ -21,6 +22,27 @@ function editor(flag: boolean | null = true, categories: string[] = [], readOnly
 }
 
 describe('explicit pre-existing-conditions answers', () => {
+  it('loads the dedicated snapshot when the host withholds the raw flag from its projection', async () => {
+    get.mockResolvedValue({ data: { no_pre_existing_conditions: true, preexisting_conditions: [] } });
+    post.mockResolvedValue({ data: { no_pre_existing_conditions: true, preexisting_conditions: [] } });
+    render(<PreexistingConditionsAnswer personId={42} flag={undefined} categories={[]}
+      readOnly={false} onSaved={vi.fn()} />);
+    expect(post).not.toHaveBeenCalled();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Confirm no pre-existing conditions' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm no pre-existing conditions' }));
+    await waitFor(() => expect(post).toHaveBeenCalled());
+    expect(post.mock.calls[0][1].expected_flag).toBe(true);
+    expect(get).toHaveBeenCalledWith('/host/v1/patient-records/42/preexisting-conditions-answer/');
+  });
+
+  it('does not offer confirmation when the dedicated snapshot cannot be loaded', async () => {
+    get.mockRejectedValue(new Error('unsupported'));
+    render(<PreexistingConditionsAnswer personId={42} flag={undefined} categories={[]}
+      readOnly={false} onSaved={vi.fn()} />);
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not load');
+    expect(screen.getByRole('button', { name: 'Confirm no pre-existing conditions' })).toBeDisabled();
+    expect(post).not.toHaveBeenCalled();
+  });
   it('does not confirm on mount or while selecting categories', () => {
     editor();
     expect(post).not.toHaveBeenCalled();
