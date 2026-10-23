@@ -22,6 +22,7 @@ vi.mock('@/hooks/useLabMeasurements', () => ({
 }));
 
 const DESCRIPTORS = {
+  preexisting_conditions: { kind: 'direct', writable: true, target: 'patient_record' },
   anc_thousand_per_ul: {
     kind: 'direct', writable: true, target: 'patient_record',
     value_kind: 'number',
@@ -37,6 +38,8 @@ const DESCRIPTORS = {
 };
 
 const PATIENT_INFO = {
+  no_pre_existing_conditions: true,
+  preexisting_conditions: [],
   person_id: 261,
   anc_thousand_per_ul: 3.1,
   absolute_neutrophile_count: '3.10',
@@ -153,6 +156,51 @@ describe('federated PatientInfo save', () => {
     await waitFor(() => expect(screen.getByText('Blood Counts')).toBeInTheDocument());
   });
 
+  it('does not resurrect none when an older in-flight PATCH finishes after withdrawal', async () => {
+    let finishPatch!: (response: unknown) => void;
+    (client.patch as ReturnType<typeof vi.fn>).mockImplementation((url: string, body: unknown) => {
+      patches.push([url, body]);
+      return new Promise(resolve => { finishPatch = resolve; });
+    });
+    (client.post as ReturnType<typeof vi.fn>).mockImplementation((url: string, body: unknown) => {
+      posts.push([url, body]);
+      return Promise.resolve({ data: { no_pre_existing_conditions: null, preexisting_conditions: [] } });
+    });
+    await renderAndLoad();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Withdraw answer' })).toBeEnabled());
+    await editAndSave('howell@example.org', 'new@example.org');
+    await waitFor(() => expect(patches).toHaveLength(1));
+    fireEvent.click(screen.getByRole('button', { name: 'Withdraw answer' }));
+    await waitFor(() => expect(screen.getByText(/Not answered/)).toBeInTheDocument());
+    await act(async () => { finishPatch({ data: { patient_info: { ...PATIENT_INFO, email: 'new@example.org' } } }); });
+    expect(screen.getByText(/Not answered/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm no pre-existing conditions' }));
+    await waitFor(() => expect(posts.at(-1)![1]).toMatchObject({
+      action: 'confirm_none', expected_flag: null, expected_categories: [],
+    }));
+  });
+  it('uses the host explicit-answer action without replaying it in pending autosave', async () => {
+    (client.post as ReturnType<typeof vi.fn>).mockImplementation((url: string, body: unknown) => {
+      posts.push([url, body]);
+      return Promise.resolve({ data: { no_pre_existing_conditions: null, preexisting_conditions: [] } });
+    });
+    await renderAndLoad();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Withdraw answer' })).toBeEnabled());
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    fireEvent.change(screen.getByDisplayValue('howell@example.org'), { target: { value: 'new@example.org' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Withdraw answer' }));
+    await waitFor(() => expect(screen.getByText(/Not answered/)).toBeInTheDocument());
+    await act(async () => { vi.advanceTimersByTime(2100); });
+    await waitFor(() => expect(patches.length).toBeGreaterThan(0));
+    expect(screen.getByText(/Not answered/)).toBeInTheDocument();
+    const body = patches.at(-1)![1];
+    expect(body).toMatchObject({ email: 'new@example.org' });
+    expect(body).not.toHaveProperty('no_pre_existing_conditions');
+    expect(body).not.toHaveProperty('preexisting_conditions');
+    expect(posts[0]).toEqual(['/api/v1/patient-records/261/preexisting-conditions-answer/', {
+      action: 'withdraw', expected_flag: true, expected_categories: [],
+    }]);
+  });
   it('fetches the descriptor through the host client, not the app singleton', async () => {
     await renderAndLoad();
     await openLabsTab();
