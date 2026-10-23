@@ -825,6 +825,10 @@ def _attestation_source(request, person):
         return 'clinician'
     if patient_person_for(user) == person:
         return 'patient'
+    from omop_core.authorization import get_actor_role
+    if get_actor_role(user, person.pk) == 'representative':
+        # Keep the explicit source within the existing 20-character column.
+        return 'proxy'
     return 'clinician'
 
 

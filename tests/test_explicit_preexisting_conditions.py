@@ -37,6 +37,31 @@ def test_explicit_reconfirmation_of_unchanged_true(editor):
     assert PreexistingConditionsAttestation.objects.count() == 1
 
 
+def test_verified_representative_is_not_attributed_as_a_clinician(editor, tmp_path):
+    import json
+    from io import StringIO
+    from django.core.management import call_command
+    from omop_core.models import PersonalRepresentative, RecordRevision
+
+    record, client = editor
+    proxy = Identity.objects.create_user(email='explicit-proxy@example.test')
+    PersonalRepresentative.objects.create(
+        representative=proxy, person_id=record.person_id,
+        relationship='caregiver', verification_status='VERIFIED',
+    )
+    client.force_authenticate(proxy)
+    response = answer(editor, 'confirm_none')
+    assert response.status_code == 200
+    assert PreexistingConditionsAttestation.objects.get(person=record.person).source == 'proxy-explicit'
+    assert not RecordRevision.objects.filter(
+        patient_record=record, field='no_pre_existing_conditions',
+    ).exists()
+    manifest = tmp_path / 'proxy-audit.json'
+    call_command('audit_pre_existing_conditions', '--output', str(manifest), stdout=StringIO())
+    row = next(row for row in json.loads(manifest.read_text())['records'] if row['id'] == record.pk)
+    assert row['classification'] == 'authored_true'
+
+
 def test_withdraw_is_unknown_and_preserves_categories(editor):
     record, _ = editor
     answer(editor, 'confirm_none')
