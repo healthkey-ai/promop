@@ -88,6 +88,18 @@ All notable changes to PRomop are documented here.
 
 ### Changed
 
+- **A patient's own record edits are recorded as patient self-report** — a
+  `PatientRecord` PATCH by the patient (`/patient-info/me/`) or their verified
+  representative projects its OMOP facts with type 32865 (Patient self-report)
+  instead of the recipe's type, which for curated mappings defaults to EHR.
+  The patient's own facts also get a `PATIENT_SELF` provenance row, as PHR
+  entries do. Same-day matching keeps the two apart in both directions: a
+  patient's answer sits beside a clinical fact recorded the same day instead of
+  overwriting it and taking over its type and provenance, and a later clinician,
+  staff or service edit that day writes its own fact rather than the patient's.
+  Their types are otherwise unchanged. Without concept 32865 loaded, the recipe
+  type stands (#1959).
+
 - **Mapping saves return immediately** — approving or re-pointing a code
   mapping (Concept to Code, Code to Concept, group approve, CSV upload) writes the mapping
   and returns; the stored clinical rows move to the new concept in a background
