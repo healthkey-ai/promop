@@ -14,7 +14,7 @@ from rest_framework.routers import SimpleRouter
 from omop_core.api import views
 
 
-def urlpatterns_for(therapy_line_viewset=None):
+def urlpatterns_for(therapy_line_viewset=None, completeness_viewset=None):
     """The widget's URLs, with an optional host viewset override.
 
     A host mounts ``include(urlpatterns_for(MyViewSet))``. Without the override it
@@ -22,8 +22,11 @@ def urlpatterns_for(therapy_line_viewset=None):
     only when the host has already scoped the request to the caller's record.
     """
     viewset = therapy_line_viewset or views.TherapyLineViewSet
+    completeness = completeness_viewset or views.TherapyHistoryCompletenessViewSet
     router = SimpleRouter()
     router.register(r'v1/therapy-lines', viewset, basename='therapy-lines')
+    router.register(r'v1/therapy-history/completeness', completeness,
+                    basename='therapy-history-completeness')
 
     read = api_view(['GET'])
     authenticated = permission_classes([IsAuthenticated])
