@@ -49,6 +49,8 @@ SYSTEM: frozenset[str] = frozenset({
     'omop_core.SuggestEmbeddingSnapshot', 'omop_core.SuggestRun',
     # Historical model-quality feedback for this instance, not a live mapping.
     'omop_core.CodeMappingUpload', 'omop_core.MappingSuggestionReview',
+    # Counts from this instance's own documents, and its curators' decisions on them.
+    'omop_core.RelevanceSignal',
     # Derived from concept + concept_synonym; rebuilt locally, never copied.
     # AI explanations are regenerated on demand, and their item ids would not
     # point at the same rows on another instance.
@@ -121,6 +123,8 @@ PATIENT: frozenset[str] = frozenset({
     'omop_core.ObservationPeriod', 'omop_core.PatientDocument', 'omop_core.PatientRecord',
     'omop_core.PatientSourceCode',
     'omop_core.PatientTrialEnrollment', 'omop_core.Person', 'omop_core.PersonLanguageSkill',
+    # The patient's own confirmation that the treatment list is complete (#1924).
+    'omop_core.TherapyHistoryAttestation',
     'omop_core.ProcedureOccurrence', 'omop_core.ProvenanceRecord', 'omop_core.RecordRevision',
     'omop_core.Specimen', 'omop_core.SupportiveTherapyCourse', 'omop_core.TrialSearchPreferences',
     'omop_core.VisitDetail', 'omop_core.VisitOccurrence', 'omop_core.WearableUpload',

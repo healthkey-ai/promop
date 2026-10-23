@@ -1,7 +1,10 @@
 import { useEffect, useState } from 'react';
 import { Pencil, Plus, Trash2 } from 'lucide-react';
 import { useWritableFields, invalidateWritableFieldsCache } from '@/hooks/useWritableFields';
-import { listTherapyRegimens, retractTherapyLine, type EditableTherapyLine } from '@/api/therapyLines';
+import {
+  listTherapyRegimens, retractTherapyLine, setTherapyHistoryCompleteness,
+  type EditableTherapyLine,
+} from '@/api/therapyLines';
 import type { TherapyRegimen } from '@/types/therapy';
 import ClinicalField from '../ClinicalField';
 import Section from '../Section';
@@ -70,6 +73,26 @@ export default function TreatmentTab({ formData, onChange, diseaseType, onRecord
   const [dialogState, setDialogState] = useState<TherapyDialogState | null>(null);
   const [retracting, setRetracting] = useState<number | null>(null);
   const [retractError, setRetractError] = useState('');
+  // Until confirmed, the recorded line count is a lower bound; the confirmation
+  // is the patient's statement that the list is complete (#1924).
+  const historyComplete = formData?.therapy_history_complete === true;
+  const [confirmingHistory, setConfirmingHistory] = useState(false);
+  const [historyError, setHistoryError] = useState('');
+
+  const setHistoryComplete = async (complete: boolean) => {
+    if (personId === null) return;
+    setHistoryError('');
+    setConfirmingHistory(true);
+    try {
+      const result = await setTherapyHistoryCompleteness(personId, complete);
+      invalidateWritableFieldsCache();
+      onRecordRefreshed?.(result.patient_info);
+    } catch {
+      setHistoryError('Could not save the confirmation. Reopen this tab to retry.');
+    } finally {
+      setConfirmingHistory(false);
+    }
+  };
 
   /** Withdraw the claim that a line happened. Different from clearing its drugs,
    *  which keeps the line and leaves its composition unknown. */
@@ -230,6 +253,24 @@ export default function TreatmentTab({ formData, onChange, diseaseType, onRecord
       )}
 
       <Section title="Treatment History">
+        <label className={`mb-4 flex items-start gap-2 rounded border border-border px-3 py-2 text-sm ${readOnly ? 'opacity-70' : ''}`}>
+          <input
+            type="checkbox"
+            checked={historyComplete}
+            disabled={readOnly || confirmingHistory || personId === null}
+            onChange={(e) => void setHistoryComplete(e.target.checked)}
+            aria-label="Treatment history is complete"
+            className="mt-0.5"
+          />
+          <span>
+            <span className="font-medium">This is my complete treatment history</span>
+            <span className="mt-0.5 block text-xs text-muted-foreground">
+              Until you confirm this, the number of prior lines is treated as a minimum
+              rather than an exact count.
+            </span>
+          </span>
+        </label>
+        {historyError && <p role="alert" className="mb-3 text-sm text-red-700">{historyError}</p>}
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
           {field('Number of Prior Lines', 'therapy_lines_count', 'number')}
           {field('Relapse Count', 'relapse_count', 'number')}

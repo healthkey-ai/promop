@@ -1874,7 +1874,8 @@ def rank_and_expand_jobs(jobs, on_ranked=None, ranking_model=DEFAULT_RANKING_MOD
     return _query_expand_failed_jobs(jobs, on_ranked=on_ranked, ranking_model=ranking_model)
 
 
-def suggest_source_code(*, source_vocabulary_id, source_code, source_text, omop_table):
+def suggest_source_code(*, source_vocabulary_id, source_code, source_text, omop_table,
+                        metadata=None):
     """Return the best proposed destination for one unresolved source code.
 
     This is the single-code entry point for the canonical lookup API.  It owns
@@ -1896,13 +1897,29 @@ def suggest_source_code(*, source_vocabulary_id, source_code, source_text, omop_
         description or source_code, source_concept.pk if source_concept else None,
         min_similarity=MIN_TRIGRAM_SCORE,
     )
+    source_context = build_source_context(
+        source_code=source_code, vocabulary_id=source_vocabulary_id,
+        description=source_text, source_concept=source_concept, umls_name=umls_name,
+        domain_id=domain_id, omop_table=omop_table,
+    )
+    # The record's own unit, value and specimen settle LOINC axes, and a
+    # candidate that conflicts with one is a different test, not a suggestion
+    # -- the same rule the queue's Suggest applies (_prepare).
+    source_axes, _hints = source_loinc_axes(
+        domain_id=domain_id, source_vocabulary_id=source_vocabulary_id,
+        source_code=source_code, metadata=metadata,
+    ) if metadata else (None, {})
+    if source_axes:
+        candidates, _excluded = loinc_axes.apply(candidates, source_axes)
+        source_context = {**source_context, 'loinc_axes': loinc_axes.values(source_axes)}
+        lab_reason = loinc_axes.lab_signal(source_vocabulary_id, metadata, source_axes)
+        if lab_reason:
+            candidates = loinc_axes.prefer_loinc(candidates)
+            source_context = {**source_context, 'expected_vocabulary': {
+                'vocabulary_id': 'LOINC', 'reason': lab_reason}}
     chosen, note, _alternatives = rank_candidates(
         source_code, candidates, source_description=description,
-        source_context=build_source_context(
-            source_code=source_code, vocabulary_id=source_vocabulary_id,
-            description=source_text, source_concept=source_concept, umls_name=umls_name,
-            domain_id=domain_id, omop_table=omop_table,
-        ),
+        source_context=source_context,
     )
     if chosen is None:
         return None, note

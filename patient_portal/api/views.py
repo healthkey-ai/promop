@@ -20,7 +20,7 @@ from patient_portal.models import Identity
 from django.contrib.auth import logout, login, authenticate
 from django.db import IntegrityError, models, transaction
 from django.db.models import Case, CharField, Count, F, IntegerField, Prefetch, Q, Value, When
-from django.db.models.functions import Concat, Length
+from django.db.models.functions import Cast, Concat, Length
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from django.utils import timezone
@@ -10048,7 +10048,15 @@ def mapping_stats(request):
     code_proposed = SourceCodeConceptMapping.objects.filter(status='proposed').count()
     code_total = code_approved + code_proposed
 
+    from omop_core.models import RelevanceSignal
+    # Decisions are per (disease, concept) pair, so count pairs, not period rows.
+    signal_pairs = dict(
+        RelevanceSignal.objects.values('status')
+        .annotate(n=Count(Concat('disease', Value(':'), Cast('concept_id', CharField())), distinct=True))
+        .values_list('status', 'n'))
+
     return Response({
+        'relevance_signals': {s: signal_pairs.get(s, 0) for s in ('proposed', 'accepted', 'rejected')},
         'field_mappings': {'total': field_total, 'approved': field_approved, 'proposed': field_proposed, 'unmapped': field_unmapped},
         'code_mappings': {'total': code_total, 'approved': code_approved, 'proposed': code_proposed},
         'therapy': {
@@ -13874,6 +13882,13 @@ def code_mapping_lookup(request):
     carrying ``axis_variant_id``: the same code means a different LOINC per
     unit, so one key per code cannot hold both answers. The answer is also
     under ``"vocab|code"`` when no unrouted entry for that code holds it.
+
+    An entry with an empty ``source_vocabulary_id`` is a **text term**: the
+    wording a document extractor found, sent as ``source_code``, with
+    ``source_unit``, ``quantity`` and ``specimen`` as its context (#1944). It
+    resolves through the same curated mappings, variants and Suggest engine
+    under the Uncoded vocabulary, keyed ``"|term"``; see
+    :mod:`omop_core.mapping.text_terms` for what differs.
     """
     codes = request.data.get('codes')
     if not codes or not isinstance(codes, list):
@@ -13901,19 +13916,26 @@ def code_mapping_lookup(request):
     # The source system is server-owned: a client must not be able to forge a
     # different importer name in SCCM provenance.
     source_system = 'code-mapping-api'
+    from omop_core.mapping import text_terms
     lookup_entries = []
+    specimens = []
     for entry in codes:
         if not isinstance(entry, dict):
             return Response({'detail': 'Each code entry must be an object.'}, status=status.HTTP_400_BAD_REQUEST)
         vocab = str(entry.get('source_vocabulary_id') or '').strip()
         code = str(entry.get('source_code') or '').strip()
         table = normalize_omop_table(entry.get('omop_table'))
-        if not vocab or not code or table not in CLINICAL_TABLES:
+        if not vocab:
+            # A text term: the document's wording is the key.
+            code = text_terms.normalize_term(code)
+        if not code or table not in CLINICAL_TABLES:
             return Response(
-                {'detail': 'Each entry needs source_vocabulary_id, source_code, and a supported omop_table.'},
+                {'detail': 'Each entry needs source_code (a code, or the term itself when '
+                           'source_vocabulary_id is empty) and a supported omop_table.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         lookup_entries.append((vocab, code, table, str(entry.get('source_text') or '').strip()))
+        specimens.append(str(entry.get('specimen') or '').strip())
 
     if request_organization is None and any(
         source_vocabularies.hospital_vendor(vocab)
@@ -13958,7 +13980,11 @@ def code_mapping_lookup(request):
     from omop_core.mapping.code_resolution import resolve_source_code_variant
     entry_keys = []
     routed_keys = {}   # "vocab|code|unit" -> "vocab|code"
+    text_keys = set()   # terms whose evidence may now imply axis variants
     for idx, (vocab, code, table, source_text) in enumerate(lookup_entries):
+        is_term = vocab == text_terms.TEXT_VOCABULARY
+        metadata = text_terms.metadata_for(
+            unit_inputs[idx][0], unit_inputs[idx][1], specimens[idx]) if is_term else None
         concept, mapping, variant = resolve_source_code_variant(
             source_vocabulary_id=vocab,
             source_code=code,
@@ -13967,6 +13993,8 @@ def code_mapping_lookup(request):
             source_system=source_system,
             organization=request_organization,
             source_unit=unit_inputs[idx][0] or None,
+            metadata=metadata,
+            mint=not is_term,
         )
         # A code with LOINC axis variants means a different concept per unit,
         # so a routed entry is keyed by its unit too: "vocab|code|unit". Every
@@ -14014,6 +14042,12 @@ def code_mapping_lookup(request):
                     unresolved_reason='destination_domain_or_validity_mismatch',
                 )
             unresolved += 1
+        if is_term:
+            units_seen = text_terms.annotate(
+                result[key], mapping=mapping, concept=concept, term=code, omop_table=table,
+                metadata=metadata, unit=unit_inputs[idx][0] or None)
+            if mapping is not None and (units_seen >= 2 or mapping.axis_variant_count):
+                text_keys.add((vocab, code))
 
     # ── Unit conversion (only when at least one entry carried source_unit) ──
     has_unit_request = any(src_unit for src_unit, _ in unit_inputs)
@@ -14061,10 +14095,20 @@ def code_mapping_lookup(request):
         if base not in result and routed in result:
             result[base] = result[routed]
 
+    # A term now seen in two units may be two LOINC tests; the queue flags it
+    # as it does a hospital code. Evidence only: never fails the lookup.
+    if text_keys:
+        try:
+            from omop_core.mapping.axis_variants import refresh_codes
+            refresh_codes(text_keys)
+        except Exception:  # noqa: BLE001
+            logger.warning('Axis variant refresh after a text-term lookup failed.', exc_info=True)
+
     response = Response({
         'mappings': result,
         'resolved': resolved,
         'unresolved': unresolved,
+        'matcher_version': text_terms.matcher_version(),
     })
     response['Cache-Control'] = 'no-store'
     return response

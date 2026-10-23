@@ -3,6 +3,7 @@ from django.urls import include, path
 from .loinc_axes import (
     code_mapping_axis_variant, code_mapping_loinc_axes, code_mapping_snomed_attributes, loinc_axis_values,
 )
+from .relevance import disease_relevance_view, relevance_signal_review, relevance_signals
 from .concept_to_code import (
     concept_to_code_list, concept_to_code_detail, concept_to_code_suggest,
     concept_to_code_run, concept_to_code_apply, concept_to_code_propose,
@@ -199,6 +200,9 @@ urlpatterns = [
     path('code-mappings/source-systems/', source_system_facilities, name='v1-source-system-facilities'),
     path('code-mappings/check-umls/', code_mapping_check_umls, name='v1-code-mapping-check-umls'),
     path('code-mappings/lookup/', code_mapping_lookup, name='v1-code-mapping-lookup'),
+    path('relevance/', disease_relevance_view, name='v1-disease-relevance'),
+    path('relevance/signals/', relevance_signals, name='v1-relevance-signals'),
+    path('relevance/signals/<int:signal_id>/', relevance_signal_review, name='v1-relevance-signal-review'),
     path('code-mappings/accuracy/', code_mapping_accuracy, name='v1-code-mapping-accuracy'),
     path('code-mappings/accuracy/dashboard/', code_mapping_accuracy_dashboard, name='v1-code-mapping-accuracy-dashboard'),
     path('code-mappings/unit-search/', code_mapping_unit_search, name='v1-code-mapping-unit-search'),

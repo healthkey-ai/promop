@@ -25907,6 +25907,21 @@ class MappingStatsTest(MappingHubTestBase):
         self.assertIn('unmapped', resp.data['field_mappings'])
         self.assertGreaterEqual(resp.data['therapy']['regimens'], 1)
 
+    def test_relevance_signals_count_pairs_not_periods(self):
+        from omop_core.models import RelevanceSignal
+        for period in ('2026-09', '2026-10'):
+            RelevanceSignal.objects.create(source='cdew', disease='MM', concept_id=1, period=period,
+                                           document_count=5, status='accepted')
+        RelevanceSignal.objects.create(source='cdew', disease='FL', concept_id=1, period='2026-10',
+                                       document_count=5)
+        RelevanceSignal.objects.create(source='cdew', disease='MM', concept_id=2, period='2026-10',
+                                       document_count=5)
+        self.client.force_authenticate(user=self.admin)
+
+        resp = self.client.get('/api/v1/mapping-stats/')
+
+        self.assertEqual(resp.data['relevance_signals'], {'proposed': 2, 'accepted': 1, 'rejected': 0})
+
     def test_org_admin_can_see_stats(self):
         org_admin = Identity.objects.create_user(
             email='org-admin-mapping@test.com', password='testpass',
