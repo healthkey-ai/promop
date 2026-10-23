@@ -43,6 +43,23 @@ ImportLine = dict[str, Any]
 ResolvedRegimens = dict[str, tuple[Concept | None, str | None]]
 
 
+class PositionalTherapyLineListSerializer(serializers.ListSerializer):
+    """Keep bounded per-line errors positional without changing DRF defaults."""
+
+    def to_internal_value(self, data):
+        try:
+            return super().to_internal_value(data)
+        except serializers.ValidationError as exc:
+            errors = exc.detail
+            if (isinstance(data, list) and len(data) <= MAX_LINES
+                    and isinstance(errors, dict) and errors
+                    and all(type(index) is int and 0 <= index < len(data) for index in errors)):
+                raise serializers.ValidationError([
+                    errors.get(index, {}) for index in range(len(data))
+                ]) from exc
+            raise
+
+
 class TherapyLineImportLineSerializer(serializers.Serializer):
     """One line as the upstream source records it."""
 
@@ -54,6 +71,9 @@ class TherapyLineImportLineSerializer(serializers.Serializer):
     regimen_concept_id = serializers.IntegerField(required=False, min_value=1)
     outcome = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=60)
     disease = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=100)
+
+    class Meta:
+        list_serializer_class = PositionalTherapyLineListSerializer
 
     def validate_start_date(self, value: date) -> date:
         """Reject a line that has not started yet."""
