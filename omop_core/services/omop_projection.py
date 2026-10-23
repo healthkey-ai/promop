@@ -11,12 +11,16 @@ from omop_core.models import (
     PatientRecord, Person, ProcedureOccurrence,
 )
 from omop_core.services.breast_mapping_safety import wrong_breast_field_mappings
+from omop_core.services.mappings import CONCEPT_PATIENT_REPORTED_TYPE
 from omop_core.services.pk import next_pk
 
 logger = logging.getLogger(__name__)
 
 # An explicit empty result stops derivation from falling back to older results.
 CLEAR_VALUE = 'PatientRecord:cleared'
+
+# OMOP type concept "Patient self-report" (Type Concept vocabulary).
+PATIENT_SELF_REPORT_TYPE = CONCEPT_PATIENT_REPORTED_TYPE
 
 _TARGET_CONFIG = {
     'measurement': (
@@ -248,12 +252,22 @@ def project_field_to_omop(mapping) -> int:
 
 
 def project_single_value(person, field_name, value, projection, *, acknowledge_existing=False,
-                         after_pk=None):
+                         after_pk=None, type_concept_id=None, patient_user_id=None):
     """Update a matching non-erroneous fact today, or create today's fact.
 
     Matching includes the concept and source key. Earlier dates are history and
     are never updated. The person lock serializes concurrent first writes for a
     day; an atomic savepoint keeps projection failures from poisoning PATCH.
+
+    *type_concept_id* types the fact by who wrote it, overriding the recipe's
+    type: 32865 when a patient or their representative is the author. It then
+    also narrows matching to facts of that type, so a patient's answer never
+    updates a clinical fact in place and takes over its type and provenance;
+    it sits beside it as its own fact. The rule holds the other way too: an
+    edit by anyone else never updates a patient's self-report fact, unless the
+    recipe itself is typed self-report. *patient_user_id* (``issuer|sub``)
+    records a PATIENT_SELF provenance row whenever the patient themselves
+    writes, the same row the PHR entry endpoints record.
 
     Normally returns whether a fact changed. Direct saves can acknowledge an
     identical existing fact too, so it is not mistaken for a failed projection.
@@ -287,6 +301,7 @@ def project_single_value(person, field_name, value, projection, *, acknowledge_e
         return False
 
     today = timezone.localdate()
+    fact_type = type_concept_id or projection.get('type_concept_id') or 32817
     try:
         with transaction.atomic():
             Person.objects.select_for_update().get(pk=person.pk)
@@ -294,6 +309,16 @@ def project_single_value(person, field_name, value, projection, *, acknowledge_e
                 person=person, is_erroneous=False,
                 **{concept_field: concept_id, src_field: source_value, date_field: today},
             )
+            # Reusing an older same-author row behind another author's newer
+            # fact acknowledges a correction that refresh will immediately undo.
+            # Only the current same-day fact is eligible for in-place reuse.
+            current_pk = candidates.order_by('-' + pk_field).values_list(pk_field, flat=True).first()
+            if current_pk is not None:
+                candidates = candidates.filter(pk=current_pk)
+            if type_concept_id is not None:
+                candidates = candidates.filter(**{type_field: type_concept_id})
+            elif fact_type != PATIENT_SELF_REPORT_TYPE:
+                candidates = candidates.exclude(**{type_field: PATIENT_SELF_REPORT_TYPE})
             if after_pk is not None:
                 candidates = candidates.filter(pk__gt=after_pk)
             instance = candidates.order_by('-' + pk_field).first()
@@ -302,7 +327,7 @@ def project_single_value(person, field_name, value, projection, *, acknowledge_e
                 instance = model(**{
                     pk_field: next_pk(model, pk_field), 'person': person,
                     concept_field: concept_id, src_field: source_value,
-                    date_field: today, type_field: projection.get('type_concept_id') or 32817,
+                    date_field: today, type_field: fact_type,
                 })
             answer_fields = ('value_as_number', 'value_as_string', 'value_as_concept_id',
                              'value_source_value', 'unit_source_value', 'unit_concept_id')
@@ -330,13 +355,44 @@ def project_single_value(person, field_name, value, projection, *, acknowledge_e
                 instance.unit_source_value = projection.get('unit') or None
                 instance.unit_concept_id = projection.get('unit_concept_id') or None
             if existing and not note_changed and all(getattr(instance, f) == v for f, v in previous.items()):
+                if acknowledge_existing and patient_user_id:
+                    _record_patient_provenance(instance, patient_user_id)
                 return acknowledge_existing
             instance._skip_patient_record_refresh = True
             instance.save()
+            if patient_user_id:
+                _record_patient_provenance(instance, patient_user_id)
         return True
     except Exception:
         logger.warning('OMOP value projection failed; edit remains pending')
         return False
+
+
+def patient_self_report_type():
+    """32865 when this database has the concept, else None.
+
+    Fact type columns are foreign keys checked when the request's transaction
+    commits, after the projection savepoint has closed. A type the vocabulary
+    lacks would fail the whole save there rather than leave the edit pending,
+    so without the concept the recipe's type stands, as it did before.
+    """
+    from omop_core.models import Concept
+
+    if Concept.objects.filter(concept_id=PATIENT_SELF_REPORT_TYPE).exists():
+        return PATIENT_SELF_REPORT_TYPE
+    logger.warning('Concept %s (Patient self-report) is not loaded; patient edits keep the recipe type',
+                   PATIENT_SELF_REPORT_TYPE)
+    return None
+
+
+def _record_patient_provenance(instance, patient_user_id):
+    from django.contrib.contenttypes.models import ContentType
+    from omop_core.models import ProvenanceRecord
+
+    ProvenanceRecord.objects.get_or_create(
+        content_type=ContentType.objects.get_for_model(type(instance)), object_id=instance.pk,
+        source='PATIENT_SELF', source_user_id=patient_user_id,
+    )
 
 
 def without_cleared_history(rows, target):
