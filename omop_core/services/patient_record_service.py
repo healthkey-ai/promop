@@ -143,6 +143,8 @@ _OMOP_DERIVED_FIELDS = [
     # These FHIR Observations are persisted as OMOP Measurements and must not
     # retain a projection-only copy after their source is removed.
     'inr', 'pt_seconds', 'ptt_seconds', 'cea_ng_ml', 'ca19_9_u_ml',
+    'prothrombin_time_uln', 'activated_partial_thromboplastin_time_uln',
+    'able_to_swallow_tablets_capsules',
     'psa_ng_ml', 'phosphorus',
     # Remaining numeric Measurement projections (#504).
     'heartrate_variability', 'ejection_fraction', 'qtcf_value',
