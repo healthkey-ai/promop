@@ -1290,6 +1290,10 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     setattr(patient_info, f'{field}_units', unit)
             serializer.save()
 
+            # These edits already passed the dedicated source writer and fresh
+            # readback. Never mark them pending or send them to same-day upsert.
+            direct_fields.difference_update(getattr(serializer, '_clinical_input_fields', ()))
+
             # Demographics were popped before the serializer (GenderField is
             # read-only and translates 'Female' → 'F'). Write the DB code to
             # PatientRecord and the raw display text to Person.
