@@ -9,6 +9,15 @@ from datetime import date
 from rest_framework import serializers
 
 from omop_core.models import Observation, PatientRecord, Person
+from omop_core.services.treatment_catalog import outcomes_for_disease
+
+
+def outcome_aliases(disease: str | None) -> dict[str, str]:
+    """Map each outcome code, value and label of the disease catalog to its value."""
+    return {
+        key: item['value'] for item in outcomes_for_disease(disease)
+        for key in (item['code'], item['value'], item['label'])
+    }
 
 
 class TherapyLineDrugSerializer(serializers.Serializer):
@@ -84,13 +93,8 @@ class TherapyLineWriteSerializer(serializers.Serializer):
                 'regimen, or composition_unknown=true to record the line alone.',
             )
         if attrs.get('outcome'):
-            from omop_core.services.treatment_catalog import outcomes_for_disease
             record = PatientRecord.objects.filter(person=attrs['person']).first()
-            options = outcomes_for_disease(record.disease if record else '')
-            aliases = {
-                key: item['value'] for item in options
-                for key in (item['code'], item['value'], item['label'])
-            }
+            aliases = outcome_aliases(record.disease if record else '')
             value = attrs['outcome']
             if value not in aliases:
                 # Preserve legacy values on a no-op edit; new selections must

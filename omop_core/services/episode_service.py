@@ -18,10 +18,11 @@ per line of therapy per person. Previously the FHIR/enrich paths keyed on
 """
 import logging
 from datetime import date
+from typing import Any, Iterable, Mapping
 from time import sleep as _sleep
 from django.db import transaction
 
-from omop_core.models import Concept, Observation
+from omop_core.models import Concept, Observation, Person
 from omop_core.services.pk import next_pk
 from omop_core.services.mappings import (
     CONCEPT_EHR_TYPE,
@@ -33,6 +34,7 @@ from omop_core.services.therapy_errors import TherapyLineValidationError
 from omop_core.services.therapy_transactions import (
     lock_therapy_patients, run_therapy_write,
 )
+from omop_core.signals import suppress_patient_record_refresh
 
 logger = logging.getLogger('audit')
 
@@ -505,6 +507,37 @@ def author_therapy_line(person, *, line_number, drugs=_UNSET, **kwargs):
     )
 
 
+def author_therapy_lines(
+    person: Person, lines: Iterable[Mapping[str, Any]], *, asserted_by: str = 'authoring',
+) -> list[TherapyLineEpisodeResult] | None:
+    """Author several lines of one person as one all-or-nothing write.
+
+    Each entry holds ``author_therapy_line`` kwargs without ``person``.
+    Returns None and writes nothing when the Treatment Regimen concept is not loaded.
+    """
+    # Copied once so every retry replays the same input
+    lines = [dict(line) for line in lines]
+
+    # A lock conflict retries the whole batch so a retry never applies half of it
+    def once() -> list[TherapyLineEpisodeResult] | None:
+        with suppress_patient_record_refresh():
+            lock_therapy_patients([person.pk])
+            results = []
+            for index, line in enumerate(lines):
+                try:
+                    result = _author_therapy_line_inner(person, asserted_by=asserted_by, **line)
+                except TherapyLineValidationError as exc:
+                    exc.index = index  # which request line was refused
+                    raise
+                if result.episode is None:
+                    transaction.set_rollback(True)
+                    return None
+                results.append(result)
+            return results
+
+    return run_therapy_write(once, backoff=_sleep)
+
+
 def _author_therapy_line_once(
     person,
     *,
@@ -520,6 +553,7 @@ def _author_therapy_line_once(
     replace=False,
     disease=None,
     episode=None,
+    asserted_by='authoring',
 ):
     """Record a line of therapy: its drug exposures, its Episode, and the links.
 
@@ -567,12 +601,12 @@ def _author_therapy_line_once(
         disease: the cancer the line treats (name or slug); None = primary.
         episode: the line being edited, updated in place rather than re-found
             by number (which another cancer's line may share).
+        asserted_by: source recorded on the TherapyLineAssertion
+            ('authoring' for the editor, 'import' for an ETL feed).
 
     Returns a TherapyLineEpisodeResult with two extra attributes attached:
     ``drug_exposure_ids`` and ``drugs_created``.
     """
-    from omop_core.signals import suppress_patient_record_refresh
-
     with suppress_patient_record_refresh():
         # Match the projection-before-person order of patient edits. Serializing
         # all authoring for one person also protects the find/create line key.
@@ -591,6 +625,7 @@ def _author_therapy_line_once(
             replace=replace,
             disease=disease,
             episode=episode,
+            asserted_by=asserted_by,
         )
         if result.episode is None:
             transaction.set_rollback(True)
@@ -612,6 +647,7 @@ def _author_therapy_line_inner(
     replace=False,
     disease=None,
     episode=None,
+    asserted_by='authoring',
 ):
     from omop_core.models import DrugExposure
     from omop_oncology.models import TherapyLineExposure
@@ -702,6 +738,7 @@ def _author_therapy_line_inner(
         disease=disease, episode=episode,
         replace_events=replace and composition_supplied,
         replace_metadata=replace,
+        asserted_by=asserted_by,
     )
     if result.episode is None:
         raise TherapyLineValidationError('vocabulary_lost')
@@ -799,6 +836,7 @@ def _author_therapy_line_inner(
     links = upsert_therapy_line_episode(
         person, line_number=line_number, episode=line, source_value=line.episode_source_value,
         drug_exposure_ids=exposure_ids, replace_events=replace,
+        asserted_by=asserted_by,
     )
     if replace:
         for owned in TherapyLineExposure.objects.filter(episode=line).exclude(
