@@ -141,6 +141,14 @@ def _record_line(pk, flag, categories, revisions, pending_edit, attestation):
     }, sort_keys=True, separators=(',', ':'))
 
 
+def approval_digest(payload):
+    """Authenticate the reviewable document, not just its underlying data state."""
+    stable = {key: value for key, value in payload.items()
+              if key not in ('generated_at', 'approval_sha256')}
+    return hashlib.sha256(json.dumps(
+        stable, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
 class Command(BaseCommand):
     help = ('Report stored "no pre-existing conditions" answers with their provenance; '
             'read-only, writes an optional manifest for the repair command')
@@ -159,7 +167,7 @@ class Command(BaseCommand):
             help='Exit 1 when any record falls into this classification (repeatable)',
         )
         parser.add_argument(
-            '--quiet', action='store_true', help='Print only the manifest hash',
+            '--quiet', action='store_true', help='Print only the full-document approval hash',
         )
 
     def handle(self, *args, **options):
@@ -179,7 +187,7 @@ class Command(BaseCommand):
 
         manifest = payload['manifest_sha256']
         if options['quiet']:
-            self.stdout.write(manifest)
+            self.stdout.write(payload['approval_sha256'])
         else:
             self._print_summary(payload)
 
@@ -274,11 +282,12 @@ class Command(BaseCommand):
                     'attestation': attestation,
                 })
 
-        return {
+        payload = {
             'generated_at': datetime.now(dt_timezone.utc).isoformat(),
             'database': {
                 'name': connection.settings_dict.get('NAME'),
                 'host': connection.settings_dict.get('HOST'),
+                'port': str(connection.settings_dict.get('PORT') or '5432'),
             },
             'formula': self._formula_state(),
             'totals': {
@@ -294,10 +303,13 @@ class Command(BaseCommand):
             'manifest_version': 2,
             'manifest_scope': 'canonical JSON per record: id, flag, raw categories, flag history, pending edit, attestation',
         }
+        payload['approval_sha256'] = approval_digest(payload)
+        return payload
 
     def _formula_state(self):
         formulas = list(FieldFormula.objects
                         .filter(field_name=FLAG_FIELD)
+                        .order_by('id')
                         .values('id', 'is_active'))
         applied = set()
         if connection.vendor == 'postgresql':
@@ -341,3 +353,4 @@ class Command(BaseCommand):
             self.stdout.write(f'  {name:<18} {count:>8}')
         self.stdout.write('')
         self.stdout.write(f'manifest: {payload["manifest_sha256"]}')
+        self.stdout.write(f'approval: {payload["approval_sha256"]}')
