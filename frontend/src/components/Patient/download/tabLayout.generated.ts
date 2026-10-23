@@ -112,6 +112,10 @@ export const TAB_LAYOUT: TabLayout = {
       "component": "GeneralTab",
       "fields": [
         [
+          "Pre-existing Conditions",
+          "preexisting_conditions"
+        ],
+        [
           "Peripheral Neuropathy Grade",
           "peripheral_neuropathy_grade"
         ],
