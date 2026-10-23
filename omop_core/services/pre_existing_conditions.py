@@ -17,7 +17,7 @@ from omop_core.models import Person, PreexistingConditionsAttestation
 # Only the dedicated deliberate-answer action writes these. Legacy generic
 # attestations may have been produced by full-form autosave echoes.
 EXPLICIT_ATTESTATION_SOURCES = frozenset({
-    'patient-explicit', 'clinician-explicit', 'host-explicit',
+    'patient-explicit', 'clinician-explicit', 'proxy-explicit', 'host-explicit',
 })
 
 
