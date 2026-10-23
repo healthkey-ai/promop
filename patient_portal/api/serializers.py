@@ -854,6 +854,25 @@ class PatientRecordSerializer(serializers.ModelSerializer):
                 "dlbcl_transformation_date and post_transformation_outcome "
                 "require transformed_to_dlbcl to be true."
             )
+
+        # "No pre-existing conditions" and recorded categories are contradictory;
+        # the write is rejected so the client chooses instead of the server guessing
+        # (#1988). A partial update falls back to the stored counterpart.
+        from omop_core.services.pre_existing_conditions import (
+            contradicts_no_pre_existing_conditions,
+        )
+        conditions_flag = data.get(
+            'no_pre_existing_conditions',
+            getattr(self.instance, 'no_pre_existing_conditions', None))
+        categories = data.get(
+            'preexisting_conditions',
+            getattr(self.instance, 'preexisting_conditions', None))
+        if contradicts_no_pre_existing_conditions(conditions_flag, categories):
+            raise serializers.ValidationError({
+                'no_pre_existing_conditions':
+                    'Recorded pre-existing condition categories contradict '
+                    '"no pre-existing conditions"; clear one of them.',
+            })
         return data
 
     def validate_stem_cell_transplant_history(self, value):
@@ -1817,15 +1836,25 @@ class FieldFormulaSerializer(serializers.ModelSerializer):
             created_by=request.user if request else None,
         )
 
+    def validate(self, attrs):
+        # Partial updates can activate a formula without validate_field_name.
+        if self.instance is not None and attrs.get('is_active') is not False:
+            self._assert_computable(attrs.get('field_name', self.instance.field_name))
+        return attrs
+
     def validate_field_name(self, value):
+        self._assert_computable(value)
+        return value
+
+    @staticmethod
+    def _assert_computable(field_name):
         from omop_core.services.field_descriptor import _COMPUTED_FIELDS
-        if value not in _COMPUTED_FIELDS and not CustomPatientField.objects.filter(
-            field_name=value, mode='computed',
+        if field_name not in _COMPUTED_FIELDS and not CustomPatientField.objects.filter(
+            field_name=field_name, mode='computed',
         ).exists():
             raise serializers.ValidationError(
-                f"'{value}' is not an application-computed PatientRecord field."
+                {'field_name': f"'{field_name}' is not an application-computed PatientRecord field."}
             )
-        return value
 
     def validate_formula(self, value):
         from omop_core.services.formula_evaluator import validate_formula
