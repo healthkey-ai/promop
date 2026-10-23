@@ -493,6 +493,31 @@ class PatientRecordSerializer(serializers.ModelSerializer):
 
     def to_internal_value(self, data):
         """Accept the historical misspelling on writes during API migration."""
+        # Schema can land before the dedicated writer. Never acknowledge a
+        # projection-only clinical edit during that intermediate deployment.
+        source_fields = {
+            'prothrombin_time_uln', 'activated_partial_thromboplastin_time_uln',
+            'able_to_swallow_tablets_capsules',
+        } & data.keys()
+        if source_fields:
+            try:
+                from omop_core.services.clinical_input_contract import CLINICAL_INPUT_CONTRACT_VERSION
+            except ModuleNotFoundError as exc:
+                if exc.name != 'omop_core.services.clinical_input_contract':
+                    raise
+                CLINICAL_INPUT_CONTRACT_VERSION = None
+            if CLINICAL_INPUT_CONTRACT_VERSION != 2:
+                # Native autosave echoes new nullable fields from GET. Empty
+                # echoes are not authored clears or source-write acknowledgements.
+                blocked = {field for field in source_fields
+                           if data[field] is not None or getattr(self.instance, field, None) is not None}
+                if blocked:
+                    raise serializers.ValidationError({
+                        field: 'Clinical source-input SDK is not available.' for field in blocked
+                    })
+                data = data.copy()
+                for field in source_fields:
+                    data.pop(field)
         if 'cytogenic_markers' in data:
             legacy_value = data.get('cytogenic_markers')
             data = data.copy()
