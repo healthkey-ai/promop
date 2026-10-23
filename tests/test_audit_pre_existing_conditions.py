@@ -176,6 +176,18 @@ def test_summary_only_omits_rows_but_keeps_the_hash(tmp_path):
     assert full['records'] and not summary['records']
     assert full['manifest_sha256'] == summary['manifest_sha256']
     assert full['totals'] == summary['totals']
+    assert full['approval_sha256'] != summary['approval_sha256']
+
+
+def test_approval_hash_covers_reviewed_rows_but_not_generation_time(tmp_path):
+    from omop_core.management.commands.audit_pre_existing_conditions import approval_digest
+    _record(True, [])
+    payload = _audit(tmp_path)
+    expected = payload['approval_sha256']
+    payload['generated_at'] = 'different generation time'
+    assert approval_digest(payload) == expected
+    payload['records'][0]['classification'] = 'authored_true'
+    assert approval_digest(payload) != expected
 
 
 def test_the_command_refuses_to_overwrite_an_existing_manifest(tmp_path):
