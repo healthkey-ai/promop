@@ -8045,7 +8045,7 @@
     {
       "field_name": "no_pre_existing_conditions",
       "formula": "@count(preexisting_conditions) == 0",
-      "is_active": true
+      "is_active": false
     },
     {
       "field_name": "no_pregnancy_or_lactation_status",
