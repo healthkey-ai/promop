@@ -8,6 +8,14 @@ All notable changes to PRomop are documented here.
 
 ### Added
 
+- **Versioned clinical source-input SDK on dev** — opt-in, per-field approved
+  source writes for laboratory ULN ratios, explicit swallowing answers and SCT
+  dates append corrections/clear tombstones and verify refreshed readback.
+  Three nullable projections add no medical defaults or mapping approvals.
+  Existing INR/seconds and native SCT behavior remain distinct; see
+  [the contract](docs/cb_clinical_inputs_architecture.md) and
+  [rollout gates](docs/cb_clinical_inputs_plan.md).
+
 - **A recorded line no longer has to name its drugs, and a wrong line can be
   withdrawn** — the therapy editor offers "I don't know which drugs were given",
   which records that the line happened with an unknown composition instead of

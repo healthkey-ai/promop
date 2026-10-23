@@ -368,7 +368,7 @@ _WRITE_RECIPE_INCOMPLETE = {
     ),
 }
 
-def _curated_writes(choice_options=None, genomics_recipes=None):
+def _curated_writes(choice_options=None, genomics_recipes=None, clinical_mappings=None):
     """Editable entries built from reviewer-approved concept mappings.
 
     The curation interface records a decision per field; this is what acts on
@@ -384,19 +384,23 @@ def _curated_writes(choice_options=None, genomics_recipes=None):
     """
     from omop_core.models import FieldConceptMapping
     from omop_core.services.breast_mapping_safety import wrong_breast_field_mappings
+    from omop_core.services.clinical_input_contract import CLINICAL_INPUT_FIELDS
 
     entries = {}
     # Genomics recipes ride along in the same read: they are writable whatever
     # their status, so they are collected into *genomics_recipes* when given.
     fetched = list(
         FieldConceptMapping.objects
-        .filter(Q(status='approved') | Q(field_name__startswith='genomics_'))
+        .filter(Q(status='approved') | Q(field_name__startswith='genomics_')
+                | Q(field_name__in=CLINICAL_INPUT_FIELDS))
         .exclude(wrong_breast_field_mappings())
-        .exclude(omop_table='')
+        .exclude(Q(omop_table='') & ~Q(field_name__in=CLINICAL_INPUT_FIELDS))
         .select_related('concept')
     )
     if genomics_recipes is not None:
         genomics_recipes.update({r.field_name: r for r in fetched if r.field_name.startswith('genomics_')})
+    if clinical_mappings is not None:
+        clinical_mappings.update({r.field_name: r for r in fetched if r.field_name in CLINICAL_INPUT_FIELDS})
     rows = [r for r in fetched if r.status == 'approved']
     # One read per distinct answer vocabulary, not one per field that uses it.
     # Four eligibility fields sharing a set is one query, the same shape the
@@ -566,7 +570,8 @@ def build_writable_field_descriptor():
     }
     from omop_core.services.genomics import mapping_is_usable
     genomics_recipes = {}
-    curated = _curated_writes(choice_options, genomics_recipes)
+    clinical_mappings = {}
+    curated = _curated_writes(choice_options, genomics_recipes, clinical_mappings)
 
     descriptor = {}
     for field in sorted(PATIENT_RECORD_OMOP_MAPPED_FIELDS - _LIFECYCLE_FIELDS):
@@ -940,4 +945,9 @@ def build_writable_field_descriptor():
             'source_value': 'patient-record:' + field,
         }
     descriptor['death_date']['reason'] = 'Corrections are dated OMOP observations; earlier facts remain as history.'
+    from omop_core.services.clinical_input_contract import NEW_INPUT_FIELDS, descriptors
+    for field, entry in descriptors(mappings=clinical_mappings).items():
+        row = clinical_mappings.get(field)
+        if field in NEW_INPUT_FIELDS or (row is not None and row.concept_id == 0):
+            descriptor[field] = entry
     return descriptor
