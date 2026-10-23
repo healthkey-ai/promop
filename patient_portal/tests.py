@@ -4812,21 +4812,47 @@ class AuditLogMiddlewareTest(_SmartBase):
     # ------------------------------------------------------------------
 
     def test_logging_failure_does_not_block_response(self):
-        """If the audit logger raises, the API response must still be returned."""
+        """If the audit logger raises, the API response must still be returned,
+        and the failure warning must not be written to the JSON audit stream."""
         import logging as _logging
         from unittest.mock import patch as mock_patch
 
         _, pi = self._make_person_and_pi(88807)
 
-        with mock_patch.object(_logging.getLogger('audit'), 'info', side_effect=RuntimeError('log exploded')):
-            response = self.write_client.patch(
-                f'/api/patient-info/{pi.pk}/',
-                {'ecog_status': '1'},
-                format='json',
-            )
+        audit_records, ops_records = [], []
+
+        class _Capture(_logging.Handler):
+            def __init__(self, records):
+                super().__init__()
+                self.records = records
+
+            def emit(self, record):
+                self.records.append(record.getMessage())
+
+        audit_capture = _Capture(audit_records)
+        ops_capture = _Capture(ops_records)
+        audit_logger = _logging.getLogger('audit')
+        ops_logger = _logging.getLogger('omop.ops')
+        audit_logger.addHandler(audit_capture)
+        ops_logger.addHandler(ops_capture)
+        try:
+            with mock_patch.object(audit_logger, 'info', side_effect=RuntimeError('log exploded')):
+                response = self.write_client.patch(
+                    f'/api/patient-info/{pi.pk}/',
+                    {'ecog_status': '1'},
+                    format='json',
+                )
+        finally:
+            audit_logger.removeHandler(audit_capture)
+            ops_logger.removeHandler(ops_capture)
 
         # Response must be returned regardless of logging failure
         self.assertIn(response.status_code, range(200, 600))
+        # The failure warning belongs to the operational stream, not `audit`.
+        self.assertFalse(any('stdout write failed' in r for r in audit_records))
+        self.assertTrue(any('stdout write failed' in r for r in ops_records))
+        for raw in audit_records:
+            json.loads(raw)
 
 
 class PatientNameRenameTest(_SmartBase):
@@ -5371,6 +5397,36 @@ class RxNavServiceTest(TestCase):
         with patch('urllib.request.urlopen', side_effect=Exception('network error')):
             result = resolve_drug('anything')
         self.assertIsNone(result)
+
+    def test_rxnav_error_log_is_valid_json(self):
+        """A drug name or error text with quotes/newlines must not break the log."""
+        import logging
+        from unittest.mock import patch
+        from omop_core.services.rxnav_service import resolve_drug
+
+        records = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record):
+                records.append(record.getMessage())
+
+        capture = _Capture()
+        ops_logger = logging.getLogger('omop.ops')
+        ops_logger.addHandler(capture)
+        try:
+            with patch(
+                'omop_core.services.rxnav_service._rxnav_lookup',
+                side_effect=RuntimeError('bad "quote"\nsecond line'),
+            ):
+                self.assertIsNone(resolve_drug('Drug "X"\nY'))
+        finally:
+            ops_logger.removeHandler(capture)
+
+        self.assertEqual(len(records), 1)
+        parsed = json.loads(records[0])
+        self.assertEqual(parsed['event'], 'rxnav_lookup_error')
+        self.assertEqual(parsed['drug'], 'Drug "X"\nY')
+        self.assertIn('bad "quote"', parsed['error'])
 
     def test_second_call_uses_cached_concept(self):
         """After first call caches a Concept, second call returns it without API hit."""
