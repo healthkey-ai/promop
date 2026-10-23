@@ -441,10 +441,26 @@ _MANUAL_ENTRIES: dict[str, FieldProvenance] = {
     ),
     "sct_date": FieldProvenance(
         omop_table="Observation",
-        lookup_strategy="snomed",
+        lookup_strategy="source_value",
+        source_values=["mm-sct-date"],
         extractor="_get_sct_cytogenetic_data",
         selection_rule="latest",
         description="SCT date from FHIR extensions / Observation",
+    ),
+    "prothrombin_time_uln": FieldProvenance(
+        omop_table="Observation", lookup_strategy="source_value",
+        source_values=["cb:pt-uln"], extractor="clinical_input_contract.values_from_snapshot",
+        selection_rule="latest", description="Reported PT ratio to laboratory ULN, not INR or seconds",
+    ),
+    "activated_partial_thromboplastin_time_uln": FieldProvenance(
+        omop_table="Observation", lookup_strategy="source_value",
+        source_values=["cb:aptt-uln"], extractor="clinical_input_contract.values_from_snapshot",
+        selection_rule="latest", description="Reported aPTT ratio to laboratory ULN, not seconds",
+    ),
+    "able_to_swallow_tablets_capsules": FieldProvenance(
+        omop_table="Observation", lookup_strategy="source_value",
+        source_values=["cb:swallow-tablets"], extractor="clinical_input_contract.values_from_snapshot",
+        selection_rule="latest", description="Explicit reported swallowing ability; absent is unknown",
     ),
     "sct_eligibility": FieldProvenance(
         omop_table="Observation",

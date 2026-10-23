@@ -4812,21 +4812,47 @@ class AuditLogMiddlewareTest(_SmartBase):
     # ------------------------------------------------------------------
 
     def test_logging_failure_does_not_block_response(self):
-        """If the audit logger raises, the API response must still be returned."""
+        """If the audit logger raises, the API response must still be returned,
+        and the failure warning must not be written to the JSON audit stream."""
         import logging as _logging
         from unittest.mock import patch as mock_patch
 
         _, pi = self._make_person_and_pi(88807)
 
-        with mock_patch.object(_logging.getLogger('audit'), 'info', side_effect=RuntimeError('log exploded')):
-            response = self.write_client.patch(
-                f'/api/patient-info/{pi.pk}/',
-                {'ecog_status': '1'},
-                format='json',
-            )
+        audit_records, ops_records = [], []
+
+        class _Capture(_logging.Handler):
+            def __init__(self, records):
+                super().__init__()
+                self.records = records
+
+            def emit(self, record):
+                self.records.append(record.getMessage())
+
+        audit_capture = _Capture(audit_records)
+        ops_capture = _Capture(ops_records)
+        audit_logger = _logging.getLogger('audit')
+        ops_logger = _logging.getLogger('omop.ops')
+        audit_logger.addHandler(audit_capture)
+        ops_logger.addHandler(ops_capture)
+        try:
+            with mock_patch.object(audit_logger, 'info', side_effect=RuntimeError('log exploded')):
+                response = self.write_client.patch(
+                    f'/api/patient-info/{pi.pk}/',
+                    {'ecog_status': '1'},
+                    format='json',
+                )
+        finally:
+            audit_logger.removeHandler(audit_capture)
+            ops_logger.removeHandler(ops_capture)
 
         # Response must be returned regardless of logging failure
         self.assertIn(response.status_code, range(200, 600))
+        # The failure warning belongs to the operational stream, not `audit`.
+        self.assertFalse(any('stdout write failed' in r for r in audit_records))
+        self.assertTrue(any('stdout write failed' in r for r in ops_records))
+        for raw in audit_records:
+            json.loads(raw)
 
 
 class PatientNameRenameTest(_SmartBase):
@@ -5371,6 +5397,36 @@ class RxNavServiceTest(TestCase):
         with patch('urllib.request.urlopen', side_effect=Exception('network error')):
             result = resolve_drug('anything')
         self.assertIsNone(result)
+
+    def test_rxnav_error_log_is_valid_json(self):
+        """A drug name or error text with quotes/newlines must not break the log."""
+        import logging
+        from unittest.mock import patch
+        from omop_core.services.rxnav_service import resolve_drug
+
+        records = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record):
+                records.append(record.getMessage())
+
+        capture = _Capture()
+        ops_logger = logging.getLogger('omop.ops')
+        ops_logger.addHandler(capture)
+        try:
+            with patch(
+                'omop_core.services.rxnav_service._rxnav_lookup',
+                side_effect=RuntimeError('bad "quote"\nsecond line'),
+            ):
+                self.assertIsNone(resolve_drug('Drug "X"\nY'))
+        finally:
+            ops_logger.removeHandler(capture)
+
+        self.assertEqual(len(records), 1)
+        parsed = json.loads(records[0])
+        self.assertEqual(parsed['event'], 'rxnav_lookup_error')
+        self.assertEqual(parsed['drug'], 'Drug "X"\nY')
+        self.assertIn('bad "quote"', parsed['error'])
 
     def test_second_call_uses_cached_concept(self):
         """After first call caches a Concept, second call returns it without API hit."""
@@ -19058,6 +19114,62 @@ class BulkOmopWriteTest(TestCase):
         self.assertEqual(resp.data[0], {})
         self.assertIn('measurement_id', resp.data[1])
         self.assertFalse(Measurement.objects.filter(measurement_id=999999).exists())
+
+    def test_sparse_validation_errors_stay_aligned_on_all_bulk_resources(self):
+        from rest_framework.settings import api_settings
+
+        # Do not restore the old format globally to make the endpoint pass.
+        self.assertTrue(api_settings.LIST_SERIALIZER_ERRORS_AS_DICT)
+        cases = [
+            ('conditions', ConditionOccurrence, 'condition_start_date', {
+                'condition_concept': self.m_concept.concept_id,
+                'condition_type_concept': self.type_concept.concept_id,
+            }),
+            ('drug-exposures', DrugExposure, 'drug_exposure_start_date', {
+                'drug_concept': self.drug_concept.concept_id,
+                'drug_type_concept': self.type_concept.concept_id,
+            }),
+            ('measurements', Measurement, 'measurement_date', {
+                'measurement_concept': self.m_concept.concept_id,
+                'measurement_type_concept': self.type_concept.concept_id,
+            }),
+            ('observations', Observation, 'observation_date', {
+                'observation_concept': self.m_concept.concept_id,
+                'observation_type_concept': self.type_concept.concept_id,
+            }),
+            ('procedures', ProcedureOccurrence, 'procedure_date', {
+                'procedure_concept': self.m_concept.concept_id,
+                'procedure_type_concept': self.type_concept.concept_id,
+            }),
+        ]
+        for prefix in ('/api', '/api/v1'):
+            for route, model, date_field, fields in cases:
+                with self.subTest(prefix=prefix, route=route):
+                    before = model.objects.count()
+                    rows = [dict(fields, person=self.person.person_id,
+                                 **{date_field: '2024-01-01'}) for _ in range(3)]
+                    del rows[0][date_field]
+                    del rows[2][date_field]
+                    resp = self.client.post(f'{prefix}/{route}/', rows, format='json')
+                    self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+                    self.assertIsInstance(resp.data, list)
+                    self.assertEqual(len(resp.data), 3)
+                    self.assertIn(date_field, resp.data[0])
+                    self.assertEqual(resp.data[1], {})
+                    self.assertIn(date_field, resp.data[2])
+                    self.assertEqual(model.objects.count(), before)
+
+    def test_bulk_list_level_validation_errors_are_not_expanded(self):
+        from rest_framework.exceptions import ValidationError
+        from unittest.mock import patch
+
+        before = Measurement.objects.count()
+        with patch('rest_framework.serializers.ListSerializer.validate',
+                   side_effect=ValidationError({'non_field_errors': ['Invalid batch.']})):
+            resp = self.client.post('/api/v1/measurements/', self._rows(3), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(resp.data, {'non_field_errors': ['Invalid batch.']})
+        self.assertEqual(Measurement.objects.count(), before)
 
     def test_mixed_person_batch_is_rejected(self):
         """One batch is one person; a mixed batch is a client bug, not a merge."""
