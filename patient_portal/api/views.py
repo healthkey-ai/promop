@@ -795,6 +795,18 @@ def _changed_fields(patient_record, previous_values, prev_val):
     }
 
 
+def _attestation_source(request, person):
+    """Provenance for an authored answer: who stated it, never a clinical decision."""
+    from patient_portal.services import patient_person_for
+
+    user = getattr(request, 'user', None)
+    if getattr(user, 'is_staff', False):
+        return 'clinician'
+    if patient_person_for(user) == person:
+        return 'patient'
+    return 'clinician'
+
+
 def _write_record_revisions(patient_record, previous_values, request):
     """Persist field-level revision-history rows for a PatientRecord update.
 
@@ -1354,6 +1366,18 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 from omop_core.services.patient_record_service import recompute_patient_record_fields
                 recompute_patient_record_fields(patient_info, changed_fields=profile_projected)
                 patient_info.refresh_from_db()
+
+            # The answer is authored, not derived, so an API write is the evidence
+            # the repair and the audit look for (#1988). Only sync when this
+            # request touched the answer or its categories; an unrelated edit must
+            # not renew a standing confirmation.
+            if {'no_pre_existing_conditions', 'preexisting_conditions'} & set(
+                    serializer.validated_data):
+                from omop_core.services.pre_existing_conditions import (
+                    sync_no_preexisting_conditions,
+                )
+                sync_no_preexisting_conditions(
+                    patient_info, source=_attestation_source(request, person))
 
         return Response({**PatientRecordSerializer(patient_info).data, 'previous_values': previous_values})
 
