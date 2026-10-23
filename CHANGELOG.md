@@ -8,6 +8,17 @@ All notable changes to PRomop are documented here.
 
 ### Added
 
+- **An ETL can write a patient's lines of therapy** — `POST
+  /api/v1/therapy-lines/bulk_upsert/` takes one person's lines as the source
+  states them (number, dates, ongoing, regimen label, outcome) and writes them
+  through the canonical line writer in one all-or-nothing request, deriving the
+  record once. Patients imported through the OMOP row endpoints had no lines,
+  because none of those endpoints writes an `Episode`, and the per-line editor
+  POST refuses the `system/etl.write` credential. Regimen labels resolve to a
+  concept only through the curated regimen table or an exact HemOnc name;
+  anything else keeps the label as the line's name and is queued as a regimen
+  mapping gap, so an abbreviation such as "R" is never guessed (#1969).
+
 - **A recorded line no longer has to name its drugs, and a wrong line can be
   withdrawn** — the therapy editor offers "I don't know which drugs were given",
   which records that the line happened with an unknown composition instead of

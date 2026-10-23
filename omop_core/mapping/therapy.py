@@ -16,6 +16,8 @@ is the single choke point for resolving a regimen/drug *name* to a concept:
      vocabularies (``standard_concept=None``, ``source='HealthKey'``) and
      record a ``RegimenMappingGap`` row so the unmatched name is visible for
      curation.
+  4. ``resolve_regimen_label`` — curated TherapyRegimen, then an exact HemOnc
+     name, else (3).
 
 Nothing in this module ever writes to the HemOnc vocabulary or to any other
 licensed/external vocabulary (RxNorm, CVX, LOINC, SNOMED, ...).
@@ -33,6 +35,7 @@ from omop_core.models import (
     ConceptClass,
     Domain,
     RegimenMappingGap,
+    TherapyRegimen,
     Vocabulary,
 )
 from omop_core.services.pk import next_pk
@@ -118,6 +121,47 @@ def match_hemonc_regimen_by_name(name):
     if concept:
         return concept
     return qs.filter(synonyms__concept_synonym_name__iexact=normalized).first()
+
+
+def is_assertable_regimen(concept: Concept | None) -> bool:
+    """True for a valid HemOnc regimen or a live HK-Regimen quarantine concept."""
+    if concept is None:
+        return False
+    if validate_hemonc_regimen(concept):
+        return True
+    return (
+        concept.vocabulary_id == HK_REGIMEN_VOCAB_ID
+        and concept.concept_class_id == REGIMEN_CONCEPT_CLASS_ID
+        and not concept.invalid_reason
+    )
+
+
+REGIMEN_MATCH_REFERENCE = 'reference'
+REGIMEN_MATCH_HEMONC = 'hemonc'
+REGIMEN_MATCH_UNMATCHED = 'unmatched'
+
+
+def resolve_regimen_label(label: str | None, source_system: str) -> tuple[Concept | None, str | None]:
+    """Resolve a regimen label to (concept, match) via TherapyRegimen, exact HemOnc name, else quarantine.
+
+    HemOnc synonyms are skipped on purpose. Labels are abbreviations that differ by disease
+    (HealthTree "R" is lenalidomide in myeloma but rituximab in lymphoma) and a wrong concept
+    would look like an asserted regimen.
+    """
+    label = (label or '').strip()
+    if not label:
+        return None, None
+    regimen = (
+        TherapyRegimen.objects.filter(Q(code__iexact=label) | Q(title__iexact=label))
+        .select_related('concept').order_by('id').first()
+    )
+    # A curated row can point at a retired or non-regimen concept
+    if regimen is not None and is_assertable_regimen(regimen.concept):
+        return regimen.concept, REGIMEN_MATCH_REFERENCE
+    concept = _valid_hemonc_regimen_qs().filter(concept_name__iexact=label).order_by('concept_id').first()
+    if concept is not None:
+        return concept, REGIMEN_MATCH_HEMONC
+    return get_or_create_quarantine_regimen(label, source_system=source_system), REGIMEN_MATCH_UNMATCHED
 
 
 def record_mapping_gap(*, source_system, source_value, matched_concept=None,
