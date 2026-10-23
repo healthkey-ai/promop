@@ -118,8 +118,10 @@ def test_forward_data_migration_preserves_mapping_ids_reviews_repeated_cache_row
     rows = [{'id': pk, 'gene': 'PALB1', 'marker_key': 'palb1', 'variant': 'PALB1 literal'} for pk in (first, second)]
     PatientRecord.objects.filter(pk=record.pk).update(genomics_palb2=rows, genetic_mutations=rows,
                                                       user_edited_fields=['genomics_palb1'])
-    measurements = list(Measurement.objects.filter(person=person).values())
-    observations = list(Observation.objects.filter(person=person).values())
+    # Fact preservation is keyed by identity, not PostgreSQL's unspecified row
+    # order. Seeding can change the query plan without changing a single fact.
+    measurements = list(Measurement.objects.filter(person=person).order_by('pk').values())
+    observations = list(Observation.objects.filter(person=person).order_by('pk').values())
     editor = SimpleNamespace(connection=connection)
     migration.rename_projection(apps, editor)
     migration.rename_projection(apps, editor)
@@ -132,8 +134,8 @@ def test_forward_data_migration_preserves_mapping_ids_reviews_repeated_cache_row
     assert {v['id'] for v in record.genomics_palb2} == {first, second}
     assert all(v['gene'] == 'PALB2' and v['source_gene'] == 'PALB1' for v in record.genetic_mutations)
     assert record.user_edited_fields == ['genomics_palb2']
-    assert list(Measurement.objects.filter(person=person).values()) == measurements
-    assert list(Observation.objects.filter(person=person).values()) == observations
+    assert list(Measurement.objects.filter(person=person).order_by('pk').values()) == measurements
+    assert list(Observation.objects.filter(person=person).order_by('pk').values()) == observations
 
 
 @pytest.mark.django_db(transaction=True)
