@@ -53,7 +53,8 @@ def _is_empty(value):
 
 def projection_for_descriptor(entry):
     """Use the same recipe and value/unit semantics the editor advertises."""
-    if not entry or not entry.get('writable') or entry.get('target') != 'patient_record':
+    if (not entry or entry.get('clinical_input_contract')
+            or not entry.get('writable') or entry.get('target') != 'patient_record'):
         return None
     if not entry.get('projection'):
         return None
@@ -64,7 +65,7 @@ def projection_for_descriptor(entry):
     }
 
 
-def curated_values_from_snapshot(snapshot):
+def curated_values_from_snapshot(snapshot, *, confirmed_clinical_fields=None):
     """Read approved scalar mappings during external OMOP refreshes only.
 
     Direct saves acknowledge successful projections without reading them back.
@@ -100,7 +101,11 @@ def curated_values_from_snapshot(snapshot):
         for row in rows:
             by_key.setdefault((getattr(row, concept_field), getattr(row, source_field)), row)
         indexed[target] = by_key
-    values = {}
+    from omop_core.services.clinical_input_contract import (
+        NEW_INPUT_FIELDS, RECIPES, source_rows_from_snapshot, values_from_snapshot,
+    )
+    values = values_from_snapshot(snapshot, confirmed_fields=confirmed_clinical_fields)
+    native_sct_source = bool(source_rows_from_snapshot(snapshot, 'sct_date'))
     # Assertion fields are answered across both OMOP tables: the latest row
     # wins, and a newer unusable answer deliberately leaves the field unknown.
     # An exact mapping reads only one table, so use the same selected row as
@@ -125,10 +130,20 @@ def curated_values_from_snapshot(snapshot):
     )
     for mapping in mappings:
         name = mapping['field_name']
+        source_value = mapping['source_value'] or mapping['concept__concept_code']
+        if name in NEW_INPUT_FIELDS or (
+            name == 'sct_date' and native_sct_source and source_value == RECIPES['sct_date'][0]
+        ):
+            # Dedicated decoder owns units, tombstones and invalid latest facts;
+            # generic conversion must not resurrect an older mapped result.
+            # When SCT delegates to its native decoder, preserve that decoder's
+            # latest imported answer instead of selecting an older SDK mapping.
+            # Other approved SCT sources retain their pre-existing curated
+            # priority; the SDK does not define a new cross-source policy.
+            continue
         target = mapping_target_for(mapping['omop_table'])
         if target not in indexed:
             continue
-        source_value = mapping['source_value'] or mapping['concept__concept_code']
         row = indexed[target].get((mapping['concept_id'], source_value))
         if row is None:
             continue
@@ -182,6 +197,10 @@ def curated_values_from_snapshot(snapshot):
                 )
                 value = normalise_cytogenetic_markers(read_cytogenetic_summary(row))
             values[name] = value
+            if name == 'sct_date' and confirmed_clinical_fields is not None:
+                # A valid custom source is the final curated winner. Its source
+                # evidence, not an older invalid SDK row, resolves pending intent.
+                confirmed_clinical_fields.add(name)
         except (ValidationError, ValueError, TypeError):
             continue
     return values
@@ -195,7 +214,11 @@ def project_field_to_omop(mapping) -> int:
     """
     from omop_core.services.patient_record_service import refresh_patient_record
     from omop_core.services.write_descriptor import build_writable_field_descriptor
+    from omop_core.services.clinical_input_contract import uses_dedicated_writer
 
+    if uses_dedicated_writer(mapping.field_name):
+        # Curation is not evidence of who authored pending projection values.
+        return 0
     if mapping.status != 'approved':
         return 0
     projection = projection_for_descriptor(
@@ -237,6 +260,9 @@ def project_single_value(person, field_name, value, projection, *, acknowledge_e
     Collection edits can supply after_pk to keep corrections newer than an
     aggregate import that superseded earlier individual rows on the same day.
     """
+    from omop_core.services.clinical_input_contract import uses_dedicated_writer
+    if uses_dedicated_writer(field_name):
+        raise ValidationError('Clinical inputs require the dedicated source writer.')
     if field_name == 'cytogenetic_markers' and 'choice_projections' in projection:
         from omop_core.services.cytogenetics import project_selections
         try:

@@ -234,10 +234,13 @@ def _lookup_observation(person: Person, entry: FieldProvenance) -> list[dict]:
     qs = (
         Observation.objects.filter(person=person)
         .select_related("observation_concept")
-        .order_by("-observation_date")
+        .order_by("-observation_date", "-observation_id")
     )
 
     filters = Q()
+    if entry.source_values:
+        filters |= Q(observation_source_value__in=entry.source_values)
+        qs = qs.filter(is_erroneous=False)
     if entry.concept_codes:
         filters |= Q(observation_concept__concept_code__in=entry.concept_codes)
         filters |= Q(observation_source_value__in=entry.concept_codes)
