@@ -1367,12 +1367,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 recompute_patient_record_fields(patient_info, changed_fields=profile_projected)
                 patient_info.refresh_from_db()
 
-            # The answer is authored, not derived, so an API write is the evidence
-            # the repair and the audit look for (#1988). Only sync when this
-            # request touched the answer or its categories; an unrelated edit must
-            # not renew a standing confirmation.
-            if {'no_pre_existing_conditions', 'preexisting_conditions'} & set(
-                    serializer.validated_data):
+            # Full-form autosave echoes are not confirmations (#1988). Only an
+            # actual change of the answer may create/renew its provenance.
+            # Category edits can withdraw it, but cannot authenticate an old True.
+            if ('no_pre_existing_conditions' in direct_fields
+                    or ('preexisting_conditions' in direct_fields
+                        and patient_info.no_pre_existing_conditions is not True)):
                 from omop_core.services.pre_existing_conditions import (
                     sync_no_preexisting_conditions,
                 )
