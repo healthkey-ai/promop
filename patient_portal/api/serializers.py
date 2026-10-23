@@ -507,7 +507,9 @@ class PatientRecordSerializer(serializers.ModelSerializer):
                     for field in self._clinical_input_fields
                 })
             try:
-                cleaned = validated_values({field: data[field] for field in self._clinical_input_fields})
+                cleaned = validated_values(
+                    {field: data[field] for field in self._clinical_input_fields}, for_write=False,
+                )
             except ModelValidationError as exc:
                 raise serializers.ValidationError(
                     exc.message_dict if hasattr(exc, 'message_dict') else {'non_field_errors': exc.messages}) from None
@@ -520,6 +522,13 @@ class PatientRecordSerializer(serializers.ModelSerializer):
                     data.pop(field)
                     cleaned.pop(field)
                     self._clinical_input_fields.remove(field)
+            try:
+                # Historical reads may contain a future SCT date. Only a new
+                # command, including a pending equal value, gets write policy.
+                cleaned = validated_values(cleaned)
+            except ModelValidationError as exc:
+                raise serializers.ValidationError(
+                    exc.message_dict if hasattr(exc, 'message_dict') else {'non_field_errors': exc.messages}) from None
             available = capabilities()
             errors = {field: available[field]['reason'] for field in self._clinical_input_fields
                       if not available[field]['writable']}

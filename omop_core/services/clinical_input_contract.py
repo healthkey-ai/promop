@@ -5,6 +5,7 @@ clinical concepts or computed formulas. No mapping is approved by this module.
 Callers must supply an already-authorized Person; curation grants no access.
 """
 from datetime import date, datetime
+from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 
 from django.core.exceptions import ValidationError
@@ -246,7 +247,7 @@ def source_rows_from_snapshot(snapshot, field):
     return _source_index(snapshot).get(RECIPES[field][0], ())
 
 
-def _snapshot_inputs(snapshot):
+def _snapshot_inputs(snapshot, *, selected_sources=None):
     """Read compatibility is independent of current write approval.
 
     New fields always use the published source keys. For SCT preserve the native
@@ -269,11 +270,15 @@ def _snapshot_inputs(snapshot):
         except (ValueError, ValidationError, InvalidOperation):
             value = None
         result[field] = value
+        if selected_sources is not None:
+            # Identity remains useful when a malformed latest SDK fact masks
+            # an older answer. It does not mean that pending intent is confirmed.
+            selected_sources[field] = ('observation', fact.pk)
     return result, confirmed
 
 
-def values_from_snapshot(snapshot, *, confirmed_fields=None):
-    values, confirmed = _snapshot_inputs(snapshot)
+def values_from_snapshot(snapshot, *, confirmed_fields=None, selected_sources=None):
+    values, confirmed = _snapshot_inputs(snapshot, selected_sources=selected_sources)
     if confirmed_fields is not None:
         confirmed_fields.update(confirmed)
     return values
@@ -282,3 +287,64 @@ def values_from_snapshot(snapshot, *, confirmed_fields=None):
 def confirmed_fields_from_snapshot(snapshot):
     """Only valid source answers (including tombstones) can resolve pending intent."""
     return _snapshot_inputs(snapshot)[1]
+
+
+@dataclass(frozen=True)
+class SctSourceSelection:
+    has_value: bool = False
+    value: date | None = None
+    confirmed: bool = False
+    selected_key: tuple[str, int] | None = None
+
+
+def native_sct_source(snapshot):
+    """The existing native parser over newest-first, generic-filtered rows."""
+    row = next((row for row in snapshot.observations
+                if row.observation_source_value == RECIPES['sct_date'][0]), None)
+    if row is not None and row.value_as_string:
+        try:
+            value = datetime.strptime(row.value_as_string[:10], '%Y-%m-%d').date()
+            return SctSourceSelection(True, value, False, ('observation', row.pk))
+        except (ValueError, TypeError):
+            pass
+    return SctSourceSelection()
+
+
+def select_sct_source(snapshot, mapping=None):
+    """Pure SCT source selection shared by derivation and provenance.
+
+    A mapping, when given, is the already-approved scalar SCT row from the
+    caller's existing mapping query. Lists are generic-filtered/newest-first;
+    raw canonical history lives separately on the snapshot. This preserves
+    native -> strict SDK -> curated priority, not cross-source recency.
+    """
+    from omop_core.models import PatientRecord
+    from omop_core.services.write_descriptor import mapping_target_for
+
+    selected = native_sct_source(snapshot)
+    confirmed, sources = set(), {}
+    values = values_from_snapshot(snapshot, confirmed_fields=confirmed, selected_sources=sources)
+    if 'sct_date' in values:
+        selected = SctSourceSelection(True, values['sct_date'], 'sct_date' in confirmed, sources['sct_date'])
+    if mapping is None:
+        return selected
+    source = mapping['source_value'] or mapping['concept__concept_code']
+    if source == RECIPES['sct_date'][0] and source_rows_from_snapshot(snapshot, 'sct_date'):
+        return selected
+    target = mapping_target_for(mapping['omop_table'])
+    if target not in ('observation', 'measurement'):
+        return selected
+    rows = snapshot.observations if target == 'observation' else snapshot.measurements
+    row = next((row for row in rows
+                if getattr(row, f'{target}_concept_id') == mapping['concept_id']
+                and getattr(row, f'{target}_source_value') == source), None)
+    if row is None:
+        return selected
+    value = row.value_as_number if row.value_as_number is not None else row.value_as_string
+    if value is None:
+        return selected
+    try:
+        value = PatientRecord._meta.get_field('sct_date').to_python(value)
+    except (ValidationError, ValueError, TypeError):
+        return selected
+    return SctSourceSelection(True, value, True, (target, row.pk))

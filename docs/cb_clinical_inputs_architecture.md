@@ -43,6 +43,9 @@ The generic field applier dispatches these commands to the dedicated writer,
 including clears, inside its transaction. The native serializer retains raw
 type validation and suppresses unchanged full-autosave echoes without pending
 intent. Those echoes neither require approval nor create self-report facts.
+Historical future SCT echoes are normalized under read rules before they are
+discarded; the future-date write restriction still applies to all remaining
+commands, including an unchanged value with pending intent.
 Body-measurement echoes retain existing units; actual edits keep the native unit
 policy. Mixed edits preserve unrelated pending values.
 
@@ -57,8 +60,12 @@ Historical read compatibility is independent of current write approval. Only a
 valid selected source answer or tombstone can resolve a pending clinical clear.
 Curation does not backfill pending projection values as patient self-reports.
 A new explicit command supersedes only its own pending intent; unrelated pending
-edits remain pending. Provenance exposes dated corrections and tombstones using
-the same deterministic ordering and patient boundary.
+edits remain pending. SCT projection and provenance share a pure source selector:
+native baseline, strict SDK override, then the existing approved custom-source
+priority. Provenance marks the actual table/row identity, not an equal or pending
+projection value, and retains the winner within its 20-row history limit even
+when an older custom source outranks newer canonical corrections. Exact custom
+mapping history and canonical corrections/tombstones stay patient-scoped.
 
 The SDK invokes full PatientRecord re-derivation, not a field-only refresh. It
 does not add clinical formulas. Current `dev` IMWG/FLC pairing and therapy-history

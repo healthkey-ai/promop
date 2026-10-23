@@ -102,10 +102,12 @@ def curated_values_from_snapshot(snapshot, *, confirmed_clinical_fields=None):
             by_key.setdefault((getattr(row, concept_field), getattr(row, source_field)), row)
         indexed[target] = by_key
     from omop_core.services.clinical_input_contract import (
-        NEW_INPUT_FIELDS, RECIPES, source_rows_from_snapshot, values_from_snapshot,
+        NEW_INPUT_FIELDS, select_sct_source, values_from_snapshot,
     )
     values = values_from_snapshot(snapshot, confirmed_fields=confirmed_clinical_fields)
-    native_sct_source = bool(source_rows_from_snapshot(snapshot, 'sct_date'))
+    values.pop('sct_date', None)
+    if confirmed_clinical_fields is not None:
+        confirmed_clinical_fields.discard('sct_date')
     # Assertion fields are answered across both OMOP tables: the latest row
     # wins, and a newer unusable answer deliberately leaves the field unknown.
     # An exact mapping reads only one table, so use the same selected row as
@@ -128,18 +130,16 @@ def curated_values_from_snapshot(snapshot, *, confirmed_clinical_fields=None):
     ).exclude(wrong_breast_field_mappings()).exclude(value_kind='json').exclude(field_name='cytogenetic_markers', vocabulary_id='SNOMED', concept_code='107675007').values(
         'field_name', 'omop_table', 'concept_id', 'concept__concept_code', 'source_value',
     )
+    sct_mapping = None
     for mapping in mappings:
         name = mapping['field_name']
+        if name == 'sct_date':
+            sct_mapping = mapping
+            continue
         source_value = mapping['source_value'] or mapping['concept__concept_code']
-        if name in NEW_INPUT_FIELDS or (
-            name == 'sct_date' and native_sct_source and source_value == RECIPES['sct_date'][0]
-        ):
+        if name in NEW_INPUT_FIELDS:
             # Dedicated decoder owns units, tombstones and invalid latest facts;
             # generic conversion must not resurrect an older mapped result.
-            # When SCT delegates to its native decoder, preserve that decoder's
-            # latest imported answer instead of selecting an older SDK mapping.
-            # Other approved SCT sources retain their pre-existing curated
-            # priority; the SDK does not define a new cross-source policy.
             continue
         target = mapping_target_for(mapping['omop_table'])
         if target not in indexed:
@@ -197,12 +197,13 @@ def curated_values_from_snapshot(snapshot, *, confirmed_clinical_fields=None):
                 )
                 value = normalise_cytogenetic_markers(read_cytogenetic_summary(row))
             values[name] = value
-            if name == 'sct_date' and confirmed_clinical_fields is not None:
-                # A valid custom source is the final curated winner. Its source
-                # evidence, not an older invalid SDK row, resolves pending intent.
-                confirmed_clinical_fields.add(name)
         except (ValidationError, ValueError, TypeError):
             continue
+    sct = select_sct_source(snapshot, sct_mapping)
+    if sct.has_value:
+        values['sct_date'] = sct.value
+    if sct.confirmed and confirmed_clinical_fields is not None:
+        confirmed_clinical_fields.add('sct_date')
     return values
 
 

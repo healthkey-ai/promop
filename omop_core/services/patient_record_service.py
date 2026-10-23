@@ -3722,7 +3722,11 @@ def _get_sct_cytogenetic_data(person: Person, snapshot: OmopSnapshot = None) -> 
     """
     snapshot = snapshot or _build_snapshot(person)
     data = {}
-    _SOURCE_KEYS = ('mm-cytogenetic-markers', 'mm-sct-date',
+    from omop_core.services.clinical_input_contract import native_sct_source
+    sct = native_sct_source(snapshot)
+    if sct.has_value:
+        data['sct_date'] = sct.value
+    _SOURCE_KEYS = ('mm-cytogenetic-markers',
         'mm-sct-history', 'mm-sct-eligibility')
     # Use index lookups instead of scanning all observations
     obs_qs = _rows_by_sources(snapshot, _SOURCE_KEYS, table='observation')
@@ -3741,11 +3745,6 @@ def _get_sct_cytogenetic_data(person: Person, snapshot: OmopSnapshot = None) -> 
                 normalise_cytogenetic_markers, read_cytogenetic_summary,
             )
             data['cytogenetic_markers'] = normalise_cytogenetic_markers(read_cytogenetic_summary(obs))
-        elif src == 'mm-sct-date':
-            try:
-                data['sct_date'] = datetime.strptime(val[:10], '%Y-%m-%d').date()
-            except (ValueError, TypeError):
-                pass
         elif src == 'mm-sct-history':
             data['stem_cell_transplant_history'] = [
                 t.strip() for t in val.split(',') if t.strip()
