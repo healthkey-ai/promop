@@ -258,18 +258,31 @@ def _get_or_create_quarantine_concept(*, vocabulary_id, domain_id,
             'concept_class_concept_id': 0,
         },
     )
-    return Concept.objects.create(
-        concept_id=next_pk(Concept, 'concept_id'),
-        concept_name=concept_name[:255],
-        domain=domain,
+    # Another import may have claimed this unique vocabulary/code since the
+    # initial lookup. Match only that key, never the proposed PK or name.
+    concept, created = Concept.objects.get_or_create(
         vocabulary=vocabulary,
-        concept_class=concept_class,
-        standard_concept=None,
-        source=SOURCE_HEALTHKEY,
         concept_code=concept_code,
-        valid_start_date=date(1970, 1, 1),
-        valid_end_date=date(2099, 12, 31),
+        defaults={
+            'concept_id': next_pk(Concept, 'concept_id'),
+            'concept_name': concept_name[:255],
+            'domain': domain,
+            'concept_class': concept_class,
+            'standard_concept': None,
+            'source': SOURCE_HEALTHKEY,
+            'valid_start_date': date(1970, 1, 1),
+            'valid_end_date': date(2099, 12, 31),
+        },
     )
+    if not created and normalize_regimen_name(concept.concept_name) != normalize_regimen_name(concept_name):
+        # A different name won the slug race: apply the same disambiguation as
+        # an ordinary existing-row collision rather than aliasing the regimens.
+        return _get_or_create_quarantine_concept(
+            vocabulary_id=vocabulary_id, domain_id=domain_id,
+            concept_class_id=concept_class_id, concept_code=concept_code,
+            concept_name=concept_name,
+        )
+    return concept
 
 
 def get_or_create_quarantine_regimen(name, source_system='fhir-upload'):

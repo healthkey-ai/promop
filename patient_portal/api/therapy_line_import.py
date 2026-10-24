@@ -34,7 +34,6 @@ from omop_core.services.therapy_transactions import (
     CONCURRENT_EDIT_MESSAGE, TherapyLineRejected, TherapyLineWriteConflict,
     lock_therapy_patients, run_therapy_write,
 )
-from omop_oncology.models import Episode
 from omop_core.signals import suppress_patient_record_refresh
 from patient_portal.api.provenance_org import ProvenanceContext, raise_on_foreign_attribution
 
@@ -216,8 +215,8 @@ def import_therapy_lines(person: Person, lines: list[ImportLine], provenance: Pr
             regimens: ResolvedRegimens = {label: resolve_regimen_label(label, SOURCE_SYSTEM) for label in labels}
             results = author_therapy_lines(
                 person, [_author_kwargs(line, regimens) for line in lines], asserted_by='import',
-                episode_write_guard=lambda episode: raise_on_foreign_attribution(
-                    Episode, [episode.pk], provenance.organization,
+                write_guard=lambda model, ids: raise_on_foreign_attribution(
+                    model, ids, provenance.organization,
                 ),
                 retry=False,
             )

@@ -98,6 +98,7 @@ def upsert_therapy_line_episode(
     overwrite_source_concept=False,
     assert_line=True,
     asserted_by='authoring',
+    write_guard=None,
 ):
     """Upsert one line-of-therapy Episode and its links; return the Episode.
 
@@ -249,24 +250,27 @@ def upsert_therapy_line_episode(
     if outcome is not _UNSET and outcome:
         _upsert_outcome_observation(person, line_number, outcome, ehr_type_concept, no_match_concept,
                                     obs_date=effective_end or effective_start or today,
-                                    line=episode, adopt=adopts_unparented)
+                                    line=episode, adopt=adopts_unparented, write_guard=write_guard)
     elif outcome is not _UNSET and replace_metadata:
-        _delete_outcome_observation(person, line_number, line=episode, adopt=adopts_unparented)
+        _delete_outcome_observation(person, line_number, line=episode, adopt=adopts_unparented,
+                                    write_guard=write_guard)
 
     obs_date = effective_end or effective_start or today
     if intent is not _UNSET and intent:
         _upsert_line_observation(person, line_number, 'intent', intent,
                                  ehr_type_concept, no_match_concept, obs_date=obs_date,
-                                 line=episode, adopt=adopts_unparented)
+                                 line=episode, adopt=adopts_unparented, write_guard=write_guard)
     elif intent is not _UNSET and replace_metadata:
-        _delete_line_observation(person, line_number, 'intent', line=episode, adopt=adopts_unparented)
+        _delete_line_observation(person, line_number, 'intent', line=episode, adopt=adopts_unparented,
+                                 write_guard=write_guard)
 
     if discontinuation_reason is not _UNSET and discontinuation_reason:
         _upsert_line_observation(person, line_number, 'discontinuation', discontinuation_reason,
                                  ehr_type_concept, no_match_concept, obs_date=obs_date,
-                                 line=episode, adopt=adopts_unparented)
+                                 line=episode, adopt=adopts_unparented, write_guard=write_guard)
     elif discontinuation_reason is not _UNSET and replace_metadata:
-        _delete_line_observation(person, line_number, 'discontinuation', line=episode, adopt=adopts_unparented)
+        _delete_line_observation(person, line_number, 'discontinuation', line=episode, adopt=adopts_unparented,
+                                 write_guard=write_guard)
 
     return TherapyLineEpisodeResult(episode, created, event_ids)
 
@@ -389,7 +393,7 @@ def _line_observations(person, src_value, line, adopt):
 
 
 def _upsert_outcome_observation(person, line_number, outcome, type_concept, no_match_concept, obs_date,
-                                line=None, adopt=True):
+                                line=None, adopt=True, write_guard=None):
     src_value = f'LOT-{line_number}-outcome'
     snomed_code = OUTCOME_SNOMED_CODES.get(outcome)
     outcome_concept = (
@@ -401,7 +405,7 @@ def _upsert_outcome_observation(person, line_number, outcome, type_concept, no_m
     value = outcome[:60]
 
     field = _episode_field() if line is not None else None
-    existing = _line_observations(person, src_value, line, adopt).first()
+    existing = _writable_line_observations(person, src_value, line, adopt, write_guard, single=True).first()
     if existing:
         if line is not None and (existing.observation_event_id != line.episode_id
                                  or existing.obs_event_field_concept_id != (field.concept_id if field else None)):
@@ -441,12 +445,12 @@ def _upsert_outcome_observation(person, line_number, outcome, type_concept, no_m
     obs.save()
 
 
-def _delete_outcome_observation(person, line_number, line=None, adopt=True):
-    _line_observations(person, f'LOT-{line_number}-outcome', line, adopt).delete()
+def _delete_outcome_observation(person, line_number, line=None, adopt=True, write_guard=None):
+    _writable_line_observations(person, f'LOT-{line_number}-outcome', line, adopt, write_guard).delete()
 
 
 def _upsert_line_observation(person, line_number, suffix, value, type_concept, no_match_concept, obs_date,
-                             line=None, adopt=True):
+                             line=None, adopt=True, write_guard=None):
     """Upsert a LOT-{n}-{suffix} Observation (intent, discontinuation, etc.)."""
     src_value = f'LOT-{line_number}-{suffix}'
     obs_concept = no_match_concept
@@ -455,7 +459,7 @@ def _upsert_line_observation(person, line_number, suffix, value, type_concept, n
     text = value[:60]
 
     field = _episode_field() if line is not None else None
-    existing = _line_observations(person, src_value, line, adopt).first()
+    existing = _writable_line_observations(person, src_value, line, adopt, write_guard, single=True).first()
     if existing:
         dirty = []
         if line is not None and existing.observation_event_id != line.episode_id:
@@ -490,8 +494,22 @@ def _upsert_line_observation(person, line_number, suffix, value, type_concept, n
     obs.save()
 
 
-def _delete_line_observation(person, line_number, suffix, line=None, adopt=True):
-    _line_observations(person, f'LOT-{line_number}-{suffix}', line, adopt).delete()
+def _delete_line_observation(person, line_number, suffix, line=None, adopt=True, write_guard=None):
+    _writable_line_observations(person, f'LOT-{line_number}-{suffix}', line, adopt, write_guard).delete()
+
+
+def _writable_line_observations(person, source, line, adopt, write_guard, *, single=False):
+    rows = _line_observations(person, source, line, adopt)
+    if write_guard is None:
+        return rows
+    locked = rows.select_for_update(nowait=True).order_by('pk')
+    if single:
+        locked = locked[:1]
+    ids = list(locked.values_list('pk', flat=True))
+    write_guard(Observation, ids)
+    # Freeze exactly the checked set; a later matching insert is not permission
+    # to mutate/delete a foreign row that was never locked or attributed here.
+    return rows.filter(pk__in=ids)
 
 
 def author_therapy_line(person, *, line_number, drugs=_UNSET, **kwargs):
@@ -511,13 +529,13 @@ def author_therapy_line(person, *, line_number, drugs=_UNSET, **kwargs):
 
 def author_therapy_lines(
     person: Person, lines: Iterable[Mapping[str, Any]], *, asserted_by: str = 'authoring',
-    episode_write_guard=None, retry=True,
+    write_guard=None, retry=True,
 ) -> list[TherapyLineEpisodeResult] | None:
     """Author several lines of one person as one all-or-nothing write.
 
     Each entry holds ``author_therapy_line`` kwargs without ``person``.
     Returns None and writes nothing when the Treatment Regimen concept is not loaded.
-    The optional guard runs on each existing episode under the writer's locks,
+    The optional guard runs on existing episodes and affected observations under locks,
     before mutation. A caller disabling retries must own the complete transaction
     retry boundary, including any preparation and post-write work.
     """
@@ -533,7 +551,7 @@ def author_therapy_lines(
                 try:
                     result = _author_therapy_line_inner(
                         person, asserted_by=asserted_by,
-                        episode_write_guard=episode_write_guard, **line,
+                        write_guard=write_guard, **line,
                     )
                 except TherapyLineRejected as exc:
                     raise TherapyLineRejected(exc.message, index=index) from exc
@@ -656,7 +674,7 @@ def _author_therapy_line_inner(
     disease=None,
     episode=None,
     asserted_by='authoring',
-    episode_write_guard=None,
+    write_guard=None,
 ):
     from omop_core.models import DrugExposure
     from omop_oncology.models import TherapyLineExposure
@@ -683,8 +701,8 @@ def _author_therapy_line_inner(
         if episode is not None:
             episode = Episode.objects.select_for_update(nowait=True).get(pk=episode.pk)
 
-    if episode is not None and episode_write_guard is not None:
-        episode_write_guard(episode)
+    if episode is not None and write_guard is not None:
+        write_guard(Episode, [episode.pk])
 
     start = (episode.episode_start_date if episode else None) if start_date is _UNSET else start_date
     end = (episode.episode_end_date if episode else None) if end_date is _UNSET else end_date
@@ -751,6 +769,7 @@ def _author_therapy_line_inner(
         replace_events=replace and composition_supplied,
         replace_metadata=replace,
         asserted_by=asserted_by,
+        write_guard=write_guard,
     )
     if result.episode is None:
         raise TherapyLineRejected('The treatment-regimen vocabulary disappeared during authoring.')

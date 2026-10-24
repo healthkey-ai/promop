@@ -410,6 +410,67 @@ def test_source_guard_checks_only_the_lines_being_updated(etl, person):
     assert ProvenanceRecord.objects.filter(organization=other).count() == 1
 
 
+@pytest.mark.parametrize('linked', [False, True])
+@pytest.mark.parametrize('outcome', ['Stable Disease', None])
+def test_foreign_outcome_cannot_be_adopted_overwritten_or_deleted(etl, person, linked, outcome):
+    from django.contrib.contenttypes.models import ContentType
+    from omop_core.models import Organization
+    from tests.factories import ObservationFactory
+
+    source = Organization.objects.create(name='Outcome A', slug='etl-outcome-a')
+    other = Organization.objects.create(name='Outcome B', slug='etl-outcome-b')
+    if linked:
+        assert _post(etl, person, TICKET_LINES[:1]).status_code == 200
+        observation = Observation.objects.get(person=person, observation_source_value='LOT-1-outcome')
+    else:
+        observation = ObservationFactory(
+            person=person, observation_concept_id=0, observation_type_concept_id=32817,
+            observation_source_value='LOT-1-outcome', value_as_string='Partial Response',
+            observation_event_id=None,
+        )
+    ProvenanceRecord.objects.create(
+        content_type=ContentType.objects.get_for_model(Observation), object_id=observation.pk,
+        source='outcome-source-a', organization=source,
+    )
+    before_observation = Observation.objects.filter(pk=observation.pk).values().get()
+    before_episodes = list(Episode.objects.filter(person=person).order_by('pk').values())
+    before_provenance = list(ProvenanceRecord.objects.order_by('pk').values())
+    response = _post(etl, person, [TICKET_LINES[0] | {'outcome': outcome}], **_source_headers(other))
+    assert response.status_code == 409, response.data
+    assert Observation.objects.filter(pk=observation.pk).values().get() == before_observation
+    assert list(Episode.objects.filter(person=person).order_by('pk').values()) == before_episodes
+    assert list(ProvenanceRecord.objects.order_by('pk').values()) == before_provenance
+
+
+@pytest.mark.parametrize('same_source', [False, True])
+def test_outcome_guard_allows_own_corrections_and_leaves_omitted_foreign_values_alone(etl, person, same_source):
+    from django.contrib.contenttypes.models import ContentType
+    from omop_core.models import Organization
+    from tests.factories import ObservationFactory
+
+    source = Organization.objects.create(name='Outcome Owner', slug='etl-outcome-owner')
+    other = Organization.objects.create(name='Other Source', slug='etl-outcome-other')
+    observation = ObservationFactory(
+        person=person, observation_concept_id=0, observation_type_concept_id=32817,
+        observation_source_value='LOT-1-outcome', value_as_string='Partial Response',
+        observation_event_id=None,
+    )
+    ProvenanceRecord.objects.create(
+        content_type=ContentType.objects.get_for_model(Observation), object_id=observation.pk,
+        source='outcome-owner', organization=source,
+    )
+    line = dict(TICKET_LINES[0])
+    if same_source:
+        line['outcome'] = 'Stable Disease'
+    else:
+        line.pop('outcome')
+    response = _post(etl, person, [line], **_source_headers(source if same_source else other))
+    assert response.status_code == 200, response.data
+    observation.refresh_from_db()
+    assert observation.value_as_string == ('Stable Disease' if same_source else 'Partial Response')
+    assert observation.observation_event_id == (response.data['lines'][0]['episode_id'] if same_source else None)
+
+
 def test_regimen_resolution_uses_mapping_gap_key_order(etl, person, monkeypatch):
     from omop_core.mapping.therapy import normalize_regimen_name
     from patient_portal.api import therapy_line_import
@@ -548,17 +609,19 @@ def test_foreign_attribution_is_checked_while_the_episode_is_locked(etl, person,
 
 
 @pytest.mark.django_db(transaction=True)
-def test_concurrent_imports_share_normalized_regimen_lock_order(etl, person):
+@pytest.mark.parametrize('seed_gaps', [False, True])
+def test_concurrent_imports_share_normalized_regimen_lock_order(etl, person, seed_gaps):
     from concurrent.futures import ThreadPoolExecutor
     from threading import Barrier
     from django.db import close_old_connections, connections
 
     people = [person, *[PatientRecordFactory(disease='multiple myeloma').person for _ in range(7)]]
-    # Prepare the shared source identity and existing mapping-gap rows first.
+    # Prepare the source identity; exercise both absent and existing gap rows.
     assert _post(etl, person, []).status_code == 400
     from omop_core.mapping.therapy import resolve_regimen_label
-    for label in ('AAA', 'bbb'):
-        resolve_regimen_label(label, 'therapy-lines-api')
+    if seed_gaps:
+        for label in ('AAA', 'bbb'):
+            resolve_regimen_label(label, 'therapy-lines-api')
     start = Barrier(len(people))
 
     def import_one(index, patient_id):
