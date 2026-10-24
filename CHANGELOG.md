@@ -78,6 +78,15 @@ All notable changes to PRomop are documented here.
 
 ### Changed
 
+- **The concept's source-code dialog opens on Suggested source codes** — and
+  has two views instead of three: the Find source codes list is gone, since
+  Suggest reaches the same rows with the ranker's evidence attached. Existing
+  mappings is grouped by status: approved first and folded, then the proposals
+  open for review, then rejected, folded, each group fetched and paged on its
+  own (`status=` on the detail endpoint, with `status_counts` for the headers).
+  Propose selected is gone too; Approve selected proposes a vocabulary-only
+  candidate from its preview and approves it in the same click (#2010).
+
 - **Mapping saves return immediately** — approving or re-pointing a code
   mapping (Concept to Code, Code to Concept, group approve, CSV upload) writes the mapping
   and returns; the stored clinical rows move to the new concept in a background

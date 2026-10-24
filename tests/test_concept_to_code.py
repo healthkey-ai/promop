@@ -723,3 +723,20 @@ def test_source_examples_do_not_write(client):
     assert client.get(EXAMPLES, {'source_vocabulary_id': 'SNOMED', 'source_code': 'ALB'}).status_code == 200
     assert client.post(EXAMPLES, {'source_vocabulary_id': 'SNOMED', 'source_code': 'ALB'}, format='json').status_code == 405
     assert PatientSourceCode.objects.values().get(pk=row.pk) == before
+
+
+def test_linked_sources_filter_by_status_and_count_every_status(client, concept):
+    source('OK', target_concept=concept, status='approved', occurrence_count=5)
+    source('MAYBE', target_concept=concept, status='proposed')
+    source('NO', target_concept=concept, status='rejected')
+    source('UNSEEN', target_concept=concept, status='approved', occurrence_count=0)
+    data = client.get(f'{BASE}{concept.pk}/', {'status': 'proposed', 'seen_only': '1'}).data
+    assert [row['source_code'] for row in data['results']] == ['MAYBE']
+    assert data['total'] == 1
+    # Counts follow the Seen filter, so a collapsed group announces what it would show.
+    assert data['status_counts'] == {'approved': 1, 'proposed': 1, 'rejected': 1}
+    unfiltered = client.get(f'{BASE}{concept.pk}/', {'seen_only': '0'}).data
+    assert unfiltered['total'] == 4
+    assert unfiltered['status_counts'] == {'approved': 2, 'proposed': 1, 'rejected': 1}
+    assert client.get(f'{BASE}{concept.pk}/', {'status': 'bogus'}).status_code == 400
+    assert client.get(f'{BASE}{concept.pk}/', {'mode': 'available'}).data['status_counts'] is None
