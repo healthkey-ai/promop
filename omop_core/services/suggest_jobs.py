@@ -184,6 +184,39 @@ def execute_preview(run_id: str, params: dict) -> None:
         runs.update(state=SuggestRun.FAILURE, error=str(exc)[:2000], finished_at=timezone.now())
 
 
+def execute_variants(run_id: str, params: dict) -> None:
+    """Suggest a proposed LOINC for each axis variant of one code (#2012).
+
+    The dialog's Suggest already runs one pipeline through this dispatcher
+    because one takes seconds; a code's variants are up to five of them, so
+    they take the same path. The result event carries the suggestions and the
+    variants as stored afterwards.
+    """
+    from omop_core.mapping import axis_variants
+
+    runs = SuggestRun.objects.filter(pk=run_id)
+    # A redelivered task must not suggest the same variants twice.
+    if not runs.filter(state=SuggestRun.QUEUED).update(state=SuggestRun.RUNNING):
+        return
+    run = runs.first()
+    spec = params['variants']
+    try:
+        mapping = SourceCodeConceptMapping.objects.filter(pk=spec['mapping_id']).first()
+        if mapping is None:
+            raise ValueError('Mapping not found.')
+        suggestions = axis_variants.suggest_destinations(
+            mapping, ranking_model=spec['ranking_model'], user=run.created_by,
+            strategies=spec.get('strategies'), overrides=spec.get('overrides'),
+            limit=spec.get('limit', axis_variants.SUGGEST_MAX),
+        )
+        runs.update(activity=[{
+            'at': timezone.now().isoformat(), 'stage': 'result', 'mapping_id': mapping.pk,
+            'suggestions': suggestions, 'variants': axis_variants.serialize_all(mapping),
+        }], state=SuggestRun.SUCCESS, done=1, retrieved=1, finished_at=timezone.now())
+    except Exception as exc:  # noqa: BLE001 - the row is where the dialog looks
+        runs.update(state=SuggestRun.FAILURE, error=str(exc)[:2000], finished_at=timezone.now())
+
+
 def _release_batch_locks(params: dict) -> None:
     """Release edit locks acquired by a batch suggest run."""
     locked_ids = params.get('_locked_mapping_ids')
@@ -209,6 +242,9 @@ def execute_run(run_id: str, params: dict) -> None:
         return
     if 'preview' in params:
         execute_preview(run_id, params)
+        return
+    if 'variants' in params:
+        execute_variants(run_id, params)
         return
 
     from omop_core.mapping.suggestions import (

@@ -88,6 +88,45 @@ All notable changes to PRomop are documented here.
 
 ### Changed
 
+- **The deployed commit sits under the PRomop logo** — in tiny type, with
+  the full SHA as a tooltip, so a report from staging names its build. It
+  comes from the new public `GET /api/v1/version/`, which answers with
+  Render's `RENDER_GIT_COMMIT` (or a checkout's `HEAD`) only when it is a Git
+  commit (#2016).
+
+- **LOINC axes read the record units first, and lead with the variants** —
+  a code whose records all arrive in mass-concentration units showed every
+  axis as "Not settled" when its stored metadata carried only a reference-range
+  unit; record units now settle Property (when they agree) and Scale (whenever
+  records carry units) ahead of the metadata's one sample. When the units
+  imply several axis sets, the LOINC axes panel leads with the variants, their
+  units and destinations, and folds the shared axes under them. The SNOMED
+  evidence section is hidden on any LOINC axis evidence, not only a settled
+  lab property (`snomed-attributes` answers `applies: false` with
+  `loinc_evidence`) (#2014).
+
+- **Suggest fills in a LOINC for each axis variant** — a source code whose
+  units imply several LOINC axis sets no longer needs one Suggest click and
+  one pick per variant. In Edit Mapping, Suggest also posts to
+  `code-mappings/<id>/axis-variants/suggest/`, which suggests a standard LOINC
+  for every variant without a destination under that variant's axes and
+  stores it as proposed; the LOINC axes panel then shows each with Approve.
+  The Concept to Code preview does the same for each flagged candidate and
+  lists the variants, with their units and destinations, under the code, where
+  an approver can approve them. The SNOMED evidence section is hidden when
+  the source's evidence says it is a lab value, since its destination is a
+  LOINC (`snomed-attributes` answers `applies: false` with `lab_signal`)
+  (#2012).
+
+- **The concept's source-code dialog opens on Suggested source codes** — and
+  has two views instead of three: the Find source codes list is gone, since
+  Suggest reaches the same rows with the ranker's evidence attached. Existing
+  mappings is grouped by status: approved first and folded, then the proposals
+  open for review, then rejected, folded, each group fetched and paged on its
+  own (`status=` on the detail endpoint, with `status_counts` for the headers).
+  Propose selected is gone too; Approve selected proposes a vocabulary-only
+  candidate from its preview and approves it in the same click (#2010).
+
 - **Mapping saves return immediately** — approving or re-pointing a code
   mapping (Concept to Code, Code to Concept, group approve, CSV upload) writes the mapping
   and returns; the stored clinical rows move to the new concept in a background

@@ -737,6 +737,54 @@ describe("CodeMappingPage", () => {
       expect(screen.getByLabelText("Destination Concept ID")).toHaveValue(proposedRow.destination_concept_id);
     });
 
+    it("fills in the axis variants with proposed LOINCs when Suggest runs for a code with several (#2012)", async () => {
+      renderPage();
+      const glucose = { concept_id: 3004501, concept_name: "Glucose [Mass/volume] in Serum or Plasma", concept_code: "2345-7", vocabulary_id: "LOINC" };
+      const axes = (variants: unknown[]) => ({
+        mapping_id: 7, applies: true, loinc_axes: {}, source_axes: { axes: {}, hints: {} }, axis_variant_count: variants.length,
+        variants, variant_notes: [],
+      });
+      const empty = [
+        { id: 1, axis_key: "property=MCnc", axis_values: { property: "MCnc" }, units: ["mg/dL"], occurrence_count: 40, status: "proposed", target_concept: null, reviewed_at: null },
+        { id: 2, axis_key: "property=SCnc", axis_values: { property: "SCnc" }, units: ["mmol/L"], occurrence_count: 3, status: "proposed", target_concept: null, reviewed_at: null },
+      ];
+      let variants = empty;
+      const originalGet = mockGet.getMockImplementation()!;
+      mockGet.mockImplementation((url: string, ...rest: unknown[]) => url === "/v1/code-mappings/7/loinc-axes/"
+        ? Promise.resolve({ data: axes(variants) }) : originalGet(url, ...rest));
+      mockPost.mockImplementation((url: string) => {
+        if (url === "/v1/code-mappings/7/axis-variants/suggest/") {
+          // The run is queued like the code's own Suggest; inline it finishes in the request.
+          variants = empty.map(v => ({ ...v, target_concept: glucose }));
+          return Promise.resolve({ data: suggestRun({ run_id: "variants-run", activity: [{ stage: "result", mapping_id: 7,
+            suggestions: [{ axis_key: "property=MCnc", suggested: glucose }, { axis_key: "property=SCnc", suggested: glucose }],
+            variants }] }) });
+        }
+        return Promise.resolve({ data: suggestRun({ activity: [] }) });
+      });
+      fireEvent.click((await screen.findByText("M-PROTEIN, SERUM", { selector: '[data-testid=source-code]' })).closest("tr")!);
+      const panel = await screen.findByRole("region", { name: "LOINC axes" });
+      await within(panel).findByRole("table", { name: "Axis variants" });
+      const dialog = within(screen.getByRole("dialog"));
+      fireEvent.click(dialog.getByRole("button", { name: "Suggest", exact: true }));
+      await waitFor(() => expect(mockPost).toHaveBeenCalledWith("/v1/code-mappings/7/axis-variants/suggest/", expect.objectContaining({
+        strategies: expect.arrayContaining(["lexical"]), ranking_model: expect.any(String) })));
+      expect(mockPost).toHaveBeenCalledWith("/v1/code-mappings/suggest-one/", expect.anything());
+      expect(await screen.findByTestId("variant-suggestion")).toHaveTextContent("Suggested a LOINC for 2 of 2 axis variants (2 in all); approve each under LOINC axes.");
+      // The panel re-read the variants: each now shows the proposed LOINC, awaiting approval.
+      await waitFor(() => expect(within(panel).getAllByText(glucose.concept_name)).toHaveLength(2));
+      expect(within(panel).getAllByText("proposed")).toHaveLength(2);
+    });
+
+    it("does not call the variant suggestion for a code with one axis set", async () => {
+      await openDialog();
+      mockPost.mockResolvedValue({ data: suggestRun({ activity: [] }) });
+      fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Suggest", exact: true }));
+      await waitFor(() => expect(mockPost).toHaveBeenCalledWith("/v1/code-mappings/suggest-one/", expect.anything()));
+      expect(mockPost).not.toHaveBeenCalledWith(expect.stringContaining("/axis-variants/suggest/"), expect.anything());
+      expect(screen.queryByTestId("variant-suggestion")).not.toBeInTheDocument();
+    });
+
     it("sends the SNOMED evidence settings with Suggest only while the source is unchanged", async () => {
       renderPage();
       const originalGet = mockGet.getMockImplementation()!;
