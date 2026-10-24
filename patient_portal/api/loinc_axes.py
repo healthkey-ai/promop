@@ -27,11 +27,14 @@ def _views():
     return views
 
 
-def _payload(mapping):
-    from omop_core.mapping.suggestions import source_loinc_axes
+def _axes_and_variants(mapping, domain):
+    """``(axes, hints, detected, notes)`` from one scan of the unit evidence;
+    ``axes`` is None when the domain cannot hold a LOINC, and then nothing
+    is scanned."""
+    from omop_core.mapping.suggestions import LOINC_AXIS_DOMAINS, source_loinc_axes
 
-    domain = mapping.domain_id or {'measurement': 'Measurement', 'observation': 'Observation'}.get(
-        mapping.omop_table, '')
+    if domain not in LOINC_AXIS_DOMAINS and not loinc_axes.is_loinc(mapping.source_vocabulary_id):
+        return None, {}, [], []
     counts = axis_variants.unit_counts(mapping)
     axes, hints = source_loinc_axes(
         domain_id=domain, source_vocabulary_id=mapping.source_vocabulary_id,
@@ -40,6 +43,13 @@ def _payload(mapping):
         observed_units=axis_variants.observed_units(mapping, counts),
     )
     detected, notes = axis_variants.detect(mapping, counts)
+    return axes, hints, detected, notes
+
+
+def _payload(mapping):
+    domain = mapping.domain_id or {'measurement': 'Measurement', 'observation': 'Observation'}.get(
+        mapping.omop_table, '')
+    axes, hints, detected, notes = _axes_and_variants(mapping, domain)
     stored = {v.axis_key: v for v in mapping.axis_variants.select_related('target_concept')}
     variants = []
     for variant in detected:
@@ -248,17 +258,30 @@ def loinc_axis_values(request):
     ]})
 
 
-def _lab_signal(mapping, domain):
-    """Why the source is a lab-style test LOINC should name, or None (#2012)."""
-    from omop_core.mapping.suggestions import source_loinc_axes
+def _loinc_evidence(mapping, domain):
+    """Why the source's destination is a LOINC, or None (#2012, #2014).
 
-    axes, _hints = source_loinc_axes(
-        domain_id=domain, source_vocabulary_id=mapping.source_vocabulary_id,
-        source_code=mapping.source_code, metadata=mapping.source_metadata,
-        overrides=mapping.loinc_axes, observed_units=axis_variants.observed_units(mapping),
-    )
-    return loinc_axes.lab_signal(mapping.source_vocabulary_id, mapping.source_metadata, axes or {},
-                                 strict_units=True)
+    Any LOINC axis evidence counts, strongest reason first: units implying
+    several axis sets (variants), a lab signal (a LOINC code or coding, a
+    laboratory category, a property or scale the records settle), then any
+    other settled axis, a curator's included. SNOMED hierarchy and attribute
+    judging has nothing to add to such a code.
+    """
+    axes, _hints, detected, _notes = _axes_and_variants(mapping, domain)
+    if axes is None:
+        return None
+    if len(detected) >= axis_variants.FLAG_THRESHOLD:
+        return f'Its units imply {len(detected)} LOINC axis sets'
+    reason = loinc_axes.lab_signal(mapping.source_vocabulary_id, mapping.source_metadata, axes)
+    if reason:
+        return reason
+    for axis in loinc_axes.AXES:
+        entry = axes.get(axis)
+        if entry:
+            value = 'methodless' if axis == 'method_type' and entry['value'] == '' else entry['value']
+            return (f"LOINC axis evidence: {loinc_axes.AXIS_LABELS[axis]} {value}"
+                    + (f" ({entry['evidence']})" if entry.get('evidence') else ''))
+    return None
 
 
 def _snomed_payload(mapping):
@@ -276,13 +299,14 @@ def _snomed_payload(mapping):
         description=mapping.source_code_description, metadata=mapping.source_metadata,
         overrides=mapping.snomed_attributes,
     )
-    # A lab value's destination is a LOINC: SNOMED judging does not apply and
-    # the panel is hidden, however the source would read as SNOMED (#2012).
-    lab_reason = _lab_signal(mapping, domain) if source is not None else None
+    # A code with LOINC axis evidence has a LOINC destination: SNOMED judging
+    # does not apply and the panel is hidden, however the source would read
+    # as SNOMED (#2012, #2014).
+    loinc_reason = _loinc_evidence(mapping, domain) if source is not None else None
     return {
         'mapping_id': mapping.pk,
-        'applies': source is not None and lab_reason is None,
-        'lab_signal': lab_reason,
+        'applies': source is not None and loinc_reason is None,
+        'loinc_evidence': loinc_reason,
         'snomed_attributes': mapping.snomed_attributes or {},
         'source': snomed_attributes.source_summary(source) if source is not None else None,
         'hierarchies': snomed_attributes.HIERARCHY_TAGS,

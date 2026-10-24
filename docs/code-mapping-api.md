@@ -151,10 +151,18 @@ At most five variants are suggested per call. The Edit Mapping dialog calls
 this from its Suggest button when the code has two or more variants, and the
 Concept to Code preview calls it for each flagged candidate.
 
-A source whose evidence says it is a lab value (a LOINC code or coding, a
-laboratory category, or a unit or value type that settles a LOINC axis) has no
-SNOMED evidence: `GET .../snomed-attributes/` answers `applies: false` with
-the reason in `lab_signal`, and the dialog hides the SNOMED section.
+A source with LOINC axis evidence has no SNOMED evidence: an axis the records
+or a curator settled, units that imply several axis sets (variants), or a lab
+signal (a LOINC code or coding, a laboratory category). `GET
+.../snomed-attributes/` answers `applies: false` with the reason in
+`loinc_evidence`, and the dialog hides the SNOMED section (#2014).
+
+Record units settle the shared axes before the metadata's one sample does:
+every record in a mass-concentration unit settles Property `MCnc`, and
+records carrying any unit settle Scale `Qn`, even when the stored metadata
+holds only a reference-range unit. When the units imply several axis sets the
+panel leads with the variants, their units and destinations, and folds the
+shared axes under them.
 
 The term is never written to a log.
 

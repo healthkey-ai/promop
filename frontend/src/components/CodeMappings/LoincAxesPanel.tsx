@@ -173,11 +173,7 @@ export default function LoincAxesPanel({ mappingId, canEdit, canApprove, onAxesC
   const hints = LOINC_AXES.filter(axis => payload.source_axes?.hints?.[axis]);
   const variants = payload.variants ?? [];
 
-  return <section aria-label="LOINC axes" className="mb-3 rounded-md border border-slate-200 bg-slate-50 p-3 text-xs">
-    <h3 className="text-sm font-semibold text-slate-900">LOINC axes</h3>
-    <p className="mt-0.5 text-slate-500">Settled axes are constraints: a LOINC that differs on any of them is a different test and is not suggested.</p>
-    {error && <p role="alert" className="mt-1 text-rose-700">{error}</p>}
-    {message && <p role="status" className="mt-1 text-green-800">{message}</p>}
+  const axesTable = <>
     <table className="mt-2 w-full text-left">
       <thead><tr className="border-b text-slate-500">
         <th className="pb-1 pr-2 font-medium">Axis</th>
@@ -220,15 +216,22 @@ export default function LoincAxesPanel({ mappingId, canEdit, canApprove, onAxesC
     {hints.length > 0 && <ul aria-label="Axis hints" className="mt-2 space-y-0.5 text-slate-600">
       {hints.map(axis => <li key={axis}>Metadata says: {axisLabel(axis, labels)} — {payload.source_axes.hints[axis]}</li>)}
     </ul>}
-    {canEdit && <div className="mt-2 flex items-center gap-2">
-      <button type="button" disabled={!dirty || saving} onClick={() => void save()}
-        className="rounded-md bg-slate-900 px-2.5 py-1 text-xs font-medium text-white hover:bg-slate-700 disabled:opacity-40">
-        {saving ? "Saving…" : "Save axes"}
-      </button>
-      {dirty && <span className="text-slate-500">Unsaved axes still apply to Suggest from this dialog.</span>}
-    </div>}
+  </>;
 
-    {variants.length >= 2 && <div className="mt-3 border-t border-slate-200 pt-2">
+  return <section aria-label="LOINC axes" className="mb-3 rounded-md border border-slate-200 bg-slate-50 p-3 text-xs">
+    <h3 className="text-sm font-semibold text-slate-900">LOINC axes</h3>
+    <p className="mt-0.5 text-slate-500">{variants.length >= 2
+      ? "This code's units imply more than one LOINC axis set. Each is a variant with its own destination; approve one to route its units."
+      : "Settled axes are constraints: a LOINC that differs on any of them is a different test and is not suggested."}</p>
+    {error && <p role="alert" className="mt-1 text-rose-700">{error}</p>}
+    {message && <p role="status" className="mt-1 text-green-800">{message}</p>}
+    {variants.length >= 2
+      ? <>
+        {/* A code with variants is curated per variant: the axis sets, their
+            units and destinations lead, and the axes every variant shares fold
+            under them (#2014). The Save bar stays outside the fold, so an
+            unsaved shared axis is never out of sight. */}
+        <div className="mt-2" data-testid="axis-variants">
       <h4 className="text-sm font-semibold text-blue-700">{variants.length} axis values — this code may need one LOINC per variant</h4>
       <p className="mt-0.5 text-slate-500">Suggest fills in a proposed LOINC for each variant without one; approve each to route its units.</p>
       {payload.variant_notes?.length > 0 && <div className="mt-1 rounded border border-amber-200 bg-amber-50 px-2 py-1 text-amber-800">
@@ -283,6 +286,21 @@ export default function LoincAxesPanel({ mappingId, canEdit, canApprove, onAxesC
           </tr>;
         })}</tbody>
       </table>
+    </div>
+        <details className="mt-3 border-t border-slate-200 pt-2">
+          <summary className="cursor-pointer text-sm font-semibold text-slate-900">Axes shared by every variant
+            {dirty && <span className="ml-2 font-normal text-amber-800">(unsaved changes)</span>}</summary>
+          <p className="mt-0.5 text-slate-500">Constraints on all of the variants; each variant adds its own axis values on top.</p>
+          {axesTable}
+        </details>
+      </>
+      : axesTable}
+    {canEdit && <div className="mt-2 flex items-center gap-2">
+      <button type="button" disabled={!dirty || saving} onClick={() => void save()}
+        className="rounded-md bg-slate-900 px-2.5 py-1 text-xs font-medium text-white hover:bg-slate-700 disabled:opacity-40">
+        {saving ? "Saving…" : "Save axes"}
+      </button>
+      {dirty && <span className="text-slate-500">Unsaved axes still apply to Suggest from this dialog.</span>}
     </div>}
   </section>;
 }
