@@ -121,6 +121,16 @@ def concept_to_code_detail(request, concept_id):
                             zero_seen=Count('pk', filter=Q(occurrence_count=0)))
     from omop_core.services.mapping_browse import apply_seen
     rows = apply_seen(rows, request.query_params)
+    # The dialog lists approved, proposed and rejected mappings as separate
+    # groups (#2010); counts cover every status so a collapsed group can show
+    # how many rows it holds before it is fetched.
+    status_counts = {status: 0 for status, _ in SourceCodeConceptMapping.STATUS_CHOICES}
+    status_counts.update(dict(rows.order_by().values_list('status').annotate(count=Count('pk'))))
+    status = request.query_params.get('status', '')
+    if status not in ('', *status_counts):
+        raise ValidationError({'status': 'Choose approved, proposed or rejected.'})
+    if status:
+        rows = rows.filter(status=status)
     order = request.query_params.get('order', '')
     if order not in ('', 'confidence', '-confidence'):
         raise ValidationError({'order': 'Choose confidence or -confidence.'})
@@ -131,7 +141,7 @@ def concept_to_code_detail(request, concept_id):
         ordering.insert(0, confidence.desc(nulls_last=True) if order == '-confidence'
                         else confidence.asc(nulls_last=True))
     page, paging = _paginate(rows.select_related('target_concept').order_by(*ordering), request.query_params)
-    return Response({**paging, **counts, 'concept': concept_payload(concept),
+    return Response({**paging, **counts, 'status_counts': status_counts, 'concept': concept_payload(concept),
                      'results': [source_payload(row) for row in page]})
 
 
