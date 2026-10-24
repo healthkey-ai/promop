@@ -14740,7 +14740,7 @@ class TherapyLineViewSet(_PackagedTherapyLineViewSet):
         # Authorize the patient before serializer validation consults their
         # disease to validate outcome aliases and line identity.
         person_serializer = TherapyLineImportPersonSerializer(
-            data={'person': request.data.get('person')},
+            data=request.data,
         )
         person_serializer.is_valid(raise_exception=True)
         _authorize_person_write(request, person_serializer.validated_data['person'])
@@ -14750,4 +14750,5 @@ class TherapyLineViewSet(_PackagedTherapyLineViewSet):
         return import_therapy_lines(
             person, serializer.validated_data['lines'],
             _provenance_context(request, header=True), _skip_refresh_requested(request),
+            authorize_person=lambda locked_person: _authorize_person_write(request, locked_person),
         )

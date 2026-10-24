@@ -415,6 +415,28 @@ def _source_headers(organization):
             'HTTP_X_PROVENANCE_ORGANIZATION_ID': str(organization.pk)}
 
 
+def _bound_org_client(organization, suffix):
+    from datetime import timedelta
+    from django.utils import timezone
+    from oauth2_provider.models import AccessToken, Application
+    from omop_core.models import ApplicationOrganization
+
+    owner = get_user_model().objects.create_user(email=f'etl-{suffix}-owner@test.invalid')
+    app = Application.objects.create(
+        name=f'ETL {suffix} bound app', client_id=f'etl-{suffix}-client',
+        client_type=Application.CLIENT_CONFIDENTIAL,
+        authorization_grant_type=Application.GRANT_CLIENT_CREDENTIALS, user=owner,
+    )
+    ApplicationOrganization.objects.create(application=app, organization=organization)
+    token = AccessToken.objects.create(
+        user=owner, application=app, token=f'etl-{suffix}-token',
+        expires=timezone.now() + timedelta(hours=1), scope='patient/*.write',
+    )
+    client = APIClient()
+    client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.token}')
+    return client
+
+
 def test_foreign_line_attribution_rejects_and_rolls_back_the_complete_import(etl, person):
     from omop_core.models import Organization
 
@@ -494,33 +516,43 @@ def test_import_attributes_new_outcome_observations_on_new_and_existing_lines(et
 
 
 def test_patient_authorization_precedes_disease_dependent_validation(etl, person):
-    from datetime import timedelta
-    from django.utils import timezone
-    from oauth2_provider.models import AccessToken, Application
-    from omop_core.models import ApplicationOrganization, Organization
+    from omop_core.models import Organization
 
     owner = Organization.objects.create(name='Patient Owner', slug='etl-patient-owner')
     other = Organization.objects.create(name='Different Tenant', slug='etl-other-tenant')
     record = PatientRecord.objects.get(person=person)
     record.organization = owner
     record.save(update_fields=['organization'])
-    app_owner = get_user_model().objects.create_user(email='etl-review-app-owner@test.invalid')
-    app = Application.objects.create(
-        name='ETL review bound app', client_id='etl-review-bound-client',
-        client_type=Application.CLIENT_CONFIDENTIAL,
-        authorization_grant_type=Application.GRANT_CLIENT_CREDENTIALS, user=app_owner,
-    )
-    ApplicationOrganization.objects.create(application=app, organization=other)
-    token = AccessToken.objects.create(
-        user=app_owner, application=app, token='etl-review-bound-token',
-        expires=timezone.now() + timedelta(hours=1), scope='patient/*.write',
-    )
-    client = APIClient()
-    client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.token}')
+    client = _bound_org_client(other, 'review-authz')
     response = _post(
         client, person, [TICKET_LINES[0] | {'outcome': 'not a valid outcome'}],
     )
     assert response.status_code == 403, response.data
+
+
+def test_patient_authorization_is_rechecked_after_root_lock(etl, person, monkeypatch):
+    from omop_core.models import Organization
+    from omop_core.services.therapy_transactions import lock_therapy_patients
+    from patient_portal.api import therapy_line_import
+
+    requester = Organization.objects.create(name='Requester Org', slug='etl-lock-requester')
+    owner = Organization.objects.create(name='New Owner Org', slug='etl-lock-new-owner')
+    client = _bound_org_client(requester, 'review-lock-authz')
+    acquire = lock_therapy_patients
+
+    def claim_before_lock(person_ids):
+        PatientRecord.objects.filter(person_id__in=person_ids).update(organization=owner)
+        return acquire(person_ids)
+
+    monkeypatch.setattr(therapy_line_import, 'lock_therapy_patients', claim_before_lock)
+    response = _post(client, person, TICKET_LINES[:1])
+    assert response.status_code == 403, response.data
+    assert not Episode.objects.filter(person=person).exists()
+
+
+def test_non_object_request_body_returns_validation_error(etl):
+    response = etl.post(URL, [], format='json')
+    assert response.status_code == 400
 
 
 def test_import_refreshes_person_after_acquiring_the_patient_lock(etl, person, monkeypatch):

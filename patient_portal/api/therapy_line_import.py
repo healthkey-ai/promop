@@ -211,7 +211,7 @@ def _rejected_response(exc: TherapyLineRejected, line_count: int) -> Response:
 
 
 def import_therapy_lines(person: Person, lines: list[ImportLine], provenance: ProvenanceContext,
-                          skip_refresh: bool) -> Response:
+                          skip_refresh: bool, authorize_person=None) -> Response:
     """Upsert validated lines of one person and derive the record once."""
 
     def once():
@@ -222,6 +222,11 @@ def import_therapy_lines(person: Person, lines: list[ImportLine], provenance: Pr
             # This instance was resolved before waiting for the Person lock.
             # Refresh under the lock so retries and projection use current data.
             person.refresh_from_db()
+            if authorize_person is not None:
+                # Tenant ownership may have changed since the pre-validation
+                # check. Re-authorize against the locked, current patient record
+                # on every complete retry attempt before any writes.
+                authorize_person(person)
             labels = sorted(
                 {line['regimen'] for line in lines
                  if line.get('regimen') and not line.get('regimen_concept_id')},
