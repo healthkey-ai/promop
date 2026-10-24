@@ -12,23 +12,32 @@ from omop_core.models import Person
 
 @worker_ready.connect
 def dispatch_hospital_code_imports_on_worker_ready(**_kwargs):
-    """Publish durable migration-created imports from a worker that knows the task."""
+    """Publish durable migration-created jobs from a worker that knows the tasks.
+
+    Hospital-code imports and axis variant refreshes (#2021) are written by
+    migrations as database rows. An older worker would discard their task
+    messages as unregistered during a rolling deployment, so the worker that
+    registers the tasks is the one that publishes them.
+    """
     import logging
     import threading
 
+    from omop_core.services.axis_variant_jobs import dispatch_queued_refreshes
     from omop_core.services.hospital_code_seed import dispatch_queued_imports
 
+    log = logging.getLogger(__name__)
+
     def dispatch():
-        try:
-            dispatch_queued_imports()
-        except (OperationalError, ProgrammingError):
-            logging.getLogger(__name__).exception(
-                'Hospital-code import dispatch deferred until the database is ready.'
-            )
-        except Exception:
-            # Never make the worker unavailable because the broker job cannot
-            # be published. The queued database row remains retryable.
-            logging.getLogger(__name__).exception('Could not dispatch hospital-code import.')
+        for label, publish in (('hospital-code import', dispatch_queued_imports),
+                               ('axis variant refresh', dispatch_queued_refreshes)):
+            try:
+                publish()
+            except (OperationalError, ProgrammingError):
+                log.exception('%s dispatch deferred until the database is ready.', label)
+            except Exception:
+                # Never make the worker unavailable because the broker job cannot
+                # be published. The queued database row remains retryable.
+                log.exception('Could not dispatch %s.', label)
 
     dispatch()
     # Render can bring the worker up while the web service is still running its
@@ -237,3 +246,25 @@ def import_hospital_code_seed_task(self, import_id: int) -> dict[str, Any]:
             outcome='queued', failure_reason=str(exc), completed_at=None,
         )
         raise self.retry(exc=exc, countdown=min(60 * (2 ** self.request.retries), 300))
+
+
+@shared_task(
+    bind=True,
+    name='omop_core.refresh_axis_variants',
+    # One request walks every multi-unit code on the instance. HealthTree's did
+    # not finish inside the Cloud Run migrate job's hour (#2021); give it the
+    # Athena sync's limit, which the Redis visibility timeout already exceeds.
+    time_limit=6 * 60 * 60,
+    acks_late=True,
+    reject_on_worker_lost=True,
+)
+def refresh_axis_variants_task(self, request_id: int) -> dict[str, Any]:
+    """Perform one durable axis variant refresh request.
+
+    The request row is claimed atomically, so a redelivery or a duplicate
+    publish from the worker-ready sweep runs nothing twice. A failure is
+    recorded on the row and raised, so Celery reports FAILURE as well.
+    """
+    from omop_core.services.axis_variant_jobs import run_refresh
+
+    return run_refresh(request_id)

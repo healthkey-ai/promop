@@ -151,6 +151,16 @@ At most five variants are suggested per call. The Edit Mapping dialog calls
 this from its Suggest button when the code has two or more variants, and the
 Concept to Code preview calls it for each flagged candidate.
 
+Flags refresh after each source-code upload for the codes it touched. The bulk
+refresh of every multi-unit code on the instance is a worker job (#2021):
+`manage.py refresh_axis_variants --queue` or migration `0303` records an
+`axis_variant_refresh` request and the Celery worker performs it, with `keys`,
+`done` and `refreshed` on the row as it goes. It never runs inside `migrate`:
+on the HealthTree instance it outlived the Cloud Run migrate job's hour, and
+no deploy reached traffic until the walk was moved off the release step. A
+worker publishes any request still queued when it starts, so a request a
+pre-upgrade worker dropped as an unknown task is picked up by the next one.
+
 A source with LOINC axis evidence has no SNOMED evidence: an axis the records
 or a curator settled, units that imply several axis sets (variants), or a lab
 signal (a LOINC code or coding, a laboratory category). `GET
