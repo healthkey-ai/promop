@@ -173,6 +173,51 @@ export default function LoincAxesPanel({ mappingId, canEdit, canApprove, onAxesC
   const hints = LOINC_AXES.filter(axis => payload.source_axes?.hints?.[axis]);
   const variants = payload.variants ?? [];
 
+  const axesTable = <>
+    <table className="mt-2 w-full text-left">
+      <thead><tr className="border-b text-slate-500">
+        <th className="pb-1 pr-2 font-medium">Axis</th>
+        <th className="pb-1 px-2 font-medium">Value</th>
+        <th className="pb-1 px-2 font-medium">Why</th>
+        {canEdit && <th className="pb-1 pl-2 font-medium">Edit</th>}
+      </tr></thead>
+      <tbody>{LOINC_AXES.map(axis => {
+        const label = axisLabel(axis, labels);
+        const listId = `${listPrefix}-${axis}`;
+        const text = typeof overrides[axis] === "string" ? overrides[axis] as string : "";
+        return <tr key={axis} className="border-b border-slate-100 align-top">
+          <td className="py-1 pr-2 font-medium text-slate-700">{label}</td>
+          <td className="py-1 px-2 font-mono text-slate-900" data-testid={`axis-value-${axis}`}>{displayValue(axis)}</td>
+          <td className="py-1 px-2 text-slate-600" data-testid={`axis-why-${axis}`}>{why(axis)}</td>
+          {canEdit && <td className="py-1 pl-2">
+            <div className="flex flex-wrap items-center gap-1">
+              <input aria-label={`${label} value`} list={listId} value={text} disabled={saving}
+                placeholder={payload.source_axes?.axes?.[axis]?.value || "any"}
+                onFocus={() => setActiveAxis(axis)}
+                onChange={event => setAxis(axis, event.target.value === "" ? undefined : event.target.value)}
+                className="h-6 w-28 rounded border border-slate-300 bg-white px-1 font-mono" />
+              <datalist id={listId}>
+                {(axisValues[axis] ?? []).map(item => <option key={item.value} value={item.value}>{`${item.codes} codes`}</option>)}
+              </datalist>
+              <button type="button" className={BUTTON} disabled={saving || overrides[axis] === null}
+                aria-label={`Clear ${label}`} title="Lift this axis: no constraint"
+                onClick={() => setAxis(axis, null)}>Clear</button>
+              {axis === "method_type" && <button type="button" className={BUTTON} disabled={saving || overrides[axis] === ""}
+                aria-label="Methodless" title="The LOINC must have no method"
+                onClick={() => setAxis(axis, "")}>Methodless</button>}
+              {axis in overrides && <button type="button" className={BUTTON} disabled={saving}
+                aria-label={`Use inferred ${label}`} title="Remove the curator entry and use what the source says"
+                onClick={() => setAxis(axis, undefined)}>Inferred</button>}
+            </div>
+          </td>}
+        </tr>;
+      })}</tbody>
+    </table>
+    {hints.length > 0 && <ul aria-label="Axis hints" className="mt-2 space-y-0.5 text-slate-600">
+      {hints.map(axis => <li key={axis}>Metadata says: {axisLabel(axis, labels)} — {payload.source_axes.hints[axis]}</li>)}
+    </ul>}
+  </>;
+
   return <section aria-label="LOINC axes" className="mb-3 rounded-md border border-slate-200 bg-slate-50 p-3 text-xs">
     <h3 className="text-sm font-semibold text-slate-900">LOINC axes</h3>
     <p className="mt-0.5 text-slate-500">{variants.length >= 2
@@ -184,7 +229,8 @@ export default function LoincAxesPanel({ mappingId, canEdit, canApprove, onAxesC
       ? <>
         {/* A code with variants is curated per variant: the axis sets, their
             units and destinations lead, and the axes every variant shares fold
-            under them (#2014). */}
+            under them (#2014). The Save bar stays outside the fold, so an
+            unsaved shared axis is never out of sight. */}
         <div className="mt-2" data-testid="axis-variants">
       <h4 className="text-sm font-semibold text-blue-700">{variants.length} axis values — this code may need one LOINC per variant</h4>
       <p className="mt-0.5 text-slate-500">Suggest fills in a proposed LOINC for each variant without one; approve each to route its units.</p>
@@ -242,102 +288,13 @@ export default function LoincAxesPanel({ mappingId, canEdit, canApprove, onAxesC
       </table>
     </div>
         <details className="mt-3 border-t border-slate-200 pt-2">
-          <summary className="cursor-pointer text-sm font-semibold text-slate-900">Axes shared by every variant</summary>
+          <summary className="cursor-pointer text-sm font-semibold text-slate-900">Axes shared by every variant
+            {dirty && <span className="ml-2 font-normal text-amber-800">(unsaved changes)</span>}</summary>
           <p className="mt-0.5 text-slate-500">Constraints on all of the variants; each variant adds its own axis values on top.</p>
-    <table className="mt-2 w-full text-left">
-      <thead><tr className="border-b text-slate-500">
-        <th className="pb-1 pr-2 font-medium">Axis</th>
-        <th className="pb-1 px-2 font-medium">Value</th>
-        <th className="pb-1 px-2 font-medium">Why</th>
-        {canEdit && <th className="pb-1 pl-2 font-medium">Edit</th>}
-      </tr></thead>
-      <tbody>{LOINC_AXES.map(axis => {
-        const label = axisLabel(axis, labels);
-        const listId = `${listPrefix}-${axis}`;
-        const text = typeof overrides[axis] === "string" ? overrides[axis] as string : "";
-        return <tr key={axis} className="border-b border-slate-100 align-top">
-          <td className="py-1 pr-2 font-medium text-slate-700">{label}</td>
-          <td className="py-1 px-2 font-mono text-slate-900" data-testid={`axis-value-${axis}`}>{displayValue(axis)}</td>
-          <td className="py-1 px-2 text-slate-600" data-testid={`axis-why-${axis}`}>{why(axis)}</td>
-          {canEdit && <td className="py-1 pl-2">
-            <div className="flex flex-wrap items-center gap-1">
-              <input aria-label={`${label} value`} list={listId} value={text} disabled={saving}
-                placeholder={payload.source_axes?.axes?.[axis]?.value || "any"}
-                onFocus={() => setActiveAxis(axis)}
-                onChange={event => setAxis(axis, event.target.value === "" ? undefined : event.target.value)}
-                className="h-6 w-28 rounded border border-slate-300 bg-white px-1 font-mono" />
-              <datalist id={listId}>
-                {(axisValues[axis] ?? []).map(item => <option key={item.value} value={item.value}>{`${item.codes} codes`}</option>)}
-              </datalist>
-              <button type="button" className={BUTTON} disabled={saving || overrides[axis] === null}
-                aria-label={`Clear ${label}`} title="Lift this axis: no constraint"
-                onClick={() => setAxis(axis, null)}>Clear</button>
-              {axis === "method_type" && <button type="button" className={BUTTON} disabled={saving || overrides[axis] === ""}
-                aria-label="Methodless" title="The LOINC must have no method"
-                onClick={() => setAxis(axis, "")}>Methodless</button>}
-              {axis in overrides && <button type="button" className={BUTTON} disabled={saving}
-                aria-label={`Use inferred ${label}`} title="Remove the curator entry and use what the source says"
-                onClick={() => setAxis(axis, undefined)}>Inferred</button>}
-            </div>
-          </td>}
-        </tr>;
-      })}</tbody>
-    </table>
-    {hints.length > 0 && <ul aria-label="Axis hints" className="mt-2 space-y-0.5 text-slate-600">
-      {hints.map(axis => <li key={axis}>Metadata says: {axisLabel(axis, labels)} — {payload.source_axes.hints[axis]}</li>)}
-    </ul>}
-    {canEdit && <div className="mt-2 flex items-center gap-2">
-      <button type="button" disabled={!dirty || saving} onClick={() => void save()}
-        className="rounded-md bg-slate-900 px-2.5 py-1 text-xs font-medium text-white hover:bg-slate-700 disabled:opacity-40">
-        {saving ? "Saving…" : "Save axes"}
-      </button>
-      {dirty && <span className="text-slate-500">Unsaved axes still apply to Suggest from this dialog.</span>}
-    </div>}
+          {axesTable}
         </details>
       </>
-      : <>
-    <table className="mt-2 w-full text-left">
-      <thead><tr className="border-b text-slate-500">
-        <th className="pb-1 pr-2 font-medium">Axis</th>
-        <th className="pb-1 px-2 font-medium">Value</th>
-        <th className="pb-1 px-2 font-medium">Why</th>
-        {canEdit && <th className="pb-1 pl-2 font-medium">Edit</th>}
-      </tr></thead>
-      <tbody>{LOINC_AXES.map(axis => {
-        const label = axisLabel(axis, labels);
-        const listId = `${listPrefix}-${axis}`;
-        const text = typeof overrides[axis] === "string" ? overrides[axis] as string : "";
-        return <tr key={axis} className="border-b border-slate-100 align-top">
-          <td className="py-1 pr-2 font-medium text-slate-700">{label}</td>
-          <td className="py-1 px-2 font-mono text-slate-900" data-testid={`axis-value-${axis}`}>{displayValue(axis)}</td>
-          <td className="py-1 px-2 text-slate-600" data-testid={`axis-why-${axis}`}>{why(axis)}</td>
-          {canEdit && <td className="py-1 pl-2">
-            <div className="flex flex-wrap items-center gap-1">
-              <input aria-label={`${label} value`} list={listId} value={text} disabled={saving}
-                placeholder={payload.source_axes?.axes?.[axis]?.value || "any"}
-                onFocus={() => setActiveAxis(axis)}
-                onChange={event => setAxis(axis, event.target.value === "" ? undefined : event.target.value)}
-                className="h-6 w-28 rounded border border-slate-300 bg-white px-1 font-mono" />
-              <datalist id={listId}>
-                {(axisValues[axis] ?? []).map(item => <option key={item.value} value={item.value}>{`${item.codes} codes`}</option>)}
-              </datalist>
-              <button type="button" className={BUTTON} disabled={saving || overrides[axis] === null}
-                aria-label={`Clear ${label}`} title="Lift this axis: no constraint"
-                onClick={() => setAxis(axis, null)}>Clear</button>
-              {axis === "method_type" && <button type="button" className={BUTTON} disabled={saving || overrides[axis] === ""}
-                aria-label="Methodless" title="The LOINC must have no method"
-                onClick={() => setAxis(axis, "")}>Methodless</button>}
-              {axis in overrides && <button type="button" className={BUTTON} disabled={saving}
-                aria-label={`Use inferred ${label}`} title="Remove the curator entry and use what the source says"
-                onClick={() => setAxis(axis, undefined)}>Inferred</button>}
-            </div>
-          </td>}
-        </tr>;
-      })}</tbody>
-    </table>
-    {hints.length > 0 && <ul aria-label="Axis hints" className="mt-2 space-y-0.5 text-slate-600">
-      {hints.map(axis => <li key={axis}>Metadata says: {axisLabel(axis, labels)} — {payload.source_axes.hints[axis]}</li>)}
-    </ul>}
+      : axesTable}
     {canEdit && <div className="mt-2 flex items-center gap-2">
       <button type="button" disabled={!dirty || saving} onClick={() => void save()}
         className="rounded-md bg-slate-900 px-2.5 py-1 text-xs font-medium text-white hover:bg-slate-700 disabled:opacity-40">
@@ -345,7 +302,6 @@ export default function LoincAxesPanel({ mappingId, canEdit, canApprove, onAxesC
       </button>
       {dirty && <span className="text-slate-500">Unsaved axes still apply to Suggest from this dialog.</span>}
     </div>}
-      </>}
   </section>;
 }
 

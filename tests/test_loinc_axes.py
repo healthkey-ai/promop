@@ -1010,15 +1010,29 @@ def test_loinc_axis_evidence_hides_the_snomed_evidence(two_unit_code, glucose):
     response = client.get(f'/api/v1/code-mappings/{two_unit_code.pk}/snomed-attributes/')
     assert response.status_code == 200, response.data
     assert response.data['applies'] is False
-    assert response.data['loinc_evidence'] == 'LOINC axis evidence: Scale Qn (records carry units (mg/dL, mmol/L))'
-    # One property across every record: the settled axis is the evidence,
+    assert response.data['loinc_evidence'] == 'Its units imply 2 LOINC axis sets'
+    # One property across every record: the settled property is the evidence,
     # whatever the metadata's own sample says.
     PatientSourceCode.objects.filter(source_unit='mmol/L').delete()
     two_unit_code.source_metadata = {'reference_range': {'unit': '%'}}
     two_unit_code.save(update_fields=['source_metadata'])
     payload = _snomed_payload(two_unit_code)
     assert payload['applies'] is False
-    assert payload['loinc_evidence'].startswith('LOINC axis evidence: Property MCnc (every record unit implies it')
+    assert payload['loinc_evidence'].startswith('Its property is settled (every record unit implies it')
+    # A LOINC source code names the code system, not an axis.
+    two_unit_code.source_vocabulary_id = 'LOINC'
+    two_unit_code.save(update_fields=['source_vocabulary_id'])
+    assert _snomed_payload(two_unit_code)['loinc_evidence'] == 'The source code is LOINC'
+    two_unit_code.source_vocabulary_id = LAB
+    two_unit_code.save(update_fields=['source_vocabulary_id'])
+    # An axis a curator settled is evidence too: the curator means LOINC.
+    PatientSourceCode.objects.all().delete()
+    two_unit_code.source_metadata = {}
+    two_unit_code.loinc_axes = {'system': 'Ser'}
+    two_unit_code.save(update_fields=['source_metadata', 'loinc_axes'])
+    assert _snomed_payload(two_unit_code)['loinc_evidence'] == 'LOINC axis evidence: System Ser (Set by a curator)'
+    two_unit_code.loinc_axes = {}
+    two_unit_code.save(update_fields=['loinc_axes'])
     # A lab category alone is enough too.
     PatientSourceCode.objects.all().delete()
     two_unit_code.source_metadata = {'fhir': {'category': [{'coding': [{'code': 'laboratory'}]}]}}
@@ -1041,7 +1055,11 @@ def test_record_units_settle_the_axes_whatever_the_metadata_sample_says():
     # A sample unit of its own still speaks when the records are silent ...
     axes, _ = loinc_axes.infer(LAB, 'ALB', {'fhir': {'valueQuantity': {'value': 4, 'unit': 'g/dL'}}})
     assert axes['property']['value'] == 'MCnc' and axes['scale_type']['value'] == 'Qn'
-    # ... but a sample that disagrees with every record does not override them.
+    # ... but a sample that disagrees with every record does not override them ...
     axes, _ = loinc_axes.infer(LAB, 'ALB', {'fhir': {'valueQuantity': {'value': 40, 'unit': 'g/L'}}},
                                observed_units=['mmol/L', 'umol/L'])
     assert axes['property']['value'] == 'SCnc'
+    # ... and records in an ambiguous unit say nothing a sample may say for them.
+    axes, _ = loinc_axes.infer(LAB, 'HCT', {'fhir': {'valueQuantity': {'value': 40, 'unit': 'g/dL'}}},
+                               observed_units=['%'])
+    assert 'property' not in axes and axes['scale_type']['value'] == 'Qn'

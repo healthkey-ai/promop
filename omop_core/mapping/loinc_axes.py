@@ -284,7 +284,10 @@ def infer(source_vocabulary_id, source_code, metadata, *, observed_units=None):
         settle({'scale_type': 'Qn'}, BASIS_VALUE_TYPE, f'records carry units ({shown})')
     if unit:
         prop = unit_property(unit)
-        if prop and not mixed:
+        # The sample settles the property only where the records are silent
+        # or agree: records in % say nothing about the property, and a g/dL
+        # sample must not say it for them.
+        if prop and not mixed and (not units or prop in properties):
             settle({'property': prop}, BASIS_UNIT, f'{where} = {unit}')
         if observed:
             settle({'scale_type': 'Qn'}, BASIS_VALUE_TYPE, f'{where} = {unit}')

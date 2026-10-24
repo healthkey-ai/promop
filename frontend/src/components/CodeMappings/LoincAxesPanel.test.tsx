@@ -57,8 +57,14 @@ describe("LoincAxesPanel", () => {
     expect(variants.compareDocumentPosition(shared) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(shared.closest("details")).not.toHaveAttribute("open");
     expect(screen.getByText(/Each is a variant with its own destination/)).toBeInTheDocument();
-    // The shared axes are still there to edit, under the fold.
+    // The shared axes are still there to edit, under the fold; Save and the
+    // unsaved notice stay outside it.
     expect(screen.getByTestId("axis-value-property")).toHaveTextContent("MCnc");
+    const save = screen.getByRole("button", { name: "Save axes" });
+    expect(save.closest("details")).toBeNull();
+    fireEvent.change(screen.getByLabelText("System value"), { target: { value: "Ser" } });
+    expect(shared).toHaveTextContent("(unsaved changes)");
+    expect(screen.getByText(/Unsaved axes still apply to Suggest/).closest("details")).toBeNull();
   });
 
   it("shows the axes table on its own for a code with one axis set", async () => {

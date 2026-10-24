@@ -27,11 +27,14 @@ def _views():
     return views
 
 
-def _payload(mapping):
-    from omop_core.mapping.suggestions import source_loinc_axes
+def _axes_and_variants(mapping, domain):
+    """``(axes, hints, detected, notes)`` from one scan of the unit evidence;
+    ``axes`` is None when the domain cannot hold a LOINC, and then nothing
+    is scanned."""
+    from omop_core.mapping.suggestions import LOINC_AXIS_DOMAINS, source_loinc_axes
 
-    domain = mapping.domain_id or {'measurement': 'Measurement', 'observation': 'Observation'}.get(
-        mapping.omop_table, '')
+    if domain not in LOINC_AXIS_DOMAINS and not loinc_axes.is_loinc(mapping.source_vocabulary_id):
+        return None, {}, [], []
     counts = axis_variants.unit_counts(mapping)
     axes, hints = source_loinc_axes(
         domain_id=domain, source_vocabulary_id=mapping.source_vocabulary_id,
@@ -40,6 +43,13 @@ def _payload(mapping):
         observed_units=axis_variants.observed_units(mapping, counts),
     )
     detected, notes = axis_variants.detect(mapping, counts)
+    return axes, hints, detected, notes
+
+
+def _payload(mapping):
+    domain = mapping.domain_id or {'measurement': 'Measurement', 'observation': 'Observation'}.get(
+        mapping.omop_table, '')
+    axes, hints, detected, notes = _axes_and_variants(mapping, domain)
     stored = {v.axis_key: v for v in mapping.axis_variants.select_related('target_concept')}
     variants = []
     for variant in detected:
@@ -251,30 +261,27 @@ def loinc_axis_values(request):
 def _loinc_evidence(mapping, domain):
     """Why the source's destination is a LOINC, or None (#2012, #2014).
 
-    Any LOINC axis evidence counts: an axis the source or a curator settled,
-    units implying several axis sets (variants), or a lab signal. SNOMED
-    hierarchy and attribute judging has nothing to add to such a code.
+    Any LOINC axis evidence counts, strongest reason first: units implying
+    several axis sets (variants), a lab signal (a LOINC code or coding, a
+    laboratory category, a property or scale the records settle), then any
+    other settled axis, a curator's included. SNOMED hierarchy and attribute
+    judging has nothing to add to such a code.
     """
-    from omop_core.mapping.suggestions import source_loinc_axes
-
-    counts = axis_variants.unit_counts(mapping)
-    axes, _hints = source_loinc_axes(
-        domain_id=domain, source_vocabulary_id=mapping.source_vocabulary_id,
-        source_code=mapping.source_code, metadata=mapping.source_metadata,
-        overrides=mapping.loinc_axes, observed_units=axis_variants.observed_units(mapping, counts),
-    )
+    axes, _hints, detected, _notes = _axes_and_variants(mapping, domain)
     if axes is None:
         return None
+    if len(detected) >= axis_variants.FLAG_THRESHOLD:
+        return f'Its units imply {len(detected)} LOINC axis sets'
+    reason = loinc_axes.lab_signal(mapping.source_vocabulary_id, mapping.source_metadata, axes)
+    if reason:
+        return reason
     for axis in loinc_axes.AXES:
         entry = axes.get(axis)
         if entry:
             value = 'methodless' if axis == 'method_type' and entry['value'] == '' else entry['value']
             return (f"LOINC axis evidence: {loinc_axes.AXIS_LABELS[axis]} {value}"
                     + (f" ({entry['evidence']})" if entry.get('evidence') else ''))
-    variants, _notes = axis_variants.detect(mapping, counts, notes=False)
-    if len(variants) >= axis_variants.FLAG_THRESHOLD:
-        return f'Its units imply {len(variants)} LOINC axis sets'
-    return loinc_axes.lab_signal(mapping.source_vocabulary_id, mapping.source_metadata, axes)
+    return None
 
 
 def _snomed_payload(mapping):
