@@ -1,8 +1,10 @@
-import { useState } from 'react';
+import { useContext, useState } from 'react';
 import Field from './Field';
 import { today } from '@/api/clinicalFacts';
 import type { VocabSource } from '@/hooks/useVocabulary';
 import type { FieldDescriptor } from '@/hooks/useWritableFields';
+import { PatientFormReadOnlyContext, usePatientFormStore } from '@/federation/PatientFormContext';
+import PatientFieldEditor from '@/federation/PatientFieldEditor';
 
 interface Props {
   label: string;
@@ -55,12 +57,17 @@ export default function ClinicalField({
   onDateChange,
   showReason = true,
 }: Props) {
+  const store = usePatientFormStore();
+  const formReadOnly = useContext(PatientFormReadOnlyContext);
   const writable = !!descriptor?.writable;
   // A tab that shares one date across its fields passes it in — a blood panel is
   // drawn once. A tab whose results come from different specimens, as a pathology
   // report's do, can leave it out and get a date per field rather than one date
   // pretending to cover all of them.
   const [ownDate, setOwnDate] = useState(today());
+  // Both the tabbed profile and embedded Trial Details use the same control,
+  // dependency dialogs and save queue. Dedicated authoring views remain separate.
+  if (store) return <PatientFieldEditor store={store} name={name} label={label} readOnly={formReadOnly} />;
   // `absent` is stronger than "not writable": the server has no such field.
   const absent = !!unknownField;
   const curated = descriptor?.options?.map((o) => o.value);

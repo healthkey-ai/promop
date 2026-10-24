@@ -46,8 +46,7 @@ export default function Field({
   }, [value]);
 
   const selectedLabels = useMemo(() => {
-    const set = new Set(selectedValues);
-    return optionObjects.filter((o) => set.has(String(o.value))).map((o) => o.label);
+    return selectedValues.map((value) => optionObjects.find((option) => String(option.value) === value)?.label ?? value);
   }, [optionObjects, selectedValues]);
 
   const msDisplay = useMemo(() => {
@@ -95,7 +94,7 @@ export default function Field({
             onChange={(nextValues) => {
               onChange(
                 name,
-                isStringBacked ? (nextValues as string[]).join(', ') : nextValues
+                isStringBacked ? (nextValues as string[]).join(',') : nextValues
               );
             }}
           />

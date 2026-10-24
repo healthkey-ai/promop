@@ -7,6 +7,8 @@ import { __resetWritableFieldsCache } from "@/hooks/useWritableFields";
 import type { LabsThemeTokens } from "./types";
 import { injectStyles } from "./injectStyles";
 import { assertLabsTokens } from "./assertLabsTokens";
+import { PatientFormContext } from './PatientFormContext';
+import { patientFormForClient } from './patientFormRuntime';
 
 injectStyles();
 assertLabsTokens();
@@ -76,11 +78,28 @@ export function PatientInfoProvider({
   );
 
   const qc = externalQC ?? internalQC;
+  const store = useMemo(() => patientFormForClient(apiClient, apiBasePath), [apiClient, apiBasePath]);
+  useEffect(() => { void store.load(); }, [store]);
+  useEffect(() => {
+    let previous: unknown;
+    const synchronize = () => {
+      const state = store.getSnapshot();
+      if (state.loading || state.values === previous) return;
+      previous = state.values;
+      qc.setQueryData(['patient-info', 'me'], (old: Record<string, unknown> | undefined) => ({
+        ...old, patient_info: state.values, patient_name: state.values.patient_name,
+      }));
+    };
+    synchronize();
+    return store.subscribe(synchronize);
+  }, [store, qc]);
   const cssVars = themeToVars(theme ?? {});
 
   const content = (
     <PatientInfoContext.Provider value={{ apiClient, apiBasePath }}>
+      <PatientFormContext.Provider value={store}>
       {children}
+      </PatientFormContext.Provider>
     </PatientInfoContext.Provider>
   );
 

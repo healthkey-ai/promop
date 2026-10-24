@@ -34,6 +34,12 @@ export default function MultiSelectControl({
     const ordered = options
       .filter((o) => next.has(optionKey(o.value)))
       .map((o) => o.value);
+    // Keep persisted unresolved codes visible and intact; selecting a known
+    // answer must not silently delete an unknown answer from the record.
+    for (const existing of selectedValues) {
+      if (!options.some((option) => optionKey(option.value) === optionKey(existing))
+          && next.has(optionKey(existing))) ordered.push(existing);
+    }
 
     onChange(ordered);
   };
