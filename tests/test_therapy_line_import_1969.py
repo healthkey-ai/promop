@@ -360,3 +360,227 @@ def test_a_lock_conflict_returns_a_fixed_message(etl, person, monkeypatch):
 
     assert response.status_code == 409
     assert response.data == {'detail': CONCURRENT_EDIT_MESSAGE}
+
+
+def _source_headers(organization):
+    return {'HTTP_X_PROVENANCE_SOURCE': 'safety-test-etl',
+            'HTTP_X_PROVENANCE_ORGANIZATION_ID': str(organization.pk)}
+
+
+def test_foreign_line_attribution_rejects_and_rolls_back_the_complete_import(etl, person):
+    from omop_core.models import Organization
+
+    source = Organization.objects.create(name='Source A', slug='etl-source-a')
+    other = Organization.objects.create(name='Source B', slug='etl-source-b')
+    assert _post(etl, person, TICKET_LINES[:1], **_source_headers(source)).status_code == 200
+    line = _lines(person)[1]
+    before_episode = Episode.objects.filter(pk=line.pk).values().get()
+    before_outcomes = list(Observation.objects.filter(person=person).order_by('pk').values())
+    before_record = PatientRecord.objects.filter(person=person).values().get()
+    before_provenance = list(ProvenanceRecord.objects.order_by('pk').values())
+    before_gaps = list(RegimenMappingGap.objects.order_by('pk').values())
+    response = _post(etl, person, [
+        TICKET_LINES[1] | {'regimen': 'new quarantined regimen'},
+        TICKET_LINES[0] | {'outcome': 'Stable Disease'},
+    ], **_source_headers(other))
+
+    assert response.status_code == 409, response.data
+    assert response.data['detail'] == 'Row already attributed to another organization.'
+    assert len(_lines(person)) == 1
+    assert Episode.objects.filter(pk=line.pk).values().get() == before_episode
+    assert list(Observation.objects.filter(person=person).order_by('pk').values()) == before_outcomes
+    assert PatientRecord.objects.filter(person=person).values().get() == before_record
+    assert list(ProvenanceRecord.objects.order_by('pk').values()) == before_provenance
+    assert list(RegimenMappingGap.objects.order_by('pk').values()) == before_gaps
+
+
+def test_source_guard_checks_only_the_lines_being_updated(etl, person):
+    from omop_core.models import Organization
+
+    source = Organization.objects.create(name='Source A', slug='etl-allowed-a')
+    other = Organization.objects.create(name='Source B', slug='etl-allowed-b')
+    assert _post(etl, person, TICKET_LINES[:1], **_source_headers(source)).status_code == 200
+    assert _post(etl, person, TICKET_LINES[1:2], **_source_headers(other)).status_code == 200
+    for _ in range(2):
+        response = _post(etl, person, [TICKET_LINES[1] | {'outcome': 'Partial Response'}],
+                         **_source_headers(other))
+        assert response.status_code == 200, response.data
+    assert _outcome(person, 2) == 'Partial Response'
+    assert ProvenanceRecord.objects.filter(organization=source).count() == 1
+    assert ProvenanceRecord.objects.filter(organization=other).count() == 1
+
+
+def test_regimen_resolution_uses_mapping_gap_key_order(etl, person, monkeypatch):
+    from omop_core.mapping.therapy import normalize_regimen_name
+    from patient_portal.api import therapy_line_import
+
+    resolve = therapy_line_import.resolve_regimen_label
+    observed = []
+
+    def record_resolution(label, source):
+        observed.append(normalize_regimen_name(label)[:255])
+        return resolve(label, source)
+
+    monkeypatch.setattr(therapy_line_import, 'resolve_regimen_label', record_resolution)
+    response = _post(etl, person, [
+        TICKET_LINES[0] | {'regimen': 'BBB'}, TICKET_LINES[1] | {'regimen': 'aaa'},
+    ])
+    assert response.status_code == 200, response.data
+    assert observed == ['aaa', 'bbb']
+
+
+def _deadlock():
+    from django.db import OperationalError
+    from psycopg.errors import DeadlockDetected
+
+    error = OperationalError('internal deadlock detail')
+    error.__cause__ = DeadlockDetected('internal PostgreSQL detail')
+    return error
+
+
+def test_deadlock_during_resolution_replays_the_whole_import(etl, person, monkeypatch):
+    from patient_portal.api import therapy_line_import
+
+    resolve = therapy_line_import.resolve_regimen_label
+    attempts = []
+
+    def fail_first_resolution(label, source):
+        result = resolve(label, source)
+        attempts.append(label)
+        if len(attempts) == 1:
+            raise _deadlock()
+        return result
+
+    monkeypatch.setattr(therapy_line_import, 'resolve_regimen_label', fail_first_resolution)
+    etl.raise_request_exception = False
+    response = _post(etl, person, TICKET_LINES[:1])
+    assert response.status_code == 200, response.data
+    assert len(attempts) == 2
+    assert Episode.objects.filter(person=person).count() == 1
+    assert RegimenMappingGap.objects.count() == 1
+    assert Observation.objects.filter(person=person, observation_source_value='LOT-1-outcome').count() == 1
+
+
+def test_exhausted_resolution_deadlocks_leave_no_partial_import(etl, person, monkeypatch):
+    from patient_portal.api import therapy_line_import
+
+    resolve = therapy_line_import.resolve_regimen_label
+    attempts = []
+
+    def always_deadlock(label, source):
+        resolve(label, source)
+        attempts.append(label)
+        raise _deadlock()
+
+    monkeypatch.setattr(therapy_line_import, 'resolve_regimen_label', always_deadlock)
+    etl.raise_request_exception = False
+    response = _post(etl, person, TICKET_LINES[:1])
+    assert response.status_code == 409, response.data
+    assert response.data == {'detail': CONCURRENT_EDIT_MESSAGE}
+    assert len(attempts) == 3
+    assert not Episode.objects.filter(person=person).exists()
+    assert not RegimenMappingGap.objects.exists()
+    assert not Concept.objects.filter(vocabulary_id='HK-Regimen').exists()
+
+
+def test_deadlock_after_writes_rolls_back_facts_provenance_and_projection(etl, person, monkeypatch):
+    from omop_core.models import Organization
+    from patient_portal.api import therapy_line_import
+
+    organization = Organization.objects.create(name='Retry Source', slug='etl-retry-source')
+    refresh = therapy_line_import.refresh_patient_record
+    attempts = []
+
+    def fail_first_refresh(patient):
+        record = refresh(patient)
+        # This failure happens after every write stage, not before validation.
+        assert Episode.objects.filter(person=person).count() == 1
+        assert ProvenanceRecord.objects.filter(organization=organization).count() == 1
+        attempts.append(record.therapy_lines_count)
+        if len(attempts) == 1:
+            raise _deadlock()
+        return record
+
+    monkeypatch.setattr(therapy_line_import, 'refresh_patient_record', fail_first_refresh)
+    etl.raise_request_exception = False
+    response = _post(etl, person, TICKET_LINES[:1], **_source_headers(organization))
+    assert response.status_code == 200, response.data
+    assert attempts == [1, 1]
+    assert response.data['created'] == 1
+    assert Episode.objects.filter(person=person).count() == 1
+    assert ProvenanceRecord.objects.filter(organization=organization).count() == 1
+    assert RegimenMappingGap.objects.count() == 1
+    assert PatientRecord.objects.get(person=person).therapy_lines_count == 1
+
+
+@pytest.mark.django_db(transaction=True)
+def test_foreign_attribution_is_checked_while_the_episode_is_locked(etl, person, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from django.db import OperationalError, connections, transaction
+    from omop_core.models import Organization
+    from patient_portal.api import therapy_line_import
+
+    source = Organization.objects.create(name='Locked Source A', slug='etl-lock-source-a')
+    other = Organization.objects.create(name='Locked Source B', slug='etl-lock-source-b')
+    assert _post(etl, person, TICKET_LINES[:1], **_source_headers(source)).status_code == 200
+    guard = therapy_line_import.raise_on_foreign_attribution
+    observed = []
+
+    def check_lock(model, ids):
+        try:
+            with transaction.atomic():
+                list(model.objects.select_for_update(nowait=True).filter(pk__in=ids))
+        except OperationalError as exc:
+            return getattr(exc.__cause__, 'sqlstate', None) or getattr(exc.__cause__, 'pgcode', None)
+        finally:
+            connections.close_all()
+        return None
+
+    def guarded(model, ids, organization):
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            observed.append(pool.submit(check_lock, model, list(ids)).result(timeout=20))
+        return guard(model, ids, organization)
+
+    monkeypatch.setattr(therapy_line_import, 'raise_on_foreign_attribution', guarded)
+    response = _post(etl, person, TICKET_LINES[:1], **_source_headers(other))
+    assert response.status_code == 409
+    assert observed == ['55P03']
+
+
+@pytest.mark.django_db(transaction=True)
+def test_concurrent_imports_share_normalized_regimen_lock_order(etl, person):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    from django.db import close_old_connections, connections
+
+    people = [person, *[PatientRecordFactory(disease='multiple myeloma').person for _ in range(7)]]
+    # Prepare the shared source identity and existing mapping-gap rows first.
+    assert _post(etl, person, []).status_code == 400
+    from omop_core.mapping.therapy import resolve_regimen_label
+    for label in ('AAA', 'bbb'):
+        resolve_regimen_label(label, 'therapy-lines-api')
+    start = Barrier(len(people))
+
+    def import_one(index, patient_id):
+        close_old_connections()
+        try:
+            api = APIClient()
+            api.credentials(HTTP_AUTHORIZATION=f'Bearer {ETL_TOKEN}')
+            labels = ('AAA', 'bbb') if index % 2 == 0 else ('BBB', 'aaa')
+            lines = [dict(TICKET_LINES[i], regimen=label) for i, label in enumerate(labels)]
+            start.wait(timeout=20)
+            response = api.post(f'{URL}?skip_refresh=true',
+                                {'person': patient_id, 'lines': lines}, format='json')
+            return response.status_code, response.data
+        finally:
+            connections.close_all()
+
+    with ThreadPoolExecutor(max_workers=len(people)) as pool:
+        futures = [pool.submit(import_one, i, patient.pk) for i, patient in enumerate(people)]
+        responses = [future.result(timeout=40) for future in futures]
+    assert [status for status, _ in responses] == [200] * len(people), responses
+    assert all(body['created'] == 2 for _, body in responses)
+    for patient in people:
+        assert Episode.objects.filter(person=patient).count() == 2
+        assert TherapyLineAssertion.objects.filter(episode__person=patient, source='import').count() == 2
+    assert set(RegimenMappingGap.objects.values_list('normalized_name', flat=True)) == {'aaa', 'bbb'}

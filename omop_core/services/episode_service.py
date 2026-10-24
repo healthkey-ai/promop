@@ -511,11 +511,15 @@ def author_therapy_line(person, *, line_number, drugs=_UNSET, **kwargs):
 
 def author_therapy_lines(
     person: Person, lines: Iterable[Mapping[str, Any]], *, asserted_by: str = 'authoring',
+    episode_write_guard=None, retry=True,
 ) -> list[TherapyLineEpisodeResult] | None:
     """Author several lines of one person as one all-or-nothing write.
 
     Each entry holds ``author_therapy_line`` kwargs without ``person``.
     Returns None and writes nothing when the Treatment Regimen concept is not loaded.
+    The optional guard runs on each existing episode under the writer's locks,
+    before mutation. A caller disabling retries must own the complete transaction
+    retry boundary, including any preparation and post-write work.
     """
     # Copied once so every retry replays the same input
     lines = [dict(line) for line in lines]
@@ -527,7 +531,10 @@ def author_therapy_lines(
             results = []
             for index, line in enumerate(lines):
                 try:
-                    result = _author_therapy_line_inner(person, asserted_by=asserted_by, **line)
+                    result = _author_therapy_line_inner(
+                        person, asserted_by=asserted_by,
+                        episode_write_guard=episode_write_guard, **line,
+                    )
                 except TherapyLineRejected as exc:
                     raise TherapyLineRejected(exc.message, index=index) from exc
                 if result.episode is None:
@@ -536,7 +543,7 @@ def author_therapy_lines(
                 results.append(result)
             return results
 
-    return run_therapy_write(once, backoff=_sleep)
+    return run_therapy_write(once, backoff=_sleep) if retry else once()
 
 
 def _author_therapy_line_once(
@@ -649,6 +656,7 @@ def _author_therapy_line_inner(
     disease=None,
     episode=None,
     asserted_by='authoring',
+    episode_write_guard=None,
 ):
     from omop_core.models import DrugExposure
     from omop_oncology.models import TherapyLineExposure
@@ -674,6 +682,9 @@ def _author_therapy_line_inner(
         episode = _find_line(person, line_number, parent, primary)
         if episode is not None:
             episode = Episode.objects.select_for_update(nowait=True).get(pk=episode.pk)
+
+    if episode is not None and episode_write_guard is not None:
+        episode_write_guard(episode)
 
     start = (episode.episode_start_date if episode else None) if start_date is _UNSET else start_date
     end = (episode.episode_end_date if episode else None) if end_date is _UNSET else end_date

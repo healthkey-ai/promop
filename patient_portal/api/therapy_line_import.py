@@ -19,21 +19,24 @@ from datetime import date
 from typing import Any
 
 from django.contrib.contenttypes.models import ContentType
-from django.db import transaction
 from rest_framework import serializers, status
 from rest_framework.response import Response
 
 from omop_core.api.serializers import outcome_aliases
-from omop_core.mapping.therapy import is_assertable_regimen, resolve_regimen_label
+from omop_core.mapping.therapy import (
+    is_assertable_regimen, normalize_regimen_name, resolve_regimen_label,
+)
 from omop_core.models import Concept, PatientRecord, Person, ProvenanceRecord
 from omop_core.services.disease_episodes import disease_key, disease_slug, primary_disease_slug
 from omop_core.services.episode_service import TherapyLineEpisodeResult, author_therapy_lines
 from omop_core.services.patient_record_service import refresh_patient_record
 from omop_core.services.therapy_transactions import (
     CONCURRENT_EDIT_MESSAGE, TherapyLineRejected, TherapyLineWriteConflict,
+    lock_therapy_patients, run_therapy_write,
 )
+from omop_oncology.models import Episode
 from omop_core.signals import suppress_patient_record_refresh
-from patient_portal.api.provenance_org import ProvenanceContext
+from patient_portal.api.provenance_org import ProvenanceContext, raise_on_foreign_attribution
 
 MAX_LINES = 100
 SOURCE_SYSTEM = 'therapy-lines-api'
@@ -197,39 +200,54 @@ def _rejected_response(exc: TherapyLineRejected, line_count: int) -> Response:
 
 
 def import_therapy_lines(person: Person, lines: list[ImportLine], provenance: ProvenanceContext,
-                         skip_refresh: bool) -> Response:
+                          skip_refresh: bool) -> Response:
     """Upsert validated lines of one person and derive the record once."""
-    try:
-        with transaction.atomic():
-            with suppress_patient_record_refresh():
-                # Sorted so concurrent imports lock mapping-gap rows in one order and cannot deadlock
-                labels = sorted({line['regimen'] for line in lines
-                                 if line.get('regimen') and not line.get('regimen_concept_id')})
-                regimens: ResolvedRegimens = {label: resolve_regimen_label(label, SOURCE_SYSTEM) for label in labels}
-                results = author_therapy_lines(
-                    person, [_author_kwargs(line, regimens) for line in lines], asserted_by='import',
+
+    def once():
+        with suppress_patient_record_refresh():
+            # Acquire patient roots before shared mapping rows, matching the
+            # canonical writer's lock order on every complete retry attempt.
+            lock_therapy_patients([person.pk])
+            labels = sorted(
+                {line['regimen'] for line in lines
+                 if line.get('regimen') and not line.get('regimen_concept_id')},
+                key=lambda label: (normalize_regimen_name(label)[:255], label),
+            )
+            regimens: ResolvedRegimens = {label: resolve_regimen_label(label, SOURCE_SYSTEM) for label in labels}
+            results = author_therapy_lines(
+                person, [_author_kwargs(line, regimens) for line in lines], asserted_by='import',
+                episode_write_guard=lambda episode: raise_on_foreign_attribution(
+                    Episode, [episode.pk], provenance.organization,
+                ),
+                retry=False,
+            )
+            if results is None:
+                # The writer marks this complete attempt for rollback, including
+                # any regimens quarantined during preparation.
+                return Response(
+                    {'detail': (
+                        'Treatment Regimen concept (32531) is not loaded, so the '
+                        'therapy lines could not be grouped. Load the Episode '
+                        'vocabulary and retry.'
+                    )},
+                    status=status.HTTP_409_CONFLICT,
                 )
-                if results is None:
-                    # Also drops the regimens quarantined above
-                    transaction.set_rollback(True)
-                    return Response(
-                        {'detail': (
-                            'Treatment Regimen concept (32531) is not loaded, so the '
-                            'therapy lines could not be grouped. Load the Episode '
-                            'vocabulary and retry.'
-                        )},
-                        status=status.HTTP_409_CONFLICT,
-                    )
-                if provenance.source:
-                    _record_created_provenance(results, person, provenance)
-            # Inside the transaction so a failed derivation rolls the lines back
-            if not skip_refresh:
-                refresh_patient_record(person)
+            if provenance.source:
+                _record_created_provenance(results, person, provenance)
+        if not skip_refresh:
+            refresh_patient_record(person)
+        return results, regimens
+
+    try:
+        result = run_therapy_write(once)
     except TherapyLineWriteConflict:
         return Response({'detail': CONCURRENT_EDIT_MESSAGE}, status=status.HTTP_409_CONFLICT)
     except TherapyLineRejected as exc:
         return _rejected_response(exc, len(lines))
 
+    if isinstance(result, Response):
+        return result
+    results, regimens = result
     created = sum(1 for result in results if result.created)
     return Response({
         'person_id': person.person_id,
