@@ -20,7 +20,7 @@ from patient_portal.models import Identity
 from django.contrib.auth import logout, login, authenticate
 from django.db import IntegrityError, models, transaction
 from django.db.models import Case, CharField, Count, F, IntegerField, Prefetch, Q, Value, When
-from django.db.models.functions import Concat, Length
+from django.db.models.functions import Cast, Concat, Length
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from django.utils import timezone
@@ -170,6 +170,27 @@ logger = logging.getLogger(__name__)
 def _genomics_type_concept(user, person):
     from omop_core.authorization import get_actor_role
     return 32865 if get_actor_role(user, person.person_id) in ('self', 'representative') else 32817
+
+
+def _patient_authorship(actor, person):
+    """project_single_value keywords for the author of a PatientRecord save.
+
+    The patient or a verified representative writes patient self-report; the
+    patient's own facts also carry PATIENT_SELF provenance. Anyone else, or a
+    service credential with no Identity, writes with the recipe's type.
+    """
+    from omop_core.authorization import get_actor_role
+    from omop_core.services.omop_projection import patient_self_report_type
+
+    if not getattr(actor, 'is_authenticated', False):
+        return {}
+    role = get_actor_role(actor, person.person_id)
+    if role not in ('self', 'representative') or not (self_report := patient_self_report_type()):
+        return {}
+    authorship = {'type_concept_id': self_report}
+    if role == 'self':
+        authorship['patient_user_id'] = f'{actor.issuer}|{actor.sub}'
+    return authorship
 
 
 def _write_genetic_mutations(person, mutations, type_concept_id):
@@ -795,6 +816,22 @@ def _changed_fields(patient_record, previous_values, prev_val):
     }
 
 
+def _attestation_source(request, person):
+    """Provenance for an authored answer: who stated it, never a clinical decision."""
+    from patient_portal.services import patient_person_for
+
+    user = getattr(request, 'user', None)
+    if getattr(user, 'is_staff', False):
+        return 'clinician'
+    if patient_person_for(user) == person:
+        return 'patient'
+    from omop_core.authorization import get_actor_role
+    if get_actor_role(user, person.pk) == 'representative':
+        # Keep the explicit source within the existing 20-character column.
+        return 'proxy'
+    return 'clinician'
+
+
 def _write_record_revisions(patient_record, previous_values, request):
     """Persist field-level revision-history rows for a PatientRecord update.
 
@@ -1290,6 +1327,10 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     setattr(patient_info, f'{field}_units', unit)
             serializer.save()
 
+            # These edits already passed the dedicated source writer and fresh
+            # readback. Never mark them pending or send them to same-day upsert.
+            direct_fields.difference_update(getattr(serializer, '_clinical_input_fields', ()))
+
             # Demographics were popped before the serializer (GenderField is
             # read-only and translates 'Female' → 'F'). Write the DB code to
             # PatientRecord and the raw display text to Person.
@@ -1344,7 +1385,9 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             if clinical_fields:
                 from omop_core.services.patient_record_service import recompute_patient_record_fields
 
-                projected = self._project_mapped_fields(person, clinical_fields, serializer.validated_data)
+                projected = self._project_mapped_fields(
+                    person, clinical_fields, serializer.validated_data, actor=request.user,
+                )
                 patient_info.user_edited_fields = sorted(
                     set(patient_info.user_edited_fields or []) - projected
                 )
@@ -1355,16 +1398,32 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 recompute_patient_record_fields(patient_info, changed_fields=profile_projected)
                 patient_info.refresh_from_db()
 
+            # Full-form autosave echoes are not confirmations (#1988). Only an
+            # actual change of the answer may create/renew its provenance.
+            # Category edits can withdraw it, but cannot authenticate an old True.
+            if ('no_pre_existing_conditions' in direct_fields
+                    or ('preexisting_conditions' in direct_fields
+                        and patient_info.no_pre_existing_conditions is not True)):
+                from omop_core.services.pre_existing_conditions import (
+                    sync_no_preexisting_conditions,
+                )
+                sync_no_preexisting_conditions(
+                    patient_info, source=_attestation_source(request, person))
+
         return Response({**PatientRecordSerializer(patient_info).data, 'previous_values': previous_values})
 
     @staticmethod
-    def _project_mapped_fields(person, direct_fields, patch_data):
+    def _project_mapped_fields(person, direct_fields, patch_data, actor=None):
         """Project validated edits using the editor's curated or built-in recipe.
 
         Each projection uses a savepoint so failure preserves the PatientRecord
         edit for a later retry. Return fields backed by OMOP, including an
         identical existing fact. PatientRecord already has these values, so
         there is no OMOP-to-PatientRecord refresh on a direct save.
+
+        A patient's or representative's edit is typed patient self-report
+        (32865), as genomics edits are; the patient's own also gets a
+        PATIENT_SELF provenance row. Anyone else's keeps the recipe's type.
         """
         from omop_core.services.omop_projection import project_single_value, projection_for_descriptor
         from omop_core.services.write_descriptor import build_writable_field_descriptor
@@ -1376,11 +1435,14 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             logger.warning('Could not resolve OMOP projections')
             return set()
         projected = set()
+        authorship = None
         for field in direct_fields:
             projection = projection_for_descriptor(descriptors.get(field))
             if projection:
+                if authorship is None:
+                    authorship = _patient_authorship(actor, person)
                 if project_single_value(person, field, patch_data[field], projection,
-                                        acknowledge_existing=True):
+                                        acknowledge_existing=True, **authorship):
                     # Occurrences and structured answers need their dedicated
                     # extractors before their saved values can be acknowledged.
                     if (projection['omop_table'] in ('measurement', 'observation')
@@ -5632,8 +5694,8 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
         editing.
         """
         from omop_core.services.write_descriptor import build_writable_field_descriptor
-
         from omop_core.services.patient_form import patient_form_descriptors
+
         shared_form = request.headers.get('X-Patient-Form') == '1'
         descriptor = build_writable_field_descriptor()
         if shared_form:
@@ -10112,7 +10174,15 @@ def mapping_stats(request):
     code_proposed = SourceCodeConceptMapping.objects.filter(status='proposed').count()
     code_total = code_approved + code_proposed
 
+    from omop_core.models import RelevanceSignal
+    # Decisions are per (disease, concept) pair, so count pairs, not period rows.
+    signal_pairs = dict(
+        RelevanceSignal.objects.values('status')
+        .annotate(n=Count(Concat('disease', Value(':'), Cast('concept_id', CharField())), distinct=True))
+        .values_list('status', 'n'))
+
     return Response({
+        'relevance_signals': {s: signal_pairs.get(s, 0) for s in ('proposed', 'accepted', 'rejected')},
         'field_mappings': {'total': field_total, 'approved': field_approved, 'proposed': field_proposed, 'unmapped': field_unmapped},
         'code_mappings': {'total': code_total, 'approved': code_approved, 'proposed': code_proposed},
         'therapy': {
@@ -13938,6 +14008,13 @@ def code_mapping_lookup(request):
     carrying ``axis_variant_id``: the same code means a different LOINC per
     unit, so one key per code cannot hold both answers. The answer is also
     under ``"vocab|code"`` when no unrouted entry for that code holds it.
+
+    An entry with an empty ``source_vocabulary_id`` is a **text term**: the
+    wording a document extractor found, sent as ``source_code``, with
+    ``source_unit``, ``quantity`` and ``specimen`` as its context (#1944). It
+    resolves through the same curated mappings, variants and Suggest engine
+    under the Uncoded vocabulary, keyed ``"|term"``; see
+    :mod:`omop_core.mapping.text_terms` for what differs.
     """
     codes = request.data.get('codes')
     if not codes or not isinstance(codes, list):
@@ -13965,19 +14042,26 @@ def code_mapping_lookup(request):
     # The source system is server-owned: a client must not be able to forge a
     # different importer name in SCCM provenance.
     source_system = 'code-mapping-api'
+    from omop_core.mapping import text_terms
     lookup_entries = []
+    specimens = []
     for entry in codes:
         if not isinstance(entry, dict):
             return Response({'detail': 'Each code entry must be an object.'}, status=status.HTTP_400_BAD_REQUEST)
         vocab = str(entry.get('source_vocabulary_id') or '').strip()
         code = str(entry.get('source_code') or '').strip()
         table = normalize_omop_table(entry.get('omop_table'))
-        if not vocab or not code or table not in CLINICAL_TABLES:
+        if not vocab:
+            # A text term: the document's wording is the key.
+            code = text_terms.normalize_term(code)
+        if not code or table not in CLINICAL_TABLES:
             return Response(
-                {'detail': 'Each entry needs source_vocabulary_id, source_code, and a supported omop_table.'},
+                {'detail': 'Each entry needs source_code (a code, or the term itself when '
+                           'source_vocabulary_id is empty) and a supported omop_table.'},
                 status=status.HTTP_400_BAD_REQUEST,
             )
         lookup_entries.append((vocab, code, table, str(entry.get('source_text') or '').strip()))
+        specimens.append(str(entry.get('specimen') or '').strip())
 
     if request_organization is None and any(
         source_vocabularies.hospital_vendor(vocab)
@@ -14022,7 +14106,11 @@ def code_mapping_lookup(request):
     from omop_core.mapping.code_resolution import resolve_source_code_variant
     entry_keys = []
     routed_keys = {}   # "vocab|code|unit" -> "vocab|code"
+    text_keys = set()   # terms whose evidence may now imply axis variants
     for idx, (vocab, code, table, source_text) in enumerate(lookup_entries):
+        is_term = vocab == text_terms.TEXT_VOCABULARY
+        metadata = text_terms.metadata_for(
+            unit_inputs[idx][0], unit_inputs[idx][1], specimens[idx]) if is_term else None
         concept, mapping, variant = resolve_source_code_variant(
             source_vocabulary_id=vocab,
             source_code=code,
@@ -14031,6 +14119,8 @@ def code_mapping_lookup(request):
             source_system=source_system,
             organization=request_organization,
             source_unit=unit_inputs[idx][0] or None,
+            metadata=metadata,
+            mint=not is_term,
         )
         # A code with LOINC axis variants means a different concept per unit,
         # so a routed entry is keyed by its unit too: "vocab|code|unit". Every
@@ -14078,6 +14168,12 @@ def code_mapping_lookup(request):
                     unresolved_reason='destination_domain_or_validity_mismatch',
                 )
             unresolved += 1
+        if is_term:
+            units_seen = text_terms.annotate(
+                result[key], mapping=mapping, concept=concept, term=code, omop_table=table,
+                metadata=metadata, unit=unit_inputs[idx][0] or None)
+            if mapping is not None and (units_seen >= 2 or mapping.axis_variant_count):
+                text_keys.add((vocab, code))
 
     # ── Unit conversion (only when at least one entry carried source_unit) ──
     has_unit_request = any(src_unit for src_unit, _ in unit_inputs)
@@ -14125,10 +14221,20 @@ def code_mapping_lookup(request):
         if base not in result and routed in result:
             result[base] = result[routed]
 
+    # A term now seen in two units may be two LOINC tests; the queue flags it
+    # as it does a hospital code. Evidence only: never fails the lookup.
+    if text_keys:
+        try:
+            from omop_core.mapping.axis_variants import refresh_codes
+            refresh_codes(text_keys)
+        except Exception:  # noqa: BLE001
+            logger.warning('Axis variant refresh after a text-term lookup failed.', exc_info=True)
+
     response = Response({
         'mappings': result,
         'resolved': resolved,
         'unresolved': unresolved,
+        'matcher_version': text_terms.matcher_version(),
     })
     response['Cache-Control'] = 'no-store'
     return response
