@@ -12,7 +12,8 @@ async function setup(extraFields = {}) {
     ...extraFields,
   };
   const get = vi.fn(async (url: string) => ({ data: url.includes('writable-fields') ? fields : {
-    patient_info: { person_id: 12, height: 170, weight: 60, bmi: 20.76 }, write_enabled: true,
+    patient_info: { person_id: 12, height: 170, weight: 60, bmi: 20.76,
+      ldh_upper_limit_normal: 250 }, write_enabled: true,
   } }));
   const patch = vi.fn(async (_url: string, values: Record<string, unknown>) => ({ data: {
     patient_info: { person_id: 12, height: 170, weight: 60, ...values, bmi: 27.68 },
@@ -45,21 +46,26 @@ describe('computed patient field input dialogs', () => {
     expect(screen.getByDisplayValue('170')).toBeEnabled();
     expect(screen.queryByRole('textbox', { name: 'BMI' })).not.toBeInTheDocument();
   });
-  it('shows clinical compatibility gates without enabling their inputs', async () => {
+  it('gates the computed result while keeping its source inputs editable', async () => {
     const { store, patch } = await setup({ slim: { label: 'SLiM', writable: false,
-      inputs: ['weight'], compatibility_reason: 'Clinical equivalence review required.' } });
+      inputs: ['weight'], compatibility_reason: 'Clinical equivalence review required.',
+      compatibility_scope: 'result' } });
     render(<PatientFieldEditor store={store} name="slim" />);
     fireEvent.click(screen.getByRole('button', { name: 'Edit SLiM inputs' }));
     expect(screen.getByRole('alert')).toHaveTextContent('Clinical equivalence review required.');
-    expect(screen.getByRole('dialog')).not.toHaveTextContent('Save their values');
-    expect(screen.queryByDisplayValue('60')).not.toBeInTheDocument();
-    expect(patch).not.toHaveBeenCalled();
+    expect(screen.getByRole('dialog')).toHaveTextContent('The result stays read-only');
+    const weight = screen.getByDisplayValue('60');
+    expect(weight).toBeEnabled();
+    fireEvent.change(weight, { target: { value: '70' } });
+    await act(async () => { await store.flush(); });
+    expect(patch.mock.calls[0][1]).toEqual({ weight: 70 });
+    expect(patch.mock.calls[0][1]).not.toHaveProperty('slim');
   });
-  it('keeps DOB and ULN navigable but read-only through nested MCL and MIPI gates', async () => {
+  it('keeps DOB and ULN navigable and editable through nested MCL and MIPI gates', async () => {
     const { store, patch } = await setup({
       high_risk_mcl_criteria: { label: 'MCL', writable: false, inputs: ['mipi_risk'],
-        compatibility_reason: 'MCL clinical review required.' },
-      // No child gate here: the ancestor alone must prevent source writes.
+        compatibility_reason: 'MCL clinical review required.', compatibility_scope: 'result' },
+      // No child gate here: the ancestor alone must not make source facts read-only.
       mipi_risk: { label: 'MIPI', writable: false, inputs: ['date_of_birth', 'ldh_upper_limit_normal'] },
       date_of_birth: { label: 'Date of birth', writable: true, target: 'patient_record', control: 'date' },
       ldh_upper_limit_normal: { label: 'LDH upper limit normal', writable: true, target: 'patient_record', control: 'number' },
@@ -69,13 +75,15 @@ describe('computed patient field input dialogs', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('MCL clinical review required.');
     fireEvent.click(screen.getByRole('button', { name: 'Edit MIPI inputs' }));
     const dialog = screen.getByRole('dialog', { name: 'MIPI' });
-    expect(within(dialog).getByText('Date of birth:')).toBeVisible();
-    expect(within(dialog).getByText('LDH upper limit normal:')).toBeVisible();
-    expect(dialog.querySelectorAll('input,select,textarea')).toHaveLength(0);
-    expect(dialog).toHaveTextContent('Saving or updating this result is unavailable here.');
+    expect(within(dialog).getByText('Date of birth')).toBeVisible();
+    const uln = within(dialog).getByDisplayValue('250');
+    expect(uln).toBeEnabled();
     expect(dialog).not.toHaveTextContent('No reviewed PROMOP field binding');
+    fireEvent.change(uln, { target: { value: '300' } });
     await act(async () => { await store.flush(); });
-    expect(patch).not.toHaveBeenCalled();
+    expect(patch.mock.calls[0][1]).toEqual({ ldh_upper_limit_normal: 300 });
+    expect(patch.mock.calls[0][1]).not.toHaveProperty('mipi_risk');
+    expect(patch.mock.calls[0][1]).not.toHaveProperty('high_risk_mcl_criteria');
   });
   it('fails closed on missing bindings and cycles, with a route-aware Your Info link', async () => {
     const { store } = await setup({ cycle: { label: 'Cycle', writable: false, inputs: ['cycle'] } });

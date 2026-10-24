@@ -8,6 +8,20 @@ All notable changes to PRomop are documented here.
 
 ### Added
 
+- **Complex eligibility subforms edit their source facts, not their verdict** —
+  the SLiM, CRAB, MIPI/MIPI-c and High-Risk-MCL rows stay computed and
+  non-authorable, but their inputs are now ordinary editable fields in the same
+  recursive dialog instead of being disabled by the row's compatibility gate.
+  Descriptors report `compatibility_scope: "result"` so a host can keep the
+  result read-only without freezing its sources. Editing a CRAB or SLiM input
+  re-derives that verdict in the same request from the record's canonical
+  values (`derive_meets_crab`, `derive_meets_slim`), keeping the existing
+  thresholds and the involved-chain burden guard; unknown inputs stay unknown
+  instead of asserting "not met". The CRAB renal alternative (serum creatinine
+  > 2 mg/dL when no clearance is recorded) is now applied on both the direct-edit
+  and OMOP paths. Full SLiM/MIPI-parity with Trial Details (MRI lesions, MIPI
+  result ownership) remains a documented clinical decision (#5482).
+
 - **The patient can confirm that the recorded treatment history is complete** —
   the Treatment tab now carries "This is my complete treatment history". Until it
   is ticked, the number of recorded lines is a lower bound ("at least N"); the
