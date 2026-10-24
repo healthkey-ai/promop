@@ -198,6 +198,26 @@ def test_legacy_descriptor_is_not_narrowed_by_shared_form_restrictions():
     assert legacy == build_writable_field_descriptor()
     shared = client.get(url, {'person_id': record.person_id}, HTTP_X_PATIENT_FORM='1').data
     assert not shared['relapse_count']['writable']
+    # Derivation owns these columns on both surfaces: a direct write would be
+    # overwritten by the next save and would hide the facts that drive them.
+    expected_inputs = {
+        'measurable_disease_imwg': [
+            'monoclonal_protein_serum', 'monoclonal_protein_urine',
+            'kappa_flc', 'lambda_flc',
+        ],
+        'measurable_disease_iwcll': [
+            'alc_thousand_per_ul', 'largest_lymph_node_size',
+            'splenomegaly', 'hepatomegaly',
+        ],
+        'metastatic_status': ['distant_metastasis_stage'],
+        'renal_adequacy_status': ['egfr_ml_min_173m2', 'serum_creatinine_mg_dl'],
+        'no_other_active_malignancies': ['active_malignancies'],
+        'patient_age': ['date_of_birth'],
+    }
+    for name, inputs in expected_inputs.items():
+        assert legacy[name]['kind'] == 'computed', name
+        assert legacy[name]['writable'] is False, name
+        assert shared[name]['inputs'] == inputs, name
 
 
 def test_noncanonical_body_units_are_not_silently_relabelled_or_written():

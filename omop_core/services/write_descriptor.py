@@ -243,15 +243,20 @@ _ALIAS_TO_CANONICAL = {
 }
 
 # Values computed during derivation from other projected fields, with the inputs
-# a UI needs in order to say why the box is not typeable.
+# a UI needs in order to say why the box is not typeable. A field belongs here
+# when `refresh_patient_record`/`recompute_patient_record_fields` owns its value:
+# offering it as a direct write would let a caller replace a verdict that the
+# next save recomputes, and would hide the facts that actually drive it.
 _COMPUTED_INPUTS = {
     'gelf_criteria_status': ['gelf_criteria_options'],
     'flipi_score': ['flipi_score_options'],
     'flipi_risk_category': ['flipi_score_options'],
+    'patient_age': ['date_of_birth'],
     'bmi': ['height', 'weight'],
     'tnbc_status': [
         'estrogen_receptor_status', 'progesterone_receptor_status', 'her2_status',
     ],
+    'hr_status': ['estrogen_receptor_status', 'progesterone_receptor_status'],
     'tp53_disruption': ['genetic_mutations'],
     'involved_uninvolved_ratio': ['kappa_flc', 'lambda_flc'],
     'molecular_markers': ['genetic_mutations'],
@@ -259,6 +264,18 @@ _COMPUTED_INPUTS = {
         'liver_enzyme_levels_ast', 'liver_enzyme_levels_alt',
         'liver_enzyme_levels_alp',
     ],
+    'measurable_disease_imwg': [
+        'monoclonal_protein_serum', 'monoclonal_protein_urine',
+        'kappa_flc', 'lambda_flc',
+    ],
+    'measurable_disease_iwcll': [
+        'alc_thousand_per_ul', 'largest_lymph_node_size',
+        'splenomegaly', 'hepatomegaly',
+    ],
+    'metastatic_status': ['distant_metastasis_stage'],
+    'renal_adequacy_status': ['egfr_ml_min_173m2', 'serum_creatinine_mg_dl'],
+    'no_active_infection_status': ['active_infection_status'],
+    'no_other_active_malignancies': ['active_malignancies'],
 }
 
 # Lifecycle columns are not clinical data and are never writable regardless of

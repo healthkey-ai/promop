@@ -8,6 +8,14 @@ All notable changes to PRomop are documented here.
 
 ### Added
 
+- **Derived verdicts are not offered as direct writes** — fields that
+  `refresh_patient_record`/`recompute_patient_record_fields` own
+  (`measurable_disease_imwg`, `measurable_disease_iwcll`, `metastatic_status`,
+  `renal_adequacy_status`, `no_other_active_malignancies`,
+  `no_active_infection_status`, `patient_age`) are now reported as computed with
+  the facts that drive them, on both the legacy and shared descriptors. A caller
+  could previously PATCH one of these verdicts, only for the next save to
+  overwrite it, and the dialog could not explain which inputs mattered.
 - **Complex eligibility subforms edit their source facts, not their verdict** —
   the SLiM, CRAB, MIPI/MIPI-c and High-Risk-MCL rows stay computed and
   non-authorable, but their inputs are now ordinary editable fields in the same
