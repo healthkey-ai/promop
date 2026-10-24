@@ -18,6 +18,11 @@ import { ASSEMBLED_FIELDS, DISEASE_COMPONENTS } from './patientReport';
 import { TAB_LAYOUT } from './tabLayout.generated';
 
 describe('tab layout', () => {
+  it('retains recorded categories after the explicit-answer editor replaces the generic field', () => {
+    const history = extractAll().GeneralTab.find((section: { title: string }) => section.title === 'Medical History');
+    expect(history.fields).toContainEqual(['Pre-existing Conditions', 'preexisting_conditions']);
+  });
+
   it('is current: run `node scripts/tab-layout.mjs` after changing a tab', () => {
     expect(readFileSync(OUTPUT, 'utf8')).toBe(render(extractAll()));
   });

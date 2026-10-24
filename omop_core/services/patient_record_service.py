@@ -1111,6 +1111,7 @@ def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fiel
     """
     from omop_core.services.pre_existing_conditions import (
         contradicts_no_pre_existing_conditions,
+        supersede_no_preexisting_conditions,
     )
     # The category list is the evidence; an explicit "no conditions" answer cannot
     # stand beside it (#1988). Invalidate the answer rather than delete the list.
@@ -1118,6 +1119,9 @@ def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fiel
         patient_info.no_pre_existing_conditions, patient_info.preexisting_conditions,
     ):
         patient_info.no_pre_existing_conditions = None
+    # A recorded category is also a more specific answer than a blanket "none",
+    # so it withdraws the attestation that backed the flag (#1988).
+    supersede_no_preexisting_conditions(patient_info)
     if 'date_of_birth' in changed_fields:
         # PatientRecord.save recalculates age when a DOB exists, but it must be
         # explicitly cleared first when the date and Person birth components
