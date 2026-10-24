@@ -998,33 +998,50 @@ def test_the_suggest_endpoint_queues_a_run_that_fills_the_variants(pipeline, two
     assert viewer.post(url, {}, format='json').status_code == 403
 
 
-def test_a_lab_hides_the_snomed_evidence(two_unit_code, glucose):
-    """The SNOMED panel does not apply to a source LOINC should name (#2012)."""
+def test_loinc_axis_evidence_hides_the_snomed_evidence(two_unit_code, glucose):
+    """The SNOMED panel does not apply to a code LOINC should name (#2012, #2014)."""
     from patient_portal.models import Identity
     from patient_portal.api.loinc_axes import _snomed_payload
     client = APIClient()
     client.force_authenticate(Identity.objects.create_user(
         email='lab@example.test', is_staff=True, is_superuser=True))
-    two_unit_code.source_metadata = {'fhir': {'category': [{'coding': [{'code': 'laboratory'}]}]}}
-    two_unit_code.save(update_fields=['source_metadata'])
 
+    # Two units implying different properties: the variants are the evidence.
     response = client.get(f'/api/v1/code-mappings/{two_unit_code.pk}/snomed-attributes/')
-
     assert response.status_code == 200, response.data
     assert response.data['applies'] is False
-    assert 'laboratory result' in response.data['lab_signal']
-    # Concentration units are lab evidence on their own (one property: two
-    # units implying different properties settle nothing, they are variants) ...
+    assert response.data['loinc_evidence'] == 'LOINC axis evidence: Scale Qn (records carry units (mg/dL, mmol/L))'
+    # One property across every record: the settled axis is the evidence,
+    # whatever the metadata's own sample says.
+    PatientSourceCode.objects.filter(source_unit='mmol/L').delete()
+    two_unit_code.source_metadata = {'reference_range': {'unit': '%'}}
+    two_unit_code.save(update_fields=['source_metadata'])
+    payload = _snomed_payload(two_unit_code)
+    assert payload['applies'] is False
+    assert payload['loinc_evidence'].startswith('LOINC axis evidence: Property MCnc (every record unit implies it')
+    # A lab category alone is enough too.
+    PatientSourceCode.objects.all().delete()
+    two_unit_code.source_metadata = {'fhir': {'category': [{'coding': [{'code': 'laboratory'}]}]}}
+    two_unit_code.save(update_fields=['source_metadata'])
+    payload = _snomed_payload(two_unit_code)
+    assert payload['applies'] is False and 'laboratory result' in payload['loinc_evidence']
+    # No units, no category, no coding: the measurement keeps its SNOMED evidence.
     two_unit_code.source_metadata = {}
     two_unit_code.save(update_fields=['source_metadata'])
-    PatientSourceCode.objects.filter(source_unit='mmol/L').delete()
     payload = _snomed_payload(two_unit_code)
-    assert payload['applies'] is False and 'property is settled' in payload['lab_signal']
-    # ... a length is not: a tumour size in mm keeps its SNOMED evidence.
-    size = SourceCodeConceptMapping.objects.create(
-        source_vocabulary_id=LAB, source_code='TUMSIZE', source_code_description='Tumor size',
-        omop_table='measurement', domain_id='Measurement')
-    PatientSourceCode.objects.create(person=PersonFactory(), source_value='TUMSIZE', source_vocabulary_id=LAB,
-                                     omop_table='measurement', source_unit='mm', occurrence_count=3)
-    payload = _snomed_payload(size)
-    assert payload['lab_signal'] is None and payload['applies'] is True
+    assert payload['loinc_evidence'] is None and payload['applies'] is True
+
+
+def test_record_units_settle_the_axes_whatever_the_metadata_sample_says():
+    """A reference-range unit in the metadata used to blank every axis (#2014)."""
+    axes, _ = loinc_axes.infer(LAB, 'ALB', {'reference_range': {'unit': 'g/dL'}},
+                               observed_units=['g/dL', 'g/L', 'mg/dL', 'G/DL'])
+    assert axes['property']['value'] == 'MCnc' and axes['property']['basis'] == loinc_axes.BASIS_UNIT
+    assert axes['scale_type']['value'] == 'Qn'
+    # A sample unit of its own still speaks when the records are silent ...
+    axes, _ = loinc_axes.infer(LAB, 'ALB', {'fhir': {'valueQuantity': {'value': 4, 'unit': 'g/dL'}}})
+    assert axes['property']['value'] == 'MCnc' and axes['scale_type']['value'] == 'Qn'
+    # ... but a sample that disagrees with every record does not override them.
+    axes, _ = loinc_axes.infer(LAB, 'ALB', {'fhir': {'valueQuantity': {'value': 40, 'unit': 'g/L'}}},
+                               observed_units=['mmol/L', 'umol/L'])
+    assert axes['property']['value'] == 'SCnc'

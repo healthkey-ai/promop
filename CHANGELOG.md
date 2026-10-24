@@ -78,6 +78,17 @@ All notable changes to PRomop are documented here.
 
 ### Changed
 
+- **LOINC axes read the record units first, and lead with the variants** —
+  a code whose records all arrive in mass-concentration units showed every
+  axis as "Not settled" when its stored metadata carried only a reference-range
+  unit; record units now settle Property (when they agree) and Scale (whenever
+  records carry units) ahead of the metadata's one sample. When the units
+  imply several axis sets, the LOINC axes panel leads with the variants, their
+  units and destinations, and folds the shared axes under them. The SNOMED
+  evidence section is hidden on any LOINC axis evidence, not only a settled
+  lab property (`snomed-attributes` answers `applies: false` with
+  `loinc_evidence`) (#2014).
+
 - **Suggest fills in a LOINC for each axis variant** — a source code whose
   units imply several LOINC axis sets no longer needs one Suggest click and
   one pick per variant. In Edit Mapping, Suggest also posts to

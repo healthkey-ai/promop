@@ -49,6 +49,25 @@ beforeEach(() => {
 });
 
 describe("LoincAxesPanel", () => {
+  it("leads with the axis variants and folds the shared axes under them (#2014)", async () => {
+    get.mockResolvedValue({ data: variantPayload() });
+    render(<LoincAxesPanel mappingId={7} canEdit canApprove />);
+    const variants = await screen.findByRole("table", { name: "Axis variants" });
+    const shared = screen.getByText("Axes shared by every variant");
+    expect(variants.compareDocumentPosition(shared) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(shared.closest("details")).not.toHaveAttribute("open");
+    expect(screen.getByText(/Each is a variant with its own destination/)).toBeInTheDocument();
+    // The shared axes are still there to edit, under the fold.
+    expect(screen.getByTestId("axis-value-property")).toHaveTextContent("MCnc");
+  });
+
+  it("shows the axes table on its own for a code with one axis set", async () => {
+    render(<LoincAxesPanel mappingId={7} canEdit canApprove={false} />);
+    await screen.findByRole("region", { name: "LOINC axes" });
+    expect(screen.queryByText("Axes shared by every variant")).not.toBeInTheDocument();
+    expect(screen.getByText(/Settled axes are constraints/)).toBeInTheDocument();
+  });
+
   it("reports how many axis variants the code has, so Suggest can fill them in (#2012)", async () => {
     const onVariantsChange = vi.fn();
     get.mockResolvedValue({ data: variantPayload() });
