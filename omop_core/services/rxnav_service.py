@@ -7,7 +7,7 @@ from datetime import date
 from omop_core.models import Concept, ConceptClass, Domain, Vocabulary
 from omop_core.services.pk import next_pk
 
-logger = logging.getLogger('audit')
+logger = logging.getLogger('omop.ops')
 
 RXNAV_BASE = 'https://rxnav.nlm.nih.gov/REST'
 
@@ -51,8 +51,14 @@ def resolve_drug(drug_source_value: str):
         return _create_rxnorm_concept(rxcui, canonical_name)
 
     except Exception as exc:
-        logger.error('{"event": "rxnav_lookup_error", "drug": "%s", "error": "%s"}',
-                     drug_source_value, exc)
+        # JSON-encode rather than interpolating into a JSON template: a drug
+        # name or exception text containing a quote, backslash or newline would
+        # otherwise produce an unparseable audit/ops record (#1929).
+        logger.error(json.dumps({
+            'event': 'rxnav_lookup_error',
+            'drug': drug_source_value,
+            'error': str(exc),
+        }))
         return None
 
 
