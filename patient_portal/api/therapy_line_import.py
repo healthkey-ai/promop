@@ -60,6 +60,28 @@ def _duplicate_line_indexes(person: Person, lines: list[ImportLine]) -> set[int]
     return duplicates
 
 
+def _revalidate_outcomes(person: Person, lines: list[ImportLine]) -> None:
+    """Recheck disease-specific outcome labels against the locked patient state."""
+    record = PatientRecord.objects.filter(person=person).only('disease').first()
+    primary = record.disease if record else ''
+    for index, line in enumerate(lines):
+        original = line.get('_outcome_input')
+        if not original:
+            continue
+        disease = line.get('disease') or primary
+        aliases = {
+            alias.casefold(): value
+            for alias, value in outcome_aliases(disease).items()
+        }
+        value = aliases.get(original.strip().casefold())
+        if value is None:
+            raise TherapyLineRejected(
+                f"Unknown outcome {original!r}; expected one of {sorted(set(aliases.values()))}.",
+                index=index,
+            )
+        line['outcome'] = value
+
+
 class PositionalTherapyLineListSerializer(serializers.ListSerializer):
     """Keep bounded per-line errors positional without changing DRF defaults."""
 
@@ -133,6 +155,7 @@ class TherapyLineImportSerializer(serializers.Serializer):
             if concept_id and not is_assertable_regimen(concepts.get(concept_id)):
                 error['regimen_concept_id'] = f'{concept_id} is not a valid HemOnc or HK-Regimen regimen concept.'
             if line.get('outcome'):
+                line['_outcome_input'] = line['outcome']
                 aliases = {
                     alias.casefold(): value
                     for alias, value in outcome_aliases(line.get('disease') or primary).items()
@@ -243,6 +266,7 @@ def import_therapy_lines(person: Person, lines: list[ImportLine], provenance: Pr
                 raise TherapyLineRejected(
                     'This line appears more than once in the request.', index=index,
                 )
+            _revalidate_outcomes(person, lines)
             labels = sorted(
                 {line['regimen'] for line in lines
                  if line.get('regimen') and not line.get('regimen_concept_id')},

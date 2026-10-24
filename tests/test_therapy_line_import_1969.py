@@ -573,6 +573,27 @@ def test_duplicate_line_keys_are_rechecked_after_primary_cancer_changes(etl, per
     assert not Episode.objects.filter(person=person).exists()
 
 
+def test_outcomes_are_revalidated_after_primary_cancer_changes(etl, person, monkeypatch):
+    from omop_core.services.therapy_transactions import lock_therapy_patients
+    from patient_portal.api import therapy_line_import
+
+    line = TICKET_LINES[0] | {'outcome': 'sCR'}
+    acquire = lock_therapy_patients
+
+    def change_primary_before_lock(person_ids):
+        PatientRecord.objects.filter(person_id__in=person_ids).update(
+            disease='Breast Cancer', disease_slug='breast-cancer',
+        )
+        return acquire(person_ids)
+
+    monkeypatch.setattr(therapy_line_import, 'lock_therapy_patients', change_primary_before_lock)
+    response = _post(etl, person, [line])
+    assert response.status_code == 400, response.data
+    assert 'Unknown outcome' in response.data['lines'][0]['non_field_errors'][0]
+    assert not Episode.objects.filter(person=person).exists()
+    assert not Observation.objects.filter(person=person, observation_source_value='LOT-1-outcome').exists()
+
+
 def test_non_object_request_body_returns_validation_error(etl):
     response = etl.post(URL, [], format='json')
     assert response.status_code == 400
