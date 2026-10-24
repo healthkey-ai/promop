@@ -389,25 +389,6 @@ def test_one_failing_code_does_not_stop_the_rest(second_two_unit_code):
     assert _counts(*second_two_unit_code) == [0, 2, 0]
 
 
-def _backfill():
-    import importlib
-
-    return importlib.import_module('omop_core.migrations.0300_backfill_axis_variants').backfill
-
-
-def test_the_migration_backfills_existing_codes(second_two_unit_code):
-    _backfill()(None, None)
-    assert _counts(*second_two_unit_code) == [2, 2, 0]
-
-
-def test_the_migration_does_not_block_a_deploy_on_a_database_error(two_unit_code):
-    from django.db import ProgrammingError
-
-    with patch.object(axis_variants, 'refresh_all', side_effect=ProgrammingError('no column')):
-        _backfill()(None, None)
-    assert _counts(two_unit_code) == [0]
-
-
 def test_the_command_reports_and_refreshes(second_two_unit_code):
     from io import StringIO
 
@@ -740,14 +721,11 @@ def test_a_lab_spelling_can_make_a_code_multi_property(glucose):
     assert mapping.axis_variant_count == 2
 
 
-def test_migration_0301_regroups_stored_variants(two_unit_code):
-    import importlib
-
-    backfill = importlib.import_module('omop_core.migrations.0301_regroup_axis_variant_unit_spellings').backfill
+def test_a_bulk_refresh_regroups_stored_variants(two_unit_code):
     axis_variants.refresh(two_unit_code)
     PatientSourceCode.objects.create(person=PersonFactory(), source_value='GLU', source_vocabulary_id=LAB,
                                      omop_table='measurement', source_unit='GM/DL', occurrence_count=5)
-    backfill(None, None)
+    axis_variants.refresh_all()
     mass = SourceCodeAxisVariant.objects.get(mapping=two_unit_code, axis_key='property=MCnc|scale_type=Qn')
     assert mass.occurrence_count == 15
 

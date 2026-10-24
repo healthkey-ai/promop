@@ -1250,7 +1250,11 @@ its units (`repoint_clinical_rows(units=...)`). Specimen variation is reported
 but cannot be routed.
 
 Counts refresh after each source-code upload for codes seen in two or more
-units, and in bulk with `manage.py refresh_axis_variants`.
+units, and in bulk with `manage.py refresh_axis_variants`. The bulk walk is a
+worker job, never a migration step: `--queue` (or migration `0303`) records an
+`AxisVariantRefresh` request that `omop_core.refresh_axis_variants` performs.
+Migrations 0300 and 0301 ran it inline and could not finish inside the Cloud
+Run migrate job's hour on the HealthTree instance (#2021).
 
 ### Concept embeddings
 
