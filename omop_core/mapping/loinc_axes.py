@@ -239,12 +239,13 @@ def infer(source_vocabulary_id, source_code, metadata, *, observed_units=None):
 
     ``axes`` is ``{axis: {'value', 'basis', 'evidence'}}`` for the axes that
     are settled. *observed_units* are the units the code's records arrived in
-    across patients; they settle the property only when every one implies the
-    same property, because a code seen in mg/dL and mmol/L is two tests
-    (``axis_variants``), not one with a property -- and then the one sample
-    unit in the metadata does not settle it either. ``hints`` is
-    ``{axis: text}`` for what the metadata says about an axis without
-    settling it.
+    across patients, and they come first: they settle the property when every
+    one implies the same property, and the scale (quantitative) whenever
+    records carry units at all, whatever one sample in the metadata says. A
+    code seen in mg/dL and mmol/L is two tests (``axis_variants``), not one
+    with a property -- and then the sample unit does not settle it either
+    (#2014). ``hints`` is ``{axis: text}`` for what the metadata says about an
+    axis without settling it.
     """
     axes, hints = {}, {}
     resource = _resource(metadata)
@@ -277,13 +278,16 @@ def infer(source_vocabulary_id, source_code, metadata, *, observed_units=None):
     if mixed:
         hints['property'] = (f'Records arrive in units implying different properties ({shown}): '
                              'one LOINC per axis variant')
-    if not unit and units:
+    if units:
         if len(properties) == 1 and '' not in properties:
             settle({'property': next(iter(properties))}, BASIS_UNIT, f'every record unit implies it ({shown})')
         settle({'scale_type': 'Qn'}, BASIS_VALUE_TYPE, f'records carry units ({shown})')
     if unit:
         prop = unit_property(unit)
-        if prop and not mixed:
+        # The sample settles the property only where the records are silent
+        # or agree: records in % say nothing about the property, and a g/dL
+        # sample must not say it for them.
+        if prop and not mixed and (not units or prop in properties):
             settle({'property': prop}, BASIS_UNIT, f'{where} = {unit}')
         if observed:
             settle({'scale_type': 'Qn'}, BASIS_VALUE_TYPE, f'{where} = {unit}')

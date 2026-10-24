@@ -22,13 +22,26 @@ counts describe stored mappings, not proof of clinical equivalence.
 
 ## Reviewing sources
 
-The selected concept has three views:
+The selected concept has two views, and opens on the second (#2010):
 
-- Existing mappings: SCCM rows already targeting that concept.
-- Find source codes: other proposed rows with compatible or unspecified source
-  domain/table, including imported proposals with nonstandard destinations.
+- Existing mappings: SCCM rows already targeting that concept, grouped by
+  status. Approved mappings come first, folded, then the proposed mappings
+  open for review, then rejected ones, folded. Each group is fetched and paged
+  on its own; the group headers carry the counts of all three under the current
+  search and Seen filter.
 - Suggested source codes: a saved preview retrieved from local vocabulary
-  evidence. No SCCM rows change when this search runs.
+  evidence. No SCCM rows change when this search runs, with one exception: a
+  candidate whose units imply several LOINC axis sets (the blue "n axis
+  values") has each axis variant without a destination suggested a standard
+  LOINC with the run's ranker, stored as proposed (#2012). The variants are
+  listed under the code with their axes, units and destination, and an
+  approver can approve each from the row; approving re-points that variant's
+  stored rows. Curator review (no ranker) lists the variants and suggests
+  nothing.
+
+The API still serves `mode=available` (other proposed rows with a compatible or
+unspecified source domain/table); the dialog no longer shows that list, since
+Suggest reaches the same rows with the ranker's evidence attached.
 
 Source rows default to Seen > 0 and sort by Seen descending. The checkbox above
 the Seen header includes zero-Seen rows when unchecked. Seen represents the
@@ -72,15 +85,18 @@ the curator can retry. A redelivery before the run started still executes it.
 
 ## Saving and approving
 
-Curators select displayed sources and choose Propose selected or, for staff and
-organization admins, Approve selected. The client processes one source per
-request and reports successes and failures separately. Each request locks the
+Staff and organization admins select displayed sources and choose Approve
+selected; there is no separate Propose step (#2010). Other curators open one
+code at a time in Edit Mapping. The client processes one source per request and
+reports successes and failures separately. Each request locks the
 SCCM row in a transaction and requires its exact `updated_at` revision from the
 preview. Concurrent edits, approved/rejected rows, Athena reference rows,
 active locks held by another user and domain mismatches prevent the write.
 
-A vocabulary-only candidate must first be proposed using its saved reverse
-preview run and source identity. The server reloads the installed source and
+A vocabulary-only candidate is first proposed using its saved reverse preview
+run and source identity, then approved on the revision that proposal returned;
+Approve selected makes both requests, and a proposal that fails leaves the row
+as it was. The server reloads the installed source and
 checks its revision, current validity and domain compatibility. Changed sources
 or a mapping created since the preview require a refreshed search. A successful
 proposal creates one SCCM row, with the full label retained in notes if it
@@ -109,7 +125,7 @@ All endpoints require an authenticated professional role:
 | Endpoint under `/api/v1/` | Purpose |
 | --- | --- |
 | `GET concept-to-code/` | Concept catalog, fields and coverage counts |
-| `GET concept-to-code/<concept_id>/` | Paginated linked or available sources |
+| `GET concept-to-code/<concept_id>/` | Paginated linked or available sources; `status=` filters one status and `status_counts` counts all three |
 | `POST concept-to-code/suggest/` | Queue a reverse preview; returns 202 |
 | `GET concept-to-code/suggest-runs/<run_id>/` | Preview progress and candidates |
 | `POST concept-to-code/<concept_id>/mappings/` | Propose one vocabulary source from a saved preview |
