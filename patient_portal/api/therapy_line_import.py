@@ -45,6 +45,21 @@ ImportLine = dict[str, Any]
 ResolvedRegimens = dict[str, tuple[Concept | None, str | None]]
 
 
+def _duplicate_line_indexes(person: Person, lines: list[ImportLine]) -> set[int]:
+    """Return positional duplicates using the person's current primary-cancer key."""
+    primary_key = disease_key(primary_disease_slug(person))
+    seen: set[tuple[str, int]] = set()
+    duplicates = set()
+    for index, line in enumerate(lines):
+        cancer = disease_key(disease_slug(line.get('disease')))
+        # An explicit primary-cancer label and an omitted disease share a key.
+        key = ('' if cancer == primary_key else cancer, line['line_number'])
+        if key in seen:
+            duplicates.add(index)
+        seen.add(key)
+    return duplicates
+
+
 class PositionalTherapyLineListSerializer(serializers.ListSerializer):
     """Keep bounded per-line errors positional without changing DRF defaults."""
 
@@ -105,20 +120,15 @@ class TherapyLineImportSerializer(serializers.Serializer):
         lines: list[ImportLine] = attrs['lines']
         record = PatientRecord.objects.filter(person=person).first()
         primary = record.disease if record else ''
-        primary_key = disease_key(primary_disease_slug(person))
+        duplicate_indexes = _duplicate_line_indexes(person, lines)
         concepts = Concept.objects.in_bulk(
             {line['regimen_concept_id'] for line in lines if line.get('regimen_concept_id')}
         )
         errors: list[dict[str, str]] = []
-        seen: set[tuple[str, int]] = set()
-        for line in lines:
+        for index, line in enumerate(lines):
             error: dict[str, str] = {}
-            cancer = disease_key(disease_slug(line.get('disease')))
-            # The writer files a line naming the primary cancer with the unnamed ones
-            key = ('' if cancer == primary_key else cancer, line['line_number'])
-            if key in seen:
+            if index in duplicate_indexes:
                 error['line_number'] = 'This line appears more than once in the request.'
-            seen.add(key)
             concept_id = line.get('regimen_concept_id')
             if concept_id and not is_assertable_regimen(concepts.get(concept_id)):
                 error['regimen_concept_id'] = f'{concept_id} is not a valid HemOnc or HK-Regimen regimen concept.'
@@ -227,6 +237,12 @@ def import_therapy_lines(person: Person, lines: list[ImportLine], provenance: Pr
                 # check. Re-authorize against the locked, current patient record
                 # on every complete retry attempt before any writes.
                 authorize_person(person)
+            duplicate_indexes = _duplicate_line_indexes(person, lines)
+            if duplicate_indexes:
+                index = min(duplicate_indexes)
+                raise TherapyLineRejected(
+                    'This line appears more than once in the request.', index=index,
+                )
             labels = sorted(
                 {line['regimen'] for line in lines
                  if line.get('regimen') and not line.get('regimen_concept_id')},

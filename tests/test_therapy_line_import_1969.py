@@ -550,6 +550,29 @@ def test_patient_authorization_is_rechecked_after_root_lock(etl, person, monkeyp
     assert not Episode.objects.filter(person=person).exists()
 
 
+def test_duplicate_line_keys_are_rechecked_after_primary_cancer_changes(etl, person, monkeypatch):
+    from omop_core.services.therapy_transactions import lock_therapy_patients
+    from patient_portal.api import therapy_line_import
+
+    first = TICKET_LINES[0] | {'line_number': 1}
+    second = TICKET_LINES[1] | {'line_number': 1, 'disease': 'Breast Cancer'}
+    acquire = lock_therapy_patients
+
+    def change_primary_before_lock(person_ids):
+        PatientRecord.objects.filter(person_id__in=person_ids).update(
+            disease='Breast Cancer', disease_slug='breast-cancer',
+        )
+        return acquire(person_ids)
+
+    monkeypatch.setattr(therapy_line_import, 'lock_therapy_patients', change_primary_before_lock)
+    response = _post(etl, person, [first, second])
+    assert response.status_code == 400, response.data
+    assert response.data['lines'][1]['non_field_errors'] == [
+        'This line appears more than once in the request.',
+    ]
+    assert not Episode.objects.filter(person=person).exists()
+
+
 def test_non_object_request_body_returns_validation_error(etl):
     response = etl.post(URL, [], format='json')
     assert response.status_code == 400
