@@ -73,7 +73,21 @@ def _hemonc_regimen(concept_id, name):
         concept_class_id='Regimen', defaults={'concept_class_name': 'Regimen', 'concept_class_concept_id': 0},
     )
     return ConceptFactory(concept_id=concept_id, concept_name=name, concept_code=str(concept_id),
-                          vocabulary=vocab, concept_class=regimen_class, standard_concept='S')
+                           vocabulary=vocab, concept_class=regimen_class, standard_concept='S')
+
+
+def test_quarantine_hash_fallback_does_not_alias_a_natural_slug(person):
+    import hashlib
+    from omop_core.mapping.therapy import get_or_create_quarantine_regimen
+
+    digest = hashlib.sha1(b'a b', usedforsecurity=False).hexdigest()[:8]
+    labels = ['a+b', f'a b {digest}', 'a b']
+    concepts = [get_or_create_quarantine_regimen(label) for label in labels]
+    assert len({concept.pk for concept in concepts}) == 3
+    assert [concept.concept_name for concept in concepts] == labels
+    assert [get_or_create_quarantine_regimen(label).pk for label in labels] == [
+        concept.pk for concept in concepts
+    ]
 
 
 def test_the_ticket_s_three_lines_land_and_reach_the_record(etl, person):

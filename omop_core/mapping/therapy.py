@@ -222,11 +222,16 @@ def _ensure_hk_vocab(vocabulary_id):
 def _get_or_create_quarantine_concept(*, vocabulary_id, domain_id,
                                       concept_class_id, concept_code,
                                       concept_name):
-    concept = Concept.objects.filter(
-        vocabulary_id=vocabulary_id, concept_code=concept_code,
-    ).first()
-    if concept is not None:
-        if normalize_regimen_name(concept.concept_name) == normalize_regimen_name(concept_name):
+    base_code = concept_code
+    normalized_name = normalize_regimen_name(concept_name)
+    collision_index = 0
+    while True:
+        concept = Concept.objects.filter(
+            vocabulary_id=vocabulary_id, concept_code=concept_code,
+        ).first()
+        if concept is None:
+            break
+        if normalize_regimen_name(concept.concept_name) == normalized_name:
             return concept
         # Slug collision: a different name already owns this code (punctuation
         # collapse / 50-char truncation can map distinct names to one slug).
@@ -235,16 +240,13 @@ def _get_or_create_quarantine_concept(*, vocabulary_id, domain_id,
         # Not a security use: this only disambiguates a slug collision so two
         # distinct regimen names get distinct concept rows. Flagged explicitly so
         # the SAST gate does not have to carry it as a baselined false positive.
+        identity = normalized_name if collision_index == 0 else f'{normalized_name}\0{collision_index}'
         digest = hashlib.sha1(
-            normalize_regimen_name(concept_name).encode('utf-8'),
+            identity.encode('utf-8'),
             usedforsecurity=False,
         ).hexdigest()[:8]
-        concept_code = f'{concept_code[:41]}-{digest}'[:50]
-        concept = Concept.objects.filter(
-            vocabulary_id=vocabulary_id, concept_code=concept_code,
-        ).first()
-        if concept is not None:
-            return concept
+        concept_code = f'{base_code[:41]}-{digest}'[:50]
+        collision_index += 1
 
     domain, _ = Domain.objects.get_or_create(
         domain_id=domain_id,
@@ -279,7 +281,7 @@ def _get_or_create_quarantine_concept(*, vocabulary_id, domain_id,
         # an ordinary existing-row collision rather than aliasing the regimens.
         return _get_or_create_quarantine_concept(
             vocabulary_id=vocabulary_id, domain_id=domain_id,
-            concept_class_id=concept_class_id, concept_code=concept_code,
+            concept_class_id=concept_class_id, concept_code=base_code,
             concept_name=concept_name,
         )
     return concept
