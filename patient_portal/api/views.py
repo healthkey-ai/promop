@@ -7806,6 +7806,19 @@ class _OmopDeferRefreshMixin:
         return response
 
 
+def _bulk_row_errors(errors, row_count):
+    """Keep the bulk endpoint's positional error list under DRF 3.18.
+
+    DRF 3.18 switched ``ListSerializer`` child errors to ``{index: detail}`` by
+    default (``LIST_SERIALIZER_ERRORS_AS_DICT``). This endpoint's documented
+    contract is a list aligned with the request rows, so expand the index-keyed
+    form back to a list. List-level errors (non-index keys) pass through.
+    """
+    if isinstance(errors, dict) and errors and set(errors) <= set(range(row_count)):
+        return [errors.get(index, {}) for index in range(row_count)]
+    return errors
+
+
 class _OmopBulkCreateMixin:
     """Accept a JSON *list* on POST and insert the rows in one batched transaction.
 
@@ -7973,7 +7986,12 @@ class _OmopBulkCreateMixin:
         # operator can tell which of N rows to fix.
         serializer = self.get_serializer(data=rows, many=True)
         _prefetch_bulk_related(serializer, rows)
-        serializer.is_valid(raise_exception=True)
+        serializer.is_valid()
+        if serializer.errors:
+            return Response(
+                _bulk_row_errors(serializer.errors, len(rows)),
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         validated = serializer.validated_data
 
         if not validated:
