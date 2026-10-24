@@ -8,6 +8,16 @@ All notable changes to PRomop are documented here.
 
 ### Added
 
+- **The patient can confirm that the recorded treatment history is complete** —
+  the Treatment tab now carries "This is my complete treatment history". Until it
+  is ticked, the number of recorded lines is a lower bound ("at least N"); the
+  projection exposes `therapy_history_complete` as null, and only an explicit
+  confirmation makes it true. Confirming is a statement about the list, not a
+  clinical fact: withdrawing it returns the record to the lower bound, and a
+  patient copy carries the confirmation with the record. The write goes through
+  the packaged endpoint, so an embedding host applies its own write gate and
+  per-person authorization (#1924).
+
 - **A recorded line no longer has to name its drugs, and a wrong line can be
   withdrawn** — the therapy editor offers "I don't know which drugs were given",
   which records that the line happened with an unknown composition instead of

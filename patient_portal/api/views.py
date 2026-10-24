@@ -9351,7 +9351,10 @@ def concept_graph_batch(request):
 # =============================================================================
 
 from omop_core.api.concepts import ConceptPagination  # noqa: E402  (packaged config)
-from omop_core.api.views import TherapyLineViewSet as _PackagedTherapyLineViewSet  # noqa: E402
+from omop_core.api.views import (  # noqa: E402
+    TherapyHistoryCompletenessViewSet as _PackagedTherapyHistoryCompletenessViewSet,
+    TherapyLineViewSet as _PackagedTherapyLineViewSet,
+)
 
 
 class MeasurementConceptPagination(CursorPagination):
@@ -14625,20 +14628,17 @@ def field_formula_detail(request, pk):
     return Response(serializer.data)
 
 
-class TherapyLineViewSet(_PackagedTherapyLineViewSet):
-    """Author a line of therapy, under PROMOP's own permissions.
+class _TherapyHostPolicy:
+    """PROMOP's policy for the packaged therapy writes (``omop_core.api``).
 
-    The clinical write and its payload are packaged (``omop_core.api``) so an
-    embedding host serves the same contract. What stays here is host policy:
-    which roles may write, the organization check object-level permissions do
-    not apply on create, and the record payload this product's client expects.
+    The clinical write and its payload are packaged so an embedding host serves
+    the same contract. What stays here is host policy: which roles may write, the
+    organization check object-level permissions do not apply on create, and the
+    record payload this product's client expects. Shared by authoring and the
+    history-completeness statement, which must never be gated more loosely.
     """
 
     permission_classes = [PatientCrudPermission, PatientSelfScopePermission]
-
-    def _check_person_write_permission(self, request, person):
-        """Kept as the name other patient-portal code calls."""
-        return self.patient_write_denied(request, person)
 
     def patient_write_denied(self, request, person):
         # Same create-time check the single-row clinical writes use: object-level
@@ -14665,3 +14665,23 @@ class TherapyLineViewSet(_PackagedTherapyLineViewSet):
 
     def patient_info_payload(self, record):
         return PatientRecordSerializer(record).data
+
+
+class TherapyLineViewSet(_TherapyHostPolicy, _PackagedTherapyLineViewSet):
+    """Author a line of therapy, under PROMOP's own permissions."""
+
+    def _check_person_write_permission(self, request, person):
+        """Kept as the name other patient-portal code calls."""
+        return self.patient_write_denied(request, person)
+
+
+class TherapyHistoryCompletenessViewSet(_TherapyHostPolicy, _PackagedTherapyHistoryCompletenessViewSet):
+    """The patient's statement that the treatment list is complete (#1924)."""
+
+    def attestation_source(self, request):
+        # Who is speaking is read off the request, never the body.
+        if is_service_token(request):
+            return 'host'
+        if getattr(request.user, 'is_staff', False):
+            return 'clinician'
+        return 'patient'

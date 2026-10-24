@@ -3210,6 +3210,30 @@ class WearableUpload(models.Model):
         return f'{self.device_type} upload {self.filename} ({self.samples_created} samples)'
 
 
+class TherapyHistoryAttestation(models.Model):
+    """The patient's explicit confirmation that the listed lines are complete.
+
+    Absence of a row means "not confirmed" — not "incomplete history". The two
+    are different claims and only the patient can make either, so the projection
+    leaves ``PatientRecord.therapy_history_complete`` NULL until this row exists
+    (#1924). Confirming is a statement about the list, not clinical data: deleting
+    the row withdraws it.
+    """
+    person = models.OneToOneField(
+        Person, on_delete=models.CASCADE, related_name='therapy_history_attestation',
+    )
+    confirmed_at = models.DateTimeField()
+    # Where the confirmation came from ('patient', 'clinician', 'host'); provenance
+    # only, never a clinical decision.
+    source = models.CharField(max_length=20, default='patient')
+
+    class Meta:
+        db_table = 'therapy_history_attestation'
+
+    def __str__(self):
+        return f'Person {self.person_id} therapy history confirmed {self.confirmed_at:%Y-%m-%d}'
+
+
 class PatientRecord(models.Model):
     """
     Comprehensive patient information model — OMOP CDM–aligned PatientRecord projection.
@@ -3407,6 +3431,11 @@ class PatientRecord(models.Model):
 
     # Legacy therapy fields
     therapy_lines_count = models.IntegerField(blank=True, null=True)
+    # True only when the patient explicitly confirmed that the recorded lines are
+    # their full history (#1924). Until then `therapy_lines_count` is a lower
+    # bound ("at least N"), not an exact count, and consumers must not exclude on
+    # a maximum it cannot prove.
+    therapy_history_complete = models.BooleanField(blank=True, null=True)
     line_of_therapy = models.TextField(blank=True, null=True)
 
     # Blood work with units
