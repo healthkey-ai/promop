@@ -546,8 +546,9 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
   // Approve one axis variant from the row: its stored rows in those units are
   // re-pointed, and the row shows the server's view of every variant (#2012).
   const approveVariant = async (row: Source, variant: AxisVariant) => {
-    if (busy || row.mapping_id === null || !variant.target_concept) return;
-    setError('');
+    if (writingRef.current || busy || row.mapping_id === null || !variant.target_concept) return;
+    // A write like any other here: one at a time, and the dialog cannot close under it.
+    writingRef.current = true; setWriting(true); onWriting(true); setError('');
     try {
       const { data } = await api.post<LoincAxesPayload>(`/v1/code-mappings/${row.mapping_id}/axis-variants/`, {
         axis_key: variant.axis_key, target_concept_id: variant.target_concept.concept_id, approve: true,
@@ -555,8 +556,8 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
       patchRow(row, { ...row, axis_variants: data.variants });
       setProgress(`Approved the ${variant.units?.join(', ') || variant.axis_key} variant of ${row.source_code}.`);
     } catch (failure) {
-      setError(`Could not approve the variant of ${row.source_code}. ${destinationError(failure)}`);
-    }
+      if (active.current) setError(`Could not approve the variant of ${row.source_code}. ${destinationError(failure)}`);
+    } finally { writingRef.current = false; if (active.current) setWriting(false); onWriting(false); }
   };
 
   const openEditor = async (row: Source) => {

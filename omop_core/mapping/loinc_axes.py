@@ -473,13 +473,27 @@ def _lab_category(metadata, resource):
     return False
 
 
-def lab_signal(source_vocabulary_id, metadata, axes):
+#: Properties a unit settles that make the test a lab assay: concentrations,
+#: fractions, counts, rates and titres. A length, mass, pressure or
+#: temperature is a measurement too, but not one SNOMED has nothing to say about.
+LAB_PROPERTIES = frozenset({
+    'MCnc', 'SCnc', 'NCnc', 'ACnc', 'CCnc', 'LsCnc', 'LaCnc', 'MFr', 'NFr', 'VFr', 'SFr',
+    'CFr', 'Titr', 'MRat', 'SRat', 'CRat', 'ARat', 'MCnt', 'SCnt', 'ACnt', 'Naric', 'EntMass',
+    'EntSub', 'EntNum', 'Osmol', 'MSCnc', 'MoM',
+})
+
+
+def lab_signal(source_vocabulary_id, metadata, axes, *, strict_units=False):
     """Why this source is a lab-style measurement LOINC should name, or None.
 
     OHDSI's convention is LOINC for lab tests, but SNOMED has standard
     Measurement-domain concepts too ("Glucose measurement, serum"), so without
     a preference one can outrank LOINC 2345-7. Each signal is something the
     source itself says; none is inferred from the candidates.
+
+    With ``strict_units`` the axis rule counts only a property in
+    :data:`LAB_PROPERTIES`: a tumour size in mm or a height in cm has a
+    settled property too, but is no lab (#2012).
     """
     if is_loinc(source_vocabulary_id):
         return 'The source code is LOINC'
@@ -490,8 +504,11 @@ def lab_signal(source_vocabulary_id, metadata, axes):
         return 'The sending system filed it as a laboratory result'
     for axis in ('property', 'scale_type'):
         entry = (axes or {}).get(axis)
-        if entry and entry['basis'] in (BASIS_UNIT, BASIS_VALUE_TYPE):
-            return f"Its {AXIS_LABELS[axis].lower()} is settled ({entry['evidence']})"
+        if not entry or entry['basis'] not in (BASIS_UNIT, BASIS_VALUE_TYPE):
+            continue
+        if strict_units and (axis != 'property' or entry['value'] not in LAB_PROPERTIES):
+            continue
+        return f"Its {AXIS_LABELS[axis].lower()} is settled ({entry['evidence']})"
     return None
 
 

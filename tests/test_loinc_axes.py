@@ -929,18 +929,29 @@ def test_suggest_destinations_proposes_a_loinc_per_variant(pipeline, two_unit_co
     assert stored['property=MCnc|scale_type=Qn'].target_concept.concept_code in mass
 
 
-def test_suggest_destinations_keeps_curator_choices_unless_replacing(pipeline, two_unit_code, glucose):
+def test_suggest_destinations_never_touches_a_variant_that_has_a_destination(pipeline, two_unit_code, glucose):
     variant = {v.axis_key: v for v in axis_variants.refresh(two_unit_code)}['property=SCnc|scale_type=Qn']
     axis_variants.set_destination(variant, glucose['2339-0'], approve=False, user=None)
     approved = {v.axis_key: v for v in axis_variants.refresh(two_unit_code)}['property=MCnc|scale_type=Qn']
     axis_variants.set_destination(approved, glucose['2345-7'], approve=True, user=None)
 
+    # A curator's pick and an approval both look the same to a ranker: left alone.
     assert axis_variants.suggest_destinations(two_unit_code, ranking_model='anthropic', user=None) == []
-    results = axis_variants.suggest_destinations(two_unit_code, ranking_model='anthropic', user=None, replace=True)
-    # Only the proposed variant is re-suggested; the approved one is a decision.
-    assert [r['axis_key'] for r in results] == ['property=SCnc|scale_type=Qn']
     variant.refresh_from_db()
-    assert variant.target_concept == glucose['14749-6']
+    assert variant.target_concept == glucose['2339-0']
+
+
+def test_suggest_destinations_respects_its_limit(pipeline, two_unit_code):
+    results = axis_variants.suggest_destinations(two_unit_code, ranking_model='anthropic', user=None, limit=1)
+    assert len(results) == 1
+    assert two_unit_code.axis_variants.filter(target_concept__isnull=False).count() == 1
+
+
+def test_a_code_without_a_table_reports_why_nothing_was_suggested(pipeline, two_unit_code):
+    two_unit_code.omop_table = ''
+    two_unit_code.save(update_fields=['omop_table'])
+    results = axis_variants.suggest_destinations(two_unit_code, ranking_model='anthropic', user=None)
+    assert results and all(r['suggested'] is None and 'quarantine' in r['note'] for r in results)
 
 
 def test_a_non_loinc_winner_leaves_the_variant_for_a_curator(pipeline, two_unit_code, glucose, monkeypatch):
@@ -957,30 +968,37 @@ def test_a_non_loinc_winner_leaves_the_variant_for_a_curator(pipeline, two_unit_
     assert not two_unit_code.axis_variants.filter(target_concept__isnull=False).exists()
 
 
-def test_the_suggest_endpoint_fills_variants_and_returns_them(pipeline, two_unit_code, glucose):
+def test_the_suggest_endpoint_queues_a_run_that_fills_the_variants(pipeline, two_unit_code, glucose):
+    from omop_core.services.suggest_jobs import InlineDispatcher, use_dispatcher
     from patient_portal.models import Identity
     client = APIClient()
-    client.force_authenticate(Identity.objects.create_user(
-        email='variants@example.test', is_staff=True, is_superuser=True))
+    user = Identity.objects.create_user(email='variants@example.test', is_staff=True, is_superuser=True)
+    client.force_authenticate(user)
     url = f'/api/v1/code-mappings/{two_unit_code.pk}/axis-variants/suggest/'
 
     assert client.post(url, {'ranking_model': 'bogus'}, format='json').status_code == 400
-    response = client.post(url, {'strategies': ['lexical'], 'ranking_model': 'jev'}, format='json')
+    with use_dispatcher(InlineDispatcher()):
+        response = client.post(url, {'strategies': ['lexical'], 'ranking_model': 'jev'}, format='json')
 
-    assert response.status_code == 200, response.data
-    suggested = {s['axis_key']: s['suggested']['concept_code'] for s in response.data['suggestions']}
+    assert response.status_code == 202, response.data
+    assert response.data['state'] == 'success'
+    result = next(event for event in response.data['activity'] if event['stage'] == 'result')
+    suggested = {s['axis_key']: s['suggested']['concept_code'] for s in result['suggestions']}
     assert suggested['property=SCnc|scale_type=Qn'] == '14749-6'
     assert suggested['property=MCnc|scale_type=Qn'] in {'2345-7', '2339-0', '41653-7'}
-    variants = {v['axis_key']: v for v in response.data['variants']}
+    variants = {v['axis_key']: v for v in result['variants']}
     assert variants['property=SCnc|scale_type=Qn']['target_concept']['concept_code'] == '14749-6'
     assert variants['property=SCnc|scale_type=Qn']['status'] == 'proposed'
+    # The panel reads the same variants back.
+    axes = client.get(f'/api/v1/code-mappings/{two_unit_code.pk}/loinc-axes/').data
+    assert {v['axis_key'] for v in axes['variants'] if v['target_concept']} == set(variants)
 
     viewer = APIClient()
     viewer.force_authenticate(Identity.objects.create_user(email='viewer@example.test'))
     assert viewer.post(url, {}, format='json').status_code == 403
 
 
-def test_a_lab_hides_the_snomed_evidence(two_unit_code):
+def test_a_lab_hides_the_snomed_evidence(two_unit_code, glucose):
     """The SNOMED panel does not apply to a source LOINC should name (#2012)."""
     from patient_portal.models import Identity
     from patient_portal.api.loinc_axes import _snomed_payload
@@ -995,9 +1013,18 @@ def test_a_lab_hides_the_snomed_evidence(two_unit_code):
     assert response.status_code == 200, response.data
     assert response.data['applies'] is False
     assert 'laboratory result' in response.data['lab_signal']
-    # Without the lab evidence the measurement's SNOMED view is back.
+    # Concentration units are lab evidence on their own (one property: two
+    # units implying different properties settle nothing, they are variants) ...
     two_unit_code.source_metadata = {}
     two_unit_code.save(update_fields=['source_metadata'])
-    PatientSourceCode.objects.all().delete()
+    PatientSourceCode.objects.filter(source_unit='mmol/L').delete()
     payload = _snomed_payload(two_unit_code)
-    assert payload['lab_signal'] is None
+    assert payload['applies'] is False and 'property is settled' in payload['lab_signal']
+    # ... a length is not: a tumour size in mm keeps its SNOMED evidence.
+    size = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id=LAB, source_code='TUMSIZE', source_code_description='Tumor size',
+        omop_table='measurement', domain_id='Measurement')
+    PatientSourceCode.objects.create(person=PersonFactory(), source_value='TUMSIZE', source_vocabulary_id=LAB,
+                                     omop_table='measurement', source_unit='mm', occurrence_count=3)
+    payload = _snomed_payload(size)
+    assert payload['lab_signal'] is None and payload['applies'] is True

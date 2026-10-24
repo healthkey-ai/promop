@@ -411,57 +411,87 @@ def set_destination(variant, concept, *, approve, user, reopen=False):
 SUGGEST_MAX = 5
 
 
+def _locked(mapping):
+    """The mapping's row, locked for the rest of the transaction."""
+    from omop_core.models import SourceCodeConceptMapping
+    return SourceCodeConceptMapping.objects.select_for_update(of=('self',)).get(pk=mapping.pk)
+
+
 def suggest_destinations(mapping, *, ranking_model, user, strategies=None, overrides=None,
-                         replace=False, limit=SUGGEST_MAX):
-    """Suggest a standard LOINC for each variant and store it as proposed (#2012).
+                         limit=SUGGEST_MAX):
+    """Suggest a standard LOINC for each variant without one; store it as proposed (#2012).
 
     Each variant is suggested as the code would be with that variant's axis
     values added to the curator's entries -- the mmol/L variant of a glucose
     code asks for a substance concentration -- so the winner is the LOINC the
     axis filter and the ranker agree on. Only a usable standard LOINC is
-    stored; anything else leaves the variant as it was. Variants that already
-    have a destination are kept unless ``replace``; approved ones always are.
+    stored; anything else leaves the variant as it was, with the reason in
+    ``note``. A variant that already has a destination, proposed by a curator
+    or approved, is never touched: variants carry no provenance, so a
+    re-suggestion could not tell a curator's pick from an earlier ranker's.
 
-    Returns ``[{axis_key, suggested, note}]`` for every variant considered,
-    ``suggested`` being the stored concept or ``None``.
+    Variants are stored under the mapping's row lock, like the variant
+    endpoint does, so a Suggest racing an approval cannot insert one twice;
+    the lock is not held across the ranker calls.
+
+    Returns ``[{axis_key, suggested, confidence, note}]`` for every variant
+    considered, ``suggested`` being the stored concept or ``None``.
     """
     from omop_core.mapping.suggestions import suggest_one_mapping
     from omop_core.models import Concept
 
-    stored = refresh(mapping)
-    todo = [v for v in stored if v.status != 'approved' and (replace or v.target_concept_id is None)]
+    counts = unit_counts(mapping)
+    with transaction.atomic():
+        _locked(mapping)
+        stored = refresh(mapping, counts)
+    todo = [v for v in stored if v.status != 'approved' and v.target_concept_id is None]
     if len(stored) < FLAG_THRESHOLD or not todo:
         return []
     base = dict(mapping.loinc_axes or {}) if overrides is None else dict(overrides)
-    units = observed_units(mapping)
+    units = observed_units(mapping, counts)
     results = []
-    for variant in todo[:limit]:
-        result = suggest_one_mapping(
-            mapping.source_code, mapping.source_vocabulary_id, mapping.omop_table,
-            source_description=mapping.source_code_description or '',
-            row_metadata=mapping.source_metadata, strategies=strategies,
-            ranking_model=ranking_model, axis_overrides={**base, **(variant.axis_values or {})},
-            observed_units=units,
-        )
+    for variant in todo[:max(0, limit)]:
+        entry = {'axis_key': variant.axis_key, 'suggested': None, 'confidence': None, 'note': ''}
+        results.append(entry)
+        try:
+            result = suggest_one_mapping(
+                mapping.source_code, mapping.source_vocabulary_id, mapping.omop_table,
+                source_description=mapping.source_code_description or '',
+                row_metadata=mapping.source_metadata, strategies=strategies,
+                ranking_model=ranking_model, axis_overrides={**base, **(variant.axis_values or {})},
+                observed_units=units,
+            )
+        except ValueError as exc:  # a code with no OMOP table has no pipeline
+            entry['note'] = str(exc)
+            continue
         chosen = result.get('suggested')
         concept = Concept.objects.filter(pk=chosen['concept_id']).first() if chosen else None
-        if concept is not None and (concept.vocabulary_id != 'LOINC' or not usable_destination(concept, mapping)):
-            concept = None
-            note = 'The suggested concept is not a standard LOINC, so the variant was left for a curator.'
-        else:
-            note = result.get('note') or ''
-        if concept is not None:
+        if concept is None:
+            entry['note'] = result.get('note') or ''
+            continue
+        if concept.vocabulary_id != 'LOINC' or not usable_destination(concept, mapping):
+            entry['note'] = 'The suggested concept is not a standard LOINC, so the variant was left for a curator.'
+            continue
+        with transaction.atomic():
+            _locked(mapping)
+            variant.refresh_from_db()
+            if variant.status == 'approved' or variant.target_concept_id is not None:
+                entry['note'] = 'A destination was set while suggesting; it was kept.'
+                continue
             set_destination(variant, concept, approve=False, user=user)
-        results.append({
-            'axis_key': variant.axis_key,
-            'suggested': None if concept is None else {
-                'concept_id': concept.concept_id, 'concept_name': concept.concept_name,
-                'concept_code': concept.concept_code, 'vocabulary_id': concept.vocabulary_id,
-            },
-            'confidence': chosen.get('confidence') if chosen and concept is not None else None,
-            'note': note,
-        })
+        entry['suggested'] = {
+            'concept_id': concept.concept_id, 'concept_name': concept.concept_name,
+            'concept_code': concept.concept_code, 'vocabulary_id': concept.vocabulary_id,
+        }
+        entry['confidence'] = chosen.get('confidence')
+        entry['note'] = result.get('note') or ''
     return results
+
+
+def serialize_all(mapping):
+    """Every stored variant of ``mapping``, largest first."""
+    return [serialize(v) for v in mapping.axis_variants.select_related('target_concept')
+            .order_by('-occurrence_count', 'axis_key')]
 
 
 def refresh_multi_unit_codes(keys):

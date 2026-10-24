@@ -754,9 +754,11 @@ describe("CodeMappingPage", () => {
         ? Promise.resolve({ data: axes(variants) }) : originalGet(url, ...rest));
       mockPost.mockImplementation((url: string) => {
         if (url === "/v1/code-mappings/7/axis-variants/suggest/") {
+          // The run is queued like the code's own Suggest; inline it finishes in the request.
           variants = empty.map(v => ({ ...v, target_concept: glucose }));
-          return Promise.resolve({ data: { ...axes(variants), suggestions: [
-            { axis_key: "property=MCnc", suggested: glucose }, { axis_key: "property=SCnc", suggested: glucose }] } });
+          return Promise.resolve({ data: suggestRun({ run_id: "variants-run", activity: [{ stage: "result", mapping_id: 7,
+            suggestions: [{ axis_key: "property=MCnc", suggested: glucose }, { axis_key: "property=SCnc", suggested: glucose }],
+            variants }] }) });
         }
         return Promise.resolve({ data: suggestRun({ activity: [] }) });
       });

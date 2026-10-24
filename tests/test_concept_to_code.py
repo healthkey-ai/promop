@@ -742,6 +742,10 @@ def test_linked_sources_filter_by_status_and_count_every_status(client, concept)
     assert client.get(f'{BASE}{concept.pk}/', {'mode': 'available'}).data['status_counts'] is None
 
 
+def django_user_model_for(client):
+    return type(client.user).objects.create_user(email='other-curator@test.com', is_staff=True)
+
+
 def test_reverse_run_fills_a_flagged_candidates_axis_variants(client, concept):
     """A candidate whose units imply several LOINC axis sets carries its variants,
     each suggested a destination with the run's ranker (#2012)."""
@@ -754,6 +758,11 @@ def test_reverse_run_fills_a_flagged_candidates_axis_variants(client, concept):
                                          axis_values={'property': 'SCnc', 'scale_type': 'Qn'}, units=['mmol/L'],
                                          occurrence_count=4)
     plain = source('ALB')
+    # Another hospital's code, locked by its own curator: listed, never written.
+    other = django_user_model_for(client)
+    locked = source('GLU2', axis_variant_count=2, locked_by=other, locked_at=timezone.now())
+    SourceCodeAxisVariant.objects.create(mapping=locked, axis_key='property=MCnc|scale_type=Qn',
+                                         axis_values={'property': 'MCnc'}, units=['mg/dL'], occurrence_count=1)
 
     def fill(mapping, **kwargs):
         variant = mapping.axis_variants.get(axis_key='property=SCnc|scale_type=Qn')
@@ -771,6 +780,9 @@ def test_reverse_run_fills_a_flagged_candidates_axis_variants(client, concept):
         execute_run(run_id, params)
     assert [call.args[0].pk for call in suggest.call_args_list] == [row.pk]
     assert suggest.call_args.kwargs['ranking_model'] == 'anthropic'
+    assert suggest.call_args.kwargs['user'] == client.user
+    # The run's own limit bounds the variants it may suggest.
+    assert suggest.call_args.kwargs['limit'] <= params['limit']
 
     candidates = {c['source_code']: c for c in client.get(f'{BASE}suggest-runs/{run_id}/').data['activity'][0]['candidates']}
     variants = {v['axis_key']: v for v in candidates['GLU']['axis_variants']}
@@ -778,6 +790,7 @@ def test_reverse_run_fills_a_flagged_candidates_axis_variants(client, concept):
     assert variants['property=MCnc|scale_type=Qn']['target_concept'] is None
     assert 'axis_variants' not in candidates['ALB']
     assert plain.axis_variant_count == 0
+    assert [v['axis_key'] for v in candidates['GLU2']['axis_variants']] == ['property=MCnc|scale_type=Qn']
 
 
 def test_reverse_run_without_a_ranker_lists_variants_but_suggests_nothing(client, concept):

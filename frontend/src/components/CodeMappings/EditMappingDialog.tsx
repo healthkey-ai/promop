@@ -21,7 +21,7 @@
 import CanonicalUnitEditor from "./CanonicalUnitEditor";
 import IndividualSuggestCandidates from "./IndividualSuggestCandidates";
 import LoincAxesPanel from "./LoincAxesPanel";
-import type { LoincAxesPayload, LoincAxisOverrides } from "./loincAxes";
+import type { LoincAxisOverrides } from "./loincAxes";
 import SnomedEvidencePanel from "./SnomedEvidencePanel";
 import type { SnomedSettings } from "./snomed";
 import SourceVocabularyLookup from "./SourceVocabularyLookup";
@@ -242,6 +242,8 @@ export default function EditMappingDialog({
       setError("");
       setSearchingConcepts(false);
       setSuggestionMessage("");
+      setVariantMessage("");
+      setVariantCount(null);
       setSaving(false);
       setMintOpen(false);
       setIndividualSuggestion(null);
@@ -512,25 +514,44 @@ export default function EditMappingDialog({
     }, CONCEPT_SEARCH_DEBOUNCE_MS);
   }, [searchVocabulary, searchScope]);
 
-  /** One Suggest for the variants: each gets a proposed LOINC, left for approval. */
+  /** One Suggest for the variants: a queued run gives each a proposed LOINC, left for approval. */
   const suggestVariants = useCallback(async (request: number) => {
     const mappingId = selectedRow?.mapping_id;
     if (!mappingId) return;
     setVariantMessage("Suggesting a LOINC for each axis variant…");
     try {
       const enabled = Object.entries(strategies).filter(([, on]) => on).map(([name]) => name);
-      const { data } = await api.post<LoincAxesPayload & { suggestions: { axis_key: string; suggested: unknown | null }[] }>(
-        `/v1/code-mappings/${mappingId}/axis-variants/suggest/`, {
-          strategies: enabled, ranking_model: rankingModel,
-          ...(loincAxes && loincAxes.mappingId === mappingId ? { loinc_axes: loincAxes.overrides } : {}),
-        });
+      const { data: started } = await api.post<SuggestRunProgress>(`/v1/code-mappings/${mappingId}/axis-variants/suggest/`, {
+        strategies: enabled, ranking_model: rankingModel,
+        ...(loincAxes && loincAxes.mappingId === mappingId ? { loinc_axes: loincAxes.overrides } : {}),
+      });
+      let current = started;
+      const deadline = Date.now() + SUGGEST_POLL_TIMEOUT_MS;
+      let failures = 0;
+      while ((current.state === "queued" || current.state === "running") && request === dialogRequest.current) {
+        if (Date.now() > deadline) throw new Error("Suggestion timed out");
+        await new Promise(resolve => setTimeout(resolve, SUGGEST_POLL_INTERVAL_MS));
+        if (request !== dialogRequest.current) return;
+        try {
+          ({ data: current } = await api.get<SuggestRunProgress>(`/v1/code-mappings/suggest-runs/${started.run_id}/`, {
+            params: { include_activity: "1" },
+          }));
+          failures = 0;
+        } catch (fetchError) {
+          if (++failures > SUGGEST_POLL_MAX_FAILURES) throw fetchError;
+        }
+      }
       if (request !== dialogRequest.current) return;
+      if (current.state === "failure") throw new Error(current.error || "The run failed.");
+      type VariantResult = { stage: string; suggestions?: { axis_key: string; suggested: unknown | null }[]; variants?: unknown[] };
+      const result = (current.activity as VariantResult[] | undefined)?.find(event => event.stage === "result");
+      const suggestions = result?.suggestions ?? [];
+      const filled = suggestions.filter(s => s.suggested).length;
+      const total = result?.variants?.length ?? 0;
       setLoincAxesReload(n => n + 1);
-      const filled = data.suggestions.filter(s => s.suggested).length;
-      const total = (data.variants ?? []).length;
-      setVariantMessage(data.suggestions.length === 0
+      setVariantMessage(suggestions.length === 0
         ? "Every axis variant already has a destination."
-        : `Suggested a LOINC for ${filled} of ${data.suggestions.length} axis variant${data.suggestions.length === 1 ? "" : "s"}${total ? ` (${total} in all)` : ""}; approve each under LOINC axes.`);
+        : `Suggested a LOINC for ${filled} of ${suggestions.length} axis variant${suggestions.length === 1 ? "" : "s"}${total ? ` (${total} in all)` : ""}; approve each under LOINC axes.`);
     } catch (failure) {
       if (request === dialogRequest.current) setVariantMessage(`Could not suggest the variants' destinations. ${describeDestinationError(failure)}`);
     }

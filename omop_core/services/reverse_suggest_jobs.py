@@ -10,7 +10,22 @@ from omop_core.services.concept_to_code import concept_payload, standard_destina
 logger = logging.getLogger(__name__)
 
 
-def _with_variant_suggestions(candidate, params):
+def _may_write_variants(mapping, user):
+    """The same rule the variant endpoint applies to its caller: the run's
+    creator must administer the mapping's organization and nobody else may
+    hold its edit lock. Other hospitals' codes are listed, never written."""
+    from patient_portal.api import views
+
+    if user is None or not views._can_administer_code_mapping(user, mapping):
+        return False
+    try:
+        views._check_mapping_lock(mapping, user)
+    except views.MappingLocked:
+        return False
+    return True
+
+
+def _with_variant_suggestions(candidate, params, run, budget):
     """Fill in a flagged candidate's axis variants with proposed LOINCs (#2012).
 
     A source code whose units imply several LOINC axis sets needs one
@@ -18,6 +33,10 @@ def _with_variant_suggestions(candidate, params):
     variant without a destination is suggested with the run's ranker and
     stored as proposed; the candidate carries every variant so the curator can
     approve them from the queue. Curator review (no ranker) only lists them.
+
+    ``budget`` is the run's remaining variant allowance: a run suggests at most
+    its own ``limit`` of variants on top of its candidates, so it costs at most
+    twice what it was given, whichever dispatcher runs it.
     """
     from omop_core.mapping import axis_variants
     from omop_core.models import SourceCodeConceptMapping
@@ -27,15 +46,15 @@ def _with_variant_suggestions(candidate, params):
     mapping = SourceCodeConceptMapping.objects.filter(pk=candidate['mapping_id']).first()
     if mapping is None:
         return candidate
-    if params['ranking_model'] != 'none':
+    if params['ranking_model'] != 'none' and budget['left'] > 0 and _may_write_variants(mapping, run.created_by):
         try:
-            axis_variants.suggest_destinations(
+            results = axis_variants.suggest_destinations(
                 mapping, strategies=params['strategies'], ranking_model=params['ranking_model'],
-                user=None)
+                user=run.created_by, limit=min(axis_variants.SUGGEST_MAX, budget['left']))
+            budget['left'] -= len(results)
         except Exception:  # the candidate itself is still a result
             logger.exception('Axis variant suggestion failed for mapping %s', mapping.pk)
-    variants = mapping.axis_variants.select_related('target_concept').order_by('-occurrence_count', 'axis_key')
-    return {**candidate, 'axis_variants': [axis_variants.serialize(v) for v in variants]}
+    return {**candidate, 'axis_variants': axis_variants.serialize_all(mapping)}
 
 
 def execute_reverse_run(run_id, params):
@@ -43,6 +62,8 @@ def execute_reverse_run(run_id, params):
     # A redelivered Celery task must not restart a completed/running preview.
     if not runs.filter(state=SuggestRun.QUEUED).update(state=SuggestRun.RUNNING):
         return
+    run = runs.first()
+    budget = {'left': params['limit']}
     events = []
     done = 0
     try:
@@ -58,7 +79,7 @@ def execute_reverse_run(run_id, params):
             runs.update(activity=events, retrieved=len(events))
             for index, candidate in enumerate(candidates):
                 ranked = reverse_rank_candidate(concept, candidate, params['ranking_model'])
-                event['candidates'][index] = _with_variant_suggestions(ranked, params)
+                event['candidates'][index] = _with_variant_suggestions(ranked, params, run, budget)
                 runs.update(activity=events)
             done += 1
             runs.update(done=done)
