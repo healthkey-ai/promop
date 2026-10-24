@@ -18,6 +18,7 @@ import logging
 from datetime import timedelta
 
 from django.conf import settings
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from omop_core.mapping import axis_variants
@@ -26,9 +27,13 @@ from omop_core.models import AxisVariantRefresh
 logger = logging.getLogger(__name__)
 
 ACTIVE_OUTCOMES = ('queued', 'running')
-#: The worker task's hard limit. A ``running`` row older than this was left
-#: behind by a worker that died, and is requeued.
+#: The worker task's hard limit, shared with ``refresh_axis_variants_task`` so
+#: the stranded-row cutoff below cannot drift from it. A ``running`` row older
+#: than this was left behind by a worker that died, and is requeued.
 TIME_LIMIT = 6 * 60 * 60
+#: Raised inside the task shortly before the hard limit, so an overrun is
+#: recorded as ``failed`` instead of a row stuck in ``running``.
+SOFT_TIME_LIMIT = TIME_LIMIT - 5 * 60
 
 
 def task_id_for(request):
@@ -39,14 +44,20 @@ def request_refresh(reason=''):
     """Record a refresh request and return ``(request, created)``.
 
     At most one request is active: a second one while the first is queued or
-    running would walk the same codes again. Publishing is best effort here.
-    A broker that is missing or unreachable leaves the row queued for the
-    worker's own sweep (:func:`dispatch_queued_refreshes`).
+    running would walk the same codes again. The partial unique constraint on
+    the row closes the race between two callers. Publishing is best effort
+    here. A broker that is missing or unreachable leaves the row queued for the
+    worker's own sweep (:func:`dispatch_queued_refreshes`), or for
+    ``manage.py refresh_axis_variants`` run by hand (:func:`run_pending_inline`).
     """
     active = AxisVariantRefresh.objects.filter(outcome__in=ACTIVE_OUTCOMES).order_by('pk').first()
     if active is not None:
         return active, False
-    request = AxisVariantRefresh.objects.create(reason=reason)
+    try:
+        with transaction.atomic():
+            request = AxisVariantRefresh.objects.create(reason=reason)
+    except IntegrityError:
+        return AxisVariantRefresh.objects.filter(outcome__in=ACTIVE_OUTCOMES).order_by('pk').first(), False
     publish(request)
     return request, True
 
@@ -65,27 +76,54 @@ def publish(request):
     except Exception:
         logger.exception('Could not publish axis variant refresh %s; it stays queued.', request.pk)
         return False
-    AxisVariantRefresh.objects.filter(pk=request.pk, outcome='queued').update(task_id=task_id_for(request))
+    request.task_id = task_id_for(request)
+    AxisVariantRefresh.objects.filter(pk=request.pk, outcome='queued').update(task_id=request.task_id)
     return True
 
 
-def dispatch_queued_refreshes():
-    """Publish every queued request. Called when a worker becomes ready.
+def dispatch_queued_refreshes(republish=True):
+    """Publish queued requests. Called when a worker becomes ready.
 
-    A request published by ``migrate`` may have reached a worker from before
-    this task existed, which dropped it, so queued rows are republished whether
-    or not they carry a task id; the claim in :func:`run_refresh` makes the
-    duplicate harmless. A request stranded in ``running`` past the task's hard
-    limit lost its worker and is requeued; the refresh is idempotent.
+    A request ``migrate`` published may have reached a worker from before this
+    task existed, which dropped it. So the pass a worker runs on boot
+    republishes queued rows whether or not they carry a task id; the claim in
+    :func:`run_refresh` makes a duplicate harmless. The later rechecks pass
+    ``republish=False`` and publish only rows nothing has published yet, so a
+    request waiting behind a busy worker is not sent three times. A request
+    stranded in ``running`` past the task's hard limit lost its worker and is
+    requeued; the refresh is idempotent.
     """
     cutoff = timezone.now() - timedelta(seconds=TIME_LIMIT)
-    AxisVariantRefresh.objects.filter(outcome='running', started_at__lt=cutoff).update(
-        outcome='queued', task_id='', started_at=None)
+    stranded = AxisVariantRefresh.objects.filter(outcome='running', started_at__lt=cutoff)
+    waiting = AxisVariantRefresh.objects.filter(outcome='queued').order_by('pk').first()
+    if waiting is not None:
+        # Only one request may be queued, and the waiting one will walk the
+        # same codes, so the stranded one is closed rather than requeued.
+        stranded.update(outcome='failed', completed_at=timezone.now(),
+                        failure_reason=f'Worker lost; request {waiting.pk} replaces it.')
+    else:
+        stranded.update(outcome='queued', task_id='', started_at=None)
+    queued = AxisVariantRefresh.objects.filter(outcome='queued').order_by('pk')
+    if not republish:
+        queued = queued.filter(task_id='')
     dispatched = 0
-    for request in AxisVariantRefresh.objects.filter(outcome='queued').order_by('pk'):
+    for request in queued:
         if publish(request):
             dispatched += 1
     return dispatched
+
+
+def run_pending_inline(reason=''):
+    """Perform the refresh here, completing a queued request if there is one.
+
+    The path for an instance with no worker: ``manage.py refresh_axis_variants``
+    without ``--queue``. A request a migration left queued is claimed and
+    closed rather than left to block every later request.
+    """
+    request = AxisVariantRefresh.objects.filter(outcome='queued').order_by('pk').first()
+    if request is None:
+        request = AxisVariantRefresh.objects.create(reason=reason)
+    return run_refresh(request.pk)
 
 
 def run_refresh(request_id, batch_size=axis_variants.REFRESH_BATCH):

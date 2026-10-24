@@ -5080,6 +5080,15 @@ class AxisVariantRefresh(models.Model):
     class Meta:
         db_table = 'axis_variant_refresh'
         ordering = ['-created_at']
+        constraints = [
+            # At most one queued and one running request: two callers racing
+            # request_refresh must not start two walks over the same codes.
+            models.UniqueConstraint(
+                fields=['outcome'],
+                condition=Q(outcome__in=('queued', 'running')),
+                name='uq_axis_variant_refresh_active',
+            ),
+        ]
 
 
 class SourceSystemFacility(models.Model):

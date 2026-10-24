@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pytest
 from django.apps import apps
 from django.core.management import call_command
+from django.db import transaction
 from django.utils import timezone
 
 from omop_core.models import AxisVariantRefresh, PatientSourceCode, SourceCodeConceptMapping
@@ -38,9 +39,21 @@ def test_a_request_is_recorded_and_published_once(settings):
         again, created_again = axis_variant_jobs.request_refresh('test')
     assert created and not created_again and again.pk == request.pk
     publish.assert_called_once_with(args=[request.pk], task_id=f'axis-variant-refresh-{request.pk}')
+    assert request.task_id == f'axis-variant-refresh-{request.pk}', 'the instance learns its task id too'
     request.refresh_from_db()
     assert (request.outcome, request.task_id, request.reason) == (
         'queued', f'axis-variant-refresh-{request.pk}', 'test')
+
+
+def test_two_requests_cannot_be_active_at_once():
+    from django.db import IntegrityError
+
+    AxisVariantRefresh.objects.create(reason='first')
+    with pytest.raises(IntegrityError):
+        with transaction.atomic():
+            AxisVariantRefresh.objects.create(reason='second')
+    AxisVariantRefresh.objects.create(reason='done', outcome='done')
+    AxisVariantRefresh.objects.create(reason='also done', outcome='done')
 
 
 def test_without_a_broker_the_request_waits_for_a_worker(settings):
@@ -90,20 +103,57 @@ def test_a_failure_is_recorded_and_raised():
     assert request.completed_at is not None
 
 
-def test_a_ready_worker_publishes_queued_and_stranded_requests(settings):
+def test_a_ready_worker_republishes_a_dropped_request_and_leaves_a_live_one(settings):
     settings.CELERY_BROKER_URL = 'redis://broker/0'
     dropped = AxisVariantRefresh.objects.create(reason='published to an old worker', task_id='axis-variant-refresh-1')
-    stranded = AxisVariantRefresh.objects.create(
-        reason='worker died', outcome='running', started_at=timezone.now() - timedelta(hours=7))
     live = AxisVariantRefresh.objects.create(reason='live', outcome='running', started_at=timezone.now())
     AxisVariantRefresh.objects.create(reason='done', outcome='done')
     with patch(PUBLISH) as publish:
-        assert axis_variant_jobs.dispatch_queued_refreshes() == 2
-    assert sorted(call.kwargs['args'][0] for call in publish.call_args_list) == sorted([dropped.pk, stranded.pk])
-    stranded.refresh_from_db()
+        assert axis_variant_jobs.dispatch_queued_refreshes() == 1
+    publish.assert_called_once_with(args=[dropped.pk], task_id=f'axis-variant-refresh-{dropped.pk}')
     live.refresh_from_db()
-    assert (stranded.outcome, stranded.task_id) == ('queued', f'axis-variant-refresh-{stranded.pk}')
     assert live.outcome == 'running'
+
+
+def test_a_ready_worker_requeues_a_request_whose_worker_died(settings):
+    settings.CELERY_BROKER_URL = 'redis://broker/0'
+    stranded = AxisVariantRefresh.objects.create(
+        reason='worker died', outcome='running', started_at=timezone.now() - timedelta(hours=7))
+    with patch(PUBLISH) as publish:
+        assert axis_variant_jobs.dispatch_queued_refreshes() == 1
+    publish.assert_called_once()
+    stranded.refresh_from_db()
+    assert (stranded.outcome, stranded.task_id) == ('queued', f'axis-variant-refresh-{stranded.pk}')
+
+
+def test_a_stranded_request_is_closed_when_another_is_already_waiting(settings):
+    settings.CELERY_BROKER_URL = 'redis://broker/0'
+    stranded = AxisVariantRefresh.objects.create(
+        reason='worker died', outcome='running', started_at=timezone.now() - timedelta(hours=7))
+    waiting = AxisVariantRefresh.objects.create(reason='waiting')
+    with patch(PUBLISH) as publish:
+        assert axis_variant_jobs.dispatch_queued_refreshes() == 1
+    publish.assert_called_once_with(args=[waiting.pk], task_id=f'axis-variant-refresh-{waiting.pk}')
+    stranded.refresh_from_db()
+    assert stranded.outcome == 'failed' and str(waiting.pk) in stranded.failure_reason
+
+
+def test_a_recheck_does_not_republish_what_was_published(settings):
+    settings.CELERY_BROKER_URL = 'redis://broker/0'
+    AxisVariantRefresh.objects.create(reason='published', task_id='axis-variant-refresh-1')
+    with patch(PUBLISH) as publish:
+        assert axis_variant_jobs.dispatch_queued_refreshes(republish=False) == 0
+    publish.assert_not_called()
+    AxisVariantRefresh.objects.filter(reason='published').update(task_id='')
+    with patch(PUBLISH) as publish:
+        assert axis_variant_jobs.dispatch_queued_refreshes(republish=False) == 1
+
+
+def test_the_task_limits_agree_with_the_stranded_cutoff():
+    from omop_core.tasks import refresh_axis_variants_task
+
+    assert refresh_axis_variants_task.time_limit == axis_variant_jobs.TIME_LIMIT
+    assert refresh_axis_variants_task.soft_time_limit < axis_variant_jobs.TIME_LIMIT
 
 
 def test_the_task_performs_the_request(two_unit_code):
@@ -124,8 +174,18 @@ def test_migration_0303_requests_one_refresh(settings, two_unit_code):
     assert (request.outcome, request.reason) == ('queued', migration.REASON)
     two_unit_code.refresh_from_db()
     assert two_unit_code.axis_variant_count == 0, 'migrate must not perform the refresh'
-    migration.withdraw_refresh(apps, None)
-    assert not AxisVariantRefresh.objects.exists()
+
+
+def test_migration_0303_publishes_only_after_commit(settings):
+    settings.CELERY_BROKER_URL = 'redis://broker/0'
+    migration = importlib.import_module('omop_core.migrations.0303_axis_variant_refresh')
+    with patch(PUBLISH) as publish:
+        with transaction.atomic():
+            migration.request_refresh(apps, None)
+            publish.assert_not_called()
+    # The test transaction never commits, so the publish never fires here; the
+    # row is what a worker's sweep would pick up.
+    assert AxisVariantRefresh.objects.get().outcome == 'queued'
 
 
 def test_the_command_can_queue_instead_of_refreshing(settings, two_unit_code):
@@ -138,3 +198,16 @@ def test_the_command_can_queue_instead_of_refreshing(settings, two_unit_code):
     assert f'refresh {request.pk} is already queued' in out.getvalue()
     two_unit_code.refresh_from_db()
     assert two_unit_code.axis_variant_count == 0
+
+
+def test_the_inline_command_completes_a_queued_request(two_unit_code):
+    queued = AxisVariantRefresh.objects.create(reason='left by a migration')
+    out = StringIO()
+    call_command('refresh_axis_variants', stdout=out)
+    queued.refresh_from_db()
+    two_unit_code.refresh_from_db()
+    assert queued.outcome == 'done' and two_unit_code.axis_variant_count == 2
+    assert 'Refreshed 1 mappings; 1 now have axis variants.' in out.getvalue()
+    assert AxisVariantRefresh.objects.count() == 1
+    call_command('refresh_axis_variants', '--dry-run', stdout=out)
+    assert '1 source codes have more than one unit.' in out.getvalue()

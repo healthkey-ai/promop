@@ -8,6 +8,7 @@ from celery.signals import worker_ready
 from django.db import OperationalError, ProgrammingError
 
 from omop_core.models import Person
+from omop_core.services import axis_variant_jobs as _axis_variant_jobs
 
 
 @worker_ready.connect
@@ -27,9 +28,11 @@ def dispatch_hospital_code_imports_on_worker_ready(**_kwargs):
 
     log = logging.getLogger(__name__)
 
-    def dispatch():
+    def dispatch(first=False):
+        # The boot pass republishes refresh requests an older worker may have
+        # dropped; the rechecks only publish what nothing has published yet.
         for label, publish in (('hospital-code import', dispatch_queued_imports),
-                               ('axis variant refresh', dispatch_queued_refreshes)):
+                               ('axis variant refresh', lambda: dispatch_queued_refreshes(republish=first))):
             try:
                 publish()
             except (OperationalError, ProgrammingError):
@@ -39,7 +42,7 @@ def dispatch_hospital_code_imports_on_worker_ready(**_kwargs):
                 # be published. The queued database row remains retryable.
                 log.exception('Could not dispatch %s.', label)
 
-    dispatch()
+    dispatch(first=True)
     # Render can bring the worker up while the web service is still running its
     # release migration. Recheck without blocking worker readiness; once a task
     # id is recorded these passes are no-ops.
@@ -253,8 +256,11 @@ def import_hospital_code_seed_task(self, import_id: int) -> dict[str, Any]:
     name='omop_core.refresh_axis_variants',
     # One request walks every multi-unit code on the instance. HealthTree's did
     # not finish inside the Cloud Run migrate job's hour (#2021); give it the
-    # Athena sync's limit, which the Redis visibility timeout already exceeds.
-    time_limit=6 * 60 * 60,
+    # Athena sync's limit, which the Redis visibility timeout (25200s) exceeds.
+    # The soft limit fires first, inside run_refresh's try, so an overrun is
+    # recorded as failed instead of leaving the row running forever.
+    time_limit=_axis_variant_jobs.TIME_LIMIT,
+    soft_time_limit=_axis_variant_jobs.SOFT_TIME_LIMIT,
     acks_late=True,
     reject_on_worker_lost=True,
 )
@@ -265,6 +271,4 @@ def refresh_axis_variants_task(self, request_id: int) -> dict[str, Any]:
     publish from the worker-ready sweep runs nothing twice. A failure is
     recorded on the row and raised, so Celery reports FAILURE as well.
     """
-    from omop_core.services.axis_variant_jobs import run_refresh
-
-    return run_refresh(request_id)
+    return _axis_variant_jobs.run_refresh(request_id)
