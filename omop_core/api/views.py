@@ -5,6 +5,8 @@ shell. Host policy is a seam, not a copy: a host subclasses the viewset to add i
 permission classes, its per-person write check, and its own ``PatientRecord``
 payload shape.
 """
+import logging
+
 from django.db import transaction
 from rest_framework import status, viewsets
 from rest_framework.permissions import IsAuthenticated
@@ -14,6 +16,32 @@ from omop_core.api.serializers import TherapyLineWriteSerializer
 from omop_core.models import PatientRecord
 from omop_core.signals import suppress_patient_record_refresh
 from omop_oncology.models import Episode
+
+logger = logging.getLogger(__name__)
+
+
+def _therapy_line_error_field(exc):
+    """A static field hint for a known authoring validation failure.
+
+    The exception text is used only for classification; it never reaches the
+    response. Clients get the field name to highlight, not internal detail.
+    """
+    message = str(exc)
+    if 'end_date' in message:
+        return 'end_date'
+    if 'line_number' in message:
+        return 'line_number'
+    if 'start_date' in message or 'future therapy line' in message:
+        return 'start_date'
+    if ('Unknown drug concept_id' in message
+            or 'Duplicate drug source_value' in message
+            or 'drug_exposure_id' in message):
+        return 'drugs'
+    if 'regimen' in message:
+        return 'regimen_concept_id'
+    if 'diagnosis' in message or 'disease' in message:
+        return 'disease'
+    return None
 
 
 class TherapyLineViewSet(viewsets.ViewSet):
@@ -73,9 +101,29 @@ class TherapyLineViewSet(viewsets.ViewSet):
                         **submitted,
                     )
         except TherapyLineWriteConflict as exc:
-            return Response({'detail': str(exc)}, status=status.HTTP_409_CONFLICT)
+            logger.warning(
+                'Therapy line write conflicted (%s); details withheld from the client',
+                type(exc).__name__,
+            )
+            return Response(
+                {'detail': 'This therapy line conflicts with an existing therapy line.'},
+                status=status.HTTP_409_CONFLICT,
+            )
         except ValueError as exc:
-            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+            logger.warning(
+                'Therapy line write rejected (%s); details withheld from the client',
+                type(exc).__name__,
+            )
+            detail = {'detail': 'The therapy line could not be saved as submitted.'}
+            field = _therapy_line_error_field(exc)
+            if field is not None:
+                detail['field'] = field
+            if field == 'drugs':
+                detail['concept_ids'] = [
+                    drug.get('concept_id') for drug in data.get('drugs') or []
+                    if isinstance(drug, dict)
+                ]
+            return Response(detail, status=status.HTTP_400_BAD_REQUEST)
 
         if result.episode is None:
             return Response(
@@ -137,7 +185,14 @@ class TherapyLineViewSet(viewsets.ViewSet):
         try:
             retract_therapy_line(episode.person, episode)
         except ValueError as exc:
-            return Response({'detail': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+            logger.warning(
+                'Therapy line retract rejected (%s); details withheld from the client',
+                type(exc).__name__,
+            )
+            return Response(
+                {'detail': 'The therapy line could not be retracted.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
 
         record = refresh_patient_record(episode.person)
         return Response({
@@ -184,6 +239,61 @@ class TherapyLineViewSet(viewsets.ViewSet):
             data=serializer.validated_data,
             episode=episode,
         )
+
+
+class TherapyHistoryCompletenessViewSet(viewsets.ViewSet):
+    """Confirm, or withdraw the confirmation, that the recorded lines are complete.
+
+    ``POST /v1/therapy-history/completeness/`` ``{"person": <id>, "complete": true|false}``.
+
+    A confirmation is what turns ``therapy_lines_count`` from a lower bound into an
+    exact count, so it is a deliberate statement rather than a side effect of
+    saving a line (#1924). Hosts apply the same write gate and per-person
+    authorization as authoring through ``patient_write_denied``.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def patient_write_denied(self, request, person):
+        # A host's therapy-line override does not secure this separate viewset.
+        # Require its explicit authorization implementation before any mutation.
+        return Response({'detail': 'The host must authorize therapy-history confirmation.'},
+                        status=status.HTTP_403_FORBIDDEN)
+
+    def patient_info_payload(self, record):
+        return None
+
+    def create(self, request):
+        from omop_core.models import Person
+        from omop_core.services.patient_record_service import refresh_patient_record
+        from omop_core.services.therapy_history import (
+            confirm_therapy_history, withdraw_therapy_history,
+        )
+
+        person_id = request.data.get('person')
+        try:
+            person = Person.objects.get(pk=int(person_id))
+        except (TypeError, ValueError, Person.DoesNotExist):
+            return Response({'detail': 'A valid person is required.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        denied = self.patient_write_denied(request, person)
+        if denied is not None:
+            return denied
+
+        complete = request.data.get('complete', True)
+        if isinstance(complete, str):
+            complete = complete.strip().lower() not in {'0', 'false', 'no', ''}
+        if complete:
+            confirm_therapy_history(person, source=request.data.get('source') or 'patient')
+        else:
+            withdraw_therapy_history(person)
+
+        record = refresh_patient_record(person)
+        return Response({
+            'therapy_history_complete': record.therapy_history_complete,
+            'patient_info': self.patient_info_payload(record),
+        })
 
 
 def therapy_outcomes(request):

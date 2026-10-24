@@ -8,6 +8,28 @@ All notable changes to PRomop are documented here.
 
 ### Added
 
+- **Derived verdicts are not offered as direct writes** — fields that
+  `refresh_patient_record`/`recompute_patient_record_fields` own
+  (`measurable_disease_imwg`, `measurable_disease_iwcll`, `metastatic_status`,
+  `renal_adequacy_status`, `no_other_active_malignancies`,
+  `no_active_infection_status`, `patient_age`) are now reported as computed with
+  the facts that drive them, on both the legacy and shared descriptors. A caller
+  could previously PATCH one of these verdicts, only for the next save to
+  overwrite it, and the dialog could not explain which inputs mattered.
+- **Complex eligibility subforms edit their source facts, not their verdict** —
+  the SLiM, CRAB, MIPI/MIPI-c and High-Risk-MCL rows stay computed and
+  non-authorable, but their inputs are now ordinary editable fields in the same
+  recursive dialog instead of being disabled by the row's compatibility gate.
+  Descriptors report `compatibility_scope: "result"` so a host can keep the
+  result read-only without freezing its sources. Editing a CRAB or SLiM input
+  re-derives that verdict in the same request from the record's canonical
+  values (`derive_meets_crab`, `derive_meets_slim`), keeping the existing
+  thresholds and the involved-chain burden guard; unknown inputs stay unknown
+  instead of asserting "not met". The CRAB renal alternative (serum creatinine
+  > 2 mg/dL when no clearance is recorded) is now applied on both the direct-edit
+  and OMOP paths. Full SLiM/MIPI-parity with Trial Details (MRI lesions, MIPI
+  result ownership) remains a documented clinical decision (#5482).
+
 - **The patient can confirm that the recorded treatment history is complete** —
   the Treatment tab now carries "This is my complete treatment history". Until it
   is ticked, the number of recorded lines is a lower bound ("at least N"); the
@@ -17,6 +39,17 @@ All notable changes to PRomop are documented here.
   patient copy carries the confirmation with the record. The write goes through
   the packaged endpoint, so an embedding host applies its own write gate and
   per-person authorization (#1924).
+
+- **An ETL can write a patient's lines of therapy** — `POST
+  /api/v1/therapy-lines/bulk_upsert/` takes one person's lines as the source
+  states them (number, dates, ongoing, regimen label, outcome) and writes them
+  through the canonical line writer in one all-or-nothing request, deriving the
+  record once. Patients imported through the OMOP row endpoints had no lines,
+  because none of those endpoints writes an `Episode`, and the per-line editor
+  POST refuses the `system/etl.write` credential. Regimen labels resolve to a
+  concept only through the curated regimen table or an exact HemOnc name;
+  anything else keeps the label as the line's name and is queued as a regimen
+  mapping gap, so an abbreviation such as "R" is never guessed (#1969).
 
 - **A recorded line no longer has to name its drugs, and a wrong line can be
   withdrawn** — the therapy editor offers "I don't know which drugs were given",
@@ -87,6 +120,18 @@ All notable changes to PRomop are documented here.
   the Existing mappings and Find source codes lists are unchanged (#1915, #1911).
 
 ### Changed
+
+- **A patient's own record edits are recorded as patient self-report** — a
+  `PatientRecord` PATCH by the patient (`/patient-info/me/`) or their verified
+  representative projects its OMOP facts with type 32865 (Patient self-report)
+  instead of the recipe's type, which for curated mappings defaults to EHR.
+  The patient's own facts also get a `PATIENT_SELF` provenance row, as PHR
+  entries do. Same-day matching keeps the two apart in both directions: a
+  patient's answer sits beside a clinical fact recorded the same day instead of
+  overwriting it and taking over its type and provenance, and a later clinician,
+  staff or service edit that day writes its own fact rather than the patient's.
+  Their types are otherwise unchanged. Without concept 32865 loaded, the recipe
+  type stands (#1959).
 
 - **Mapping saves return immediately** — approving or re-pointing a code
   mapping (Concept to Code, Code to Concept, group approve, CSV upload) writes the mapping

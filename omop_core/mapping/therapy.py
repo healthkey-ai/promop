@@ -16,6 +16,8 @@ is the single choke point for resolving a regimen/drug *name* to a concept:
      vocabularies (``standard_concept=None``, ``source='HealthKey'``) and
      record a ``RegimenMappingGap`` row so the unmatched name is visible for
      curation.
+  4. ``resolve_regimen_label`` — curated TherapyRegimen, then an exact HemOnc
+     name, else (3).
 
 Nothing in this module ever writes to the HemOnc vocabulary or to any other
 licensed/external vocabulary (RxNorm, CVX, LOINC, SNOMED, ...).
@@ -33,6 +35,7 @@ from omop_core.models import (
     ConceptClass,
     Domain,
     RegimenMappingGap,
+    TherapyRegimen,
     Vocabulary,
 )
 from omop_core.services.pk import next_pk
@@ -120,6 +123,47 @@ def match_hemonc_regimen_by_name(name):
     return qs.filter(synonyms__concept_synonym_name__iexact=normalized).first()
 
 
+def is_assertable_regimen(concept: Concept | None) -> bool:
+    """True for a valid HemOnc regimen or a live HK-Regimen quarantine concept."""
+    if concept is None:
+        return False
+    if validate_hemonc_regimen(concept):
+        return True
+    return (
+        concept.vocabulary_id == HK_REGIMEN_VOCAB_ID
+        and concept.concept_class_id == REGIMEN_CONCEPT_CLASS_ID
+        and not concept.invalid_reason
+    )
+
+
+REGIMEN_MATCH_REFERENCE = 'reference'
+REGIMEN_MATCH_HEMONC = 'hemonc'
+REGIMEN_MATCH_UNMATCHED = 'unmatched'
+
+
+def resolve_regimen_label(label: str | None, source_system: str) -> tuple[Concept | None, str | None]:
+    """Resolve a regimen label to (concept, match) via TherapyRegimen, exact HemOnc name, else quarantine.
+
+    HemOnc synonyms are skipped on purpose. Labels are abbreviations that differ by disease
+    (HealthTree "R" is lenalidomide in myeloma but rituximab in lymphoma) and a wrong concept
+    would look like an asserted regimen.
+    """
+    label = (label or '').strip()
+    if not label:
+        return None, None
+    regimen = (
+        TherapyRegimen.objects.filter(Q(code__iexact=label) | Q(title__iexact=label))
+        .select_related('concept').order_by('id').first()
+    )
+    # A curated row can point at a retired or non-regimen concept
+    if regimen is not None and is_assertable_regimen(regimen.concept):
+        return regimen.concept, REGIMEN_MATCH_REFERENCE
+    concept = _valid_hemonc_regimen_qs().filter(concept_name__iexact=label).order_by('concept_id').first()
+    if concept is not None:
+        return concept, REGIMEN_MATCH_HEMONC
+    return get_or_create_quarantine_regimen(label, source_system=source_system), REGIMEN_MATCH_UNMATCHED
+
+
 def record_mapping_gap(*, source_system, source_value, matched_concept=None,
                        quarantine_concept=None, status=None):
     """Idempotently record a mapping gap.
@@ -178,11 +222,25 @@ def _ensure_hk_vocab(vocabulary_id):
 def _get_or_create_quarantine_concept(*, vocabulary_id, domain_id,
                                       concept_class_id, concept_code,
                                       concept_name):
-    concept = Concept.objects.filter(
-        vocabulary_id=vocabulary_id, concept_code=concept_code,
-    ).first()
-    if concept is not None:
-        if normalize_regimen_name(concept.concept_name) == normalize_regimen_name(concept_name):
+    original_code = concept_code
+    normalized_name = normalize_regimen_name(concept_name)
+    if len(concept_name) > 255:
+        # The display cannot preserve the full identity. Put a digest of the
+        # original source slug and complete normalized input in the code, so
+        # both source-code identity and differences beyond the display survive.
+        identity = f'{original_code}\0{normalized_name}'
+        digest = hashlib.sha256(identity.encode('utf-8')).hexdigest()[:40]
+        concept_code = f'{concept_code[:9]}-{digest}'
+    base_code = concept_code
+    stored_name = normalize_regimen_name(concept_name[:255])
+    collision_index = 0
+    while True:
+        concept = Concept.objects.filter(
+            vocabulary_id=vocabulary_id, concept_code=concept_code,
+        ).first()
+        if concept is None:
+            break
+        if normalize_regimen_name(concept.concept_name) == stored_name:
             return concept
         # Slug collision: a different name already owns this code (punctuation
         # collapse / 50-char truncation can map distinct names to one slug).
@@ -191,16 +249,13 @@ def _get_or_create_quarantine_concept(*, vocabulary_id, domain_id,
         # Not a security use: this only disambiguates a slug collision so two
         # distinct regimen names get distinct concept rows. Flagged explicitly so
         # the SAST gate does not have to carry it as a baselined false positive.
+        identity = normalized_name if collision_index == 0 else f'{normalized_name}\0{collision_index}'
         digest = hashlib.sha1(
-            normalize_regimen_name(concept_name).encode('utf-8'),
+            identity.encode('utf-8'),
             usedforsecurity=False,
         ).hexdigest()[:8]
-        concept_code = f'{concept_code[:41]}-{digest}'[:50]
-        concept = Concept.objects.filter(
-            vocabulary_id=vocabulary_id, concept_code=concept_code,
-        ).first()
-        if concept is not None:
-            return concept
+        concept_code = f'{base_code[:41]}-{digest}'[:50]
+        collision_index += 1
 
     domain, _ = Domain.objects.get_or_create(
         domain_id=domain_id,
@@ -214,18 +269,31 @@ def _get_or_create_quarantine_concept(*, vocabulary_id, domain_id,
             'concept_class_concept_id': 0,
         },
     )
-    return Concept.objects.create(
-        concept_id=next_pk(Concept, 'concept_id'),
-        concept_name=concept_name[:255],
-        domain=domain,
+    # Another import may have claimed this unique vocabulary/code since the
+    # initial lookup. Match only that key, never the proposed PK or name.
+    concept, created = Concept.objects.get_or_create(
         vocabulary=vocabulary,
-        concept_class=concept_class,
-        standard_concept=None,
-        source=SOURCE_HEALTHKEY,
         concept_code=concept_code,
-        valid_start_date=date(1970, 1, 1),
-        valid_end_date=date(2099, 12, 31),
+        defaults={
+            'concept_id': next_pk(Concept, 'concept_id'),
+            'concept_name': concept_name[:255],
+            'domain': domain,
+            'concept_class': concept_class,
+            'standard_concept': None,
+            'source': SOURCE_HEALTHKEY,
+            'valid_start_date': date(1970, 1, 1),
+            'valid_end_date': date(2099, 12, 31),
+        },
     )
+    if not created and normalize_regimen_name(concept.concept_name) != stored_name:
+        # A different name won the slug race: apply the same disambiguation as
+        # an ordinary existing-row collision rather than aliasing the regimens.
+        return _get_or_create_quarantine_concept(
+            vocabulary_id=vocabulary_id, domain_id=domain_id,
+            concept_class_id=concept_class_id, concept_code=original_code,
+            concept_name=concept_name,
+        )
+    return concept
 
 
 def get_or_create_quarantine_regimen(name, source_system='fhir-upload'):

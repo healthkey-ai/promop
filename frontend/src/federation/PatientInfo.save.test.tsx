@@ -10,6 +10,7 @@ import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import type { AxiosInstance } from 'axios';
 import { QueryClient } from '@tanstack/react-query';
 import PatientInfo from './PatientInfo';
+import { patientFormForClient } from './patientFormRuntime';
 import { __resetWritableFieldsCache } from '@/hooks/useWritableFields';
 import { resetClinicalTransport } from '@/api/clinicalTransport';
 
@@ -22,6 +23,8 @@ vi.mock('@/hooks/useLabMeasurements', () => ({
 }));
 
 const DESCRIPTORS = {
+  email: { kind: 'direct', writable: true, target: 'patient_record', control: 'email' },
+  preexisting_conditions: { kind: 'direct', writable: true, target: 'patient_record' },
   anc_thousand_per_ul: {
     kind: 'direct', writable: true, target: 'patient_record',
     value_kind: 'number',
@@ -37,6 +40,8 @@ const DESCRIPTORS = {
 };
 
 const PATIENT_INFO = {
+  no_pre_existing_conditions: true,
+  preexisting_conditions: [],
   person_id: 261,
   anc_thousand_per_ul: 3.1,
   absolute_neutrophile_count: '3.10',
@@ -94,6 +99,7 @@ beforeEach(() => {
         data: {
           patient_info: merged,
           patient_name: 'Alishia Tawny Howell',
+          write: { applied: Object.keys(body as Record<string, unknown>), rejected: {} },
         },
       });
     }),
@@ -103,6 +109,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
   resetClinicalTransport();
+  window.history.replaceState({}, '', '/');
 });
 
 async function renderAndLoad() {
@@ -120,10 +127,83 @@ async function openLabsTab() {
 async function editAndSave(displayValue: string, next: string) {
   vi.useFakeTimers({ shouldAdvanceTime: true });
   fireEvent.change(screen.getByDisplayValue(displayValue), { target: { value: next } });
-  await act(async () => { vi.advanceTimersByTime(2100); });
+  await act(async () => { await vi.advanceTimersByTimeAsync(500); });
 }
 
 describe('federated PatientInfo save', () => {
+  it('does not resurrect none when an older in-flight PATCH finishes after withdrawal', async () => {
+    let finishPatch!: (response: unknown) => void;
+    (client.patch as ReturnType<typeof vi.fn>).mockImplementation((url: string, body: unknown) => {
+      patches.push([url, body]);
+      return new Promise(resolve => { finishPatch = resolve; });
+    });
+    (client.post as ReturnType<typeof vi.fn>).mockImplementation((url: string, body: unknown) => {
+      posts.push([url, body]);
+      return Promise.resolve({ data: { no_pre_existing_conditions: null, preexisting_conditions: [] } });
+    });
+    await renderAndLoad();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Withdraw answer' })).toBeEnabled());
+    await editAndSave('howell@example.org', 'new@example.org');
+    await waitFor(() => expect(patches).toHaveLength(1));
+    fireEvent.click(screen.getByRole('button', { name: 'Withdraw answer' }));
+    await waitFor(() => expect(screen.getByText(/Not answered/)).toBeInTheDocument());
+    await act(async () => { finishPatch({ data: { patient_info: { ...PATIENT_INFO, email: 'new@example.org' } } }); });
+    expect(screen.getByText(/Not answered/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm no pre-existing conditions' }));
+    await waitFor(() => expect(posts.at(-1)![1]).toMatchObject({
+      action: 'confirm_none', expected_flag: null, expected_categories: [],
+    }));
+  });
+  it('uses the host explicit-answer action without replaying it in pending autosave', async () => {
+    (client.post as ReturnType<typeof vi.fn>).mockImplementation((url: string, body: unknown) => {
+      posts.push([url, body]);
+      return Promise.resolve({ data: { no_pre_existing_conditions: null, preexisting_conditions: [] } });
+    });
+    (client.patch as ReturnType<typeof vi.fn>).mockImplementation((url: string, body: unknown) => {
+      patches.push([url, body]);
+      return Promise.resolve({ data: { patient_info: {
+        ...PATIENT_INFO, ...(body as Record<string, unknown>),
+        no_pre_existing_conditions: null, preexisting_conditions: [],
+      } } });
+    });
+    await renderAndLoad();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Withdraw answer' })).toBeEnabled());
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    fireEvent.change(screen.getByDisplayValue('howell@example.org'), { target: { value: 'new@example.org' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Withdraw answer' }));
+    await waitFor(() => expect(screen.getByText(/Not answered/)).toBeInTheDocument());
+    await act(async () => { vi.advanceTimersByTime(2100); });
+    await waitFor(() => expect(patches.length).toBeGreaterThan(0));
+    expect(screen.getByText(/Not answered/)).toBeInTheDocument();
+    const body = patches.at(-1)![1];
+    expect(body).toMatchObject({ email: 'new@example.org' });
+    expect(body).not.toHaveProperty('no_pre_existing_conditions');
+    expect(body).not.toHaveProperty('preexisting_conditions');
+    expect(posts[0]).toEqual(['/api/v1/patient-records/261/preexisting-conditions-answer/', {
+      action: 'withdraw', expected_flag: true, expected_categories: [],
+    }]);
+  });
+  it('labels mantle cell lymphoma as its own disease tab', async () => {
+    (client.get as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
+      if (url.includes('writable-fields')) return Promise.resolve({ data: DESCRIPTORS });
+      if (url.includes('/patient-info/me/')) return Promise.resolve({ data: {
+        patient_info: { ...PATIENT_INFO, disease: 'mantle cell lymphoma' },
+        user: { name: 'Alishia Howell', email: 'howell@example.org' },
+        patient_name: 'Alishia Tawny Howell',
+      } });
+      return Promise.resolve({ data: [] });
+    });
+    await renderAndLoad();
+    expect(screen.getByRole('button', { name: 'Mantle Cell Lymphoma' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Follicular Lymphoma' })).not.toBeInTheDocument();
+  });
+
+  it('opens the tab named by the host deep link', async () => {
+    window.history.replaceState({}, '', '/info?tab=labs');
+    render(<PatientInfo apiClient={client} apiBasePath="/api" queryClient={qc} />);
+    await waitFor(() => expect(screen.getByText('Blood Counts')).toBeInTheDocument());
+  });
+
   it('fetches the descriptor through the host client, not the app singleton', async () => {
     await renderAndLoad();
     await openLabsTab();
@@ -141,9 +221,9 @@ describe('federated PatientInfo save', () => {
     await editAndSave('3.1', '5.5');
 
     await waitFor(() =>
-      expect(patches.some(([u]) => u.includes('/patient-info/me/'))).toBe(true),
+      expect(patches.some(([u]) => u === '/api/v1/patient-records/261/')).toBe(true),
     );
-    const [, body] = patches.find(([u]) => u.includes('/patient-info/me/'))!;
+    const [, body] = patches.find(([u]) => u === '/api/v1/patient-records/261/')!;
     expect(body).toMatchObject({ anc_thousand_per_ul: 5.5 });
     // No separate OMOP endpoint post
     expect(posts).toEqual([]);
@@ -155,7 +235,7 @@ describe('federated PatientInfo save', () => {
     await editAndSave('3.1', '5.5');
 
     await waitFor(() =>
-      expect(patches.some(([u]) => u.includes('/patient-info/me/'))).toBe(true),
+      expect(patches.some(([u]) => u === '/api/v1/patient-records/261/')).toBe(true),
     );
     // No measurement/observation POST should happen
     expect(posts).toEqual([]);
@@ -166,9 +246,9 @@ describe('federated PatientInfo save', () => {
     await editAndSave('howell@example.org', 'a.howell@example.org');
 
     await waitFor(() =>
-      expect(patches.some(([u]) => u.includes('/patient-info/me/'))).toBe(true),
+      expect(patches.some(([u]) => u === '/api/v1/patient-records/261/')).toBe(true),
     );
-    const [, body] = patches.find(([u]) => u.includes('/patient-info/me/'))!;
+    const [, body] = patches.find(([u]) => u === '/api/v1/patient-records/261/')!;
     expect(body).not.toHaveProperty('absolute_neutrophile_count');
   });
 
@@ -177,9 +257,9 @@ describe('federated PatientInfo save', () => {
     await editAndSave('howell@example.org', 'a.howell@example.org');
 
     await waitFor(() =>
-      expect(patches.some(([u]) => u.includes('/patient-info/me/'))).toBe(true),
+      expect(patches.some(([u]) => u === '/api/v1/patient-records/261/')).toBe(true),
     );
-    const [, body] = patches.find(([u]) => u.includes('/patient-info/me/'))!;
+    const [, body] = patches.find(([u]) => u === '/api/v1/patient-records/261/')!;
     for (const f of ['id', 'created_at', 'updated_at', 'derivation_version']) {
       expect(body).not.toHaveProperty(f);
     }
@@ -190,9 +270,9 @@ describe('federated PatientInfo save', () => {
     await editAndSave('howell@example.org', 'a.howell@example.org');
 
     await waitFor(() =>
-      expect(patches.some(([u]) => u.includes('/patient-info/me/'))).toBe(true),
+      expect(patches.some(([u]) => u === '/api/v1/patient-records/261/')).toBe(true),
     );
-    const [, body] = patches.find(([u]) => u.includes('/patient-info/me/'))!;
+    const [, body] = patches.find(([u]) => u === '/api/v1/patient-records/261/')!;
     expect(body).toEqual({ email: 'a.howell@example.org' });
   });
 
@@ -201,7 +281,7 @@ describe('federated PatientInfo save', () => {
     await editAndSave('howell@example.org', 'a.howell@example.org');
 
     await waitFor(() =>
-      expect(patches.some(([u]) => u.includes('/patient-info/me/'))).toBe(true),
+      expect(patches.some(([u]) => u === '/api/v1/patient-records/261/')).toBe(true),
     );
     expect(screen.getByDisplayValue('a.howell@example.org')).toBeInTheDocument();
   });
@@ -213,17 +293,18 @@ describe('federated PatientInfo save', () => {
       target: { value: 'a.howell@example.org' },
     });
     await act(async () => {
-      qc.setQueryData(['patient-info', 'me'], {
-        patient_info: { ...PATIENT_INFO, anc_thousand_per_ul: 4.2 },
-        user: { name: 'Alishia Howell', email: 'howell@example.org' },
-        patient_name: 'Alishia Tawny Howell',
-      });
+      (client.get as ReturnType<typeof vi.fn>).mockImplementation((url: string) => Promise.resolve({
+        data: url.includes('writable-fields') ? DESCRIPTORS : {
+          patient_info: { ...PATIENT_INFO, anc_thousand_per_ul: 4.2 }, patient_name: 'Alishia Tawny Howell',
+        },
+      }));
+      await patientFormForClient(client, '/api').load();
     });
     expect(screen.getByDisplayValue('a.howell@example.org')).toBeInTheDocument();
     fireEvent.change(screen.getByDisplayValue('a.howell@example.org'), {
       target: { value: 'b.howell@example.org' },
     });
-    await act(async () => { vi.advanceTimersByTime(2100); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(500); });
     await waitFor(() => expect(patches).toHaveLength(1));
     expect(patches[0][1]).toEqual({ email: 'b.howell@example.org' });
   });
@@ -243,10 +324,9 @@ describe('federated PatientInfo save', () => {
       return Promise.resolve({ data: [] });
     });
 
-    await renderAndLoad();
-    await editAndSave('howell@example.org', 'a.howell@example.org');
-
-    expect(patches.filter(([u]) => u.includes('/patient-info/me/'))).toEqual([]);
+    render(<PatientInfo apiClient={client} apiBasePath="/api" queryClient={qc} />);
+    await screen.findByRole('alert');
+    expect(patches).toEqual([]);
     expect(posts).toEqual([]);
   });
 });

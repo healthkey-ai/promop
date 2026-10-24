@@ -3235,6 +3235,31 @@ class TherapyHistoryAttestation(models.Model):
         return f'Person {self.person_id} therapy history confirmed {self.confirmed_at:%Y-%m-%d}'
 
 
+class PreexistingConditionsAttestation(models.Model):
+    """The person's explicit statement that they have no pre-existing conditions.
+
+    ``PatientRecord.no_pre_existing_conditions`` answers a question, it is not a
+    derivation of an empty category list (#1988). Absence of this row means
+    "not answered" -- the projection stays NULL. Adding a category is the more
+    specific statement and withdraws this one, because both cannot be true.
+    """
+    person = models.OneToOneField(
+        Person, on_delete=models.CASCADE,
+        related_name='preexisting_conditions_attestation',
+    )
+    confirmed_at = models.DateTimeField()
+    # Where the statement came from ('patient', 'clinician', 'host'); provenance
+    # only, never a clinical decision.
+    source = models.CharField(max_length=20, default='patient')
+
+    class Meta:
+        db_table = 'preexisting_conditions_attestation'
+
+    def __str__(self):
+        return (f'Person {self.person_id} no pre-existing conditions '
+                f'{self.confirmed_at:%Y-%m-%d}')
+
+
 class PatientRecord(models.Model):
     """
     Comprehensive patient information model — OMOP CDM–aligned PatientRecord projection.

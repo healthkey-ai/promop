@@ -1,5 +1,4 @@
 import functools
-from dataclasses import dataclass
 from collections import defaultdict
 from typing import Any, Callable, ContextManager
 
@@ -144,8 +143,11 @@ from .permissions import (
     get_request_org, is_service_token, is_machine_request,
 )
 from .providers.base import TokenClaims
+from .therapy_line_import import (
+    TherapyLineImportPersonSerializer, TherapyLineImportSerializer, import_therapy_lines,
+)
 from .provenance_org import (
-    PROVENANCE_ORG_HEADER, header_organization, raise_on_foreign_attribution,
+    PROVENANCE_ORG_HEADER, ProvenanceContext, header_organization, raise_on_foreign_attribution,
     resolve_explicit_organization,
 )
 from .serializers import (
@@ -170,6 +172,27 @@ logger = logging.getLogger(__name__)
 def _genomics_type_concept(user, person):
     from omop_core.authorization import get_actor_role
     return 32865 if get_actor_role(user, person.person_id) in ('self', 'representative') else 32817
+
+
+def _patient_authorship(actor, person):
+    """project_single_value keywords for the author of a PatientRecord save.
+
+    The patient or a verified representative writes patient self-report; the
+    patient's own facts also carry PATIENT_SELF provenance. Anyone else, or a
+    service credential with no Identity, writes with the recipe's type.
+    """
+    from omop_core.authorization import get_actor_role
+    from omop_core.services.omop_projection import patient_self_report_type
+
+    if not getattr(actor, 'is_authenticated', False):
+        return {}
+    role = get_actor_role(actor, person.person_id)
+    if role not in ('self', 'representative') or not (self_report := patient_self_report_type()):
+        return {}
+    authorship = {'type_concept_id': self_report}
+    if role == 'self':
+        authorship['patient_user_id'] = f'{actor.issuer}|{actor.sub}'
+    return authorship
 
 
 def _write_genetic_mutations(person, mutations, type_concept_id):
@@ -442,19 +465,6 @@ def _extract_provenance(request):
         source_user_id = f"{request.user.issuer}|{request.user.sub}"
     modification_reason = body.get('modification_reason')
     return source, source_user_id, modification_reason
-
-
-@dataclass(frozen=True)
-class ProvenanceContext:
-    source: str | None
-    source_user_id: str
-    reason: str | None
-    organization: Organization | None
-    explicit: bool
-
-    @property
-    def match_organization(self) -> Organization | None:
-        return self.organization if self.explicit else None
 
 
 _PROVENANCE_CONTEXT_ATTR = '_promop_provenance_context'
@@ -793,6 +803,22 @@ def _changed_fields(patient_record, previous_values, prev_val):
         field for field, old in previous_values.items()
         if prev_val(patient_record, field) != old
     }
+
+
+def _attestation_source(request, person):
+    """Provenance for an authored answer: who stated it, never a clinical decision."""
+    from patient_portal.services import patient_person_for
+
+    user = getattr(request, 'user', None)
+    if getattr(user, 'is_staff', False):
+        return 'clinician'
+    if patient_person_for(user) == person:
+        return 'patient'
+    from omop_core.authorization import get_actor_role
+    if get_actor_role(user, person.pk) == 'representative':
+        # Keep the explicit source within the existing 20-character column.
+        return 'proxy'
+    return 'clinician'
 
 
 def _write_record_revisions(patient_record, previous_values, request):
@@ -1348,7 +1374,9 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             if clinical_fields:
                 from omop_core.services.patient_record_service import recompute_patient_record_fields
 
-                projected = self._project_mapped_fields(person, clinical_fields, serializer.validated_data)
+                projected = self._project_mapped_fields(
+                    person, clinical_fields, serializer.validated_data, actor=request.user,
+                )
                 patient_info.user_edited_fields = sorted(
                     set(patient_info.user_edited_fields or []) - projected
                 )
@@ -1359,16 +1387,32 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 recompute_patient_record_fields(patient_info, changed_fields=profile_projected)
                 patient_info.refresh_from_db()
 
+            # Full-form autosave echoes are not confirmations (#1988). Only an
+            # actual change of the answer may create/renew its provenance.
+            # Category edits can withdraw it, but cannot authenticate an old True.
+            if ('no_pre_existing_conditions' in direct_fields
+                    or ('preexisting_conditions' in direct_fields
+                        and patient_info.no_pre_existing_conditions is not True)):
+                from omop_core.services.pre_existing_conditions import (
+                    sync_no_preexisting_conditions,
+                )
+                sync_no_preexisting_conditions(
+                    patient_info, source=_attestation_source(request, person))
+
         return Response({**PatientRecordSerializer(patient_info).data, 'previous_values': previous_values})
 
     @staticmethod
-    def _project_mapped_fields(person, direct_fields, patch_data):
+    def _project_mapped_fields(person, direct_fields, patch_data, actor=None):
         """Project validated edits using the editor's curated or built-in recipe.
 
         Each projection uses a savepoint so failure preserves the PatientRecord
         edit for a later retry. Return fields backed by OMOP, including an
         identical existing fact. PatientRecord already has these values, so
         there is no OMOP-to-PatientRecord refresh on a direct save.
+
+        A patient's or representative's edit is typed patient self-report
+        (32865), as genomics edits are; the patient's own also gets a
+        PATIENT_SELF provenance row. Anyone else's keeps the recipe's type.
         """
         from omop_core.services.omop_projection import project_single_value, projection_for_descriptor
         from omop_core.services.write_descriptor import build_writable_field_descriptor
@@ -1380,11 +1424,14 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             logger.warning('Could not resolve OMOP projections')
             return set()
         projected = set()
+        authorship = None
         for field in direct_fields:
             projection = projection_for_descriptor(descriptors.get(field))
             if projection:
+                if authorship is None:
+                    authorship = _patient_authorship(actor, person)
                 if project_single_value(person, field, patch_data[field], projection,
-                                        acknowledge_existing=True):
+                                        acknowledge_existing=True, **authorship):
                     # Occurrences and structured answers need their dedicated
                     # extractors before their saved values can be acknowledged.
                     if (projection['omop_table'] in ('measurement', 'observation')
@@ -5570,6 +5617,51 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
     so anything added there widens a frozen API. New actions belong here.
     """
 
+    def partial_update(self, request, pk=None):
+        # The shared field form opts into explicit per-field acknowledgements.
+        # Other v1 clients keep their existing full-record serializer contract.
+        if request.headers.get('X-Patient-Form') != '1':
+            return super().partial_update(request, pk=pk)
+        from omop_core.services.patient_form import apply_patient_form_patch
+        person, record, error = self._resolve_patient_with_auth(request, pk)
+        if error is not None:
+            return error
+        if not _caller_may_write_patient(request, person.person_id):
+            return Response({'detail': 'You have read-only access to this patient.'}, status=403)
+        if not isinstance(request.data, dict) or not request.data:
+            return Response({'detail': 'Provide a non-empty object of field edits.'}, status=400)
+        try:
+            record, result = apply_patient_form_patch(person, request.data)
+        except ValueError as exc:
+            return Response({'detail': str(exc)}, status=400)
+        if not result.applied:
+            return Response({'detail': 'No fields were saved.', 'rejected': result.rejected}, status=400)
+        return Response({'patient_info': PatientRecordSerializer(record, context={'request': request}).data,
+                         'patient_name': _rendered_patient_name(person),
+                         'write': {'applied': result.applied, 'rejected': result.rejected,
+                                   'deferred_profile': sorted(result.profile)}})
+
+    @action(detail=True, methods=['get', 'post'], url_path='preexisting-conditions-answer',
+            permission_classes=[PatientCrudPermission, PatientSelfScopePermission])
+    def preexisting_conditions_answer(self, request, pk=None):
+        person, record, error = self._resolve_patient_with_auth(request, pk)
+        if error is not None:
+            return error
+        if request.method == 'GET':
+            return Response({'no_pre_existing_conditions': record.no_pre_existing_conditions,
+                             'preexisting_conditions': record.preexisting_conditions})
+        if not _caller_may_write_patient(request, person.person_id):
+            return Response({'detail': 'You have read-only access to this patient.'}, status=403)
+        if not is_machine_request(request) and not getattr(request.user, 'is_staff', False):
+            from omop_core.authorization import can_write_patient
+            if not can_write_patient(request.user, person.person_id):
+                return Response({'detail': 'You have read-only access to this patient.'}, status=403)
+        from .preexisting_conditions import write_answer
+        source = ('host-explicit' if is_machine_request(request)
+                  else f'{_attestation_source(request, person)}-explicit')
+        return write_answer(request, record, source=source,
+                            revision_writer=_write_record_revisions)
+
     @action(detail=False, methods=['get'], url_path='writable-fields')
     def writable_fields(self, request: Request) -> Response:
         """Which PatientRecord fields a client may edit and their OMOP projection.
@@ -5591,8 +5683,12 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
         editing.
         """
         from omop_core.services.write_descriptor import build_writable_field_descriptor
+        from omop_core.services.patient_form import patient_form_descriptors
 
+        shared_form = request.headers.get('X-Patient-Form') == '1'
         descriptor = build_writable_field_descriptor()
+        if shared_form:
+            descriptor = patient_form_descriptors(descriptor)
 
         raw_person = request.query_params.get('person_id')
         if raw_person is None:
@@ -5607,6 +5703,9 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
             )
 
         if _caller_may_write_patient(request, person_id):
+            if shared_form:
+                record = PatientRecord.objects.filter(person_id=person_id).first()
+                descriptor = patient_form_descriptors(descriptor, record=record)
             return Response(descriptor)
 
         # Read-only for this caller: keep every entry, so the client still knows
@@ -14663,3 +14762,24 @@ class TherapyLineViewSet(_PackagedTherapyLineViewSet):
 
     def patient_info_payload(self, record):
         return PatientRecordSerializer(record).data
+
+    # The class permission refuses system/etl.write because the editor POST is a patient write
+    @action(detail=False, methods=['post'], url_path='bulk_upsert',
+            permission_classes=[EtlWritePermission])
+    def bulk_upsert(self, request: Request) -> Response:
+        """Upsert one person's lines of therapy from an ETL feed."""
+        # Authorize the patient before serializer validation consults their
+        # disease to validate outcome aliases and line identity.
+        person_serializer = TherapyLineImportPersonSerializer(
+            data=request.data,
+        )
+        person_serializer.is_valid(raise_exception=True)
+        _authorize_person_write(request, person_serializer.validated_data['person'])
+        serializer = TherapyLineImportSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        person = serializer.validated_data['person']
+        return import_therapy_lines(
+            person, serializer.validated_data['lines'],
+            _provenance_context(request, header=True), _skip_refresh_requested(request),
+            authorize_person=lambda locked_person: _authorize_person_write(request, locked_person),
+        )
