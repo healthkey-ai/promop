@@ -1174,6 +1174,13 @@ def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fiel
         patient_info.gelf_criteria_status = 'Met' if patient_info.gelf_criteria_options.strip() else 'Not Met'
     elif 'gelf_criteria_options' in changed_fields:
         patient_info.gelf_criteria_status = None
+    # MM defining events are computed, but their source facts are ordinary
+    # editable inputs. A direct edit to one of those inputs must move the verdict
+    # now rather than leaving a stale result from the last OMOP refresh.
+    if MEETS_CRAB_INPUT_FIELDS.intersection(changed_fields):
+        patient_info.meets_crab = derive_meets_crab(patient_info)
+    if MEETS_SLIM_INPUT_FIELDS.intersection(changed_fields):
+        patient_info.meets_slim = derive_meets_slim(patient_info)
     _compute_derived_fields(patient_info, apply_formulas=False)
     _clear_overflowing_decimal_fields(patient_info)
     patient_info.save()
@@ -3613,6 +3620,104 @@ def _meets_flc_criterion(
     return involved >= _SLIM_INVOLVED_FLC_MG_L
 
 
+#: Canonical PatientRecord inputs for the two MM defining events. A direct edit
+#: to any of them re-derives the verdict for that event without waiting for the
+#: next OMOP refresh.
+MEETS_CRAB_INPUT_FIELDS = frozenset({
+    'hemoglobin_g_dl', 'serum_calcium_mg_dl', 'creatinine_clearance_ml_min',
+    'serum_creatinine_mg_dl', 'bone_lesions',
+})
+MEETS_SLIM_INPUT_FIELDS = frozenset({
+    'clonal_plasma_cells', 'kappa_flc', 'lambda_flc', 'kappa_lambda_ratio',
+})
+
+
+def _decimal_or_none(value):
+    """A finite non-negative Decimal, or None for a missing/invalid input."""
+    if value is None or value == '':
+        return None
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    if not number.is_finite() or number < 0:
+        return None
+    return number
+
+
+def _bone_lesions_component(value):
+    """True for a recorded lesion, False for an explicit negative, None if blank.
+
+    ``bone_lesions`` is stored as free text and the extractor writes
+    ``Present``/``Absent``. Treating an explicit negative as evidence is what
+    lets a fully negative CRAB work-up answer "not met" instead of "unknown".
+    """
+    if value is None or str(value).strip() == '':
+        return None
+    return str(value).strip().casefold() not in {
+        'absent', 'no', 'false', '0', 'none', 'negative',
+    }
+
+
+def derive_meets_crab(patient_info: PatientRecord):
+    """Three-valued CRAB from the record's canonical inputs.
+
+    Same thresholds as the OMOP fallback in :func:`_get_mm_specific_data`
+    (hemoglobin < 10 g/dL, calcium > 11 mg/dL, clearance < 40 mL/min) plus the
+    standard serum-creatinine alternative (> 2 mg/dL) when no clearance is
+    recorded. A positive component establishes CRAB; a negative answer requires
+    every component to be evaluated, otherwise the result stays unknown rather
+    than asserting a defining event that was never assessed.
+    """
+    hgb = _decimal_or_none(patient_info.hemoglobin_g_dl)
+    calcium = _decimal_or_none(patient_info.serum_calcium_mg_dl)
+    clearance = _decimal_or_none(patient_info.creatinine_clearance_ml_min)
+    creatinine = _decimal_or_none(patient_info.serum_creatinine_mg_dl)
+    if clearance is not None:
+        renal = clearance < Decimal('40')
+    elif creatinine is not None:
+        renal = creatinine > Decimal('2')
+    else:
+        renal = None
+    components = [
+        None if hgb is None else hgb < Decimal('10'),
+        None if calcium is None else calcium > Decimal('11'),
+        renal,
+        _bone_lesions_component(patient_info.bone_lesions),
+    ]
+    if any(component is True for component in components):
+        return True
+    if all(component is not None for component in components):
+        return False
+    return None
+
+
+def derive_meets_slim(patient_info: PatientRecord):
+    """Three-valued SLiM from the record's canonical inputs.
+
+    Uses the same Sixty and Light-chain rule as :func:`_get_mm_specific_data`,
+    including the involved-chain burden guard. The MRI-lesion criterion is not
+    inferred here: ``bone_lesions`` is a shared CRAB presence flag whose value
+    set does not distinguish "one lesion" from "more than one", so treating any
+    recorded value as the SLiM-M criterion would invent a positive.
+    """
+    plasma = _decimal_or_none(patient_info.clonal_plasma_cells)
+    sixty = None if plasma is None else plasma >= Decimal('60')
+    kappa = _decimal_or_none(patient_info.kappa_flc)
+    lam = _decimal_or_none(patient_info.lambda_flc)
+    ratio = _decimal_or_none(patient_info.kappa_lambda_ratio)
+    if kappa is None or lam is None:
+        light = None
+    else:
+        light = _meets_flc_criterion(kappa, lam, ratio)
+    components = [sixty, light]
+    if any(component is True for component in components):
+        return True
+    if all(component is False for component in components):
+        return False
+    return None
+
+
 def _get_mm_specific_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     """Derive MM-specific boolean and coded fields from OMOP Observation table.
 
@@ -3713,7 +3818,8 @@ def _get_mm_specific_data(person: Person, snapshot: OmopSnapshot = None) -> dict
 
     # ── meets_crab fallback: compute from OMOP Measurements when obs missing ─
     if 'meets_crab' not in data:
-        _CRAB_CODES = ('718-7', '59260-0', '17861-6', '2000-0', '2164-2', '33914-3')
+        _CRAB_CODES = ('718-7', '59260-0', '17861-6', '2000-0',
+                       '2164-2', '33914-3', '2160-0')
         crab_vals = {}
         for code in _CRAB_CODES:
             for m in snapshot.meas_by_source.get(code, ()):
@@ -3723,10 +3829,18 @@ def _get_mm_specific_data(person: Person, snapshot: OmopSnapshot = None) -> dict
         hgb_vals = crab_vals.get('718-7', []) or crab_vals.get('59260-0', [])
         ca_vals = crab_vals.get('17861-6', []) or crab_vals.get('2000-0', [])
         crcl_vals = crab_vals.get('2164-2', []) or crab_vals.get('33914-3', [])
+        creatinine_vals = crab_vals.get('2160-0', [])
 
         crab_anemia = hgb_vals and min(hgb_vals) < 10.0
         crab_calcium = ca_vals and max(ca_vals) > 11.0
-        crab_renal = crcl_vals and min(crcl_vals) < 40.0
+        # Clearance is the preferred renal fact; serum creatinine > 2 mg/dL is
+        # the recorded alternative, matching derive_meets_crab().
+        if crcl_vals:
+            crab_renal = min(crcl_vals) < 40.0
+        elif creatinine_vals:
+            crab_renal = max(creatinine_vals) > 2.0
+        else:
+            crab_renal = False
         crab_bone = data.get('bone_lesions') == 'Present'
 
         if any([crab_anemia, crab_calcium, crab_renal, crab_bone]):

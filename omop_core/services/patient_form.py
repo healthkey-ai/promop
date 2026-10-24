@@ -8,10 +8,14 @@ from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.utils import timezone
 from datetime import datetime
+from decimal import Decimal
 
 from omop_core.models import PatientRecord
 from omop_core.services.field_write_service import apply_field_writes, FieldWriteResult
-from omop_core.services.patient_record_service import refresh_patient_record
+from omop_core.services.patient_record_service import (
+    refresh_patient_record,
+    recompute_patient_record_fields,
+)
 from omop_core.services.write_descriptor import build_writable_field_descriptor
 
 
@@ -72,12 +76,17 @@ FORM_INPUTS = {
     'high_risk_mcl_criteria': ['mipi_risk', 'mipi_c_risk', 'ki67_proliferation_index'],
 }
 COMPATIBILITY_GATES = {
-    'meets_slim': 'SLiM input/result compatibility is pending clinical review: CB includes MRI lesions; '
-                  'PROMOP currently derives marrow/FLC criteria with different unknown/history semantics.',
-    'meets_crab': 'CRAB input/result compatibility with Trial Details is pending clinical review.',
-    'mipi_risk': 'MIPI is not yet exposed as a reviewed PROMOP PatientRecord result.',
-    'mipi_c_risk': 'MIPI-c is not yet exposed as a reviewed PROMOP PatientRecord result.',
-    'high_risk_mcl_criteria': 'The complete MCL result and source-field bindings require review.',
+    'meets_slim': 'The SLiM result is not authored by this form and its full parity with Trial Details '
+                  'is pending clinical review: CB includes MRI lesions; PROMOP derives marrow/FLC criteria '
+                  'with different unknown/history semantics. The source facts remain editable.',
+    'meets_crab': 'The CRAB result is not authored by this form and its parity with Trial Details is '
+                  'pending clinical review. The source facts it is derived from remain editable.',
+    'mipi_risk': 'PROMOP does not yet expose MIPI as a reviewed PatientRecord result. '
+                 'Its source facts remain editable; the result is not.',
+    'mipi_c_risk': 'PROMOP does not yet expose MIPI-c as a reviewed PatientRecord result. '
+                   'Its source facts remain editable; the result is not.',
+    'high_risk_mcl_criteria': 'The complete MCL result and source-field bindings require review. '
+                              'Its navigable inputs remain editable; the result is not.',
 }
 DEDICATED_WRITES = {
     'death_date': 'Use the dedicated dated assertion workflow; the scalar form writer cannot safely author this field.',
@@ -116,6 +125,11 @@ def patient_form_descriptors(descriptor=None, *, readable_fields=None, writable=
             entry.update(options_source='therapy_regimens', multiple=True)
         if name in COMPATIBILITY_GATES:
             entry['compatibility_reason'] = COMPATIBILITY_GATES[name]
+            # The gate withholds permission to author the RESULT, not permission
+            # to record the source facts it is derived from. Those inputs are
+            # ordinary writable fields; a host must keep the result read-only and
+            # must not present an input edit as establishing the result.
+            entry['compatibility_scope'] = 'result'
         projection = entry.get('projection') or {}
         unsupported = DEDICATED_WRITES.get(name)
         if projection and (projection.get('omop_table') not in ('measurement', 'observation')
@@ -205,6 +219,13 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
                 result.rejected[name] = 'Not an editable patient-record column.'
                 continue
             try:
+                # JSON numbers arrive as floats. Django's DecimalField converts
+                # a float with Decimal(float), which produces a long binary
+                # expansion and fails its own decimal_places validator for
+                # perfectly ordinary values such as 2.4. Go through str().
+                if (field.get_internal_type() == 'DecimalField'
+                        and isinstance(value, (int, float)) and not isinstance(value, bool)):
+                    value = Decimal(str(value))
                 direct[name] = field.clean(None if value == '' else value, record)
             except ValidationError as exc:
                 raise ValueError(f'{name}: {"; ".join(exc.messages)}') from exc
@@ -242,5 +263,14 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
             refresh_patient_record(person)
     if (direct or person_changes) and not (facts and fact_result.applied):
         refresh_patient_record(person)
+    if direct:
+        # A direct edit has no OMOP fact to re-derive from yet. Recompute the
+        # dependent defining events from the record's own canonical inputs so
+        # the saved verdict is the one the form will read back, not a stale
+        # value from the last refresh.
+        record = recompute_patient_record_fields(
+            PatientRecord.objects.select_for_update().get(pk=record.pk),
+            changed_fields=set(direct),
+        )
     record.refresh_from_db()
     return record, result

@@ -31,9 +31,26 @@ the integration PR. CB records any pre-merge pin as an exact-SHA, expiring
 exception naming the actual published feature branch. Integration does not wait
 for promotion to `dev`, and no ancestry or security check is disabled.
 
-- BMI is verified end to end on synthetic local data. SLiM/CRAB and MIPI/MCL
-  input/result compatibility remains blocked on clinical review and complete
-  reviewed bindings. Do not change formulas to make the extraction appear done.
+- BMI is verified end to end on synthetic local data. The complex rows keep a
+  **result-only** gate: `meets_crab`, `meets_slim`, `mipi_risk`, `mipi_c_risk`
+  and `high_risk_mcl_criteria` are computed and cannot be authored, but their
+  source facts (`hemoglobin_g_dl`, `serum_calcium_mg_dl`,
+  `creatinine_clearance_ml_min`, `serum_creatinine_mg_dl`, `bone_lesions`,
+  `clonal_plasma_cells`, `kappa_flc`, `lambda_flc`, `ldh_*`, `wbc_*`,
+  `ki67_*`, `date_of_birth`, `ecog_performance_status`) stay editable through
+  the same recursive subform. A gate is reported as `compatibility_scope:
+  'result'`.
+- Editing a CRAB/SLiM source fact re-derives that verdict from the record's own
+  canonical inputs in the same request (`derive_meets_crab`,
+  `derive_meets_slim`), so the value read back is the current one rather than a
+  stale result from the last OMOP refresh. The existing thresholds and the
+  involved-chain burden guard are unchanged; unknown inputs stay unknown instead
+  of asserting "not met".
+- Full parity with Trial Details remains a clinical decision, not a coding gap:
+  CB's SLiM adds the MRI-lesion criterion, and CB derives CRAB/SLiM with its own
+  three-valued rule. PROMOP does not invent `bone_lesions` MRI semantics from a
+  shared presence flag, and MIPI/MIPI-c still have no reviewed PROMOP result
+  column. Do not change formulas to make the extraction appear done.
 - The existing patient-self-report scalar applier does not support every native
   projection. Shared descriptors reject condition/procedure/drug projections,
   structured fields and special treatment/death assertions rather than writing

@@ -33,6 +33,10 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
   const inputs = field.inputs ?? (field.canonical ? [field.canonical] : []);
   const writable = !readOnly && state.writable && field.writable && field.target === 'patient_record';
   const reason = field.compatibility_reason ?? field.reason ?? 'Derived value; edit the source inputs.';
+  // A compatibility gate withholds the RESULT, not the clinical facts it is
+  // computed from. Editing an input never writes the verdict; the result remains
+  // read-only and is recalculated by PROMOP.
+  const gated = Boolean(field.compatibility_reason);
   const formatted = value == null || value === '' ? 'Unknown'
     : typeof value === 'boolean' ? (value ? 'Yes' : 'No')
     : typeof value === 'object' ? JSON.stringify(value) : String(value);
@@ -50,12 +54,14 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
           <Dialog.Portal><Dialog.Overlay className="fixed inset-0 z-[60] bg-black/40" />
             <Dialog.Content className="promop-root fixed left-1/2 top-1/2 z-[61] max-h-[85vh] w-[min(32rem,calc(100%-2rem))] -translate-x-1/2 -translate-y-1/2 space-y-4 overflow-y-auto rounded-xl bg-background p-6 shadow-xl">
               <Dialog.Title className="font-semibold">{label}</Dialog.Title>
-              <Dialog.Description className="text-sm text-muted-foreground">{readOnly || field.compatibility_reason
-                ? 'These inputs are read-only in this view. Saving or updating this result is unavailable here.'
-                : 'Computed from the inputs below. Save their values to update this result.'}</Dialog.Description>
+              <Dialog.Description className="text-sm text-muted-foreground">{readOnly
+                ? 'These inputs are read-only in this view.'
+                : gated
+                  ? 'The result stays read-only. Editing these inputs records the source facts it is computed from; it does not set the result itself.'
+                  : 'Computed from the inputs below. Save their values to update this result.'}</Dialog.Description>
               {field.compatibility_reason && <p role="alert">{field.compatibility_reason}</p>}
               {inputs.map((input) => <PatientFieldEditor key={input} store={store} name={input}
-                readOnly={readOnly || Boolean(field.compatibility_reason)} infoHref={infoHref}
+                readOnly={readOnly} infoHref={infoHref}
                 ancestors={[...ancestors, canonical]} />)}
               {infoHref && <a className="block underline" href={infoHref}>Open Your Info</a>}
               <Dialog.Close asChild><button type="button" className="rounded border px-3 py-1">Close</button></Dialog.Close>
