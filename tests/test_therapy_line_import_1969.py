@@ -331,15 +331,22 @@ def test_a_line_s_existing_drugs_are_kept(etl, person):
 
 
 def test_provenance_is_recorded_for_created_lines_only(etl, person):
+    from django.contrib.contenttypes.models import ContentType
+
     _post(etl, person, TICKET_LINES[:1])  # No source header: nothing to attribute.
     response = _post(etl, person, TICKET_LINES[:2], HTTP_X_PROVENANCE_SOURCE='healthtree-etl')
 
     assert response.status_code == 200, response.data
-    records = ProvenanceRecord.objects.filter(source='healthtree-etl')
+    episode_type = ContentType.objects.get_for_model(Episode)
+    observation_type = ContentType.objects.get_for_model(Observation)
+    episode_records = ProvenanceRecord.objects.filter(source='healthtree-etl', content_type=episode_type)
+    observation_records = ProvenanceRecord.objects.filter(source='healthtree-etl', content_type=observation_type)
     # Line 1 already existed, so this request created only line 2.
-    assert [(r.object_id, r.target_patient_id) for r in records] == [
+    assert [(r.object_id, r.target_patient_id) for r in episode_records] == [
         (_lines(person)[2].episode_id, str(person.person_id))]
     assert not ProvenanceRecord.objects.filter(object_id=_lines(person)[1].episode_id).exists()
+    line_2_observation = Observation.objects.get(person=person, observation_source_value='LOT-2-outcome')
+    assert list(observation_records.values_list('object_id', flat=True)) == [line_2_observation.pk]
 
 
 def test_skip_refresh_defers_the_derivation(etl, person):
@@ -447,8 +454,94 @@ def test_source_guard_checks_only_the_lines_being_updated(etl, person):
                          **_source_headers(other))
         assert response.status_code == 200, response.data
     assert _outcome(person, 2) == 'Partial Response'
-    assert ProvenanceRecord.objects.filter(organization=source).count() == 1
-    assert ProvenanceRecord.objects.filter(organization=other).count() == 1
+    assert ProvenanceRecord.objects.filter(organization=source).count() == 2
+    assert ProvenanceRecord.objects.filter(organization=other).count() == 2
+
+
+def test_import_attributes_new_outcome_observations_on_new_and_existing_lines(etl, person):
+    from django.contrib.contenttypes.models import ContentType
+    from omop_core.models import Organization
+
+    source = Organization.objects.create(name='Outcome Importer', slug='etl-outcome-importer')
+    observation_type = ContentType.objects.get_for_model(Observation)
+    # First request creates the line and its outcome Observation.
+    response = _post(etl, person, [TICKET_LINES[0] | {'outcome': 'Stable Disease'}],
+                     **_source_headers(source))
+    assert response.status_code == 200, response.data
+    first_obs = Observation.objects.get(person=person, observation_source_value='LOT-1-outcome')
+    assert ProvenanceRecord.objects.filter(
+        content_type=observation_type, object_id=first_obs.pk, organization=source,
+    ).exists()
+
+    # A later request can create an outcome fact on an existing line too.
+    line_without_outcome = TICKET_LINES[1] | {'outcome': None}
+    response = _post(etl, person, [line_without_outcome], **_source_headers(source))
+    assert response.status_code == 200, response.data
+    response = _post(etl, person, [TICKET_LINES[1] | {'outcome': 'Partial Response'}],
+                     **_source_headers(source))
+    assert response.status_code == 200, response.data
+    second_obs = Observation.objects.get(person=person, observation_source_value='LOT-2-outcome')
+    assert ProvenanceRecord.objects.filter(
+        content_type=observation_type, object_id=second_obs.pk, organization=source,
+    ).exists()
+    other = Organization.objects.create(name='Other Outcome Importer', slug='etl-other-outcome-importer')
+    cross_hospital_update = etl.patch(
+        f'/api/v1/observations/{second_obs.pk}/', {'value_as_string': 'Stable Disease'},
+        format='json', HTTP_X_PROVENANCE_SOURCE='other-etl',
+        HTTP_X_PROVENANCE_ORGANIZATION_ID=str(other.pk),
+    )
+    assert cross_hospital_update.status_code == 409, cross_hospital_update.data
+
+
+def test_patient_authorization_precedes_disease_dependent_validation(etl, person):
+    from datetime import timedelta
+    from django.utils import timezone
+    from oauth2_provider.models import AccessToken, Application
+    from omop_core.models import ApplicationOrganization, Organization
+
+    owner = Organization.objects.create(name='Patient Owner', slug='etl-patient-owner')
+    other = Organization.objects.create(name='Different Tenant', slug='etl-other-tenant')
+    record = PatientRecord.objects.get(person=person)
+    record.organization = owner
+    record.save(update_fields=['organization'])
+    app_owner = get_user_model().objects.create_user(email='etl-review-app-owner@test.invalid')
+    app = Application.objects.create(
+        name='ETL review bound app', client_id='etl-review-bound-client',
+        client_type=Application.CLIENT_CONFIDENTIAL,
+        authorization_grant_type=Application.GRANT_CLIENT_CREDENTIALS, user=app_owner,
+    )
+    ApplicationOrganization.objects.create(application=app, organization=other)
+    token = AccessToken.objects.create(
+        user=app_owner, application=app, token='etl-review-bound-token',
+        expires=timezone.now() + timedelta(hours=1), scope='patient/*.write',
+    )
+    client = APIClient()
+    client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.token}')
+    response = _post(
+        client, person, [TICKET_LINES[0] | {'outcome': 'not a valid outcome'}],
+    )
+    assert response.status_code == 403, response.data
+
+
+def test_import_refreshes_person_after_acquiring_the_patient_lock(etl, person, monkeypatch):
+    from omop_core.models import Person
+    from patient_portal.api import therapy_line_import
+
+    stale_year = person.year_of_birth or 1980
+    new_year = stale_year + 1
+    acquire = therapy_line_import.lock_therapy_patients
+    changed = []
+
+    def update_before_lock(person_ids):
+        if not changed:
+            Person.objects.filter(pk=person.pk).update(year_of_birth=new_year)
+            changed.append(True)
+        return acquire(person_ids)
+
+    monkeypatch.setattr(therapy_line_import, 'lock_therapy_patients', update_before_lock)
+    response = _post(etl, person, TICKET_LINES[:1])
+    assert response.status_code == 200, response.data
+    assert PatientRecord.objects.get(person=person).date_of_birth.year == new_year
 
 
 @pytest.mark.parametrize('linked', [False, True])
@@ -597,7 +690,7 @@ def test_deadlock_after_writes_rolls_back_facts_provenance_and_projection(etl, p
         record = refresh(patient)
         # This failure happens after every write stage, not before validation.
         assert Episode.objects.filter(person=person).count() == 1
-        assert ProvenanceRecord.objects.filter(organization=organization).count() == 1
+        assert ProvenanceRecord.objects.filter(organization=organization).count() == 2
         attempts.append(record.therapy_lines_count)
         if len(attempts) == 1:
             raise _deadlock()
@@ -610,7 +703,7 @@ def test_deadlock_after_writes_rolls_back_facts_provenance_and_projection(etl, p
     assert attempts == [1, 1]
     assert response.data['created'] == 1
     assert Episode.objects.filter(person=person).count() == 1
-    assert ProvenanceRecord.objects.filter(organization=organization).count() == 1
+    assert ProvenanceRecord.objects.filter(organization=organization).count() == 2
     assert RegimenMappingGap.objects.count() == 1
     assert PatientRecord.objects.get(person=person).therapy_lines_count == 1
 

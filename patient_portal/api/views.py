@@ -143,7 +143,9 @@ from .permissions import (
     get_request_org, is_service_token, is_machine_request,
 )
 from .providers.base import TokenClaims
-from .therapy_line_import import TherapyLineImportSerializer, import_therapy_lines
+from .therapy_line_import import (
+    TherapyLineImportPersonSerializer, TherapyLineImportSerializer, import_therapy_lines,
+)
 from .provenance_org import (
     PROVENANCE_ORG_HEADER, ProvenanceContext, header_organization, raise_on_foreign_attribution,
     resolve_explicit_organization,
@@ -14735,10 +14737,16 @@ class TherapyLineViewSet(_PackagedTherapyLineViewSet):
             permission_classes=[EtlWritePermission])
     def bulk_upsert(self, request: Request) -> Response:
         """Upsert one person's lines of therapy from an ETL feed."""
+        # Authorize the patient before serializer validation consults their
+        # disease to validate outcome aliases and line identity.
+        person_serializer = TherapyLineImportPersonSerializer(
+            data={'person': request.data.get('person')},
+        )
+        person_serializer.is_valid(raise_exception=True)
+        _authorize_person_write(request, person_serializer.validated_data['person'])
         serializer = TherapyLineImportSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         person = serializer.validated_data['person']
-        _authorize_person_write(request, person)
         return import_therapy_lines(
             person, serializer.validated_data['lines'],
             _provenance_context(request, header=True), _skip_refresh_requested(request),

@@ -52,7 +52,7 @@ class TherapyLineEpisodeResult:
     event_ids   — EpisodeEvent pks touched (created or pre-existing links)
     """
 
-    __slots__ = ('episode', 'created', 'event_ids',
+    __slots__ = ('episode', 'created', 'event_ids', 'created_observations',
                  # Attached by author_therapy_line, which also writes the
                  # exposures the episode groups.
                  'drug_exposure_ids', 'drugs_created')
@@ -61,6 +61,7 @@ class TherapyLineEpisodeResult:
         self.episode = episode
         self.created = created
         self.event_ids = event_ids
+        self.created_observations = []
 
 # SNOMED CT response-assessment codes for per-line outcomes. Anything without a
 # mapping (e.g. "Very Good Partial Response") still records value_as_string.
@@ -247,10 +248,12 @@ def upsert_therapy_line_episode(
 
     if replace_metadata is None:
         replace_metadata = replace_events
+    created_observations = []
     if outcome is not _UNSET and outcome:
         _upsert_outcome_observation(person, line_number, outcome, ehr_type_concept, no_match_concept,
                                     obs_date=effective_end or effective_start or today,
-                                    line=episode, adopt=adopts_unparented, write_guard=write_guard)
+                                    line=episode, adopt=adopts_unparented, write_guard=write_guard,
+                                    created_observations=created_observations)
     elif outcome is not _UNSET and replace_metadata:
         _delete_outcome_observation(person, line_number, line=episode, adopt=adopts_unparented,
                                     write_guard=write_guard)
@@ -259,7 +262,8 @@ def upsert_therapy_line_episode(
     if intent is not _UNSET and intent:
         _upsert_line_observation(person, line_number, 'intent', intent,
                                  ehr_type_concept, no_match_concept, obs_date=obs_date,
-                                 line=episode, adopt=adopts_unparented, write_guard=write_guard)
+                                 line=episode, adopt=adopts_unparented, write_guard=write_guard,
+                                 created_observations=created_observations)
     elif intent is not _UNSET and replace_metadata:
         _delete_line_observation(person, line_number, 'intent', line=episode, adopt=adopts_unparented,
                                  write_guard=write_guard)
@@ -267,12 +271,15 @@ def upsert_therapy_line_episode(
     if discontinuation_reason is not _UNSET and discontinuation_reason:
         _upsert_line_observation(person, line_number, 'discontinuation', discontinuation_reason,
                                  ehr_type_concept, no_match_concept, obs_date=obs_date,
-                                 line=episode, adopt=adopts_unparented, write_guard=write_guard)
+                                 line=episode, adopt=adopts_unparented, write_guard=write_guard,
+                                 created_observations=created_observations)
     elif discontinuation_reason is not _UNSET and replace_metadata:
         _delete_line_observation(person, line_number, 'discontinuation', line=episode, adopt=adopts_unparented,
                                  write_guard=write_guard)
 
-    return TherapyLineEpisodeResult(episode, created, event_ids)
+    result = TherapyLineEpisodeResult(episode, created, event_ids)
+    result.created_observations = created_observations
+    return result
 
 
 def _assert_therapy_line(episode, source):
@@ -393,7 +400,7 @@ def _line_observations(person, src_value, line, adopt):
 
 
 def _upsert_outcome_observation(person, line_number, outcome, type_concept, no_match_concept, obs_date,
-                                line=None, adopt=True, write_guard=None):
+                                line=None, adopt=True, write_guard=None, created_observations=None):
     src_value = f'LOT-{line_number}-outcome'
     snomed_code = OUTCOME_SNOMED_CODES.get(outcome)
     outcome_concept = (
@@ -443,6 +450,8 @@ def _upsert_outcome_observation(person, line_number, outcome, type_concept, no_m
     )
     obs._skip_patient_record_refresh = True
     obs.save()
+    if created_observations is not None:
+        created_observations.append(obs)
 
 
 def _delete_outcome_observation(person, line_number, line=None, adopt=True, write_guard=None):
@@ -450,7 +459,7 @@ def _delete_outcome_observation(person, line_number, line=None, adopt=True, writ
 
 
 def _upsert_line_observation(person, line_number, suffix, value, type_concept, no_match_concept, obs_date,
-                             line=None, adopt=True, write_guard=None):
+                             line=None, adopt=True, write_guard=None, created_observations=None):
     """Upsert a LOT-{n}-{suffix} Observation (intent, discontinuation, etc.)."""
     src_value = f'LOT-{line_number}-{suffix}'
     obs_concept = no_match_concept
@@ -492,6 +501,8 @@ def _upsert_line_observation(person, line_number, suffix, value, type_concept, n
     )
     obs._skip_patient_record_refresh = True
     obs.save()
+    if created_observations is not None:
+        created_observations.append(obs)
 
 
 def _delete_line_observation(person, line_number, suffix, line=None, adopt=True, write_guard=None):

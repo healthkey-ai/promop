@@ -140,6 +140,12 @@ class TherapyLineImportSerializer(serializers.Serializer):
         return attrs
 
 
+class TherapyLineImportPersonSerializer(serializers.Serializer):
+    """Resolve the target before validating fields that reveal patient data."""
+
+    person = serializers.PrimaryKeyRelatedField(queryset=Person.objects.all())
+
+
 def _author_kwargs(line: ImportLine, regimens: ResolvedRegimens) -> dict[str, Any]:
     """Translate a source line into author_therapy_lines kwargs."""
     # replace=True lets outcome: null clear. Drugs are never passed so their links survive
@@ -172,23 +178,29 @@ def _regimen_match(line: ImportLine, regimens: ResolvedRegimens) -> str | None:
 
 def _record_created_provenance(results: list[TherapyLineEpisodeResult], person: Person,
                                provenance: ProvenanceContext) -> None:
-    """Attach provenance to the lines this request created."""
+    """Attach provenance to newly created lines and their newly written facts."""
     episodes = [result.episode for result in results if result.created]
-    if not episodes:
+    observations = [obs for result in results for obs in result.created_observations]
+    if not episodes and not observations:
         return
-    content_type = ContentType.objects.get_for_model(episodes[0])
-    ProvenanceRecord.objects.bulk_create([
-        ProvenanceRecord(
-            source=provenance.source,
-            source_user_id=provenance.source_user_id,
-            target_patient_id=str(person.person_id),
-            modification_reason=provenance.reason,
-            organization=provenance.organization,
-            content_type=content_type,
-            object_id=episode.pk,
+    records = []
+    for model_rows in (episodes, observations):
+        if not model_rows:
+            continue
+        content_type = ContentType.objects.get_for_model(model_rows[0])
+        records.extend(
+            ProvenanceRecord(
+                source=provenance.source,
+                source_user_id=provenance.source_user_id,
+                target_patient_id=str(person.person_id),
+                modification_reason=provenance.reason,
+                organization=provenance.organization,
+                content_type=content_type,
+                object_id=row.pk,
+            )
+            for row in model_rows
         )
-        for episode in episodes
-    ])
+    ProvenanceRecord.objects.bulk_create(records)
 
 
 def _rejected_response(exc: TherapyLineRejected, line_count: int) -> Response:
@@ -207,6 +219,9 @@ def import_therapy_lines(person: Person, lines: list[ImportLine], provenance: Pr
             # Acquire patient roots before shared mapping rows, matching the
             # canonical writer's lock order on every complete retry attempt.
             lock_therapy_patients([person.pk])
+            # This instance was resolved before waiting for the Person lock.
+            # Refresh under the lock so retries and projection use current data.
+            person.refresh_from_db()
             labels = sorted(
                 {line['regimen'] for line in lines
                  if line.get('regimen') and not line.get('regimen_concept_id')},
