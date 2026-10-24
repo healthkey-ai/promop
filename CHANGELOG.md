@@ -140,6 +140,11 @@ All notable changes to PRomop are documented here.
 
 ### Fixed
 
+- **The commit stamp is filled in on HealthTree GCP** — the Cloud Run image
+  now carries `GIT_COMMIT`, passed by the deploy workflow as a build argument,
+  so `/api/v1/version/` and the line under the logo show the deployed commit
+  there as well as on Render. (#2024)
+
 - **The bulk LOINC axis variant backfill no longer runs inside `migrate`** —
   migrations 0300 and 0301 walked every multi-unit code during the release
   step. On the HealthTree GCP instance, which holds the data with the most such
