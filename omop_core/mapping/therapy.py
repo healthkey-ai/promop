@@ -222,12 +222,14 @@ def _ensure_hk_vocab(vocabulary_id):
 def _get_or_create_quarantine_concept(*, vocabulary_id, domain_id,
                                       concept_class_id, concept_code,
                                       concept_name):
+    original_code = concept_code
     normalized_name = normalize_regimen_name(concept_name)
     if len(concept_name) > 255:
         # The display cannot preserve the full identity. Put a digest of the
-        # complete normalized input in the code, so repeats are stable and
-        # names differing only beyond the display limit remain distinct.
-        digest = hashlib.sha256(normalized_name.encode('utf-8')).hexdigest()[:40]
+        # original source slug and complete normalized input in the code, so
+        # both source-code identity and differences beyond the display survive.
+        identity = f'{original_code}\0{normalized_name}'
+        digest = hashlib.sha256(identity.encode('utf-8')).hexdigest()[:40]
         concept_code = f'{concept_code[:9]}-{digest}'
     base_code = concept_code
     stored_name = normalize_regimen_name(concept_name[:255])
@@ -288,7 +290,7 @@ def _get_or_create_quarantine_concept(*, vocabulary_id, domain_id,
         # an ordinary existing-row collision rather than aliasing the regimens.
         return _get_or_create_quarantine_concept(
             vocabulary_id=vocabulary_id, domain_id=domain_id,
-            concept_class_id=concept_class_id, concept_code=base_code,
+            concept_class_id=concept_class_id, concept_code=original_code,
             concept_name=concept_name,
         )
     return concept

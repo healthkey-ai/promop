@@ -103,6 +103,20 @@ def test_quarantine_overlong_names_are_stable_and_distinct(person):
         ]
 
 
+@pytest.mark.parametrize('kind', ['drug', 'observation', 'procedure'])
+def test_quarantine_overlong_displays_preserve_source_codes(person, kind):
+    from omop_core.mapping import therapy
+
+    resolve = getattr(therapy, f'get_or_create_quarantine_{kind}')
+    display = 'ZZ-' + ('y' * 400)
+    sources = [('LOINC', '12345-1'), ('LOINC', '12345-2'), ('SNOMED', '12345-1')]
+    concepts = [resolve(source_vocabulary_id=vocab, concept_code=code, concept_name=display)
+                for vocab, code in sources]
+    assert len({concept.pk for concept in concepts}) == 3
+    assert [resolve(source_vocabulary_id=vocab, concept_code=code, concept_name=display).pk
+            for vocab, code in sources] == [concept.pk for concept in concepts]
+
+
 def test_the_ticket_s_three_lines_land_and_reach_the_record(etl, person):
     response = _post(etl, person, TICKET_LINES)
 
