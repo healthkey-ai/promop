@@ -1,4 +1,5 @@
 from django.conf import settings
+from decimal import Decimal
 from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
@@ -2418,6 +2419,47 @@ class MappingSuggestionReview(models.Model):
         db_table = 'mapping_suggestion_review'
 
 
+class RelevanceSignal(models.Model):
+    """A concept an extractor kept meeting for a disease outside its relevance set (#1942).
+
+    Aggregate only: how many documents of the period mentioned the concept,
+    never which patient or document. A curator accepts or rejects it; accepted
+    concepts join the disease's set at the ``curated`` tier
+    (``omop_core.services.disease_relevance``). A later period's signal for a
+    pair already decided inherits that decision, so a rejection stays rejected.
+    """
+    STATUS_CHOICES = [
+        ('proposed', 'Proposed'),
+        ('accepted', 'Accepted'),
+        ('rejected', 'Rejected'),
+    ]
+
+    source = models.CharField(max_length=100, help_text='The service that reported it.')
+    disease = models.CharField(max_length=10)
+    # A snapshot id, like MappingSuggestionReview: a vocabulary reload must not
+    # cascade into or block the curation record.
+    concept_id = models.BigIntegerField()
+    period = models.CharField(max_length=32, help_text='The reporting window, e.g. 2026-10.')
+    document_count = models.PositiveIntegerField()
+    document_total = models.PositiveIntegerField(null=True, blank=True)
+    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='proposed')
+    reviewer = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='+',
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'relevance_signal'
+        constraints = [
+            models.UniqueConstraint(fields=['source', 'disease', 'concept_id', 'period'],
+                                    name='uniq_relevance_signal'),
+        ]
+        indexes = [models.Index(fields=['disease', 'status'])]
+
+
 class MappingDestinationCandidate(models.Model):
     """An imported alternative; it does not change the chosen clinical mapping."""
 
@@ -3169,6 +3211,55 @@ class WearableUpload(models.Model):
         return f'{self.device_type} upload {self.filename} ({self.samples_created} samples)'
 
 
+class TherapyHistoryAttestation(models.Model):
+    """The patient's explicit confirmation that the listed lines are complete.
+
+    Absence of a row means "not confirmed" — not "incomplete history". The two
+    are different claims and only the patient can make either, so the projection
+    leaves ``PatientRecord.therapy_history_complete`` NULL until this row exists
+    (#1924). Confirming is a statement about the list, not clinical data: deleting
+    the row withdraws it.
+    """
+    person = models.OneToOneField(
+        Person, on_delete=models.CASCADE, related_name='therapy_history_attestation',
+    )
+    confirmed_at = models.DateTimeField()
+    # Where the confirmation came from ('patient', 'clinician', 'host'); provenance
+    # only, never a clinical decision.
+    source = models.CharField(max_length=20, default='patient')
+
+    class Meta:
+        db_table = 'therapy_history_attestation'
+
+    def __str__(self):
+        return f'Person {self.person_id} therapy history confirmed {self.confirmed_at:%Y-%m-%d}'
+
+
+class PreexistingConditionsAttestation(models.Model):
+    """The person's explicit statement that they have no pre-existing conditions.
+
+    ``PatientRecord.no_pre_existing_conditions`` answers a question, it is not a
+    derivation of an empty category list (#1988). Absence of this row means
+    "not answered" -- the projection stays NULL. Adding a category is the more
+    specific statement and withdraws this one, because both cannot be true.
+    """
+    person = models.OneToOneField(
+        Person, on_delete=models.CASCADE,
+        related_name='preexisting_conditions_attestation',
+    )
+    confirmed_at = models.DateTimeField()
+    # Where the statement came from ('patient', 'clinician', 'host'); provenance
+    # only, never a clinical decision.
+    source = models.CharField(max_length=20, default='patient')
+
+    class Meta:
+        db_table = 'preexisting_conditions_attestation'
+
+    def __str__(self):
+        return (f'Person {self.person_id} no pre-existing conditions '
+                f'{self.confirmed_at:%Y-%m-%d}')
+
+
 class PatientRecord(models.Model):
     """
     Comprehensive patient information model — OMOP CDM–aligned PatientRecord projection.
@@ -3245,6 +3336,17 @@ class PatientRecord(models.Model):
     molecular_markers = models.TextField(blank=True, null=True)
     stem_cell_transplant_history = models.JSONField(blank=True, null=True, default=list)
     sct_date = models.DateField(blank=True, null=True)
+    prothrombin_time_uln = models.DecimalField(
+        max_digits=10, decimal_places=5, blank=True, null=True,
+        validators=[MinValueValidator(Decimal('0.00001'))],
+        help_text='Prothrombin time ratio to laboratory ULN, not INR or seconds',
+    )
+    activated_partial_thromboplastin_time_uln = models.DecimalField(
+        max_digits=10, decimal_places=5, blank=True, null=True,
+        validators=[MinValueValidator(Decimal('0.00001'))],
+        help_text='aPTT ratio to laboratory ULN, not seconds',
+    )
+    able_to_swallow_tablets_capsules = models.BooleanField(blank=True, null=True)
     sct_eligibility = models.JSONField(blank=True, null=True, default=list,
         help_text="Multi-select from SctEligibility vocabulary")
     plasma_cell_leukemia = models.BooleanField(blank=True, null=True, default=None)
@@ -3366,6 +3468,11 @@ class PatientRecord(models.Model):
 
     # Legacy therapy fields
     therapy_lines_count = models.IntegerField(blank=True, null=True)
+    # True only when the patient explicitly confirmed that the recorded lines are
+    # their full history (#1924). Until then `therapy_lines_count` is a lower
+    # bound ("at least N"), not an exact count, and consumers must not exclude on
+    # a maximum it cannot prove.
+    therapy_history_complete = models.BooleanField(blank=True, null=True)
     line_of_therapy = models.TextField(blank=True, null=True)
 
     # Blood work with units

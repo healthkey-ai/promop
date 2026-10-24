@@ -206,15 +206,27 @@ LOGGING = {
         'audit_stdout': {
             'class': 'logging.StreamHandler',
             'formatter': 'audit_json',
+            # SIEM reads stdout; without this the handler inherits stderr and
+            # the operational console stream can interleave with the JSON
+            # records (#1929).
+            'stream': 'ext://sys.stdout',
         },
         'console': {
             'class': 'logging.StreamHandler',
             'formatter': 'verbose',
+            'stream': 'ext://sys.stderr',
         },
     },
     'loggers': {
         'audit': {
             'handlers': ['audit_stdout'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        # Operational warnings/errors from audit-adjacent code. Separate from
+        # `audit` so SIEM consumers never have to parse plain text (#1929).
+        'omop.ops': {
+            'handlers': ['console'],
             'level': 'INFO',
             'propagate': False,
         },

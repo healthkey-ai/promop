@@ -10,7 +10,8 @@ const fields = {
 };
 function setup() {
   const get = vi.fn(async (url: string) => ({ data: url.includes('writable-fields') ? fields : {
-    patient_info: { person_id: 12, height: 170, weight: 60, bmi: 20.76 }, write_enabled: true,
+    patient_info: { person_id: 12, height: 170, weight: 60, bmi: 20.76,
+      no_pre_existing_conditions: true, preexisting_conditions: [] }, write_enabled: true,
   } }));
   const patch = vi.fn(async (_url: string, edits: Record<string, unknown>) => ({ data: {
     patient_info: { person_id: 12, height: 170, weight: 60, ...edits, bmi: 24.22 },
@@ -64,6 +65,22 @@ describe('shared patient-form queue', () => {
     expect(patch).toHaveBeenCalledTimes(2);
     expect(patch.mock.calls[1][1]).toEqual({ weight: 80 });
     expect(store.getSnapshot().values.weight).toBe(80);
+  });
+  it('does not let an in-flight PATCH resurrect a withdrawn conditions answer', async () => {
+    const { store, patch } = setup();
+    await store.load();
+    let settle!: (value: Awaited<ReturnType<typeof patch>>) => void;
+    patch.mockImplementationOnce(() => new Promise((resolve) => { settle = resolve; }));
+    store.enqueue('weight', 80);
+    await vi.advanceTimersByTimeAsync(500);
+    store.applyServerValues({ no_pre_existing_conditions: null, preexisting_conditions: [] });
+    settle({ data: {
+      patient_info: { person_id: 12, height: 170, weight: 80, bmi: 24.22,
+        no_pre_existing_conditions: true, preexisting_conditions: [] },
+      write: { applied: ['weight'], rejected: {} },
+    } });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(store.getSnapshot().values.no_pre_existing_conditions).toBeNull();
   });
   it('rolls failed PATCH back and exposes an error', async () => {
     const { store, patch } = setup();

@@ -12,10 +12,12 @@ import { __resetWritableFieldsCache } from '@/hooks/useWritableFields';
 
 const mockGet = vi.fn();
 const mockDelete = vi.fn();
+const mockPost = vi.fn();
 vi.mock('@/api/axios', () => ({
   default: {
     get: (...a: unknown[]) => mockGet(...a), post: vi.fn(), patch: vi.fn(),
     delete: (...a: unknown[]) => mockDelete(...a),
+    post: (...a: unknown[]) => mockPost(...a),
   },
 }));
 
@@ -45,6 +47,7 @@ const DESCRIPTORS: Record<string, unknown> = {
 beforeEach(() => {
   vi.clearAllMocks();
   mockDelete.mockResolvedValue({ data: { episode_id: 901, retracted: true, patient_info: {} } });
+  mockPost.mockResolvedValue({ data: { therapy_history_complete: true, patient_info: {} } });
   __resetWritableFieldsCache();
   mockGet.mockImplementation((url: string) => Promise.resolve({ data: url.includes('writable-fields') ? DESCRIPTORS : [] }));
 });
@@ -278,5 +281,48 @@ describe('TreatmentTab — unknown composition', () => {
     });
     await waitFor(() => expect(mockGet).toHaveBeenCalled());
     expect(screen.getByText(/Line 3: Drugs unknown/i)).toBeInTheDocument();
+  });
+});
+
+
+describe('TreatmentTab — completeness confirmation', () => {
+  it('confirms the full history through the packaged endpoint', async () => {
+    const refreshed = vi.fn();
+    render(
+      <TreatmentTab
+        formData={{ ...THREE_LINES, person_id: 262 }}
+        onChange={vi.fn()}
+        diseaseType="myeloma"
+        onRecordRefreshed={refreshed}
+      />,
+    );
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+
+    fireEvent.click(screen.getByLabelText(/treatment history is complete/i));
+    await waitFor(() => expect(mockPost).toHaveBeenCalledWith(
+      '/v1/therapy-history/completeness/',
+      { person: 262, complete: true },
+    ));
+    expect(refreshed).toHaveBeenCalled();
+  });
+
+  it('shows an already-confirmed history and can withdraw it', async () => {
+    renderTab({ ...THREE_LINES, person_id: 262, therapy_history_complete: true });
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+    const box = screen.getByLabelText(/treatment history is complete/i) as HTMLInputElement;
+    expect(box.checked).toBe(true);
+
+    fireEvent.click(box);
+    await waitFor(() => expect(mockPost).toHaveBeenCalledWith(
+      '/v1/therapy-history/completeness/',
+      { person: 262, complete: false },
+    ));
+  });
+
+  it('does not offer the confirmation when the host is read-only', async () => {
+    renderTab({ ...THREE_LINES, person_id: 262 }, true);
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+    expect(screen.getByLabelText(/treatment history is complete/i)).toBeDisabled();
+    expect(mockPost).not.toHaveBeenCalled();
   });
 });

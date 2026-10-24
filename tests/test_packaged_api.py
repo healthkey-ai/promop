@@ -36,6 +36,7 @@ def test_the_endpoints_require_authentication():
     with override_settings(**PACKAGED):
         assert APIClient().get('/federation/v1/therapy-outcomes/').status_code in (401, 403)
         assert APIClient().post('/federation/v1/therapy-lines/', {}, format='json').status_code in (401, 403)
+        assert APIClient().post('/federation/v1/therapy-history/completeness/', {}, format='json').status_code in (401, 403)
 
 
 @override_settings(**PACKAGED)
@@ -199,3 +200,62 @@ def test_clearing_composition_keeps_the_line(api, person):
 @override_settings(**PACKAGED)
 def test_retracting_an_unknown_line_is_404(api):
     assert api.delete('/federation/v1/therapy-lines/999999/').status_code == 404
+
+
+@override_settings(**PACKAGED)
+def test_history_is_not_complete_until_the_patient_says_so(api, person):
+    record = refresh_patient_record(person)
+    assert record.therapy_history_complete is None
+
+    response = api.post('/federation/v1/therapy-history/completeness/',
+                        {'person': person.pk, 'complete': True}, format='json')
+
+    assert response.status_code == 200, response.data
+    assert response.data['therapy_history_complete'] is True
+    assert PatientRecord.objects.get(person=person).therapy_history_complete is True
+
+
+@pytest.mark.parametrize('complete', [True, False])
+def test_protected_therapy_mount_does_not_expose_ungated_confirmation(api, person, complete):
+    from django.urls import include, path
+    from rest_framework.response import Response
+    from omop_core.api.urls import urlpatterns_for
+    from omop_core.api.views import TherapyLineViewSet
+    if not complete:
+        from omop_core.services.therapy_history import confirm_therapy_history
+        confirm_therapy_history(person)
+        refresh_patient_record(person)
+    before = PatientRecord.objects.get(person=person).therapy_history_complete
+
+    class ProtectedLines(TherapyLineViewSet):
+        def patient_write_denied(self, request, person):
+            return Response({'detail': 'Host refused this patient.'}, status=403)
+
+    class HostUrls:
+        urlpatterns = [path('federation/', include(urlpatterns_for(ProtectedLines)))]
+
+    with override_settings(ROOT_URLCONF=HostUrls):
+        response = api.post('/federation/v1/therapy-history/completeness/',
+                            {'person': person.pk, 'complete': complete}, format='json')
+    assert response.status_code == 403
+    assert PatientRecord.objects.get(person=person).therapy_history_complete == before
+
+
+@override_settings(**PACKAGED)
+def test_withdrawing_the_confirmation_returns_to_a_lower_bound(api, person):
+    api.post('/federation/v1/therapy-history/completeness/',
+             {'person': person.pk, 'complete': True}, format='json')
+
+    response = api.post('/federation/v1/therapy-history/completeness/',
+                        {'person': person.pk, 'complete': False}, format='json')
+
+    assert response.status_code == 200
+    assert response.data['therapy_history_complete'] is None
+    assert PatientRecord.objects.get(person=person).therapy_history_complete is None
+
+
+@override_settings(**PACKAGED)
+def test_a_confirmation_needs_a_known_patient(api):
+    response = api.post('/federation/v1/therapy-history/completeness/',
+                        {'person': 999999, 'complete': True}, format='json')
+    assert response.status_code == 400, response.data

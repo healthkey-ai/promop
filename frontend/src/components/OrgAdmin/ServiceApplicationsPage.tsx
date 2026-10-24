@@ -18,6 +18,7 @@ const scopeOptions = [
   ['patient/*.read', 'Read patient data'], ['patient/*.write', 'Write and delete patient data'],
   ['system/etl.write', 'ETL imports (no deletes)'],
   ['system/etl.delete', 'ETL deletes clinical rows'], ['system/*.read', 'Read reference data'],
+  ['system/disease.read', "Read a patient's diseases only"],
   ['user/*.read', 'Read user data'], ['user/*.write', 'Write user data'],
 ];
 const endpoint = '/v1/service-applications/';

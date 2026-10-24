@@ -84,6 +84,8 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
     <div><div className="pb-4 pt-2"><h2 className="text-base font-medium text-foreground/70">{labels[tabKey]}</h2></div>
       <fieldset disabled={readOnly || !state.writable}>
         {tabKey === 'general' && <GeneralTab showCoordinates={!federated} patientMode={federated}
+          conditionsReadOnly={readOnly}
+          onConditionsSaved={(answer) => store.applyServerValues({ ...answer })}
           formData={editedInfo} onChange={handleFieldChange} editedName={editedName}
           onNameChange={(value) => handleFieldChange('patient_name', value)} onZipcodeChange={handleZipcodeChange} />}
         {tabKey === 'disease' && <DiseaseTab formData={editedInfo} onChange={handleFieldChange} diseaseType={diseaseType} />}

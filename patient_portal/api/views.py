@@ -5590,6 +5590,27 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
                          'write': {'applied': result.applied, 'rejected': result.rejected,
                                    'deferred_profile': sorted(result.profile)}})
 
+    @action(detail=True, methods=['get', 'post'], url_path='preexisting-conditions-answer',
+            permission_classes=[PatientCrudPermission, PatientSelfScopePermission])
+    def preexisting_conditions_answer(self, request, pk=None):
+        person, record, error = self._resolve_patient_with_auth(request, pk)
+        if error is not None:
+            return error
+        if request.method == 'GET':
+            return Response({'no_pre_existing_conditions': record.no_pre_existing_conditions,
+                             'preexisting_conditions': record.preexisting_conditions})
+        if not _caller_may_write_patient(request, person.person_id):
+            return Response({'detail': 'You have read-only access to this patient.'}, status=403)
+        if not is_machine_request(request) and not getattr(request.user, 'is_staff', False):
+            from omop_core.authorization import can_write_patient
+            if not can_write_patient(request.user, person.person_id):
+                return Response({'detail': 'You have read-only access to this patient.'}, status=403)
+        from .preexisting_conditions import write_answer
+        source = ('host-explicit' if is_machine_request(request)
+                  else f'{_attestation_source(request, person)}-explicit')
+        return write_answer(request, record, source=source,
+                            revision_writer=_write_record_revisions)
+
     @action(detail=False, methods=['get'], url_path='writable-fields')
     def writable_fields(self, request: Request) -> Response:
         """Which PatientRecord fields a client may edit and their OMOP projection.

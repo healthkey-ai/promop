@@ -67,7 +67,7 @@ def _usable_concept_name(concept) -> str | None:
 
 # Bump this whenever aggregation or computation logic changes in any section
 # extractor or in _compute_derived_fields.  See DERIVATION_CHANGELOG.md.
-DERIVATION_VERSION = 16
+DERIVATION_VERSION = 19
 
 # These PatientRecord columns are projections of PersonLanguageSkill, never
 # independent edits. Older PATCH requests could mark them as user-edited and
@@ -107,6 +107,9 @@ _OMOP_DERIVED_FIELDS = [
     'later_therapy_type_ids', 'therapy_type_ids',
     'therapy_ids_provenance',
     'therapy_lines_count', 'last_treatment',
+    # Set only when the patient has confirmed the list is complete (#1924), so a
+    # withdrawn confirmation must clear it on the next refresh.
+    'therapy_history_complete',
     'concomitant_medications',
     # Treatment assertions and summaries. These are set from dated OMOP rows
     # below; clearing them prevents legacy PatientRecord patches surviving a
@@ -140,6 +143,8 @@ _OMOP_DERIVED_FIELDS = [
     # These FHIR Observations are persisted as OMOP Measurements and must not
     # retain a projection-only copy after their source is removed.
     'inr', 'pt_seconds', 'ptt_seconds', 'cea_ng_ml', 'ca19_9_u_ml',
+    'prothrombin_time_uln', 'activated_partial_thromboplastin_time_uln',
+    'able_to_swallow_tablets_capsules',
     'psa_ng_ml', 'phosphorus',
     # Remaining numeric Measurement projections (#504).
     'heartrate_variability', 'ejection_fraction', 'qtcf_value',
@@ -358,16 +363,16 @@ _LOINC_LAB_FIELDS = {
     '33358-3': ('monoclonal_protein_serum',       float),  # M-protein, SPEP (3046299)
     '32730-5': ('monoclonal_protein_urine',       float),  # Urine M-spike 24h
     '42482-0': ('monoclonal_protein_urine',       float),  # Approved FCM destination
-    '33944-8': ('kappa_flc',                      float),  # seeded demo concept only
-    '36916-5': ('kappa_flc',                      float),  # Kappa FLC, Serum (3034860)
-    '80515-0': ('kappa_flc',                      float),  # Kappa FLC by nephelometry
-    '104544-2': ('kappa_flc',                     float),  # Approved FCM destination
-    '33945-5': ('lambda_flc',                     float),  # seeded demo concept only
-    '33944-0': ('lambda_flc',                     float),  # Lambda FLC, Serum (3047169)
-    '80516-8': ('lambda_flc',                     float),  # Lambda FLC by nephelometry
-    '48378-4': ('kappa_lambda_ratio',             float),  # Kappa/lambda ratio (3053209)
-    '80517-6': ('kappa_lambda_ratio',             float),  # ratio by nephelometry
-    '104546-7': ('kappa_lambda_ratio',            float),  # ratio, newer LOINC
+    '33944-8': ('kappa_flc',                      Decimal),  # seeded demo concept only
+    '36916-5': ('kappa_flc',                      Decimal),  # Kappa FLC, Serum (3034860)
+    '80515-0': ('kappa_flc',                      Decimal),  # Kappa FLC by nephelometry
+    '104544-2': ('kappa_flc',                     Decimal),  # Approved FCM destination
+    '33945-5': ('lambda_flc',                     Decimal),  # seeded demo concept only
+    '33944-0': ('lambda_flc',                     Decimal),  # Lambda FLC, Serum (3047169)
+    '80516-8': ('lambda_flc',                     Decimal),  # Lambda FLC by nephelometry
+    '48378-4': ('kappa_lambda_ratio',             Decimal),  # Kappa/lambda ratio (3053209)
+    '80517-6': ('kappa_lambda_ratio',             Decimal),  # ratio by nephelometry
+    '104546-7': ('kappa_lambda_ratio',            Decimal),  # ratio, newer LOINC
     # '26098-4' is "XR Ankle - left Views" in LOINC, so it used to project ankle
     # radiographs into clonal_plasma_cells. '11118-7' is the real marrow code.
     '11118-7': ('clonal_plasma_cells',            float),  # Plasma cells/100 cells in marrow (3003879)
@@ -707,6 +712,9 @@ class OmopSnapshot:
     # Per-refresh memo of (disease slug, end date) per line of therapy, read
     # only when the person has more than one cancer to choose the primary from.
     cancer_lines: dict = dataclasses.field(default_factory=dict, compare=False)
+    # Raw source-input history, including tombstones. Generic filtering is keyed
+    # by concept+source and cannot clear an older legacy SCT concept by source.
+    clinical_input_observations: list | None = None
 
 
 def _first_by_code(snapshot: OmopSnapshot, code: str, table: str = 'measurement'):
@@ -834,6 +842,9 @@ def _build_snapshot(person: Person) -> OmopSnapshot:
     breast_measurements = [m for m in measurements if
         m.measurement_source_value in ('29593-1', '85069-3')
         or getattr(m.measurement_concept, 'concept_code', None) in ('29593-1', '85069-3')]
+    from omop_core.services.clinical_input_contract import RECIPES
+    clinical_sources = {recipe[0] for recipe in RECIPES.values()}
+    clinical_input_observations = [o for o in observations if o.observation_source_value in clinical_sources]
     measurements = without_cleared_history(measurements, 'measurement')
     observations = without_cleared_history(observations, 'observation')
 
@@ -868,6 +879,7 @@ def _build_snapshot(person: Person) -> OmopSnapshot:
         death_date_assertion=death_date_assertion,
         cytogenetic_observations=cytogenetic_observations,
         breast_measurements=breast_measurements,
+        clinical_input_observations=clinical_input_observations,
         meas_by_code=dict(meas_by_code),
         obs_by_code=dict(obs_by_code),
         meas_by_source=dict(meas_by_source),
@@ -1043,7 +1055,10 @@ def refresh_patient_record(person: Person) -> PatientRecord:
 
         patient_info.custom_fields = _get_custom_patient_field_data(snapshot)
         from omop_core.services.omop_projection import curated_values_from_snapshot
-        for field, value in curated_values_from_snapshot(snapshot).items():
+        confirmed_inputs = set()
+        for field, value in curated_values_from_snapshot(
+            snapshot, confirmed_clinical_fields=confirmed_inputs,
+        ).items():
             # The lab extractor has already selected the latest code across
             # canonical and approved-alias results (including unit handling).
             # An older exact FCM row must not overwrite that latest result.
@@ -1053,10 +1068,16 @@ def refresh_patient_record(person: Person) -> PatientRecord:
         # Pending edits (including explicit clears) win until OMOP actually
         # represents the saved value. A stale fact or a failed projection must
         # not silently undo a user's change.
+        from omop_core.services.clinical_input_contract import (
+            NEW_INPUT_FIELDS, values_from_snapshot,
+        )
+        clinical_values = values_from_snapshot(snapshot) if preserved else {}
         still_orphaned = []
         for field, value in preserved.items():
             derived_value = getattr(patient_info, field, None)
             matches = _derived_value_matches(field, derived_value, value)
+            if field in NEW_INPUT_FIELDS or field in clinical_values:
+                matches = matches and field in confirmed_inputs
             if (field == 'flipi_score_options' and value is None
                     and patient_info.flipi_score is not None):
                 # A pending explicit clear also supersedes a legacy numeric
@@ -1088,6 +1109,19 @@ def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fiel
     This does not advance derived_at/version: those describe the last full
     OMOP refresh, not the last edit of PatientRecord's own values.
     """
+    from omop_core.services.pre_existing_conditions import (
+        contradicts_no_pre_existing_conditions,
+        supersede_no_preexisting_conditions,
+    )
+    # The category list is the evidence; an explicit "no conditions" answer cannot
+    # stand beside it (#1988). Invalidate the answer rather than delete the list.
+    if contradicts_no_pre_existing_conditions(
+        patient_info.no_pre_existing_conditions, patient_info.preexisting_conditions,
+    ):
+        patient_info.no_pre_existing_conditions = None
+    # A recorded category is also a more specific answer than a blanket "none",
+    # so it withdraws the attestation that backed the flag (#1988).
+    supersede_no_preexisting_conditions(patient_info)
     if 'date_of_birth' in changed_fields:
         # PatientRecord.save recalculates age when a DOB exists, but it must be
         # explicitly cleared first when the date and Person birth components
@@ -1695,6 +1729,12 @@ def _disease_name_to_slug(name: str) -> str:
 def _get_treatment_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     data = {}
     snapshot = snapshot or _build_snapshot(person)
+
+    # An explicit confirmation is the only thing that makes the recorded line
+    # count exact; without it the projection leaves the flag NULL (#1924).
+    from omop_core.models import TherapyHistoryAttestation
+    if TherapyHistoryAttestation.objects.filter(person=person).exists():
+        data['therapy_history_complete'] = True
 
     drug_exposures = snapshot.drug_exposures  # already ordered by start_date, id
 
@@ -3403,54 +3443,174 @@ def _get_infection_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
 
 
 #: IMWG 2014: involved/uninvolved ratio >= 100 with involved chain >= 100 mg/L.
-_SLIM_FLC_RATIO = 100.0
-_SLIM_INVOLVED_FLC_MG_L = 100.0
+_SLIM_FLC_RATIO = Decimal('100')
+_SLIM_INVOLVED_FLC_MG_L = Decimal('100')
+
+# Sentinel for "no projection provided this refresh". Direct callers of
+# _compute_derived_fields (unit tests, legacy call sites) did not have a chance
+# to attach the FLC pair, so they keep the old field-based behaviour.
+_FLC_PAIR_UNSET = object()
+
+
+def _lab_field_for_measurement(measurement):
+    """Return the target lab field for either LOINC or display-name rows."""
+    code = _measurement_code(measurement)
+    field = _LOINC_LAB_FIELDS.get(code, (None, None))[0]
+    if field is None:
+        field = _SOURCE_VALUE_LAB_FIELDS.get(measurement.measurement_source_value)
+    return field
+
+
+def _flc_field_for_measurement(measurement):
+    """Return kappa_flc/lambda_flc for either LOINC or display-name rows."""
+    field = _lab_field_for_measurement(measurement)
+    return field if field in _FLC_FIELDS else None
+
+
+def _flc_event_key(measurement):
+    """Group FLC rows by the best available specimen/lab-event identity.
+
+    OMOP Measurement has no specimen_id in this schema. Prefer an explicit
+    measurement_event_id qualified by the field concept it points at, then a
+    visit + timestamp, then a visit + date, then the timestamp/date alone.
+    Rows without any key cannot prove they belong to the same draw and are
+    never paired.
+    """
+    event_id = getattr(measurement, 'measurement_event_id', None)
+    event_domain = getattr(measurement, 'meas_event_field_concept_id', None)
+    if event_id is not None and event_domain is not None:
+        # measurement_event_id alone may point at another domain's event. OMOP
+        # requires meas_event_field_concept_id to interpret the reference.
+        return ('event', event_domain, event_id)
+
+    visit_id = getattr(measurement, 'visit_occurrence_id', None)
+    event_at = getattr(measurement, 'measurement_datetime', None)
+    event_date = getattr(measurement, 'measurement_date', None)
+    if visit_id is not None:
+        if event_at is not None:
+            return ('visit_datetime', visit_id, event_at)
+        if event_date is not None:
+            return ('visit_date', visit_id, event_date)
+    if event_at is not None:
+        return ('datetime', event_at)
+    if event_date is not None:
+        return ('date', event_date)
+    return None
+
+
+def _flc_event_observed_at(measurement):
+    """Sort key for the collection time, falling back to the measurement date."""
+    event_at = getattr(measurement, 'measurement_datetime', None)
+    if event_at is not None:
+        return (
+            event_at.date(), event_at.hour, event_at.minute,
+            event_at.second, event_at.microsecond, 1,
+        )
+    event_date = getattr(measurement, 'measurement_date', None) or date.min
+    return (event_date, 0, 0, 0, 0, 0)
+
+
+def _select_flc_pair_with_ratio(measurements):
+    """Return the newest complete kappa/lambda pair and its same-event ratio.
+
+    A ratio must not combine kappa from one draw with lambda from another. The
+    newest event that contains both chains decides; if its units cannot be
+    converted, the pair is unknown rather than falling back to an older event.
+    Events with only one chain are skipped because they cannot form a ratio.
+    The reported ratio is included only when it belongs to the selected event.
+
+    The snapshot is ordered by date and row id, not collection time. Sort the
+    grouped events explicitly so a later draw on the same day wins even when
+    its rows were inserted first.
+    """
+    events = {}
+    for measurement in measurements:
+        if measurement.value_as_number is None:
+            continue
+        field = _lab_field_for_measurement(measurement)
+        if field not in _FLC_FIELDS and field != 'kappa_lambda_ratio':
+            continue
+        key = _flc_event_key(measurement)
+        if key is None:
+            continue
+        event = events.setdefault(
+            key, {'observed_at': _flc_event_observed_at(measurement), 'rows': {}},
+        )
+        event['observed_at'] = max(
+            event['observed_at'], _flc_event_observed_at(measurement),
+        )
+        event['rows'].setdefault(field, measurement)
+
+    ordered_events = sorted(
+        events.values(), key=lambda event: event['observed_at'], reverse=True,
+    )
+    for event in ordered_events:
+        rows = event['rows']
+        kappa_row = rows.get('kappa_flc')
+        lambda_row = rows.get('lambda_flc')
+        if kappa_row is None or lambda_row is None:
+            continue
+        kappa = flc_to_canonical(
+            kappa_row.value_as_number, kappa_row.unit_source_value,
+        )
+        lam = flc_to_canonical(
+            lambda_row.value_as_number, lambda_row.unit_source_value,
+        )
+        if kappa is None or lam is None:
+            return None
+        if not kappa.is_finite() or not lam.is_finite() or kappa < 0 or lam < 0:
+            return None
+
+        ratio = None
+        ratio_row = rows.get('kappa_lambda_ratio')
+        if ratio_row is not None:
+            try:
+                candidate = Decimal(str(ratio_row.value_as_number))
+            except (InvalidOperation, TypeError, ValueError):
+                candidate = None
+            if candidate is not None and candidate.is_finite() and candidate > 0:
+                ratio = candidate
+        return kappa, lam, ratio
+    return None
+
+
+def _select_flc_pair(measurements):
+    """Return the newest complete kappa/lambda pair from one lab event."""
+    selected = _select_flc_pair_with_ratio(measurements)
+    return selected[:2] if selected is not None else None
 
 
 def _meets_flc_criterion(
-    kappas: list[tuple[float, str | None]],
-    lambdas: list[tuple[float, str | None]],
-    ratios: list[float],
-    person: Person,
+    kappa: Decimal | None,
+    lam: Decimal | None,
+    reported_ratio: Decimal | None,
 ) -> bool:
     """Whether the SLiM light chain criterion is established.
 
-    Chains are (value, unit_source_value) in date order. Both halves must hold,
-    and the absolute half needs mg/L, so a ratio with no chain result is
-    unproven rather than satisfied.
+    ``kappa`` and ``lam`` are a same-event pair already converted to mg/L.
+    Both halves must hold, so a reported ratio without that pair is unproven
+    rather than satisfied. Ratios use Decimal to keep an exact 100 inclusive.
     """
-    if not kappas or not lambdas:
+    if kappa is None or lam is None:
         return False
 
-    k_raw, k_unit = kappas[-1]
-    lam_raw, lam_unit = lambdas[-1]
-
-    # A reported ratio beats one divided out of two results that may come from
-    # different draws.
-    ratio = None
-    if ratios:
-        ratio = ratios[-1]
-    elif lam_raw > 0 and k_raw > 0:
-        ratio = k_raw / lam_raw
-    if ratio is None or ratio <= 0:
+    if reported_ratio is not None:
+        ratio = reported_ratio
+    elif lam > 0:
+        ratio = kappa / lam
+    else:
+        return False
+    if ratio <= 0:
         return False
 
     if ratio >= _SLIM_FLC_RATIO:
-        involved, involved_unit = k_raw, k_unit
+        involved = kappa
     elif ratio <= 1 / _SLIM_FLC_RATIO:
-        involved, involved_unit = lam_raw, lam_unit
+        involved = lam
     else:
         return False
 
-    involved_mg_l = flc_to_canonical(involved, involved_unit)
-    if involved_mg_l is None:
-        logger.warning(
-            'SLiM light-chain criterion left unproven for person_id=%s: involved '
-            'free light chain has unit_source_value=%r, which is not convertible '
-            'to mg/L', getattr(person, 'person_id', None), involved_unit,
-        )
-        return False
-    return involved_mg_l >= _SLIM_INVOLVED_FLC_MG_L
+    return involved >= _SLIM_INVOLVED_FLC_MG_L
 
 
 def _get_mm_specific_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
@@ -3537,9 +3697,7 @@ def _get_mm_specific_data(person: Person, snapshot: OmopSnapshot = None) -> dict
                 (float(m.value_as_number), m.unit_source_value))
 
     plasma_pcts = [v for v, _unit in slim_vals.get('clonal_plasma_cells', [])]
-    kappas = slim_vals.get('kappa_flc', [])
-    lambdas = slim_vals.get('lambda_flc', [])
-    ratios = [v for v, _unit in slim_vals.get('kappa_lambda_ratio', [])]
+    flc_pair = _select_flc_pair_with_ratio(snapshot.measurements)
 
     meets_slim = False
     # Sixty criterion: any plasma cells measurement ≥60%
@@ -3548,7 +3706,7 @@ def _get_mm_specific_data(person: Person, snapshot: OmopSnapshot = None) -> dict
     # Ratio alone is not enough. A patient with both chains low reaches a ratio
     # of 100 without the absolute burden, and this decides a myeloma defining
     # event.
-    elif _meets_flc_criterion(kappas, lambdas, ratios, person):
+    elif flc_pair is not None and _meets_flc_criterion(*flc_pair):
         meets_slim = True
 
     data['meets_slim'] = meets_slim
@@ -3732,6 +3890,41 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
         if measurement.unit_source_value:
             data[f'{field_name}_units'] = measurement.unit_source_value
 
+    # --- FLC values: one chronological pass across both representations ---
+    # Measurements are newest-first. The first kappa/lambda row decides: if its
+    # unit cannot be converted, an older row must not resurrect a stale value
+    # that could satisfy the IMWG absolute threshold.
+    flc_blocked = set()
+    for m in measurements:
+        if m.value_as_number is None:
+            continue
+        code = _measurement_code(m)
+        field = code_fields.get(code, (None, None))[0]
+        if field not in _FLC_FIELDS:
+            field = _SOURCE_VALUE_LAB_FIELDS.get(m.measurement_source_value)
+        if field not in _FLC_FIELDS or field in data or field in flc_blocked:
+            continue
+        canonical_flc = flc_to_canonical(m.value_as_number, m.unit_source_value)
+        if canonical_flc is None:
+            # The latest row still owns the display field, as the lab reported
+            # it: blanking thousands of patients is worse than the lab's own
+            # unit (#640). It can never satisfy a threshold, though: IMWG and
+            # SLiM read only the converted same-event pair, which refuses it.
+            flc_blocked.add(field)
+            logger.warning(
+                'FLC projected without unit conversion for person_id=%s: '
+                'unit_source_value=%r is not convertible to mg/L',
+                person.person_id, m.unit_source_value,
+            )
+            data[field] = Decimal(str(m.value_as_number))
+            continue
+        data[field] = canonical_flc
+
+    # The ratio-bearing values must come from one lab event, not the newest
+    # kappa and the newest lambda independently. The individual fields above
+    # remain useful for display; this transient pair is what IMWG/SLiM consume.
+    data['_flc_pair'] = _select_flc_pair(measurements)
+
     # --- New UI fields via LOINC concept code (primary path) ---
     # Lazy unit_system: queried at most once, outside the per-measurement loop.
     _unit_system_cache = []  # sentinel: empty = not yet fetched
@@ -3752,6 +3945,8 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
         if code not in code_fields:
             continue
         field, cast = code_fields[code]
+        if field in _FLC_FIELDS:
+            continue
         canonical_value = None
         if code == '6690-2':
             if wbc_projection_blocked:
@@ -3765,21 +3960,6 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
                     'WBC projections skipped for person_id=%s: unsupported or absent '
                     'unit_source_value=%r', person.person_id, m.unit_source_value,
                 )
-                continue
-        if field in _FLC_FIELDS:
-            canonical_flc = flc_to_canonical(m.value_as_number, m.unit_source_value)
-            if canonical_flc is None:
-                # Unlike WBC this still projects: blanking thousands of patients
-                # is worse than the lab's own unit. The SLiM threshold refuses
-                # it instead, which is where a 10x error changes the answer.
-                logger.warning(
-                    'FLC projected without unit conversion for person_id=%s: '
-                    'unit_source_value=%r is not convertible to mg/L',
-                    person.person_id, m.unit_source_value,
-                )
-            else:
-                if field not in data:
-                    data[field] = cast(canonical_flc)
                 continue
         if field not in data:
             if code != '6690-2' or canonical_value is not None:
@@ -3796,7 +3976,7 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
                 continue
             if field == 'wbc_count_thousand_per_ul' and wbc_projection_blocked:
                 continue
-            if field in data:
+            if field in data or field in _FLC_FIELDS:
                 continue
             for m in snapshot.meas_by_source.get(source_value, ()):
                 if m.value_as_number is not None:
@@ -4401,28 +4581,78 @@ def _compute_derived_fields(patient_info: PatientRecord, *, apply_formulas=True)
 
     serum_mp = patient_info.monoclonal_protein_serum
     urine_mp = patient_info.monoclonal_protein_urine
-    # As floats: a refresh holds a freshly projected value as a float and one
-    # kept from the stored record as the Decimal the database returned.
-    kappa = None if patient_info.kappa_flc is None else float(patient_info.kappa_flc)
-    lam = None if patient_info.lambda_flc is None else float(patient_info.lambda_flc)
+    flc_pair = getattr(patient_info, '_flc_pair', _FLC_PAIR_UNSET)
+    if flc_pair is _FLC_PAIR_UNSET:
+        # Direct callers/tests construct PatientRecord without a projection.
+        kappa = patient_info.kappa_flc
+        lam = patient_info.lambda_flc
+    else:
+        # A refresh always supplies the pair, including None when no two chains
+        # came from the same lab event. Never reconstruct a ratio from fields
+        # that may belong to different draws.
+        kappa, lam = flc_pair if flc_pair else (None, None)
 
-    if kappa is not None and lam is not None and min(kappa, lam) > 0:
-        patient_info.involved_uninvolved_ratio = max(kappa, lam) / min(kappa, lam)
+    # The involved/uninvolved ratio shown on the record comes from the same
+    # pair IMWG uses when there is one. Without a convertible same-event pair
+    # it falls back to the projected fields, as before: a display ratio, never
+    # a threshold.
+    ratio_kappa, ratio_lam = (kappa, lam) if flc_pair else (patient_info.kappa_flc, patient_info.lambda_flc)
+    try:
+        kappa_f = None if ratio_kappa is None else float(ratio_kappa)
+        lam_f = None if ratio_lam is None else float(ratio_lam)
+    except (TypeError, ValueError):
+        kappa_f = lam_f = None
+    if (kappa_f is not None and lam_f is not None and math.isfinite(kappa_f)
+            and math.isfinite(lam_f) and min(kappa_f, lam_f) > 0):
+        patient_info.involved_uninvolved_ratio = max(kappa_f, lam_f) / min(kappa_f, lam_f)
     else:
         patient_info.involved_uninvolved_ratio = None
 
-    imwg = None
-    if serum_mp is not None and float(serum_mp) >= 0.5:
+    # Keep this in lockstep with CB PatientInfoAttributes.measurable_disease_imwg
+    # (and trials/signals.py): a negative OR is definitive only when all three
+    # components were evaluated; a missing component keeps the result unknown.
+    # The FLC window and thresholds are the reviewed CB rule (CB #858). Decimal
+    # (not float) is required so exact boundary ratios such as 100.65/61.00
+    # (1.65) and 33.80/130.00 (0.26) stay inside the normal window.
+    def _decimal(value):
+        # Invalid/non-finite/negative concentrations are unknown, not a
+        # positive result. Comparisons on NaN would otherwise raise and abort
+        # the whole refresh.
+        try:
+            number = Decimal(str(value))
+        except (InvalidOperation, ValueError):
+            return None
+        if not number.is_finite() or number < 0:
+            return None
+        return number
+
+    serum_threshold = Decimal('0.5')
+    urine_threshold = Decimal('200')
+    flc_low = Decimal('0.26')
+    flc_high = Decimal('1.65')
+    flc_high_absolute = Decimal('100')
+
+    serum_dec = _decimal(serum_mp)
+    urine_dec = _decimal(urine_mp)
+    serum_component = None if serum_dec is None else serum_dec >= serum_threshold
+    urine_component = None if urine_dec is None else urine_dec >= urine_threshold
+    kappa_dec, lam_dec = _decimal(kappa), _decimal(lam)
+    if kappa_dec is None or lam_dec is None or lam_dec == 0:
+        flc_component = None
+    else:
+        ratio = kappa_dec / lam_dec
+        if not (ratio < flc_low or ratio > flc_high):
+            flc_component = False
+        else:
+            flc_component = kappa_dec >= flc_high_absolute or lam_dec >= flc_high_absolute
+
+    components = [serum_component, urine_component, flc_component]
+    if any(component is True for component in components):
         imwg = True
-    elif urine_mp is not None and float(urine_mp) >= 200:
-        imwg = True
-    elif kappa is not None and lam is not None and lam > 0:
-        ratio = kappa / lam
-        diff = abs(kappa - lam)
-        if (ratio > 100 or ratio < 0.01) and diff >= 10:
-            imwg = True
-    elif any(v is not None for v in (serum_mp, urine_mp, kappa, lam)):
+    elif all(component is False for component in components):
         imwg = False
+    else:
+        imwg = None
     patient_info.measurable_disease_imwg = imwg
 
     # Use the canonical LOINC-derived column (10³/µL) for the iwCLL 5.0

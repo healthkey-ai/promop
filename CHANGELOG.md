@@ -8,6 +8,16 @@ All notable changes to PRomop are documented here.
 
 ### Added
 
+- **The patient can confirm that the recorded treatment history is complete** —
+  the Treatment tab now carries "This is my complete treatment history". Until it
+  is ticked, the number of recorded lines is a lower bound ("at least N"); the
+  projection exposes `therapy_history_complete` as null, and only an explicit
+  confirmation makes it true. Confirming is a statement about the list, not a
+  clinical fact: withdrawing it returns the record to the lower bound, and a
+  patient copy carries the confirmation with the record. The write goes through
+  the packaged endpoint, so an embedding host applies its own write gate and
+  per-person authorization (#1924).
+
 - **A recorded line no longer has to name its drugs, and a wrong line can be
   withdrawn** — the therapy editor offers "I don't know which drugs were given",
   which records that the line happened with an unknown composition instead of
@@ -77,6 +87,18 @@ All notable changes to PRomop are documented here.
   the Existing mappings and Find source codes lists are unchanged (#1915, #1911).
 
 ### Changed
+
+- **A patient's own record edits are recorded as patient self-report** — a
+  `PatientRecord` PATCH by the patient (`/patient-info/me/`) or their verified
+  representative projects its OMOP facts with type 32865 (Patient self-report)
+  instead of the recipe's type, which for curated mappings defaults to EHR.
+  The patient's own facts also get a `PATIENT_SELF` provenance row, as PHR
+  entries do. Same-day matching keeps the two apart in both directions: a
+  patient's answer sits beside a clinical fact recorded the same day instead of
+  overwriting it and taking over its type and provenance, and a later clinician,
+  staff or service edit that day writes its own fact rather than the patient's.
+  Their types are otherwise unchanged. Without concept 32865 loaded, the recipe
+  type stands (#1959).
 
 - **Mapping saves return immediately** — approving or re-pointing a code
   mapping (Concept to Code, Code to Concept, group approve, CSV upload) writes the mapping

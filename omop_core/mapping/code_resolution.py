@@ -435,13 +435,22 @@ def resolve_source_code(*, source_code, omop_table, source_vocabulary_id='',
 
 def resolve_source_code_variant(*, source_code, omop_table, source_vocabulary_id='',
                                 source_text='', source_system='fhir-upload',
-                                organization=None, source_unit=None):
+                                organization=None, source_unit=None, metadata=None,
+                                mint=True):
     """:func:`resolve_source_code`, also returning the axis variant that
-    routed the record (``None`` when the mapping's own concept applies)."""
+    routed the record (``None`` when the mapping's own concept applies).
+
+    *metadata* is what the caller knows about the record (unit, value,
+    specimen) in the shape :mod:`loinc_axes` reads; it steers the suggestion
+    made for a new code. *mint* False queues a code nothing matched with no
+    destination instead of a placeholder concept: right for a document term
+    (:mod:`text_terms`), where a placeholder per phrasing would be noise.
+    """
     concept, mapping = _resolve_source_code(
         source_code=source_code, omop_table=omop_table,
         source_vocabulary_id=source_vocabulary_id, source_text=source_text,
         source_system=source_system, organization=organization,
+        metadata=metadata, mint=mint,
     )
     if mapping is not None and source_unit:
         from omop_core.mapping.axis_variants import variant_for
@@ -452,7 +461,8 @@ def resolve_source_code_variant(*, source_code, omop_table, source_vocabulary_id
 
 
 def _resolve_source_code(*, source_code, omop_table, source_vocabulary_id,
-                         source_text, source_system, organization):
+                         source_text, source_system, organization,
+                         metadata=None, mint=True):
     source_code = (source_code or '').strip()
     if not source_code:
         return None, None
@@ -545,6 +555,7 @@ def _resolve_source_code(*, source_code, omop_table, source_vocabulary_id,
         source_code=source_code,
         source_text=source_text,
         omop_table=table,
+        metadata=metadata,
     )
     if suggested is not None:
         mapping = _record_proposal(
@@ -561,6 +572,17 @@ def _resolve_source_code(*, source_code, omop_table, source_vocabulary_id,
         return None, mapping
 
     # Rule 5 — mint only after direct resolution and suggestion both fail.
+    if not mint:
+        return None, _record_proposal(
+            source_vocabulary_id=source_vocabulary_id,
+            source_code=source_code,
+            source_text=source_text,
+            concept=None,
+            omop_table=table,
+            source_system=source_system,
+            organization=mapping_organization,
+            notes=note,
+        )
     target = _QUARANTINE_TARGETS.get(table)
     if target is None:
         logger.warning(

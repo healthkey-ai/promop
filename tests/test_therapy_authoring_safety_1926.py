@@ -271,6 +271,46 @@ def test_api_missing_vocabulary_returns_conflict_without_orphan_facts(setup):
     assert not DrugExposure.objects.filter(person=person).exists()
 
 
+def test_api_write_error_does_not_echo_exception_text(setup, monkeypatch):
+    from omop_core.services import episode_service
+
+    person, a, _ = setup
+
+    def fail(*args, **kwargs):
+        raise ValueError('internal patient detail 42')
+
+    monkeypatch.setattr(episode_service, 'author_therapy_line', fail)
+    response = patient_client(person).post('/api/v1/therapy-lines/', {
+        'person': person.pk, 'line_number': 1, 'start_date': START.isoformat(),
+        'drugs': [{'concept_id': a.pk}],
+    }, format='json')
+    assert response.status_code == 400, response.data
+    assert response.data['detail'] == 'The therapy line could not be saved as submitted.'
+    assert 'internal patient detail' not in str(response.data)
+
+
+def test_api_retract_error_does_not_echo_exception_text(setup, monkeypatch):
+    from omop_core.api.views import TherapyLineViewSet
+    from omop_core.services import episode_service
+    from rest_framework.test import APIRequestFactory
+
+    original = write(setup)
+
+    def fail(*args, **kwargs):
+        raise ValueError('internal retract detail 43')
+
+    monkeypatch.setattr(episode_service, 'retract_therapy_line', fail)
+    # Call the packaged view directly: the API client's patient role is denied
+    # DELETE by the host permission classes, which is not what this test covers.
+    response = TherapyLineViewSet().destroy(
+        APIRequestFactory().delete('/v1/therapy-lines/'),
+        pk=str(original.episode.pk),
+    )
+    assert response.status_code == 400, response.data
+    assert response.data['detail'] == 'The therapy line could not be retracted.'
+    assert 'internal retract detail' not in str(response.data)
+
+
 def test_api_end_date_only_clear_updates_line_not_individual_administration(setup):
     original = write(setup)
     response = patient_client(setup[0]).patch(f'/api/v1/therapy-lines/{original.episode.pk}/',

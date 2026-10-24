@@ -38,6 +38,7 @@ export class PatientFormStore {
   private queue: Record<string, unknown> = {};
   private revisions: Record<string, number> = {};
   private revision = 0;
+  private explicitRevision = 0;
   private timer?: ReturnType<typeof setTimeout>;
   private flight = false;
   private loading?: Promise<void>;
@@ -72,6 +73,11 @@ export class PatientFormStore {
   resolve(name: string): string | undefined {
     if (name in this.snapshot.fields) return name;
     return Object.keys(this.snapshot.fields).find((key) => this.snapshot.fields[key].bindings?.includes(name));
+  }
+  /** Merge an explicit server acknowledgement that did not go through the queue. */
+  applyServerValues(values: Record<string, unknown>) {
+    ++this.explicitRevision;
+    this.publish({ values: { ...this.snapshot.values, ...values } });
   }
   load = (): Promise<void> => {
     if (this.loading) return this.loading;
@@ -132,6 +138,7 @@ export class PatientFormStore {
     if (this.flight || !Object.keys(this.queue).length || !this.snapshot.personId) return;
     const batch = this.queue;
     const revisions = { ...this.revisions };
+    const explicitAtStart = this.explicitRevision;
     this.queue = {};
     this.flight = true;
     this.publish({ saving: true });
@@ -147,7 +154,15 @@ export class PatientFormStore {
       // Ignore GETs started before this confirmed write. Never merge submitted
       // values into the baseline: the server's re-derived read model owns it.
       ++this.readRevision;
-      this.publish({ values: { ...data.patient_info,
+      const serverValues = { ...data.patient_info };
+      // An explicit pre-existing-conditions answer can land while this PATCH is
+      // in flight. Its response was built from the older answer; do not let it
+      // resurrect what the patient just withdrew.
+      if (this.explicitRevision !== explicitAtStart) {
+        serverValues.no_pre_existing_conditions = this.snapshot.values.no_pre_existing_conditions;
+        serverValues.preexisting_conditions = this.snapshot.values.preexisting_conditions;
+      }
+      this.publish({ values: { ...serverValues,
         patient_name: data.patient_name ?? this.snapshot.values.patient_name } });
       for (const name of Object.keys(batch)) {
         if (!data.write.applied.includes(name)) batchErrors[name] = data.write.rejected?.[name]
