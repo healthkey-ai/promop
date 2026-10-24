@@ -234,21 +234,65 @@ class TherapyHistoryCompletenessViewSet(viewsets.ViewSet):
 
     A confirmation is what turns ``therapy_lines_count`` from a lower bound into an
     exact count, so it is a deliberate statement rather than a side effect of
-    saving a line (#1924). Hosts apply the same write gate and per-person
-    authorization as authoring through ``patient_write_denied``.
+    saving a line (#1924). It is a write about one patient, so it is gated exactly
+    like authoring: the same permission classes and the same per-person check.
+    ``urlpatterns_for`` builds this class from the host's therapy-line viewset
+    (:meth:`for_host`), so a host that overrides authoring is covered here too.
     """
 
     permission_classes = [IsAuthenticated]
 
+    #: The seams a host's therapy-line viewset may carry; copied by for_host.
+    HOST_SEAMS = ('permission_classes', 'patient_write_denied', 'patient_info_payload',
+                  'attestation_source')
+
+    @classmethod
+    def for_host(cls, therapy_line_viewset):
+        """This endpoint under the host's therapy-line policy.
+
+        Copies the authorization seams off the host's viewset, so the default
+        is never more permissive than authoring. A host whose seams depend on
+        other attributes of its own class passes its own ``completeness_viewset``
+        to ``urlpatterns_for`` instead.
+        """
+        if therapy_line_viewset is None or therapy_line_viewset is TherapyLineViewSet:
+            return cls
+        seams = {}
+        for name in cls.HOST_SEAMS:
+            value = therapy_line_viewset.__dict__.get(name)
+            if value is None:
+                for base in therapy_line_viewset.__mro__[1:]:
+                    if base is TherapyLineViewSet or base is viewsets.ViewSet:
+                        break
+                    if name in base.__dict__:
+                        value = base.__dict__[name]
+                        break
+            if value is not None:
+                seams[name] = value
+        return type(f'{therapy_line_viewset.__name__}HistoryCompleteness', (cls,), seams)
+
+    # --- host seams -------------------------------------------------------
+
     def patient_write_denied(self, request, person):
+        """Return a Response to refuse this write, or None to allow it."""
         return None
 
     def patient_info_payload(self, record):
+        """The re-derived record in the shape this host's client expects."""
         return None
+
+    def attestation_source(self, request):
+        """Who is making the statement: ``patient``, ``clinician`` or ``host``.
+
+        Decided here, never taken from the body: a caller must not be able to
+        label their own confirmation as somebody else's. Provenance only.
+        """
+        return 'patient'
+
+    # --- shared implementation -------------------------------------------
 
     def create(self, request):
         from omop_core.models import Person
-        from omop_core.services.patient_record_service import refresh_patient_record
         from omop_core.services.therapy_history import (
             confirm_therapy_history, withdraw_therapy_history,
         )
@@ -264,19 +308,33 @@ class TherapyHistoryCompletenessViewSet(viewsets.ViewSet):
         if denied is not None:
             return denied
 
-        complete = request.data.get('complete', True)
-        if isinstance(complete, str):
-            complete = complete.strip().lower() not in {'0', 'false', 'no', ''}
-        if complete:
-            confirm_therapy_history(person, source=request.data.get('source') or 'patient')
-        else:
-            withdraw_therapy_history(person)
+        complete = _as_bool(request.data.get('complete'))
+        if complete is None:
+            return Response({'detail': 'complete must be true or false.'},
+                            status=status.HTTP_400_BAD_REQUEST)
 
-        record = refresh_patient_record(person)
+        # The services derive the record once; nothing derives it again here.
+        if complete:
+            record = confirm_therapy_history(person, source=self.attestation_source(request))
+        else:
+            record = withdraw_therapy_history(person)
         return Response({
             'therapy_history_complete': record.therapy_history_complete,
             'patient_info': self.patient_info_payload(record),
         })
+
+
+def _as_bool(value):
+    """A JSON boolean, or its form-encoded spellings; None when it is neither."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {'true', '1', 'yes'}:
+            return True
+        if lowered in {'false', '0', 'no'}:
+            return False
+    return None
 
 
 def therapy_outcomes(request):

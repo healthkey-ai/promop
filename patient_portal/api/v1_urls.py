@@ -28,7 +28,7 @@ from .views import (
     resolve_run_status,
     V1ConditionOccurrenceViewSet, V1DrugExposureViewSet, V1MeasurementViewSet,
     V1ObservationViewSet, V1ProcedureOccurrenceViewSet, EpisodeViewSet, EpisodeEventViewSet,
-    TherapyLineViewSet,
+    TherapyLineViewSet, TherapyHistoryCompletenessViewSet,
     PatientDocumentViewSet,
     PatientTrialEnrollmentViewSet,
     TrialSearchPreferencesViewSet,
@@ -104,6 +104,9 @@ router.register(r'episode-events', EpisodeEventViewSet, basename='v1-episode-eve
 # than any single row. See TherapyLineViewSet.
 router.register(r'supportive-therapies', SupportiveTherapyViewSet, basename='v1-supportive-therapies')
 router.register(r'therapy-lines', TherapyLineViewSet, basename='v1-therapy-lines')
+# The patient's statement that the recorded lines are their whole history (#1924).
+router.register(r'therapy-history/completeness', TherapyHistoryCompletenessViewSet,
+                basename='v1-therapy-history-completeness')
 router.register(r'documents', PatientDocumentViewSet, basename='v1-documents')
 router.register(r'trial-enrollments', PatientTrialEnrollmentViewSet, basename='v1-trial-enrollments')
 router.register(r'trial-search-preferences', TrialSearchPreferencesViewSet, basename='v1-trial-search-preferences')
