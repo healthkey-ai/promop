@@ -29,6 +29,7 @@ from omop_core.services.mappings import (
     CONCEPT_DRUG_EXPOSURE_FIELD,
 )
 from omop_oncology.models import Episode, EpisodeEvent
+from omop_core.services.therapy_errors import TherapyLineValidationError
 from omop_core.services.therapy_transactions import (
     lock_therapy_patients, run_therapy_write,
 )
@@ -308,7 +309,7 @@ def retract_therapy_line(person, episode):
     from omop_oncology.models import TherapyLineAssertion
 
     if episode is None or episode.person_id != person.pk:
-        raise ValueError('The therapy line must belong to this patient.')
+        raise TherapyLineValidationError('line_not_owned')
     assertion, _ = TherapyLineAssertion.objects.get_or_create(
         episode=episode, defaults={'source': 'authoring'},
     )
@@ -344,13 +345,10 @@ def _line_parent(person, disease, episode):
     if slug and disease_key(slug) == disease_key(primary_disease_slug(person)):
         return disease_episode(person, slug), True  # None without the vocabulary: stays unparented
     if not slug or disease_key(slug) not in disease_keys_on_record(person):
-        raise ValueError(f'This record has no diagnosis of {disease!r} to file a line of therapy under.')
+        raise TherapyLineValidationError('unknown_disease', disease)
     parent = disease_episode(person, slug)
     if parent is None:
-        raise ValueError(
-            'A line of therapy for a second cancer needs the Episode vocabulary '
-            '(Disease First Occurrence, 32528) loaded.'
-        )
+        raise TherapyLineValidationError('second_cancer_vocabulary')
     return parent, False
 
 
@@ -622,9 +620,9 @@ def _author_therapy_line_inner(
         return TherapyLineEpisodeResult(None, False, [])
     ehr_type = _concept(CONCEPT_EHR_TYPE)
     if ehr_type is None or _concept(CONCEPT_DRUG_EXPOSURE_FIELD) is None:
-        raise ValueError('The EHR type and drug-exposure field vocabulary must be loaded.')
+        raise TherapyLineValidationError('vocabulary_missing')
     if not isinstance(line_number, int) or line_number < 1:
-        raise ValueError('line_number must be a positive integer.')
+        raise TherapyLineValidationError('line_number_invalid')
 
     if episode is not None:
         try:
@@ -633,7 +631,7 @@ def _author_therapy_line_inner(
                 episode_number=line_number,
             )
         except Episode.DoesNotExist as exc:
-            raise ValueError('The therapy line must belong to this person and line number.') from exc
+            raise TherapyLineValidationError('line_not_found') from exc
     else:
         parent, primary = _line_parent(person, disease, None)
         episode = _find_line(person, line_number, parent, primary)
@@ -643,7 +641,7 @@ def _author_therapy_line_inner(
     start = (episode.episode_start_date if episode else None) if start_date is _UNSET else start_date
     end = (episode.episode_end_date if episode else None) if end_date is _UNSET else end_date
     if start and end and end < start:
-        raise ValueError('end_date cannot precede start_date.')
+        raise TherapyLineValidationError('end_before_start')
     if source_value is _UNSET:
         source_value = episode.episode_source_value if episode else None
     if regimen_concept_id is _UNSET:
@@ -651,10 +649,10 @@ def _author_therapy_line_inner(
         object_regimen = episode.episode_object_concept if episode else None
     else:
         if regimen_concept_id is not None and regimen_concept_id <= 0:
-            raise ValueError(f'Unknown regimen concept_id {regimen_concept_id}')
+            raise TherapyLineValidationError('unknown_regimen', regimen_concept_id)
         regimen = _concept(regimen_concept_id) if regimen_concept_id else None
         if regimen_concept_id and regimen is None:
-            raise ValueError(f'Unknown regimen concept_id {regimen_concept_id}')
+            raise TherapyLineValidationError('unknown_regimen', regimen_concept_id)
         if regimen is None and episode is not None and (
             episode.episode_source_concept_id or episode.episode_object_concept_id not in (
                 None, 0, CONCEPT_EHR_TYPE, CONCEPT_TREATMENT_REGIMEN,
@@ -662,7 +660,7 @@ def _author_therapy_line_inner(
         ):
             # Unknown-regimen assertions need #1924's explicit representation.
             # Until then refuse, rather than silently retain A or invent a code.
-            raise ValueError('Clearing a regimen requires the unknown-regimen assertion workflow.')
+            raise TherapyLineValidationError('regimen_clear_requires_assertion')
         object_regimen = regimen
 
     linked = list(DrugExposure.objects.filter(
@@ -678,21 +676,21 @@ def _author_therapy_line_inner(
         concept_id = drug.get('concept_id') if isinstance(drug, dict) else drug
         concept = _concept(concept_id)
         if concept is None or concept_id <= 0:
-            raise ValueError(f'Unknown drug concept_id {concept_id}')
+            raise TherapyLineValidationError('unknown_drug', concept_id)
         values = drug if isinstance(drug, dict) else {'concept_id': drug}
         ref = values.get('drug_exposure_id')
         if ref is not None and (not isinstance(ref, int) or isinstance(ref, bool) or ref <= 0):
-            raise ValueError('drug_exposure_id must be a positive integer.')
+            raise TherapyLineValidationError('drug_exposure_id_invalid')
         raw = values.get('source_value')
         raw = (raw or concept.concept_name or '')[:50]
         key = ('id', ref) if ref is not None else ('source', raw)
         if key in validated and (ref is not None or validated[key][0] != values):
-            raise ValueError(f'Duplicate drug source_value {raw!r}; use distinct administration IDs.')
+            raise TherapyLineValidationError('duplicate_drug_source', repr(raw))
         validated[key] = (values, concept, raw)
     if not start:
-        raise ValueError('A therapy line requires a known start_date; no date is fabricated.')
+        raise TherapyLineValidationError('start_date_required')
     if start > date.today():
-        raise ValueError('A future therapy line is planned, not received treatment.')
+        raise TherapyLineValidationError('future_line')
 
     # Establish the line before exposures. Any later failure rolls back this
     # whole service call, including direct (non-HTTP) callers.
@@ -706,7 +704,7 @@ def _author_therapy_line_inner(
         replace_metadata=replace,
     )
     if result.episode is None:
-        raise ValueError('The treatment-regimen vocabulary disappeared during authoring.')
+        raise TherapyLineValidationError('vocabulary_lost')
     line = result.episode
     if not composition_supplied:
         # A line interval is not every administration's interval. Preserve exact
@@ -733,7 +731,7 @@ def _author_therapy_line_inner(
         if ref is not None:
             existing = next((de for de in linked if de.pk == ref), None)
             if existing is None:
-                raise ValueError('drug_exposure_id must identify an active drug already linked to this line.')
+                raise TherapyLineValidationError('drug_not_on_line')
         else:
             candidates = [de for de in linked if de.drug_source_value == raw]
             if not candidates:
@@ -741,11 +739,11 @@ def _author_therapy_line_inner(
                     TherapyLineExposure.objects.filter(episode=line, source_value=raw)
                     .select_related('drug_exposure')]
             if len(candidates) > 1:
-                raise ValueError('Ambiguous drug source_value; supply drug_exposure_id for each administration.')
+                raise TherapyLineValidationError('ambiguous_drug_source')
             existing = candidates[0] if candidates else None
         if existing is not None:
             if existing.pk in used_ids:
-                raise ValueError('Duplicate drug_exposure_id in the submitted composition.')
+                raise TherapyLineValidationError('duplicate_drug_exposure_id')
             used_ids.add(existing.pk)
             if ref is not None:
                 raw = values.get('source_value', existing.drug_source_value)
@@ -756,9 +754,9 @@ def _author_therapy_line_inner(
         drug_start = values.get('start_date', existing.drug_exposure_start_date if existing else start)
         drug_end = values.get('end_date', existing.drug_exposure_end_date if existing else end)
         if not drug_start or (drug_end and drug_end < drug_start):
-            raise ValueError('Drug dates require a known start_date and end_date cannot precede it.')
+            raise TherapyLineValidationError('drug_dates_invalid')
         if drug_start > date.today():
-            raise ValueError('A future drug administration is planned, not received treatment.')
+            raise TherapyLineValidationError('future_drug')
         shared = existing is not None and EpisodeEvent.objects.filter(
             event_id=existing.pk, episode_event_field_concept_id=CONCEPT_DRUG_EXPOSURE_FIELD,
         ).exclude(episode_id=line.pk).exists()
