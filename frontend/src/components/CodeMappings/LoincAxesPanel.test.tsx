@@ -49,6 +49,22 @@ beforeEach(() => {
 });
 
 describe("LoincAxesPanel", () => {
+  it("reports how many axis variants the code has, so Suggest can fill them in (#2012)", async () => {
+    const onVariantsChange = vi.fn();
+    get.mockResolvedValue({ data: variantPayload() });
+    render(<LoincAxesPanel mappingId={7} canEdit canApprove={false} onVariantsChange={onVariantsChange} />);
+    await screen.findByRole("table", { name: "Axis variants" });
+    expect(onVariantsChange).toHaveBeenLastCalledWith(2);
+    expect(screen.getByText(/Suggest fills in a proposed LOINC for each variant/)).toBeInTheDocument();
+  });
+
+  it("reports zero variants for a code with one axis set", async () => {
+    const onVariantsChange = vi.fn();
+    render(<LoincAxesPanel mappingId={7} canEdit canApprove={false} onVariantsChange={onVariantsChange} />);
+    await screen.findByRole("region", { name: "LOINC axes" });
+    expect(onVariantsChange).toHaveBeenLastCalledWith(0);
+  });
+
   it("shows each axis with its value, basis and evidence, and the metadata hints", async () => {
     render(<LoincAxesPanel mappingId={7} canEdit canApprove={false} />);
     expect(await screen.findByRole("region", { name: "LOINC axes" })).toBeInTheDocument();

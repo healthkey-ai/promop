@@ -407,6 +407,63 @@ def set_destination(variant, concept, *, approve, user, reopen=False):
     return result
 
 
+#: Variants one Suggest click fills in; a code with more has a curator's work.
+SUGGEST_MAX = 5
+
+
+def suggest_destinations(mapping, *, ranking_model, user, strategies=None, overrides=None,
+                         replace=False, limit=SUGGEST_MAX):
+    """Suggest a standard LOINC for each variant and store it as proposed (#2012).
+
+    Each variant is suggested as the code would be with that variant's axis
+    values added to the curator's entries -- the mmol/L variant of a glucose
+    code asks for a substance concentration -- so the winner is the LOINC the
+    axis filter and the ranker agree on. Only a usable standard LOINC is
+    stored; anything else leaves the variant as it was. Variants that already
+    have a destination are kept unless ``replace``; approved ones always are.
+
+    Returns ``[{axis_key, suggested, note}]`` for every variant considered,
+    ``suggested`` being the stored concept or ``None``.
+    """
+    from omop_core.mapping.suggestions import suggest_one_mapping
+    from omop_core.models import Concept
+
+    stored = refresh(mapping)
+    todo = [v for v in stored if v.status != 'approved' and (replace or v.target_concept_id is None)]
+    if len(stored) < FLAG_THRESHOLD or not todo:
+        return []
+    base = dict(mapping.loinc_axes or {}) if overrides is None else dict(overrides)
+    units = observed_units(mapping)
+    results = []
+    for variant in todo[:limit]:
+        result = suggest_one_mapping(
+            mapping.source_code, mapping.source_vocabulary_id, mapping.omop_table,
+            source_description=mapping.source_code_description or '',
+            row_metadata=mapping.source_metadata, strategies=strategies,
+            ranking_model=ranking_model, axis_overrides={**base, **(variant.axis_values or {})},
+            observed_units=units,
+        )
+        chosen = result.get('suggested')
+        concept = Concept.objects.filter(pk=chosen['concept_id']).first() if chosen else None
+        if concept is not None and (concept.vocabulary_id != 'LOINC' or not usable_destination(concept, mapping)):
+            concept = None
+            note = 'The suggested concept is not a standard LOINC, so the variant was left for a curator.'
+        else:
+            note = result.get('note') or ''
+        if concept is not None:
+            set_destination(variant, concept, approve=False, user=user)
+        results.append({
+            'axis_key': variant.axis_key,
+            'suggested': None if concept is None else {
+                'concept_id': concept.concept_id, 'concept_name': concept.concept_name,
+                'concept_code': concept.concept_code, 'vocabulary_id': concept.vocabulary_id,
+            },
+            'confidence': chosen.get('confidence') if chosen and concept is not None else None,
+            'note': note,
+        })
+    return results
+
+
 def refresh_multi_unit_codes(keys):
     """Refresh only the codes among ``keys`` that can have variants.
 

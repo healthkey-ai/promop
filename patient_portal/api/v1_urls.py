@@ -1,7 +1,8 @@
 from .canonical_units import canonical_unit
 from django.urls import include, path
 from .loinc_axes import (
-    code_mapping_axis_variant, code_mapping_loinc_axes, code_mapping_snomed_attributes, loinc_axis_values,
+    code_mapping_axis_variant, code_mapping_axis_variant_suggest, code_mapping_loinc_axes,
+    code_mapping_snomed_attributes, loinc_axis_values,
 )
 from .relevance import disease_relevance_view, relevance_signal_review, relevance_signals
 from .concept_to_code import (
@@ -211,6 +212,7 @@ urlpatterns = [
     path('code-mappings/<int:mapping_id>/lock/', code_mapping_lock, name='v1-code-mapping-lock'),
     path('code-mappings/<int:mapping_id>/loinc-axes/', code_mapping_loinc_axes, name='v1-code-mapping-loinc-axes'),
     path('code-mappings/<int:mapping_id>/axis-variants/', code_mapping_axis_variant, name='v1-code-mapping-axis-variant'),
+    path('code-mappings/<int:mapping_id>/axis-variants/suggest/', code_mapping_axis_variant_suggest, name='v1-code-mapping-axis-variant-suggest'),
     path('code-mappings/<int:mapping_id>/snomed-attributes/', code_mapping_snomed_attributes, name='v1-code-mapping-snomed-attributes'),
     path('loinc/axis-values/', loinc_axis_values, name='v1-loinc-axis-values'),
     path('custom-patient-fields/', custom_patient_field_list, name='v1-custom-patient-field-list'),

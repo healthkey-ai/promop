@@ -78,6 +78,19 @@ All notable changes to PRomop are documented here.
 
 ### Changed
 
+- **Suggest fills in a LOINC for each axis variant** — a source code whose
+  units imply several LOINC axis sets no longer needs one Suggest click and
+  one pick per variant. In Edit Mapping, Suggest also posts to
+  `code-mappings/<id>/axis-variants/suggest/`, which suggests a standard LOINC
+  for every variant without a destination under that variant's axes and
+  stores it as proposed; the LOINC axes panel then shows each with Approve.
+  The Concept to Code preview does the same for each flagged candidate and
+  lists the variants, with their units and destinations, under the code, where
+  an approver can approve them. The SNOMED evidence section is hidden when
+  the source's evidence says it is a lab value, since its destination is a
+  LOINC (`snomed-attributes` answers `applies: false` with `lab_signal`)
+  (#2012).
+
 - **The concept's source-code dialog opens on Suggested source codes** — and
   has two views instead of three: the Find source codes list is gone, since
   Suggest reaches the same rows with the ranker's evidence attached. Existing

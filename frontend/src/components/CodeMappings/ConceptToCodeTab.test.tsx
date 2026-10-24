@@ -362,6 +362,50 @@ describe('concept-first curation', () => {
   });
 });
 
+describe('axis variants on a source code (#2012)', () => {
+  const glucose = { concept_id: 3020491, concept_name: 'Glucose [Moles/volume] in Serum or Plasma', concept_code: '14749-6', vocabulary_id: 'LOINC' };
+  const variants = [
+    { id: 1, axis_key: 'property=MCnc', axis_values: { property: 'MCnc', scale_type: 'Qn' }, units: ['mg/dL'], occurrence_count: 7,
+      status: 'approved', target_concept: { ...glucose, concept_id: 3004501, concept_code: '2345-7', concept_name: 'Glucose [Mass/volume] in Serum or Plasma' }, reviewed_at: null },
+    { id: 2, axis_key: 'property=SCnc', axis_values: { property: 'SCnc', scale_type: 'Qn' }, units: ['mmol/L'], occurrence_count: 4,
+      status: 'proposed', target_concept: glucose, reviewed_at: null },
+  ];
+  const flagged = { ...source, axis_variant_count: 2, axis_variants: variants };
+
+  it('lists each variant with its units and suggested LOINC under the code, and approves one in place', async () => {
+    post.mockImplementation((url: string) => Promise.resolve({ data: url.endsWith('/axis-variants/')
+      ? { mapping_id: 7, applies: true, variants: variants.map(v => ({ ...v, status: 'approved' })) }
+      : { ...run(), activity: [{ concept: { concept_id: 123 }, candidates: [flagged] }] } }));
+    await selectConcept();
+    fireEvent.click(screen.getByRole('button', { name: 'Suggest source codes' }));
+    const list = await screen.findByRole('list', { name: 'Axis variants' });
+    expect(within(list).getAllByRole('listitem')).toHaveLength(2);
+    expect(list).toHaveTextContent('Property SCnc · Scale Qn');
+    expect(list).toHaveTextContent('mmol/L');
+    expect(list).toHaveTextContent(glucose.concept_name);
+    // Only the proposed variant can be approved; the approved one is a decision.
+    const approve = within(list).getAllByRole('button', { name: /^Approve / });
+    expect(approve).toHaveLength(1);
+    expect(approve[0]).toHaveAccessibleName('Approve Property SCnc · Scale Qn');
+    fireEvent.click(approve[0]);
+    await waitFor(() => expect(post).toHaveBeenCalledWith('/v1/code-mappings/7/axis-variants/', {
+      axis_key: 'property=SCnc', target_concept_id: glucose.concept_id, approve: true }));
+    await screen.findByText('Approved the mmol/L variant of S1.');
+    expect(within(list).queryByRole('button', { name: /^Approve / })).not.toBeInTheDocument();
+    // Approving a variant never opened the editor.
+    expect(screen.queryByRole('dialog', { name: 'Edit Mapping' })).not.toBeInTheDocument();
+  });
+
+  it('shows variants on an existing mapping too, without Approve for curators who cannot approve', async () => {
+    get.mockImplementation((url: string) => Promise.resolve({ data: url === '/v1/concept-to-code/' ? page([concept]) : page([flagged]) }));
+    await selectConcept(false);
+    const list = screen.getByRole('list', { name: 'Axis variants' });
+    expect(screen.getByText('2 axis values')).toBeInTheDocument();
+    expect(list).toHaveTextContent('mg/dL');
+    expect(within(list).queryByRole('button')).not.toBeInTheDocument();
+  });
+});
+
 describe('suggestion confidence', () => {
   const scored = [
     { ...source, mapping_id: 1, source_code: 'HIGH', confidence: 0.85 },

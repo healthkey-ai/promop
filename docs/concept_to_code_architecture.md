@@ -30,7 +30,14 @@ The selected concept has two views, and opens on the second (#2010):
   on its own; the group headers carry the counts of all three under the current
   search and Seen filter.
 - Suggested source codes: a saved preview retrieved from local vocabulary
-  evidence. No SCCM rows change when this search runs.
+  evidence. No SCCM rows change when this search runs, with one exception: a
+  candidate whose units imply several LOINC axis sets (the blue "n axis
+  values") has each axis variant without a destination suggested a standard
+  LOINC with the run's ranker, stored as proposed (#2012). The variants are
+  listed under the code with their axes, units and destination, and an
+  approver can approve each from the row; approving re-points that variant's
+  stored rows. Curator review (no ranker) lists the variants and suggests
+  nothing.
 
 The API still serves `mode=available` (other proposed rows with a compatible or
 unspecified source domain/table); the dialog no longer shows that list, since

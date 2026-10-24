@@ -134,6 +134,28 @@ re-run is explainable. A term seen in a second unit is flagged with axis
 variants in the queue, exactly as a hospital code is, and a curator can give
 each unit its own LOINC.
 
+### Axis variants and Suggest
+
+`GET /api/v1/code-mappings/<id>/loinc-axes/` lists a code's axis variants;
+`POST .../axis-variants/` points one at a destination (`approve: true`
+re-points its stored rows). `POST .../axis-variants/suggest/` (#2012) takes
+`{strategies?, ranking_model?, loinc_axes?, replace?}` and suggests a standard
+LOINC for every variant without a destination (every proposed one with
+`replace`), storing each as proposed; approved variants are never touched.
+Each variant is suggested as the code would be with that variant's axis
+values added to the curator's entries, so the mmol/L variant of a glucose
+code is only ever offered a substance concentration. A winner that is not a
+standard LOINC in the mapping's domain is dropped and reported in `note`. The
+response is the axes payload plus `suggestions`, one per variant considered.
+At most five variants are suggested per call. The Edit Mapping dialog calls
+this from its Suggest button when the code has two or more variants, and the
+Concept to Code preview calls it for each flagged candidate.
+
+A source whose evidence says it is a lab value (a LOINC code or coding, a
+laboratory category, or a unit or value type that settles a LOINC axis) has no
+SNOMED evidence: `GET .../snomed-attributes/` answers `applies: false` with
+the reason in `lab_signal`, and the dialog hides the SNOMED section.
+
 The term is never written to a log.
 
 The endpoint is an ingest encounter operation, not a cacheable reference GET:
