@@ -4,6 +4,8 @@
 each axis and why, the curator's entries, and the variants its units imply.
 ``PUT`` saves the curator's entries. ``POST .../axis-variants/`` points one
 variant at a destination and, when approving, re-points its stored rows.
+``POST .../axis-variants/suggest/`` queues a run that suggests a standard LOINC
+for each variant without one and stores it as proposed (#2012).
 ``GET /api/v1/loinc/axis-values/`` suggests values for an axis as a curator
 types. See ``omop_core/mapping/loinc_axes.py`` and ``axis_variants.py``.
 """
@@ -14,7 +16,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from omop_core.mapping import axis_variants, loinc_axes
-from omop_core.models import Concept, LoincCodeClass, SourceCodeConceptMapping
+from omop_core.models import Concept, LoincCodeClass, SourceCodeConceptMapping, SuggestRun
 
 AXIS_VALUE_LIMIT = 25
 
@@ -159,6 +161,70 @@ def code_mapping_axis_variant(request, mapping_id):
     return Response(payload)
 
 
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def code_mapping_axis_variant_suggest(request, mapping_id):
+    """Queue a run that suggests and stores a proposed LOINC per variant (#2012).
+
+    ``{strategies?, ranking_model?, loinc_axes?}``. ``loinc_axes`` are the
+    dialog's possibly unsaved curator entries, applied under each variant's own
+    axis values as Suggest for one variant does. Returns 202 with the run, as
+    ``suggest-one`` does; the run's ``result`` event carries ``suggestions``
+    and the variants as stored. A variant that already has a destination is
+    never re-suggested.
+    """
+    from omop_core.mapping.suggestions import (
+        ALL_STRATEGIES, DEFAULT_RANKING_MODEL, DEFAULT_STRATEGIES, RANKING_MODELS,
+        SUGGESTION_MODEL_VERSION,
+    )
+    from omop_core.services.suggest_jobs import get_dispatcher
+
+    views = _views()
+    if not views._can_manage_field_mappings(request.user):
+        return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
+    mapping = SourceCodeConceptMapping.objects.filter(pk=mapping_id).first()
+    if mapping is None:
+        return Response({'detail': 'Mapping not found.'}, status=status.HTTP_404_NOT_FOUND)
+    if not views._can_administer_code_mapping(request.user, mapping):
+        return Response({'detail': 'You do not administer this mapping organization.'},
+                        status=status.HTTP_403_FORBIDDEN)
+    try:
+        views._check_mapping_lock(mapping, request.user)
+    except views.MappingLocked as exc:
+        return exc.as_response()
+    strategies = request.data.get('strategies') or list(DEFAULT_STRATEGIES)
+    if not isinstance(strategies, list) or not strategies or any(s not in ALL_STRATEGIES for s in strategies):
+        return Response({'strategies': 'Choose at least one retrieval strategy.'},
+                        status=status.HTTP_400_BAD_REQUEST)
+    ranking_model = str(request.data.get('ranking_model') or DEFAULT_RANKING_MODEL)
+    if ranking_model not in RANKING_MODELS:
+        return Response({'ranking_model': f'Must be one of {sorted(RANKING_MODELS)}.'},
+                        status=status.HTTP_400_BAD_REQUEST)
+    try:
+        overrides = (loinc_axes.clean_overrides(request.data.get('loinc_axes'))
+                     if 'loinc_axes' in request.data else None)
+    except ValueError as exc:
+        return Response({'loinc_axes': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+    dispatcher = get_dispatcher()
+    # Inline (no broker) the run executes in this request: as many pipelines
+    # as that dispatcher allows a run, never more.
+    limit = min(axis_variants.SUGGEST_MAX, dispatcher.max_codes)
+    spec = {'mapping_id': mapping.pk, 'strategies': strategies, 'ranking_model': ranking_model,
+            'overrides': overrides, 'limit': limit}
+    with transaction.atomic():
+        run = SuggestRun.objects.create(
+            source_vocabulary_id=mapping.source_vocabulary_id, total=1,
+            model_version=SUGGESTION_MODEL_VERSION, ranking_model=ranking_model,
+            created_by=request.user,
+            selection={'mode': 'axis-variants', 'mapping_id': mapping.pk, 'limit': limit,
+                       'strategies': strategies, 'source_vocabulary_id': mapping.source_vocabulary_id,
+                       'order': 'Each axis variant of the code open in the mapping dialog.'},
+        )
+        dispatcher.dispatch(run, {'variants': spec, 'ranking_model': ranking_model})
+    run.refresh_from_db()
+    return Response(views._serialize_suggest_run(run, include_activity=True), status=status.HTTP_202_ACCEPTED)
+
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def loinc_axis_values(request):
@@ -182,6 +248,19 @@ def loinc_axis_values(request):
     ]})
 
 
+def _lab_signal(mapping, domain):
+    """Why the source is a lab-style test LOINC should name, or None (#2012)."""
+    from omop_core.mapping.suggestions import source_loinc_axes
+
+    axes, _hints = source_loinc_axes(
+        domain_id=domain, source_vocabulary_id=mapping.source_vocabulary_id,
+        source_code=mapping.source_code, metadata=mapping.source_metadata,
+        overrides=mapping.loinc_axes, observed_units=axis_variants.observed_units(mapping),
+    )
+    return loinc_axes.lab_signal(mapping.source_vocabulary_id, mapping.source_metadata, axes or {},
+                                 strict_units=True)
+
+
 def _snomed_payload(mapping):
     from omop_core.mapping import snomed_attributes
     from omop_core.mapping.suggestions import _find_source_concept, source_snomed
@@ -197,9 +276,13 @@ def _snomed_payload(mapping):
         description=mapping.source_code_description, metadata=mapping.source_metadata,
         overrides=mapping.snomed_attributes,
     )
+    # A lab value's destination is a LOINC: SNOMED judging does not apply and
+    # the panel is hidden, however the source would read as SNOMED (#2012).
+    lab_reason = _lab_signal(mapping, domain) if source is not None else None
     return {
         'mapping_id': mapping.pk,
-        'applies': source is not None,
+        'applies': source is not None and lab_reason is None,
+        'lab_signal': lab_reason,
         'snomed_attributes': mapping.snomed_attributes or {},
         'source': snomed_attributes.source_summary(source) if source is not None else None,
         'hierarchies': snomed_attributes.HIERARCHY_TAGS,

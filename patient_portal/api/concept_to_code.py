@@ -144,7 +144,8 @@ def concept_to_code_detail(request, concept_id):
         confidence = F('suggestion_confidence')
         ordering.insert(0, confidence.desc(nulls_last=True) if order == '-confidence'
                         else confidence.asc(nulls_last=True))
-    page, paging = _paginate(rows.select_related('target_concept').order_by(*ordering), request.query_params)
+    page, paging = _paginate(rows.select_related('target_concept').prefetch_related('axis_variants__target_concept')
+                             .order_by(*ordering), request.query_params)
     return Response({**paging, **counts, 'status_counts': status_counts, 'concept': concept_payload(concept),
                      'results': [source_payload(row) for row in page]})
 

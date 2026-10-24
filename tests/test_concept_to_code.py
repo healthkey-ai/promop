@@ -740,3 +740,70 @@ def test_linked_sources_filter_by_status_and_count_every_status(client, concept)
     assert unfiltered['status_counts'] == {'approved': 2, 'proposed': 1, 'rejected': 1}
     assert client.get(f'{BASE}{concept.pk}/', {'status': 'bogus'}).status_code == 400
     assert client.get(f'{BASE}{concept.pk}/', {'mode': 'available'}).data['status_counts'] is None
+
+
+def django_user_model_for(client):
+    return type(client.user).objects.create_user(email='other-curator@test.com', is_staff=True)
+
+
+def test_reverse_run_fills_a_flagged_candidates_axis_variants(client, concept):
+    """A candidate whose units imply several LOINC axis sets carries its variants,
+    each suggested a destination with the run's ranker (#2012)."""
+    from omop_core.models import SourceCodeAxisVariant
+    row = source('GLU', axis_variant_count=2)
+    SourceCodeAxisVariant.objects.create(mapping=row, axis_key='property=MCnc|scale_type=Qn',
+                                         axis_values={'property': 'MCnc', 'scale_type': 'Qn'}, units=['mg/dL'],
+                                         occurrence_count=10)
+    SourceCodeAxisVariant.objects.create(mapping=row, axis_key='property=SCnc|scale_type=Qn',
+                                         axis_values={'property': 'SCnc', 'scale_type': 'Qn'}, units=['mmol/L'],
+                                         occurrence_count=4)
+    plain = source('ALB')
+    # Another hospital's code, locked by its own curator: listed, never written.
+    other = django_user_model_for(client)
+    locked = source('GLU2', axis_variant_count=2, locked_by=other, locked_at=timezone.now())
+    SourceCodeAxisVariant.objects.create(mapping=locked, axis_key='property=MCnc|scale_type=Qn',
+                                         axis_values={'property': 'MCnc'}, units=['mg/dL'], occurrence_count=1)
+
+    def fill(mapping, **kwargs):
+        variant = mapping.axis_variants.get(axis_key='property=SCnc|scale_type=Qn')
+        variant.target_concept = concept
+        variant.save()
+        return [{'axis_key': variant.axis_key, 'suggested': {'concept_id': concept.pk}, 'note': ''}]
+
+    dispatcher = FakeDispatcher()
+    with use_dispatcher(dispatcher):
+        response = client.post(f'{BASE}suggest/', {
+            'concept_ids': [concept.pk], 'strategies': ['lexical'], 'ranking_model': 'anthropic'}, format='json')
+    run_id, params = dispatcher.calls[0]
+    with patch('omop_core.mapping.axis_variants.suggest_destinations', side_effect=fill) as suggest, \
+            patch('omop_core.mapping.suggestions.rank_candidates_dispatch', return_value=(None, 'review', [], {})):
+        execute_run(run_id, params)
+    assert [call.args[0].pk for call in suggest.call_args_list] == [row.pk]
+    assert suggest.call_args.kwargs['ranking_model'] == 'anthropic'
+    assert suggest.call_args.kwargs['user'] == client.user
+    # The run's own limit bounds the variants it may suggest.
+    assert suggest.call_args.kwargs['limit'] <= params['limit']
+
+    candidates = {c['source_code']: c for c in client.get(f'{BASE}suggest-runs/{run_id}/').data['activity'][0]['candidates']}
+    variants = {v['axis_key']: v for v in candidates['GLU']['axis_variants']}
+    assert variants['property=SCnc|scale_type=Qn']['target_concept']['concept_id'] == concept.pk
+    assert variants['property=MCnc|scale_type=Qn']['target_concept'] is None
+    assert 'axis_variants' not in candidates['ALB']
+    assert plain.axis_variant_count == 0
+    assert [v['axis_key'] for v in candidates['GLU2']['axis_variants']] == ['property=MCnc|scale_type=Qn']
+
+
+def test_reverse_run_without_a_ranker_lists_variants_but_suggests_nothing(client, concept):
+    from omop_core.models import SourceCodeAxisVariant
+    row = source('GLU', axis_variant_count=2)
+    SourceCodeAxisVariant.objects.create(mapping=row, axis_key='property=MCnc|scale_type=Qn',
+                                         axis_values={'property': 'MCnc'}, units=['mg/dL'], occurrence_count=1)
+    dispatcher = FakeDispatcher()
+    with use_dispatcher(dispatcher):
+        client.post(f'{BASE}suggest/', {'concept_ids': [concept.pk], 'strategies': ['lexical']}, format='json')
+    run_id, params = dispatcher.calls[0]
+    with patch('omop_core.mapping.axis_variants.suggest_destinations') as suggest:
+        execute_run(run_id, params)
+    suggest.assert_not_called()
+    candidate = client.get(f'{BASE}suggest-runs/{run_id}/').data['activity'][0]['candidates'][0]
+    assert [v['axis_key'] for v in candidate['axis_variants']] == ['property=MCnc|scale_type=Qn']

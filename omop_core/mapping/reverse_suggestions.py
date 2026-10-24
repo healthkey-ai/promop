@@ -151,7 +151,8 @@ def _similarity_threshold():
 
 
 def _retrieve(concept, *, strategies, limit, include_zero_seen, evaluate):
-    rows = _candidate_rows(concept, include_zero_seen).select_related('target_concept')
+    rows = (_candidate_rows(concept, include_zero_seen).select_related('target_concept')
+            .prefetch_related('axis_variants__target_concept'))
     pool = {}
     terms = []
 

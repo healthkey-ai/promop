@@ -18,6 +18,9 @@ type Props = {
   /** Called with the current, possibly unsaved, overrides whenever they change. */
   onAxesChange?: (overrides: LoincAxisOverrides) => void;
   onSuggestVariant?: (axisKey: string) => void;
+  /** Called with how many axis variants the code has (0 when fewer than two), so
+   * the dialog's Suggest can fill them in (#2012). */
+  onVariantsChange?: (count: number) => void;
   /** Bump to re-read the axes and variants (e.g. after a variant was set elsewhere). */
   reloadToken?: number;
 };
@@ -30,7 +33,7 @@ function sameOverrides(a: LoincAxisOverrides, b: LoincAxisOverrides): boolean {
   return [...keys].every(key => (key in a) === (key in b) && a[key] === b[key]);
 }
 
-export default function LoincAxesPanel({ mappingId, canEdit, canApprove, onAxesChange, onSuggestVariant, reloadToken = 0 }: Props) {
+export default function LoincAxesPanel({ mappingId, canEdit, canApprove, onAxesChange, onSuggestVariant, onVariantsChange, reloadToken = 0 }: Props) {
   const listPrefix = useId();
   const [payload, setPayload] = useState<LoincAxesPayload | null>(null);
   const [overrides, setOverrides] = useState<LoincAxisOverrides>({});
@@ -43,7 +46,8 @@ export default function LoincAxesPanel({ mappingId, canEdit, canApprove, onAxesC
   const [variantBusy, setVariantBusy] = useState<string | null>(null);
   const [pickingVariant, setPickingVariant] = useState<string | null>(null);
   const onAxesChangeRef = useRef(onAxesChange);
-  useEffect(() => { onAxesChangeRef.current = onAxesChange; });
+  const onVariantsChangeRef = useRef(onVariantsChange);
+  useEffect(() => { onAxesChangeRef.current = onAxesChange; onVariantsChangeRef.current = onVariantsChange; });
 
   const accept = useCallback((data: LoincAxesPayload) => {
     setPayload(data);
@@ -51,6 +55,8 @@ export default function LoincAxesPanel({ mappingId, canEdit, canApprove, onAxesC
     setOverrides(saved);
     // Only a code with LOINC axes has overrides for Suggest to send.
     if (data.applies) onAxesChangeRef.current?.(saved);
+    const count = data.applies ? (data.variants ?? []).length : 0;
+    onVariantsChangeRef.current?.(count >= 2 ? count : 0);
   }, []);
 
   useEffect(() => {
@@ -224,6 +230,7 @@ export default function LoincAxesPanel({ mappingId, canEdit, canApprove, onAxesC
 
     {variants.length >= 2 && <div className="mt-3 border-t border-slate-200 pt-2">
       <h4 className="text-sm font-semibold text-blue-700">{variants.length} axis values — this code may need one LOINC per variant</h4>
+      <p className="mt-0.5 text-slate-500">Suggest fills in a proposed LOINC for each variant without one; approve each to route its units.</p>
       {payload.variant_notes?.length > 0 && <div className="mt-1 rounded border border-amber-200 bg-amber-50 px-2 py-1 text-amber-800">
         {payload.variant_notes.map(note => <p key={note}>{note}</p>)}
       </div>}

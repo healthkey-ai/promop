@@ -907,3 +907,124 @@ def test_jev_is_told_loinc_is_expected(settings):
                             source_context={'code': 'GLU', 'expected_vocabulary': {
                                 'vocabulary_id': 'LOINC', 'reason': 'filed as a laboratory result'}})
     assert 'laboratory-style test (filed as a laboratory result): prefer a LOINC' in post.call_args.kwargs['json']['state']
+
+
+# --- Suggest fills in the variants (#2012) --------------------------------------------
+
+def test_suggest_destinations_proposes_a_loinc_per_variant(pipeline, two_unit_code, glucose):
+    results = axis_variants.suggest_destinations(two_unit_code, ranking_model='anthropic', user=None)
+
+    by_key = {r['axis_key']: r for r in results}
+    # Nothing settles the specimen, so any mass concentration may win the mg/dL
+    # variant; the mmol/L variant can only be the substance concentration.
+    mass = {'2345-7', '2339-0', '41653-7'}
+    assert by_key['property=MCnc|scale_type=Qn']['suggested']['concept_code'] in mass
+    assert by_key['property=SCnc|scale_type=Qn']['suggested']['concept_code'] == '14749-6'
+    # The ranker saw only the candidates each variant's axes allow.
+    assert pipeline['context']['loinc_axes']['property'] == 'SCnc'
+    assert {c['concept_code'] for c in pipeline['candidates']} == {'14749-6'}
+    stored = {v.axis_key: v for v in two_unit_code.axis_variants.select_related('target_concept')}
+    assert stored['property=SCnc|scale_type=Qn'].target_concept == glucose['14749-6']
+    assert stored['property=SCnc|scale_type=Qn'].status == 'proposed'
+    assert stored['property=MCnc|scale_type=Qn'].target_concept.concept_code in mass
+
+
+def test_suggest_destinations_never_touches_a_variant_that_has_a_destination(pipeline, two_unit_code, glucose):
+    variant = {v.axis_key: v for v in axis_variants.refresh(two_unit_code)}['property=SCnc|scale_type=Qn']
+    axis_variants.set_destination(variant, glucose['2339-0'], approve=False, user=None)
+    approved = {v.axis_key: v for v in axis_variants.refresh(two_unit_code)}['property=MCnc|scale_type=Qn']
+    axis_variants.set_destination(approved, glucose['2345-7'], approve=True, user=None)
+
+    # A curator's pick and an approval both look the same to a ranker: left alone.
+    assert axis_variants.suggest_destinations(two_unit_code, ranking_model='anthropic', user=None) == []
+    variant.refresh_from_db()
+    assert variant.target_concept == glucose['2339-0']
+
+
+def test_suggest_destinations_respects_its_limit(pipeline, two_unit_code):
+    results = axis_variants.suggest_destinations(two_unit_code, ranking_model='anthropic', user=None, limit=1)
+    assert len(results) == 1
+    assert two_unit_code.axis_variants.filter(target_concept__isnull=False).count() == 1
+
+
+def test_a_code_without_a_table_reports_why_nothing_was_suggested(pipeline, two_unit_code):
+    two_unit_code.omop_table = ''
+    two_unit_code.save(update_fields=['omop_table'])
+    results = axis_variants.suggest_destinations(two_unit_code, ranking_model='anthropic', user=None)
+    assert results and all(r['suggested'] is None and 'quarantine' in r['note'] for r in results)
+
+
+def test_a_non_loinc_winner_leaves_the_variant_for_a_curator(pipeline, two_unit_code, glucose, monkeypatch):
+    snomed = ConceptFactory(concept_name='Glucose measurement', concept_code='33747003',
+                            vocabulary=VocabularyFactory(vocabulary_id='SNOMED'), domain=glucose['2345-7'].domain)
+    monkeypatch.setattr('omop_core.mapping.suggestions.lexical_candidates', lambda *a, **k: [candidate(snomed)])
+    monkeypatch.setattr('omop_core.mapping.suggestions.rank_candidates',
+                        lambda source_value, candidates, source_description='', **kwargs: (candidates[0], 'ok', []))
+
+    results = axis_variants.suggest_destinations(two_unit_code, ranking_model='anthropic', user=None)
+
+    assert all(r['suggested'] is None for r in results)
+    assert all('not a standard LOINC' in r['note'] for r in results)
+    assert not two_unit_code.axis_variants.filter(target_concept__isnull=False).exists()
+
+
+def test_the_suggest_endpoint_queues_a_run_that_fills_the_variants(pipeline, two_unit_code, glucose):
+    from omop_core.services.suggest_jobs import InlineDispatcher, use_dispatcher
+    from patient_portal.models import Identity
+    client = APIClient()
+    user = Identity.objects.create_user(email='variants@example.test', is_staff=True, is_superuser=True)
+    client.force_authenticate(user)
+    url = f'/api/v1/code-mappings/{two_unit_code.pk}/axis-variants/suggest/'
+
+    assert client.post(url, {'ranking_model': 'bogus'}, format='json').status_code == 400
+    with use_dispatcher(InlineDispatcher()):
+        response = client.post(url, {'strategies': ['lexical'], 'ranking_model': 'jev'}, format='json')
+
+    assert response.status_code == 202, response.data
+    assert response.data['state'] == 'success'
+    result = next(event for event in response.data['activity'] if event['stage'] == 'result')
+    suggested = {s['axis_key']: s['suggested']['concept_code'] for s in result['suggestions']}
+    assert suggested['property=SCnc|scale_type=Qn'] == '14749-6'
+    assert suggested['property=MCnc|scale_type=Qn'] in {'2345-7', '2339-0', '41653-7'}
+    variants = {v['axis_key']: v for v in result['variants']}
+    assert variants['property=SCnc|scale_type=Qn']['target_concept']['concept_code'] == '14749-6'
+    assert variants['property=SCnc|scale_type=Qn']['status'] == 'proposed'
+    # The panel reads the same variants back.
+    axes = client.get(f'/api/v1/code-mappings/{two_unit_code.pk}/loinc-axes/').data
+    assert {v['axis_key'] for v in axes['variants'] if v['target_concept']} == set(variants)
+
+    viewer = APIClient()
+    viewer.force_authenticate(Identity.objects.create_user(email='viewer@example.test'))
+    assert viewer.post(url, {}, format='json').status_code == 403
+
+
+def test_a_lab_hides_the_snomed_evidence(two_unit_code, glucose):
+    """The SNOMED panel does not apply to a source LOINC should name (#2012)."""
+    from patient_portal.models import Identity
+    from patient_portal.api.loinc_axes import _snomed_payload
+    client = APIClient()
+    client.force_authenticate(Identity.objects.create_user(
+        email='lab@example.test', is_staff=True, is_superuser=True))
+    two_unit_code.source_metadata = {'fhir': {'category': [{'coding': [{'code': 'laboratory'}]}]}}
+    two_unit_code.save(update_fields=['source_metadata'])
+
+    response = client.get(f'/api/v1/code-mappings/{two_unit_code.pk}/snomed-attributes/')
+
+    assert response.status_code == 200, response.data
+    assert response.data['applies'] is False
+    assert 'laboratory result' in response.data['lab_signal']
+    # Concentration units are lab evidence on their own (one property: two
+    # units implying different properties settle nothing, they are variants) ...
+    two_unit_code.source_metadata = {}
+    two_unit_code.save(update_fields=['source_metadata'])
+    PatientSourceCode.objects.filter(source_unit='mmol/L').delete()
+    payload = _snomed_payload(two_unit_code)
+    assert payload['applies'] is False and 'property is settled' in payload['lab_signal']
+    # ... a length is not: a tumour size in mm keeps its SNOMED evidence.
+    size = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id=LAB, source_code='TUMSIZE', source_code_description='Tumor size',
+        omop_table='measurement', domain_id='Measurement')
+    PatientSourceCode.objects.create(person=PersonFactory(), source_value='TUMSIZE', source_vocabulary_id=LAB,
+                                     omop_table='measurement', source_unit='mm', occurrence_count=3)
+    payload = _snomed_payload(size)
+    assert payload['lab_signal'] is None and payload['applies'] is True

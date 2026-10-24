@@ -3,6 +3,7 @@ from django.db.models import Count, Exists, F, OuterRef, Q, Subquery, Sum, Value
 from django.db.models.functions import Coalesce
 from django.utils import timezone
 
+from omop_core.mapping import axis_variants
 from omop_core.models import Concept, FieldConceptMapping, SourceCodeConceptMapping
 from omop_core.services.source_vocabularies import DOMAIN_TO_TABLE
 
@@ -39,6 +40,9 @@ def source_payload(row):
         'confidence': row.suggestion_confidence,
         # Its units imply this many LOINC axis sets (the blue "n axis values").
         'axis_variant_count': row.axis_variant_count,
+        # ... and these are the variants, each with its own destination (#2012).
+        **({'axis_variants': [axis_variants.serialize(v) for v in row.axis_variants.all()]}
+           if row.axis_variant_count >= axis_variants.FLAG_THRESHOLD else {}),
     }
 
 

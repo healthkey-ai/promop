@@ -3,7 +3,8 @@ import * as Dialog from '@radix-ui/react-dialog';
 import api from '@/api/axios';
 import { destinationError } from './destinationSearch';
 import EditMappingDialog from './EditMappingDialog';
-import { AxisVariantFlag } from './LoincAxisChips';
+import { AxisVariantFlag, AxisVariantList } from './LoincAxisChips';
+import type { AxisVariant, LoincAxesPayload } from './loincAxes';
 import { type CodeMappingRow, type ConceptResult, type Reference, DOMAIN_TO_TABLE, emptyReference } from './codeMappingTypes';
 
 type Concept = {
@@ -23,6 +24,8 @@ type Source = {
   evidence?: string[]; verdict?: string; note?: string;
   /** How many LOINC axis sets this code's units imply, when the server reports it. */
   axis_variant_count?: number;
+  /** The variants themselves, each with its own (suggested) destination (#2012). */
+  axis_variants?: AxisVariant[];
   /** The ranker's confidence (0-1) in this source → concept pairing. */
   confidence?: number | null;
   /** Saved in the full editor since the preview: no longer a bulk-review row. */
@@ -540,6 +543,23 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
     } finally { writingRef.current = false; if (active.current) setWriting(false); onWriting(false); }
   };
 
+  // Approve one axis variant from the row: its stored rows in those units are
+  // re-pointed, and the row shows the server's view of every variant (#2012).
+  const approveVariant = async (row: Source, variant: AxisVariant) => {
+    if (writingRef.current || busy || row.mapping_id === null || !variant.target_concept) return;
+    // A write like any other here: one at a time, and the dialog cannot close under it.
+    writingRef.current = true; setWriting(true); onWriting(true); setError('');
+    try {
+      const { data } = await api.post<LoincAxesPayload>(`/v1/code-mappings/${row.mapping_id}/axis-variants/`, {
+        axis_key: variant.axis_key, target_concept_id: variant.target_concept.concept_id, approve: true,
+      });
+      patchRow(row, { ...row, axis_variants: data.variants });
+      setProgress(`Approved the ${variant.units?.join(', ') || variant.axis_key} variant of ${row.source_code}.`);
+    } catch (failure) {
+      if (active.current) setError(`Could not approve the variant of ${row.source_code}. ${destinationError(failure)}`);
+    } finally { writingRef.current = false; if (active.current) setWriting(false); onWriting(false); }
+  };
+
   const openEditor = async (row: Source) => {
     if (busy || opening) return;
     setOpening(true); setError('');
@@ -690,7 +710,8 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
           onChange={event => setSelected(previous => { const next = new Set(previous); if (event.target.checked) next.add(sourceKey(row)); else next.delete(sourceKey(row)); return next; })} /></td>
         <td className="p-2 font-mono text-xs"><button type="button" className="text-left underline underline-offset-2 hover:text-slate-950 disabled:opacity-40"
           disabled={busy || opening} aria-haspopup="dialog" title={`Open ${row.source_code} in Edit Mapping`}
-          onClick={() => void openEditor(row)}>{row.source_vocabulary_id || 'Uncoded'}:{row.source_code}</button><AxisVariantFlag count={row.axis_variant_count} /></td>
+          onClick={() => void openEditor(row)}>{row.source_vocabulary_id || 'Uncoded'}:{row.source_code}</button><AxisVariantFlag count={row.axis_variant_count} />
+          <AxisVariantList variants={row.axis_variants} canApprove={canApprove} busy={busy} onApprove={variant => void approveVariant(row, variant)} /></td>
         <td className="p-2">{row.source_code_description || '—'}</td><td className="p-2 text-right tabular-nums">{row.occurrence_count}</td>
         <td className="p-2 text-xs">{row.destination_concept_name || 'None'}{row.destination_concept_id && <div className="mt-1 text-slate-500">
           OMOP {row.destination_concept_id} · {row.destination_standard_concept === 'S' ? 'Standard' : 'Nonstandard'}</div>}</td>
