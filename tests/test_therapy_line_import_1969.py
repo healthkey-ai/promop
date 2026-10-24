@@ -90,6 +90,19 @@ def test_quarantine_hash_fallback_does_not_alias_a_natural_slug(person):
     ]
 
 
+def test_quarantine_overlong_names_are_stable_and_distinct(person):
+    from omop_core.mapping.therapy import get_or_create_quarantine_regimen
+
+    prefix = 'ZZ-' + ('y' * 400)
+    labels = [prefix, prefix + ' a', prefix + ' b']
+    concepts = [get_or_create_quarantine_regimen(label) for label in labels]
+    assert len({concept.pk for concept in concepts}) == 3
+    for _ in range(3):
+        assert [get_or_create_quarantine_regimen(label).pk for label in labels] == [
+            concept.pk for concept in concepts
+        ]
+
+
 def test_the_ticket_s_three_lines_land_and_reach_the_record(etl, person):
     response = _post(etl, person, TICKET_LINES)
 

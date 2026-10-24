@@ -222,8 +222,15 @@ def _ensure_hk_vocab(vocabulary_id):
 def _get_or_create_quarantine_concept(*, vocabulary_id, domain_id,
                                       concept_class_id, concept_code,
                                       concept_name):
-    base_code = concept_code
     normalized_name = normalize_regimen_name(concept_name)
+    if len(concept_name) > 255:
+        # The display cannot preserve the full identity. Put a digest of the
+        # complete normalized input in the code, so repeats are stable and
+        # names differing only beyond the display limit remain distinct.
+        digest = hashlib.sha256(normalized_name.encode('utf-8')).hexdigest()[:40]
+        concept_code = f'{concept_code[:9]}-{digest}'
+    base_code = concept_code
+    stored_name = normalize_regimen_name(concept_name[:255])
     collision_index = 0
     while True:
         concept = Concept.objects.filter(
@@ -231,7 +238,7 @@ def _get_or_create_quarantine_concept(*, vocabulary_id, domain_id,
         ).first()
         if concept is None:
             break
-        if normalize_regimen_name(concept.concept_name) == normalized_name:
+        if normalize_regimen_name(concept.concept_name) == stored_name:
             return concept
         # Slug collision: a different name already owns this code (punctuation
         # collapse / 50-char truncation can map distinct names to one slug).
@@ -276,7 +283,7 @@ def _get_or_create_quarantine_concept(*, vocabulary_id, domain_id,
             'valid_end_date': date(2099, 12, 31),
         },
     )
-    if not created and normalize_regimen_name(concept.concept_name) != normalize_regimen_name(concept_name):
+    if not created and normalize_regimen_name(concept.concept_name) != stored_name:
         # A different name won the slug race: apply the same disambiguation as
         # an ordinary existing-row collision rather than aliasing the regimens.
         return _get_or_create_quarantine_concept(
