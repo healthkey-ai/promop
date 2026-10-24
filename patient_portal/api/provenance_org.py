@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from typing import Any
 
 from rest_framework import status
@@ -12,6 +13,22 @@ from omop_core.models import Organization
 from omop_core.services.provenance_attribution import ATTRIBUTION, with_attribution
 
 from .permissions import get_request_org, is_machine_request
+
+
+@dataclass(frozen=True)
+class ProvenanceContext:
+    """Who wrote a request and for which hospital."""
+
+    source: str | None
+    source_user_id: str
+    reason: str | None
+    organization: Organization | None
+    explicit: bool
+
+    @property
+    def match_organization(self) -> Organization | None:
+        return self.organization if self.explicit else None
+
 
 PROVENANCE_ORG_HEADER = 'X-Provenance-Organization-ID'
 PROVENANCE_ORG_META = 'HTTP_X_PROVENANCE_ORGANIZATION_ID'
