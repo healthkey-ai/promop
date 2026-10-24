@@ -19,6 +19,7 @@ from datetime import timedelta
 
 from django.conf import settings
 from django.db import IntegrityError, transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from omop_core.mapping import axis_variants
@@ -27,10 +28,12 @@ from omop_core.models import AxisVariantRefresh
 logger = logging.getLogger(__name__)
 
 ACTIVE_OUTCOMES = ('queued', 'running')
-#: The worker task's hard limit, shared with ``refresh_axis_variants_task`` so
-#: the stranded-row cutoff below cannot drift from it. A ``running`` row older
-#: than this was left behind by a worker that died, and is requeued.
+#: The worker task's hard limit, shared with ``refresh_axis_variants_task``.
 TIME_LIMIT = 6 * 60 * 60
+#: A running request whose heartbeat is older than this lost its worker: a
+#: deploy replaced the pool mid-walk (#2023). A batch of 500 keys takes far
+#: less, so the next worker boot requeues it and the walk resumes from ``done``.
+STALE = 15 * 60
 #: Raised inside the task shortly before the hard limit, so an overrun is
 #: recorded as ``failed`` instead of a row stuck in ``running``.
 SOFT_TIME_LIMIT = TIME_LIMIT - 5 * 60
@@ -90,11 +93,13 @@ def dispatch_queued_refreshes(republish=True):
     :func:`run_refresh` makes a duplicate harmless. The later rechecks pass
     ``republish=False`` and publish only rows nothing has published yet, so a
     request waiting behind a busy worker is not sent three times. A request
-    stranded in ``running`` past the task's hard limit lost its worker and is
-    requeued; the refresh is idempotent.
+    ``running`` with no heartbeat for :data:`STALE` lost its worker, most often
+    to the deploy that booted this one, and is requeued with its ``done``
+    offset kept, so the walk resumes rather than restarts.
     """
-    cutoff = timezone.now() - timedelta(seconds=TIME_LIMIT)
-    stranded = AxisVariantRefresh.objects.filter(outcome='running', started_at__lt=cutoff)
+    cutoff = timezone.now() - timedelta(seconds=STALE)
+    stranded = AxisVariantRefresh.objects.filter(outcome='running').filter(
+        Q(progress_at__lt=cutoff) | Q(progress_at__isnull=True, started_at__lt=cutoff))
     waiting = AxisVariantRefresh.objects.filter(outcome='queued').order_by('pk').first()
     if waiting is not None:
         # Only one request may be queued, and the waiting one will walk the
@@ -130,23 +135,33 @@ def run_refresh(request_id, batch_size=axis_variants.REFRESH_BATCH):
     """Perform one request on the worker and return a summary.
 
     Claims the row first: a request that is not ``queued`` is running or
-    finished elsewhere and is left alone. Progress is written after every
-    batch, so an operator can watch ``done`` against ``keys``.
+    finished elsewhere and is left alone. Progress and a heartbeat are written
+    after every batch, so an operator can watch ``done`` against ``keys`` and
+    the sweep can tell a killed walk from a live one. A requeued request
+    resumes at its ``done`` offset: keys are walked in a fixed order, and the
+    codes before the offset were refreshed by the attempt that was killed.
     """
+    now = timezone.now()
     claimed = AxisVariantRefresh.objects.filter(pk=request_id, outcome='queued').update(
-        outcome='running', started_at=timezone.now(), completed_at=None, failure_reason='')
+        outcome='running', started_at=now, progress_at=now, completed_at=None, failure_reason='')
     if not claimed:
         request = AxisVariantRefresh.objects.filter(pk=request_id).first()
         return {'request_id': request_id, 'skipped': True,
                 'outcome': request.outcome if request is not None else 'missing'}
+    request = AxisVariantRefresh.objects.get(pk=request_id)
+    offset, already = request.done, request.refreshed
 
     def progress(done, refreshed):
-        AxisVariantRefresh.objects.filter(pk=request_id).update(done=done, refreshed=refreshed)
+        AxisVariantRefresh.objects.filter(pk=request_id).update(
+            done=offset + done, refreshed=already + refreshed, progress_at=timezone.now())
 
     try:
-        keys = axis_variants.multi_unit_keys()
+        keys = sorted(axis_variants.multi_unit_keys(), key=lambda k: (k[0] or '', k[1] or ''))
         AxisVariantRefresh.objects.filter(pk=request_id).update(keys=len(keys))
-        refreshed = axis_variants.refresh_all(keys, batch_size=batch_size, on_batch=progress)
+        if offset:
+            logger.info('Axis variant refresh %s resumes at code %s of %s.', request_id, offset, len(keys))
+        refreshed = already + axis_variants.refresh_all(
+            keys[offset:], batch_size=batch_size, on_batch=progress)
     except Exception as exc:
         AxisVariantRefresh.objects.filter(pk=request_id).update(
             outcome='failed', failure_reason=str(exc)[:2000], completed_at=timezone.now())

@@ -82,7 +82,27 @@ def test_the_worker_claims_the_request_and_records_progress(two_unit_code):
                       'keys': 1, 'refreshed': 1}
     assert (request.outcome, request.keys, request.done, request.refreshed) == ('done', 1, 1, 1)
     assert request.started_at is not None and request.completed_at is not None
+    assert request.progress_at is not None and request.progress_at >= request.started_at
     assert two_unit_code.axis_variant_count == 2
+
+
+def test_a_requeued_request_resumes_where_it_stopped(two_unit_code):
+    """GLU sorts before GLU2; a request killed after GLU resumes with GLU2 only."""
+    other = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id=LAB, source_code='GLU2', omop_table='measurement')
+    for unit in ('mg/dL', 'mmol/L'):
+        PatientSourceCode.objects.create(
+            person=PersonFactory(), source_value='GLU2', source_vocabulary_id=LAB,
+            omop_table='measurement', source_unit=unit, occurrence_count=3)
+    request = AxisVariantRefresh.objects.create(reason='requeued', done=1, refreshed=1)
+    result = axis_variant_jobs.run_refresh(request.pk, batch_size=1)
+    request.refresh_from_db()
+    two_unit_code.refresh_from_db()
+    other.refresh_from_db()
+    assert result['outcome'] == 'done' and result['keys'] == 2 and result['refreshed'] == 2
+    assert (request.done, request.refreshed) == (2, 2)
+    assert (two_unit_code.axis_variant_count, other.axis_variant_count) == (0, 2), \
+        'the code before the offset was not walked again'
 
 
 def test_a_request_that_is_not_queued_is_left_alone():
@@ -106,30 +126,46 @@ def test_a_failure_is_recorded_and_raised():
 def test_a_ready_worker_republishes_a_dropped_request_and_leaves_a_live_one(settings):
     settings.CELERY_BROKER_URL = 'redis://broker/0'
     dropped = AxisVariantRefresh.objects.create(reason='published to an old worker', task_id='axis-variant-refresh-1')
-    live = AxisVariantRefresh.objects.create(reason='live', outcome='running', started_at=timezone.now())
+    live = AxisVariantRefresh.objects.create(
+        reason='live', outcome='running', started_at=timezone.now() - timedelta(hours=3),
+        progress_at=timezone.now() - timedelta(minutes=2))
     AxisVariantRefresh.objects.create(reason='done', outcome='done')
     with patch(PUBLISH) as publish:
         assert axis_variant_jobs.dispatch_queued_refreshes() == 1
     publish.assert_called_once_with(args=[dropped.pk], task_id=f'axis-variant-refresh-{dropped.pk}')
     live.refresh_from_db()
-    assert live.outcome == 'running'
+    assert live.outcome == 'running', 'a walk that reported progress two minutes ago is alive'
 
 
-def test_a_ready_worker_requeues_a_request_whose_worker_died(settings):
+def test_a_ready_worker_requeues_a_request_whose_heartbeat_stopped(settings):
     settings.CELERY_BROKER_URL = 'redis://broker/0'
     stranded = AxisVariantRefresh.objects.create(
-        reason='worker died', outcome='running', started_at=timezone.now() - timedelta(hours=7))
+        reason='worker replaced by a deploy', outcome='running', keys=40000, done=12500, refreshed=900,
+        started_at=timezone.now() - timedelta(hours=1), progress_at=timezone.now() - timedelta(minutes=20))
     with patch(PUBLISH) as publish:
         assert axis_variant_jobs.dispatch_queued_refreshes() == 1
     publish.assert_called_once()
     stranded.refresh_from_db()
     assert (stranded.outcome, stranded.task_id) == ('queued', f'axis-variant-refresh-{stranded.pk}')
+    assert (stranded.done, stranded.refreshed) == (12500, 900), 'the offset survives the requeue'
+
+
+def test_a_running_request_from_before_the_heartbeat_counts_as_stranded(settings):
+    settings.CELERY_BROKER_URL = 'redis://broker/0'
+    old = AxisVariantRefresh.objects.create(
+        reason='claimed by the previous release', outcome='running',
+        started_at=timezone.now() - timedelta(minutes=20), progress_at=None)
+    with patch(PUBLISH):
+        assert axis_variant_jobs.dispatch_queued_refreshes() == 1
+    old.refresh_from_db()
+    assert old.outcome == 'queued'
 
 
 def test_a_stranded_request_is_closed_when_another_is_already_waiting(settings):
     settings.CELERY_BROKER_URL = 'redis://broker/0'
     stranded = AxisVariantRefresh.objects.create(
-        reason='worker died', outcome='running', started_at=timezone.now() - timedelta(hours=7))
+        reason='worker died', outcome='running', started_at=timezone.now() - timedelta(hours=7),
+        progress_at=timezone.now() - timedelta(hours=7))
     waiting = AxisVariantRefresh.objects.create(reason='waiting')
     with patch(PUBLISH) as publish:
         assert axis_variant_jobs.dispatch_queued_refreshes() == 1
