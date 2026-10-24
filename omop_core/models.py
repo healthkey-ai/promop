@@ -5074,6 +5074,9 @@ class AxisVariantRefresh(models.Model):
     refreshed = models.PositiveIntegerField(default=0)
     failure_reason = models.TextField(blank=True)
     started_at = models.DateTimeField(null=True, blank=True)
+    # Heartbeat: written on claim and after every batch. A running request
+    # whose heartbeat stops was killed with its worker (#2023).
+    progress_at = models.DateTimeField(null=True, blank=True)
     completed_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 

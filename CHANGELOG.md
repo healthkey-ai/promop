@@ -140,6 +140,13 @@ All notable changes to PRomop are documented here.
 
 ### Fixed
 
+- **A deploy mid-walk no longer costs the axis variant refresh six hours** —
+  the request row now carries a `progress_at` heartbeat written after every
+  batch. A `running` request with no heartbeat for 15 minutes lost its worker
+  to the deploy that replaced the pool, and the next worker boot requeues it
+  and resumes at its `done` offset instead of waiting for the six-hour task
+  limit and starting over. (#2023)
+
 - **The bulk LOINC axis variant backfill no longer runs inside `migrate`** —
   migrations 0300 and 0301 walked every multi-unit code during the release
   step. On the HealthTree GCP instance, which holds the data with the most such

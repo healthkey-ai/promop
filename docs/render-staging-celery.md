@@ -71,8 +71,10 @@ Django uses the broker for its shared cache.
   staging.
 - After a deploy that requests one, `axis_variant_refresh` must progress from
   `queued` to `running` and `done`; `done` counts up against `keys` while it
-  runs. A worker publishes queued requests when it starts, so a request a
-  pre-upgrade worker dropped is picked up on the next worker boot.
+  runs and `progress_at` moves with every batch. A worker publishes queued
+  requests when it starts, so a request a pre-upgrade worker dropped is picked
+  up on the next worker boot, and a `running` request whose heartbeat is older
+  than 15 minutes is requeued and resumed from `done` rather than restarted.
 - After a changed Athena artifact, `athena_vocabulary_sync` must progress from
   `queued` to `running` and then `applied` (or `current` when no table work is
   needed). A `failed` row can be retried with

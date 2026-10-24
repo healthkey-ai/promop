@@ -155,7 +155,10 @@ Flags refresh after each source-code upload for the codes it touched. The bulk
 refresh of every multi-unit code on the instance is a worker job (#2021):
 `manage.py refresh_axis_variants --queue` or migration `0303` records an
 `axis_variant_refresh` request and the Celery worker performs it, with `keys`,
-`done` and `refreshed` on the row as it goes. It never runs inside `migrate`:
+`done`, `refreshed` and a `progress_at` heartbeat on the row as it goes. A
+deploy that replaces the worker mid-walk kills the task; the next worker boot
+sees the stale heartbeat, requeues the request and resumes it at `done`
+(#2023). It never runs inside `migrate`:
 on the HealthTree instance it outlived the Cloud Run migrate job's hour, and
 no deploy reached traffic until the walk was moved off the release step. A
 worker publishes any request still queued when it starts, so a request a
