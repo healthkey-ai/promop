@@ -359,8 +359,9 @@ function useSourceGroup(conceptId: number, status: Status, enabled: boolean, que
     }, 250);
     return () => { current = false; controller.abort(); window.clearTimeout(timer); };
   }, [conceptId, status, enabled, search, seenOnly, order, page, revision]);
-  // Stale rows must not stay selectable while a changed query loads.
-  const reset = useCallback(() => { setData(null); setPage(1); }, []);
+  // Stale rows must not stay selectable while a changed query loads, and a
+  // folded group's failure must not outlive the group.
+  const reset = useCallback(() => { setData(null); setPage(1); setFailed(false); }, []);
   return { data, setData, page, setPage, loading, failed, reset };
 }
 
@@ -392,7 +393,10 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
   const proposedGroup = useSourceGroup(concept.concept_id, 'proposed', mode === 'linked' && open.proposed, groupQuery);
   const rejectedGroup = useSourceGroup(concept.concept_id, 'rejected', mode === 'linked' && open.rejected, groupQuery);
   const groups = { approved: approvedGroup, proposed: proposedGroup, rejected: rejectedGroup };
-  const resetGroups = () => STATUSES.forEach(status => groups[status].reset());
+  // A folded group's effect never runs again, so only the groups being shown
+  // may contribute loading, failure or counts.
+  const shownGroups = STATUSES.filter(status => mode === 'linked' && open[status]);
+  const resetView = () => { setSelected(new Set()); STATUSES.forEach(status => groups[status].reset()); };
   const [edit, setEdit] = useState<EditTarget | null>(null);
   const [opening, setOpening] = useState(false);
   const [reference, setReference] = useState<Reference | null>(null);
@@ -442,9 +446,12 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
     return () => { current = false; window.clearTimeout(timer); };
   }, [run]);
 
-  const changeMode = (next: typeof mode) => { setMode(next); setSelected(new Set()); setSearch(''); resetGroups(); setError(''); };
+  const changeMode = (next: typeof mode) => { setMode(next); setSearch(''); resetView(); setError(''); };
   const toggleGroup = (status: Status) => {
     setOpen(previous => ({ ...previous, [status]: !previous[status] }));
+    // Folding drops the rows, so reopening fetches them fresh instead of
+    // showing what was there before later writes.
+    groups[status].reset();
     setSelected(new Set());
   };
   const start = async () => {
@@ -470,10 +477,10 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
   const editable = rows.filter(row => !row.edited && (row.status === 'proposed' || (row.status === 'unmapped' && row.mapping_id === null)) && row.origin_system !== 'athena');
   const pending = editable.filter(row => selected.has(sourceKey(row)));
   // Every open group answers with the counts of all three, under the same filters.
-  const statusCounts = STATUSES.map(status => groups[status].data?.status_counts).find(Boolean) ?? null;
-  const zeroSeen = STATUSES.map(status => groups[status].data?.zero_seen).find(value => value !== undefined);
-  const loading = STATUSES.some(status => groups[status].loading);
-  const loadError = STATUSES.some(status => groups[status].failed);
+  const statusCounts = shownGroups.map(status => groups[status].data?.status_counts).find(Boolean) ?? null;
+  const zeroSeen = shownGroups.map(status => groups[status].data?.zero_seen).find(value => value !== undefined);
+  const loading = shownGroups.some(status => groups[status].loading);
+  const loadError = shownGroups.some(status => groups[status].failed);
   const validThreshold = Number.isFinite(threshold) && threshold >= 0 && threshold <= 100;
   // Compare the percentage the column shows: 0.55 * 100 is 55.00000000000001.
   const confident = validThreshold
@@ -482,7 +489,7 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
   const selectConfident = () => setSelected(new Set(confident.map(sourceKey)));
   const changeOrder = () => {
     setOrder(previous => previous === '-confidence' ? 'confidence' : '-confidence');
-    setSelected(new Set()); resetGroups();
+    resetView();
   };
   // A saved row replaces its stale copy wherever the dialog shows it.
   const patchRow = (row: Source, updated: Source) => {
@@ -502,6 +509,8 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
     writingRef.current = true; setWriting(true); onWriting(true); setError('');
     const failures: string[] = [];
     let saved = 0;
+    // Rows written, approved or only proposed: each changes the counts and the estimate.
+    let written = 0;
     try {
       for (const [index, row] of batch.entries()) {
         if (!active.current) break;
@@ -512,12 +521,13 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
             ({ data: current } = await api.post<Source>(`/v1/concept-to-code/${concept.concept_id}/mappings/`, {
               run_id: run?.run_id, source_vocabulary_id: row.source_vocabulary_id, source_code: row.source_code, status: 'proposed',
             }));
+            written += 1;
             patchRow(row, current);
           }
           const { data: updated } = await api.post<Source>(`/v1/concept-to-code/${concept.concept_id}/mappings/${current.mapping_id}/`, {
             status: 'approved', expected_updated_at: current.updated_at,
           });
-          saved += 1;
+          saved += 1; written += 1;
           patchRow(row, updated);
         } catch (failure) { failures.push(`${row.source_code}: ${destinationError(failure)}`); }
       }
@@ -525,7 +535,7 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
         setProgress(`Approved ${saved} of ${batch.length} selected mappings.`);
         setSelected(new Set());
         if (failures.length) setError(failures.join(' '));
-        if (saved) { onSaved(); setRevision(value => value + 1); }
+        if (written) { onSaved(); setRevision(value => value + 1); }
       }
     } finally { writingRef.current = false; if (active.current) setWriting(false); onWriting(false); }
   };
@@ -554,7 +564,8 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
   const editorSaved = (saved: CodeMappingRow) => {
     onSaved();
     setRevision(value => value + 1);
-    if (mode !== 'candidates') return;
+    // Stored rows reload with new revisions; a selection made over the old ones must not be approved.
+    if (mode !== 'candidates') { setSelected(new Set()); return; }
     const key = edit ? sourceKey(edit.source) : '';
     setSelected(previous => { const next = new Set(previous); next.delete(key); return next; });
     setRun(previous => previous ? { ...previous, activity: previous.activity.map(event => ({ ...event,
@@ -567,7 +578,7 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
   };
 
   const busy = writing || running;
-  const retry = () => { resetGroups(); setSelected(new Set()); setError(''); setRevision(value => value + 1); };
+  const retry = () => { resetView(); setError(''); setRevision(value => value + 1); };
   return <section aria-label={`Source codes for ${concept.concept_name}`} className="space-y-4">
     <div role="group" aria-label="Source code views" className="flex flex-wrap gap-2">
       {([['linked', 'Existing mappings'], ['candidates', 'Suggested source codes']] as const).map(([key, label]) =>
@@ -576,7 +587,7 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
     </div>
     <div className="flex flex-wrap items-center gap-3">
       {mode !== 'candidates' && <input className={`${input} flex-1`} aria-label="Search source codes" placeholder="Source code, description or vocabulary"
-        value={search} disabled={busy} onChange={event => { setSearch(event.target.value); setSelected(new Set()); resetGroups(); }} />}
+        value={search} disabled={busy} onChange={event => { setSearch(event.target.value); resetView(); }} />}
       {(['umls', 'lexical'] as const).map(strategy => <label key={strategy} className="flex items-center gap-1 text-sm">
         <input type="checkbox" checked={strategies[strategy]} disabled={busy} onChange={event => setStrategies(previous => ({ ...previous, [strategy]: event.target.checked }))} />
         {strategy === 'umls' ? 'UMLS' : 'Names and synonyms'}</label>)}
@@ -592,7 +603,7 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
       </div>
     </div>
     <p className="text-xs text-slate-500">Review clinical meaning before selecting codes. Suggestions do not change mappings; approval updates the mapping and matching stored clinical rows.
-      {' '}New vocabulary codes have Seen = 0 and must be proposed before approval.</p>
+      {' '}New vocabulary codes have Seen = 0; approving one proposes it from this preview first.</p>
     {run && mode === 'candidates' && <p role="status" className="text-sm text-slate-600">
       {running ? 'Searching local vocabulary evidence…' : `${candidates.length} candidates retrieved (limit ${run.selection.limit}).`}
       {!running && unscoredHidden > 0 && ` ${unscoredHidden} without a confidence score hidden.`}
@@ -625,9 +636,9 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
         <th className="p-2">Description</th>
         <th className="p-2" aria-sort={order ? 'none' : 'descending'}><label className="mb-1 flex whitespace-nowrap items-center gap-1 font-normal">
           <input type="checkbox" aria-label="Only source codes with Seen greater than zero" checked={seenOnly} disabled={busy}
-            onChange={event => { setSeenOnly(event.target.checked); resetGroups(); setSelected(new Set()); }} />&gt; 0 only</label>
+            onChange={event => { setSeenOnly(event.target.checked); resetView(); }} />&gt; 0 only</label>
           {order ? <button type="button" className="font-semibold hover:text-slate-950 disabled:opacity-40" disabled={busy} title="Order by Seen"
-            onClick={() => { setOrder(''); setSelected(new Set()); resetGroups(); }}>Seen ↕</button> : 'Seen ↓'}</th>
+            onClick={() => { setOrder(''); resetView(); }}>Seen ↕</button> : 'Seen ↓'}</th>
         <th className="p-2">Current destination</th>
         <th className="p-2" aria-sort={order === '-confidence' ? 'descending' : order === 'confidence' ? 'ascending' : 'none'}>
           <button type="button" className="flex items-center gap-1 font-semibold hover:text-slate-950 disabled:opacity-40" disabled={busy}
@@ -661,7 +672,7 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
       reference={reference ?? emptyReference} canApprove={canApprove}
       strategies={dialogStrategies} rankingModel={dialogRanking}
       onStrategiesChange={setDialogStrategies} onRankingModelChange={setDialogRanking}
-      onSaved={editorSaved} onDeleted={() => { onSaved(); setRevision(value => value + 1); }}
+      onSaved={editorSaved} onDeleted={() => { onSaved(); setSelected(new Set()); setRevision(value => value + 1); }}
       defaultDestination={destination} sourceExamples />
   </section>;
 

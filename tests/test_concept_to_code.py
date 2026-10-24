@@ -739,3 +739,4 @@ def test_linked_sources_filter_by_status_and_count_every_status(client, concept)
     assert unfiltered['total'] == 4
     assert unfiltered['status_counts'] == {'approved': 2, 'proposed': 1, 'rejected': 1}
     assert client.get(f'{BASE}{concept.pk}/', {'status': 'bogus'}).status_code == 400
+    assert client.get(f'{BASE}{concept.pk}/', {'mode': 'available'}).data['status_counts'] is None

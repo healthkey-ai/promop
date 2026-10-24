@@ -216,6 +216,56 @@ describe('concept-first curation', () => {
     expect(screen.queryByText('SNOMED:OK1')).not.toBeInTheDocument();
   });
 
+  it('forgets a folded group\'s failure and stale counts; a write refreshes the open groups', async () => {
+    let approvedFails = true;
+    let counts = { approved: 2, proposed: 1, rejected: 0 };
+    get.mockImplementation((url: string, config?: { params?: { status?: string } }) => {
+      if (url === '/v1/concept-to-code/') return Promise.resolve({ data: page([concept]) });
+      if (config?.params?.status === 'approved' && approvedFails) return Promise.reject(new Error('Unavailable'));
+      return Promise.resolve({ data: { ...page(config?.params?.status === 'proposed' ? [source] : []), status_counts: counts } });
+    });
+    render(<ConceptToCodeTab canApprove />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Serum albumin' }));
+    await showExisting();
+    await screen.findByText('SNOMED:S1');
+    fireEvent.click(screen.getByRole('button', { name: 'Approved mappings (2)' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not load source codes.');
+    // Folding the group that failed clears the failure; the proposed group loaded fine.
+    fireEvent.click(screen.getByRole('button', { name: 'Approved mappings (2)' }));
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Loading source codes/)).not.toBeInTheDocument();
+
+    // Approving the proposed row reloads the open group, whose counts then win.
+    approvedFails = false;
+    counts = { approved: 3, proposed: 0, rejected: 0 };
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select SNOMED S1' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Approve selected (1)' }));
+    await screen.findByText('Approved 1 of 1 selected mappings.');
+    expect(await screen.findByRole('button', { name: 'Approved mappings (3)' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Proposed mappings (0)' })).toBeInTheDocument();
+  });
+
+  it('refreshes the concept when a candidate was proposed but its approval failed', async () => {
+    const fresh = { ...source, mapping_id: null, status: 'unmapped', occurrence_count: 0, source_code: 'NEW1' };
+    post.mockResolvedValueOnce({ data: { ...run(), selection: { limit: 25, include_zero_seen: true },
+      activity: [{ concept: { concept_id: 123 }, candidates: [fresh] }] } });
+    await selectConcept();
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Only source codes with Seen greater than zero' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Suggest source codes' }));
+    await screen.findByText('Not yet mapped');
+    const listLoads = () => get.mock.calls.filter(([url]) => url === '/v1/concept-to-code/').length;
+    const before = listLoads();
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select SNOMED NEW1' }));
+    post.mockResolvedValueOnce({ data: { ...fresh, mapping_id: 21, status: 'proposed', updated_at: 'r2' } })
+      .mockRejectedValueOnce({ response: { status: 409, data: { detail: 'Locked by another curator.' } } });
+    fireEvent.click(screen.getByRole('button', { name: 'Approve selected (1)' }));
+    await screen.findByText('Approved 0 of 1 selected mappings.');
+    expect(screen.getByRole('alert')).toHaveTextContent('Locked by another curator.');
+    // The row is now a stored proposal, so the coverage counts reload.
+    expect(screen.getByText('proposed')).toBeInTheDocument();
+    await waitFor(() => expect(listLoads()).toBeGreaterThan(before));
+  });
+
   it('reports partial batch failures without claiming every row was approved', async () => {
     const second = { ...source, mapping_id: 8, source_code: 'S2' };
     get.mockImplementation((url: string) => Promise.resolve({ data: url === '/v1/concept-to-code/' ? page([concept]) : page([source, second]) }));

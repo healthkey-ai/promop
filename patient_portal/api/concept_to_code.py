@@ -123,12 +123,16 @@ def concept_to_code_detail(request, concept_id):
     rows = apply_seen(rows, request.query_params)
     # The dialog lists approved, proposed and rejected mappings as separate
     # groups (#2010); counts cover every status so a collapsed group can show
-    # how many rows it holds before it is fetched.
-    status_counts = {status: 0 for status, _ in SourceCodeConceptMapping.STATUS_CHOICES}
-    status_counts.update(dict(rows.order_by().values_list('status').annotate(count=Count('pk'))))
+    # how many rows it holds before it is fetched. Available rows are all
+    # proposed by construction, so only linked mode counts.
+    statuses = [status for status, _ in SourceCodeConceptMapping.STATUS_CHOICES]
     status = request.query_params.get('status', '')
-    if status not in ('', *status_counts):
+    if status not in ('', *statuses):
         raise ValidationError({'status': 'Choose approved, proposed or rejected.'})
+    status_counts = None
+    if mode == 'linked':
+        status_counts = dict.fromkeys(statuses, 0)
+        status_counts.update(dict(rows.order_by().values_list('status').annotate(count=Count('pk'))))
     if status:
         rows = rows.filter(status=status)
     order = request.query_params.get('order', '')
