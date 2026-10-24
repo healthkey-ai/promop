@@ -5,6 +5,7 @@ from .loinc_axes import (
     code_mapping_snomed_attributes, loinc_axis_values,
 )
 from .relevance import disease_relevance_view, relevance_signal_review, relevance_signals
+from .version import version_view
 from .concept_to_code import (
     concept_to_code_list, concept_to_code_detail, concept_to_code_suggest,
     concept_to_code_run, concept_to_code_apply, concept_to_code_propose,
@@ -122,6 +123,7 @@ urlpatterns = [
     # The surveys the PROlog runner serves, for the portal's Surveys tab.
     path('prolog-surveys/', PrologSurveyListView.as_view(), name='v1-prolog-surveys'),
     path('', include(router.urls)),
+    path('version/', version_view, name='v1-version'),
     path('auth/login/', login_view, name='v1-login'),
     path('auth/logout/', logout_view, name='v1-logout'),
     path('auth/change-password/', change_password, name='v1-change-password'),

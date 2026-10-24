@@ -78,6 +78,12 @@ All notable changes to PRomop are documented here.
 
 ### Changed
 
+- **The deployed commit sits under the PRomop logo** — in tiny type, with
+  the full SHA as a tooltip, so a report from staging names its build. It
+  comes from the new public `GET /api/v1/version/`, which answers with
+  Render's `RENDER_GIT_COMMIT` (or a checkout's `HEAD`) only when it is a Git
+  commit (#2016).
+
 - **LOINC axes read the record units first, and lead with the variants** —
   a code whose records all arrive in mass-concentration units showed every
   axis as "Not settled" when its stored metadata carried only a reference-range
