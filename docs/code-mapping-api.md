@@ -153,6 +153,9 @@ Concept to Code preview calls it for each flagged candidate.
 
 Flags refresh after each source-code upload for the codes it touched. The bulk
 refresh of every multi-unit code on the instance is a worker job (#2021):
+`manage.py refresh_axis_variants --rebuild-evidence` or migration `0307` has the
+walk first rewrite each code's stored unit evidence from the instance's own
+patient data (#2043).
 `manage.py refresh_axis_variants --queue` or migration `0303` records an
 `axis_variant_refresh` request and the Celery worker performs it, with `keys`,
 `done`, `refreshed` and a `progress_at` heartbeat on the row as it goes. A

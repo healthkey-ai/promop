@@ -79,7 +79,7 @@ def test_the_worker_claims_the_request_and_records_progress(two_unit_code):
     request.refresh_from_db()
     two_unit_code.refresh_from_db()
     assert result == {'request_id': request.pk, 'skipped': False, 'outcome': 'done',
-                      'keys': 1, 'refreshed': 1}
+                      'keys': 1, 'refreshed': 1, 'rebuild_evidence': False}
     assert (request.outcome, request.keys, request.done, request.refreshed) == ('done', 1, 1, 1)
     assert request.started_at is not None and request.completed_at is not None
     assert request.progress_at is not None and request.progress_at >= request.started_at
@@ -94,15 +94,41 @@ def test_a_requeued_request_resumes_where_it_stopped(two_unit_code):
         PatientSourceCode.objects.create(
             person=PersonFactory(), source_value='GLU2', source_vocabulary_id=LAB,
             omop_table='measurement', source_unit=unit, occurrence_count=3)
-    request = AxisVariantRefresh.objects.create(reason='requeued', done=1, refreshed=1)
+    from omop_core.mapping.axis_variants import key_text
+
+    request = AxisVariantRefresh.objects.create(reason='requeued', done=1, refreshed=1, cursor=key_text((LAB, 'GLU')))
     result = axis_variant_jobs.run_refresh(request.pk, batch_size=1)
     request.refresh_from_db()
     two_unit_code.refresh_from_db()
     other.refresh_from_db()
     assert result['outcome'] == 'done' and result['keys'] == 2 and result['refreshed'] == 2
-    assert (request.done, request.refreshed) == (2, 2)
+    assert (request.done, request.refreshed, request.cursor) == (2, 2, key_text((LAB, 'GLU2')))
     assert (two_unit_code.axis_variant_count, other.axis_variant_count) == (0, 2), \
-        'the code before the offset was not walked again'
+        'the code up to the cursor was not walked again'
+
+
+def test_a_resumed_rebuild_is_not_shifted_by_codes_the_first_attempt_cleared(two_unit_code):
+    """A rebuild drops codes with no patient data from the key set as it goes;
+    the resume follows the cursor, not an offset into the shrunken list."""
+    from omop_core.mapping.axis_variants import key_text
+
+    cleared = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id=LAB, source_code='A-NOPAT', omop_table='measurement', source_unit_evidence=SEEDED)
+    later = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id=LAB, source_code='Z-LATER', omop_table='measurement', source_unit_evidence=SEEDED)
+    PatientSourceCode.objects.create(person=PersonFactory(), source_value='Z-LATER', source_vocabulary_id=LAB,
+                                     omop_table='measurement', source_unit='%', occurrence_count=2)
+    # The first attempt walked A-NOPAT (now cleared, so gone from the key set) and died.
+    cleared.source_unit_evidence = []
+    cleared.save(update_fields=['source_unit_evidence'])
+    request = AxisVariantRefresh.objects.create(
+        reason='requeued', rebuild_evidence=True, done=1, cursor=key_text((LAB, 'A-NOPAT')))
+    result = axis_variant_jobs.run_refresh(request.pk, batch_size=1)
+    assert result['keys'] == 3  # A-NOPAT done before, GLU and Z-LATER now
+    two_unit_code.refresh_from_db()
+    later.refresh_from_db()
+    assert two_unit_code.axis_variant_count == 2
+    assert [(e['display'], e['count'], e['patients']) for e in later.source_unit_evidence] == [('%', 2, 1)]
 
 
 def test_a_request_that_is_not_queued_is_left_alone():
@@ -222,6 +248,123 @@ def test_migration_0303_publishes_only_after_commit(settings):
     # The test transaction never commits, so the publish never fires here; the
     # row is what a worker's sweep would pick up.
     assert AxisVariantRefresh.objects.get().outcome == 'queued'
+
+
+SEEDED = [{'display': 'g/dL', 'code': 'g/dL', 'count': 10, 'patients': 1, 'source': 'nikita-fhir_code_inventory_20261005b'},
+          {'display': '%', 'code': '%', 'count': 1, 'patients': 1, 'source': 'nikita-fhir_code_inventory_20261005b'}]
+
+
+def test_a_rebuild_request_rewrites_evidence_from_patient_data_and_refreshes(two_unit_code):
+    """The seed's label-level counts (#2041) give way to what this instance's patients say (#2043)."""
+    two_unit_code.source_unit_evidence = SEEDED
+    two_unit_code.save(update_fields=['source_unit_evidence'])
+    request = AxisVariantRefresh.objects.create(reason='test', rebuild_evidence=True)
+    result = axis_variant_jobs.run_refresh(request.pk)
+    assert result['outcome'] == 'done' and result['rebuild_evidence'] is True and result['keys'] == 1
+    two_unit_code.refresh_from_db()
+    assert two_unit_code.source_unit_evidence == [
+        {'display': 'mg/dL', 'code': 'mg/dL', 'normalized': 'mg/dL', 'count': 3, 'patients': 1, 'source': 'patient-data'},
+        {'display': 'mmol/L', 'code': 'mmol/L', 'normalized': 'mmol/L', 'count': 3, 'patients': 1, 'source': 'patient-data'},
+    ]
+    assert two_unit_code.axis_variant_count == 2
+    assert sorted(v.units for v in two_unit_code.axis_variants.all()) == [['mg/dL'], ['mmol/L']]
+
+
+def test_a_rebuild_clears_seeded_units_a_code_was_never_seen_in():
+    from omop_core.mapping import axis_variants
+
+    mapping = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id=LAB, source_code='ALB', omop_table='measurement', source_unit_evidence=SEEDED)
+    PatientSourceCode.objects.create(person=PersonFactory(), source_value='ALB', source_vocabulary_id=LAB,
+                                     omop_table='measurement', source_unit='g/dL', occurrence_count=1)
+    axis_variants.refresh_all(rebuild_evidence=True)
+    mapping.refresh_from_db()
+    assert [(e['display'], e['count']) for e in mapping.source_unit_evidence] == [('g/dL', 1)]
+    assert mapping.axis_variant_count == 0
+    # A code with no patient data on this instance keeps no units at all.
+    bare = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id=LAB, source_code='NOPAT', omop_table='measurement', source_unit_evidence=SEEDED)
+    assert (LAB, 'NOPAT') in axis_variants.evidence_keys()
+    axis_variants.refresh_all(rebuild_evidence=True)
+    bare.refresh_from_db()
+    assert bare.source_unit_evidence == []
+
+
+def test_a_rebuild_keeps_units_this_instance_recorded_itself_and_merges_spellings():
+    """A text term's units come from lookups, not patients, and stay; two spellings are one unit and one person."""
+    from omop_core.mapping import axis_variants
+
+    term = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id='', source_code='blood glucose', omop_table='measurement',
+        source_unit_evidence=[{'code': 'mg/dL', 'display': 'mg/dL', 'count': 4}, {'code': 'mmol/L', 'display': 'mmol/L', 'count': 1}],
+        axis_variant_count=2)
+    code = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id=LAB, source_code='HGB', omop_table='measurement', source_unit_evidence=SEEDED)
+    # Two patients, two spellings of one unit: one unit, two people.
+    for unit in ('g/dL', 'G/DL'):
+        PatientSourceCode.objects.create(person=PersonFactory(), source_value='HGB', source_vocabulary_id=LAB,
+                                         omop_table='measurement', source_unit=unit, occurrence_count=2)
+    axis_variants.refresh_all(rebuild_evidence=True)
+    term.refresh_from_db()
+    code.refresh_from_db()
+    assert [(e['code'], e['count']) for e in term.source_unit_evidence] == [('mg/dL', 4), ('mmol/L', 1)]
+    assert term.axis_variant_count == 2
+    assert code.source_unit_evidence == [
+        {'display': 'g/dL', 'code': 'g/dL', 'normalized': 'g/dL', 'count': 4, 'patients': 2, 'source': 'patient-data'}]
+
+
+def test_evidence_keys_ignore_patient_codes_with_no_mapping(two_unit_code):
+    from omop_core.mapping import axis_variants
+
+    PatientSourceCode.objects.create(person=PersonFactory(), source_value='UNMAPPED', source_vocabulary_id=LAB,
+                                     omop_table='measurement', source_unit='mg/dL', occurrence_count=1)
+    assert axis_variants.evidence_keys() == {(LAB, 'GLU')}
+
+
+def test_a_rebuild_asked_for_while_a_refresh_is_queued_is_folded_into_it(settings):
+    settings.CELERY_BROKER_URL = ''
+    plain, _ = axis_variant_jobs.request_refresh(reason='plain')
+    folded, created = axis_variant_jobs.request_refresh(reason='rebuild', rebuild_evidence=True)
+    assert (folded.pk, created, folded.rebuild_evidence) == (plain.pk, False, True)
+    assert AxisVariantRefresh.objects.get(pk=plain.pk).rebuild_evidence is True
+    # A running request has read its flag already and is not changed.
+    AxisVariantRefresh.objects.filter(pk=plain.pk).update(outcome='running', rebuild_evidence=False)
+    running, created = axis_variant_jobs.request_refresh(reason='rebuild', rebuild_evidence=True)
+    assert (running.pk, created, running.rebuild_evidence) == (plain.pk, False, False)
+    out = StringIO()
+    call_command('refresh_axis_variants', '--queue', '--rebuild-evidence', stdout=out)
+    assert 'without the evidence rebuild' in out.getvalue()
+
+
+def test_migration_0307_requests_one_rebuild(settings, two_unit_code):
+    settings.CELERY_BROKER_URL = ''
+    migration = importlib.import_module('omop_core.migrations.0307_unit_evidence_rebuild')
+    migration.request_rebuild(apps, None)
+    migration.request_rebuild(apps, None)
+    request = AxisVariantRefresh.objects.get()
+    assert (request.outcome, request.reason, request.rebuild_evidence) == ('queued', migration.REASON, True)
+    two_unit_code.refresh_from_db()
+    assert two_unit_code.axis_variant_count == 0, 'migrate must not perform the rebuild'
+    # A plain refresh still queued takes the rebuild on instead of a second row.
+    AxisVariantRefresh.objects.all().delete()
+    plain = AxisVariantRefresh.objects.create(reason='plain')
+    migration.request_rebuild(apps, None)
+    plain.refresh_from_db()
+    assert plain.rebuild_evidence is True and migration.REASON in plain.reason
+    assert AxisVariantRefresh.objects.count() == 1
+
+
+def test_the_command_rebuilds_evidence(two_unit_code):
+    two_unit_code.source_unit_evidence = SEEDED
+    two_unit_code.save(update_fields=['source_unit_evidence'])
+    out = StringIO()
+    call_command('refresh_axis_variants', '--dry-run', '--rebuild-evidence', stdout=out)
+    assert '1 source codes would have their unit evidence rebuilt from patient data.' in out.getvalue()
+    call_command('refresh_axis_variants', '--rebuild-evidence', stdout=out)
+    assert '1 source codes had their unit evidence rebuilt from patient data.' in out.getvalue()
+    two_unit_code.refresh_from_db()
+    assert [e['display'] for e in two_unit_code.source_unit_evidence] == ['mg/dL', 'mmol/L']
+    assert AxisVariantRefresh.objects.get().rebuild_evidence is True
 
 
 def test_the_command_can_queue_instead_of_refreshing(settings, two_unit_code):
