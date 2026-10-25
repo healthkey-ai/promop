@@ -49,6 +49,12 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+# The deployed commit, for /api/v1/version/ and the stamp under the logo
+# (#2016). Render injects RENDER_GIT_COMMIT; Cloud Run has no git checkout,
+# so the workflow passes the SHA it builds (#2024).
+ARG GIT_COMMIT=""
+ENV GIT_COMMIT=${GIT_COMMIT}
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq-dev curl && \
     rm -rf /var/lib/apt/lists/*

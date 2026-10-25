@@ -44,14 +44,15 @@ describeLive('Suggest source codes estimate against a live backend', () => {
       .toHaveTextContent(`About ${before.total.toLocaleString()} candidate source codes`), { timeout: 15000 });
     expect(within(coverage).getByTestId('source-estimate')).toHaveTextContent(`about ${runs} runs of 25`);
 
-    // A curator-review run of 5, all proposed for this concept.
+    // A curator-review run of 5, all approved for this concept: Approve
+    // proposes a vocabulary-only candidate from the preview first (#2010).
     fireEvent.change(within(coverage).getByLabelText('Source suggestion ranker'), { target: { value: 'none' } });
     fireEvent.change(within(coverage).getByLabelText('Maximum source candidates'), { target: { value: '5' } });
     fireEvent.click(within(coverage).getByRole('button', { name: 'Suggest source codes' }));
     await within(coverage).findByText('5 candidates retrieved (limit 5).', {}, { timeout: 30000 });
     fireEvent.click(within(coverage).getByRole('checkbox', { name: 'Select displayed proposed sources' }));
-    fireEvent.click(within(coverage).getByRole('button', { name: 'Propose selected (5)' }));
-    await within(coverage).findByText('Proposed 5 of 5 selected mappings.', {}, { timeout: 30000 });
+    fireEvent.click(within(coverage).getByRole('button', { name: 'Approve selected (5)' }));
+    await within(coverage).findByText('Approved 5 of 5 selected mappings.', {}, { timeout: 30000 });
 
     // The next estimate, from the server and on the page, no longer counts them.
     await waitFor(() => expect(within(coverage).getByTestId('source-estimate'))

@@ -1,30 +1,11 @@
-import logging
-
-from django.db import DatabaseError, migrations
-
-logger = logging.getLogger(__name__)
-
-
-def backfill(apps, schema_editor):
-    # #1965. unit_code now reads lab spellings ("gm/dL", "Grams/Deciliter",
-    # "GDL") that 0300 left unrecognised, so stored variants regroup and codes
-    # those spellings make multi-property gain a flag. Same refresh as 0300,
-    # with the same reasons for using the living code and not blocking a
-    # deploy on a database error.
-    from omop_core.mapping import axis_variants
-
-    try:
-        refreshed = axis_variants.refresh_all()
-    except DatabaseError:
-        logger.warning(
-            'Axis variant backfill failed; run `manage.py refresh_axis_variants` '
-            'after migrating.', exc_info=True)
-        return
-    logger.info('Axis variant backfill refreshed %s mappings.', refreshed)
+from django.db import migrations
 
 
 class Migration(migrations.Migration):
-    # A transaction per batch (refresh_all), as in 0300.
+    # #1966 re-ran the axis variant refresh here so stored variants regrouped
+    # under the corrected unit spellings. Like 0300 it could not finish inside
+    # the Cloud Run migrate job on the HealthTree instance (#2021); the worker
+    # job that migration 0303 requests regroups them instead.
     atomic = False
 
     dependencies = [
@@ -32,5 +13,5 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.RunPython(backfill, migrations.RunPython.noop),
+        migrations.RunPython(migrations.RunPython.noop, migrations.RunPython.noop),
     ]

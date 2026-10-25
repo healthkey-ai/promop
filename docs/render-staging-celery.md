@@ -59,7 +59,8 @@ Django uses the broker for its shared cache.
 ## Verify
 
 - Worker logs must show a connection to the staging broker and registration of
-  `omop_core.suggest_mappings` and `omop_core.sync_athena_vocabulary`. From the Render shell,
+  `omop_core.suggest_mappings`, `omop_core.sync_athena_vocabulary` and
+  `omop_core.refresh_axis_variants`. From the Render shell,
   `celery -A promop inspect ping` must get a worker response.
 - Authenticated `/api/v1/code-mappings/reference/` must return
   `suggest_max_per_run: 100`.
@@ -68,6 +69,12 @@ Django uses the broker for its shared cache.
   100 in the UI proves broker configuration, not worker health.
 - Check web and worker memory during the run. Do not run the test suite against
   staging.
+- After a deploy that requests one, `axis_variant_refresh` must progress from
+  `queued` to `running` and `done`; `done` counts up against `keys` while it
+  runs and `progress_at` moves with every batch. A worker publishes queued
+  requests when it starts, so a request a pre-upgrade worker dropped is picked
+  up on the next worker boot, and a `running` request whose heartbeat is older
+  than 15 minutes is requeued and resumed from `done` rather than restarted.
 - After a changed Athena artifact, `athena_vocabulary_sync` must progress from
   `queued` to `running` and then `applied` (or `current` when no table work is
   needed). A `failed` row can be retried with

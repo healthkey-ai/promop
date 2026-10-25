@@ -23998,6 +23998,70 @@ class FieldSynonymBatchTest(TestCase):
         self.assertEqual(len(resp.data['hemoglobin_g_dl']), 5)
 
 
+class TherapyHistoryCompletenessTest(TestCase):
+    """POST /api/v1/therapy-history/completeness/ under PROMOP's own policy (#1924).
+
+    The packaged endpoint is mounted here with the same gate as therapy-line
+    authoring, and who is speaking is read off the request, not the body.
+    """
+
+    def setUp(self):
+        self.person = Person.objects.create(person_id=77101, year_of_birth=1961)
+        self.other = Person.objects.create(person_id=77102, year_of_birth=1962)
+        PatientRecord.objects.get_or_create(person=self.person)
+        PatientRecord.objects.get_or_create(person=self.other)
+        self.staff = Identity.objects.create_user(
+            email='history_staff@test.com', password='pw', is_staff=True,
+        )
+        self.patient = Identity.objects.create_user(
+            email='history_patient@test.com', password='pw',
+        )
+        PatientUser.objects.create(identity=self.patient, person=self.person)
+        self.client = APIClient()
+
+    def _confirm(self, person, complete=True, **extra):
+        return self.client.post(
+            '/api/v1/therapy-history/completeness/',
+            {'person': person.person_id, 'complete': complete, **extra}, format='json',
+        )
+
+    def test_the_patient_confirms_their_own_history(self):
+        from omop_core.models import TherapyHistoryAttestation
+
+        self.client.force_authenticate(user=self.patient)
+        resp = self._confirm(self.person, source='clinician')
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertIs(resp.data['therapy_history_complete'], True)
+        self.assertIs(resp.data['patient_info']['therapy_history_complete'], True)
+        self.assertIs(PatientRecord.objects.get(person=self.person).therapy_history_complete, True)
+        # The body's claim to be a clinician is ignored.
+        self.assertEqual(TherapyHistoryAttestation.objects.get(person=self.person).source, 'patient')
+
+        resp = self._confirm(self.person, complete=False)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertIsNone(PatientRecord.objects.get(person=self.person).therapy_history_complete)
+
+    def test_a_patient_cannot_confirm_for_somebody_else(self):
+        from omop_core.models import TherapyHistoryAttestation
+
+        self.client.force_authenticate(user=self.patient)
+        resp = self._confirm(self.other)
+        self.assertEqual(resp.status_code, 403, resp.data)
+        self.assertFalse(TherapyHistoryAttestation.objects.filter(person=self.other).exists())
+
+    def test_staff_confirm_as_a_clinician(self):
+        from omop_core.models import TherapyHistoryAttestation
+
+        self.client.force_authenticate(user=self.staff)
+        resp = self._confirm(self.other)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(TherapyHistoryAttestation.objects.get(person=self.other).source, 'clinician')
+
+    def test_unauthenticated_callers_are_refused(self):
+        resp = self._confirm(self.person)
+        self.assertIn(resp.status_code, (401, 403))
+
+
 class TherapyLineAuthoringTest(TestCase):
     """POST /api/v1/therapy-lines/ — the write behind the read-only treatment tab.
 

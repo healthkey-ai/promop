@@ -20,9 +20,14 @@ def urlpatterns_for(therapy_line_viewset=None, completeness_viewset=None):
     A host mounts ``include(urlpatterns_for(MyViewSet))``. Without the override it
     gets the packaged viewset, whose only policy is "authenticated" -- suitable
     only when the host has already scoped the request to the caller's record.
+    ``completeness_viewset`` is only needed when the host's seams cannot be
+    copied off ``MyViewSet`` (see ``TherapyHistoryCompletenessViewSet.for_host``).
     """
     viewset = therapy_line_viewset or views.TherapyLineViewSet
-    completeness = completeness_viewset or views.TherapyHistoryCompletenessViewSet
+    # The completeness statement is gated like authoring: without an explicit
+    # override it inherits the host's therapy-line policy rather than the
+    # packaged "any authenticated caller" default.
+    completeness = completeness_viewset or views.TherapyHistoryCompletenessViewSet.for_host(viewset)
     router = SimpleRouter()
     router.register(r'v1/therapy-lines', viewset, basename='therapy-lines')
     router.register(r'v1/therapy-history/completeness', completeness,

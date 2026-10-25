@@ -350,7 +350,7 @@ export function ConceptAssignDialog({
                     onClick={() => onShowSourceCodes(selected.concept_id)}
                     className="ml-auto rounded border border-slate-300 bg-white px-1.5 py-0.5 font-mono text-xs text-slate-600 hover:bg-slate-100"
                     aria-label={`Source codes for ${selected.concept_name || selected.concept_code}`}
-                    title="Find source codes that map to this concept"
+                    title="Suggest source codes for this concept"
                   >
                     {"{codes}"}
                   </button>

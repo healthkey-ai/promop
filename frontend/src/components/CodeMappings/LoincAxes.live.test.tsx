@@ -44,7 +44,7 @@ describeLive("LOINC axes against a live backend", () => {
     return row;
   };
 
-  it("flags the code, infers its axes, saves an entry and approves a variant", async () => {
+  it("flags the code, infers its axes and approves a variant", async () => {
     const row = await openRow();
     // The flag the queue shows for a code whose units imply two LOINC tests.
     const flag = within(row).getByText("2 axis values");
@@ -54,21 +54,19 @@ describeLive("LOINC axes against a live backend", () => {
     const panel = await screen.findByRole("region", { name: "LOINC axes" }, { timeout: 20000 });
 
     // Inferred from the unit in the stored metadata, not typed by anyone.
-    await waitFor(() => expect(within(panel).getByTestId("axis-value-scale_type")).toHaveTextContent("Qn"));
-    const variants = within(panel).getByRole("table", { name: "Axis variants" });
+    const variants = await within(panel).findByRole("table", { name: "Axis variants" });
+    expect(variants).toHaveTextContent("Scale Qn");
     expect(variants).toHaveTextContent("mg/dL");
     expect(variants).toHaveTextContent("mmol/L");
 
-    // A curator settles the component; the server stores it and says so.
-    fireEvent.change(within(panel).getByLabelText("Component value"), { target: { value: "Glucose" } });
-    fireEvent.click(within(panel).getByRole("button", { name: "Save axes" }));
-    await waitFor(() => expect(within(panel).getByTestId("axis-why-component")).toHaveTextContent(/Set by curator$/));
+    // A flagged code shows its variants, not the shared six-axis table (#2037).
+    expect(within(panel).queryByText("Axes shared by every variant")).not.toBeInTheDocument();
 
     // Point the mmol/L variant at the substance-concentration LOINC and approve it.
     // The panel re-renders after each write, so the row is looked up afresh.
     const mmolRow = () => within(within(panel).getByRole("table", { name: "Axis variants" }))
       .getByText("mmol/L").closest("tr")!;
-    fireEvent.click(within(mmolRow()).getByRole("button", { name: /^Set destination/ }));
+    fireEvent.click(within(mmolRow()).getByRole("button", { name: /^Search destination/ }));
     const search = await within(panel).findByLabelText(/^Search destination/);
     fireEvent.change(search, { target: { value: "14749-6" } });
     const option = await within(panel).findByText(/14749-6/, {}, { timeout: 20000 });

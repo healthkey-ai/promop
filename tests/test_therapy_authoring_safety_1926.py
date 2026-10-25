@@ -311,6 +311,56 @@ def test_api_retract_error_does_not_echo_exception_text(setup, monkeypatch):
     assert 'internal retract detail' not in str(response.data)
 
 
+def test_api_validation_refusal_keeps_its_message_and_field(setup):
+    """A refusal written for the user reaches the user; the submitted value does not."""
+    from omop_core.services.therapy_errors import MESSAGES
+
+    person, a, _ = setup
+    response = patient_client(person).post('/api/v1/therapy-lines/', {
+        'person': person.pk, 'line_number': 1, 'start_date': START.isoformat(),
+        'drugs': [{'concept_id': a.pk}], 'disease': 'zzz-private-cancer',
+    }, format='json')
+    assert response.status_code == 400, response.data
+    assert response.data['detail'] == MESSAGES['unknown_disease']
+    assert response.data['code'] == 'unknown_disease'
+    assert response.data['field'] == 'disease'
+    assert 'zzz-private' not in str(response.data)
+
+
+def test_api_unknown_drug_names_the_field_and_echoes_the_submitted_ids(setup):
+    from omop_core.services.therapy_errors import MESSAGES
+
+    person, a, _ = setup
+    response = patient_client(person).post('/api/v1/therapy-lines/', {
+        'person': person.pk, 'line_number': 1, 'start_date': START.isoformat(),
+        'drugs': [{'concept_id': a.pk}, {'concept_id': 99999999}],
+    }, format='json')
+    assert response.status_code == 400, response.data
+    assert response.data['detail'] == MESSAGES['unknown_drug']
+    assert response.data['field'] == 'drugs'
+    assert response.data['concept_ids'] == [a.pk, 99999999]
+
+
+def test_api_write_conflict_returns_the_retry_message_not_the_exception(setup, monkeypatch):
+    from omop_core.services import episode_service
+    from omop_core.services.therapy_errors import CONFLICT_MESSAGE
+    from omop_core.services.therapy_transactions import TherapyLineWriteConflict
+
+    person, a, _ = setup
+
+    def fail(*args, **kwargs):
+        raise TherapyLineWriteConflict('internal conflict detail 77')
+
+    monkeypatch.setattr(episode_service, 'author_therapy_line', fail)
+    response = patient_client(person).post('/api/v1/therapy-lines/', {
+        'person': person.pk, 'line_number': 1, 'start_date': START.isoformat(),
+        'drugs': [{'concept_id': a.pk}],
+    }, format='json')
+    assert response.status_code == 409, response.data
+    assert response.data['detail'] == CONFLICT_MESSAGE
+    assert 'internal conflict detail' not in str(response.data)
+
+
 def test_api_end_date_only_clear_updates_line_not_individual_administration(setup):
     original = write(setup)
     response = patient_client(setup[0]).patch(f'/api/v1/therapy-lines/{original.episode.pk}/',

@@ -20,28 +20,36 @@ from omop_oncology.models import Episode
 logger = logging.getLogger(__name__)
 
 
-def _therapy_line_error_field(exc):
-    """A static field hint for a known authoring validation failure.
+GENERIC_WRITE_REFUSAL = 'The therapy line could not be saved as submitted.'
+GENERIC_RETRACT_REFUSAL = 'The therapy line could not be retracted.'
 
-    The exception text is used only for classification; it never reaches the
-    response. Clients get the field name to highlight, not internal detail.
+
+def _refusal(exc, data, generic):
+    """The 400 body for a refused write or retract.
+
+    A :class:`TherapyLineValidationError` carries a catalog code, and the client
+    gets the catalog's message and field for it: the refusals are written for the
+    person editing the line, and "save failed" would throw that away. Any other
+    ``ValueError`` is internal, so its text is withheld (CodeQL
+    ``py/stack-trace-exposure``) and only its type is logged. Nothing taken from
+    the exception is serialized either way; see ``refusal_payload``.
     """
-    message = str(exc)
-    if 'end_date' in message:
-        return 'end_date'
-    if 'line_number' in message:
-        return 'line_number'
-    if 'start_date' in message or 'future therapy line' in message:
-        return 'start_date'
-    if ('Unknown drug concept_id' in message
-            or 'Duplicate drug source_value' in message
-            or 'drug_exposure_id' in message):
-        return 'drugs'
-    if 'regimen' in message:
-        return 'regimen_concept_id'
-    if 'diagnosis' in message or 'disease' in message:
-        return 'disease'
-    return None
+    from omop_core.services.therapy_errors import TherapyLineValidationError, refusal_payload
+
+    payload = refusal_payload(exc) if isinstance(exc, TherapyLineValidationError) else None
+    if payload is None:
+        logger.warning(
+            'Therapy line request rejected (%s); details withheld from the client',
+            type(exc).__name__,
+        )
+        return {'detail': generic}
+    if payload.get('field') == 'drugs':
+        # The client's own submission, echoed so it can point at the drug.
+        payload['concept_ids'] = [
+            drug.get('concept_id') for drug in (data or {}).get('drugs') or []
+            if isinstance(drug, dict)
+        ]
+    return payload
 
 
 class TherapyLineViewSet(viewsets.ViewSet):
@@ -76,6 +84,7 @@ class TherapyLineViewSet(viewsets.ViewSet):
 
     def _write(self, request, *, person, line_number, data, episode=None):
         from omop_core.services.episode_service import author_therapy_line
+        from omop_core.services.therapy_errors import CONFLICT_MESSAGE
         from omop_core.services.therapy_transactions import TherapyLineWriteConflict
 
         denied = self.patient_write_denied(request, person)
@@ -100,30 +109,13 @@ class TherapyLineViewSet(viewsets.ViewSet):
                         replace=episode is not None,
                         **submitted,
                     )
-        except TherapyLineWriteConflict as exc:
-            logger.warning(
-                'Therapy line write conflicted (%s); details withheld from the client',
-                type(exc).__name__,
-            )
-            return Response(
-                {'detail': 'This therapy line conflicts with an existing therapy line.'},
-                status=status.HTTP_409_CONFLICT,
-            )
+        except TherapyLineWriteConflict:
+            # The message is a constant; the exception is never serialized.
+            logger.warning('Therapy line write lost the retry race; the client was told to retry')
+            return Response({'detail': CONFLICT_MESSAGE}, status=status.HTTP_409_CONFLICT)
         except ValueError as exc:
-            logger.warning(
-                'Therapy line write rejected (%s); details withheld from the client',
-                type(exc).__name__,
-            )
-            detail = {'detail': 'The therapy line could not be saved as submitted.'}
-            field = _therapy_line_error_field(exc)
-            if field is not None:
-                detail['field'] = field
-            if field == 'drugs':
-                detail['concept_ids'] = [
-                    drug.get('concept_id') for drug in data.get('drugs') or []
-                    if isinstance(drug, dict)
-                ]
-            return Response(detail, status=status.HTTP_400_BAD_REQUEST)
+            return Response(_refusal(exc, data, GENERIC_WRITE_REFUSAL),
+                            status=status.HTTP_400_BAD_REQUEST)
 
         if result.episode is None:
             return Response(
@@ -185,14 +177,8 @@ class TherapyLineViewSet(viewsets.ViewSet):
         try:
             retract_therapy_line(episode.person, episode)
         except ValueError as exc:
-            logger.warning(
-                'Therapy line retract rejected (%s); details withheld from the client',
-                type(exc).__name__,
-            )
-            return Response(
-                {'detail': 'The therapy line could not be retracted.'},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            return Response(_refusal(exc, None, GENERIC_RETRACT_REFUSAL),
+                            status=status.HTTP_400_BAD_REQUEST)
 
         record = refresh_patient_record(episode.person)
         return Response({
@@ -248,24 +234,65 @@ class TherapyHistoryCompletenessViewSet(viewsets.ViewSet):
 
     A confirmation is what turns ``therapy_lines_count`` from a lower bound into an
     exact count, so it is a deliberate statement rather than a side effect of
-    saving a line (#1924). Hosts apply the same write gate and per-person
-    authorization as authoring through ``patient_write_denied``.
+    saving a line (#1924). It is a write about one patient, so it is gated exactly
+    like authoring: the same permission classes and the same per-person check.
+    ``urlpatterns_for`` builds this class from the host's therapy-line viewset
+    (:meth:`for_host`), so a host that overrides authoring is covered here too.
     """
 
     permission_classes = [IsAuthenticated]
 
+    #: The seams a host's therapy-line viewset may carry; copied by for_host.
+    HOST_SEAMS = ('permission_classes', 'patient_write_denied', 'patient_info_payload',
+                  'attestation_source')
+
+    @classmethod
+    def for_host(cls, therapy_line_viewset):
+        """This endpoint under the host's therapy-line policy.
+
+        Copies the authorization seams off the host's viewset, so the default
+        is never more permissive than authoring. A host whose seams depend on
+        other attributes of its own class passes its own ``completeness_viewset``
+        to ``urlpatterns_for`` instead.
+        """
+        if therapy_line_viewset is None or therapy_line_viewset is TherapyLineViewSet:
+            return cls
+        seams = {}
+        for name in cls.HOST_SEAMS:
+            value = therapy_line_viewset.__dict__.get(name)
+            if value is None:
+                for base in therapy_line_viewset.__mro__[1:]:
+                    if base is TherapyLineViewSet or base is viewsets.ViewSet:
+                        break
+                    if name in base.__dict__:
+                        value = base.__dict__[name]
+                        break
+            if value is not None:
+                seams[name] = value
+        return type(f'{therapy_line_viewset.__name__}HistoryCompleteness', (cls,), seams)
+
+    # --- host seams -------------------------------------------------------
+
     def patient_write_denied(self, request, person):
-        # A host's therapy-line override does not secure this separate viewset.
-        # Require its explicit authorization implementation before any mutation.
-        return Response({'detail': 'The host must authorize therapy-history confirmation.'},
-                        status=status.HTTP_403_FORBIDDEN)
+        """Return a Response to refuse this write, or None to allow it."""
+        return None
 
     def patient_info_payload(self, record):
+        """The re-derived record in the shape this host's client expects."""
         return None
+
+    def attestation_source(self, request):
+        """Who is making the statement: ``patient``, ``clinician`` or ``host``.
+
+        Decided here, never taken from the body: a caller must not be able to
+        label their own confirmation as somebody else's. Provenance only.
+        """
+        return 'patient'
+
+    # --- shared implementation -------------------------------------------
 
     def create(self, request):
         from omop_core.models import Person
-        from omop_core.services.patient_record_service import refresh_patient_record
         from omop_core.services.therapy_history import (
             confirm_therapy_history, withdraw_therapy_history,
         )
@@ -281,19 +308,33 @@ class TherapyHistoryCompletenessViewSet(viewsets.ViewSet):
         if denied is not None:
             return denied
 
-        complete = request.data.get('complete', True)
-        if isinstance(complete, str):
-            complete = complete.strip().lower() not in {'0', 'false', 'no', ''}
-        if complete:
-            confirm_therapy_history(person, source=request.data.get('source') or 'patient')
-        else:
-            withdraw_therapy_history(person)
+        complete = _as_bool(request.data.get('complete'))
+        if complete is None:
+            return Response({'detail': 'complete must be true or false.'},
+                            status=status.HTTP_400_BAD_REQUEST)
 
-        record = refresh_patient_record(person)
+        # The services derive the record once; nothing derives it again here.
+        if complete:
+            record = confirm_therapy_history(person, source=self.attestation_source(request))
+        else:
+            record = withdraw_therapy_history(person)
         return Response({
             'therapy_history_complete': record.therapy_history_complete,
             'patient_info': self.patient_info_payload(record),
         })
+
+
+def _as_bool(value):
+    """A JSON boolean, or its form-encoded spellings; None when it is neither."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {'true', '1', 'yes'}:
+            return True
+        if lowered in {'false', '0', 'no'}:
+            return False
+    return None
 
 
 def therapy_outcomes(request):

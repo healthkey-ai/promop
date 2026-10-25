@@ -20,8 +20,8 @@
 
 import CanonicalUnitEditor from "./CanonicalUnitEditor";
 import IndividualSuggestCandidates from "./IndividualSuggestCandidates";
-import LoincAxesPanel from "./LoincAxesPanel";
-import type { LoincAxisOverrides } from "./loincAxes";
+import LoincAxesPanel, { type LoincAxesPanelHandle } from "./LoincAxesPanel";
+import { describeAxisValues, type AxisVariant, type LoincAxisOverrides } from "./loincAxes";
 import SnomedEvidencePanel from "./SnomedEvidencePanel";
 import type { SnomedSettings } from "./snomed";
 import SourceVocabularyLookup from "./SourceVocabularyLookup";
@@ -133,6 +133,7 @@ export default function EditMappingDialog({
 }: EditMappingDialogProps) {
   // ── refs ────────────────────────────────────────────────────────
   const dialogRequest = useRef(0);
+  const axesPanel = useRef<LoincAxesPanelHandle>(null);
   const dialogChoice = useRef<number | null>(null);
   const conceptSearchTimer = useRef<number | null>(null);
   const conceptSearchAbort = useRef<AbortController | null>(null);
@@ -156,6 +157,10 @@ export default function EditMappingDialog({
   // must never ride along with a Suggest for another row or an edited code.
   const [loincAxes, setLoincAxes] = useState<{ mappingId: number; overrides: LoincAxisOverrides } | null>(null);
   const [loincAxesReload, setLoincAxesReload] = useState(0);
+  // How many axis variants the panel shows for this row: two or more and the
+  // dialog's Suggest fills each in with a proposed LOINC (#2012).
+  const [variantCount, setVariantCount] = useState<{ mappingId: number; count: number; variants: AxisVariant[] } | null>(null);
+  const [variantMessage, setVariantMessage] = useState("");
   // SNOMED evidence: the panel's current settings, under the same guard.
   const [snomedSettings, setSnomedSettings] = useState<{ mappingId: number; settings: SnomedSettings } | null>(null);
   const [error, setError] = useState("");
@@ -238,6 +243,8 @@ export default function EditMappingDialog({
       setError("");
       setSearchingConcepts(false);
       setSuggestionMessage("");
+      setVariantMessage("");
+      setVariantCount(null);
       setSaving(false);
       setMintOpen(false);
       setIndividualSuggestion(null);
@@ -508,9 +515,75 @@ export default function EditMappingDialog({
     }, CONCEPT_SEARCH_DEBOUNCE_MS);
   }, [searchVocabulary, searchScope]);
 
+  // Whether the row can have LOINC axes at all: the server decides by domain
+  // (Measurement, Observation) or a LOINC source. A row that cannot gets no
+  // section while the axes request is in flight (#2030).
+  const axesMayApply = Boolean(selectedRow && (
+    ["Measurement", "Observation"].includes(selectedRow.domain_id
+      || { measurement: "Measurement", observation: "Observation" }[form.omop_table] || "")
+    || /loinc/i.test(form.source_vocabulary_id)));
+
+  /** The panel's variant for an axis key, when the panel has reported this row's variants. */
+  const currentVariant = useCallback((axisKey: string): AxisVariant | undefined =>
+    variantCount?.mappingId === selectedRow?.mapping_id ? variantCount?.variants.find(v => v.axis_key === axisKey) : undefined,
+  [variantCount, selectedRow?.mapping_id]);
+  /** The units of one variant ("%", "mg/dL, mg/dl"), else its axis values; never the raw key. */
+  const variantLabel = useCallback((axisKey: string): string => {
+    const variant = currentVariant(axisKey);
+    return variant?.units?.join(", ") || (variant ? describeAxisValues(variant.axis_values) : "this");
+  }, [currentVariant]);
+
+  /** One Suggest for the variants: a queued run gives each a proposed LOINC, left for approval. */
+  const suggestVariants = useCallback(async (request: number) => {
+    const mappingId = selectedRow?.mapping_id;
+    if (!mappingId) return;
+    setVariantMessage("Suggesting a LOINC for each axis variant…");
+    try {
+      const enabled = Object.entries(strategies).filter(([, on]) => on).map(([name]) => name);
+      const { data: started } = await api.post<SuggestRunProgress>(`/v1/code-mappings/${mappingId}/axis-variants/suggest/`, {
+        strategies: enabled, ranking_model: rankingModel,
+        ...(loincAxes && loincAxes.mappingId === mappingId ? { loinc_axes: loincAxes.overrides } : {}),
+      });
+      let current = started;
+      const deadline = Date.now() + SUGGEST_POLL_TIMEOUT_MS;
+      let failures = 0;
+      while ((current.state === "queued" || current.state === "running") && request === dialogRequest.current) {
+        if (Date.now() > deadline) throw new Error("Suggestion timed out");
+        await new Promise(resolve => setTimeout(resolve, SUGGEST_POLL_INTERVAL_MS));
+        if (request !== dialogRequest.current) return;
+        try {
+          ({ data: current } = await api.get<SuggestRunProgress>(`/v1/code-mappings/suggest-runs/${started.run_id}/`, {
+            params: { include_activity: "1" },
+          }));
+          failures = 0;
+        } catch (fetchError) {
+          if (++failures > SUGGEST_POLL_MAX_FAILURES) throw fetchError;
+        }
+      }
+      if (request !== dialogRequest.current) return;
+      if (current.state === "failure") throw new Error(current.error || "The run failed.");
+      type VariantResult = { stage: string; suggestions?: { axis_key: string; suggested: unknown | null }[]; variants?: unknown[] };
+      const result = (current.activity as VariantResult[] | undefined)?.find(event => event.stage === "result");
+      const suggestions = result?.suggestions ?? [];
+      const filled = suggestions.filter(s => s.suggested).length;
+      const total = result?.variants?.length ?? 0;
+      setLoincAxesReload(n => n + 1);
+      setVariantMessage(suggestions.length === 0
+        ? "Every axis variant already has a destination."
+        : `Suggested a LOINC for ${filled} of ${suggestions.length} axis variant${suggestions.length === 1 ? "" : "s"}${total ? ` (${total} in all)` : ""}; approve each under LOINC axes.`);
+    } catch (failure) {
+      if (request === dialogRequest.current) setVariantMessage(`Could not suggest the variants' destinations. ${describeDestinationError(failure)}`);
+    }
+  }, [selectedRow?.mapping_id, strategies, rankingModel, loincAxes]);
+
   const suggestCurrentCode = useCallback(async (axisKey?: string) => {
     setSuggestionMessage("");
+    setVariantMessage("");
     const request = ++dialogRequest.current;
+    // The code's own destination and its variants are suggested together.
+    if (!axisKey && sourceIdentityUnchanged && variantCount && variantCount.mappingId === selectedRow?.mapping_id && variantCount.count >= 2) {
+      void suggestVariants(request);
+    }
     dialogChoice.current = null;
     setIndividualSuggestion({ request, activity: [], running: true, axisKey });
     setError("");
@@ -560,7 +633,7 @@ export default function EditMappingDialog({
       const result = current.activity?.filter(event => event.stage === "result").at(-1);
       if (axisKey) {
         // A variant's winner belongs to the variant, not the mapping's destination.
-        setSuggestionMessage("Variant candidates shown. Choose one to set that variant's destination.");
+        setVariantMessage(`Candidates for the ${variantLabel(axisKey)} variant are shown below. Use one to make it that variant's destination.`);
       } else if (result?.suggested && dialogChoice.current !== request) {
         applyConcept(result.suggested as ConceptResult);
         setSuggestionMessage("Winner filled in. You can choose another candidate before saving.");
@@ -575,7 +648,9 @@ export default function EditMappingDialog({
         setIndividualSuggestion(cur => cur?.request === request ? { ...cur, running: false } : cur);
       }
     }
-  }, [strategies, rankingModel, form.source_code, form.source_vocabulary_id, form.source_code_description, form.omop_table, selectedRow?.source_metadata, selectedRow?.mapping_id, sourceIdentityUnchanged, applyConcept, loincAxes, snomedSettings]);
+  }, [strategies, rankingModel, form.source_code, form.source_vocabulary_id, form.source_code_description, form.omop_table, selectedRow?.source_metadata, selectedRow?.mapping_id, sourceIdentityUnchanged, applyConcept, loincAxes, snomedSettings, variantCount, suggestVariants, variantLabel]);
+
+  const suggestedVariant = individualSuggestion?.axisKey ? currentVariant(individualSuggestion.axisKey) : undefined;
 
   const sourceContextDirty = Boolean(patientId && selectedRow?.source_code_id && (
     sourceUnit.trim() !== savedSourceUnit
@@ -986,26 +1061,29 @@ export default function EditMappingDialog({
                     </button>
                   </div>
                 </div>
+                {variantMessage && <p role="status" data-testid="variant-suggestion" className="text-xs text-slate-700">{variantMessage}</p>}
                 {mode === "edit" && selectedRow?.mapping_id && <LoincAxesPanel
-                  key={selectedRow.mapping_id} mappingId={selectedRow.mapping_id} canEdit canApprove={canApprove}
+                  key={selectedRow.mapping_id} ref={axesPanel} mappingId={selectedRow.mapping_id} canEdit canApprove={canApprove}
                   reloadToken={loincAxesReload}
+                  expectedVariants={selectedRow.axis_variant_count}
+                  mayApply={axesMayApply}
                   onAxesChange={overrides => setLoincAxes({ mappingId: selectedRow.mapping_id!, overrides })}
+                  onVariantsChange={(count, variants) => setVariantCount({ mappingId: selectedRow.mapping_id!, count, variants })}
                   onSuggestVariant={axisKey => void suggestCurrentCode(axisKey)} />}
                 {mode === "edit" && selectedRow?.mapping_id && <SnomedEvidencePanel
                   key={`snomed-${selectedRow.mapping_id}`} mappingId={selectedRow.mapping_id} canEdit
                   onSettingsChange={settings => setSnomedSettings({ mappingId: selectedRow.mapping_id!, settings })} />}
                 {individualSuggestion?.request === dialogRequest.current && <IndividualSuggestCandidates
                   activity={individualSuggestion.activity} running={individualSuggestion.running}
-                  selectedId={individualSuggestion.axisKey ? "" : form.destination_concept_id}
+                  variant={individualSuggestion.axisKey ? variantLabel(individualSuggestion.axisKey) : undefined}
+                  selectedId={individualSuggestion.axisKey
+                    ? String(suggestedVariant?.target_concept?.concept_id ?? "") : form.destination_concept_id}
                   onSelect={candidate => {
                     const axisKey = individualSuggestion.axisKey;
                     if (axisKey && selectedRow?.mapping_id) {
-                      api.post(`/v1/code-mappings/${selectedRow.mapping_id}/axis-variants/`, {
-                        axis_key: axisKey, target_concept_id: candidate.concept_id, approve: false,
-                      }).then(() => {
-                        setLoincAxesReload(n => n + 1);
-                        setSuggestionMessage(`Variant destination set to ${candidate.concept_name}.`);
-                      }).catch(failure => setError(`Could not set the variant's destination. ${describeDestinationError(failure)}`));
+                      // The panel writes it, keeps an approved variant approved, and
+                      // shows the outcome beside the variants (#2036).
+                      void axesPanel.current?.setVariantDestination(axisKey, candidate.concept_id);
                       return;
                     }
                     applyConcept(candidate as ConceptResult);

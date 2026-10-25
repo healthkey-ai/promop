@@ -51,7 +51,10 @@ def unit_counts(mapping):
 
 
 def axis_key(values):
-    return '|'.join(f'{axis}={values[axis]}' for axis in loinc_axes.AXES if axis in values)
+    """The canonical form of axis values; a set reads ``property=ACnc,CCnc``."""
+    def text(value):
+        return ','.join(str(v) for v in value) if isinstance(value, (list, tuple)) else value
+    return '|'.join(f'{axis}={text(values[axis])}' for axis in loinc_axes.AXES if axis in values)
 
 
 def _unit_counts(mapping):
@@ -59,12 +62,19 @@ def _unit_counts(mapping):
     return unit_counts_for([mapping]).get(mapping.pk, Counter())
 
 
-def unit_counts_for(mappings):
+#: ``source`` of an evidence entry this instance derived from its own patient
+#: data (#2043). A seed load leaves such evidence alone.
+PATIENT_DATA_SOURCE = 'patient-data'
+
+
+def unit_counts_for(mappings, include_imported=True):
     """``{mapping_id: Counter}`` of normalized units, in a fixed number of queries.
 
     The Measurement read is the approval unit check's own batched aggregate
     (one query, plus one per hospital), so a 50-code Suggest run pays for one
     scan, not fifty. Per-patient source codes are one query for the batch.
+    ``include_imported=False`` reads only what this instance's patients say,
+    which is what a rebuild of the stored evidence writes.
     """
     from django.db.models import Q
 
@@ -80,7 +90,7 @@ def unit_counts_for(mappings):
     # Union, not sum: the inventory and the stored rows can describe the same
     # records, as the approval unit check documents.
     live = live_unit_counts(measured) if measured else {}
-    imported = _imported_unit_counts(measured) if measured else {}
+    imported = _imported_unit_counts(measured) if measured and include_imported else {}
     result = {m.pk: live.get(m.pk, Counter()) | imported.get(m.pk, Counter()) for m in mappings}
 
     match = Q()
@@ -101,6 +111,128 @@ def unit_counts_for(mappings):
             if not m.omop_table or m.omop_table == table:
                 patient[m.pk][normalized] += max(1, count or 0)
     return {pk: counts | patient.get(pk, Counter()) for pk, counts in result.items()}
+
+
+def _is_imported(entry):
+    """An evidence entry a seed or inventory wrote: it names its ``source``. A
+    text term's unit (``text_terms.record``) names none and is this instance's own."""
+    return bool(entry.get('source')) and entry.get('source') != PATIENT_DATA_SOURCE
+
+
+def patient_unit_evidence(mappings):
+    """``({mapping_id: entries}, {mapping_id: Counter})`` from this instance's
+    own patient data (#2043).
+
+    The units come from the source codes recorded on each loaded patient and
+    the stored Measurement rows; seeded evidence is not read. One entry per
+    normalized unit, largest first: ``count`` records, ``patients`` distinct
+    people where the per-patient source codes say, ``source`` = ``patient-data``.
+    One Measurement aggregate and one per-patient query for the batch; the
+    Counter is what the entries say, for the caller to refresh variants with.
+    """
+    from django.db.models import Q, Sum
+
+    from omop_core.models import PatientSourceCode
+    from omop_core.services.mapping_unit_consistency import _unit_counts as live_unit_counts
+
+    mappings = [m for m in mappings if m is not None]
+    if not mappings:
+        return {}, {}
+    measured = [m for m in mappings if m.omop_table == 'measurement']
+    live = live_unit_counts(measured) if measured else {}
+    match = Q()
+    for m in mappings:
+        match |= Q(source_value=m.source_code, source_vocabulary_id=m.source_vocabulary_id,
+                   **({'omop_table': m.omop_table} if m.omop_table else {}))
+    by_key = defaultdict(list)
+    for m in mappings:
+        by_key[(m.source_vocabulary_id, m.source_code)].append(m)
+    recorded = defaultdict(Counter)
+    people = defaultdict(lambda: defaultdict(set))
+    rows = (PatientSourceCode.objects.filter(match)
+            .values_list('source_vocabulary_id', 'source_value', 'omop_table', 'source_unit',
+                         'source_unit_override', 'person_id')
+            .annotate(records=Sum('occurrence_count')))
+    for vocab, code, table, unit, override, person_id, records in rows:
+        # Spellings that normalize to one unit are one unit, and a person seen
+        # in two spellings is one person.
+        normalized = unit_code(override if override is not None else unit)
+        if not normalized:
+            continue
+        for m in by_key.get((vocab, code), ()):
+            if not m.omop_table or m.omop_table == table:
+                recorded[m.pk][normalized] += max(1, records or 0)
+                people[m.pk][normalized].add(person_id)
+    entries, counts = {}, {}
+    for m in mappings:
+        # Union, not sum, as unit_counts_for: the two sources can describe the same records.
+        counts[m.pk] = live.get(m.pk, Counter()) | recorded.get(m.pk, Counter())
+        entries[m.pk] = []
+        for unit, count in sorted(counts[m.pk].items(), key=lambda item: (-item[1], item[0])):
+            entry = {'display': unit, 'code': unit, 'normalized': unit, 'count': count,
+                     'source': PATIENT_DATA_SOURCE}
+            if people[m.pk].get(unit):
+                entry['patients'] = len(people[m.pk][unit])
+            entries[m.pk].append(entry)
+    return entries, counts
+
+
+def rebuild_unit_evidence(mappings):
+    """Store each mapping's unit evidence as its own patient data says (#2043).
+
+    Replaces whatever a seed or inventory wrote, which on the seeded instances
+    was the inventory's label-level counts repeated on every code with the
+    label (#2041). Units this instance recorded itself with no ``source`` (a
+    text term's lookups) are kept. A code with no patient data here gets no
+    units. Returns ``(changed, counts)``: how many mappings changed, and each
+    mapping's unit Counter as the stored evidence now reads, for the variant
+    refresh that follows.
+    """
+    from omop_core.models import SourceCodeConceptMapping
+    from omop_core.services.mapping_unit_consistency import _imported_unit_counts
+
+    mappings = [m for m in mappings if m is not None]
+    patient, counts = patient_unit_evidence(mappings)
+    changed = []
+    for m in mappings:
+        kept = [e for e in (m.source_unit_evidence or []) if isinstance(e, dict) and not _is_imported(e)]
+        rebuilt = patient.get(m.pk, []) + kept
+        if (m.source_unit_evidence or []) != rebuilt:
+            m.source_unit_evidence = rebuilt
+            changed.append(m)
+        if kept:
+            counts[m.pk] = counts.get(m.pk, Counter()) | _imported_unit_counts([m]).get(m.pk, Counter())
+    if changed:
+        SourceCodeConceptMapping.objects.bulk_update(changed, ['source_unit_evidence'], batch_size=500)
+    return len(changed), counts
+
+
+def is_patient_evidence(evidence):
+    """Whether stored evidence is this instance's own (:func:`rebuild_unit_evidence`),
+    which a seed or inventory load must not overwrite."""
+    return any(isinstance(entry, dict) and entry.get('source') == PATIENT_DATA_SOURCE
+               for entry in evidence or [])
+
+
+def evidence_keys():
+    """Every ``(source_vocabulary_id, source_code)`` a rebuild rewrites: mapped
+    codes with stored evidence, mapped codes on loaded patients' records with
+    a unit, and codes already flagged. A patient code with no mapping has
+    nothing to rewrite."""
+    from django.db.models import Exists, OuterRef, Q
+
+    from omop_core.models import PatientSourceCode, SourceCodeConceptMapping
+
+    keys = set(SourceCodeConceptMapping.objects.exclude(source_unit_evidence=[])
+               .values_list('source_vocabulary_id', 'source_code'))
+    keys |= set(SourceCodeConceptMapping.objects.filter(axis_variant_count__gt=0)
+                .values_list('source_vocabulary_id', 'source_code'))
+    with_units = PatientSourceCode.objects.filter(
+        Q(source_unit__gt='') | Q(source_unit_override__gt=''),
+        source_vocabulary_id=OuterRef('source_vocabulary_id'), source_value=OuterRef('source_code'))
+    keys |= set(SourceCodeConceptMapping.objects.filter(Exists(with_units))
+                .values_list('source_vocabulary_id', 'source_code'))
+    return keys
 
 
 def _specimen_systems(mapping):
@@ -138,11 +270,17 @@ def detect(mapping, unit_counts=None, notes=True):
             # variant of its own would flag one test as two.
             unrecognised[unit] += count
             continue
-        prop = unit_property(unit)
-        # A unit with no single property is still a quantity, but nothing says
-        # which group it joins, so it is a variant of its own, keyed by unit.
-        values = {'property': prop, 'scale_type': 'Qn'} if prop else {'scale_type': 'Qn'}
-        key = axis_key(values) if prop else f'unit={unit}'
+        options = loinc_axes.unit_property_options(unit)
+        if options:
+            # One property, or the set a unit such as % or U/L fits (#2029):
+            # U/L and IU/L fit the same set and are one variant.
+            values = {'property': loinc_axes._property_value(options), 'scale_type': 'Qn'}
+            key = axis_key(values)
+        else:
+            # A unit that fits no property is still a quantity, and nothing
+            # more, so it is a variant of its own, keyed by unit.
+            values = {'scale_type': 'Qn'}
+            key = f'unit={unit}'
         groups[key]['units'][unit] += count
         groups[key]['axis_values'] = values
     variants = [
@@ -172,14 +310,35 @@ def detect(mapping, unit_counts=None, notes=True):
     return variants, notes
 
 
+def _legacy_row(existing, variant):
+    """A row stored under the per-unit key an ambiguous unit had before its
+    property set was derived (``unit=%``, #2029), re-keyed to ``variant``'s key
+    so its destination is kept. Of several, the one with a decision wins; the
+    rest, undecided, are deleted rather than kept as unseen duplicates."""
+    legacy = [existing[key] for key in list(existing)
+              if key.startswith('unit=') and key != variant['axis_key']
+              and key[len('unit='):] in variant['units']]
+    if not legacy:
+        return None
+    legacy.sort(key=lambda row: (row.status == 'approved', row.target_concept_id is not None), reverse=True)
+    for row in legacy[1:]:
+        if row.status != 'approved' and row.target_concept_id is None:
+            existing.pop(row.axis_key)
+            row.delete()
+    row = existing.pop(legacy[0].axis_key)
+    row.axis_key = variant['axis_key']
+    return row
+
+
 @transaction.atomic
 def refresh(mapping, unit_counts=None):
     """Store the detected variants and the count the queue flags.
 
     Existing variants keep their destination and status: a re-detection must
-    not undo a curator's choice. Variants no longer seen are kept too, because
-    their units may simply not have arrived in the latest load. Returns the
-    variants as stored.
+    not undo a curator's choice. A variant no longer seen is kept when it
+    carries a destination or an approval, because its units may simply not
+    have arrived in the latest load; one with nothing decided is deleted.
+    Returns the variants as stored.
     """
     from omop_core.models import SourceCodeAxisVariant
 
@@ -189,12 +348,22 @@ def refresh(mapping, unit_counts=None):
         for variant in variants:
             row = existing.get(variant['axis_key'])
             if row is None:
+                row = _legacy_row(existing, variant)
+            if row is None:
                 row = SourceCodeAxisVariant(mapping=mapping, axis_key=variant['axis_key'])
             row.axis_values = variant['axis_values']
             row.units = variant['units']
             row.occurrence_count = variant['occurrence_count']
             row.save()
             existing[variant['axis_key']] = row
+    # A variant the evidence no longer shows keeps a destination or an
+    # approval, which is a curator's work; one with nothing decided was only
+    # ever evidence, and evidence that has gone is deleted (#2043).
+    seen = {variant['axis_key'] for variant in variants}
+    for key, row in list(existing.items()):
+        if key not in seen and row.pk and row.status != 'approved' and row.target_concept_id is None:
+            existing.pop(key)
+            row.delete()
     # An approved variant routes ingest, so its count must not drop to 0 just
     # because the latest evidence lost its units -- routing is gated on it,
     # and the rows its approval re-pointed would disagree with new records.
@@ -207,11 +376,13 @@ def refresh(mapping, unit_counts=None):
     return list(mapping.axis_variants.select_related('target_concept').order_by('-occurrence_count', 'axis_key'))
 
 
-def refresh_codes(keys):
+def refresh_codes(keys, rebuild_evidence=False):
     """Refresh every mapping for ``(source_vocabulary_id, source_code)`` keys.
 
     Failures are logged, not raised: this runs after ingest writes, and a
-    variant count is curation evidence, not a reason to fail an upload.
+    variant count is curation evidence, not a reason to fail an upload. With
+    ``rebuild_evidence`` the batch's stored unit evidence is first rewritten
+    from the instance's patient data (#2043).
     """
     import logging
 
@@ -227,7 +398,11 @@ def refresh_codes(keys):
         match |= Q(source_vocabulary_id=vocab, source_code=code)
     refreshed = 0
     mappings = list(SourceCodeConceptMapping.objects.filter(match))
-    counts = unit_counts_for(mappings)
+    if rebuild_evidence:
+        # The rebuild has already read the evidence the refresh needs.
+        _changed, counts = rebuild_unit_evidence(mappings)
+    else:
+        counts = unit_counts_for(mappings)
     for mapping in mappings:
         try:
             # A savepoint each, so one failed row cannot abort the rest.
@@ -291,19 +466,32 @@ def multi_unit_keys():
     return keys
 
 
-def refresh_all(keys=None, batch_size=REFRESH_BATCH):
-    """Refresh ``keys`` (default :func:`multi_unit_keys`) a batch at a time.
+def refresh_all(keys=None, batch_size=REFRESH_BATCH, on_batch=None, rebuild_evidence=False):
+    """Refresh ``keys`` (default :func:`multi_unit_keys`, or :func:`evidence_keys`
+    with ``rebuild_evidence``) a batch at a time.
 
     One transaction per batch: the whole backlog in one would hold its locks
     for minutes, and one OR over every key makes a statement the planner
-    chokes on. Returns the number of mappings refreshed.
+    chokes on. ``on_batch(done, refreshed, last_key)`` is called after each
+    batch, which is how the worker job records its progress and where to
+    resume. Returns the number of mappings refreshed.
     """
-    keys = sorted(multi_unit_keys() if keys is None else keys, key=lambda k: (k[0] or '', k[1] or ''))
+    if keys is None:
+        keys = evidence_keys() if rebuild_evidence else multi_unit_keys()
+    keys = sorted(keys, key=key_text)
     refreshed = 0
     for start in range(0, len(keys), batch_size):
+        batch = keys[start:start + batch_size]
         with transaction.atomic():
-            refreshed += refresh_codes(keys[start:start + batch_size])
+            refreshed += refresh_codes(batch, rebuild_evidence=rebuild_evidence)
+        if on_batch is not None:
+            on_batch(start + len(batch), refreshed, batch[-1])
     return refreshed
+
+
+def key_text(key):
+    """The sort key of a ``(vocabulary, code)``, also stored as a walk's cursor."""
+    return f"{key[0] or ''}\x1f{key[1] or ''}"
 
 
 def usable_destination(concept, mapping=None):
@@ -328,14 +516,19 @@ def variant_for(mapping, source_unit):
     prop = unit_property(unit)
     approved = [v for v in mapping.axis_variants.filter(status='approved', target_concept__isnull=False)
                                                   .select_related('target_concept')
+                                                  .order_by('-occurrence_count', 'axis_key')
                 if usable_destination(v.target_concept, mapping)]
     for variant in approved:
         if unit in (variant.units or []):
             return variant
     if prop:
-        for variant in approved:
-            if (variant.axis_values or {}).get('property') == prop:
-                return variant
+        # The variant for exactly this property first; then one whose set
+        # (U/L: catalytic or arbitrary) includes it.
+        for exact in (True, False):
+            for variant in approved:
+                options = loinc_axes.options_of((variant.axis_values or {}).get('property'))
+                if prop in options and (len(options) == 1) == exact:
+                    return variant
     return None
 
 
@@ -405,6 +598,93 @@ def set_destination(variant, concept, *, approve, user, reopen=False):
         mapping.axis_variant_count = max(FLAG_THRESHOLD, mapping.axis_variants.count())
         mapping.save(update_fields=['axis_variant_count'])
     return result
+
+
+#: Variants one Suggest click fills in; a code with more has a curator's work.
+SUGGEST_MAX = 5
+
+
+def _locked(mapping):
+    """The mapping's row, locked for the rest of the transaction."""
+    from omop_core.models import SourceCodeConceptMapping
+    return SourceCodeConceptMapping.objects.select_for_update(of=('self',)).get(pk=mapping.pk)
+
+
+def suggest_destinations(mapping, *, ranking_model, user, strategies=None, overrides=None,
+                         limit=SUGGEST_MAX):
+    """Suggest a standard LOINC for each variant without one; store it as proposed (#2012).
+
+    Each variant is suggested as the code would be with that variant's axis
+    values added to the curator's entries -- the mmol/L variant of a glucose
+    code asks for a substance concentration -- so the winner is the LOINC the
+    axis filter and the ranker agree on. Only a usable standard LOINC is
+    stored; anything else leaves the variant as it was, with the reason in
+    ``note``. A variant that already has a destination, proposed by a curator
+    or approved, is never touched: variants carry no provenance, so a
+    re-suggestion could not tell a curator's pick from an earlier ranker's.
+
+    Variants are stored under the mapping's row lock, like the variant
+    endpoint does, so a Suggest racing an approval cannot insert one twice;
+    the lock is not held across the ranker calls.
+
+    Returns ``[{axis_key, suggested, confidence, note}]`` for every variant
+    considered, ``suggested`` being the stored concept or ``None``.
+    """
+    from omop_core.mapping.suggestions import suggest_one_mapping
+    from omop_core.models import Concept
+
+    counts = unit_counts(mapping)
+    with transaction.atomic():
+        _locked(mapping)
+        stored = refresh(mapping, counts)
+    todo = [v for v in stored if v.status != 'approved' and v.target_concept_id is None]
+    if len(stored) < FLAG_THRESHOLD or not todo:
+        return []
+    base = dict(mapping.loinc_axes or {}) if overrides is None else dict(overrides)
+    units = observed_units(mapping, counts)
+    results = []
+    for variant in todo[:max(0, limit)]:
+        entry = {'axis_key': variant.axis_key, 'suggested': None, 'confidence': None, 'note': ''}
+        results.append(entry)
+        try:
+            result = suggest_one_mapping(
+                mapping.source_code, mapping.source_vocabulary_id, mapping.omop_table,
+                source_description=mapping.source_code_description or '',
+                row_metadata=mapping.source_metadata, strategies=strategies,
+                ranking_model=ranking_model, axis_overrides={**base, **(variant.axis_values or {})},
+                observed_units=units,
+            )
+        except ValueError as exc:  # a code with no OMOP table has no pipeline
+            entry['note'] = str(exc)
+            continue
+        chosen = result.get('suggested')
+        concept = Concept.objects.filter(pk=chosen['concept_id']).first() if chosen else None
+        if concept is None:
+            entry['note'] = result.get('note') or ''
+            continue
+        if concept.vocabulary_id != 'LOINC' or not usable_destination(concept, mapping):
+            entry['note'] = 'The suggested concept is not a standard LOINC, so the variant was left for a curator.'
+            continue
+        with transaction.atomic():
+            _locked(mapping)
+            variant.refresh_from_db()
+            if variant.status == 'approved' or variant.target_concept_id is not None:
+                entry['note'] = 'A destination was set while suggesting; it was kept.'
+                continue
+            set_destination(variant, concept, approve=False, user=user)
+        entry['suggested'] = {
+            'concept_id': concept.concept_id, 'concept_name': concept.concept_name,
+            'concept_code': concept.concept_code, 'vocabulary_id': concept.vocabulary_id,
+        }
+        entry['confidence'] = chosen.get('confidence')
+        entry['note'] = result.get('note') or ''
+    return results
+
+
+def serialize_all(mapping):
+    """Every stored variant of ``mapping``, largest first."""
+    return [serialize(v) for v in mapping.axis_variants.select_related('target_concept')
+            .order_by('-occurrence_count', 'axis_key')]
 
 
 def refresh_multi_unit_codes(keys):
