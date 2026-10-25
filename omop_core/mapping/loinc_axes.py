@@ -35,6 +35,9 @@ Free-text ``Observation.method`` and an ``effectivePeriod`` are shown as hints
 and never become constraints: LOINC's method and time names rarely appear in
 free text, and a wrong constraint hides the right answer.
 """
+import functools
+import re
+
 from omop_core.services.canonical_units import UNIT_GROUPS, unit_code
 
 AXES = ('component', 'property', 'time_aspect', 'system', 'scale_type', 'method_type')
@@ -80,24 +83,64 @@ _EXTRA_UNIT_PROPERTIES = {
 #: (an enzyme) or arbitrary (CA-125, 10334-1, is ACnc) concentration. Such a
 #: unit settles the property to this set: a candidate with any of them is
 #: eligible, one with a property outside it -- a mass concentration for a "%"
-#: -- is a different test. The sets are the properties of the LOINC codes that
-#: list the unit among their example units (LOINC table, October 2026), most
-#: common first; a property with a single code was treated as noise.
+#: -- is a different test.
+#:
+#: The sets are the properties of the LOINC codes that list the unit among
+#: their example units. On an instance with a loaded LOINC table they are read
+#: from it (:func:`loaded_unit_properties`), so a release that adds a property
+#: is followed; this table is the fallback, from the October 2026 release, a
+#: property with a single code treated as noise. Sets are sorted: the order
+#: never means anything, and two units with the same set are the same test.
 AMBIGUOUS_UNIT_PROPERTIES = {
-    '%': ('NFr', 'MFr', 'AFr', 'VFr', 'SFr', 'CFr', 'RelACnc', 'LenFr', 'Prctl', 'Ratio',
-          'RelRto', 'NRto', 'RelTime', 'RelMCnc'),
-    'U/L': ('CCnc', 'ACnc'), 'u/l': ('CCnc', 'ACnc'),
-    'U/mL': ('ACnc', 'CCnc'), 'u/mL': ('ACnc', 'CCnc'),
-    'IU/L': ('ACnc', 'CCnc'), '[IU]/L': ('ACnc', 'CCnc'),
-    'IU/mL': ('ACnc', 'CCnc'), '[IU]/mL': ('ACnc', 'CCnc'),
-    'kU/L': ('ACnc', 'CCnc'),
-    '{ratio}': ('Ratio', 'MRto', 'RelRto', 'SRto'),
+    unit: tuple(sorted(options)) for unit, options in {
+        '%': ('NFr', 'MFr', 'AFr', 'VFr', 'SFr', 'CFr', 'RelACnc', 'LenFr', 'Prctl', 'Ratio',
+              'RelRto', 'NRto', 'RelTime', 'RelMCnc'),
+        'U/L': ('CCnc', 'ACnc'), 'U/mL': ('ACnc', 'CCnc'),
+        'IU/L': ('ACnc', 'CCnc'), '[IU]/L': ('ACnc', 'CCnc'),
+        'IU/mL': ('ACnc', 'CCnc'), '[IU]/mL': ('ACnc', 'CCnc'),
+        'kU/L': ('ACnc', 'CCnc'),
+        '{ratio}': ('Ratio', 'MRto', 'RelRto', 'SRto'),
+    }.items()
 }
+#: Lower-case lab spellings, and the spelling LOINC lists them under.
+_CANONICAL_SPELLING = {'u/l': 'U/L', 'u/mL': 'U/mL'}
+AMBIGUOUS_UNIT_PROPERTIES.update({alias: AMBIGUOUS_UNIT_PROPERTIES[unit] for alias, unit in _CANONICAL_SPELLING.items()})
 #: Units that settle no single property. UNIT_GROUPS lists convertible units,
 #: not unambiguous ones, so these are taken back out of it. "1" (dimensionless)
 #: says nothing about the property at all.
 AMBIGUOUS_UNITS = frozenset({*AMBIGUOUS_UNIT_PROPERTIES, '1'})
+_FOLDED_AMBIGUOUS_UNITS = frozenset(u.casefold() for u in AMBIGUOUS_UNITS)
 _FOLDED_AMBIGUOUS_PROPERTIES = {unit.casefold(): options for unit, options in AMBIGUOUS_UNIT_PROPERTIES.items()}
+#: A code whose example units name a property fewer times than this is noise
+#: (LOINC lists "IU/L" on one MCnc code).
+_EXAMPLE_UNIT_MIN_CODES = 2
+
+
+@functools.lru_cache(maxsize=1)
+def loaded_unit_properties():
+    """``{unit: sorted properties}`` for the ambiguous units, from the loaded
+    LOINC table's example units; ``{}`` when no table with example units is
+    loaded, and then the static sets apply. Cached per process; a LOINC load
+    calls :func:`reset_loaded_unit_properties`."""
+    from collections import Counter, defaultdict
+
+    from omop_core.models import LoincCodeClass
+
+    counts = defaultdict(Counter)
+    rows = LoincCodeClass.objects.exclude(example_units='').exclude(property='') \
+        .values_list('example_units', 'property')
+    for example, prop in rows.iterator(chunk_size=5000):
+        for token in re.split(r'[;,]\s*', example):
+            token = token.strip()
+            if token in AMBIGUOUS_UNIT_PROPERTIES:
+                counts[token][prop] += 1
+    found = {unit: tuple(sorted(p for p, n in c.items() if n >= _EXAMPLE_UNIT_MIN_CODES))
+             for unit, c in counts.items()}
+    return {unit: options for unit, options in found.items() if options}
+
+
+def reset_loaded_unit_properties():
+    loaded_unit_properties.cache_clear()
 UNIT_PROPERTIES = {
     unit: prop
     for unit, prop in {
@@ -135,7 +178,7 @@ def unit_property(unit):
         return ''
     if normalized in UNIT_PROPERTIES:
         return UNIT_PROPERTIES[normalized]
-    if normalized.casefold() in {u.casefold() for u in AMBIGUOUS_UNITS}:
+    if normalized.casefold() in _FOLDED_AMBIGUOUS_UNITS:
         return ''
     # A short unit is all case: S (siemens) is not s (seconds).
     if len(normalized) <= 2:
@@ -156,12 +199,17 @@ def unit_property_options(unit):
     prop = unit_property(normalized)
     if prop:
         return (prop,)
-    return tuple(AMBIGUOUS_UNIT_PROPERTIES.get(normalized)
-                 or _FOLDED_AMBIGUOUS_PROPERTIES.get(normalized.casefold()) or ())
+    key = normalized if normalized in AMBIGUOUS_UNIT_PROPERTIES else next(
+        (u for u in AMBIGUOUS_UNIT_PROPERTIES if u.casefold() == normalized.casefold()), None)
+    if key is None:
+        return ()
+    key = _CANONICAL_SPELLING.get(key, key)
+    return tuple(loaded_unit_properties().get(key) or AMBIGUOUS_UNIT_PROPERTIES[key])
 
 
 def _property_value(options):
-    """An axis value from :func:`unit_property_options`: the one property, or the set."""
+    """An axis value from :func:`unit_property_options`: the one property, or
+    the set as a list; ``[]`` for none."""
     return options[0] if len(options) == 1 else list(options)
 
 
@@ -170,7 +218,7 @@ def unit_is_recognised(unit):
     to fit several. A misspelling or unlisted unit is neither."""
     normalized = unit_code(unit)
     return bool(normalized) and (bool(unit_property(normalized)) or normalized in AMBIGUOUS_UNITS
-                                 or normalized.casefold() in {u.casefold() for u in AMBIGUOUS_UNITS})
+                                 or normalized.casefold() in _FOLDED_AMBIGUOUS_UNITS)
 
 
 #: FHIR specimen display -> LOINC system. Exact phrases only: "blood" inside
@@ -373,8 +421,7 @@ def resolve(source_vocabulary_id, source_code, metadata, overrides=None, *, obse
             continue
         if isinstance(value, (list, tuple)):
             # An axis variant's values: the set an ambiguous unit fits.
-            value = [str(v).strip() for v in value if str(v).strip()]
-            value = value[0] if len(value) == 1 else value
+            value = _property_value(tuple(sorted({str(v).strip() for v in value if str(v).strip()})))
         if value is None or (value == '' and axis != 'method_type') or value == []:
             axes.pop(axis, None)
         else:
@@ -422,7 +469,7 @@ def compare(axis, source_value, candidate_value):
     A source value that is a set (the properties a ``%`` can mean) matches a
     candidate with any member and conflicts with one outside it.
     """
-    if source_value is None or candidate_value is None:
+    if source_value is None or candidate_value is None or not options_of(source_value):
         return UNKNOWN
     candidate = _norm(candidate_value)
     verdict = CONFLICT
@@ -507,8 +554,11 @@ def axis_candidates(source_axes, domain_id, limit=AXIS_RETRIEVAL_LIMIT):
     for axis in ('property', 'time_aspect', 'scale_type', 'method_type'):
         if axis in source_values:
             accepted = [str(v).strip() for v in options_of(source_values[axis])]
-            rows = (rows.filter(**{f'{axis}__iexact': accepted[0]}) if len(accepted) == 1
-                    else rows.filter(**{f'{axis}__in': accepted}))
+            if accepted:
+                any_of = Q()
+                for value in accepted:
+                    any_of |= Q(**{f'{axis}__iexact': value})
+                rows = rows.filter(any_of)
     codes = list(rows.values_list('loinc_num', 'system')[:500])
     if 'system' in source_values:
         source_system = source_values['system']

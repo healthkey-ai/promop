@@ -13429,12 +13429,17 @@ def code_mapping_suggest_one(request):
     except ValueError as exc:
         return Response({'loinc_axes': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
     axis_key = str(request.data.get('axis_key') or '')
+    # One scan of the code's unit evidence serves the variant's axis values
+    # and observed_units below.
+    unit_evidence = (axis_variants_module.unit_counts(axes_mapping)
+                     if axes_mapping and (axis_key or omop_table == 'measurement') else None)
     if axis_key:
         # What the units imply now, so a row stored before the axis values it
         # carries were derived (a % variant with no property set) is suggested
         # with the current constraints; a stored variant the evidence no
         # longer shows keeps its own.
-        detected = {v['axis_key']: v for v in axis_variants_module.detect(axes_mapping)[0]} if axes_mapping else {}
+        detected = ({v['axis_key']: v for v in axis_variants_module.detect(axes_mapping, unit_evidence, notes=False)[0]}
+                    if axes_mapping else {})
         values = (detected.get(axis_key) or {}).get('axis_values')
         if values is None:
             variant = axes_mapping.axis_variants.filter(axis_key=axis_key).first() if axes_mapping else None
@@ -13460,8 +13465,8 @@ def code_mapping_suggest_one(request):
         'axis_overrides': axis_overrides,
         'snomed_overrides': snomed_overrides,
         'observed_units': (
-            axis_variants_module.observed_units(axes_mapping) if axes_mapping and omop_table == 'measurement'
-            else None
+            axis_variants_module.observed_units(axes_mapping, unit_evidence)
+            if axes_mapping and omop_table == 'measurement' else None
         ),
         'source_description': str(request.data.get('source_code_description') or ''),
         # The dialog's Source Metadata, else this table's mapping's own:
