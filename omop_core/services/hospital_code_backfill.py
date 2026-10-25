@@ -432,6 +432,11 @@ def upsert_inventory(build, *, provenance, actor=None, dry_run=False,
                 for key in keys
             ], batch_size=batch_size)
 
+        # Once this instance has rebuilt its evidence from its own patients
+        # (#2043), an inventory's counts are not written over any existing
+        # row's, cleared ones included; new rows still take the inventory's.
+        from omop_core.models import AxisVariantRefresh
+        rebuilt_here = AxisVariantRefresh.objects.filter(rebuild_evidence=True, outcome='done').exists()
         updates = []
         for mapping in existing:
             imported = rows[(mapping.source_vocabulary_id, mapping.source_code)]
@@ -442,7 +447,7 @@ def upsert_inventory(build, *, provenance, actor=None, dry_run=False,
             # Evidence this instance derived from its own patients (#2043) is
             # the code's real units; an inventory's is not allowed over it.
             if imported.source_unit_evidence != mapping.source_unit_evidence \
-                    and not axis_variants.is_patient_evidence(mapping.source_unit_evidence):
+                    and not rebuilt_here and not axis_variants.is_patient_evidence(mapping.source_unit_evidence):
                 mapping.source_unit_evidence = imported.source_unit_evidence
                 changed = True
             if imported.source_group_occurrence_count != mapping.source_group_occurrence_count:

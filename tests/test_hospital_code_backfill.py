@@ -176,6 +176,17 @@ def test_an_inventory_load_leaves_patient_derived_evidence_alone():
     mapping.refresh_from_db()
     assert mapping.source_unit_evidence == mine
     assert mapping.occurrence_count == 5
+    # After a completed rebuild, a code the rebuild left without units stays without them.
+    from omop_core.models import AxisVariantRefresh
+    cleared = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id=EPIC, source_code='ALB', source_code_description='Albumin', occurrence_count=1,
+        origin='import', origin_system='healthtree-unmapped-v2', source_unit_evidence=[])
+    AxisVariantRefresh.objects.create(reason='done', rebuild_evidence=True, outcome='done')
+    upsert_inventory(build_inventory([primary(EPIC, 'ALB', 'Albumin', 5)], unit_rows=[
+        {'coding_system': EPIC, 'coding_code': 'ALB', 'unit_display': '%', 'unit_ucum': '%', 'n_records': 3},
+    ]), provenance='healthtree-unmapped-v2')
+    cleared.refresh_from_db()
+    assert cleared.source_unit_evidence == []
 
 
 def test_dry_run_does_not_write():

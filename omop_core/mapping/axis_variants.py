@@ -113,22 +113,33 @@ def unit_counts_for(mappings, include_imported=True):
     return {pk: counts | patient.get(pk, Counter()) for pk, counts in result.items()}
 
 
+def _is_imported(entry):
+    """An evidence entry a seed or inventory wrote: it names its ``source``. A
+    text term's unit (``text_terms.record``) names none and is this instance's own."""
+    return bool(entry.get('source')) and entry.get('source') != PATIENT_DATA_SOURCE
+
+
 def patient_unit_evidence(mappings):
-    """``{mapping_id: evidence}`` from this instance's own patient data (#2043).
+    """``({mapping_id: entries}, {mapping_id: Counter})`` from this instance's
+    own patient data (#2043).
 
     The units come from the source codes recorded on each loaded patient and
     the stored Measurement rows; seeded evidence is not read. One entry per
     normalized unit, largest first: ``count`` records, ``patients`` distinct
     people where the per-patient source codes say, ``source`` = ``patient-data``.
+    One Measurement aggregate and one per-patient query for the batch; the
+    Counter is what the entries say, for the caller to refresh variants with.
     """
-    from django.db.models import Count, Q
+    from django.db.models import Q, Sum
 
     from omop_core.models import PatientSourceCode
+    from omop_core.services.mapping_unit_consistency import _unit_counts as live_unit_counts
 
     mappings = [m for m in mappings if m is not None]
     if not mappings:
-        return {}
-    counts = unit_counts_for(mappings, include_imported=False)
+        return {}, {}
+    measured = [m for m in mappings if m.omop_table == 'measurement']
+    live = live_unit_counts(measured) if measured else {}
     match = Q()
     for m in mappings:
         match |= Q(source_value=m.source_code, source_vocabulary_id=m.source_vocabulary_id,
@@ -136,48 +147,64 @@ def patient_unit_evidence(mappings):
     by_key = defaultdict(list)
     for m in mappings:
         by_key[(m.source_vocabulary_id, m.source_code)].append(m)
-    patients = defaultdict(Counter)
+    recorded = defaultdict(Counter)
+    people = defaultdict(lambda: defaultdict(set))
     rows = (PatientSourceCode.objects.filter(match)
-            .values_list('source_vocabulary_id', 'source_value', 'omop_table', 'source_unit', 'source_unit_override')
-            .annotate(people=Count('person', distinct=True)))
-    for vocab, code, table, unit, override, people in rows:
+            .values_list('source_vocabulary_id', 'source_value', 'omop_table', 'source_unit',
+                         'source_unit_override', 'person_id')
+            .annotate(records=Sum('occurrence_count')))
+    for vocab, code, table, unit, override, person_id, records in rows:
+        # Spellings that normalize to one unit are one unit, and a person seen
+        # in two spellings is one person.
         normalized = unit_code(override if override is not None else unit)
         if not normalized:
             continue
         for m in by_key.get((vocab, code), ()):
             if not m.omop_table or m.omop_table == table:
-                patients[m.pk][normalized] += people
-    result = {}
+                recorded[m.pk][normalized] += max(1, records or 0)
+                people[m.pk][normalized].add(person_id)
+    entries, counts = {}, {}
     for m in mappings:
-        entries = []
-        for unit, count in sorted(counts.get(m.pk, Counter()).items(), key=lambda item: (-item[1], item[0])):
+        # Union, not sum, as unit_counts_for: the two sources can describe the same records.
+        counts[m.pk] = live.get(m.pk, Counter()) | recorded.get(m.pk, Counter())
+        entries[m.pk] = []
+        for unit, count in sorted(counts[m.pk].items(), key=lambda item: (-item[1], item[0])):
             entry = {'display': unit, 'code': unit, 'normalized': unit, 'count': count,
                      'source': PATIENT_DATA_SOURCE}
-            if patients[m.pk].get(unit):
-                entry['patients'] = patients[m.pk][unit]
-            entries.append(entry)
-        result[m.pk] = entries
-    return result
+            if people[m.pk].get(unit):
+                entry['patients'] = len(people[m.pk][unit])
+            entries[m.pk].append(entry)
+    return entries, counts
 
 
 def rebuild_unit_evidence(mappings):
     """Store each mapping's unit evidence as its own patient data says (#2043).
 
-    Replaces whatever a seed wrote, which on the seeded instances was the
-    inventory's label-level counts repeated on every code with the label
-    (#2041). A code with no patient data here gets no units. Returns how many
-    mappings changed.
+    Replaces whatever a seed or inventory wrote, which on the seeded instances
+    was the inventory's label-level counts repeated on every code with the
+    label (#2041). Units this instance recorded itself with no ``source`` (a
+    text term's lookups) are kept. A code with no patient data here gets no
+    units. Returns ``(changed, counts)``: how many mappings changed, and each
+    mapping's unit Counter as the stored evidence now reads, for the variant
+    refresh that follows.
     """
     from omop_core.models import SourceCodeConceptMapping
+    from omop_core.services.mapping_unit_consistency import _imported_unit_counts
 
     mappings = [m for m in mappings if m is not None]
-    evidence = patient_unit_evidence(mappings)
-    changed = [m for m in mappings if (m.source_unit_evidence or []) != evidence.get(m.pk, [])]
-    for m in changed:
-        m.source_unit_evidence = evidence.get(m.pk, [])
+    patient, counts = patient_unit_evidence(mappings)
+    changed = []
+    for m in mappings:
+        kept = [e for e in (m.source_unit_evidence or []) if isinstance(e, dict) and not _is_imported(e)]
+        rebuilt = patient.get(m.pk, []) + kept
+        if (m.source_unit_evidence or []) != rebuilt:
+            m.source_unit_evidence = rebuilt
+            changed.append(m)
+        if kept:
+            counts[m.pk] = counts.get(m.pk, Counter()) | _imported_unit_counts([m]).get(m.pk, Counter())
     if changed:
         SourceCodeConceptMapping.objects.bulk_update(changed, ['source_unit_evidence'], batch_size=500)
-    return len(changed)
+    return len(changed), counts
 
 
 def is_patient_evidence(evidence):
@@ -188,10 +215,11 @@ def is_patient_evidence(evidence):
 
 
 def evidence_keys():
-    """Every ``(source_vocabulary_id, source_code)`` a rebuild rewrites: codes
-    with stored evidence, codes on loaded patients' records with a unit, and
-    codes already flagged."""
-    from django.db.models import Q
+    """Every ``(source_vocabulary_id, source_code)`` a rebuild rewrites: mapped
+    codes with stored evidence, mapped codes on loaded patients' records with
+    a unit, and codes already flagged. A patient code with no mapping has
+    nothing to rewrite."""
+    from django.db.models import Exists, OuterRef, Q
 
     from omop_core.models import PatientSourceCode, SourceCodeConceptMapping
 
@@ -199,8 +227,11 @@ def evidence_keys():
                .values_list('source_vocabulary_id', 'source_code'))
     keys |= set(SourceCodeConceptMapping.objects.filter(axis_variant_count__gt=0)
                 .values_list('source_vocabulary_id', 'source_code'))
-    keys |= set(PatientSourceCode.objects.filter(Q(source_unit__gt='') | Q(source_unit_override__gt=''))
-                .values_list('source_vocabulary_id', 'source_value').distinct())
+    with_units = PatientSourceCode.objects.filter(
+        Q(source_unit__gt='') | Q(source_unit_override__gt=''),
+        source_vocabulary_id=OuterRef('source_vocabulary_id'), source_value=OuterRef('source_code'))
+    keys |= set(SourceCodeConceptMapping.objects.filter(Exists(with_units))
+                .values_list('source_vocabulary_id', 'source_code'))
     return keys
 
 
@@ -368,8 +399,10 @@ def refresh_codes(keys, rebuild_evidence=False):
     refreshed = 0
     mappings = list(SourceCodeConceptMapping.objects.filter(match))
     if rebuild_evidence:
-        rebuild_unit_evidence(mappings)
-    counts = unit_counts_for(mappings)
+        # The rebuild has already read the evidence the refresh needs.
+        _changed, counts = rebuild_unit_evidence(mappings)
+    else:
+        counts = unit_counts_for(mappings)
     for mapping in mappings:
         try:
             # A savepoint each, so one failed row cannot abort the rest.
@@ -439,21 +472,26 @@ def refresh_all(keys=None, batch_size=REFRESH_BATCH, on_batch=None, rebuild_evid
 
     One transaction per batch: the whole backlog in one would hold its locks
     for minutes, and one OR over every key makes a statement the planner
-    chokes on. ``on_batch(done, refreshed)`` is called after each batch, which
-    is how the worker job records its progress. Returns the number of
-    mappings refreshed.
+    chokes on. ``on_batch(done, refreshed, last_key)`` is called after each
+    batch, which is how the worker job records its progress and where to
+    resume. Returns the number of mappings refreshed.
     """
     if keys is None:
         keys = evidence_keys() if rebuild_evidence else multi_unit_keys()
-    keys = sorted(keys, key=lambda k: (k[0] or '', k[1] or ''))
+    keys = sorted(keys, key=key_text)
     refreshed = 0
     for start in range(0, len(keys), batch_size):
         batch = keys[start:start + batch_size]
         with transaction.atomic():
             refreshed += refresh_codes(batch, rebuild_evidence=rebuild_evidence)
         if on_batch is not None:
-            on_batch(start + len(batch), refreshed)
+            on_batch(start + len(batch), refreshed, batch[-1])
     return refreshed
+
+
+def key_text(key):
+    """The sort key of a ``(vocabulary, code)``, also stored as a walk's cursor."""
+    return f"{key[0] or ''}\x1f{key[1] or ''}"
 
 
 def usable_destination(concept, mapping=None):

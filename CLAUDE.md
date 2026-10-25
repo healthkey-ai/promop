@@ -1270,10 +1270,13 @@ the instance's own: `--rebuild-evidence` (or migration `0307`) sets
 `rebuild_evidence` on the request and the walk first rewrites every code's
 units from the source codes on its loaded patients and the stored Measurement
 rows (`axis_variants.rebuild_unit_evidence`, entries with `source:
-"patient-data"`), then refreshes the variants, deleting one the evidence no
-longer shows unless a curator decided it. A seed or inventory load never
-overwrites patient-derived evidence. The hospital code seed used to carry the
-inventory's label-level counts on every code with the label (#2041).
+"patient-data"`; a text term's own recorded units, which name no source, are
+kept), then refreshes the variants, deleting one the evidence no longer shows
+unless a curator decided it. The walk resumes after its stored `cursor`, not
+an offset, because the key set shrinks as codes are rebuilt. Once an instance
+has completed a rebuild, a seed or inventory load writes no unit evidence
+over existing rows. The hospital code seed used to carry the inventory's
+label-level counts on every code with the label (#2041).
 
 ### Concept embeddings
 

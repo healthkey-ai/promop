@@ -57,8 +57,10 @@ def request_refresh(reason='', rebuild_evidence=False):
     """
     active = AxisVariantRefresh.objects.filter(outcome__in=ACTIVE_OUTCOMES).order_by('pk').first()
     if active is not None:
-        if rebuild_evidence and not active.rebuild_evidence and active.outcome == 'queued':
-            AxisVariantRefresh.objects.filter(pk=active.pk, outcome='queued').update(rebuild_evidence=True)
+        # Folded only while still queued: a worker that has claimed the row
+        # has read the flag already. The caller sees what the row now says.
+        if rebuild_evidence and not active.rebuild_evidence and active.outcome == 'queued' \
+                and AxisVariantRefresh.objects.filter(pk=active.pk, outcome='queued').update(rebuild_evidence=True):
             active.rebuild_evidence = True
         return active, False
     try:
@@ -135,7 +137,7 @@ def run_pending_inline(reason='', rebuild_evidence=False):
     if request is None:
         request = AxisVariantRefresh.objects.create(reason=reason, rebuild_evidence=rebuild_evidence)
     elif rebuild_evidence and not request.rebuild_evidence:
-        AxisVariantRefresh.objects.filter(pk=request.pk).update(rebuild_evidence=True)
+        AxisVariantRefresh.objects.filter(pk=request.pk, outcome='queued').update(rebuild_evidence=True)
     return run_refresh(request.pk)
 
 
@@ -143,11 +145,14 @@ def run_refresh(request_id, batch_size=axis_variants.REFRESH_BATCH):
     """Perform one request on the worker and return a summary.
 
     Claims the row first: a request that is not ``queued`` is running or
-    finished elsewhere and is left alone. Progress and a heartbeat are written
-    after every batch, so an operator can watch ``done`` against ``keys`` and
-    the sweep can tell a killed walk from a live one. A requeued request
-    resumes at its ``done`` offset: keys are walked in a fixed order, and the
-    codes before the offset were refreshed by the attempt that was killed.
+    finished elsewhere and is left alone. Progress, a heartbeat and the last
+    key walked are written after every batch, so an operator can watch
+    ``done`` against ``keys`` and the sweep can tell a killed walk from a live
+    one. A requeued request resumes after its ``cursor``: keys are walked in
+    one fixed order, and the codes up to the cursor were done by the attempt
+    that was killed. The cursor, not an offset, because a rebuild changes the
+    key set as it goes (a code left with no units leaves it), which would
+    shift an offset onto codes never walked (#2043).
     """
     now = timezone.now()
     claimed = AxisVariantRefresh.objects.filter(pk=request_id, outcome='queued').update(
@@ -157,24 +162,28 @@ def run_refresh(request_id, batch_size=axis_variants.REFRESH_BATCH):
         return {'request_id': request_id, 'skipped': True,
                 'outcome': request.outcome if request is not None else 'missing'}
     request = AxisVariantRefresh.objects.get(pk=request_id)
-    offset, already = request.done, request.refreshed
+    offset, already, cursor = request.done, request.refreshed, request.cursor
 
-    def progress(done, refreshed):
+    def progress(done, refreshed, last_key):
         AxisVariantRefresh.objects.filter(pk=request_id).update(
-            done=offset + done, refreshed=already + refreshed, progress_at=timezone.now())
+            done=offset + done, refreshed=already + refreshed, progress_at=timezone.now(),
+            cursor=axis_variants.key_text(last_key))
 
     try:
         # A rebuild walks every code with evidence or patient data and rewrites
         # its stored units from that data first (#2043); a plain refresh walks
         # only the codes seen in several units.
         keys = axis_variants.evidence_keys() if request.rebuild_evidence else axis_variants.multi_unit_keys()
-        keys = sorted(keys, key=lambda k: (k[0] or '', k[1] or ''))
-        AxisVariantRefresh.objects.filter(pk=request_id).update(keys=len(keys))
-        if offset:
-            logger.info('Axis variant refresh %s resumes at code %s of %s.', request_id, offset, len(keys))
+        keys = sorted(keys, key=axis_variants.key_text)
+        remaining = [k for k in keys if axis_variants.key_text(k) > cursor] if cursor else keys
+        AxisVariantRefresh.objects.filter(pk=request_id).update(keys=offset + len(remaining))
+        if cursor:
+            logger.info('Axis variant refresh %s resumes after %s with %s codes left.',
+                        request_id, cursor.replace('\x1f', ':'), len(remaining))
         refreshed = already + axis_variants.refresh_all(
-            keys[offset:], batch_size=batch_size, on_batch=progress,
+            remaining, batch_size=batch_size, on_batch=progress,
             rebuild_evidence=request.rebuild_evidence)
+        keys = offset + len(remaining)
     except Exception as exc:
         AxisVariantRefresh.objects.filter(pk=request_id).update(
             outcome='failed', failure_reason=str(exc)[:2000], completed_at=timezone.now())
@@ -182,7 +191,7 @@ def run_refresh(request_id, batch_size=axis_variants.REFRESH_BATCH):
     AxisVariantRefresh.objects.filter(pk=request_id).update(
         outcome='done', completed_at=timezone.now())
     logger.info('Axis variant refresh %s walked %s codes and refreshed %s mappings%s.',
-                request_id, len(keys), refreshed,
+                request_id, keys, refreshed,
                 ', rebuilding their unit evidence from patient data' if request.rebuild_evidence else '')
     return {'request_id': request_id, 'skipped': False, 'outcome': 'done',
-            'keys': len(keys), 'refreshed': refreshed, 'rebuild_evidence': request.rebuild_evidence}
+            'keys': keys, 'refreshed': refreshed, 'rebuild_evidence': request.rebuild_evidence}

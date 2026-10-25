@@ -5105,6 +5105,9 @@ class AxisVariantRefresh(models.Model):
     keys = models.PositiveIntegerField(default=0)
     done = models.PositiveIntegerField(default=0)
     refreshed = models.PositiveIntegerField(default=0)
+    #: The last key walked, as ``vocabulary\x1fcode``; a requeued request resumes
+    #: after it, whatever the key set looks like by then (#2043).
+    cursor = models.TextField(blank=True)
     failure_reason = models.TextField(blank=True)
     started_at = models.DateTimeField(null=True, blank=True)
     # Heartbeat: written on claim and after every batch. A running request

@@ -39,6 +39,13 @@ class Command(BaseCommand):
             if created:
                 self.stdout.write(self.style.SUCCESS(
                     f'Queued axis variant refresh {request.pk}; the worker performs it.'))
+            elif rebuild and request.rebuild_evidence:
+                self.stdout.write(f'Axis variant refresh {request.pk} is already {request.outcome} and '
+                                  'rebuilds the unit evidence; not queued twice.')
+            elif rebuild:
+                self.stdout.write(self.style.WARNING(
+                    f'Axis variant refresh {request.pk} is {request.outcome} without the evidence rebuild and '
+                    'cannot take it on now; run this again once it has finished.'))
             else:
                 self.stdout.write(
                     f'Axis variant refresh {request.pk} is already {request.outcome}; not queued twice.')
