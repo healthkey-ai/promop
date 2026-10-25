@@ -150,6 +150,16 @@ All notable changes to PRomop are documented here.
 
 ### Fixed
 
+- **A variant's suggestion candidates say how to use them** — the blue
+  candidates area names the variant it is for ("Suggestion candidates for the
+  % variant"), every row has a **Use** button (the winner's reads **Use
+  winner**), the variant's current destination is marked, and the confirmation
+  appears with the variants. The variant row's search button reads **Search
+  destination**, so it is not mistaken for applying the suggestion. (#2036)
+- **The "Axes shared by every variant" fold is gone** — on every instance
+  measured it settled nothing but Scale, which each variant row shows, and no
+  curator had ever entered a shared axis; the six-axis table stays for a code
+  with one axis set. Saved entries still reach Suggest. (#2037)
 - **Concept to Code Suggest moves on instead of repeating declined codes** — a
   run used to retrieve the same best-`limit` sources every time, so when the
   ranker declined all of them ("25 without a confidence score hidden") the next
