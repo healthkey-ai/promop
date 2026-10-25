@@ -15,6 +15,7 @@ from tests.test_episode_service import _seed_episode_writer_concepts
 pytestmark = pytest.mark.django_db
 
 PACKAGED = dict(ROOT_URLCONF='tests.urls_packaged_api')
+HOSTED = dict(ROOT_URLCONF='tests.urls_packaged_api_host')
 START = date(2025, 1, 15)
 
 
@@ -199,3 +200,89 @@ def test_clearing_composition_keeps_the_line(api, person):
 @override_settings(**PACKAGED)
 def test_retracting_an_unknown_line_is_404(api):
     assert api.delete('/federation/v1/therapy-lines/999999/').status_code == 404
+
+
+@override_settings(**PACKAGED)
+def test_history_is_not_complete_until_the_patient_says_so(api, person):
+    record = refresh_patient_record(person)
+    assert record.therapy_history_complete is None
+
+    response = api.post('/federation/v1/therapy-history/completeness/',
+                        {'person': person.pk, 'complete': True}, format='json')
+
+    assert response.status_code == 200, response.data
+    assert response.data['therapy_history_complete'] is True
+    assert PatientRecord.objects.get(person=person).therapy_history_complete is True
+
+
+@override_settings(**PACKAGED)
+def test_withdrawing_the_confirmation_returns_to_a_lower_bound(api, person):
+    api.post('/federation/v1/therapy-history/completeness/',
+             {'person': person.pk, 'complete': True}, format='json')
+
+    response = api.post('/federation/v1/therapy-history/completeness/',
+                        {'person': person.pk, 'complete': False}, format='json')
+
+    assert response.status_code == 200
+    assert response.data['therapy_history_complete'] is None
+    assert PatientRecord.objects.get(person=person).therapy_history_complete is None
+
+
+@override_settings(**PACKAGED)
+def test_a_confirmation_needs_a_known_patient(api):
+    response = api.post('/federation/v1/therapy-history/completeness/',
+                        {'person': 999999, 'complete': True}, format='json')
+    assert response.status_code == 400, response.data
+
+
+@override_settings(**PACKAGED)
+def test_a_confirmation_needs_an_explicit_answer(api, person):
+    response = api.post('/federation/v1/therapy-history/completeness/',
+                        {'person': person.pk}, format='json')
+    assert response.status_code == 400, response.data
+
+
+@override_settings(**PACKAGED)
+def test_the_body_cannot_choose_who_is_speaking(api, person):
+    from omop_core.models import TherapyHistoryAttestation
+
+    response = api.post('/federation/v1/therapy-history/completeness/',
+                        {'person': person.pk, 'complete': True, 'source': 'clinician'},
+                        format='json')
+    assert response.status_code == 200, response.data
+    assert TherapyHistoryAttestation.objects.get(person=person).source == 'patient'
+
+
+@override_settings(**HOSTED)
+def test_completeness_inherits_the_hosts_therapy_line_policy(api, person):
+    """A host that overrides authoring must not get a fail-open completeness endpoint."""
+    from omop_core.models import TherapyHistoryAttestation
+
+    refused = api.post('/federation/v1/therapy-history/completeness/',
+                       {'person': person.pk, 'complete': True}, format='json')
+    assert refused.status_code == 403, refused.data
+    assert refused.data['detail'] == 'host says no'
+    assert not TherapyHistoryAttestation.objects.filter(person=person).exists()
+
+    allowed = api.post('/federation/v1/therapy-history/completeness/',
+                       {'person': person.pk, 'complete': True}, format='json',
+                       HTTP_X_HOST_ALLOW='yes')
+    assert allowed.status_code == 200, allowed.data
+    assert allowed.data['therapy_history_complete'] is True
+    assert allowed.data['patient_info'] == {'host_shape': person.pk}
+    assert TherapyHistoryAttestation.objects.get(person=person).source == 'host'
+
+
+def test_the_services_derive_once_and_hand_back_the_record(person, django_assert_max_num_queries):
+    from omop_core.services import therapy_history
+    from unittest import mock
+
+    with mock.patch.object(therapy_history, '_refresh', wraps=therapy_history._refresh) as refresh:
+        record = therapy_history.confirm_therapy_history(person, source='patient')
+        assert record.therapy_history_complete is True
+        record = therapy_history.withdraw_therapy_history(person)
+        assert record.therapy_history_complete is None
+    assert refresh.call_count == 2
+
+    with pytest.raises(ValueError):
+        therapy_history.confirm_therapy_history(person, source='the client said so')

@@ -155,3 +155,15 @@ export async function retractTherapyLine(episodeId: number): Promise<TherapyLine
   const resp = await clinicalClient().delete(clinicalUrl(`/v1/therapy-lines/${episodeId}/`));
   return resp.data as TherapyLineResult;
 }
+
+/** Confirm, or withdraw, that the recorded lines are the patient's full history. */
+export async function setTherapyHistoryCompleteness(
+  personId: number,
+  complete: boolean,
+): Promise<{ therapy_history_complete: boolean | null; patient_info: Record<string, unknown> }> {
+  const resp = await clinicalClient().post(clinicalUrl('/v1/therapy-history/completeness/'), {
+    person: personId,
+    complete,
+  });
+  return resp.data;
+}
