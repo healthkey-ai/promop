@@ -49,22 +49,16 @@ beforeEach(() => {
 });
 
 describe("LoincAxesPanel", () => {
-  it("leads with the axis variants and folds the shared axes under them (#2014)", async () => {
+  it("shows a flagged code's variants only: no shared axes table and no Save bar (#2037)", async () => {
     get.mockResolvedValue({ data: variantPayload() });
     render(<LoincAxesPanel mappingId={7} canEdit canApprove />);
-    const variants = await screen.findByRole("table", { name: "Axis variants" });
-    const shared = screen.getByText("Axes shared by every variant");
-    expect(variants.compareDocumentPosition(shared) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-    expect(shared.closest("details")).not.toHaveAttribute("open");
+    await screen.findByRole("table", { name: "Axis variants" });
+    expect(screen.queryByText("Axes shared by every variant")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("axis-value-property")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Save axes" })).not.toBeInTheDocument();
     expect(screen.getByText(/Each is a variant with its own destination/)).toBeInTheDocument();
-    // The shared axes are still there to edit, under the fold; Save and the
-    // unsaved notice stay outside it.
-    expect(screen.getByTestId("axis-value-property")).toHaveTextContent("MCnc");
-    const save = screen.getByRole("button", { name: "Save axes" });
-    expect(save.closest("details")).toBeNull();
-    fireEvent.change(screen.getByLabelText("System value"), { target: { value: "Ser" } });
-    expect(shared).toHaveTextContent("(unsaved changes)");
-    expect(screen.getByText(/Unsaved axes still apply to Suggest/).closest("details")).toBeNull();
+    // Each variant still shows its own axis values and units.
+    expect(screen.getByRole("table", { name: "Axis variants" })).toHaveTextContent("Property SCnc · Scale Qn");
   });
 
   it("reads a property set as 'any of', in full in the title (#2029)", async () => {
@@ -84,8 +78,14 @@ describe("LoincAxesPanel", () => {
     const cell = within(variants).getByText(/Property any of NFr, MFr, AFr, VFr \(\+2 more\) · Scale Qn/);
     expect(cell.closest("td")).toHaveAttribute("title", "Property any of NFr, MFr, AFr, VFr, SFr, CFr · Scale Qn");
     expect(screen.getByRole("button", { name: "Suggest for Property any of NFr, MFr, AFr, VFr (+2 more) · Scale Qn" })).toBeInTheDocument();
-    // The shared axes show the set too, since every % record settles it.
-    expect(screen.getByTestId("axis-value-property")).toHaveTextContent("any of NFr, MFr, AFr, VFr (+2 more)");
+  });
+
+  it("reads a property set as 'any of' in the axes table of a code with one axis set", async () => {
+    get.mockResolvedValue({ data: payload({
+      source_axes: { axes: { property: { value: ["NFr", "MFr", "AFr", "VFr", "SFr", "CFr"], basis: "unit", evidence: "every record unit is %" } }, hints: {} },
+    }) });
+    render(<LoincAxesPanel mappingId={7} canEdit canApprove={false} />);
+    expect(await screen.findByTestId("axis-value-property")).toHaveTextContent("any of NFr, MFr, AFr, VFr (+2 more)");
     expect(screen.getByTestId("axis-value-property")).toHaveAttribute("title", "any of NFr, MFr, AFr, VFr, SFr, CFr");
   });
 
@@ -101,7 +101,7 @@ describe("LoincAxesPanel", () => {
     get.mockResolvedValue({ data: variantPayload() });
     render(<LoincAxesPanel mappingId={7} canEdit canApprove={false} onVariantsChange={onVariantsChange} />);
     await screen.findByRole("table", { name: "Axis variants" });
-    expect(onVariantsChange).toHaveBeenLastCalledWith(2);
+    expect(onVariantsChange).toHaveBeenLastCalledWith(2, expect.arrayContaining([expect.objectContaining({ axis_key: "property=SCnc" })]));
     expect(screen.getByText(/Suggest fills in a proposed LOINC for each variant/)).toBeInTheDocument();
   });
 
@@ -109,7 +109,7 @@ describe("LoincAxesPanel", () => {
     const onVariantsChange = vi.fn();
     render(<LoincAxesPanel mappingId={7} canEdit canApprove={false} onVariantsChange={onVariantsChange} />);
     await screen.findByRole("region", { name: "LOINC axes" });
-    expect(onVariantsChange).toHaveBeenLastCalledWith(0);
+    expect(onVariantsChange).toHaveBeenLastCalledWith(0, []);
   });
 
   it("shows each axis with its value, basis and evidence, and the metadata hints", async () => {
@@ -256,14 +256,14 @@ describe("LoincAxesPanel", () => {
     expect(await screen.findByText(/Variant reopened: moved 40 row\(s\)/)).toBeInTheDocument();
   });
 
-  it("hides Set destination on an approved variant from a curator who cannot approve", async () => {
+  it("hides Search destination on an approved variant from a curator who cannot approve", async () => {
     const approved = variantPayload();
     approved.variants[0] = { ...approved.variants[0], status: "approved" };
     get.mockResolvedValue({ data: approved });
     render(<LoincAxesPanel mappingId={7} canEdit canApprove={false} />);
     const table = await screen.findByRole("table", { name: "Axis variants" });
-    expect(within(table).queryByRole("button", { name: "Set destination for Property MCnc · Scale Qn" })).toBeNull();
-    expect(within(table).getByRole("button", { name: "Set destination for Property SCnc · Scale Qn" })).toBeInTheDocument();
+    expect(within(table).queryByRole("button", { name: "Search destination for Property MCnc · Scale Qn" })).toBeNull();
+    expect(within(table).getByRole("button", { name: "Search destination for Property SCnc · Scale Qn" })).toBeInTheDocument();
   });
 
   it("sets a variant's destination from the concept search", async () => {
@@ -272,7 +272,7 @@ describe("LoincAxesPanel", () => {
     render(<LoincAxesPanel mappingId={7} canEdit canApprove={false} />);
     const table = await screen.findByRole("table", { name: "Axis variants" });
     expect(within(table).queryByRole("button", { name: /^Approve/ })).not.toBeInTheDocument();
-    fireEvent.click(within(table).getByRole("button", { name: "Set destination for Property SCnc · Scale Qn" }));
+    fireEvent.click(within(table).getByRole("button", { name: "Search destination for Property SCnc · Scale Qn" }));
     fireEvent.change(screen.getByRole("textbox", { name: "Search destination for Property SCnc · Scale Qn" }), { target: { value: "glucose" } });
     fireEvent.click(await screen.findByRole("option", { name: /Glucose \[Mass\/volume\]/ }));
     await waitFor(() => expect(post).toHaveBeenCalledWith("/v1/code-mappings/7/axis-variants/", {

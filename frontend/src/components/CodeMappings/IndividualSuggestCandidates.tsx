@@ -44,11 +44,15 @@ function mergeCandidates(searches: CandidateActivity[], effectiveResult?: Candid
   return applyAxisOrder([...byId.values()], effectiveResult);
 }
 
-export default function IndividualSuggestCandidates({ activity, running, selectedId, onSelect }: {
+const USE = "rounded border border-sky-300 bg-white px-1.5 py-0.5 text-[11px] font-medium text-sky-800 hover:bg-sky-100";
+
+export default function IndividualSuggestCandidates({ activity, running, selectedId, onSelect, variant }: {
   activity: CandidateActivity[];
   running: boolean;
   selectedId: string;
   onSelect: (candidate: SuggestCandidate) => void;
+  /** The axis variant these candidates are for (its units), when Suggest ran for one (#2036). */
+  variant?: string;
 }) {
   const result = activity.filter(event => event.stage === "result").at(-1);
   const ranked = activity.filter(event => event.stage === "ranked").at(-1);
@@ -64,10 +68,13 @@ export default function IndividualSuggestCandidates({ activity, running, selecte
     confidences.set(alt.concept_id, existing);
   }
 
+  const choose = variant
+    ? "Use a candidate to make it this variant's destination, then approve it under LOINC axes to route its units."
+    : "Choose a candidate to fill the destination, then Save your mapping.";
   return <section aria-label="Individual suggestion candidates" className="mb-3 rounded-md border border-sky-200 bg-sky-50 p-3">
-    <h3 className="text-sm font-semibold">Suggestion candidates</h3>
+    <h3 className="text-sm font-semibold">{variant ? `Suggestion candidates for the ${variant} variant` : "Suggestion candidates"}</h3>
     <p role="status" className="mt-1 text-xs text-slate-600">
-      {running ? "Searching\u2026 Candidates appear as each search finishes. You can choose one now." : "Choose a candidate to fill the destination, then Save your mapping."}
+      {running ? `Searching\u2026 Candidates appear as each search finishes. ${choose}` : choose}
     </p>
     <SourceAxesSummary sourceAxes={effectiveResult?.source_axes ?? ranked?.source_axes} />
     <SourceSnomedSummary sourceSnomed={effectiveResult?.source_snomed ?? ranked?.source_snomed} />
@@ -107,8 +114,13 @@ export default function IndividualSuggestCandidates({ activity, running, selecte
                 title={conf.ranker ? `${conf.ranker} confidence` : "confidence"}>{Math.round(conf.confidence * 100)}%{conf.ranker ? ` ${conf.ranker[0].toUpperCase()}` : ""}</span>)}
             </td>
             <td className="py-1 pl-1 whitespace-nowrap">
-              {isWinner && <strong className="text-sky-700">Winner</strong>}
-              {isSelected && !isWinner && <span className="text-sky-600">Selected</span>}
+              {isWinner && <strong className="mr-1 text-sky-700">Winner</strong>}
+              {isSelected && <span className="mr-1 text-sky-600">{variant ? "Current destination" : "Selected"}</span>}
+              {/* The row is clickable, and says so: a curator reading the
+                  list for the first time should not have to guess (#2036). */}
+              <button type="button" className={USE} aria-label={`Use ${candidate.concept_name}`}
+                title={variant ? "Make this the variant's destination" : "Fill the destination with this concept"}
+                onClick={event => { event.stopPropagation(); onSelect(candidate); }}>{isWinner ? "Use winner" : "Use"}</button>
             </td>
           </tr>;
         })}</tbody>

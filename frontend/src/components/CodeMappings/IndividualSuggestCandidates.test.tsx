@@ -30,6 +30,29 @@ describe("IndividualSuggestCandidates LOINC preference for labs", () => {
   });
 });
 
+describe("IndividualSuggestCandidates for one axis variant (#2036)", () => {
+  it("names the variant, offers Use on every row, Use winner on the winner, and marks the current destination", () => {
+    const onSelect = vi.fn();
+    render(<IndividualSuggestCandidates activity={activity} running={false} selectedId="15" onSelect={onSelect} variant="%" />);
+    expect(screen.getByRole("heading", { name: "Suggestion candidates for the % variant" })).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("Use a candidate to make it this variant's destination, then approve it under LOINC axes to route its units.");
+    const rows = within(screen.getByRole("table")).getAllByRole("row").slice(1);
+    expect(within(rows[0]).getByRole("button", { name: `Use ${mass.concept_name}` })).toHaveTextContent("Use winner");
+    expect(within(rows[1]).getByRole("button", { name: `Use ${snomed.concept_name}` })).toHaveTextContent("Use");
+    expect(rows[1]).toHaveTextContent("Current destination");
+    fireEvent.click(within(rows[0]).getByRole("button", { name: `Use ${mass.concept_name}` }));
+    expect(onSelect).toHaveBeenCalledTimes(1);
+    expect(onSelect).toHaveBeenCalledWith(expect.objectContaining({ concept_id: 11 }));
+  });
+
+  it("keeps the mapping wording and a plain Use button when no variant is named", () => {
+    render(<IndividualSuggestCandidates activity={activity} running={false} selectedId="" onSelect={vi.fn()} />);
+    expect(screen.getByRole("heading", { name: "Suggestion candidates" })).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("Choose a candidate to fill the destination, then Save your mapping.");
+    expect(screen.getByRole("button", { name: `Use ${mass.concept_name}` })).toHaveTextContent("Use winner");
+  });
+});
+
 describe("IndividualSuggestCandidates LOINC axes", () => {
   it("orders by axes matched, shows chips, and discloses the conflicting candidates", () => {
     const onSelect = vi.fn();

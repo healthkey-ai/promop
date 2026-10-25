@@ -18,9 +18,10 @@ type Props = {
   /** Called with the current, possibly unsaved, overrides whenever they change. */
   onAxesChange?: (overrides: LoincAxisOverrides) => void;
   onSuggestVariant?: (axisKey: string) => void;
-  /** Called with how many axis variants the code has (0 when fewer than two), so
-   * the dialog's Suggest can fill them in (#2012). */
-  onVariantsChange?: (count: number) => void;
+  /** Called with how many axis variants the code has (0 when fewer than two) and
+   * the variants themselves, so the dialog's Suggest can fill them in (#2012)
+   * and name the one a candidate list is for (#2036). */
+  onVariantsChange?: (count: number, variants: AxisVariant[]) => void;
   /** Bump to re-read the axes and variants (e.g. after a variant was set elsewhere). */
   reloadToken?: number;
   /** The queue row's axis variant count, so the loading state can say what is coming (#2030). */
@@ -64,7 +65,7 @@ export default function LoincAxesPanel({ mappingId, canEdit, canApprove, onAxesC
     // Only a code with LOINC axes has overrides for Suggest to send.
     if (data.applies) onAxesChangeRef.current?.(saved);
     const count = data.applies ? (data.variants ?? []).length : 0;
-    onVariantsChangeRef.current?.(count >= 2 ? count : 0);
+    onVariantsChangeRef.current?.(count >= 2 ? count : 0, count >= 2 ? data.variants ?? [] : []);
   }, []);
 
   useEffect(() => {
@@ -160,6 +161,8 @@ export default function LoincAxesPanel({ mappingId, canEdit, canApprove, onAxesC
       });
       setPayload(data);
       setPickingVariant(null);
+      const stored = data.variants ?? [];
+      onVariantsChangeRef.current?.(stored.length >= 2 ? stored.length : 0, stored.length >= 2 ? stored : []);
       // Say what the server did, not what was asked: reopening also moves rows.
       const what = data.variant_status === "approved" ? "Variant approved"
         : reopen ? "Variant reopened" : "Variant destination saved";
@@ -264,9 +267,10 @@ export default function LoincAxesPanel({ mappingId, canEdit, canApprove, onAxesC
     {variants.length >= 2
       ? <>
         {/* A code with variants is curated per variant: the axis sets, their
-            units and destinations lead, and the axes every variant shares fold
-            under them (#2014). The Save bar stays outside the fold, so an
-            unsaved shared axis is never out of sight. */}
+            units and destinations (#2014). The shared six-axis table is not
+            shown for them: on every instance measured it settled nothing but
+            Scale, which each variant row shows, and no curator has ever
+            entered a shared axis (#2037). Saved entries still reach Suggest. */}
         <div className="mt-2" data-testid="axis-variants">
       <h4 className="text-sm font-semibold text-blue-700">{variants.length} axis values — this code may need one LOINC per variant</h4>
       <p className="mt-0.5 text-slate-500">Suggest fills in a proposed LOINC for each variant without one; approve each to route its units.</p>
@@ -299,8 +303,8 @@ export default function LoincAxesPanel({ mappingId, canEdit, canApprove, onAxesC
                 {onSuggestVariant && <button type="button" className={BUTTON} disabled={busy}
                   aria-label={`Suggest for ${description}`} onClick={() => onSuggestVariant(variant.axis_key)}>Suggest</button>}
                 {canEdit && (variant.status !== "approved" || canApprove) && <button type="button" className={BUTTON} disabled={busy}
-                  aria-label={`Set destination for ${description}`}
-                  onClick={() => setPickingVariant(current => current === variant.axis_key ? null : variant.axis_key)}>Set destination</button>}
+                  aria-label={`Search destination for ${description}`} title="Search LOINC by name or code for this variant"
+                  onClick={() => setPickingVariant(current => current === variant.axis_key ? null : variant.axis_key)}>Search destination</button>}
                 {canEdit && canApprove && variant.status !== "approved" && <button type="button"
                   className="rounded border border-green-300 bg-green-50 px-1.5 py-0.5 text-[11px] font-medium text-green-800 hover:bg-green-100 disabled:opacity-40"
                   disabled={busy || !variant.target_concept} aria-label={`Approve ${description}`}
@@ -323,15 +327,9 @@ export default function LoincAxesPanel({ mappingId, canEdit, canApprove, onAxesC
         })}</tbody>
       </table>
     </div>
-        <details className="mt-3 border-t border-slate-200 pt-2">
-          <summary className="cursor-pointer text-sm font-semibold text-slate-900">Axes shared by every variant
-            {dirty && <span className="ml-2 font-normal text-amber-800">(unsaved changes)</span>}</summary>
-          <p className="mt-0.5 text-slate-500">Constraints on all of the variants; each variant adds its own axis values on top.</p>
-          {axesTable}
-        </details>
       </>
       : axesTable}
-    {canEdit && <div className="mt-2 flex items-center gap-2">
+    {canEdit && variants.length < 2 && <div className="mt-2 flex items-center gap-2">
       <button type="button" disabled={!dirty || saving} onClick={() => void save()}
         className="rounded-md bg-slate-900 px-2.5 py-1 text-xs font-medium text-white hover:bg-slate-700 disabled:opacity-40">
         {saving ? "Saving…" : "Save axes"}
