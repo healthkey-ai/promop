@@ -5254,6 +5254,42 @@ class SuggestRun(models.Model):
                 f'{self.destinations} destination(s))')
 
 
+class ReverseSuggestDecline(models.Model):
+    """A source code a ranker declined for a concept on the Concept to Code tab (#2034).
+
+    A Concept to Code run retrieves the best ``limit`` sources for a concept
+    and asks the ranker about each. One it declines gets no confidence and is
+    hidden, and nothing used to remember that, so the next run retrieved and
+    ranked the same codes and never reached the rest of the pool. A decline is
+    recorded here and skipped by later runs and by the estimate; a run with
+    ``include_declined`` retries them. A decision on the mapping itself
+    (approved, rejected) takes the source out of the pool anyway.
+    """
+    concept = models.ForeignKey(Concept, on_delete=models.CASCADE, related_name='+')
+    #: The mapping row the candidate came from, for reference; None for an
+    #: unregistered vocabulary code the catalog search found. Runs skip by the
+    #: vocabulary and code, which every hospital's row of the code shares.
+    mapping = models.ForeignKey(
+        SourceCodeConceptMapping, on_delete=models.CASCADE, null=True, blank=True, related_name='+',
+    )
+    source_vocabulary_id = models.CharField(max_length=255, blank=True, default='')
+    source_code = models.CharField(max_length=255)
+    ranking_model = models.CharField(max_length=20)
+    run = models.ForeignKey(SuggestRun, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'reverse_suggest_decline'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['concept', 'source_vocabulary_id', 'source_code'], name='uq_reverse_suggest_decline',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.concept_id} declined {self.source_vocabulary_id}:{self.source_code} ({self.ranking_model})'
+
+
 class SuggestEmbeddingSnapshot(models.Model):
     """Candidate IDs for a precompute configuration and its vocabulary inputs."""
     key = models.CharField(max_length=64, primary_key=True)

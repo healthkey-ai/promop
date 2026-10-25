@@ -30,12 +30,14 @@ type Source = {
   confidence?: number | null;
   /** Saved in the full editor since the preview: no longer a bulk-review row. */
   edited?: boolean;
+  /** The ranker answered "no suitable concept" for this source (#2034). */
+  declined?: boolean;
 };
 type ConfidenceOrder = '' | '-confidence' | 'confidence';
 type Page<T> = { results: T[]; page: number; page_size: number; total: number };
 type Run = {
   run_id: string; state: string; error: string; done: number; total: number;
-  selection: { limit: number; include_zero_seen: boolean; ranking_model?: string };
+  selection: { limit: number; include_zero_seen: boolean; include_declined?: boolean; ranking_model?: string };
   activity: { concept: { concept_id: number }; candidates: Source[] }[];
 };
 /** How many concepts a page may show: more per page lets a curator drag a
@@ -299,15 +301,23 @@ type EditTarget = { mode: 'new' | 'edit'; row: CodeMappingRow; source: Source };
 type Estimate = {
   total: number | null; umls?: number; lexical?: number; capped?: boolean; partial?: boolean;
   approximate?: 'earlier' | 'sample' | null; timed_out: boolean;
+  /** Sources this estimate skips because a ranker already declined them (#2034). */
+  declined_skipped?: number;
 };
+
+/** "12 a ranker already declined are skipped." when earlier runs declined some of the pool. */
+function skippedText(estimate: Estimate) {
+  const skipped = estimate.declined_skipped ?? 0;
+  return skipped > 0 ? ` ${skipped.toLocaleString()} a ranker already declined ${skipped === 1 ? 'is' : 'are'} skipped.` : '';
+}
 
 function estimateText(estimate: Estimate, limit: number) {
   if (estimate.total === null) return 'Could not estimate how many source codes Suggest could find: the search took too long.';
   const sampled = estimate.approximate === 'sample';
   if (estimate.total === 0) {
-    return sampled
+    return (sampled
       ? 'A sample found no candidate source codes; the full count took too long, so there may be a few.'
-      : 'Suggest source codes would find no candidate source codes with these settings.';
+      : 'Suggest source codes would find no candidate source codes with these settings.') + skippedText(estimate);
   }
   const plus = estimate.capped ? '+' : '';
   const evidence = [estimate.lexical ? `${estimate.lexical.toLocaleString()}${plus} by name` : '',
@@ -315,6 +325,7 @@ function estimateText(estimate: Estimate, limit: number) {
   const runs = Number.isInteger(limit) && limit > 0 ? Math.ceil(estimate.total / limit) : null;
   return `${sampled ? 'Roughly' : 'About'} ${estimate.total.toLocaleString()}${plus} candidate source codes${evidence ? ` (${evidence})` : ''}`
     + (runs ? ` · about ${runs.toLocaleString()}${plus} ${runs === 1 && !plus ? 'run' : 'runs'} of ${limit}` : '') + '.'
+    + skippedText(estimate)
     + (sampled ? ' Estimated from a sample: the full count took too long.' : '')
     + (estimate.approximate === 'earlier' ? ' From an earlier count: this one took too long, so codes handled since may still be counted.' : '')
     + (estimate.partial ? ` Vocabulary codes never seen were not ${sampled ? '' : 'all '}counted${sampled ? '' : ' in time'}.` : '');
@@ -390,6 +401,8 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
   const [starting, setStarting] = useState(false);
   const [ranker, setRanker] = useState('jev');
   const [limit, setLimit] = useState(25);
+  // Retry the sources a ranker declined in earlier runs, instead of skipping them (#2034).
+  const [retryDeclined, setRetryDeclined] = useState(false);
   const [strategies, setStrategies] = useState({ umls: true, lexical: true });
   const [writing, setWriting] = useState(false);
   const [progress, setProgress] = useState('');
@@ -419,6 +432,7 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
   const active = useRef(true);
   useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
   const running = starting || run?.state === 'queued' || run?.state === 'running';
+  const finishedRun = run && !running ? run.run_id : null;
 
   // Re-estimated after every write: a proposed source leaves the pool, so the
   // next run reaches codes the last one did not show.
@@ -431,13 +445,15 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
       if (!strategyKey) return;
       try {
         const response = await api.get<Estimate>(`/v1/concept-to-code/${concept.concept_id}/estimate/`, {
-          params: { strategies: strategyKey, include_zero_seen: seenOnly ? '0' : '1' }, signal: controller.signal,
+          params: { strategies: strategyKey, include_zero_seen: seenOnly ? '0' : '1', include_declined: retryDeclined ? '1' : '0' },
+          signal: controller.signal,
         });
         if (current) setEstimate(response.data);
       } catch { /* The estimate is a guide; Suggest works without it. */ }
     }, 250);
     return () => { current = false; controller.abort(); window.clearTimeout(timer); };
-  }, [concept.concept_id, strategyKey, seenOnly, revision]);
+    // A finished run recorded declines, which the estimate now skips.
+  }, [concept.concept_id, strategyKey, seenOnly, retryDeclined, revision, finishedRun]);
 
   useEffect(() => {
     if (!run || !['queued', 'running'].includes(run.state)) return;
@@ -466,7 +482,7 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
     try {
       const { data: next } = await api.post<Run>('/v1/concept-to-code/suggest/', {
         concept_ids: [concept.concept_id], strategies: Object.keys(strategies).filter(key => strategies[key as keyof typeof strategies]),
-        limit, include_zero_seen: !seenOnly, ranking_model: ranker,
+        limit, include_zero_seen: !seenOnly, ranking_model: ranker, include_declined: retryDeclined,
       });
       if (active.current) setRun(next);
     } catch (failure) { if (active.current) setError(destinationError(failure)); }
@@ -480,7 +496,11 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
   // unscored is not a suggestion. An unranked run scores nothing, so it shows all.
   const ranked = Boolean(run?.selection.ranking_model && run.selection.ranking_model !== 'none');
   const scored = ranked ? candidates.filter(row => row.confidence != null) : candidates;
-  const unscoredHidden = candidates.length - scored.length;
+  const unscored = ranked ? candidates.filter(row => row.confidence == null) : [];
+  // A decline is the ranker's answer; a candidate it could not rank (the
+  // ranker was unavailable) is hidden too, but nothing was decided (#2034).
+  const declinedHidden = unscored.filter(row => row.declined).length;
+  const unrankedHidden = unscored.length - declinedHidden;
   const candidateRows = scored.filter(row => !seenOnly || row.occurrence_count > 0);
   const linkedRows = STATUSES.flatMap(status => open[status] ? groups[status].data?.results ?? [] : []);
   const rows = mode === 'candidates' ? (order ? [...candidateRows].sort(byConfidence(order)) : candidateRows) : linkedRows;
@@ -628,28 +648,36 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
         <button key={key} className={`${button} ${mode === key ? 'bg-slate-100 font-semibold' : ''}`} disabled={writing} aria-pressed={mode === key}
           onClick={() => changeMode(key)}>{label}</button>)}
     </div>
-    <div className="flex flex-wrap items-center gap-3">
-      {mode !== 'candidates' && <input className={`${input} flex-1`} aria-label="Search source codes" placeholder="Source code, description or vocabulary"
-        value={search} disabled={writing} onChange={event => { setSearch(event.target.value); resetView(); }} />}
-      {(['umls', 'lexical'] as const).map(strategy => <label key={strategy} className="flex items-center gap-1 text-sm">
-        <input type="checkbox" checked={strategies[strategy]} disabled={busy} onChange={event => setStrategies(previous => ({ ...previous, [strategy]: event.target.checked }))} />
-        {strategy === 'umls' ? 'UMLS' : 'Names and synonyms'}</label>)}
-      <select aria-label="Source suggestion ranker" className={input} value={ranker} disabled={busy} onChange={event => setRanker(event.target.value)}>
-        <option value="jev">Jev assistance</option><option value="anthropic">Anthropic assistance</option>
-        <option value="both">Both rankers</option><option value="none">Curator review</option>
-      </select>
-      <input type="number" aria-label="Maximum source candidates" className={`${input} w-20`} value={limit} min={1} max={100} disabled={busy} onChange={event => setLimit(Number(event.target.value))} />
-      <div className="flex flex-col gap-1">
-        <button className={`${button} self-start`} disabled={busy || (!strategies.umls && !strategies.lexical) || !Number.isInteger(limit) || limit < 1 || limit > 100}
-          onClick={() => void start()}>{running ? 'Searching…' : 'Suggest source codes'}</button>
-        {estimate && <p data-testid="source-estimate" className="text-xs text-slate-600">{estimateText(estimate, limit)}</p>}
+    {mode !== 'candidates' && <input className={`${input} w-full`} aria-label="Search source codes" placeholder="Source code, description or vocabulary"
+      value={search} disabled={writing} onChange={event => { setSearch(event.target.value); resetView(); }} />}
+    <div className="space-y-1">
+      {/* The ranker, the limit and the button stay on one line: the button
+          is read with the settings it runs (#2034). */}
+      <div role="group" aria-label="Suggest settings" className="flex flex-wrap items-center gap-3">
+        {(['umls', 'lexical'] as const).map(strategy => <label key={strategy} className="flex items-center gap-1 text-sm">
+          <input type="checkbox" checked={strategies[strategy]} disabled={busy} onChange={event => setStrategies(previous => ({ ...previous, [strategy]: event.target.checked }))} />
+          {strategy === 'umls' ? 'UMLS' : 'Names and synonyms'}</label>)}
+        <label className="flex items-center gap-1 text-sm" title="Search the sources a ranker declined in earlier runs again, instead of skipping them">
+          <input type="checkbox" checked={retryDeclined} disabled={busy} onChange={event => setRetryDeclined(event.target.checked)} />
+          Retry declined</label>
+        <span className="flex flex-nowrap items-center gap-3">
+          <select aria-label="Source suggestion ranker" className={input} value={ranker} disabled={busy} onChange={event => setRanker(event.target.value)}>
+            <option value="jev">Jev assistance</option><option value="anthropic">Anthropic assistance</option>
+            <option value="both">Both rankers</option><option value="none">Curator review</option>
+          </select>
+          <input type="number" aria-label="Maximum source candidates" className={`${input} w-20`} value={limit} min={1} max={100} disabled={busy} onChange={event => setLimit(Number(event.target.value))} />
+          <button className={`${button} whitespace-nowrap`} disabled={busy || (!strategies.umls && !strategies.lexical) || !Number.isInteger(limit) || limit < 1 || limit > 100}
+            onClick={() => void start()}>{running ? 'Searching…' : 'Suggest source codes'}</button>
+        </span>
       </div>
+      {estimate && <p data-testid="source-estimate" className="text-xs text-slate-600">{estimateText(estimate, limit)}</p>}
     </div>
     <p className="text-xs text-slate-500">Review clinical meaning before selecting codes. Suggestions do not change mappings; approval updates the mapping and matching stored clinical rows.
       {' '}New vocabulary codes have Seen = 0; approving one proposes it from this preview first.</p>
     {run && mode === 'candidates' && <p role="status" className="text-sm text-slate-600">
       {running ? 'Searching local vocabulary evidence…' : `${candidates.length} candidates retrieved (limit ${run.selection.limit}).`}
-      {!running && unscoredHidden > 0 && ` ${unscoredHidden} without a confidence score hidden.`}
+      {!running && declinedHidden > 0 && ` ${declinedHidden} declined by the ranker and hidden${run.selection.include_declined ? '' : '; the next run moves on to other codes'}.`}
+      {!running && unrankedHidden > 0 && ` ${unrankedHidden} could not be ranked (the ranker was unavailable) and ${unrankedHidden === 1 ? 'is' : 'are'} hidden.`}
       {run.error && ` ${run.error}`}
     </p>}
     {run && mode === 'candidates' && run.selection.include_zero_seen === seenOnly && <p className="text-xs text-amber-800">Run Suggest source codes again to search with the changed Seen filter.</p>}

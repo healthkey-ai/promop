@@ -131,6 +131,19 @@ All endpoints require an authenticated professional role:
 | `POST concept-to-code/<concept_id>/mappings/` | Propose one vocabulary source from a saved preview |
 | `POST concept-to-code/<concept_id>/mappings/<mapping_id>/` | Propose or approve one reviewed source with a revision precondition |
 
+### A run moves on
+
+A run retrieves the best `limit` sources for the concept and asks the ranker
+about each. One the ranker declines gets no confidence and the tab hides it.
+Each decline is recorded (`ReverseSuggestDecline`: concept, mapping or
+vocabulary key, ranker, run), and later runs and the estimate skip declined
+sources in the query itself, so the next Suggest reaches the sources the last
+one did not. The estimate reports `declined` and `declined_skipped`; the run
+event carries `declined`. `include_declined` on the suggest and estimate
+requests ("Retry declined" on the tab) searches them again. Curator review
+(no ranker) declines nothing, and a decision on the mapping takes the source
+out of the pool anyway (#2034).
+
 Migration 0264 adds the run direction and pending destination IDs with database
 defaults for older writers, and builds a GIN trigram index on uppercase source
 descriptions concurrently.

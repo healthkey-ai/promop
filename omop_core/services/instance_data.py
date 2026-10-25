@@ -47,6 +47,8 @@ SYSTEM: frozenset[str] = frozenset({
     # caller's own ids, which mean nothing on another instance.
     'omop_core.PatientSourceCodeUpload',
     'omop_core.SuggestEmbeddingSnapshot', 'omop_core.SuggestRun',
+    # What a ranker declined on this instance's Concept to Code runs.
+    'omop_core.ReverseSuggestDecline',
     # Historical model-quality feedback for this instance, not a live mapping.
     'omop_core.CodeMappingUpload', 'omop_core.MappingSuggestionReview',
     # Counts from this instance's own documents, and its curators' decisions on them.
