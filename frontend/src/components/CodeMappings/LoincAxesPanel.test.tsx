@@ -116,9 +116,53 @@ describe("LoincAxesPanel", () => {
   it("renders nothing when the domain has no LOINC", async () => {
     get.mockResolvedValue({ data: payload({ applies: false }) });
     const { container } = render(<LoincAxesPanel mappingId={7} canEdit canApprove={false} />);
-    await waitFor(() => expect(get).toHaveBeenCalled());
-    await Promise.resolve();
+    await waitFor(() => expect(container).toBeEmptyDOMElement());
+  });
+
+  it("says it is loading until the axes arrive, naming the flagged variants, in one section throughout (#2030)", async () => {
+    let answer: (value: { data: LoincAxesPayload }) => void = () => {};
+    get.mockImplementation(() => new Promise(resolve => { answer = resolve; }));
+    render(<LoincAxesPanel mappingId={7} canEdit canApprove={false} expectedVariants={3} />);
+    const section = screen.getByRole("region", { name: "LOINC axes" });
+    expect(section).toHaveAttribute("aria-busy", "true");
+    const status = within(section).getByRole("status");
+    expect(status).toHaveTextContent("Loading the 3 axis values the queue flagged for this code, and their destinations…");
+    answer({ data: variantPayload() });
+    await within(section).findByRole("table", { name: "Axis variants" });
+    expect(section).not.toHaveAttribute("aria-busy");
+    expect(within(section).getByRole("status")).toHaveTextContent(/Each is a variant with its own destination/);
+    expect(screen.queryByText(/^Loading the/)).not.toBeInTheDocument();
+  });
+
+  it("says it is loading the axes for a code the queue has not flagged", () => {
+    get.mockImplementation(() => new Promise(() => {}));
+    render(<LoincAxesPanel mappingId={7} canEdit canApprove={false} />);
+    expect(screen.getByRole("status")).toHaveTextContent("Loading the LOINC axes this code settles");
+  });
+
+  it("stays off screen while loading for a row whose domain cannot hold LOINC axes", () => {
+    get.mockImplementation(() => new Promise(() => {}));
+    const { container } = render(<LoincAxesPanel mappingId={7} canEdit canApprove={false} mayApply={false} />);
     expect(container).toBeEmptyDOMElement();
+  });
+
+  it("marks a re-read busy too, keeping the axes on screen", async () => {
+    const { rerender } = render(<LoincAxesPanel mappingId={7} canEdit canApprove={false} />);
+    const section = await screen.findByRole("region", { name: "LOINC axes" });
+    expect(section).not.toHaveAttribute("aria-busy");
+    get.mockImplementation(() => new Promise(() => {}));
+    rerender(<LoincAxesPanel mappingId={7} canEdit canApprove={false} reloadToken={1} />);
+    expect(section).toHaveAttribute("aria-busy", "true");
+    expect(within(section).getByRole("status")).toHaveTextContent("Re-reading the axes and variants…");
+    expect(screen.getByTestId("axis-value-property")).toHaveTextContent("MCnc");
+  });
+
+  it("reports a failed load inside the section", async () => {
+    get.mockRejectedValue(new Error("boom"));
+    render(<LoincAxesPanel mappingId={7} canEdit canApprove={false} />);
+    const section = screen.getByRole("region", { name: "LOINC axes" });
+    expect(await within(section).findByRole("alert")).toHaveTextContent("Could not load the LOINC axes for this code.");
+    expect(section).not.toHaveAttribute("aria-busy");
   });
 
   it("reports edits, Clear and Methodless, and saves them as the PUT body", async () => {
