@@ -210,7 +210,8 @@ def test_legacy_descriptor_is_not_narrowed_by_shared_form_restrictions():
             'splenomegaly', 'hepatomegaly',
         ],
         'metastatic_status': ['distant_metastasis_stage'],
-        'renal_adequacy_status': ['egfr_ml_min_173m2', 'serum_creatinine_mg_dl'],
+        'renal_adequacy_status': ['date_of_birth', 'gender', 'serum_creatinine_mg_dl',
+                                  'creatinine_clearance_ml_min'],
         'no_other_active_malignancies': ['active_malignancies'],
         'patient_age': ['date_of_birth'],
     }

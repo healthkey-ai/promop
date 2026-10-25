@@ -73,7 +73,19 @@ FORM_INPUTS = {
     'mipi_risk': ['date_of_birth', 'ecog_performance_status', 'ldh_u_l', 'ldh_upper_limit_normal', 'wbc_count_thousand_per_ul'],
     'mipi_c_risk': ['date_of_birth', 'ecog_performance_status', 'ldh_u_l', 'ldh_upper_limit_normal',
                     'wbc_count_thousand_per_ul', 'ki67_proliferation_index'],
-    'high_risk_mcl_criteria': ['mipi_risk', 'mipi_c_risk', 'ki67_proliferation_index'],
+    # CB's subform metadata names these source facts. PROMOP has no native
+    # hepatic/haematological result column, so the nodes are navigation with a
+    # result gate; the renal verdict exists but uses PROMOP's own eGFR/creatinine
+    # rule. Editing an input never writes the verdict.
+    'renal_adequacy_status': ['date_of_birth', 'gender', 'serum_creatinine_mg_dl',
+                              'creatinine_clearance_ml_min'],
+    'hepatic_adequacy_status': ['ast_u_l', 'alt_u_l', 'bilirubin_total_mg_dl',
+                                'ethnicity', 'gender'],
+    'haematological_adequacy_status': ['anc_thousand_per_ul',
+                                       'platelet_count_thousand_per_ul', 'hemoglobin_g_dl'],
+    'high_risk_mcl_criteria': ['mipi_risk', 'mipi_c_risk', 'ki67_proliferation_index',
+                               'cytogenetic_markers', 'largest_lymph_node_size',
+                               'spleen_size', 'alc_thousand_per_ul'],
 }
 COMPATIBILITY_GATES = {
     'meets_slim': 'The SLiM result is not authored by this form and its full parity with Trial Details '
@@ -85,6 +97,15 @@ COMPATIBILITY_GATES = {
                  'Its source facts remain editable; the result is not.',
     'mipi_c_risk': 'PROMOP does not yet expose MIPI-c as a reviewed PatientRecord result. '
                    'Its source facts remain editable; the result is not.',
+    'renal_adequacy_status': 'PROMOP derives its own renal verdict from eGFR and creatinine; Trial Details '
+                             'uses CB\'s clearance/eGFR rule. The result is not authored here, while the '
+                             'source facts remain editable.',
+    'hepatic_adequacy_status': 'PROMOP has no native hepatic-adequacy result; Trial Details derives it '
+                               'from these facts in CB. The result is not authored here, while the source '
+                               'facts remain editable.',
+    'haematological_adequacy_status': 'PROMOP has no native haematological-adequacy result; Trial Details '
+                                      'derives it from these facts in CB. The result is not authored here, '
+                                      'while the source facts remain editable.',
     'high_risk_mcl_criteria': 'The complete MCL result and source-field bindings require review. '
                               'Its navigable inputs remain editable; the result is not.',
 }
