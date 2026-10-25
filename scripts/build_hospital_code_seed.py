@@ -266,8 +266,18 @@ def facility_objects(rows):
 
 
 def merged_units(alex_units, rows, *, unit_source):
-    # Alex is the distribution source. Nikita is the authoritative unit
-    # parsing/validation source. Match on the two untouched FHIR strings.
+    """One evidence entry per unit the v2 extract saw on the code.
+
+    Alex's v2 extract is the per-code ``(code, unit)`` distribution and the
+    only per-code count. Nikita's CSV is the authoritative unit parsing and
+    validation source, but its unit rows are a label-level join repeated for
+    every code that carries the label, so a unit it alone knows is not this
+    code's evidence and is left out, and its counts are never used (#2041).
+    The two match on the untouched FHIR strings, truncated as the extract
+    truncates them; CSV rows that differ only in parsing detail are one unit.
+    """
+    from omop_core.services.hospital_code_backfill import UNIT_MAX
+
     distributions = {
         (text(unit.get('display')), text(unit.get('code'))): unit
         for unit in alex_units
@@ -275,21 +285,21 @@ def merged_units(alex_units, rows, *, unit_source):
     result = []
     matched = set()
     for row in rows:
-        display, raw_code = row[0], row[1]
+        display, raw_code = text(row[0])[:UNIT_MAX], text(row[1])[:UNIT_MAX]
+        alex = distributions.get((display, raw_code))
+        if not alex or (display, raw_code) in matched:
+            continue
+        matched.add((display, raw_code))
         evidence = {
             'display': display, 'code': raw_code, 'system': row[2],
             'normalized': row[3], 'normalized_source': row[4],
             'verdict': row[5], 'verdict_reason': row[6],
-            'count': row[7], 'patients': row[8], 'values': row[9],
             'source': unit_source,
         }
-        alex = distributions.get((display, raw_code))
-        if alex:
-            matched.add((display, raw_code))
-            for field in ('distribution', 'suppressed'):
-                if field in alex:
-                    evidence[field] = alex[field]
-            evidence['distribution_source'] = 'alex-unmapped-source-codes-v2'
+        for field in ('count', 'patients', 'values', 'distribution', 'suppressed'):
+            if field in alex:
+                evidence[field] = alex[field]
+        evidence['distribution_source'] = 'alex-unmapped-source-codes-v2'
         result.append({key: value for key, value in evidence.items() if value not in ('', None, 0) or key == 'count'})
     for key, alex in distributions.items():
         if key in matched:

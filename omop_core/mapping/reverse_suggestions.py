@@ -14,18 +14,22 @@ from django.db import OperationalError, transaction, connection
 from django.db.models import Case, CharField, Exists, OuterRef, Q, Value, When
 from django.db.models.functions import Upper
 
-from omop_core.models import ConceptSynonym, SourceCodeConceptMapping, UmlsSourceCode
+from omop_core.models import ConceptSynonym, ReverseSuggestDecline, SourceCodeConceptMapping, UmlsSourceCode
 from omop_core.services.concept_to_code import concept_payload, eligible_sources, source_payload
 from omop_core.services.source_vocabularies import VOCAB_TO_UMLS_ROOT, VOCABULARY_OID_ALIASES
 from omop_core.mapping.reverse_catalog import catalog_candidates, catalog_keys
 
 
-def reverse_retrieval_pool(concept, *, strategies, limit, include_zero_seen=False, timeout_ms=30000):
+def reverse_retrieval_pool(concept, *, strategies, limit, include_zero_seen=False, include_declined=False,
+                           timeout_ms=30000):
+    """The best ``limit`` sources for ``concept``, skipping what a ranker already
+    declined unless ``include_declined`` (#2034)."""
     return _bounded(timeout_ms, lambda evaluate: _retrieve(
-        concept, strategies=strategies, limit=limit, include_zero_seen=include_zero_seen, evaluate=evaluate))
+        concept, strategies=strategies, limit=limit, include_zero_seen=include_zero_seen,
+        include_declined=include_declined, evaluate=evaluate))
 
 
-def estimate_reverse_pool(concept, *, strategies, include_zero_seen=False, timeout_ms=8000):
+def estimate_reverse_pool(concept, *, strategies, include_zero_seen=False, include_declined=False, timeout_ms=8000):
     """How many sources a run could return, by the same queries a run makes.
 
     A run reads the best ``limit`` rows of each query; this counts them all
@@ -36,7 +40,8 @@ def estimate_reverse_pool(concept, *, strategies, include_zero_seen=False, timeo
     when even the registered count does not fit the budget.
     """
     return _bounded(timeout_ms, lambda evaluate: _estimate(
-        concept, strategies=strategies, include_zero_seen=include_zero_seen, evaluate=evaluate))
+        concept, strategies=strategies, include_zero_seen=include_zero_seen,
+        include_declined=include_declined, evaluate=evaluate))
 
 
 #: How long an exact estimate stands in for one that runs out of time.
@@ -45,7 +50,7 @@ ESTIMATE_CACHE_SECONDS = 24 * 60 * 60
 SAMPLE_PERCENT = 2
 
 
-def estimate_source_count(concept, *, strategies, include_zero_seen=False,
+def estimate_source_count(concept, *, strategies, include_zero_seen=False, include_declined=False,
                           timeout_ms=8000, fallback_ms=4000):
     """:func:`estimate_reverse_pool`, or an approximation when it runs out of time.
 
@@ -56,16 +61,18 @@ def estimate_source_count(concept, *, strategies, include_zero_seen=False,
     sample. ``approximate`` is ``'earlier'``, ``'sample'`` or None for exact.
     Raises like :func:`estimate_reverse_pool` when the sample misses as well.
     """
-    key = ':'.join(['c2c-estimate', str(concept.pk), ','.join(sorted(strategies)), str(int(include_zero_seen))])
+    key = ':'.join(['c2c-estimate', str(concept.pk), ','.join(sorted(strategies)), str(int(include_zero_seen)),
+                    str(int(include_declined))])
     try:
-        estimate = estimate_reverse_pool(concept, strategies=strategies,
-                                         include_zero_seen=include_zero_seen, timeout_ms=timeout_ms)
+        estimate = estimate_reverse_pool(concept, strategies=strategies, include_zero_seen=include_zero_seen,
+                                         include_declined=include_declined, timeout_ms=timeout_ms)
     except (TimeoutError, OperationalError):
         earlier = _cached(cache.get, key)
         if earlier:
             return {**earlier, 'approximate': 'earlier'}
         return _bounded(fallback_ms, lambda evaluate: _sampled(
-            concept, strategies=strategies, include_zero_seen=include_zero_seen, evaluate=evaluate))
+            concept, strategies=strategies, include_zero_seen=include_zero_seen,
+            include_declined=include_declined, evaluate=evaluate))
     _cached(cache.set, key, estimate, ESTIMATE_CACHE_SECONDS)
     return {**estimate, 'approximate': None}
 
@@ -104,9 +111,59 @@ def _bounded(timeout_ms, search):
         return result
 
 
-def _candidate_rows(concept, include_zero_seen):
+def _declines(concept):
+    return ReverseSuggestDecline.objects.filter(concept=concept)
+
+
+def _declined(concept):
+    """A filter for the mapping rows a ranker declined for ``concept``: by
+    vocabulary and code, which every hospital's row of a code shares."""
+    return Exists(_declines(concept).filter(
+        source_vocabulary_id=OuterRef('source_vocabulary_id'), source_code=OuterRef('source_code')))
+
+
+def declined_keys(concept):
+    """``{(source_vocabulary_id, source_code)}`` a ranker declined for ``concept``."""
+    return set(_declines(concept).values_list('source_vocabulary_id', 'source_code'))
+
+
+def record_declines(concept, candidates, *, ranking_model, run=None):
+    """Remember the ranked candidates the ranker declined (#2034).
+
+    Later runs and the estimate skip them, so each run moves on through the
+    pool instead of ranking the same best-``limit`` sources again. A decline
+    is the ranker answering "no suitable concept" (``declined`` on the
+    candidate); a ranker that was unavailable declined nothing, and curator
+    review (no ranker) never does. A candidate the ranker now supports, on a
+    retry of declined sources, loses its earlier decline. Returns how many
+    this run declined.
+    """
+    if ranking_model == 'none':
+        return 0
+    declined = [c for c in candidates if c.get('declined')]
+    supported = [c for c in candidates if c.get('confidence') is not None]
+    if supported:
+        keys = Q()
+        for c in supported:
+            keys |= Q(source_vocabulary_id=c.get('source_vocabulary_id') or '', source_code=c['source_code'])
+        _declines(concept).filter(keys).delete()
+    if declined:
+        ReverseSuggestDecline.objects.bulk_create([ReverseSuggestDecline(
+            concept=concept, mapping_id=c.get('mapping_id'), source_vocabulary_id=c.get('source_vocabulary_id') or '',
+            source_code=c['source_code'], ranking_model=ranking_model, run=run,
+        ) for c in declined], ignore_conflicts=True)
+    return len(declined)
+
+
+def _candidate_rows(concept, include_zero_seen, include_declined=False):
     rows = eligible_sources(concept)
-    return rows if include_zero_seen else rows.filter(occurrence_count__gt=0)
+    if not include_zero_seen:
+        rows = rows.filter(occurrence_count__gt=0)
+    if not include_declined:
+        # Skipped in the query, not after it: each query reads its best
+        # ``limit`` rows, and those could all be the ones already declined.
+        rows = rows.exclude(_declined(concept))
+    return rows
 
 
 def _umls_rows(concept, rows):
@@ -150,10 +207,14 @@ def _similarity_threshold():
         cursor.execute("SET LOCAL pg_trgm.similarity_threshold = 0.3")
 
 
-def _retrieve(concept, *, strategies, limit, include_zero_seen, evaluate):
-    rows = _candidate_rows(concept, include_zero_seen).select_related('target_concept')
+def _retrieve(concept, *, strategies, limit, include_zero_seen, evaluate, include_declined=False):
+    rows = (_candidate_rows(concept, include_zero_seen, include_declined).select_related('target_concept')
+            .prefetch_related('axis_variants__target_concept'))
     pool = {}
     terms = []
+    # Declined vocabulary codes are dropped after the catalog search, which
+    # reads its best ``limit`` keys, so it is asked for that many more.
+    skip = evaluate(lambda: declined_keys(concept)) if include_zero_seen and not include_declined else set()
 
     def collect(matches, strategy):
         for row in evaluate(matches):
@@ -182,7 +243,10 @@ def _retrieve(concept, *, strategies, limit, include_zero_seen, evaluate):
     # Unregistered vocabulary codes have never been encountered. Search them
     # only when zero-Seen sources are included; keep the preview read-only.
     if include_zero_seen:
-        for candidate in catalog_candidates(concept, strategies=strategies, terms=terms, limit=limit, evaluate=evaluate):
+        for candidate in catalog_candidates(concept, strategies=strategies, terms=terms, limit=limit + len(skip),
+                                            evaluate=evaluate):
+            if (candidate['source_vocabulary_id'], candidate['source_code']) in skip:
+                continue
             key = candidate['mapping_id'] if candidate['mapping_id'] is not None else (
                 candidate['source_vocabulary_id'], candidate['source_code'],
             )
@@ -197,8 +261,15 @@ def _retrieve(concept, *, strategies, limit, include_zero_seen, evaluate):
     ))[:limit]
 
 
-def _estimate(concept, *, strategies, include_zero_seen, evaluate):
-    rows = _candidate_rows(concept, include_zero_seen)
+def _declined_in_pool(concept, include_zero_seen, evaluate):
+    """How many of the sources a run could otherwise return are skipped as declined."""
+    return evaluate(_candidate_rows(concept, include_zero_seen, include_declined=True).filter(_declined(concept)).count)
+
+
+def _estimate(concept, *, strategies, include_zero_seen, evaluate, include_declined=False):
+    rows = _candidate_rows(concept, include_zero_seen, include_declined)
+    skipped = 0 if include_declined else _declined_in_pool(concept, include_zero_seen, evaluate)
+    skip = evaluate(lambda: declined_keys(concept)) if include_zero_seen and not include_declined else set()
     umls = _umls_rows(concept, rows) if 'umls' in strategies else None
     terms = _lexical_terms(concept, evaluate) if 'lexical' in strategies else []
     counts = {'umls': evaluate(umls.count) if umls is not None else 0, 'lexical': 0}
@@ -225,8 +296,12 @@ def _estimate(concept, *, strategies, include_zero_seen, evaluate):
                 found, registered, capped = catalog_keys(
                     concept, strategies=strategies, terms=terms, evaluate=evaluate)
                 # Open mapping rows the vocabulary search reached by a name or
-                # synonym their own description does not match.
+                # synonym their own description does not match -- the ones a
+                # run could return, so not the declined ones.
                 ids = set().union(*registered.values())
+                if ids:
+                    ids &= set(evaluate(rows.filter(pk__in=ids).values_list('pk', flat=True)))
+                    registered = {evidence: keys & ids for evidence, keys in registered.items()}
                 counted = set()
                 for query in (umls, lexical):
                     if ids and query is not None:
@@ -234,13 +309,16 @@ def _estimate(concept, *, strategies, include_zero_seen, evaluate):
         except (TimeoutError, OperationalError):
             capped = partial = True
         else:
+            found = {evidence: {key for key in keys if key not in skip} for evidence, keys in found.items()}
             for evidence, keys in found.items():
                 counts[evidence] += len(keys) + len(registered[evidence] - counted)
             total += len(set().union(*found.values())) + len(ids - counted)
-    return {'total': total, **counts, 'capped': capped, 'partial': partial}
+    # ``declined_skipped``: sources a run could otherwise return that are
+    # skipped because a ranker declined them (none when the run includes them).
+    return {'total': total, **counts, 'capped': capped, 'partial': partial, 'declined_skipped': skipped}
 
 
-def _sampled(concept, *, strategies, include_zero_seen, evaluate):
+def _sampled(concept, *, strategies, include_zero_seen, evaluate, include_declined=False):
     """The name count over a sample of the mapping table's pages, scaled up.
 
     Sampled rows cannot use the trigram index, so the cost follows the sample
@@ -250,7 +328,8 @@ def _sampled(concept, *, strategies, include_zero_seen, evaluate):
     cheap), the overlap is ignored, and never-seen vocabulary codes are left
     out (``partial``).
     """
-    rows = _candidate_rows(concept, include_zero_seen)
+    rows = _candidate_rows(concept, include_zero_seen, include_declined)
+    skipped = 0 if include_declined else _declined_in_pool(concept, include_zero_seen, evaluate)
     umls = _umls_rows(concept, rows) if 'umls' in strategies else None
     terms = _lexical_terms(concept, evaluate) if 'lexical' in strategies else []
     counts = {'umls': evaluate(umls.count) if umls is not None else 0, 'lexical': 0}
@@ -274,7 +353,7 @@ def _sampled(concept, *, strategies, include_zero_seen, evaluate):
 
         counts['lexical'] = _two_figures(evaluate(count) * 100 / SAMPLE_PERCENT)
     return {'total': counts['umls'] + counts['lexical'], **counts, 'capped': False,
-            'partial': include_zero_seen, 'approximate': 'sample'}
+            'partial': include_zero_seen, 'approximate': 'sample', 'declined_skipped': skipped}
 
 
 def _two_figures(value):
@@ -300,6 +379,9 @@ def reverse_rank_candidate(concept, candidate, ranking_model):
             'original_description': candidate['source_code_description'],
         },
     )
+    # The ranker answered "no suitable concept": a decline, remembered so the
+    # next run moves on. An unavailable ranker is neither (#2034).
+    declined = chosen is None and (note or '').startswith('No suitable concept')
     return {**candidate, 'verdict': 'supported' if chosen else 'review', 'note': note,
-            'confidence': chosen_confidence(chosen, alternatives),
+            'confidence': chosen_confidence(chosen, alternatives), 'declined': declined,
             'alternatives': alternatives or []}

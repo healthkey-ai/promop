@@ -15,7 +15,7 @@ const mockDelete = vi.fn();
 const mockPost = vi.fn();
 vi.mock('@/api/axios', () => ({
   default: {
-    get: (...a: unknown[]) => mockGet(...a), post: vi.fn(), patch: vi.fn(),
+    get: (...a: unknown[]) => mockGet(...a), patch: vi.fn(),
     delete: (...a: unknown[]) => mockDelete(...a),
     post: (...a: unknown[]) => mockPost(...a),
   },

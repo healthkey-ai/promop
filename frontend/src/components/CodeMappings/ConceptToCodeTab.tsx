@@ -3,7 +3,8 @@ import * as Dialog from '@radix-ui/react-dialog';
 import api from '@/api/axios';
 import { destinationError } from './destinationSearch';
 import EditMappingDialog from './EditMappingDialog';
-import { AxisVariantFlag } from './LoincAxisChips';
+import { AxisVariantFlag, AxisVariantList } from './LoincAxisChips';
+import type { AxisVariant, LoincAxesPayload } from './loincAxes';
 import { type CodeMappingRow, type ConceptResult, type Reference, DOMAIN_TO_TABLE, emptyReference } from './codeMappingTypes';
 
 type Concept = {
@@ -23,16 +24,20 @@ type Source = {
   evidence?: string[]; verdict?: string; note?: string;
   /** How many LOINC axis sets this code's units imply, when the server reports it. */
   axis_variant_count?: number;
+  /** The variants themselves, each with its own (suggested) destination (#2012). */
+  axis_variants?: AxisVariant[];
   /** The ranker's confidence (0-1) in this source → concept pairing. */
   confidence?: number | null;
   /** Saved in the full editor since the preview: no longer a bulk-review row. */
   edited?: boolean;
+  /** The ranker answered "no suitable concept" for this source (#2034). */
+  declined?: boolean;
 };
 type ConfidenceOrder = '' | '-confidence' | 'confidence';
 type Page<T> = { results: T[]; page: number; page_size: number; total: number };
 type Run = {
   run_id: string; state: string; error: string; done: number; total: number;
-  selection: { limit: number; include_zero_seen: boolean; ranking_model?: string };
+  selection: { limit: number; include_zero_seen: boolean; include_declined?: boolean; ranking_model?: string };
   activity: { concept: { concept_id: number }; candidates: Source[] }[];
 };
 /** How many concepts a page may show: more per page lets a curator drag a
@@ -67,11 +72,15 @@ function Pagination({ data, change, disabled = false }: {
   </nav>;
 }
 
-type SourceMode = 'linked' | 'available' | 'candidates';
+type SourceMode = 'linked' | 'candidates';
+/** A stored mapping's status; Existing mappings shows one group per status (#2010). */
+type Status = 'approved' | 'proposed' | 'rejected';
+const STATUSES: Status[] = ['approved', 'proposed', 'rejected'];
+type SourcePage = Page<Source> & { zero_seen: number; status_counts?: Record<Status, number> };
 
 export default function ConceptToCodeTab({ canApprove, onWritingChange, initialConceptId, onInitialConceptHandled }: {
   canApprove: boolean; onWritingChange?: (value: boolean) => void;
-  /** Open this concept's source codes on arrival, ready to search for more. */
+  /** Open this concept's source codes on arrival, ready to suggest more. */
   initialConceptId?: number;
   /** Called once the linked concept is opened or reported, so it is not reopened. */
   onInitialConceptHandled?: () => void;
@@ -88,7 +97,6 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange, initialC
   const [dragged, setDragged] = useState<Concept | null>(null);
   const [dropTarget, setDropTarget] = useState<number | null>(null);
   const [selected, setSelected] = useState<Concept | null>(null);
-  const [selectedMode, setSelectedMode] = useState<SourceMode>('linked');
   const selectedTrigger = useRef<HTMLButtonElement | null>(null);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
@@ -153,7 +161,6 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange, initialC
           `/v1/concept-to-code/${initialConceptId}/`);
         if (!active) return;
         // The dialog shows neither; the list row carries them.
-        setSelectedMode('available');
         setSelected({ ...found.concept, fields: [], sccm_counts: { approved: 0, proposed: 0, rejected: 0 } });
       } catch (failure) {
         if (!active) return;
@@ -221,7 +228,7 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange, initialC
             disabled={writing || moving} onMove={position => void move(concept, position)} /></td>
           <td className="p-3"><button className="text-left font-medium text-slate-950 underline underline-offset-2" disabled={writing}
             aria-haspopup="dialog" aria-expanded={selected?.concept_id === concept.concept_id}
-            onClick={event => { selectedTrigger.current = event.currentTarget; setSelectedMode('linked'); setSelected(concept); }}>{concept.concept_name}</button>
+            onClick={event => { selectedTrigger.current = event.currentTarget; setSelected(concept); }}>{concept.concept_name}</button>
             <div className="mt-1 text-xs text-slate-500">{concept.vocabulary_id}:{concept.concept_code} · OMOP {concept.concept_id} · {concept.domain_id}</div></td>
           <td className="p-3 text-xs text-slate-600">{concept.fields.length
             ? concept.fields.map(field => <div key={field.field_name}>{field.field_name} <span className="text-slate-400">({field.status})</span></div>) : '—'}</td>
@@ -246,7 +253,7 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange, initialC
           </div>
           <Dialog.Close className={button} disabled={writing}>Close</Dialog.Close>
         </div>
-        <SourceCoverage key={selected.concept_id} concept={selected} canApprove={canApprove} initialMode={selectedMode}
+        <SourceCoverage key={selected.concept_id} concept={selected} canApprove={canApprove}
           onWriting={value => { setWriting(value); onWritingChange?.(value); }} onSaved={() => setRevision(value => value + 1)}
           onEditingChange={setEditing} />
       </Dialog.Content>
@@ -285,6 +292,7 @@ function PriorityCell({ concept, lastPosition, disabled, onMove }: {
 }
 
 const loadFailed = 'Could not load source codes.';
+const statusLabel: Record<Status, string> = { approved: 'Approved mappings', proposed: 'Proposed mappings', rejected: 'Rejected mappings' };
 
 type EditTarget = { mode: 'new' | 'edit'; row: CodeMappingRow; source: Source };
 /** How many sources Suggest could find, by the same retrieval as a run.
@@ -293,15 +301,23 @@ type EditTarget = { mode: 'new' | 'edit'; row: CodeMappingRow; source: Source };
 type Estimate = {
   total: number | null; umls?: number; lexical?: number; capped?: boolean; partial?: boolean;
   approximate?: 'earlier' | 'sample' | null; timed_out: boolean;
+  /** Sources this estimate skips because a ranker already declined them (#2034). */
+  declined_skipped?: number;
 };
+
+/** "12 a ranker already declined are skipped." when earlier runs declined some of the pool. */
+function skippedText(estimate: Estimate) {
+  const skipped = estimate.declined_skipped ?? 0;
+  return skipped > 0 ? ` ${skipped.toLocaleString()} a ranker already declined ${skipped === 1 ? 'is' : 'are'} skipped.` : '';
+}
 
 function estimateText(estimate: Estimate, limit: number) {
   if (estimate.total === null) return 'Could not estimate how many source codes Suggest could find: the search took too long.';
   const sampled = estimate.approximate === 'sample';
   if (estimate.total === 0) {
-    return sampled
+    return (sampled
       ? 'A sample found no candidate source codes; the full count took too long, so there may be a few.'
-      : 'Suggest source codes would find no candidate source codes with these settings.';
+      : 'Suggest source codes would find no candidate source codes with these settings.') + skippedText(estimate);
   }
   const plus = estimate.capped ? '+' : '';
   const evidence = [estimate.lexical ? `${estimate.lexical.toLocaleString()}${plus} by name` : '',
@@ -309,6 +325,7 @@ function estimateText(estimate: Estimate, limit: number) {
   const runs = Number.isInteger(limit) && limit > 0 ? Math.ceil(estimate.total / limit) : null;
   return `${sampled ? 'Roughly' : 'About'} ${estimate.total.toLocaleString()}${plus} candidate source codes${evidence ? ` (${evidence})` : ''}`
     + (runs ? ` · about ${runs.toLocaleString()}${plus} ${runs === 1 && !plus ? 'run' : 'runs'} of ${limit}` : '') + '.'
+    + skippedText(estimate)
     + (sampled ? ' Estimated from a sample: the full count took too long.' : '')
     + (estimate.approximate === 'earlier' ? ' From an earlier count: this one took too long, so codes handled since may still be counted.' : '')
     + (estimate.partial ? ` Vocabulary codes never seen were not ${sampled ? '' : 'all '}counted${sampled ? '' : ' in time'}.` : '');
@@ -329,29 +346,77 @@ function newMappingRow(source: Source, concept: Concept): CodeMappingRow {
   };
 }
 
-function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChange, initialMode = 'linked' }: {
+/** One status group of a concept's stored mappings, fetched while it is open. */
+function useSourceGroup(conceptId: number, status: Status, enabled: boolean, query: {
+  search: string; seenOnly: boolean; order: ConfidenceOrder; revision: number;
+}) {
+  const [page, setPage] = useState(1);
+  const [data, setData] = useState<SourcePage | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [failed, setFailed] = useState(false);
+  const { search, seenOnly, order, revision } = query;
+  useEffect(() => {
+    if (!enabled) return;
+    let current = true;
+    const controller = new AbortController();
+    const timer = window.setTimeout(async () => {
+      setLoading(true); setFailed(false);
+      try {
+        const response = await api.get<SourcePage>(`/v1/concept-to-code/${conceptId}/`, {
+          params: { mode: 'linked', status, search, seen_only: seenOnly ? '1' : '0', page, ...(order ? { order } : {}) },
+          signal: controller.signal,
+        });
+        if (current) setData(response.data);
+      } catch {
+        if (current) setFailed(true);
+      } finally { if (current) setLoading(false); }
+    }, 250);
+    return () => { current = false; controller.abort(); window.clearTimeout(timer); };
+  }, [conceptId, status, enabled, search, seenOnly, order, page, revision]);
+  // Stale rows must not stay selectable while a changed query loads, and a
+  // folded group's failure must not outlive the group.
+  const reset = useCallback(() => { setData(null); setPage(1); setFailed(false); }, []);
+  return { data, setData, page, setPage, loading, failed, reset };
+}
+
+function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChange }: {
   concept: Concept; canApprove: boolean; onSaved: () => void; onWriting: (value: boolean) => void;
   onEditingChange?: (value: boolean) => void;
-  initialMode?: SourceMode;
 }) {
-  const [mode, setMode] = useState<SourceMode>(initialMode);
+  // Suggested source codes is the view a curator comes for, so it opens first (#2010).
+  const [mode, setMode] = useState<SourceMode>('candidates');
   const [search, setSearch] = useState('');
   const [seenOnly, setSeenOnly] = useState(true);
-  const [page, setPage] = useState(1);
-  const [data, setData] = useState<(Page<Source> & { zero_seen: number }) | null>(null);
-  const [loading, setLoading] = useState(false);
   const [revision, setRevision] = useState(0);
   const [error, setError] = useState('');
+  // Approved mappings are done and rejected ones are decided; both start folded
+  // so the proposals waiting for review are what the curator sees first.
+  const [open, setOpen] = useState<Record<Status, boolean>>({ approved: false, proposed: true, rejected: false });
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [run, setRun] = useState<Run | null>(null);
+  // Rows saved or approved while a run is still streaming, by source key. The
+  // poll replaces the run wholesale, so edits live beside it and are laid over
+  // its candidates on every render (#2028).
+  const [patched, setPatched] = useState<Record<string, Partial<Source>>>({});
   const [starting, setStarting] = useState(false);
   const [ranker, setRanker] = useState('jev');
   const [limit, setLimit] = useState(25);
+  // Retry the sources a ranker declined in earlier runs, instead of skipping them (#2034).
+  const [retryDeclined, setRetryDeclined] = useState(false);
   const [strategies, setStrategies] = useState({ umls: true, lexical: true });
   const [writing, setWriting] = useState(false);
   const [progress, setProgress] = useState('');
   const [order, setOrder] = useState<ConfidenceOrder>('');
   const [threshold, setThreshold] = useState(80);
+  const groupQuery = { search, seenOnly, order, revision };
+  const approvedGroup = useSourceGroup(concept.concept_id, 'approved', mode === 'linked' && open.approved, groupQuery);
+  const proposedGroup = useSourceGroup(concept.concept_id, 'proposed', mode === 'linked' && open.proposed, groupQuery);
+  const rejectedGroup = useSourceGroup(concept.concept_id, 'rejected', mode === 'linked' && open.rejected, groupQuery);
+  const groups = { approved: approvedGroup, proposed: proposedGroup, rejected: rejectedGroup };
+  // A folded group's effect never runs again, so only the groups being shown
+  // may contribute loading, failure or counts.
+  const shownGroups = STATUSES.filter(status => mode === 'linked' && open[status]);
+  const resetView = () => { setSelected(new Set()); STATUSES.forEach(status => groups[status].reset()); };
   const [edit, setEdit] = useState<EditTarget | null>(null);
   const [opening, setOpening] = useState(false);
   const [reference, setReference] = useState<Reference | null>(null);
@@ -367,24 +432,7 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
   const active = useRef(true);
   useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
   const running = starting || run?.state === 'queued' || run?.state === 'running';
-
-  useEffect(() => {
-    if (mode === 'candidates') return;
-    let current = true;
-    const controller = new AbortController();
-    const timer = window.setTimeout(async () => {
-      setLoading(true);
-      try {
-        const response = await api.get<Page<Source> & { zero_seen: number }>(`/v1/concept-to-code/${concept.concept_id}/`, {
-          params: { mode, search, seen_only: seenOnly ? '1' : '0', page, ...(order ? { order } : {}) }, signal: controller.signal,
-        });
-        if (current) { setData(response.data); setSelected(new Set()); }
-      } catch {
-        if (current) setError(loadFailed);
-      } finally { if (current) setLoading(false); }
-    }, 250);
-    return () => { current = false; controller.abort(); window.clearTimeout(timer); };
-  }, [concept.concept_id, mode, search, seenOnly, page, order, revision]);
+  const finishedRun = run && !running ? run.run_id : null;
 
   // Re-estimated after every write: a proposed source leaves the pool, so the
   // next run reaches codes the last one did not show.
@@ -397,13 +445,15 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
       if (!strategyKey) return;
       try {
         const response = await api.get<Estimate>(`/v1/concept-to-code/${concept.concept_id}/estimate/`, {
-          params: { strategies: strategyKey, include_zero_seen: seenOnly ? '0' : '1' }, signal: controller.signal,
+          params: { strategies: strategyKey, include_zero_seen: seenOnly ? '0' : '1', include_declined: retryDeclined ? '1' : '0' },
+          signal: controller.signal,
         });
         if (current) setEstimate(response.data);
       } catch { /* The estimate is a guide; Suggest works without it. */ }
     }, 250);
     return () => { current = false; controller.abort(); window.clearTimeout(timer); };
-  }, [concept.concept_id, strategyKey, seenOnly, revision]);
+    // A finished run recorded declines, which the estimate now skips.
+  }, [concept.concept_id, strategyKey, seenOnly, retryDeclined, revision, finishedRun]);
 
   useEffect(() => {
     if (!run || !['queued', 'running'].includes(run.state)) return;
@@ -419,29 +469,48 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
     return () => { current = false; window.clearTimeout(timer); };
   }, [run]);
 
-  const changeMode = (next: typeof mode) => { setMode(next); setSelected(new Set()); setPage(1); setSearch(''); setData(null); setError(''); };
+  const changeMode = (next: typeof mode) => { setMode(next); setSearch(''); resetView(); setError(''); };
+  const toggleGroup = (status: Status) => {
+    setOpen(previous => ({ ...previous, [status]: !previous[status] }));
+    // Folding drops the rows, so reopening fetches them fresh instead of
+    // showing what was there before later writes.
+    groups[status].reset();
+    setSelected(new Set());
+  };
   const start = async () => {
-    setStarting(true); setError(''); setProgress(''); setSelected(new Set()); setRun(null); setMode('candidates');
+    setStarting(true); setError(''); setProgress(''); setSelected(new Set()); setRun(null); setPatched({}); setMode('candidates');
     try {
       const { data: next } = await api.post<Run>('/v1/concept-to-code/suggest/', {
         concept_ids: [concept.concept_id], strategies: Object.keys(strategies).filter(key => strategies[key as keyof typeof strategies]),
-        limit, include_zero_seen: !seenOnly, ranking_model: ranker,
+        limit, include_zero_seen: !seenOnly, ranking_model: ranker, include_declined: retryDeclined,
       });
       if (active.current) setRun(next);
     } catch (failure) { if (active.current) setError(destinationError(failure)); }
     finally { if (active.current) setStarting(false); }
   };
-  const candidates = run?.activity.find(event => event.concept.concept_id === concept.concept_id)?.candidates ?? [];
+  const streamed = run?.activity.find(event => event.concept.concept_id === concept.concept_id)?.candidates ?? [];
+  const candidates = Object.keys(patched).length
+    ? streamed.map(item => { const edit = patched[sourceKey(item)]; return edit ? { ...item, ...edit } : item; })
+    : streamed;
   // A ranked run scores every source it considers a possible match; one it left
   // unscored is not a suggestion. An unranked run scores nothing, so it shows all.
   const ranked = Boolean(run?.selection.ranking_model && run.selection.ranking_model !== 'none');
   const scored = ranked ? candidates.filter(row => row.confidence != null) : candidates;
-  const unscoredHidden = candidates.length - scored.length;
+  const unscored = ranked ? candidates.filter(row => row.confidence == null) : [];
+  // A decline is the ranker's answer; a candidate it could not rank (the
+  // ranker was unavailable) is hidden too, but nothing was decided (#2034).
+  const declinedHidden = unscored.filter(row => row.declined).length;
+  const unrankedHidden = unscored.length - declinedHidden;
   const candidateRows = scored.filter(row => !seenOnly || row.occurrence_count > 0);
-  const rows = mode === 'candidates' ? (order ? [...candidateRows].sort(byConfidence(order)) : candidateRows) : data?.results ?? [];
+  const linkedRows = STATUSES.flatMap(status => open[status] ? groups[status].data?.results ?? [] : []);
+  const rows = mode === 'candidates' ? (order ? [...candidateRows].sort(byConfidence(order)) : candidateRows) : linkedRows;
   const editable = rows.filter(row => !row.edited && (row.status === 'proposed' || (row.status === 'unmapped' && row.mapping_id === null)) && row.origin_system !== 'athena');
   const pending = editable.filter(row => selected.has(sourceKey(row)));
-  const approvable = pending.filter(row => row.mapping_id !== null);
+  // Every open group answers with the counts of all three, under the same filters.
+  const statusCounts = shownGroups.map(status => groups[status].data?.status_counts).find(Boolean) ?? null;
+  const zeroSeen = shownGroups.map(status => groups[status].data?.zero_seen).find(value => value !== undefined);
+  const loading = shownGroups.some(status => groups[status].loading);
+  const loadError = shownGroups.some(status => groups[status].failed);
   const validThreshold = Number.isFinite(threshold) && threshold >= 0 && threshold <= 100;
   // Compare the percentage the column shows: 0.55 * 100 is 55.00000000000001.
   const confident = validThreshold
@@ -450,54 +519,78 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
   const selectConfident = () => setSelected(new Set(confident.map(sourceKey)));
   const changeOrder = () => {
     setOrder(previous => previous === '-confidence' ? 'confidence' : '-confidence');
-    setPage(1); setSelected(new Set());
-    if (mode !== 'candidates') setData(null);
+    resetView();
+  };
+  // What a write changed on a row, laid over its copies wherever the dialog
+  // shows it. Only the fields the write touched, so a running search's later
+  // updates to the same candidate (its verdict, note, other variants) still
+  // show; a full server row from the batch approve replaces the stored copy.
+  const patchRow = (row: Source, updated: Partial<Source>, { replace = false } = {}) => {
+    if (!active.current) return;
+    STATUSES.forEach(status => groups[status].setData(previous => previous
+      ? { ...previous, results: previous.results.map(item => sourceKey(item) === sourceKey(row)
+        ? (replace ? updated as Source : { ...item, ...updated }) : item) } : null));
+    setPatched(previous => ({ ...previous, [sourceKey(row)]: { ...previous[sourceKey(row)], ...updated } }));
   };
 
-  const save = async (approve: boolean) => {
-    if (writingRef.current || !pending.length || (approve && !canApprove)) return;
-    const batch = approve ? approvable : [...pending];
-    if (!batch.length) return;
+  // One click approves: a suggested source with no mapping yet is proposed from
+  // its saved preview first, then approved on the revision that returned (#2010).
+  const approve = async () => {
+    if (writingRef.current || !pending.length || !canApprove) return;
+    const batch = [...pending];
     writingRef.current = true; setWriting(true); onWriting(true); setError('');
     const failures: string[] = [];
     let saved = 0;
+    // Rows written, approved or only proposed: each changes the counts and the estimate.
+    let written = 0;
     try {
       for (const [index, row] of batch.entries()) {
         if (!active.current) break;
         setProgress(`Reviewing ${index + 1} of ${batch.length}…`);
         try {
-          let updated: Source;
-          if (row.mapping_id === null) {
-            ({ data: updated } = await api.post<Source>(`/v1/concept-to-code/${concept.concept_id}/mappings/`, {
+          let current = row;
+          if (current.mapping_id === null) {
+            ({ data: current } = await api.post<Source>(`/v1/concept-to-code/${concept.concept_id}/mappings/`, {
               run_id: run?.run_id, source_vocabulary_id: row.source_vocabulary_id, source_code: row.source_code, status: 'proposed',
             }));
-          } else {
-            const applyUrl = `/v1/concept-to-code/${concept.concept_id}/mappings/${row.mapping_id}/`;
-            const applyPayload = {
-              status: approve ? 'approved' : 'proposed', expected_updated_at: row.updated_at,
-            };
-            ({ data: updated } = await api.post<Source>(applyUrl, applyPayload));
+            written += 1;
+            patchRow(row, current, { replace: true });
           }
-          saved += 1;
-          if (active.current) {
-            setData(previous => previous ? { ...previous, results: previous.results.map(item => sourceKey(item) === sourceKey(row) ? updated : item) } : null);
-            setRun(previous => previous ? { ...previous, activity: previous.activity.map(event => ({ ...event,
-              candidates: event.candidates.map(item => sourceKey(item) === sourceKey(row) ? { ...item, ...updated } : item),
-            })) } : null);
-          }
+          const { data: updated } = await api.post<Source>(`/v1/concept-to-code/${concept.concept_id}/mappings/${current.mapping_id}/`, {
+            status: 'approved', expected_updated_at: current.updated_at,
+          });
+          saved += 1; written += 1;
+          patchRow(row, updated, { replace: true });
         } catch (failure) { failures.push(`${row.source_code}: ${destinationError(failure)}`); }
       }
       if (active.current) {
-        setProgress(`${approve ? 'Approved' : 'Proposed'} ${saved} of ${batch.length} selected mappings.`);
+        setProgress(`Approved ${saved} of ${batch.length} selected mappings.`);
         setSelected(new Set());
         if (failures.length) setError(failures.join(' '));
-        if (saved) { onSaved(); setRevision(value => value + 1); }
+        if (written) { onSaved(); setRevision(value => value + 1); }
       }
     } finally { writingRef.current = false; if (active.current) setWriting(false); onWriting(false); }
   };
 
+  // Approve one axis variant from the row: its stored rows in those units are
+  // re-pointed, and the row shows the server's view of every variant (#2012).
+  const approveVariant = async (row: Source, variant: AxisVariant) => {
+    if (writingRef.current || opening || row.mapping_id === null || !variant.target_concept) return;
+    // A write like any other here: one at a time, and the dialog cannot close under it.
+    writingRef.current = true; setWriting(true); onWriting(true); setError('');
+    try {
+      const { data } = await api.post<LoincAxesPayload>(`/v1/code-mappings/${row.mapping_id}/axis-variants/`, {
+        axis_key: variant.axis_key, target_concept_id: variant.target_concept.concept_id, approve: true,
+      });
+      patchRow(row, { axis_variants: data.variants });
+      setProgress(`Approved the ${variant.units?.join(', ') || variant.axis_key} variant of ${row.source_code}.`);
+    } catch (failure) {
+      if (active.current) setError(`Could not approve the variant of ${row.source_code}. ${destinationError(failure)}`);
+    } finally { writingRef.current = false; if (active.current) setWriting(false); onWriting(false); }
+  };
+
   const openEditor = async (row: Source) => {
-    if (busy || opening) return;
+    if (writingRef.current || opening) return;
     setOpening(true); setError('');
     try {
       let current = reference;
@@ -520,61 +613,84 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
   const editorSaved = (saved: CodeMappingRow) => {
     onSaved();
     setRevision(value => value + 1);
-    if (mode !== 'candidates') return;
+    // Stored rows reload with new revisions; a selection made over the old ones must not be approved.
+    if (mode !== 'candidates') { setSelected(new Set()); return; }
     const key = edit ? sourceKey(edit.source) : '';
     setSelected(previous => { const next = new Set(previous); next.delete(key); return next; });
-    setRun(previous => previous ? { ...previous, activity: previous.activity.map(event => ({ ...event,
-      candidates: event.candidates.map(item => sourceKey(item) === key ? {
-        ...item, edited: true, mapping_id: saved.mapping_id, status: saved.status,
+    if (edit) {
+      patchRow(edit.source, {
+        edited: true, mapping_id: saved.mapping_id, status: saved.status,
         destination_concept_id: saved.destination_concept_id, destination_concept_name: saved.destination_concept_name,
         destination_standard_concept: saved.standard_concept ?? null,
-      } : item),
-    })) } : null);
+      });
+    }
   };
 
+  const editorDeleted = () => {
+    onSaved(); setSelected(new Set()); setRevision(value => value + 1);
+    if (edit) {
+      patchRow(edit.source, {
+        edited: false, mapping_id: null, status: 'unmapped',
+        destination_concept_id: null, destination_concept_name: '', destination_standard_concept: null,
+      });
+    }
+  };
+
+  // The run's controls and the batch selection wait for a run to finish; a
+  // write in progress blocks everything. Opening a code to edit it waits only
+  // for a write, so a curator works through the list while Suggest searches (#2028).
   const busy = writing || running;
-  const retry = useCallback(() => { setData(null); setSelected(new Set()); setError(''); setRevision(value => value + 1); }, []);
+  const locked = writing || opening;
+  const retry = () => { resetView(); setError(''); setRevision(value => value + 1); };
   return <section aria-label={`Source codes for ${concept.concept_name}`} className="space-y-4">
     <div role="group" aria-label="Source code views" className="flex flex-wrap gap-2">
-      {([['linked', 'Existing mappings'], ['available', 'Find source codes'], ['candidates', 'Suggested source codes']] as const).map(([key, label]) =>
-        <button key={key} className={`${button} ${mode === key ? 'bg-slate-100 font-semibold' : ''}`} disabled={busy} aria-pressed={mode === key}
+      {([['linked', 'Existing mappings'], ['candidates', 'Suggested source codes']] as const).map(([key, label]) =>
+        <button key={key} className={`${button} ${mode === key ? 'bg-slate-100 font-semibold' : ''}`} disabled={writing} aria-pressed={mode === key}
           onClick={() => changeMode(key)}>{label}</button>)}
     </div>
-    <div className="flex flex-wrap items-center gap-3">
-      {mode !== 'candidates' && <input className={`${input} flex-1`} aria-label="Search source codes" placeholder="Source code, description or vocabulary"
-        value={search} disabled={busy} onChange={event => { setSearch(event.target.value); setPage(1); setSelected(new Set()); setData(null); }} />}
-      {(['umls', 'lexical'] as const).map(strategy => <label key={strategy} className="flex items-center gap-1 text-sm">
-        <input type="checkbox" checked={strategies[strategy]} disabled={busy} onChange={event => setStrategies(previous => ({ ...previous, [strategy]: event.target.checked }))} />
-        {strategy === 'umls' ? 'UMLS' : 'Names and synonyms'}</label>)}
-      <select aria-label="Source suggestion ranker" className={input} value={ranker} disabled={busy} onChange={event => setRanker(event.target.value)}>
-        <option value="jev">Jev assistance</option><option value="anthropic">Anthropic assistance</option>
-        <option value="both">Both rankers</option><option value="none">Curator review</option>
-      </select>
-      <input type="number" aria-label="Maximum source candidates" className={`${input} w-20`} value={limit} min={1} max={100} disabled={busy} onChange={event => setLimit(Number(event.target.value))} />
-      <div className="flex flex-col gap-1">
-        <button className={`${button} self-start`} disabled={busy || (!strategies.umls && !strategies.lexical) || !Number.isInteger(limit) || limit < 1 || limit > 100}
-          onClick={() => void start()}>{running ? 'Searching…' : 'Suggest source codes'}</button>
-        {estimate && <p data-testid="source-estimate" className="text-xs text-slate-600">{estimateText(estimate, limit)}</p>}
+    {mode !== 'candidates' && <input className={`${input} w-full`} aria-label="Search source codes" placeholder="Source code, description or vocabulary"
+      value={search} disabled={writing} onChange={event => { setSearch(event.target.value); resetView(); }} />}
+    <div className="space-y-1">
+      {/* The ranker, the limit and the button stay on one line: the button
+          is read with the settings it runs (#2034). */}
+      <div role="group" aria-label="Suggest settings" className="flex flex-wrap items-center gap-3">
+        {(['umls', 'lexical'] as const).map(strategy => <label key={strategy} className="flex items-center gap-1 text-sm">
+          <input type="checkbox" checked={strategies[strategy]} disabled={busy} onChange={event => setStrategies(previous => ({ ...previous, [strategy]: event.target.checked }))} />
+          {strategy === 'umls' ? 'UMLS' : 'Names and synonyms'}</label>)}
+        <label className="flex items-center gap-1 text-sm" title="Search the sources a ranker declined in earlier runs again, instead of skipping them">
+          <input type="checkbox" checked={retryDeclined} disabled={busy} onChange={event => setRetryDeclined(event.target.checked)} />
+          Retry declined</label>
+        <span className="flex flex-nowrap items-center gap-3">
+          <select aria-label="Source suggestion ranker" className={input} value={ranker} disabled={busy} onChange={event => setRanker(event.target.value)}>
+            <option value="jev">Jev assistance</option><option value="anthropic">Anthropic assistance</option>
+            <option value="both">Both rankers</option><option value="none">Curator review</option>
+          </select>
+          <input type="number" aria-label="Maximum source candidates" className={`${input} w-20`} value={limit} min={1} max={100} disabled={busy} onChange={event => setLimit(Number(event.target.value))} />
+          <button className={`${button} whitespace-nowrap`} disabled={busy || (!strategies.umls && !strategies.lexical) || !Number.isInteger(limit) || limit < 1 || limit > 100}
+            onClick={() => void start()}>{running ? 'Searching…' : 'Suggest source codes'}</button>
+        </span>
       </div>
+      {estimate && <p data-testid="source-estimate" className="text-xs text-slate-600">{estimateText(estimate, limit)}</p>}
     </div>
     <p className="text-xs text-slate-500">Review clinical meaning before selecting codes. Suggestions do not change mappings; approval updates the mapping and matching stored clinical rows.
-      {' '}New vocabulary codes have Seen = 0 and must be proposed before approval.</p>
+      {' '}New vocabulary codes have Seen = 0; approving one proposes it from this preview first.</p>
     {run && mode === 'candidates' && <p role="status" className="text-sm text-slate-600">
       {running ? 'Searching local vocabulary evidence…' : `${candidates.length} candidates retrieved (limit ${run.selection.limit}).`}
-      {!running && unscoredHidden > 0 && ` ${unscoredHidden} without a confidence score hidden.`}
+      {!running && declinedHidden > 0 && ` ${declinedHidden} declined by the ranker and hidden${run.selection.include_declined ? '' : '; the next run moves on to other codes'}.`}
+      {!running && unrankedHidden > 0 && ` ${unrankedHidden} could not be ranked (the ranker was unavailable) and ${unrankedHidden === 1 ? 'is' : 'are'} hidden.`}
       {run.error && ` ${run.error}`}
     </p>}
     {run && mode === 'candidates' && run.selection.include_zero_seen === seenOnly && <p className="text-xs text-amber-800">Run Suggest source codes again to search with the changed Seen filter.</p>}
-    {error && <p role="alert" className="text-sm text-rose-700">{error}
-      {error === loadFailed && <button type="button" className="ml-2 underline" onClick={retry}>Retry</button>}</p>}
+    {(error || loadError) && <p role="alert" className="text-sm text-rose-700">{error || loadFailed}
+      {loadError && <button type="button" className="ml-2 underline" onClick={retry}>Retry</button>}</p>}
     {progress && <p role="status" className="text-sm font-medium text-slate-800">{progress}</p>}
     {loading && <p role="status" className="text-sm text-slate-500">Loading source codes…</p>}
-    <div className="flex flex-wrap items-center gap-3">
-      <button className={button} disabled={busy || !pending.length} onClick={() => void save(false)}>Propose selected ({pending.length})</button>
-      {canApprove && <button className="rounded bg-slate-950 px-3 py-1.5 text-sm text-white disabled:opacity-40" disabled={busy || !approvable.length}
-        onClick={() => void save(true)}>Approve selected ({approvable.length})</button>}
-      {mode !== 'candidates' && data && <span className="text-xs text-slate-500">{data.total} matching sources{seenOnly ? ` · ${data.zero_seen} zero-Seen codes excluded` : ''}</span>}
-    </div>
+    {(canApprove || (mode === 'linked' && statusCounts)) && <div className="flex flex-wrap items-center gap-3">
+      {canApprove && <button className="rounded bg-slate-950 px-3 py-1.5 text-sm text-white disabled:opacity-40" disabled={busy || !pending.length}
+        onClick={() => void approve()}>Approve selected ({pending.length})</button>}
+      {mode === 'linked' && statusCounts && <span className="text-xs text-slate-500">
+        {STATUSES.reduce((sum, status) => sum + statusCounts[status], 0)} matching sources{seenOnly && zeroSeen !== undefined ? ` · ${zeroSeen} zero-Seen codes excluded` : ''}</span>}
+    </div>}
     <div className="overflow-x-auto"><table aria-label="Source codes for selected concept" className="w-full text-left text-sm">
       <thead className="border-y bg-slate-50 text-xs text-slate-600"><tr>
         <th className="p-2"><input type="checkbox" aria-label="Select displayed proposed sources" disabled={busy || !editable.length}
@@ -591,16 +707,50 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
         <th className="p-2">Description</th>
         <th className="p-2" aria-sort={order ? 'none' : 'descending'}><label className="mb-1 flex whitespace-nowrap items-center gap-1 font-normal">
           <input type="checkbox" aria-label="Only source codes with Seen greater than zero" checked={seenOnly} disabled={busy}
-            onChange={event => { setSeenOnly(event.target.checked); setPage(1); setData(null); setSelected(new Set()); }} />&gt; 0 only</label>
+            onChange={event => { setSeenOnly(event.target.checked); resetView(); }} />&gt; 0 only</label>
           {order ? <button type="button" className="font-semibold hover:text-slate-950 disabled:opacity-40" disabled={busy} title="Order by Seen"
-            onClick={() => { setOrder(''); setPage(1); setSelected(new Set()); if (mode !== 'candidates') setData(null); }}>Seen ↕</button> : 'Seen ↓'}</th>
+            onClick={() => { setOrder(''); resetView(); }}>Seen ↕</button> : 'Seen ↓'}</th>
         <th className="p-2">Current destination</th>
         <th className="p-2" aria-sort={order === '-confidence' ? 'descending' : order === 'confidence' ? 'ascending' : 'none'}>
           <button type="button" className="flex items-center gap-1 font-semibold hover:text-slate-950 disabled:opacity-40" disabled={busy}
             title="Order by confidence" onClick={changeOrder}>Status / evidence · Confidence
             <span aria-hidden="true">{order === '-confidence' ? '↓' : order === 'confidence' ? '↑' : '↕'}</span></button></th>
       </tr></thead>
-      <tbody>{rows.map(row => <tr key={sourceKey(row)} className="cursor-pointer border-b border-slate-100 align-top hover:bg-slate-50"
+      {mode === 'linked' ? STATUSES.map(status => {
+        const group = groups[status];
+        const count = statusCounts?.[status];
+        return <tbody key={status} data-testid={`mapping-group-${status}`}>
+          <tr className="border-b border-slate-100 bg-slate-50">
+            <td colSpan={6} className="p-2">
+              <button type="button" className="flex items-center gap-2 text-sm font-semibold text-slate-800 disabled:opacity-40"
+                aria-expanded={open[status]} disabled={writing} onClick={() => toggleGroup(status)}>
+                <span aria-hidden="true">{open[status] ? '▾' : '▸'}</span>
+                {statusLabel[status]}{count !== undefined ? ` (${count})` : ''}
+              </button>
+            </td>
+          </tr>
+          {open[status] && group.data?.results.map(renderRow)}
+          {open[status] && group.data && !group.data.results.length && <tr><td colSpan={6} className="p-2 text-sm text-slate-500">
+            No {status} mappings{search ? ' match this search' : ''}{seenOnly ? '; uncheck > 0 only to include zero-Seen codes' : ''}.</td></tr>}
+          {open[status] && group.data && <tr><td colSpan={6} className="p-0">
+            <Pagination data={group.data} disabled={writing || group.loading} change={next => { group.setPage(next); group.setData(null); setSelected(new Set()); }} /></td></tr>}
+        </tbody>;
+      }) : <tbody>{rows.map(renderRow)}</tbody>}
+    </table></div>
+    {mode === 'candidates' && !loading && !rows.length && <p className="text-sm text-slate-500">No source codes shown. {seenOnly ? 'Uncheck > 0 only to include zero-Seen codes. ' : ''}
+      Run Suggest source codes to search.</p>}
+    <EditMappingDialog open={edit !== null} onClose={closeEditor} mode={edit?.mode ?? 'edit'} row={edit?.row ?? null}
+      reference={reference ?? emptyReference} canApprove={canApprove}
+      strategies={dialogStrategies} rankingModel={dialogRanking}
+      onStrategiesChange={setDialogStrategies} onRankingModelChange={setDialogRanking}
+      onSaved={editorSaved} onDeleted={editorDeleted}
+      defaultDestination={destination} sourceExamples />
+  </section>;
+
+  // A plain render function, not a nested component: a component declared here
+  // would be a new type every render and remount each row.
+  function renderRow(row: Source) {
+    return <tr key={sourceKey(row)} className="cursor-pointer border-b border-slate-100 align-top hover:bg-slate-50"
         onClick={event => {
           // The checkbox and the code button act on their own.
           if ((event.target as HTMLElement).closest('input, button, a, select, label')) return;
@@ -610,8 +760,9 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
           disabled={busy || !editable.includes(row)} checked={selected.has(sourceKey(row))}
           onChange={event => setSelected(previous => { const next = new Set(previous); if (event.target.checked) next.add(sourceKey(row)); else next.delete(sourceKey(row)); return next; })} /></td>
         <td className="p-2 font-mono text-xs"><button type="button" className="text-left underline underline-offset-2 hover:text-slate-950 disabled:opacity-40"
-          disabled={busy || opening} aria-haspopup="dialog" title={`Open ${row.source_code} in Edit Mapping`}
-          onClick={() => void openEditor(row)}>{row.source_vocabulary_id || 'Uncoded'}:{row.source_code}</button><AxisVariantFlag count={row.axis_variant_count} /></td>
+          disabled={locked} aria-haspopup="dialog" title={`Open ${row.source_code} in Edit Mapping`}
+          onClick={() => void openEditor(row)}>{row.source_vocabulary_id || 'Uncoded'}:{row.source_code}</button><AxisVariantFlag count={row.axis_variant_count} />
+          <AxisVariantList variants={row.axis_variants} canApprove={canApprove} busy={locked} onApprove={variant => void approveVariant(row, variant)} /></td>
         <td className="p-2">{row.source_code_description || '—'}</td><td className="p-2 text-right tabular-nums">{row.occurrence_count}</td>
         <td className="p-2 text-xs">{row.destination_concept_name || 'None'}{row.destination_concept_id && <div className="mt-1 text-slate-500">
           OMOP {row.destination_concept_id} · {row.destination_standard_concept === 'S' ? 'Standard' : 'Nonstandard'}</div>}</td>
@@ -622,16 +773,6 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
           {row.verdict === 'supported' && <div className="mt-1 text-sky-800">Model-supported; curator review required</div>}
           {row.note && <p className="mt-1 max-w-xs text-slate-500">{row.note}</p>}
           {row.edited && <div className="mt-1 text-slate-700">Saved in the editor</div>}</td>
-      </tr>)}</tbody>
-    </table></div>
-    {!loading && !rows.length && <p className="text-sm text-slate-500">No source codes shown. {seenOnly ? 'Uncheck > 0 only to include zero-Seen codes. ' : ''}
-      {mode === 'candidates' ? 'Run Suggest source codes to search.' : mode === 'linked' ? 'Use Find source codes or Suggest source codes to extend coverage.' : 'Try a different source search.'}</p>}
-    {mode !== 'candidates' && data && <Pagination data={data} disabled={busy || loading} change={next => { setPage(next); setData(null); setSelected(new Set()); }} />}
-    <EditMappingDialog open={edit !== null} onClose={closeEditor} mode={edit?.mode ?? 'edit'} row={edit?.row ?? null}
-      reference={reference ?? emptyReference} canApprove={canApprove}
-      strategies={dialogStrategies} rankingModel={dialogRanking}
-      onStrategiesChange={setDialogStrategies} onRankingModelChange={setDialogRanking}
-      onSaved={editorSaved} onDeleted={() => { onSaved(); setRevision(value => value + 1); }}
-      defaultDestination={destination} sourceExamples />
-  </section>;
+      </tr>;
+  }
 }

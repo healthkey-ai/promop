@@ -121,6 +121,20 @@ def concept_to_code_detail(request, concept_id):
                             zero_seen=Count('pk', filter=Q(occurrence_count=0)))
     from omop_core.services.mapping_browse import apply_seen
     rows = apply_seen(rows, request.query_params)
+    # The dialog lists approved, proposed and rejected mappings as separate
+    # groups (#2010); counts cover every status so a collapsed group can show
+    # how many rows it holds before it is fetched. Available rows are all
+    # proposed by construction, so only linked mode counts.
+    statuses = [status for status, _ in SourceCodeConceptMapping.STATUS_CHOICES]
+    status = request.query_params.get('status', '')
+    if status not in ('', *statuses):
+        raise ValidationError({'status': 'Choose approved, proposed or rejected.'})
+    status_counts = None
+    if mode == 'linked':
+        status_counts = dict.fromkeys(statuses, 0)
+        status_counts.update(dict(rows.order_by().values_list('status').annotate(count=Count('pk'))))
+    if status:
+        rows = rows.filter(status=status)
     order = request.query_params.get('order', '')
     if order not in ('', 'confidence', '-confidence'):
         raise ValidationError({'order': 'Choose confidence or -confidence.'})
@@ -130,8 +144,9 @@ def concept_to_code_detail(request, concept_id):
         confidence = F('suggestion_confidence')
         ordering.insert(0, confidence.desc(nulls_last=True) if order == '-confidence'
                         else confidence.asc(nulls_last=True))
-    page, paging = _paginate(rows.select_related('target_concept').order_by(*ordering), request.query_params)
-    return Response({**paging, **counts, 'concept': concept_payload(concept),
+    page, paging = _paginate(rows.select_related('target_concept').prefetch_related('axis_variants__target_concept')
+                             .order_by(*ordering), request.query_params)
+    return Response({**paging, **counts, 'status_counts': status_counts, 'concept': concept_payload(concept),
                      'results': [source_payload(row) for row in page]})
 
 
@@ -230,8 +245,10 @@ def concept_to_code_estimate(request, concept_id):
     if not strategies or any(s not in ('umls', 'lexical') for s in strategies):
         raise ValidationError({'strategies': 'Choose umls, lexical, or both.'})
     include_zero = request.query_params.get('include_zero_seen', '0') == '1'
+    include_declined = request.query_params.get('include_declined', '0') == '1'
     try:
-        estimate = estimate_source_count(concept, strategies=strategies, include_zero_seen=include_zero)
+        estimate = estimate_source_count(concept, strategies=strategies, include_zero_seen=include_zero,
+                                         include_declined=include_declined)
     except (TimeoutError, OperationalError):
         # Even the approximation outran its budget; the page says so.
         return Response({'total': None, 'timed_out': True})
@@ -265,6 +282,9 @@ def concept_to_code_suggest(request):
     include_zero = data.get('include_zero_seen', False)
     if type(include_zero) is not bool:
         raise ValidationError({'include_zero_seen': 'Supply a boolean.'})
+    include_declined = data.get('include_declined', False)
+    if type(include_declined) is not bool:
+        raise ValidationError({'include_declined': 'Supply a boolean.'})
     limit = data.get('limit', 10)
     if type(limit) is not int or not 1 <= limit <= 100:
         raise ValidationError({'limit': 'Choose a whole number from 1 to 100.'})
@@ -272,7 +292,7 @@ def concept_to_code_suggest(request):
     ceiling = dispatcher.max_codes if ranking_model != 'none' else 100
     limit = min(limit, max(1, ceiling // len(ids)))
     params = dict(direction='reverse', concept_ids=ids, strategies=strategies, limit=limit,
-                  include_zero_seen=include_zero, ranking_model=ranking_model,
+                  include_zero_seen=include_zero, include_declined=include_declined, ranking_model=ranking_model,
                   retrieval_timeout_ms=8000 if inline else 30000)
     with transaction.atomic():
         run = SuggestRun.objects.create(

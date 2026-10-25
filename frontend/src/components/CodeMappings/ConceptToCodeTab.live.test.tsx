@@ -48,9 +48,12 @@ describeLive('ConceptToCodeTab against a live backend', () => {
     fireEvent.click(await screen.findByRole('button', { name: new RegExp(CONCEPT) }, { timeout: 10000 }));
     const coverage = await screen.findByRole('dialog', { name: new RegExp(`Source codes for .*${CONCEPT}`) });
 
-    // The code has no destination yet, so it is found, not linked.
-    fireEvent.click(within(coverage).getByRole('button', { name: 'Find source codes' }));
-    fireEvent.click(await within(coverage).findByRole('button', { name: SOURCE }, { timeout: 10000 }));
+    // The code has no destination yet, so it is suggested, not linked: a
+    // curator-review run retrieves it without spending a ranker call (#2010).
+    fireEvent.change(within(coverage).getByLabelText('Source suggestion ranker'), { target: { value: 'none' } });
+    fireEvent.change(within(coverage).getByLabelText('Maximum source candidates'), { target: { value: '100' } });
+    fireEvent.click(within(coverage).getByRole('button', { name: 'Suggest source codes' }));
+    fireEvent.click(await within(coverage).findByRole('button', { name: SOURCE }, { timeout: 30000 }));
 
     const editor = await screen.findByRole('dialog', { name: 'Edit Mapping' }, { timeout: 10000 });
     await waitFor(() => expect(within(editor).getByLabelText('Destination Concept ID')).toHaveValue(CONCEPT_ID), { timeout: 10000 });

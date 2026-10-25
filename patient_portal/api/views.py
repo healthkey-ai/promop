@@ -7909,6 +7909,19 @@ class _OmopDeferRefreshMixin:
         return response
 
 
+def _bulk_row_errors(errors, row_count):
+    """Keep the bulk endpoint's positional error list under DRF 3.18.
+
+    DRF 3.18 switched ``ListSerializer`` child errors to ``{index: detail}`` by
+    default (``LIST_SERIALIZER_ERRORS_AS_DICT``). This endpoint's documented
+    contract is a list aligned with the request rows, so expand the index-keyed
+    form back to a list. List-level errors (non-index keys) pass through.
+    """
+    if isinstance(errors, dict) and errors and set(errors) <= set(range(row_count)):
+        return [errors.get(index, {}) for index in range(row_count)]
+    return errors
+
+
 class _OmopBulkCreateMixin:
     """Accept a JSON *list* on POST and insert the rows in one batched transaction.
 
@@ -8078,17 +8091,12 @@ class _OmopBulkCreateMixin:
         # after the batch-size guard above has limited the allocation.
         serializer = self.get_serializer(data=rows, many=True)
         _prefetch_bulk_related(serializer, rows)
-        try:
-            serializer.is_valid(raise_exception=True)
-        except ValidationError as exc:
-            errors = exc.detail
-            if isinstance(errors, dict) and errors and all(
-                type(index) is int and 0 <= index < len(rows) for index in errors
-            ):
-                raise ValidationError([
-                    errors.get(index, {}) for index in range(len(rows))
-                ]) from exc
-            raise
+        serializer.is_valid()
+        if serializer.errors:
+            return Response(
+                _bulk_row_errors(serializer.errors, len(rows)),
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         validated = serializer.validated_data
 
         if not validated:
@@ -9448,7 +9456,10 @@ def concept_graph_batch(request):
 # =============================================================================
 
 from omop_core.api.concepts import ConceptPagination  # noqa: E402  (packaged config)
-from omop_core.api.views import TherapyLineViewSet as _PackagedTherapyLineViewSet  # noqa: E402
+from omop_core.api.views import (  # noqa: E402
+    TherapyHistoryCompletenessViewSet as _PackagedTherapyHistoryCompletenessViewSet,
+    TherapyLineViewSet as _PackagedTherapyLineViewSet,
+)
 
 
 class MeasurementConceptPagination(CursorPagination):
@@ -13526,14 +13537,21 @@ def code_mapping_suggest_one(request):
     except ValueError as exc:
         return Response({'loinc_axes': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
     axis_key = str(request.data.get('axis_key') or '')
+    # One scan of the code's unit evidence serves the variant's axis values
+    # and observed_units below.
+    unit_evidence = (axis_variants_module.unit_counts(axes_mapping)
+                     if axes_mapping and (axis_key or omop_table == 'measurement') else None)
     if axis_key:
-        variant = axes_mapping.axis_variants.filter(axis_key=axis_key).first() if axes_mapping else None
-        if variant is None:
-            from omop_core.mapping.axis_variants import detect
-            detected = {v['axis_key']: v for v in detect(axes_mapping)[0]} if axes_mapping else {}
-            values = (detected.get(axis_key) or {}).get('axis_values')
-        else:
-            values = variant.axis_values
+        # What the units imply now, so a row stored before the axis values it
+        # carries were derived (a % variant with no property set) is suggested
+        # with the current constraints; a stored variant the evidence no
+        # longer shows keeps its own.
+        detected = ({v['axis_key']: v for v in axis_variants_module.detect(axes_mapping, unit_evidence, notes=False)[0]}
+                    if axes_mapping else {})
+        values = (detected.get(axis_key) or {}).get('axis_values')
+        if values is None:
+            variant = axes_mapping.axis_variants.filter(axis_key=axis_key).first() if axes_mapping else None
+            values = variant.axis_values if variant is not None else None
         if values is None:
             return Response({'axis_key': 'This code has no such axis variant.'},
                             status=status.HTTP_400_BAD_REQUEST)
@@ -13555,8 +13573,8 @@ def code_mapping_suggest_one(request):
         'axis_overrides': axis_overrides,
         'snomed_overrides': snomed_overrides,
         'observed_units': (
-            axis_variants_module.observed_units(axes_mapping) if axes_mapping and omop_table == 'measurement'
-            else None
+            axis_variants_module.observed_units(axes_mapping, unit_evidence)
+            if axes_mapping and omop_table == 'measurement' else None
         ),
         'source_description': str(request.data.get('source_code_description') or ''),
         # The dialog's Source Metadata, else this table's mapping's own:
@@ -14722,20 +14740,17 @@ def field_formula_detail(request, pk):
     return Response(serializer.data)
 
 
-class TherapyLineViewSet(_PackagedTherapyLineViewSet):
-    """Author a line of therapy, under PROMOP's own permissions.
+class _TherapyHostPolicy:
+    """PROMOP's policy for the packaged therapy writes (``omop_core.api``).
 
-    The clinical write and its payload are packaged (``omop_core.api``) so an
-    embedding host serves the same contract. What stays here is host policy:
-    which roles may write, the organization check object-level permissions do
-    not apply on create, and the record payload this product's client expects.
+    The clinical write and its payload are packaged so an embedding host serves
+    the same contract. What stays here is host policy: which roles may write, the
+    organization check object-level permissions do not apply on create, and the
+    record payload this product's client expects. Shared by authoring and the
+    history-completeness statement, which must never be gated more loosely.
     """
 
     permission_classes = [PatientCrudPermission, PatientSelfScopePermission]
-
-    def _check_person_write_permission(self, request, person):
-        """Kept as the name other patient-portal code calls."""
-        return self.patient_write_denied(request, person)
 
     def patient_write_denied(self, request, person):
         # Same create-time check the single-row clinical writes use: object-level
@@ -14763,6 +14778,14 @@ class TherapyLineViewSet(_PackagedTherapyLineViewSet):
     def patient_info_payload(self, record):
         return PatientRecordSerializer(record).data
 
+
+class TherapyLineViewSet(_TherapyHostPolicy, _PackagedTherapyLineViewSet):
+    """Author a line of therapy, under PROMOP's own permissions."""
+
+    def _check_person_write_permission(self, request, person):
+        """Kept as the name other patient-portal code calls."""
+        return self.patient_write_denied(request, person)
+
     # The class permission refuses system/etl.write because the editor POST is a patient write
     @action(detail=False, methods=['post'], url_path='bulk_upsert',
             permission_classes=[EtlWritePermission])
@@ -14783,3 +14806,15 @@ class TherapyLineViewSet(_PackagedTherapyLineViewSet):
             _provenance_context(request, header=True), _skip_refresh_requested(request),
             authorize_person=lambda locked_person: _authorize_person_write(request, locked_person),
         )
+
+
+class TherapyHistoryCompletenessViewSet(_TherapyHostPolicy, _PackagedTherapyHistoryCompletenessViewSet):
+    """The patient's statement that the treatment list is complete (#1924)."""
+
+    def attestation_source(self, request):
+        # Who is speaking is read off the request, never the body.
+        if is_service_token(request):
+            return 'host'
+        if getattr(request.user, 'is_staff', False):
+            return 'clinician'
+        return 'patient'
