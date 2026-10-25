@@ -23,9 +23,12 @@ type Props = {
   onVariantsChange?: (count: number) => void;
   /** Bump to re-read the axes and variants (e.g. after a variant was set elsewhere). */
   reloadToken?: number;
+  /** The queue row's axis variant count, so the loading state can say what is coming (#2030). */
+  expectedVariants?: number;
 };
 
 const AXIS_VALUE_DEBOUNCE_MS = 250;
+const SECTION = "mb-3 rounded-md border border-slate-200 bg-slate-50 p-3 text-xs";
 const BUTTON = "rounded border border-slate-300 bg-white px-1.5 py-0.5 text-[11px] text-slate-700 hover:bg-slate-100 disabled:opacity-40";
 
 function sameOverrides(a: LoincAxisOverrides, b: LoincAxisOverrides): boolean {
@@ -33,7 +36,7 @@ function sameOverrides(a: LoincAxisOverrides, b: LoincAxisOverrides): boolean {
   return [...keys].every(key => (key in a) === (key in b) && a[key] === b[key]);
 }
 
-export default function LoincAxesPanel({ mappingId, canEdit, canApprove, onAxesChange, onSuggestVariant, onVariantsChange, reloadToken = 0 }: Props) {
+export default function LoincAxesPanel({ mappingId, canEdit, canApprove, onAxesChange, onSuggestVariant, onVariantsChange, reloadToken = 0, expectedVariants = 0 }: Props) {
   const listPrefix = useId();
   const [payload, setPayload] = useState<LoincAxesPayload | null>(null);
   const [overrides, setOverrides] = useState<LoincAxisOverrides>({});
@@ -90,7 +93,18 @@ export default function LoincAxesPanel({ mappingId, canEdit, canApprove, onAxesC
   }, [activeAxis, query]);
 
   if (loadError) return <p className="text-xs text-rose-700">{loadError}</p>;
-  if (!payload || !payload.applies) return null;
+  // The axes request scans the code's unit evidence across patients, which
+  // takes seconds on a large instance. The section is on screen from the
+  // start and says so, instead of appearing once it has an answer (#2030).
+  if (!payload) {
+    return <section aria-label="LOINC axes" aria-busy="true" className={SECTION}>
+      <h3 className="text-sm font-semibold text-slate-900">LOINC axes</h3>
+      <p role="status" className="mt-0.5 text-slate-500">{expectedVariants >= 2
+        ? `Loading the ${expectedVariants} axis values of this code and their destinations…`
+        : "Loading the LOINC axes this code settles from its units and metadata…"}</p>
+    </section>;
+  }
+  if (!payload.applies) return null;
 
   const labels = payload.axis_labels;
   const saved = payload.loinc_axes || {};
@@ -218,7 +232,7 @@ export default function LoincAxesPanel({ mappingId, canEdit, canApprove, onAxesC
     </ul>}
   </>;
 
-  return <section aria-label="LOINC axes" className="mb-3 rounded-md border border-slate-200 bg-slate-50 p-3 text-xs">
+  return <section aria-label="LOINC axes" className={SECTION}>
     <h3 className="text-sm font-semibold text-slate-900">LOINC axes</h3>
     <p className="mt-0.5 text-slate-500">{variants.length >= 2
       ? "This code's units imply more than one LOINC axis set. Each is a variant with its own destination; approve one to route its units."

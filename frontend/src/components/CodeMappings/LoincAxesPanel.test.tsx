@@ -116,9 +116,27 @@ describe("LoincAxesPanel", () => {
   it("renders nothing when the domain has no LOINC", async () => {
     get.mockResolvedValue({ data: payload({ applies: false }) });
     const { container } = render(<LoincAxesPanel mappingId={7} canEdit canApprove={false} />);
-    await waitFor(() => expect(get).toHaveBeenCalled());
-    await Promise.resolve();
-    expect(container).toBeEmptyDOMElement();
+    await waitFor(() => expect(container).toBeEmptyDOMElement());
+  });
+
+  it("says it is loading until the axes arrive, naming the flagged variants (#2030)", async () => {
+    let answer: (value: { data: LoincAxesPayload }) => void = () => {};
+    get.mockImplementation(() => new Promise(resolve => { answer = resolve; }));
+    render(<LoincAxesPanel mappingId={7} canEdit canApprove={false} expectedVariants={3} />);
+    const section = screen.getByRole("region", { name: "LOINC axes" });
+    expect(section).toHaveAttribute("aria-busy", "true");
+    expect(within(section).getByRole("status")).toHaveTextContent(
+      "Loading the 3 axis values of this code and their destinations…");
+    answer({ data: variantPayload() });
+    await screen.findByRole("table", { name: "Axis variants" });
+    expect(screen.getByRole("region", { name: "LOINC axes" })).not.toHaveAttribute("aria-busy");
+    expect(screen.queryByText(/^Loading the/)).not.toBeInTheDocument();
+  });
+
+  it("says it is loading the axes for a code the queue has not flagged", () => {
+    get.mockImplementation(() => new Promise(() => {}));
+    render(<LoincAxesPanel mappingId={7} canEdit canApprove={false} />);
+    expect(screen.getByRole("status")).toHaveTextContent("Loading the LOINC axes this code settles");
   });
 
   it("reports edits, Clear and Methodless, and saves them as the PUT body", async () => {

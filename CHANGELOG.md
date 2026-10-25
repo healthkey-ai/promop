@@ -145,6 +145,10 @@ All notable changes to PRomop are documented here.
   paging wait only for a write in progress; the search's own controls and the
   batch selection still wait for the run. An edit saved while the run streams
   is kept when the next poll replaces the run's candidates. (#2028)
+- **The Edit Mapping dialog says it is loading the LOINC axes** — the section
+  is on screen as soon as the dialog opens, with a status line that names how
+  many axis values the queue flagged, instead of appearing without warning once
+  the unit evidence has been scanned. (#2030)
 - **A deploy mid-walk no longer costs the axis variant refresh six hours** —
   the request row now carries a `progress_at` heartbeat written after every
   batch. A `running` request with no heartbeat for 15 minutes lost its worker

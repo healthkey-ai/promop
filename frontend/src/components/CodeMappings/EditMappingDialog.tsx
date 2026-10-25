@@ -1044,6 +1044,7 @@ export default function EditMappingDialog({
                 {mode === "edit" && selectedRow?.mapping_id && <LoincAxesPanel
                   key={selectedRow.mapping_id} mappingId={selectedRow.mapping_id} canEdit canApprove={canApprove}
                   reloadToken={loincAxesReload}
+                  expectedVariants={selectedRow.axis_variant_count ?? 0}
                   onAxesChange={overrides => setLoincAxes({ mappingId: selectedRow.mapping_id!, overrides })}
                   onVariantsChange={count => setVariantCount({ mappingId: selectedRow.mapping_id!, count })}
                   onSuggestVariant={axisKey => void suggestCurrentCode(axisKey)} />}
