@@ -62,10 +62,10 @@ supplements missing code keys but does not supply unit evidence. The seed
 build (`scripts/build_hospital_code_seed.py`) applies the same rule: a unit the
 v2 extract saw on the code carries the extract's per-code count, patients and
 values, and the CSV supplies only its parsing and verdict; a unit the CSV knows
-for the label but the extract never saw on the code is listed with
-`count_scope: "label"` and `count: 0`, so it is never read as the code's
-evidence (#2041). Seeds built before that rule carried the label's counts on
-every code with the label and must be rebuilt and reloaded.
+for the label but the extract never saw on the code is left out, so nothing
+reads it as the code's evidence (#2041). Seeds built before that rule carried
+the label's counts on every code with the label and must be rebuilt and
+reloaded.
 
 ## Organization scope
 
