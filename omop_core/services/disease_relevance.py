@@ -69,6 +69,7 @@ DISEASE_FIELDS: dict[str, frozenset[str]] = {
     'MCL': frozenset({
         'stage', 'protein_expressions', 'ki67_proliferation_index', 'lymphadenopathy',
         'splenomegaly', 'spleen_size', 'hepatomegaly', 'largest_lymph_node_size',
+        'mipi_risk', 'mipi_c_risk', 'high_risk_mcl_criteria',
     }),
 }
 
