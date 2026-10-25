@@ -140,6 +140,18 @@ All notable changes to PRomop are documented here.
 
 ### Fixed
 
+- **A `%` variant is no longer suggested the mass-concentration LOINC** — a
+  unit that fits several LOINC properties (`%`, `U/L`, `IU/L`, `{ratio}`) now
+  settles the property to that set instead of none, so albumin in `%` keeps
+  the fraction codes and excludes 1751-7 the way the `mmol/L` variant already
+  did. The sets come from the properties of the LOINC codes that list the unit
+  among their example units; `mIU/L`, `mIU/mL` and `g/g` turned out to name one
+  property each and now settle it; on a loaded instance the sets are read from
+  the LOINC table's example units, so a new release is followed. Units with the
+  same set (`U/L`, `IU/L`) are one variant. Suggesting a variant reads the axis
+  values its units imply now, not the ones stored before this change, and a
+  variant stored under the older per-unit key is re-keyed, keeping its
+  destination. The dialog shows a set as "any of …". (#2029)
 - **A running Suggest no longer locks the Concept to Code list** — opening a
   source code to edit it, approving a variant in place, folding a group and
   paging wait only for a write in progress; the search's own controls and the

@@ -29,11 +29,14 @@ export const AXIS_BASIS_LABELS: Record<string, string> = {
 
 export type AxisVerdict = "match" | "compatible" | "conflict" | "unknown";
 
+/** A settled axis: one value, or the set of values a unit such as "%" can mean (#2029). */
+export type AxisValue = string | string[];
+
 /** Curator overrides: a string settles the axis, null lifts an inferred one. */
 export type LoincAxisOverrides = Partial<Record<LoincAxis, string | null>>;
 
 export interface SourceAxes {
-  axes: Partial<Record<LoincAxis, { value: string; basis: AxisBasis | string; evidence: string }>>;
+  axes: Partial<Record<LoincAxis, { value: AxisValue; basis: AxisBasis | string; evidence: string }>>;
   hints: Partial<Record<LoincAxis, string>>;
   /** Set when the source is a lab-style test: LOINC candidates go first. */
   expected_vocabulary?: { vocabulary_id: string; reason: string };
@@ -58,7 +61,7 @@ export interface AxisExcludedCandidate {
 export interface AxisVariant {
   id: number | null;
   axis_key: string;
-  axis_values: Partial<Record<LoincAxis, string>> & Record<string, string>;
+  axis_values: Partial<Record<LoincAxis, AxisValue>> & Record<string, AxisValue>;
   units: string[];
   occurrence_count: number;
   status: "proposed" | "approved";
@@ -86,14 +89,32 @@ export function axisLabel(axis: string, labels?: Record<string, string>): string
 }
 
 /** "Property SCnc · Scale Qn", or "Unit %" for keys the backend adds. */
-export function describeAxisValues(values: Record<string, string>, labels?: Record<string, string>): string {
+const SET_SHOWN = 4;
+
+/**
+ * An axis value as text. A set reads "any of A, B, C, D (+n more)", or in full
+ * with `full`, for a title. An empty string is the methodless method.
+ */
+export function axisValueText(value: AxisValue | null | undefined, options: { full?: boolean; blank?: string; empty?: string } = {}): string {
+  const { full = false, blank = "—", empty = "(none)" } = options;
+  if (value == null) return blank;
+  if (Array.isArray(value)) {
+    if (!value.length) return blank;
+    const shown = full ? value : value.slice(0, SET_SHOWN);
+    const more = value.length - shown.length;
+    return `any of ${shown.join(", ")}${more > 0 ? ` (+${more} more)` : ""}`;
+  }
+  return value === "" ? empty : value;
+}
+
+export function describeAxisValues(values: Record<string, AxisValue>, labels?: Record<string, string>, options: { full?: boolean } = {}): string {
   const ordered = [
     ...LOINC_AXES.filter(axis => axis in values),
     ...Object.keys(values).filter(key => !(LOINC_AXES as readonly string[]).includes(key)),
   ];
   return ordered.map(key => {
     const label = key === "unit" ? "Unit" : axisLabel(key, labels);
-    return `${label} ${values[key] === "" ? "(none)" : values[key]}`;
+    return `${label} ${axisValueText(values[key], { full: options.full })}`;
   }).join(" · ") || "—";
 }
 

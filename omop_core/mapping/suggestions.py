@@ -1102,9 +1102,15 @@ def chosen_confidence(chosen, alternatives):
                  and isinstance(a.get('confidence'), (int, float))), None)
 
 
+def _axis_value_text(value):
+    if isinstance(value, (list, tuple)):
+        return 'one of ' + ', '.join(str(v) for v in value)
+    return value or '(none)'
+
+
 def _axes_text(axes):
     return '; '.join(
-        f"{loinc_axes.AXIS_LABELS[axis]}={axes[axis] or '(none)'}"
+        f"{loinc_axes.AXIS_LABELS[axis]}={_axis_value_text(axes[axis])}"
         for axis in loinc_axes.AXES if axis in axes
     )
 

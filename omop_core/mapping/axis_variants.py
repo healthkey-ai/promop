@@ -51,7 +51,10 @@ def unit_counts(mapping):
 
 
 def axis_key(values):
-    return '|'.join(f'{axis}={values[axis]}' for axis in loinc_axes.AXES if axis in values)
+    """The canonical form of axis values; a set reads ``property=ACnc,CCnc``."""
+    def text(value):
+        return ','.join(str(v) for v in value) if isinstance(value, (list, tuple)) else value
+    return '|'.join(f'{axis}={text(values[axis])}' for axis in loinc_axes.AXES if axis in values)
 
 
 def _unit_counts(mapping):
@@ -138,11 +141,17 @@ def detect(mapping, unit_counts=None, notes=True):
             # variant of its own would flag one test as two.
             unrecognised[unit] += count
             continue
-        prop = unit_property(unit)
-        # A unit with no single property is still a quantity, but nothing says
-        # which group it joins, so it is a variant of its own, keyed by unit.
-        values = {'property': prop, 'scale_type': 'Qn'} if prop else {'scale_type': 'Qn'}
-        key = axis_key(values) if prop else f'unit={unit}'
+        options = loinc_axes.unit_property_options(unit)
+        if options:
+            # One property, or the set a unit such as % or U/L fits (#2029):
+            # U/L and IU/L fit the same set and are one variant.
+            values = {'property': loinc_axes._property_value(options), 'scale_type': 'Qn'}
+            key = axis_key(values)
+        else:
+            # A unit that fits no property is still a quantity, and nothing
+            # more, so it is a variant of its own, keyed by unit.
+            values = {'scale_type': 'Qn'}
+            key = f'unit={unit}'
         groups[key]['units'][unit] += count
         groups[key]['axis_values'] = values
     variants = [
@@ -172,6 +181,26 @@ def detect(mapping, unit_counts=None, notes=True):
     return variants, notes
 
 
+def _legacy_row(existing, variant):
+    """A row stored under the per-unit key an ambiguous unit had before its
+    property set was derived (``unit=%``, #2029), re-keyed to ``variant``'s key
+    so its destination is kept. Of several, the one with a decision wins; the
+    rest, undecided, are deleted rather than kept as unseen duplicates."""
+    legacy = [existing[key] for key in list(existing)
+              if key.startswith('unit=') and key != variant['axis_key']
+              and key[len('unit='):] in variant['units']]
+    if not legacy:
+        return None
+    legacy.sort(key=lambda row: (row.status == 'approved', row.target_concept_id is not None), reverse=True)
+    for row in legacy[1:]:
+        if row.status != 'approved' and row.target_concept_id is None:
+            existing.pop(row.axis_key)
+            row.delete()
+    row = existing.pop(legacy[0].axis_key)
+    row.axis_key = variant['axis_key']
+    return row
+
+
 @transaction.atomic
 def refresh(mapping, unit_counts=None):
     """Store the detected variants and the count the queue flags.
@@ -188,6 +217,8 @@ def refresh(mapping, unit_counts=None):
     if len(variants) >= FLAG_THRESHOLD:
         for variant in variants:
             row = existing.get(variant['axis_key'])
+            if row is None:
+                row = _legacy_row(existing, variant)
             if row is None:
                 row = SourceCodeAxisVariant(mapping=mapping, axis_key=variant['axis_key'])
             row.axis_values = variant['axis_values']
@@ -333,14 +364,19 @@ def variant_for(mapping, source_unit):
     prop = unit_property(unit)
     approved = [v for v in mapping.axis_variants.filter(status='approved', target_concept__isnull=False)
                                                   .select_related('target_concept')
+                                                  .order_by('-occurrence_count', 'axis_key')
                 if usable_destination(v.target_concept, mapping)]
     for variant in approved:
         if unit in (variant.units or []):
             return variant
     if prop:
-        for variant in approved:
-            if (variant.axis_values or {}).get('property') == prop:
-                return variant
+        # The variant for exactly this property first; then one whose set
+        # (U/L: catalytic or arbitrary) includes it.
+        for exact in (True, False):
+            for variant in approved:
+                options = loinc_axes.options_of((variant.axis_values or {}).get('property'))
+                if prop in options and (len(options) == 1) == exact:
+                    return variant
     return None
 
 

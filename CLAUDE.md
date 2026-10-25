@@ -1193,7 +1193,16 @@ Source axes come from, strongest first: a curator's entry
 `method_type` means methodless), the source code itself when it is LOINC, a
 LOINC coding in the resource's `code.coding`, then the metadata -- a UCUM unit
 names a property, `valueQuantity` names scale `Qn`, an exact specimen display
-names a system. Free-text method and `effectivePeriod` are hints only: a wrong
+names a system. A unit that fits several properties (`%` is a mass, number,
+volume or other fraction; `U/L` is catalytic or arbitrary concentration)
+settles the property to that **set**: the properties of the LOINC codes that
+give the unit as an example unit, read from the loaded `LoincCodeClass` table
+(`loinc_axes.loaded_unit_properties`, cached per process) with
+`AMBIGUOUS_UNIT_PROPERTIES` as the fallback. A candidate with any of them is
+eligible; a mass concentration for a `%` is excluded. Sets are sorted, so
+`U/L` and `IU/L` are one variant, keyed `property=ACnc,CCnc|scale_type=Qn`;
+a row stored under the older `unit=%` key is re-keyed on refresh. A set reads
+"any of …" in the dialog and "one of …" to the rankers. Free-text method and `effectivePeriod` are hints only: a wrong
 constraint hides the right answer. Inference reads the metadata *as stored*,
 because de-identification drops `specimen` (a Reference).
 

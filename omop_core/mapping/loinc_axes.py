@@ -26,10 +26,18 @@ Where the source axes come from, strongest first:
    unambiguously: a UCUM unit names a property, a ``valueQuantity`` means a
    quantitative scale, and a specimen display names a system.
 
+A settled axis is usually one value. A unit that fits several properties
+settles the property to that *set*: "%" is a mass, number, volume or other
+fraction and never a mass concentration, so a candidate is eligible when its
+value is any of the set and conflicts otherwise (``AMBIGUOUS_UNIT_PROPERTIES``).
+
 Free-text ``Observation.method`` and an ``effectivePeriod`` are shown as hints
 and never become constraints: LOINC's method and time names rarely appear in
 free text, and a wrong constraint hides the right answer.
 """
+import functools
+import re
+
 from omop_core.services.canonical_units import UNIT_GROUPS, unit_code
 
 AXES = ('component', 'property', 'time_aspect', 'system', 'scale_type', 'method_type')
@@ -67,15 +75,72 @@ _EXTRA_UNIT_PROPERTIES = {
     'mg/dl': 'MCnc', 'g/dl': 'MCnc', 'g/l': 'MCnc', 'mg/l': 'MCnc', 'ug/ml': 'MCnc',
     'ng/ml': 'MCnc', 'pg/ml': 'MCnc', 'ug/l': 'MCnc',
     'mmol/l': 'SCnc', 'umol/l': 'SCnc', 'nmol/l': 'SCnc', 'meq/l': 'SCnc',
+    # One property on the loaded LOINC table (see AMBIGUOUS_UNIT_PROPERTIES).
+    'mIU/L': 'ACnc', 'mIU/mL': 'ACnc', 'g/g': 'MRto',
 }
-#: Real units that fit more than one LOINC property: "%" is mass, number or
-#: volume fraction; "U/mL" is catalytic (an enzyme) or arbitrary (CA-125,
-#: 10334-1, is ACnc) concentration. UNIT_GROUPS lists convertible units, not
-#: unambiguous ones, so these are taken back out of it.
-AMBIGUOUS_UNITS = frozenset({
-    '%', 'U/L', 'U/mL', 'u/l', 'u/mL', 'IU/L', 'IU/mL', '[IU]/L', '[IU]/mL',
-    'mIU/L', 'mIU/mL', 'kU/L', 'g/g', '{ratio}', '1',
-})
+#: Real units that fit more than one LOINC property, and which. "%" is a mass,
+#: number, volume or other fraction, or a relative quantity; "U/L" is catalytic
+#: (an enzyme) or arbitrary (CA-125, 10334-1, is ACnc) concentration. Such a
+#: unit settles the property to this set: a candidate with any of them is
+#: eligible, one with a property outside it -- a mass concentration for a "%"
+#: -- is a different test.
+#:
+#: The sets are the properties of the LOINC codes that list the unit among
+#: their example units. On an instance with a loaded LOINC table they are read
+#: from it (:func:`loaded_unit_properties`), so a release that adds a property
+#: is followed; this table is the fallback, from the October 2026 release, a
+#: property with a single code treated as noise. Sets are sorted: the order
+#: never means anything, and two units with the same set are the same test.
+AMBIGUOUS_UNIT_PROPERTIES = {
+    unit: tuple(sorted(options)) for unit, options in {
+        '%': ('NFr', 'MFr', 'AFr', 'VFr', 'SFr', 'CFr', 'RelACnc', 'LenFr', 'Prctl', 'Ratio',
+              'RelRto', 'NRto', 'RelTime', 'RelMCnc'),
+        'U/L': ('CCnc', 'ACnc'), 'U/mL': ('ACnc', 'CCnc'),
+        'IU/L': ('ACnc', 'CCnc'), '[IU]/L': ('ACnc', 'CCnc'),
+        'IU/mL': ('ACnc', 'CCnc'), '[IU]/mL': ('ACnc', 'CCnc'),
+        'kU/L': ('ACnc', 'CCnc'),
+        '{ratio}': ('Ratio', 'MRto', 'RelRto', 'SRto'),
+    }.items()
+}
+#: Lower-case lab spellings, and the spelling LOINC lists them under.
+_CANONICAL_SPELLING = {'u/l': 'U/L', 'u/mL': 'U/mL'}
+AMBIGUOUS_UNIT_PROPERTIES.update({alias: AMBIGUOUS_UNIT_PROPERTIES[unit] for alias, unit in _CANONICAL_SPELLING.items()})
+#: Units that settle no single property. UNIT_GROUPS lists convertible units,
+#: not unambiguous ones, so these are taken back out of it. "1" (dimensionless)
+#: says nothing about the property at all.
+AMBIGUOUS_UNITS = frozenset({*AMBIGUOUS_UNIT_PROPERTIES, '1'})
+_FOLDED_AMBIGUOUS_UNITS = frozenset(u.casefold() for u in AMBIGUOUS_UNITS)
+_FOLDED_AMBIGUOUS_PROPERTIES = {unit.casefold(): options for unit, options in AMBIGUOUS_UNIT_PROPERTIES.items()}
+#: A code whose example units name a property fewer times than this is noise
+#: (LOINC lists "IU/L" on one MCnc code).
+_EXAMPLE_UNIT_MIN_CODES = 2
+
+
+@functools.lru_cache(maxsize=1)
+def loaded_unit_properties():
+    """``{unit: sorted properties}`` for the ambiguous units, from the loaded
+    LOINC table's example units; ``{}`` when no table with example units is
+    loaded, and then the static sets apply. Cached per process; a LOINC load
+    calls :func:`reset_loaded_unit_properties`."""
+    from collections import Counter, defaultdict
+
+    from omop_core.models import LoincCodeClass
+
+    counts = defaultdict(Counter)
+    rows = LoincCodeClass.objects.exclude(example_units='').exclude(property='') \
+        .values_list('example_units', 'property')
+    for example, prop in rows.iterator(chunk_size=5000):
+        for token in re.split(r'[;,]\s*', example):
+            token = token.strip()
+            if token in AMBIGUOUS_UNIT_PROPERTIES:
+                counts[token][prop] += 1
+    found = {unit: tuple(sorted(p for p, n in c.items() if n >= _EXAMPLE_UNIT_MIN_CODES))
+             for unit, c in counts.items()}
+    return {unit: options for unit, options in found.items() if options}
+
+
+def reset_loaded_unit_properties():
+    loaded_unit_properties.cache_clear()
 UNIT_PROPERTIES = {
     unit: prop
     for unit, prop in {
@@ -113,7 +178,7 @@ def unit_property(unit):
         return ''
     if normalized in UNIT_PROPERTIES:
         return UNIT_PROPERTIES[normalized]
-    if normalized.casefold() in {u.casefold() for u in AMBIGUOUS_UNITS}:
+    if normalized.casefold() in _FOLDED_AMBIGUOUS_UNITS:
         return ''
     # A short unit is all case: S (siemens) is not s (seconds).
     if len(normalized) <= 2:
@@ -121,12 +186,39 @@ def unit_property(unit):
     return _FOLDED_UNIT_PROPERTIES.get(normalized.casefold(), '')
 
 
+def unit_property_options(unit):
+    """The LOINC properties a source unit can imply: one, several, or ``()``.
+
+    One for a unit :func:`unit_property` settles; the set for a unit that fits
+    several (``%``, ``U/L``); empty for a unit inference does not know, or one
+    that says nothing about the property (``1``).
+    """
+    normalized = unit_code(unit)
+    if not normalized:
+        return ()
+    prop = unit_property(normalized)
+    if prop:
+        return (prop,)
+    key = normalized if normalized in AMBIGUOUS_UNIT_PROPERTIES else next(
+        (u for u in AMBIGUOUS_UNIT_PROPERTIES if u.casefold() == normalized.casefold()), None)
+    if key is None:
+        return ()
+    key = _CANONICAL_SPELLING.get(key, key)
+    return tuple(loaded_unit_properties().get(key) or AMBIGUOUS_UNIT_PROPERTIES[key])
+
+
+def _property_value(options):
+    """An axis value from :func:`unit_property_options`: the one property, or
+    the set as a list; ``[]`` for none."""
+    return options[0] if len(options) == 1 else list(options)
+
+
 def unit_is_recognised(unit):
     """Whether a unit is one LOINC inference knows: one property, or known
     to fit several. A misspelling or unlisted unit is neither."""
     normalized = unit_code(unit)
     return bool(normalized) and (bool(unit_property(normalized)) or normalized in AMBIGUOUS_UNITS
-                                 or normalized.casefold() in {u.casefold() for u in AMBIGUOUS_UNITS})
+                                 or normalized.casefold() in _FOLDED_AMBIGUOUS_UNITS)
 
 
 #: FHIR specimen display -> LOINC system. Exact phrases only: "blood" inside
@@ -272,23 +364,29 @@ def infer(source_vocabulary_id, source_code, metadata, *, observed_units=None):
     unit, where, observed = _unit(metadata, resource)
     # Only units inference recognises: a misspelling is not a second property.
     units = sorted({u for u in observed_units or [] if u and unit_is_recognised(u)})
-    properties = {unit_property(u) for u in units}
-    mixed = len(properties) > 1
+    # Each unit's properties: one, or the set an ambiguous unit fits. Units
+    # whose sets differ are different tests (``axis_variants``).
+    options = {unit_property_options(u) for u in units}
+    mixed = len(options) > 1
     shown = ', '.join(units[:4]) + ('…' if len(units) > 4 else '')
     if mixed:
         hints['property'] = (f'Records arrive in units implying different properties ({shown}): '
                              'one LOINC per axis variant')
     if units:
-        if len(properties) == 1 and '' not in properties:
-            settle({'property': next(iter(properties))}, BASIS_UNIT, f'every record unit implies it ({shown})')
+        only = next(iter(options)) if len(options) == 1 else ()
+        if len(only) == 1:
+            settle({'property': only[0]}, BASIS_UNIT, f'every record unit implies it ({shown})')
+        elif only:
+            settle({'property': list(only)}, BASIS_UNIT,
+                   f'every record unit is {shown}, which fits only these properties')
         settle({'scale_type': 'Qn'}, BASIS_VALUE_TYPE, f'records carry units ({shown})')
     if unit:
-        prop = unit_property(unit)
+        sample = unit_property_options(unit)
         # The sample settles the property only where the records are silent
-        # or agree: records in % say nothing about the property, and a g/dL
-        # sample must not say it for them.
-        if prop and not mixed and (not units or prop in properties):
-            settle({'property': prop}, BASIS_UNIT, f'{where} = {unit}')
+        # or agree: records in g/dL and % are two tests, and a g/dL sample
+        # must not pick one for them.
+        if sample and not mixed and (not units or sample in options):
+            settle({'property': _property_value(sample)}, BASIS_UNIT, f'{where} = {unit}')
         if observed:
             settle({'scale_type': 'Qn'}, BASIS_VALUE_TYPE, f'{where} = {unit}')
     quantitative = _quantitative(metadata, resource)
@@ -321,11 +419,14 @@ def resolve(source_vocabulary_id, source_code, metadata, overrides=None, *, obse
     for axis, value in (overrides or {}).items():
         if axis not in AXES:
             continue
-        if value is None or (value == '' and axis != 'method_type'):
+        if isinstance(value, (list, tuple)):
+            # An axis variant's values: the set an ambiguous unit fits.
+            value = _property_value(tuple(sorted({str(v).strip() for v in value if str(v).strip()})))
+        if value is None or (value == '' and axis != 'method_type') or value == []:
             axes.pop(axis, None)
         else:
-            axes[axis] = {'value': str(value).strip(), 'basis': BASIS_CURATOR,
-                          'evidence': 'Set by a curator'}
+            axes[axis] = {'value': value if isinstance(value, list) else str(value).strip(),
+                          'basis': BASIS_CURATOR, 'evidence': 'Set by a curator'}
     return axes, hints
 
 
@@ -355,20 +456,34 @@ def values(axes):
 
 # --- comparing ------------------------------------------------------------------
 
+def options_of(value):
+    """A settled axis value as the values it accepts: one, or a set's members."""
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return tuple(value)
+    return (value,)
+
+
 def compare(axis, source_value, candidate_value):
-    """How one candidate axis stands against the source's."""
-    if source_value is None or candidate_value is None:
+    """How one candidate axis stands against the source's.
+
+    A source value that is a set (the properties a ``%`` can mean) matches a
+    candidate with any member and conflicts with one outside it.
+    """
+    if source_value is None or candidate_value is None or not options_of(source_value):
         return UNKNOWN
-    source, candidate = _norm(source_value), _norm(candidate_value)
-    if source == candidate:
-        return MATCH
-    if axis == 'system' and source and candidate:
-        # "Ser/Plas" is how LOINC names a test valid on either specimen, so
-        # serum is compatible with it -- and with each other way round.
-        source_parts, candidate_parts = set(source.split('/')), set(candidate.split('/'))
-        if source_parts <= candidate_parts or candidate_parts <= source_parts:
-            return COMPATIBLE
-    return CONFLICT
+    candidate = _norm(candidate_value)
+    verdict = CONFLICT
+    for option in options_of(source_value):
+        source = _norm(option)
+        if source == candidate:
+            return MATCH
+        if axis == 'system' and source and candidate:
+            # "Ser/Plas" is how LOINC names a test valid on either specimen, so
+            # serum is compatible with it -- and with each other way round.
+            source_parts, candidate_parts = set(source.split('/')), set(candidate.split('/'))
+            if source_parts <= candidate_parts or candidate_parts <= source_parts:
+                verdict = COMPATIBLE
+    return verdict
 
 
 def assess(source_values, candidate_axes):
@@ -438,7 +553,12 @@ def axis_candidates(source_axes, domain_id, limit=AXIS_RETRIEVAL_LIMIT):
     rows = LoincCodeClass.objects.filter(component__iexact=component.strip())
     for axis in ('property', 'time_aspect', 'scale_type', 'method_type'):
         if axis in source_values:
-            rows = rows.filter(**{f'{axis}__iexact': source_values[axis].strip()})
+            accepted = [str(v).strip() for v in options_of(source_values[axis])]
+            if accepted:
+                any_of = Q()
+                for value in accepted:
+                    any_of |= Q(**{f'{axis}__iexact': value})
+                rows = rows.filter(any_of)
     codes = list(rows.values_list('loinc_num', 'system')[:500])
     if 'system' in source_values:
         source_system = source_values['system']

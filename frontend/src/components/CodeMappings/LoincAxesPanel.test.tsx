@@ -67,6 +67,28 @@ describe("LoincAxesPanel", () => {
     expect(screen.getByText(/Unsaved axes still apply to Suggest/).closest("details")).toBeNull();
   });
 
+  it("reads a property set as 'any of', in full in the title (#2029)", async () => {
+    const fractions = ["NFr", "MFr", "AFr", "VFr", "SFr", "CFr"];
+    get.mockResolvedValue({ data: payload({
+      axis_variant_count: 2,
+      source_axes: { axes: { property: { value: fractions, basis: "unit", evidence: "every record unit is %" } }, hints: {} },
+      variants: [
+        { id: 1, axis_key: "property=MCnc|scale_type=Qn", axis_values: { property: "MCnc", scale_type: "Qn" }, units: ["g/dL"],
+          occurrence_count: 10, status: "proposed", target_concept: glucose, reviewed_at: null },
+        { id: null, axis_key: "unit=%", axis_values: { property: fractions, scale_type: "Qn" }, units: ["%"],
+          occurrence_count: 3, status: "proposed", target_concept: null, reviewed_at: null },
+      ],
+    }) });
+    render(<LoincAxesPanel mappingId={7} canEdit canApprove={false} onSuggestVariant={() => {}} />);
+    const variants = await screen.findByRole("table", { name: "Axis variants" });
+    const cell = within(variants).getByText(/Property any of NFr, MFr, AFr, VFr \(\+2 more\) · Scale Qn/);
+    expect(cell.closest("td")).toHaveAttribute("title", "Property any of NFr, MFr, AFr, VFr, SFr, CFr · Scale Qn");
+    expect(screen.getByRole("button", { name: "Suggest for Property any of NFr, MFr, AFr, VFr (+2 more) · Scale Qn" })).toBeInTheDocument();
+    // The shared axes show the set too, since every % record settles it.
+    expect(screen.getByTestId("axis-value-property")).toHaveTextContent("any of NFr, MFr, AFr, VFr (+2 more)");
+    expect(screen.getByTestId("axis-value-property")).toHaveAttribute("title", "any of NFr, MFr, AFr, VFr, SFr, CFr");
+  });
+
   it("shows the axes table on its own for a code with one axis set", async () => {
     render(<LoincAxesPanel mappingId={7} canEdit canApprove={false} />);
     await screen.findByRole("region", { name: "LOINC axes" });

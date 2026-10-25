@@ -7,7 +7,7 @@ import { useCallback, useEffect, useId, useRef, useState } from "react";
 import api from "@/api/axios";
 import { destinationError, searchDestinationConcepts, type DestinationConcept } from "./destinationSearch";
 import {
-  AXIS_BASIS_LABELS, LOINC_AXES, axisLabel, describeAxisValues,
+  AXIS_BASIS_LABELS, LOINC_AXES, axisLabel, axisValueText, describeAxisValues,
   type AxisVariant, type LoincAxesPayload, type LoincAxis, type LoincAxisOverrides,
 } from "./loincAxes";
 
@@ -181,8 +181,13 @@ export default function LoincAxesPanel({ mappingId, canEdit, canApprove, onAxesC
       if (value) return value;
     }
     const inferred = payload.source_axes?.axes?.[axis];
-    if (inferred) return inferred.value === "" && axis === "method_type" ? "Methodless" : inferred.value;
+    if (inferred) return axisValueText(inferred.value, { empty: axis === "method_type" ? "Methodless" : "(none)" });
     return "—";
+  };
+  /** The whole set, for a title, where the cell shows the first few. */
+  const fullValue = (axis: LoincAxis): string | undefined => {
+    const inferred = payload.source_axes?.axes?.[axis];
+    return !(axis in overrides) && Array.isArray(inferred?.value) ? axisValueText(inferred.value, { full: true }) : undefined;
   };
   const why = (axis: LoincAxis): string => {
     const unsaved = overrides[axis] !== saved[axis] || (axis in overrides) !== (axis in saved);
@@ -215,12 +220,12 @@ export default function LoincAxesPanel({ mappingId, canEdit, canApprove, onAxesC
         const text = typeof overrides[axis] === "string" ? overrides[axis] as string : "";
         return <tr key={axis} className="border-b border-slate-100 align-top">
           <td className="py-1 pr-2 font-medium text-slate-700">{label}</td>
-          <td className="py-1 px-2 font-mono text-slate-900" data-testid={`axis-value-${axis}`}>{displayValue(axis)}</td>
+          <td className="py-1 px-2 font-mono text-slate-900" data-testid={`axis-value-${axis}`} title={fullValue(axis)}>{displayValue(axis)}</td>
           <td className="py-1 px-2 text-slate-600" data-testid={`axis-why-${axis}`}>{why(axis)}</td>
           {canEdit && <td className="py-1 pl-2">
             <div className="flex flex-wrap items-center gap-1">
               <input aria-label={`${label} value`} list={listId} value={text} disabled={saving}
-                placeholder={payload.source_axes?.axes?.[axis]?.value || "any"}
+                placeholder={axisValueText(payload.source_axes?.axes?.[axis]?.value, { blank: "any", empty: "any" })}
                 onFocus={() => setActiveAxis(axis)}
                 onChange={event => setAxis(axis, event.target.value === "" ? undefined : event.target.value)}
                 className="h-6 w-28 rounded border border-slate-300 bg-white px-1 font-mono" />
@@ -281,7 +286,7 @@ export default function LoincAxesPanel({ mappingId, canEdit, canApprove, onAxesC
           const description = describeAxisValues(variant.axis_values, labels);
           const busy = variantBusy !== null || saving;
           return <tr key={variant.axis_key} className="border-b border-slate-100 align-top">
-            <td className="py-1 pr-2">{description}{variant.seen === false && <span className="ml-1 text-slate-400">(not in current evidence)</span>}</td>
+            <td className="py-1 pr-2" title={describeAxisValues(variant.axis_values, labels, { full: true })}>{description}{variant.seen === false && <span className="ml-1 text-slate-400">(not in current evidence)</span>}</td>
             <td className="py-1 px-2 font-mono">{variant.units?.join(", ") || "—"}</td>
             <td className="py-1 px-2 text-right tabular-nums">{variant.occurrence_count ?? 0}</td>
             <td className="py-1 px-2">{variant.target_concept
