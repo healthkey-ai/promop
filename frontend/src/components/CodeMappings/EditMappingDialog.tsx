@@ -514,6 +514,14 @@ export default function EditMappingDialog({
     }, CONCEPT_SEARCH_DEBOUNCE_MS);
   }, [searchVocabulary, searchScope]);
 
+  // Whether the row can have LOINC axes at all: the server decides by domain
+  // (Measurement, Observation) or a LOINC source. A row that cannot gets no
+  // section while the axes request is in flight (#2030).
+  const axesMayApply = Boolean(selectedRow && (
+    ["Measurement", "Observation"].includes(selectedRow.domain_id
+      || { measurement: "Measurement", observation: "Observation" }[form.omop_table] || "")
+    || /loinc/i.test(form.source_vocabulary_id)));
+
   /** One Suggest for the variants: a queued run gives each a proposed LOINC, left for approval. */
   const suggestVariants = useCallback(async (request: number) => {
     const mappingId = selectedRow?.mapping_id;
@@ -1044,7 +1052,8 @@ export default function EditMappingDialog({
                 {mode === "edit" && selectedRow?.mapping_id && <LoincAxesPanel
                   key={selectedRow.mapping_id} mappingId={selectedRow.mapping_id} canEdit canApprove={canApprove}
                   reloadToken={loincAxesReload}
-                  expectedVariants={selectedRow.axis_variant_count ?? 0}
+                  expectedVariants={selectedRow.axis_variant_count}
+                  mayApply={axesMayApply}
                   onAxesChange={overrides => setLoincAxes({ mappingId: selectedRow.mapping_id!, overrides })}
                   onVariantsChange={count => setVariantCount({ mappingId: selectedRow.mapping_id!, count })}
                   onSuggestVariant={axisKey => void suggestCurrentCode(axisKey)} />}

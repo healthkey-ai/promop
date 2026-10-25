@@ -737,6 +737,30 @@ describe("CodeMappingPage", () => {
       expect(screen.getByLabelText("Destination Concept ID")).toHaveValue(proposedRow.destination_concept_id);
     });
 
+    it("says the LOINC axes are loading, with the row's flagged count, until they arrive (#2030)", async () => {
+      renderPage([{ ...proposedRow, axis_variant_count: 2 }]);
+      const originalGet = mockGet.getMockImplementation()!;
+      let answer: (value: unknown) => void = () => {};
+      mockGet.mockImplementation((url: string, ...rest: unknown[]) => url === "/v1/code-mappings/7/loinc-axes/"
+        ? new Promise(resolve => { answer = resolve; }) : originalGet(url, ...rest));
+      const cell = await screen.findByText("M-PROTEIN, SERUM", { selector: '[data-testid=source-code]' });
+      fireEvent.click(cell.closest("tr")!);
+      await screen.findByText("Edit Mapping");
+      const panel = await screen.findByRole("region", { name: "LOINC axes" });
+      expect(panel).toHaveAttribute("aria-busy", "true");
+      expect(within(panel).getByRole("status")).toHaveTextContent(
+        "Loading the 2 axis values the queue flagged for this code, and their destinations…");
+      answer({ data: {
+        mapping_id: 7, applies: true, loinc_axes: {}, source_axes: { axes: {}, hints: {} }, axis_variant_count: 2, variant_notes: [],
+        variants: [
+          { id: 1, axis_key: "property=MCnc", axis_values: { property: "MCnc" }, units: ["mg/dL"], occurrence_count: 40, status: "proposed", target_concept: null, reviewed_at: null },
+          { id: 2, axis_key: "property=SCnc", axis_values: { property: "SCnc" }, units: ["mmol/L"], occurrence_count: 3, status: "proposed", target_concept: null, reviewed_at: null },
+        ],
+      } });
+      await within(panel).findByRole("table", { name: "Axis variants" });
+      expect(panel).not.toHaveAttribute("aria-busy");
+    });
+
     it("fills in the axis variants with proposed LOINCs when Suggest runs for a code with several (#2012)", async () => {
       renderPage();
       const glucose = { concept_id: 3004501, concept_name: "Glucose [Mass/volume] in Serum or Plasma", concept_code: "2345-7", vocabulary_id: "LOINC" };

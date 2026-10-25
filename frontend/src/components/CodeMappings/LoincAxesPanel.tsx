@@ -25,6 +25,10 @@ type Props = {
   reloadToken?: number;
   /** The queue row's axis variant count, so the loading state can say what is coming (#2030). */
   expectedVariants?: number;
+  /** Whether the row's domain can hold LOINC axes at all. False keeps the section
+   * off screen while loading, so a Condition or Drug row gets no flash of a
+   * section the server is about to say does not apply. */
+  mayApply?: boolean;
 };
 
 const AXIS_VALUE_DEBOUNCE_MS = 250;
@@ -36,11 +40,12 @@ function sameOverrides(a: LoincAxisOverrides, b: LoincAxisOverrides): boolean {
   return [...keys].every(key => (key in a) === (key in b) && a[key] === b[key]);
 }
 
-export default function LoincAxesPanel({ mappingId, canEdit, canApprove, onAxesChange, onSuggestVariant, onVariantsChange, reloadToken = 0, expectedVariants = 0 }: Props) {
+export default function LoincAxesPanel({ mappingId, canEdit, canApprove, onAxesChange, onSuggestVariant, onVariantsChange, reloadToken = 0, expectedVariants, mayApply = true }: Props) {
   const listPrefix = useId();
   const [payload, setPayload] = useState<LoincAxesPayload | null>(null);
   const [overrides, setOverrides] = useState<LoincAxisOverrides>({});
   const [loadError, setLoadError] = useState("");
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState("");
@@ -64,12 +69,15 @@ export default function LoincAxesPanel({ mappingId, canEdit, canApprove, onAxesC
 
   useEffect(() => {
     let active = true;
+    setLoading(true);
     (async () => {
       try {
         const { data } = await api.get<LoincAxesPayload>(`/v1/code-mappings/${mappingId}/loinc-axes/`);
         if (active) { accept(data); setLoadError(""); }
       } catch {
         if (active) setLoadError("Could not load the LOINC axes for this code.");
+      } finally {
+        if (active) setLoading(false);
       }
     })();
     return () => { active = false; };
@@ -92,16 +100,22 @@ export default function LoincAxesPanel({ mappingId, canEdit, canApprove, onAxesC
     return () => { window.clearTimeout(timer); controller.abort(); };
   }, [activeAxis, query]);
 
-  if (loadError) return <p className="text-xs text-rose-700">{loadError}</p>;
   // The axes request scans the code's unit evidence across patients, which
   // takes seconds on a large instance. The section is on screen from the
   // start and says so, instead of appearing once it has an answer (#2030).
+  // One section element throughout, so what a test or a screen reader found
+  // while it was busy is the element that fills in. The status line is the
+  // same live region before and after, so the change is announced.
+  const waiting = (expectedVariants ?? 0) >= 2
+    ? `Loading the ${expectedVariants} axis values the queue flagged for this code, and their destinations…`
+    : "Loading the LOINC axes this code settles from its units and metadata…";
   if (!payload) {
-    return <section aria-label="LOINC axes" aria-busy="true" className={SECTION}>
+    if (!loadError && !mayApply) return null;
+    return <section aria-label="LOINC axes" aria-busy={loading || undefined} className={SECTION}>
       <h3 className="text-sm font-semibold text-slate-900">LOINC axes</h3>
-      <p role="status" className="mt-0.5 text-slate-500">{expectedVariants >= 2
-        ? `Loading the ${expectedVariants} axis values of this code and their destinations…`
-        : "Loading the LOINC axes this code settles from its units and metadata…"}</p>
+      {loadError
+        ? <p role="alert" className="mt-0.5 text-rose-700">{loadError}</p>
+        : <p role="status" className="mt-0.5 text-slate-500">{waiting}</p>}
     </section>;
   }
   if (!payload.applies) return null;
@@ -232,11 +246,14 @@ export default function LoincAxesPanel({ mappingId, canEdit, canApprove, onAxesC
     </ul>}
   </>;
 
-  return <section aria-label="LOINC axes" className={SECTION}>
+  return <section aria-label="LOINC axes" aria-busy={loading || undefined} className={SECTION}>
     <h3 className="text-sm font-semibold text-slate-900">LOINC axes</h3>
-    <p className="mt-0.5 text-slate-500">{variants.length >= 2
+    <p role="status" className="mt-0.5 text-slate-500">{loading
+      ? "Re-reading the axes and variants…"
+      : variants.length >= 2
       ? "This code's units imply more than one LOINC axis set. Each is a variant with its own destination; approve one to route its units."
       : "Settled axes are constraints: a LOINC that differs on any of them is a different test and is not suggested."}</p>
+    {loadError && <p role="alert" className="mt-1 text-rose-700">{loadError}</p>}
     {error && <p role="alert" className="mt-1 text-rose-700">{error}</p>}
     {message && <p role="status" className="mt-1 text-green-800">{message}</p>}
     {variants.length >= 2
