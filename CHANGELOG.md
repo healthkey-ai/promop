@@ -140,6 +140,11 @@ All notable changes to PRomop are documented here.
 
 ### Fixed
 
+- **A running Suggest no longer locks the Concept to Code list** — opening a
+  source code to edit it, approving a variant in place, folding a group and
+  paging wait only for a write in progress; the search's own controls and the
+  batch selection still wait for the run. An edit saved while the run streams
+  is kept when the next poll replaces the run's candidates. (#2028)
 - **A deploy mid-walk no longer costs the axis variant refresh six hours** —
   the request row now carries a `progress_at` heartbeat written after every
   batch. A `running` request with no heartbeat for 15 minutes lost its worker

@@ -396,6 +396,30 @@ describe('axis variants on a source code (#2012)', () => {
     expect(screen.queryByRole('dialog', { name: 'Edit Mapping' })).not.toBeInTheDocument();
   });
 
+  it('keeps a variant approved while the run streams when the next poll replaces the run (#2028)', async () => {
+    const streaming = { ...run('running'), activity: [{ concept: { concept_id: 123 }, candidates: [flagged] }] };
+    post.mockImplementation((url: string) => Promise.resolve({ data: url.endsWith('/axis-variants/')
+      ? { mapping_id: 7, applies: true, variants: variants.map(v => ({ ...v, status: 'approved' })) }
+      : streaming }));
+    const polls = () => get.mock.calls.filter(([url]) => String(url).includes('suggest-runs')).length;
+    // Each poll answers with a fresh object, as the server does, so the run really is replaced.
+    get.mockImplementation((url: string) => Promise.resolve({ data: url.includes('suggest-runs') ? { ...streaming, done: polls() }
+      : url === '/v1/concept-to-code/' ? page([concept]) : page([source]) }));
+    await selectConcept();
+    fireEvent.click(screen.getByRole('button', { name: 'Suggest source codes' }));
+    const list = await screen.findByRole('list', { name: 'Axis variants' });
+    expect(screen.getByRole('button', { name: 'Searching…' })).toBeDisabled();
+    // Approving in place is an individual edit, so the running search does not block it.
+    const approve = within(list).getByRole('button', { name: /^Approve / });
+    expect(approve).toBeEnabled();
+    fireEvent.click(approve);
+    await screen.findByText('Approved the mmol/L variant of S1.');
+    // The next poll brings the run's own copy of the row, still proposed; the approval stands.
+    const before = polls();
+    await waitFor(() => expect(polls()).toBeGreaterThan(before), { timeout: 5000 });
+    expect(within(screen.getByRole('list', { name: 'Axis variants' })).queryByRole('button', { name: /^Approve / })).not.toBeInTheDocument();
+  });
+
   it('shows variants on an existing mapping too, without Approve for curators who cannot approve', async () => {
     get.mockImplementation((url: string) => Promise.resolve({ data: url === '/v1/concept-to-code/' ? page([concept]) : page([flagged]) }));
     await selectConcept(false);
@@ -601,6 +625,22 @@ describe('editing a source code from a concept (#1915)', () => {
     fireEvent.click(within(editor).getByRole('button', { name: 'Close' }));
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Edit Mapping' })).not.toBeInTheDocument());
     expect(screen.getByRole('dialog', { name: 'Source codes for Serum albumin' })).toBeInTheDocument();
+  });
+
+  it('opens a source code for editing while the Suggest run is still running (#2028)', async () => {
+    post.mockResolvedValue({ data: run('running') });
+    get.mockImplementation(routes({ '/v1/concept-to-code/suggest-runs/run-1/': () => Promise.resolve({ data: run('running') }) }));
+    await selectConcept();
+    fireEvent.click(screen.getByRole('button', { name: 'Suggest source codes' }));
+    const code = await screen.findByRole('button', { name: 'SNOMED:S1' });
+    // The run's own controls wait for it; the rows do not.
+    expect(screen.getByRole('button', { name: 'Searching…' })).toBeDisabled();
+    expect(screen.getByRole('checkbox', { name: 'Select SNOMED S1' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Existing mappings' })).toBeEnabled();
+    expect(code).toBeEnabled();
+    fireEvent.click(code);
+    expect(await screen.findByRole('dialog', { name: 'Edit Mapping' })).toBeInTheDocument();
+    expect(get).toHaveBeenCalledWith('/v1/code-mappings/7/');
   });
 
   it('opens from a click anywhere on the row, but not from its checkbox', async () => {
