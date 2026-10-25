@@ -3,7 +3,7 @@
  * plus its axis variants (one source code whose units imply different axes).
  * Backed by /v1/code-mappings/<id>/loinc-axes/ and .../axis-variants/.
  */
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { forwardRef, useCallback, useEffect, useId, useImperativeHandle, useRef, useState } from "react";
 import api from "@/api/axios";
 import { destinationError, searchDestinationConcepts, type DestinationConcept } from "./destinationSearch";
 import {
@@ -41,7 +41,16 @@ function sameOverrides(a: LoincAxisOverrides, b: LoincAxisOverrides): boolean {
   return [...keys].every(key => (key in a) === (key in b) && a[key] === b[key]);
 }
 
-export default function LoincAxesPanel({ mappingId, canEdit, canApprove, onAxesChange, onSuggestVariant, onVariantsChange, reloadToken = 0, expectedVariants, mayApply = true }: Props) {
+/** What the dialog may ask the panel to do: point one variant at a concept
+ * the way the panel's own Search destination does, keeping its approval (#2036). */
+export type LoincAxesPanelHandle = {
+  /** Returns false when the variant is approved and this curator cannot approve. */
+  setVariantDestination: (axisKey: string, conceptId: number) => Promise<boolean>;
+};
+
+const LoincAxesPanel = forwardRef<LoincAxesPanelHandle, Props>(function LoincAxesPanel(
+  { mappingId, canEdit, canApprove, onAxesChange, onSuggestVariant, onVariantsChange, reloadToken = 0, expectedVariants, mayApply = true }, ref,
+) {
   const listPrefix = useId();
   const [payload, setPayload] = useState<LoincAxesPayload | null>(null);
   const [overrides, setOverrides] = useState<LoincAxisOverrides>({});
@@ -58,15 +67,19 @@ export default function LoincAxesPanel({ mappingId, canEdit, canApprove, onAxesC
   const onVariantsChangeRef = useRef(onVariantsChange);
   useEffect(() => { onAxesChangeRef.current = onAxesChange; onVariantsChangeRef.current = onVariantsChange; });
 
+  /** Tell the dialog what variants the code has now: two or more, or none. */
+  const notifyVariants = useCallback((data: LoincAxesPayload) => {
+    const stored = data.applies ? data.variants ?? [] : [];
+    onVariantsChangeRef.current?.(stored.length >= 2 ? stored.length : 0, stored.length >= 2 ? stored : []);
+  }, []);
   const accept = useCallback((data: LoincAxesPayload) => {
     setPayload(data);
     const saved = data.loinc_axes || {};
     setOverrides(saved);
     // Only a code with LOINC axes has overrides for Suggest to send.
     if (data.applies) onAxesChangeRef.current?.(saved);
-    const count = data.applies ? (data.variants ?? []).length : 0;
-    onVariantsChangeRef.current?.(count >= 2 ? count : 0, count >= 2 ? data.variants ?? [] : []);
-  }, []);
+    notifyVariants(data);
+  }, [notifyVariants]);
 
   useEffect(() => {
     let active = true;
@@ -100,6 +113,48 @@ export default function LoincAxesPanel({ mappingId, canEdit, canApprove, onAxesC
     }, AXIS_VALUE_DEBOUNCE_MS);
     return () => { window.clearTimeout(timer); controller.abort(); };
   }, [activeAxis, query]);
+
+  const postVariant = useCallback(async (variant: AxisVariant, targetConceptId: number | null, approve: boolean, reopen = false): Promise<boolean> => {
+    setVariantBusy(variant.axis_key);
+    setError("");
+    setMessage("");
+    try {
+      const { data } = await api.post<LoincAxesPayload>(`/v1/code-mappings/${mappingId}/axis-variants/`, {
+        axis_key: variant.axis_key, target_concept_id: targetConceptId, approve, ...(reopen ? { reopen: true } : {}),
+      });
+      setPayload(data);
+      setPickingVariant(null);
+      notifyVariants(data);
+      // Say what the server did, not what was asked: reopening also moves rows.
+      const chosen = (data.variants ?? []).find(v => v.axis_key === variant.axis_key)?.target_concept;
+      const what = data.variant_status === "approved" ? "Variant approved"
+        : reopen ? "Variant reopened" : `Variant destination saved${chosen ? `: ${chosen.concept_name}` : ""}`;
+      setMessage(data.repoint
+        ? `${what}: moved ${data.repoint.rows_updated} row(s), ${data.repoint.persons_marked_stale} patient record(s) marked for refresh.`
+        : `${what}${data.variant_status === "approved" ? "" : ". Approve it to route its units"}.`);
+      return true;
+    } catch (failure) {
+      setError(`Could not update the variant. ${destinationError(failure)}`);
+      return false;
+    } finally {
+      setVariantBusy(null);
+    }
+  }, [mappingId, notifyVariants]);
+
+  // The dialog's Use button on a variant's suggestion candidates writes
+  // through this same path, so an approved variant keeps its approval and the
+  // panel shows the result at once, with no second read of the unit evidence.
+  useImperativeHandle(ref, () => ({
+    setVariantDestination: async (axisKey, conceptId) => {
+      const variant = (payload?.variants ?? []).find(v => v.axis_key === axisKey);
+      if (!variant) return false;
+      if (variant.status === "approved" && !canApprove) {
+        setError("This variant is approved; only an approver can point it at another LOINC.");
+        return false;
+      }
+      return postVariant(variant, conceptId, variant.status === "approved");
+    },
+  }), [payload, canApprove, postVariant]);
 
   // The axes request scans the code's unit evidence across patients, which
   // takes seconds on a large instance. The section is on screen from the
@@ -151,30 +206,6 @@ export default function LoincAxesPanel({ mappingId, canEdit, canApprove, onAxesC
     }
   };
 
-  const postVariant = async (variant: AxisVariant, targetConceptId: number | null, approve: boolean, reopen = false) => {
-    setVariantBusy(variant.axis_key);
-    setError("");
-    setMessage("");
-    try {
-      const { data } = await api.post<LoincAxesPayload>(`/v1/code-mappings/${mappingId}/axis-variants/`, {
-        axis_key: variant.axis_key, target_concept_id: targetConceptId, approve, ...(reopen ? { reopen: true } : {}),
-      });
-      setPayload(data);
-      setPickingVariant(null);
-      const stored = data.variants ?? [];
-      onVariantsChangeRef.current?.(stored.length >= 2 ? stored.length : 0, stored.length >= 2 ? stored : []);
-      // Say what the server did, not what was asked: reopening also moves rows.
-      const what = data.variant_status === "approved" ? "Variant approved"
-        : reopen ? "Variant reopened" : "Variant destination saved";
-      setMessage(data.repoint
-        ? `${what}: moved ${data.repoint.rows_updated} row(s), ${data.repoint.persons_marked_stale} patient record(s) marked for refresh.`
-        : `${what}.`);
-    } catch (failure) {
-      setError(`Could not update the variant. ${destinationError(failure)}`);
-    } finally {
-      setVariantBusy(null);
-    }
-  };
 
   const displayValue = (axis: LoincAxis): string => {
     if (axis in overrides) {
@@ -208,8 +239,12 @@ export default function LoincAxesPanel({ mappingId, canEdit, canApprove, onAxesC
 
   const hints = LOINC_AXES.filter(axis => payload.source_axes?.hints?.[axis]);
   const variants = payload.variants ?? [];
+  // For a code with variants the shared six-axis table is shown only when it
+  // carries something: a curator's entry (which Suggest still applies, so it
+  // must be visible and clearable here) or a metadata hint (#2037).
+  const sharedAxesShown = variants.length < 2 || Object.keys(saved).length > 0 || hints.length > 0 || dirty;
 
-  const axesTable = <>
+  const renderAxesTable = () => <>
     <table className="mt-2 w-full text-left">
       <thead><tr className="border-b text-slate-500">
         <th className="pb-1 pr-2 font-medium">Axis</th>
@@ -267,10 +302,10 @@ export default function LoincAxesPanel({ mappingId, canEdit, canApprove, onAxesC
     {variants.length >= 2
       ? <>
         {/* A code with variants is curated per variant: the axis sets, their
-            units and destinations (#2014). The shared six-axis table is not
-            shown for them: on every instance measured it settled nothing but
-            Scale, which each variant row shows, and no curator has ever
-            entered a shared axis (#2037). Saved entries still reach Suggest. */}
+            units and destinations (#2014). The shared six-axis table is left
+            out unless it carries a curator entry or a hint: on every instance
+            measured it settled nothing but Scale, which each variant row
+            shows, and no curator had entered a shared axis (#2037). */}
         <div className="mt-2" data-testid="axis-variants">
       <h4 className="text-sm font-semibold text-blue-700">{variants.length} axis values — this code may need one LOINC per variant</h4>
       <p className="mt-0.5 text-slate-500">Suggest fills in a proposed LOINC for each variant without one; approve each to route its units.</p>
@@ -327,9 +362,15 @@ export default function LoincAxesPanel({ mappingId, canEdit, canApprove, onAxesC
         })}</tbody>
       </table>
     </div>
+        {sharedAxesShown && <div className="mt-3 border-t border-slate-200 pt-2" data-testid="shared-axes">
+          <h4 className="text-sm font-semibold text-slate-900">Axes shared by every variant
+            {dirty && <span className="ml-2 font-normal text-amber-800">(unsaved changes)</span>}</h4>
+          <p className="mt-0.5 text-slate-500">A curator's constraint on all of the variants; each variant adds its own axis values on top.</p>
+          {renderAxesTable()}
+        </div>}
       </>
-      : axesTable}
-    {canEdit && variants.length < 2 && <div className="mt-2 flex items-center gap-2">
+      : renderAxesTable()}
+    {canEdit && sharedAxesShown && <div className="mt-2 flex items-center gap-2">
       <button type="button" disabled={!dirty || saving} onClick={() => void save()}
         className="rounded-md bg-slate-900 px-2.5 py-1 text-xs font-medium text-white hover:bg-slate-700 disabled:opacity-40">
         {saving ? "Saving…" : "Save axes"}
@@ -337,7 +378,9 @@ export default function LoincAxesPanel({ mappingId, canEdit, canApprove, onAxesC
       {dirty && <span className="text-slate-500">Unsaved axes still apply to Suggest from this dialog.</span>}
     </div>}
   </section>;
-}
+});
+
+export default LoincAxesPanel;
 
 /** Destination search for one variant, using the queue's concept search. */
 function VariantDestinationSearch({ label, disabled, onChoose, onCancel }: {

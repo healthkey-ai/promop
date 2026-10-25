@@ -49,8 +49,53 @@ beforeEach(() => {
 });
 
 describe("LoincAxesPanel", () => {
-  it("shows a flagged code's variants only: no shared axes table and no Save bar (#2037)", async () => {
+  it("keeps the shared axes for a flagged code when a curator entry or a hint exists (#2037)", async () => {
     get.mockResolvedValue({ data: variantPayload() });
+    const first = render(<LoincAxesPanel mappingId={7} canEdit canApprove />);
+    await screen.findByRole("table", { name: "Axis variants" });
+    // variantPayload has a System hint, so the table stays, under its heading, with Save.
+    expect(screen.getByTestId("shared-axes")).toHaveTextContent("Axes shared by every variant");
+    expect(screen.getByRole("button", { name: "Save axes" })).toBeInTheDocument();
+    first.unmount();
+    get.mockResolvedValue({ data: payload({ ...variantPayload(), loinc_axes: { component: "Glucose" },
+      source_axes: { axes: { component: { value: "Glucose", basis: "curator", evidence: "" } }, hints: {} } }) });
+    render(<LoincAxesPanel mappingId={7} canEdit canApprove />);
+    await screen.findByRole("table", { name: "Axis variants" });
+    expect(screen.getByTestId("axis-why-component")).toHaveTextContent("Set by curator");
+    expect(screen.getByRole("button", { name: "Clear Component" })).toBeInTheDocument();
+  });
+
+  it("writes a variant destination for the dialog through its own path, keeping approval (#2036)", async () => {
+    const approved = { ...variantPayload(), variants: variantPayload().variants.map(v => v.id === 1 ? { ...v, status: "approved" as const } : v) };
+    get.mockResolvedValue({ data: approved });
+    post.mockImplementation((_url: string, body: { axis_key: string; target_concept_id: number; approve: boolean }) =>
+      Promise.resolve({ data: { ...approved, variant_status: body.approve ? "approved" : "proposed",
+        variants: approved.variants.map(v => v.axis_key === body.axis_key ? { ...v, target_concept: { ...glucose, concept_id: body.target_concept_id, concept_name: "Chosen" } } : v) } }));
+    const handle = { current: null as import("./LoincAxesPanel").LoincAxesPanelHandle | null };
+    render(<LoincAxesPanel ref={handle} mappingId={7} canEdit canApprove />);
+    await screen.findByRole("table", { name: "Axis variants" });
+    await expect(handle.current!.setVariantDestination("property=MCnc", 99)).resolves.toBe(true);
+    expect(post).toHaveBeenCalledWith("/v1/code-mappings/7/axis-variants/", { axis_key: "property=MCnc", target_concept_id: 99, approve: true });
+    await screen.findByText(/Variant approved/);
+    await expect(handle.current!.setVariantDestination("property=SCnc", 98)).resolves.toBe(true);
+    expect(post).toHaveBeenLastCalledWith("/v1/code-mappings/7/axis-variants/", { axis_key: "property=SCnc", target_concept_id: 98, approve: false });
+    await screen.findByText("Variant destination saved: Chosen. Approve it to route its units.");
+    await expect(handle.current!.setVariantDestination("property=NCnc", 1)).resolves.toBe(false);
+  });
+
+  it("refuses to re-point an approved variant for a curator who cannot approve", async () => {
+    const approved = { ...variantPayload(), variants: variantPayload().variants.map(v => v.id === 1 ? { ...v, status: "approved" as const } : v) };
+    get.mockResolvedValue({ data: approved });
+    const handle = { current: null as import("./LoincAxesPanel").LoincAxesPanelHandle | null };
+    render(<LoincAxesPanel ref={handle} mappingId={7} canEdit canApprove={false} />);
+    await screen.findByRole("table", { name: "Axis variants" });
+    await expect(handle.current!.setVariantDestination("property=MCnc", 99)).resolves.toBe(false);
+    expect(post).not.toHaveBeenCalled();
+    expect(await screen.findByRole("alert")).toHaveTextContent("only an approver can point it at another LOINC");
+  });
+
+  it("shows a flagged code's variants only: no shared axes table and no Save bar (#2037)", async () => {
+    get.mockResolvedValue({ data: { ...variantPayload(), source_axes: { axes: {}, hints: {} } } });
     render(<LoincAxesPanel mappingId={7} canEdit canApprove />);
     await screen.findByRole("table", { name: "Axis variants" });
     expect(screen.queryByText("Axes shared by every variant")).not.toBeInTheDocument();

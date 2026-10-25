@@ -20,7 +20,7 @@
 
 import CanonicalUnitEditor from "./CanonicalUnitEditor";
 import IndividualSuggestCandidates from "./IndividualSuggestCandidates";
-import LoincAxesPanel from "./LoincAxesPanel";
+import LoincAxesPanel, { type LoincAxesPanelHandle } from "./LoincAxesPanel";
 import { describeAxisValues, type AxisVariant, type LoincAxisOverrides } from "./loincAxes";
 import SnomedEvidencePanel from "./SnomedEvidencePanel";
 import type { SnomedSettings } from "./snomed";
@@ -133,6 +133,7 @@ export default function EditMappingDialog({
 }: EditMappingDialogProps) {
   // ── refs ────────────────────────────────────────────────────────
   const dialogRequest = useRef(0);
+  const axesPanel = useRef<LoincAxesPanelHandle>(null);
   const dialogChoice = useRef<number | null>(null);
   const conceptSearchTimer = useRef<number | null>(null);
   const conceptSearchAbort = useRef<AbortController | null>(null);
@@ -522,12 +523,15 @@ export default function EditMappingDialog({
       || { measurement: "Measurement", observation: "Observation" }[form.omop_table] || "")
     || /loinc/i.test(form.source_vocabulary_id)));
 
-  /** The units of one variant ("%", "mg/dL, mg/dl"), else its axis values, else its key. */
+  /** The panel's variant for an axis key, when the panel has reported this row's variants. */
+  const currentVariant = useCallback((axisKey: string): AxisVariant | undefined =>
+    variantCount?.mappingId === selectedRow?.mapping_id ? variantCount?.variants.find(v => v.axis_key === axisKey) : undefined,
+  [variantCount, selectedRow?.mapping_id]);
+  /** The units of one variant ("%", "mg/dL, mg/dl"), else its axis values; never the raw key. */
   const variantLabel = useCallback((axisKey: string): string => {
-    const variant = variantCount?.mappingId === selectedRow?.mapping_id
-      ? variantCount?.variants.find(v => v.axis_key === axisKey) : undefined;
-    return variant?.units?.join(", ") || (variant ? describeAxisValues(variant.axis_values) : axisKey);
-  }, [variantCount, selectedRow?.mapping_id]);
+    const variant = currentVariant(axisKey);
+    return variant?.units?.join(", ") || (variant ? describeAxisValues(variant.axis_values) : "this");
+  }, [currentVariant]);
 
   /** One Suggest for the variants: a queued run gives each a proposed LOINC, left for approval. */
   const suggestVariants = useCallback(async (request: number) => {
@@ -646,8 +650,7 @@ export default function EditMappingDialog({
     }
   }, [strategies, rankingModel, form.source_code, form.source_vocabulary_id, form.source_code_description, form.omop_table, selectedRow?.source_metadata, selectedRow?.mapping_id, sourceIdentityUnchanged, applyConcept, loincAxes, snomedSettings, variantCount, suggestVariants, variantLabel]);
 
-  const suggestedVariant = individualSuggestion?.axisKey && variantCount?.mappingId === selectedRow?.mapping_id
-    ? variantCount?.variants.find(v => v.axis_key === individualSuggestion.axisKey) : undefined;
+  const suggestedVariant = individualSuggestion?.axisKey ? currentVariant(individualSuggestion.axisKey) : undefined;
 
   const sourceContextDirty = Boolean(patientId && selectedRow?.source_code_id && (
     sourceUnit.trim() !== savedSourceUnit
@@ -1060,7 +1063,7 @@ export default function EditMappingDialog({
                 </div>
                 {variantMessage && <p role="status" data-testid="variant-suggestion" className="text-xs text-slate-700">{variantMessage}</p>}
                 {mode === "edit" && selectedRow?.mapping_id && <LoincAxesPanel
-                  key={selectedRow.mapping_id} mappingId={selectedRow.mapping_id} canEdit canApprove={canApprove}
+                  key={selectedRow.mapping_id} ref={axesPanel} mappingId={selectedRow.mapping_id} canEdit canApprove={canApprove}
                   reloadToken={loincAxesReload}
                   expectedVariants={selectedRow.axis_variant_count}
                   mayApply={axesMayApply}
@@ -1078,14 +1081,9 @@ export default function EditMappingDialog({
                   onSelect={candidate => {
                     const axisKey = individualSuggestion.axisKey;
                     if (axisKey && selectedRow?.mapping_id) {
-                      const label = variantLabel(axisKey);
-                      api.post(`/v1/code-mappings/${selectedRow.mapping_id}/axis-variants/`, {
-                        axis_key: axisKey, target_concept_id: candidate.concept_id, approve: false,
-                      }).then(() => {
-                        setLoincAxesReload(n => n + 1);
-                        // Said where the variants are, which is where the curator looks next.
-                        setVariantMessage(`${label} variant destination set to ${candidate.concept_name}. Approve it under LOINC axes to route its units.`);
-                      }).catch(failure => setError(`Could not set the variant's destination. ${describeDestinationError(failure)}`));
+                      // The panel writes it, keeps an approved variant approved, and
+                      // shows the outcome beside the variants (#2036).
+                      void axesPanel.current?.setVariantDestination(axisKey, candidate.concept_id);
                       return;
                     }
                     applyConcept(candidate as ConceptResult);
