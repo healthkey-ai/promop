@@ -383,6 +383,10 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
   const [open, setOpen] = useState<Record<Status, boolean>>({ approved: false, proposed: true, rejected: false });
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [run, setRun] = useState<Run | null>(null);
+  // Rows saved or approved while a run is still streaming, by source key. The
+  // poll replaces the run wholesale, so edits live beside it and are laid over
+  // its candidates on every render (#2028).
+  const [patched, setPatched] = useState<Record<string, Partial<Source>>>({});
   const [starting, setStarting] = useState(false);
   const [ranker, setRanker] = useState('jev');
   const [limit, setLimit] = useState(25);
@@ -458,7 +462,7 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
     setSelected(new Set());
   };
   const start = async () => {
-    setStarting(true); setError(''); setProgress(''); setSelected(new Set()); setRun(null); setMode('candidates');
+    setStarting(true); setError(''); setProgress(''); setSelected(new Set()); setRun(null); setPatched({}); setMode('candidates');
     try {
       const { data: next } = await api.post<Run>('/v1/concept-to-code/suggest/', {
         concept_ids: [concept.concept_id], strategies: Object.keys(strategies).filter(key => strategies[key as keyof typeof strategies]),
@@ -468,7 +472,8 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
     } catch (failure) { if (active.current) setError(destinationError(failure)); }
     finally { if (active.current) setStarting(false); }
   };
-  const candidates = run?.activity.find(event => event.concept.concept_id === concept.concept_id)?.candidates ?? [];
+  const candidates = (run?.activity.find(event => event.concept.concept_id === concept.concept_id)?.candidates ?? [])
+    .map(item => { const edit = patched[sourceKey(item)]; return edit ? { ...item, ...edit } : item; });
   // A ranked run scores every source it considers a possible match; one it left
   // unscored is not a suggestion. An unranked run scores nothing, so it shows all.
   const ranked = Boolean(run?.selection.ranking_model && run.selection.ranking_model !== 'none');
@@ -495,13 +500,11 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
     resetView();
   };
   // A saved row replaces its stale copy wherever the dialog shows it.
-  const patchRow = (row: Source, updated: Source) => {
+  const patchRow = (row: Source, updated: Partial<Source>) => {
     if (!active.current) return;
     STATUSES.forEach(status => groups[status].setData(previous => previous
-      ? { ...previous, results: previous.results.map(item => sourceKey(item) === sourceKey(row) ? updated : item) } : null));
-    setRun(previous => previous ? { ...previous, activity: previous.activity.map(event => ({ ...event,
-      candidates: event.candidates.map(item => sourceKey(item) === sourceKey(row) ? { ...item, ...updated } : item),
-    })) } : null);
+      ? { ...previous, results: previous.results.map(item => sourceKey(item) === sourceKey(row) ? { ...item, ...updated } : item) } : null));
+    setPatched(previous => ({ ...previous, [sourceKey(row)]: { ...previous[sourceKey(row)], ...updated } }));
   };
 
   // One click approves: a suggested source with no mapping yet is proposed from
@@ -546,7 +549,7 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
   // Approve one axis variant from the row: its stored rows in those units are
   // re-pointed, and the row shows the server's view of every variant (#2012).
   const approveVariant = async (row: Source, variant: AxisVariant) => {
-    if (writingRef.current || busy || row.mapping_id === null || !variant.target_concept) return;
+    if (writingRef.current || row.mapping_id === null || !variant.target_concept) return;
     // A write like any other here: one at a time, and the dialog cannot close under it.
     writingRef.current = true; setWriting(true); onWriting(true); setError('');
     try {
@@ -561,7 +564,7 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
   };
 
   const openEditor = async (row: Source) => {
-    if (busy || opening) return;
+    if (writingRef.current || opening) return;
     setOpening(true); setError('');
     try {
       let current = reference;
@@ -588,16 +591,20 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
     if (mode !== 'candidates') { setSelected(new Set()); return; }
     const key = edit ? sourceKey(edit.source) : '';
     setSelected(previous => { const next = new Set(previous); next.delete(key); return next; });
-    setRun(previous => previous ? { ...previous, activity: previous.activity.map(event => ({ ...event,
-      candidates: event.candidates.map(item => sourceKey(item) === key ? {
-        ...item, edited: true, mapping_id: saved.mapping_id, status: saved.status,
+    if (edit) {
+      patchRow(edit.source, {
+        edited: true, mapping_id: saved.mapping_id, status: saved.status,
         destination_concept_id: saved.destination_concept_id, destination_concept_name: saved.destination_concept_name,
         destination_standard_concept: saved.standard_concept ?? null,
-      } : item),
-    })) } : null);
+      });
+    }
   };
 
+  // The run's controls and the batch selection wait for a run to finish; a
+  // write in progress blocks everything. Opening a code to edit it waits only
+  // for a write, so a curator works through the list while Suggest searches (#2028).
   const busy = writing || running;
+  const locked = writing || opening;
   const retry = () => { resetView(); setError(''); setRevision(value => value + 1); };
   return <section aria-label={`Source codes for ${concept.concept_name}`} className="space-y-4">
     <div role="group" aria-label="Source code views" className="flex flex-wrap gap-2">
@@ -672,7 +679,7 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
           <tr className="border-b border-slate-100 bg-slate-50">
             <td colSpan={6} className="p-2">
               <button type="button" className="flex items-center gap-2 text-sm font-semibold text-slate-800 disabled:opacity-40"
-                aria-expanded={open[status]} disabled={busy} onClick={() => toggleGroup(status)}>
+                aria-expanded={open[status]} disabled={writing} onClick={() => toggleGroup(status)}>
                 <span aria-hidden="true">{open[status] ? '▾' : '▸'}</span>
                 {statusLabel[status]}{count !== undefined ? ` (${count})` : ''}
               </button>
@@ -682,7 +689,7 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
           {open[status] && group.data && !group.data.results.length && <tr><td colSpan={6} className="p-2 text-sm text-slate-500">
             No {status} mappings{search ? ' match this search' : ''}{seenOnly ? '; uncheck > 0 only to include zero-Seen codes' : ''}.</td></tr>}
           {open[status] && group.data && <tr><td colSpan={6} className="p-0">
-            <Pagination data={group.data} disabled={busy || group.loading} change={next => { group.setPage(next); group.setData(null); setSelected(new Set()); }} /></td></tr>}
+            <Pagination data={group.data} disabled={writing || group.loading} change={next => { group.setPage(next); group.setData(null); setSelected(new Set()); }} /></td></tr>}
         </tbody>;
       }) : <tbody>{rows.map(renderRow)}</tbody>}
     </table></div>
@@ -709,9 +716,9 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
           disabled={busy || !editable.includes(row)} checked={selected.has(sourceKey(row))}
           onChange={event => setSelected(previous => { const next = new Set(previous); if (event.target.checked) next.add(sourceKey(row)); else next.delete(sourceKey(row)); return next; })} /></td>
         <td className="p-2 font-mono text-xs"><button type="button" className="text-left underline underline-offset-2 hover:text-slate-950 disabled:opacity-40"
-          disabled={busy || opening} aria-haspopup="dialog" title={`Open ${row.source_code} in Edit Mapping`}
+          disabled={locked} aria-haspopup="dialog" title={`Open ${row.source_code} in Edit Mapping`}
           onClick={() => void openEditor(row)}>{row.source_vocabulary_id || 'Uncoded'}:{row.source_code}</button><AxisVariantFlag count={row.axis_variant_count} />
-          <AxisVariantList variants={row.axis_variants} canApprove={canApprove} busy={busy} onApprove={variant => void approveVariant(row, variant)} /></td>
+          <AxisVariantList variants={row.axis_variants} canApprove={canApprove} busy={locked} onApprove={variant => void approveVariant(row, variant)} /></td>
         <td className="p-2">{row.source_code_description || '—'}</td><td className="p-2 text-right tabular-nums">{row.occurrence_count}</td>
         <td className="p-2 text-xs">{row.destination_concept_name || 'None'}{row.destination_concept_id && <div className="mt-1 text-slate-500">
           OMOP {row.destination_concept_id} · {row.destination_standard_concept === 'S' ? 'Standard' : 'Nonstandard'}</div>}</td>
