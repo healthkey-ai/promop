@@ -385,6 +385,19 @@ def test_one_property_in_two_spellings_is_one_variant(glucose):
     assert mapping.axis_variant_count == 0
 
 
+def test_refresh_deletes_an_unseen_variant_with_nothing_decided_and_keeps_a_decided_one(two_unit_code, glucose):
+    undecided = SourceCodeAxisVariant.objects.create(
+        mapping=two_unit_code, axis_key='property=NCnc|scale_type=Qn', axis_values={'property': 'NCnc'}, units=['/uL'])
+    decided = SourceCodeAxisVariant.objects.create(
+        mapping=two_unit_code, axis_key='property=ACnc|scale_type=Qn', axis_values={'property': 'ACnc'}, units=['U/L'],
+        target_concept=glucose['2345-7'])
+    stored = axis_variants.refresh(two_unit_code)
+    assert not SourceCodeAxisVariant.objects.filter(pk=undecided.pk).exists()
+    assert SourceCodeAxisVariant.objects.filter(pk=decided.pk).exists()
+    assert sorted(v.axis_key for v in stored) == [
+        'property=ACnc|scale_type=Qn', 'property=MCnc|scale_type=Qn', 'property=SCnc|scale_type=Qn']
+
+
 def test_refresh_flags_the_code_and_keeps_a_curators_choice(two_unit_code, glucose):
     stored = axis_variants.refresh(two_unit_code)
     two_unit_code.refresh_from_db()

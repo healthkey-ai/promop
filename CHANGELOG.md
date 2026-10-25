@@ -150,6 +150,14 @@ All notable changes to PRomop are documented here.
 
 ### Fixed
 
+- **Unit counts come from the instance's own patients** — migration 0307 asks
+  the worker to rewrite every code's stored unit evidence from the source codes
+  on its loaded patients and the stored measurements, then refresh its axis
+  variants, through the same durable request as the variant walk. The seeded
+  label-level counts (#2041) are replaced, a variant the evidence no longer
+  shows is deleted unless a curator decided it, and a later seed or inventory
+  load leaves patient-derived evidence alone. `manage.py refresh_axis_variants
+  --rebuild-evidence` does the same by hand. (#2043)
 - **Unit counts in the axis variants table are the code's own** — the
   hospital code seed took each unit's count from the inventory CSV, whose unit
   rows are a label-level join repeated for every code with the label, so every

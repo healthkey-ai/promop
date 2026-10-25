@@ -17,6 +17,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from omop_core.mapping.code_resolution import SOURCE_CODE_MAX
+from omop_core.mapping import axis_variants
 from omop_core.models import SourceCodeConceptMapping, SourceSystemFacility
 from omop_core.services import source_vocabularies
 
@@ -438,7 +439,10 @@ def upsert_inventory(build, *, provenance, actor=None, dry_run=False,
             if imported.occurrence_count > mapping.occurrence_count:
                 mapping.occurrence_count = imported.occurrence_count
                 changed = True
-            if imported.source_unit_evidence != mapping.source_unit_evidence:
+            # Evidence this instance derived from its own patients (#2043) is
+            # the code's real units; an inventory's is not allowed over it.
+            if imported.source_unit_evidence != mapping.source_unit_evidence \
+                    and not axis_variants.is_patient_evidence(mapping.source_unit_evidence):
                 mapping.source_unit_evidence = imported.source_unit_evidence
                 changed = True
             if imported.source_group_occurrence_count != mapping.source_group_occurrence_count:

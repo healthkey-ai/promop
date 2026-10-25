@@ -43,22 +43,27 @@ def task_id_for(request):
     return f'axis-variant-refresh-{request.pk}'
 
 
-def request_refresh(reason=''):
+def request_refresh(reason='', rebuild_evidence=False):
     """Record a refresh request and return ``(request, created)``.
 
     At most one request is active: a second one while the first is queued or
     running would walk the same codes again. The partial unique constraint on
-    the row closes the race between two callers. Publishing is best effort
-    here. A broker that is missing or unreachable leaves the row queued for the
-    worker's own sweep (:func:`dispatch_queued_refreshes`), or for
-    ``manage.py refresh_axis_variants`` run by hand (:func:`run_pending_inline`).
+    the row closes the race between two callers. A rebuild of the unit
+    evidence (#2043) asked for while a plain refresh is still queued is folded
+    into it. Publishing is best effort here. A broker that is missing or
+    unreachable leaves the row queued for the worker's own sweep
+    (:func:`dispatch_queued_refreshes`), or for ``manage.py
+    refresh_axis_variants`` run by hand (:func:`run_pending_inline`).
     """
     active = AxisVariantRefresh.objects.filter(outcome__in=ACTIVE_OUTCOMES).order_by('pk').first()
     if active is not None:
+        if rebuild_evidence and not active.rebuild_evidence and active.outcome == 'queued':
+            AxisVariantRefresh.objects.filter(pk=active.pk, outcome='queued').update(rebuild_evidence=True)
+            active.rebuild_evidence = True
         return active, False
     try:
         with transaction.atomic():
-            request = AxisVariantRefresh.objects.create(reason=reason)
+            request = AxisVariantRefresh.objects.create(reason=reason, rebuild_evidence=rebuild_evidence)
     except IntegrityError:
         return AxisVariantRefresh.objects.filter(outcome__in=ACTIVE_OUTCOMES).order_by('pk').first(), False
     publish(request)
@@ -118,16 +123,19 @@ def dispatch_queued_refreshes(republish=True):
     return dispatched
 
 
-def run_pending_inline(reason=''):
+def run_pending_inline(reason='', rebuild_evidence=False):
     """Perform the refresh here, completing a queued request if there is one.
 
     The path for an instance with no worker: ``manage.py refresh_axis_variants``
     without ``--queue``. A request a migration left queued is claimed and
-    closed rather than left to block every later request.
+    closed rather than left to block every later request; a rebuild asked
+    for here is folded into it.
     """
     request = AxisVariantRefresh.objects.filter(outcome='queued').order_by('pk').first()
     if request is None:
-        request = AxisVariantRefresh.objects.create(reason=reason)
+        request = AxisVariantRefresh.objects.create(reason=reason, rebuild_evidence=rebuild_evidence)
+    elif rebuild_evidence and not request.rebuild_evidence:
+        AxisVariantRefresh.objects.filter(pk=request.pk).update(rebuild_evidence=True)
     return run_refresh(request.pk)
 
 
@@ -156,19 +164,25 @@ def run_refresh(request_id, batch_size=axis_variants.REFRESH_BATCH):
             done=offset + done, refreshed=already + refreshed, progress_at=timezone.now())
 
     try:
-        keys = sorted(axis_variants.multi_unit_keys(), key=lambda k: (k[0] or '', k[1] or ''))
+        # A rebuild walks every code with evidence or patient data and rewrites
+        # its stored units from that data first (#2043); a plain refresh walks
+        # only the codes seen in several units.
+        keys = axis_variants.evidence_keys() if request.rebuild_evidence else axis_variants.multi_unit_keys()
+        keys = sorted(keys, key=lambda k: (k[0] or '', k[1] or ''))
         AxisVariantRefresh.objects.filter(pk=request_id).update(keys=len(keys))
         if offset:
             logger.info('Axis variant refresh %s resumes at code %s of %s.', request_id, offset, len(keys))
         refreshed = already + axis_variants.refresh_all(
-            keys[offset:], batch_size=batch_size, on_batch=progress)
+            keys[offset:], batch_size=batch_size, on_batch=progress,
+            rebuild_evidence=request.rebuild_evidence)
     except Exception as exc:
         AxisVariantRefresh.objects.filter(pk=request_id).update(
             outcome='failed', failure_reason=str(exc)[:2000], completed_at=timezone.now())
         raise
     AxisVariantRefresh.objects.filter(pk=request_id).update(
         outcome='done', completed_at=timezone.now())
-    logger.info('Axis variant refresh %s walked %s codes and refreshed %s mappings.',
-                request_id, len(keys), refreshed)
+    logger.info('Axis variant refresh %s walked %s codes and refreshed %s mappings%s.',
+                request_id, len(keys), refreshed,
+                ', rebuilding their unit evidence from patient data' if request.rebuild_evidence else '')
     return {'request_id': request_id, 'skipped': False, 'outcome': 'done',
-            'keys': len(keys), 'refreshed': refreshed}
+            'keys': len(keys), 'refreshed': refreshed, 'rebuild_evidence': request.rebuild_evidence}
