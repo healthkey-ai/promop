@@ -58,7 +58,14 @@ double-counting records that occur in both datasets.
 
 The older CSV is useful for code coverage but its unit rows are a label-level
 join repeated for each code, not direct per-code observations. It therefore
-supplements missing code keys but does not supply unit evidence.
+supplements missing code keys but does not supply unit evidence. The seed
+build (`scripts/build_hospital_code_seed.py`) applies the same rule: a unit the
+v2 extract saw on the code carries the extract's per-code count, patients and
+values, and the CSV supplies only its parsing and verdict; a unit the CSV knows
+for the label but the extract never saw on the code is left out, so nothing
+reads it as the code's evidence (#2041). Seeds built before that rule carried
+the label's counts on every code with the label and must be rebuilt and
+reloaded.
 
 ## Organization scope
 

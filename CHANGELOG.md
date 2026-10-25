@@ -150,6 +150,14 @@ All notable changes to PRomop are documented here.
 
 ### Fixed
 
+- **Unit counts in the axis variants table are the code's own** — the
+  hospital code seed took each unit's count from the inventory CSV, whose unit
+  rows are a label-level join repeated for every code with the label, so every
+  albumin code of a hospital showed the same `g/dL 10, % 1`. The seed build now
+  takes the per-code count, patients and values from the v2 extract and leaves
+  out a unit the CSV knows only for the label, so nothing reads it as the
+  code's evidence. Instances seeded before this need the seed rebuilt and
+  reloaded. (#2041)
 - **A variant's suggestion candidates say how to use them** — the blue
   candidates area names the variant it is for ("Suggestion candidates for the
   % variant"), every row has a **Use** button (the winner's reads **Use
