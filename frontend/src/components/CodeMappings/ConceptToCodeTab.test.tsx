@@ -296,9 +296,41 @@ describe('concept-first curation', () => {
     await screen.findByText('1 candidates retrieved (limit 25).');
     expect(post).toHaveBeenCalledTimes(1);
     expect(post).toHaveBeenCalledWith('/v1/concept-to-code/suggest/', {
-      concept_ids: [123], strategies: ['umls', 'lexical'], limit: 25, include_zero_seen: false, ranking_model: 'jev',
+      concept_ids: [123], strategies: ['umls', 'lexical'], limit: 25, include_zero_seen: false, ranking_model: 'jev', include_declined: false,
     });
     expect(screen.getByRole('button', { name: 'Approve selected (0)' })).toBeDisabled();
+  });
+
+  it('keeps the Suggest button on the same line as the ranker and the limit, and sends Retry declined (#2034)', async () => {
+    post.mockResolvedValue({ data: run() });
+    await selectConcept();
+    const settings = screen.getByRole('group', { name: 'Suggest settings' });
+    const ranker = within(settings).getByLabelText('Source suggestion ranker');
+    const limit = within(settings).getByLabelText('Maximum source candidates');
+    const suggest = within(settings).getByRole('button', { name: 'Suggest source codes' });
+    // One non-wrapping row holds all three.
+    expect(ranker.parentElement).toBe(limit.parentElement);
+    expect(suggest.parentElement).toBe(ranker.parentElement);
+    expect(ranker.parentElement).toHaveClass('flex-nowrap');
+    fireEvent.click(within(settings).getByRole('checkbox', { name: 'Retry declined' }));
+    await waitFor(() => expect(get).toHaveBeenCalledWith('/v1/concept-to-code/123/estimate/', expect.objectContaining({
+      params: expect.objectContaining({ include_declined: '1' }) })));
+    fireEvent.click(suggest);
+    await waitFor(() => expect(post).toHaveBeenCalledWith('/v1/concept-to-code/suggest/', expect.objectContaining({ include_declined: true })));
+  });
+
+  it('says hidden candidates were declined and that the next run moves on, and how many the estimate skips (#2034)', async () => {
+    get.mockImplementation((url: string) => Promise.resolve({ data: url.includes('/estimate/')
+      ? { total: 29, lexical: 29, declined: 25, declined_skipped: 25, timed_out: false, approximate: null }
+      : url === '/v1/concept-to-code/' ? page([concept]) : page([source]) }));
+    post.mockResolvedValue({ data: { ...run(), selection: { limit: 25, include_zero_seen: false, ranking_model: 'jev' },
+      activity: [{ concept: { concept_id: 123 }, candidates: [{ ...source, evidence: ['lexical'], verdict: 'review', confidence: null }] }] } });
+    await selectConcept();
+    expect(await screen.findByTestId('source-estimate')).toHaveTextContent(
+      'About 29 candidate source codes (29 by name) · about 2 runs of 25. 25 a ranker already declined are skipped.');
+    fireEvent.click(screen.getByRole('button', { name: 'Suggest source codes' }));
+    expect(await screen.findByText(/1 candidates retrieved \(limit 25\)\. 1 declined by the ranker and hidden; the next run moves on to other codes\./)).toBeInTheDocument();
+    expect(screen.queryByText('SNOMED:S1')).not.toBeInTheDocument();
   });
 
   it('polls queued jobs and retains failure information', async () => {
@@ -721,7 +753,7 @@ describe('suggestions without a confidence score (#1915)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Suggest source codes' }));
     expect(await screen.findByText('SNOMED:SCORED')).toBeInTheDocument();
     expect(screen.queryByText('SNOMED:UNSCORED')).not.toBeInTheDocument();
-    expect(screen.getByText(/1 without a confidence score hidden/)).toBeInTheDocument();
+    expect(screen.getByText(/1 declined by the ranker and hidden; the next run moves on to other codes/)).toBeInTheDocument();
   });
 
   it('shows every suggestion after an unranked run', async () => {
@@ -730,7 +762,7 @@ describe('suggestions without a confidence score (#1915)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Suggest source codes' }));
     expect(await screen.findByText('SNOMED:SCORED')).toBeInTheDocument();
     expect(screen.getByText('SNOMED:UNSCORED')).toBeInTheDocument();
-    expect(screen.queryByText(/without a confidence score hidden/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/declined by the ranker and hidden/)).not.toBeInTheDocument();
   });
 
   it('leaves existing mappings visible whether or not they were scored', async () => {
@@ -848,7 +880,7 @@ describe('concept priority (#1914)', () => {
     await selectConcept();
     const estimate = await screen.findByTestId('source-estimate');
     expect(estimate).toHaveTextContent('About 60 candidate source codes (57 by name, 4 by UMLS) · about 3 runs of 25.');
-    expect(estimates[0]).toEqual({ strategies: 'umls,lexical', include_zero_seen: '0' });
+    expect(estimates[0]).toEqual({ strategies: 'umls,lexical', include_zero_seen: '0', include_declined: '0' });
     // The run count follows the limit as it is typed.
     fireEvent.change(screen.getByLabelText('Maximum source candidates'), { target: { value: '60' } });
     expect(estimate).toHaveTextContent('about 1 run of 60.');
@@ -856,9 +888,9 @@ describe('concept priority (#1914)', () => {
     fireEvent.click(screen.getByRole('checkbox', { name: 'Names and synonyms' }));
     await waitFor(() => expect(screen.getByTestId('source-estimate'))
       .toHaveTextContent('Suggest source codes would find no candidate source codes with these settings.'));
-    expect(estimates.at(-1)).toEqual({ strategies: 'umls', include_zero_seen: '0' });
+    expect(estimates.at(-1)).toEqual({ strategies: 'umls', include_zero_seen: '0', include_declined: '0' });
     fireEvent.click(screen.getByRole('checkbox', { name: 'Only source codes with Seen greater than zero' }));
-    await waitFor(() => expect(estimates.at(-1)).toEqual({ strategies: 'umls', include_zero_seen: '1' }));
+    await waitFor(() => expect(estimates.at(-1)).toEqual({ strategies: 'umls', include_zero_seen: '1', include_declined: '0' }));
   });
 
   it('marks a capped estimate as a floor and says when the estimate timed out', async () => {

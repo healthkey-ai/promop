@@ -4,7 +4,9 @@ import logging
 from django.utils import timezone
 
 from omop_core.models import SuggestRun
-from omop_core.mapping.reverse_suggestions import reverse_rank_candidate, reverse_retrieval_pool
+from omop_core.mapping.reverse_suggestions import (
+    record_declines, reverse_rank_candidate, reverse_retrieval_pool,
+)
 from omop_core.services.concept_to_code import concept_payload, standard_destinations
 
 logger = logging.getLogger(__name__)
@@ -72,6 +74,7 @@ def execute_reverse_run(run_id, params):
             candidates = reverse_retrieval_pool(
                 concept, strategies=params['strategies'], limit=params['limit'],
                 include_zero_seen=params['include_zero_seen'],
+                include_declined=params.get('include_declined', False),
                 timeout_ms=params['retrieval_timeout_ms'],
             )
             event = {'concept': concept_payload(concept), 'candidates': candidates}
@@ -81,6 +84,11 @@ def execute_reverse_run(run_id, params):
                 ranked = reverse_rank_candidate(concept, candidate, params['ranking_model'])
                 event['candidates'][index] = _with_variant_suggestions(ranked, params, run, budget)
                 runs.update(activity=events)
+            # What the ranker declined is remembered, so the next run for this
+            # concept moves on to sources this one did not reach (#2034).
+            event['declined'] = record_declines(
+                concept, event['candidates'], ranking_model=params['ranking_model'], run=run)
+            runs.update(activity=events)
             done += 1
             runs.update(done=done)
         runs.update(state=SuggestRun.SUCCESS, finished_at=timezone.now())

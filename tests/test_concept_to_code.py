@@ -205,6 +205,84 @@ def test_suggest_dispatch_persisted_poll_and_no_mapping_mutations(client, concep
         retrieval.assert_not_called()
 
 
+def _declining_ranker():
+    return patch('omop_core.mapping.suggestions.rank_candidates_dispatch', return_value=(None, 'Not equivalent', [], {}))
+
+
+def test_a_ranked_run_remembers_what_the_ranker_declined_and_the_next_run_moves_on(client, concept):
+    """The ranker declined every one of the best ``limit`` sources; the next run must not rank them again (#2034)."""
+    from omop_core.models import ReverseSuggestDecline
+    first = [source(f'A{n}', occurrence_count=10 - n) for n in range(3)]
+    rest = [source(f'B{n}', occurrence_count=2) for n in range(2)]
+    dispatcher = FakeDispatcher()
+    body = {'concept_ids': [concept.pk], 'strategies': ['lexical'], 'limit': 3, 'ranking_model': 'jev'}
+    with use_dispatcher(dispatcher):
+        run_id, params = dispatcher.calls[-1] if dispatcher.calls else (None, None)
+        response = client.post(f'{BASE}suggest/', body, format='json')
+        assert response.status_code == 202
+        run_id, params = dispatcher.calls[-1]
+        with _declining_ranker():
+            execute_run(run_id, params)
+    event = client.get(f'{BASE}suggest-runs/{run_id}/').data['activity'][0]
+    assert [c['source_code'] for c in event['candidates']] == ['A0', 'A1', 'A2']
+    assert all(c['confidence'] is None for c in event['candidates'])
+    assert event['declined'] == 3
+    assert set(ReverseSuggestDecline.objects.filter(concept=concept).values_list('source_code', flat=True)) == {'A0', 'A1', 'A2'}
+    assert ReverseSuggestDecline.objects.get(source_code='A0').mapping_id == first[0].pk
+
+    # The estimate skips them and says so.
+    estimate = client.get(f'{BASE}{concept.pk}/estimate/', {'strategies': 'lexical'}).data
+    assert estimate['total'] == 2 and estimate['declined'] == 3 and estimate['declined_skipped'] == 3
+    retry = client.get(f'{BASE}{concept.pk}/estimate/', {'strategies': 'lexical', 'include_declined': '1'}).data
+    assert retry['total'] == 5 and retry['declined_skipped'] == 0
+
+    # The next run reaches the rest of the pool.
+    with use_dispatcher(dispatcher):
+        client.post(f'{BASE}suggest/', body, format='json')
+        run_id, params = dispatcher.calls[-1]
+        with _declining_ranker():
+            execute_run(run_id, params)
+    event = client.get(f'{BASE}suggest-runs/{run_id}/').data['activity'][0]
+    assert sorted(c['source_code'] for c in event['candidates']) == ['B0', 'B1']
+    assert ReverseSuggestDecline.objects.filter(concept=concept).count() == 5
+
+    # Retrying declined codes brings the first three back, best first.
+    with use_dispatcher(dispatcher):
+        client.post(f'{BASE}suggest/', {**body, 'include_declined': True}, format='json')
+        run_id, params = dispatcher.calls[-1]
+        assert params['include_declined'] is True
+        with _declining_ranker():
+            execute_run(run_id, params)
+    event = client.get(f'{BASE}suggest-runs/{run_id}/').data['activity'][0]
+    assert [c['source_code'] for c in event['candidates']] == ['A0', 'A1', 'A2']
+    assert rest  # the B rows exist throughout
+
+
+def test_a_confident_candidate_and_curator_review_are_not_declines(client, concept):
+    from omop_core.models import ReverseSuggestDecline
+    source('A')
+    dispatcher = FakeDispatcher()
+    with use_dispatcher(dispatcher):
+        client.post(f'{BASE}suggest/', {'concept_ids': [concept.pk], 'strategies': ['lexical']}, format='json')
+        run_id, params = dispatcher.calls[-1]
+        execute_run(run_id, params)  # ranking_model 'none'
+    assert ReverseSuggestDecline.objects.count() == 0
+    chosen = {'concept_id': concept.pk, 'confidence': 0.9}
+    with use_dispatcher(dispatcher):
+        client.post(f'{BASE}suggest/', {'concept_ids': [concept.pk], 'strategies': ['lexical'], 'ranking_model': 'jev'}, format='json')
+        run_id, params = dispatcher.calls[-1]
+        with patch('omop_core.mapping.suggestions.rank_candidates_dispatch', return_value=(chosen, 'high', [chosen], {})):
+            execute_run(run_id, params)
+    assert ReverseSuggestDecline.objects.count() == 0
+    event = client.get(f'{BASE}suggest-runs/{run_id}/').data['activity'][0]
+    assert event['candidates'][0]['confidence'] == 0.9 and event['declined'] == 0
+
+
+def test_include_declined_must_be_a_boolean(client, concept):
+    response = client.post(f'{BASE}suggest/', {'concept_ids': [concept.pk], 'include_declined': 'yes'}, format='json')
+    assert response.status_code == 400 and 'include_declined' in response.data
+
+
 def test_ranker_cannot_fallback_to_first_candidate_without_model_selection(concept):
     with patch('omop_core.mapping.suggestions.rank_candidates_dispatch', return_value=(None, 'Unavailable', [], {})) as rank:
         candidate = reverse_rank_candidate(concept, {'source_code': 'A', 'source_code_description': 'Albumin', 'source_vocabulary_id': 'SNOMED'}, 'anthropic')
@@ -321,7 +399,7 @@ def test_estimate_counts_every_source_a_run_could_return(client, concept):
     data = client.get(f'{BASE}{concept.pk}/estimate/').data
     # More than one run's worth: 30 by name, one by UMLS, none counted twice.
     assert data == {'total': 31, 'umls': 1, 'lexical': 30, 'capped': False, 'partial': False,
-                    'approximate': None, 'timed_out': False}
+                    'approximate': None, 'timed_out': False, 'declined': 0, 'declined_skipped': 0}
     assert len(reverse_retrieval_pool(concept, strategies=['umls', 'lexical'], limit=25)) == 25
     assert client.get(f'{BASE}{concept.pk}/estimate/', {'include_zero_seen': '1'}).data['total'] == 32
     assert client.get(f'{BASE}{concept.pk}/estimate/', {'strategies': 'umls'}).data['total'] == 1
@@ -412,7 +490,7 @@ def test_a_timed_out_estimate_with_no_earlier_count_is_sampled(client, concept):
         data = client.get(f'{BASE}{concept.pk}/estimate/').data
         zero_seen = client.get(f'{BASE}{concept.pk}/estimate/', {'include_zero_seen': '1'}).data
     assert data == {'total': 31, 'umls': 1, 'lexical': 30, 'capped': False, 'partial': False,
-                    'approximate': 'sample', 'timed_out': False}
+                    'approximate': 'sample', 'timed_out': False, 'declined': 0, 'declined_skipped': 0}
     # Never-seen vocabulary codes are not sampled, so that total is a floor.
     assert zero_seen['partial'] is True
 

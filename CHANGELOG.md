@@ -140,6 +140,14 @@ All notable changes to PRomop are documented here.
 
 ### Fixed
 
+- **Concept to Code Suggest moves on instead of repeating declined codes** — a
+  run used to retrieve the same best-`limit` sources every time, so when the
+  ranker declined all of them ("25 without a confidence score hidden") the next
+  click found nothing new. Declines are now remembered per concept and skipped
+  by later runs and by the estimate, which says how many are skipped; "Retry
+  declined" searches them again. The Suggest button sits on the same line as
+  the ranker and the limit, and the run summary says the hidden codes were
+  declined and that the next run moves on. (#2034)
 - **A `%` variant is no longer suggested the mass-concentration LOINC** — a
   unit that fits several LOINC properties (`%`, `U/L`, `IU/L`, `{ratio}`) now
   settles the property to that set instead of none, so albumin in `%` keeps

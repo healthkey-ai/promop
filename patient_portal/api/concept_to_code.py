@@ -245,8 +245,10 @@ def concept_to_code_estimate(request, concept_id):
     if not strategies or any(s not in ('umls', 'lexical') for s in strategies):
         raise ValidationError({'strategies': 'Choose umls, lexical, or both.'})
     include_zero = request.query_params.get('include_zero_seen', '0') == '1'
+    include_declined = request.query_params.get('include_declined', '0') == '1'
     try:
-        estimate = estimate_source_count(concept, strategies=strategies, include_zero_seen=include_zero)
+        estimate = estimate_source_count(concept, strategies=strategies, include_zero_seen=include_zero,
+                                         include_declined=include_declined)
     except (TimeoutError, OperationalError):
         # Even the approximation outran its budget; the page says so.
         return Response({'total': None, 'timed_out': True})
@@ -280,6 +282,9 @@ def concept_to_code_suggest(request):
     include_zero = data.get('include_zero_seen', False)
     if type(include_zero) is not bool:
         raise ValidationError({'include_zero_seen': 'Supply a boolean.'})
+    include_declined = data.get('include_declined', False)
+    if type(include_declined) is not bool:
+        raise ValidationError({'include_declined': 'Supply a boolean.'})
     limit = data.get('limit', 10)
     if type(limit) is not int or not 1 <= limit <= 100:
         raise ValidationError({'limit': 'Choose a whole number from 1 to 100.'})
@@ -287,7 +292,7 @@ def concept_to_code_suggest(request):
     ceiling = dispatcher.max_codes if ranking_model != 'none' else 100
     limit = min(limit, max(1, ceiling // len(ids)))
     params = dict(direction='reverse', concept_ids=ids, strategies=strategies, limit=limit,
-                  include_zero_seen=include_zero, ranking_model=ranking_model,
+                  include_zero_seen=include_zero, include_declined=include_declined, ranking_model=ranking_model,
                   retrieval_timeout_ms=8000 if inline else 30000)
     with transaction.atomic():
         run = SuggestRun.objects.create(
