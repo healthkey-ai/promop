@@ -84,8 +84,8 @@ def execute_reverse_run(run_id, params):
                 ranked = reverse_rank_candidate(concept, candidate, params['ranking_model'])
                 event['candidates'][index] = _with_variant_suggestions(ranked, params, run, budget)
                 runs.update(activity=events)
-            # What the ranker declined is remembered, so the next run for this
-            # concept moves on to sources this one did not reach (#2034).
+            # What the ranker declined this run is remembered, so the next run
+            # for this concept moves on to sources this one did not reach (#2034).
             event['declined'] = record_declines(
                 concept, event['candidates'], ranking_model=params['ranking_model'], run=run)
             runs.update(activity=events)

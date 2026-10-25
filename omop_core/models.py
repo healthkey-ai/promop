@@ -5237,8 +5237,9 @@ class ReverseSuggestDecline(models.Model):
     (approved, rejected) takes the source out of the pool anyway.
     """
     concept = models.ForeignKey(Concept, on_delete=models.CASCADE, related_name='+')
-    #: The mapping row the candidate came from; None for an unregistered
-    #: vocabulary code the catalog search found.
+    #: The mapping row the candidate came from, for reference; None for an
+    #: unregistered vocabulary code the catalog search found. Runs skip by the
+    #: vocabulary and code, which every hospital's row of the code shares.
     mapping = models.ForeignKey(
         SourceCodeConceptMapping, on_delete=models.CASCADE, null=True, blank=True, related_name='+',
     )
@@ -5255,7 +5256,6 @@ class ReverseSuggestDecline(models.Model):
                 fields=['concept', 'source_vocabulary_id', 'source_code'], name='uq_reverse_suggest_decline',
             ),
         ]
-        indexes = [models.Index(fields=['concept', 'mapping'], name='ix_reverse_decline_mapping')]
 
     def __str__(self):
         return f'{self.concept_id} declined {self.source_vocabulary_id}:{self.source_code} ({self.ranking_model})'

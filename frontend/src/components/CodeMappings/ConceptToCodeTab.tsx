@@ -30,6 +30,8 @@ type Source = {
   confidence?: number | null;
   /** Saved in the full editor since the preview: no longer a bulk-review row. */
   edited?: boolean;
+  /** The ranker answered "no suitable concept" for this source (#2034). */
+  declined?: boolean;
 };
 type ConfidenceOrder = '' | '-confidence' | 'confidence';
 type Page<T> = { results: T[]; page: number; page_size: number; total: number };
@@ -299,8 +301,8 @@ type EditTarget = { mode: 'new' | 'edit'; row: CodeMappingRow; source: Source };
 type Estimate = {
   total: number | null; umls?: number; lexical?: number; capped?: boolean; partial?: boolean;
   approximate?: 'earlier' | 'sample' | null; timed_out: boolean;
-  /** Sources a ranker already declined for this concept, and how many of them this estimate skips (#2034). */
-  declined?: number; declined_skipped?: number;
+  /** Sources this estimate skips because a ranker already declined them (#2034). */
+  declined_skipped?: number;
 };
 
 /** "12 a ranker already declined are skipped." when earlier runs declined some of the pool. */
@@ -430,6 +432,7 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
   const active = useRef(true);
   useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
   const running = starting || run?.state === 'queued' || run?.state === 'running';
+  const finishedRun = run && !running ? run.run_id : null;
 
   // Re-estimated after every write: a proposed source leaves the pool, so the
   // next run reaches codes the last one did not show.
@@ -449,7 +452,8 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
       } catch { /* The estimate is a guide; Suggest works without it. */ }
     }, 250);
     return () => { current = false; controller.abort(); window.clearTimeout(timer); };
-  }, [concept.concept_id, strategyKey, seenOnly, retryDeclined, revision]);
+    // A finished run recorded declines, which the estimate now skips.
+  }, [concept.concept_id, strategyKey, seenOnly, retryDeclined, revision, finishedRun]);
 
   useEffect(() => {
     if (!run || !['queued', 'running'].includes(run.state)) return;
@@ -492,7 +496,11 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
   // unscored is not a suggestion. An unranked run scores nothing, so it shows all.
   const ranked = Boolean(run?.selection.ranking_model && run.selection.ranking_model !== 'none');
   const scored = ranked ? candidates.filter(row => row.confidence != null) : candidates;
-  const unscoredHidden = candidates.length - scored.length;
+  const unscored = ranked ? candidates.filter(row => row.confidence == null) : [];
+  // A decline is the ranker's answer; a candidate it could not rank (the
+  // ranker was unavailable) is hidden too, but nothing was decided (#2034).
+  const declinedHidden = unscored.filter(row => row.declined).length;
+  const unrankedHidden = unscored.length - declinedHidden;
   const candidateRows = scored.filter(row => !seenOnly || row.occurrence_count > 0);
   const linkedRows = STATUSES.flatMap(status => open[status] ? groups[status].data?.results ?? [] : []);
   const rows = mode === 'candidates' ? (order ? [...candidateRows].sort(byConfidence(order)) : candidateRows) : linkedRows;
@@ -668,7 +676,8 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
       {' '}New vocabulary codes have Seen = 0; approving one proposes it from this preview first.</p>
     {run && mode === 'candidates' && <p role="status" className="text-sm text-slate-600">
       {running ? 'Searching local vocabulary evidence…' : `${candidates.length} candidates retrieved (limit ${run.selection.limit}).`}
-      {!running && unscoredHidden > 0 && ` ${unscoredHidden} declined by the ranker and hidden; the next run moves on to other codes.`}
+      {!running && declinedHidden > 0 && ` ${declinedHidden} declined by the ranker and hidden${run.selection.include_declined ? '' : '; the next run moves on to other codes'}.`}
+      {!running && unrankedHidden > 0 && ` ${unrankedHidden} could not be ranked (the ranker was unavailable) and ${unrankedHidden === 1 ? 'is' : 'are'} hidden.`}
       {run.error && ` ${run.error}`}
     </p>}
     {run && mode === 'candidates' && run.selection.include_zero_seen === seenOnly && <p className="text-xs text-amber-800">Run Suggest source codes again to search with the changed Seen filter.</p>}

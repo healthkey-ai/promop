@@ -321,16 +321,34 @@ describe('concept-first curation', () => {
 
   it('says hidden candidates were declined and that the next run moves on, and how many the estimate skips (#2034)', async () => {
     get.mockImplementation((url: string) => Promise.resolve({ data: url.includes('/estimate/')
-      ? { total: 29, lexical: 29, declined: 25, declined_skipped: 25, timed_out: false, approximate: null }
+      ? { total: 29, lexical: 29, declined_skipped: 25, timed_out: false, approximate: null }
       : url === '/v1/concept-to-code/' ? page([concept]) : page([source]) }));
     post.mockResolvedValue({ data: { ...run(), selection: { limit: 25, include_zero_seen: false, ranking_model: 'jev' },
-      activity: [{ concept: { concept_id: 123 }, candidates: [{ ...source, evidence: ['lexical'], verdict: 'review', confidence: null }] }] } });
+      activity: [{ concept: { concept_id: 123 }, candidates: [{ ...source, evidence: ['lexical'], verdict: 'review', confidence: null, declined: true }] }] } });
     await selectConcept();
     expect(await screen.findByTestId('source-estimate')).toHaveTextContent(
       'About 29 candidate source codes (29 by name) · about 2 runs of 25. 25 a ranker already declined are skipped.');
+    const estimates = () => get.mock.calls.filter(([url]) => String(url).includes('/estimate/')).length;
+    const before = estimates();
     fireEvent.click(screen.getByRole('button', { name: 'Suggest source codes' }));
     expect(await screen.findByText(/1 candidates retrieved \(limit 25\)\. 1 declined by the ranker and hidden; the next run moves on to other codes\./)).toBeInTheDocument();
     expect(screen.queryByText('SNOMED:S1')).not.toBeInTheDocument();
+    // The finished run recorded declines, so the estimate is read again.
+    await waitFor(() => expect(estimates()).toBeGreaterThan(before));
+  });
+
+  it('tells an unavailable ranker apart from a decline, and does not promise to move on past retried codes (#2034)', async () => {
+    post.mockResolvedValue({ data: { ...run(), selection: { limit: 25, include_zero_seen: false, ranking_model: 'jev', include_declined: true },
+      activity: [{ concept: { concept_id: 123 }, candidates: [
+        { ...source, evidence: ['lexical'], verdict: 'review', confidence: null, declined: true },
+        { ...source, source_code: 'S2', mapping_id: 8, evidence: ['lexical'], verdict: 'review', confidence: null, declined: false, note: 'Ranking model unavailable' },
+      ] }] } });
+    await selectConcept();
+    fireEvent.click(screen.getByRole('button', { name: 'Suggest source codes' }));
+    const status = await screen.findByText(/2 candidates retrieved/);
+    expect(status).toHaveTextContent('1 declined by the ranker and hidden.');
+    expect(status).not.toHaveTextContent('moves on');
+    expect(status).toHaveTextContent('1 could not be ranked (the ranker was unavailable) and is hidden.');
   });
 
   it('polls queued jobs and retains failure information', async () => {
@@ -740,7 +758,7 @@ describe('editing a source code from a concept (#1915)', () => {
 describe('suggestions without a confidence score (#1915)', () => {
   const candidates = [
     { ...source, source_code: 'SCORED', confidence: 0.72 },
-    { ...source, source_code: 'UNSCORED', confidence: null },
+    { ...source, source_code: 'UNSCORED', confidence: null, declined: true },
   ];
   const suggest = (ranking_model: string) => {
     post.mockResolvedValue({ data: { ...run(), selection: { limit: 25, include_zero_seen: false, ranking_model },

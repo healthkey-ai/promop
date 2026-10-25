@@ -206,7 +206,23 @@ def test_suggest_dispatch_persisted_poll_and_no_mapping_mutations(client, concep
 
 
 def _declining_ranker():
-    return patch('omop_core.mapping.suggestions.rank_candidates_dispatch', return_value=(None, 'Not equivalent', [], {}))
+    return patch('omop_core.mapping.suggestions.rank_candidates_dispatch',
+                 return_value=(None, 'No suitable concept (Jev ranking).', [], {}))
+
+
+def _unavailable_ranker():
+    return patch('omop_core.mapping.suggestions.rank_candidates_dispatch',
+                 return_value=(None, 'Ranking model unavailable; expanded search remains unresolved. Details: JEV_API_KEY is not configured.', None, {}))
+
+
+def _run(client, concept, dispatcher, ranker, **body):
+    with use_dispatcher(dispatcher):
+        response = client.post(f'{BASE}suggest/', {'concept_ids': [concept.pk], 'strategies': ['lexical'], **body}, format='json')
+        assert response.status_code == 202, response.data
+        run_id, params = dispatcher.calls[-1]
+        with ranker():
+            execute_run(run_id, params)
+    return client.get(f'{BASE}suggest-runs/{run_id}/').data['activity'][0], params
 
 
 def test_a_ranked_run_remembers_what_the_ranker_declined_and_the_next_run_moves_on(client, concept):
@@ -225,16 +241,22 @@ def test_a_ranked_run_remembers_what_the_ranker_declined_and_the_next_run_moves_
             execute_run(run_id, params)
     event = client.get(f'{BASE}suggest-runs/{run_id}/').data['activity'][0]
     assert [c['source_code'] for c in event['candidates']] == ['A0', 'A1', 'A2']
-    assert all(c['confidence'] is None for c in event['candidates'])
+    assert all(c['confidence'] is None and c['declined'] is True for c in event['candidates'])
     assert event['declined'] == 3
     assert set(ReverseSuggestDecline.objects.filter(concept=concept).values_list('source_code', flat=True)) == {'A0', 'A1', 'A2'}
     assert ReverseSuggestDecline.objects.get(source_code='A0').mapping_id == first[0].pk
 
     # The estimate skips them and says so.
     estimate = client.get(f'{BASE}{concept.pk}/estimate/', {'strategies': 'lexical'}).data
-    assert estimate['total'] == 2 and estimate['declined'] == 3 and estimate['declined_skipped'] == 3
+    assert estimate['total'] == 2 and estimate['declined_skipped'] == 3
     retry = client.get(f'{BASE}{concept.pk}/estimate/', {'strategies': 'lexical', 'include_declined': '1'}).data
     assert retry['total'] == 5 and retry['declined_skipped'] == 0
+    # Only declines still in the pool count as skipped: an approved row left it anyway.
+    first[2].status = 'approved'
+    first[2].save(update_fields=['status'])
+    assert client.get(f'{BASE}{concept.pk}/estimate/', {'strategies': 'lexical'}).data['declined_skipped'] == 2
+    first[2].status = 'proposed'
+    first[2].save(update_fields=['status'])
 
     # The next run reaches the rest of the pool.
     with use_dispatcher(dispatcher):
@@ -256,6 +278,46 @@ def test_a_ranked_run_remembers_what_the_ranker_declined_and_the_next_run_moves_
     event = client.get(f'{BASE}suggest-runs/{run_id}/').data['activity'][0]
     assert [c['source_code'] for c in event['candidates']] == ['A0', 'A1', 'A2']
     assert rest  # the B rows exist throughout
+
+
+def test_an_unavailable_ranker_declines_nothing(client, concept):
+    """A missing key or a failed request is not the ranker's answer; the sources stay in the pool."""
+    from omop_core.models import ReverseSuggestDecline
+    source('A')
+    event, _ = _run(client, concept, FakeDispatcher(), _unavailable_ranker, ranking_model='jev')
+    assert event['candidates'][0]['confidence'] is None and event['candidates'][0]['declined'] is False
+    assert event['declined'] == 0 and ReverseSuggestDecline.objects.count() == 0
+    # The same source comes back next time.
+    event, _ = _run(client, concept, FakeDispatcher(), _unavailable_ranker, ranking_model='jev')
+    assert [c['source_code'] for c in event['candidates']] == ['A']
+
+
+def test_every_hospitals_row_of_a_declined_code_is_skipped(client, concept):
+    """Hospital codes have one row per organization; a decline is about the code."""
+    from omop_core.models import Organization
+    orgs = [Organization.objects.create(name=f'Hospital {n}', slug=f'hospital-{n}') for n in range(2)]
+    rows = [source('HOSP-1', organization=org, occurrence_count=5) for org in orgs]
+    other = source('OTHER', occurrence_count=1)
+    event, _ = _run(client, concept, FakeDispatcher(), _declining_ranker, ranking_model='jev', limit=2)
+    assert [c['mapping_id'] for c in event['candidates']] == [rows[0].pk, rows[1].pk]
+    event, _ = _run(client, concept, FakeDispatcher(), _declining_ranker, ranking_model='jev', limit=2)
+    assert [c['mapping_id'] for c in event['candidates']] == [other.pk]
+
+
+def test_a_source_the_ranker_supports_on_a_retry_is_no_longer_declined(client, concept):
+    from omop_core.models import ReverseSuggestDecline
+    source('A')
+    _run(client, concept, FakeDispatcher(), _declining_ranker, ranking_model='jev')
+    assert ReverseSuggestDecline.objects.filter(source_code='A').exists()
+    chosen = {'concept_id': concept.pk, 'confidence': 0.9}
+    supporting = lambda: patch('omop_core.mapping.suggestions.rank_candidates_dispatch',  # noqa: E731
+                               return_value=(chosen, 'high', [chosen], {}))
+    event, _ = _run(client, concept, FakeDispatcher(), supporting, ranking_model='anthropic', include_declined=True)
+    assert event['candidates'][0]['confidence'] == 0.9
+    assert not ReverseSuggestDecline.objects.filter(source_code='A').exists()
+    # ... so a normal run shows it again.
+    event, _ = _run(client, concept, FakeDispatcher(), supporting, ranking_model='anthropic')
+    assert [c['source_code'] for c in event['candidates']] == ['A']
 
 
 def test_a_confident_candidate_and_curator_review_are_not_declines(client, concept):
@@ -399,7 +461,7 @@ def test_estimate_counts_every_source_a_run_could_return(client, concept):
     data = client.get(f'{BASE}{concept.pk}/estimate/').data
     # More than one run's worth: 30 by name, one by UMLS, none counted twice.
     assert data == {'total': 31, 'umls': 1, 'lexical': 30, 'capped': False, 'partial': False,
-                    'approximate': None, 'timed_out': False, 'declined': 0, 'declined_skipped': 0}
+                    'approximate': None, 'timed_out': False, 'declined_skipped': 0}
     assert len(reverse_retrieval_pool(concept, strategies=['umls', 'lexical'], limit=25)) == 25
     assert client.get(f'{BASE}{concept.pk}/estimate/', {'include_zero_seen': '1'}).data['total'] == 32
     assert client.get(f'{BASE}{concept.pk}/estimate/', {'strategies': 'umls'}).data['total'] == 1
@@ -490,7 +552,7 @@ def test_a_timed_out_estimate_with_no_earlier_count_is_sampled(client, concept):
         data = client.get(f'{BASE}{concept.pk}/estimate/').data
         zero_seen = client.get(f'{BASE}{concept.pk}/estimate/', {'include_zero_seen': '1'}).data
     assert data == {'total': 31, 'umls': 1, 'lexical': 30, 'capped': False, 'partial': False,
-                    'approximate': 'sample', 'timed_out': False, 'declined': 0, 'declined_skipped': 0}
+                    'approximate': 'sample', 'timed_out': False, 'declined_skipped': 0}
     # Never-seen vocabulary codes are not sampled, so that total is a floor.
     assert zero_seen['partial'] is True
 
