@@ -612,6 +612,24 @@ export const TAB_LAYOUT: TabLayout = {
       ]
     },
     {
+      "title": "Computed Criteria",
+      "component": "MCLSection",
+      "fields": [
+        [
+          "MIPI Risk",
+          "mipi_risk"
+        ],
+        [
+          "MIPI-c Risk",
+          "mipi_c_risk"
+        ],
+        [
+          "High-Risk MCL Criteria",
+          "high_risk_mcl_criteria"
+        ]
+      ]
+    },
+    {
       "title": "Staging & Biomarkers",
       "component": "StagingBiomarkersSection",
       "fields": [
@@ -874,6 +892,24 @@ export const TAB_LAYOUT: TabLayout = {
         [
           "Bone Imaging Normal",
           "bone_imaging_result"
+        ]
+      ]
+    },
+    {
+      "title": "Organ Function",
+      "component": "LabsTab",
+      "fields": [
+        [
+          "Renal Adequacy",
+          "renal_adequacy_status"
+        ],
+        [
+          "Hepatic Adequacy",
+          "hepatic_adequacy_status"
+        ],
+        [
+          "Haematological Adequacy",
+          "haematological_adequacy_status"
         ]
       ]
     }
