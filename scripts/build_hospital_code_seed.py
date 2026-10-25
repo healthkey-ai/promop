@@ -266,8 +266,11 @@ def facility_objects(rows):
 
 
 def merged_units(alex_units, rows, *, unit_source):
-    # Alex is the distribution source. Nikita is the authoritative unit
-    # parsing/validation source. Match on the two untouched FHIR strings.
+    # Alex's v2 extract is the per-code (code, unit) distribution and the only
+    # per-code count. Nikita's CSV is the authoritative unit parsing and
+    # validation source, but its counts are a label-level join repeated for
+    # every code that carries the label, so they never stand as this code's
+    # evidence (#2041). Match on the two untouched FHIR strings.
     distributions = {
         (text(unit.get('display')), text(unit.get('code'))): unit
         for unit in alex_units
@@ -280,16 +283,22 @@ def merged_units(alex_units, rows, *, unit_source):
             'display': display, 'code': raw_code, 'system': row[2],
             'normalized': row[3], 'normalized_source': row[4],
             'verdict': row[5], 'verdict_reason': row[6],
-            'count': row[7], 'patients': row[8], 'values': row[9],
             'source': unit_source,
         }
         alex = distributions.get((display, raw_code))
         if alex:
             matched.add((display, raw_code))
-            for field in ('distribution', 'suppressed'):
+            for field in ('count', 'patients', 'values', 'distribution', 'suppressed'):
                 if field in alex:
                     evidence[field] = alex[field]
             evidence['distribution_source'] = 'alex-unmapped-source-codes-v2'
+        else:
+            # Known to the label, not seen on this code in the v2 extract:
+            # listed for what the unit is, with no count to be read as evidence.
+            evidence.update({
+                'count': 0, 'count_scope': 'label',
+                'label_count': row[7], 'label_patients': row[8], 'label_values': row[9],
+            })
         result.append({key: value for key, value in evidence.items() if value not in ('', None, 0) or key == 'count'})
     for key, alex in distributions.items():
         if key in matched:
