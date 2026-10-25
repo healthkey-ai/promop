@@ -49,10 +49,44 @@ def test_crab_navigation_uses_readable_canonical_clearance_without_lifting_gate(
     assert 'clinical review' in crab['compatibility_reason']
 
 
+def test_adequacy_subforms_are_navigable_but_results_are_gated():
+    inputs = {
+        'renal_adequacy_status': {'date_of_birth', 'gender', 'serum_creatinine_mg_dl',
+                                  'creatinine_clearance_ml_min'},
+        'hepatic_adequacy_status': {'ast_u_l', 'alt_u_l', 'bilirubin_total_mg_dl',
+                                    'ethnicity', 'gender'},
+        'haematological_adequacy_status': {'anc_thousand_per_ul',
+                                           'platelet_count_thousand_per_ul', 'hemoglobin_g_dl'},
+    }
+    source = {name for names in inputs.values() for name in names}
+    descriptors = patient_form_descriptors({
+        name: {'kind': 'direct', 'writable': True, 'target': 'patient_record'}
+        for name in source
+    }, readable_fields=source | set(inputs))
+    for root, expected in inputs.items():
+        entry = descriptors[root]
+        assert set(entry['inputs']) == expected
+        assert entry['kind'] == 'computed'
+        assert entry['writable'] is False
+        assert entry['compatibility_scope'] == 'result'
+        assert all(name in descriptors for name in entry['inputs'])
+
+
+def test_mcl_navigation_names_the_source_facts_that_exist():
+    descriptors = patient_form_descriptors({})
+    mcl = descriptors['high_risk_mcl_criteria']
+    for name in ('cytogenetic_markers', 'largest_lymph_node_size', 'spleen_size',
+                 'alc_thousand_per_ul'):
+        assert name in mcl['inputs']
+    assert mcl['writable'] is False
+    assert mcl['compatibility_scope'] == 'result'
+
+
 def test_mcl_dependency_graph_resolves_without_exposing_host_withheld_age():
     inputs = {'date_of_birth', 'ecog_performance_status', 'ldh_u_l',
               'ldh_upper_limit_normal', 'wbc_count_thousand_per_ul',
-              'ki67_proliferation_index'}
+              'ki67_proliferation_index', 'cytogenetic_markers',
+              'largest_lymph_node_size', 'spleen_size', 'alc_thousand_per_ul'}
     descriptors = patient_form_descriptors({
         name: {'kind': 'direct', 'writable': True, 'target': 'patient_record'}
         for name in inputs | {'patient_age'}

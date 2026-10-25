@@ -283,6 +283,16 @@ function MCLSection({ formData, onChange }: Pick<Props, 'formData' | 'onChange'>
           <ClinicalField label="Largest Lymph Node Size (cm)" name="largest_lymph_node_size" descriptor={descriptors.largest_lymph_node_size} type="number" value={formData?.largest_lymph_node_size} onChange={onChange} />
         </div>
       </Section>
+
+      <Section title="Computed Criteria">
+        <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
+          <ClinicalField label="MIPI Risk" name="mipi_risk" descriptor={descriptors.mipi_risk} type="text" value={formData?.mipi_risk} onChange={onChange} />
+          <ClinicalField label="MIPI-c Risk" name="mipi_c_risk" descriptor={descriptors.mipi_c_risk} type="text" value={formData?.mipi_c_risk} onChange={onChange} />
+          <div className="sm:col-span-2">
+            <ClinicalField label="High-Risk MCL Criteria" name="high_risk_mcl_criteria" descriptor={descriptors.high_risk_mcl_criteria} type="text" value={formData?.high_risk_mcl_criteria} onChange={onChange} />
+          </div>
+        </div>
+      </Section>
     </>
   );
 }

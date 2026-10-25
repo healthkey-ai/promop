@@ -4,6 +4,8 @@ import FieldMappingLink from '../FieldMappingLink';
 import { clinicalClient, clinicalUrl } from '@/api/clinicalTransport';
 import { Button } from '@/components/shadcn/button';
 import { useWritableFields } from '@/hooks/useWritableFields';
+import { usePatientFormStore } from '@/federation/PatientFormContext';
+import PatientFieldEditor from '@/federation/PatientFieldEditor';
 import { Dialog, DialogContent, DialogTitle, DialogDescription } from '@/components/ui-labs/dialog';
 
 type Variant = { id?: number; gene?: string; variant?: string; [key: string]: string | number | null | undefined };
@@ -91,6 +93,7 @@ export default function GenomicsTab({ formData, readOnly = false }: {
   readOnly?: boolean;
 }) {
   const personId = (formData.person_id ?? formData.person) as number | undefined;
+  const store = usePatientFormStore();
   const { descriptors } = useWritableFields(personId);
   const editable = !readOnly && descriptors.genetic_mutations?.writable === true;
   const [variants, setVariants] = useState<Variant[]>([]);
@@ -178,6 +181,9 @@ export default function GenomicsTab({ formData, readOnly = false }: {
   if (loadError) return <div role="alert">Could not load genomics. <Button variant="outline" onClick={() => setReload(n => n + 1)}>Retry</Button></div>;
 
   return <section className="space-y-5" aria-label="Patient genomic findings" data-patient-field="genetic_mutations">
+    {store && <div className="rounded-md border p-4">
+      <PatientFieldEditor store={store} name="tp53_disruption" label="TP53 Disruption" />
+    </div>}
     <div className="flex items-center justify-between gap-3">
       <p className="text-sm text-muted-foreground">{variants.length} genomic finding record{variants.length === 1 ? '' : 's'}</p>
       {editable && <Button disabled={busy || !!draft} onClick={() => {
