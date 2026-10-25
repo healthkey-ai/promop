@@ -472,8 +472,10 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
     } catch (failure) { if (active.current) setError(destinationError(failure)); }
     finally { if (active.current) setStarting(false); }
   };
-  const candidates = (run?.activity.find(event => event.concept.concept_id === concept.concept_id)?.candidates ?? [])
-    .map(item => { const edit = patched[sourceKey(item)]; return edit ? { ...item, ...edit } : item; });
+  const streamed = run?.activity.find(event => event.concept.concept_id === concept.concept_id)?.candidates ?? [];
+  const candidates = Object.keys(patched).length
+    ? streamed.map(item => { const edit = patched[sourceKey(item)]; return edit ? { ...item, ...edit } : item; })
+    : streamed;
   // A ranked run scores every source it considers a possible match; one it left
   // unscored is not a suggestion. An unranked run scores nothing, so it shows all.
   const ranked = Boolean(run?.selection.ranking_model && run.selection.ranking_model !== 'none');
@@ -499,11 +501,15 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
     setOrder(previous => previous === '-confidence' ? 'confidence' : '-confidence');
     resetView();
   };
-  // A saved row replaces its stale copy wherever the dialog shows it.
-  const patchRow = (row: Source, updated: Partial<Source>) => {
+  // What a write changed on a row, laid over its copies wherever the dialog
+  // shows it. Only the fields the write touched, so a running search's later
+  // updates to the same candidate (its verdict, note, other variants) still
+  // show; a full server row from the batch approve replaces the stored copy.
+  const patchRow = (row: Source, updated: Partial<Source>, { replace = false } = {}) => {
     if (!active.current) return;
     STATUSES.forEach(status => groups[status].setData(previous => previous
-      ? { ...previous, results: previous.results.map(item => sourceKey(item) === sourceKey(row) ? { ...item, ...updated } : item) } : null));
+      ? { ...previous, results: previous.results.map(item => sourceKey(item) === sourceKey(row)
+        ? (replace ? updated as Source : { ...item, ...updated }) : item) } : null));
     setPatched(previous => ({ ...previous, [sourceKey(row)]: { ...previous[sourceKey(row)], ...updated } }));
   };
 
@@ -528,13 +534,13 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
               run_id: run?.run_id, source_vocabulary_id: row.source_vocabulary_id, source_code: row.source_code, status: 'proposed',
             }));
             written += 1;
-            patchRow(row, current);
+            patchRow(row, current, { replace: true });
           }
           const { data: updated } = await api.post<Source>(`/v1/concept-to-code/${concept.concept_id}/mappings/${current.mapping_id}/`, {
             status: 'approved', expected_updated_at: current.updated_at,
           });
           saved += 1; written += 1;
-          patchRow(row, updated);
+          patchRow(row, updated, { replace: true });
         } catch (failure) { failures.push(`${row.source_code}: ${destinationError(failure)}`); }
       }
       if (active.current) {
@@ -549,14 +555,14 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
   // Approve one axis variant from the row: its stored rows in those units are
   // re-pointed, and the row shows the server's view of every variant (#2012).
   const approveVariant = async (row: Source, variant: AxisVariant) => {
-    if (writingRef.current || row.mapping_id === null || !variant.target_concept) return;
+    if (writingRef.current || opening || row.mapping_id === null || !variant.target_concept) return;
     // A write like any other here: one at a time, and the dialog cannot close under it.
     writingRef.current = true; setWriting(true); onWriting(true); setError('');
     try {
       const { data } = await api.post<LoincAxesPayload>(`/v1/code-mappings/${row.mapping_id}/axis-variants/`, {
         axis_key: variant.axis_key, target_concept_id: variant.target_concept.concept_id, approve: true,
       });
-      patchRow(row, { ...row, axis_variants: data.variants });
+      patchRow(row, { axis_variants: data.variants });
       setProgress(`Approved the ${variant.units?.join(', ') || variant.axis_key} variant of ${row.source_code}.`);
     } catch (failure) {
       if (active.current) setError(`Could not approve the variant of ${row.source_code}. ${destinationError(failure)}`);
@@ -600,6 +606,16 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
     }
   };
 
+  const editorDeleted = () => {
+    onSaved(); setSelected(new Set()); setRevision(value => value + 1);
+    if (edit) {
+      patchRow(edit.source, {
+        edited: false, mapping_id: null, status: 'unmapped',
+        destination_concept_id: null, destination_concept_name: '', destination_standard_concept: null,
+      });
+    }
+  };
+
   // The run's controls and the batch selection wait for a run to finish; a
   // write in progress blocks everything. Opening a code to edit it waits only
   // for a write, so a curator works through the list while Suggest searches (#2028).
@@ -609,12 +625,12 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
   return <section aria-label={`Source codes for ${concept.concept_name}`} className="space-y-4">
     <div role="group" aria-label="Source code views" className="flex flex-wrap gap-2">
       {([['linked', 'Existing mappings'], ['candidates', 'Suggested source codes']] as const).map(([key, label]) =>
-        <button key={key} className={`${button} ${mode === key ? 'bg-slate-100 font-semibold' : ''}`} disabled={busy} aria-pressed={mode === key}
+        <button key={key} className={`${button} ${mode === key ? 'bg-slate-100 font-semibold' : ''}`} disabled={writing} aria-pressed={mode === key}
           onClick={() => changeMode(key)}>{label}</button>)}
     </div>
     <div className="flex flex-wrap items-center gap-3">
       {mode !== 'candidates' && <input className={`${input} flex-1`} aria-label="Search source codes" placeholder="Source code, description or vocabulary"
-        value={search} disabled={busy} onChange={event => { setSearch(event.target.value); resetView(); }} />}
+        value={search} disabled={writing} onChange={event => { setSearch(event.target.value); resetView(); }} />}
       {(['umls', 'lexical'] as const).map(strategy => <label key={strategy} className="flex items-center gap-1 text-sm">
         <input type="checkbox" checked={strategies[strategy]} disabled={busy} onChange={event => setStrategies(previous => ({ ...previous, [strategy]: event.target.checked }))} />
         {strategy === 'umls' ? 'UMLS' : 'Names and synonyms'}</label>)}
@@ -699,7 +715,7 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
       reference={reference ?? emptyReference} canApprove={canApprove}
       strategies={dialogStrategies} rankingModel={dialogRanking}
       onStrategiesChange={setDialogStrategies} onRankingModelChange={setDialogRanking}
-      onSaved={editorSaved} onDeleted={() => { onSaved(); setSelected(new Set()); setRevision(value => value + 1); }}
+      onSaved={editorSaved} onDeleted={editorDeleted}
       defaultDestination={destination} sourceExamples />
   </section>;
 

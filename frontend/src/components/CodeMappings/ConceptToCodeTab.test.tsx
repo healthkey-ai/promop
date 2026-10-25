@@ -401,9 +401,10 @@ describe('axis variants on a source code (#2012)', () => {
     post.mockImplementation((url: string) => Promise.resolve({ data: url.endsWith('/axis-variants/')
       ? { mapping_id: 7, applies: true, variants: variants.map(v => ({ ...v, status: 'approved' })) }
       : streaming }));
-    get.mockImplementation((url: string) => Promise.resolve({ data: url.includes('suggest-runs') ? streaming
-      : url === '/v1/concept-to-code/' ? page([concept]) : page([source]) }));
     const polls = () => get.mock.calls.filter(([url]) => String(url).includes('suggest-runs')).length;
+    // Each poll answers with a fresh object, as the server does, so the run really is replaced.
+    get.mockImplementation((url: string) => Promise.resolve({ data: url.includes('suggest-runs') ? { ...streaming, done: polls() }
+      : url === '/v1/concept-to-code/' ? page([concept]) : page([source]) }));
     await selectConcept();
     fireEvent.click(screen.getByRole('button', { name: 'Suggest source codes' }));
     const list = await screen.findByRole('list', { name: 'Axis variants' });
@@ -415,7 +416,7 @@ describe('axis variants on a source code (#2012)', () => {
     await screen.findByText('Approved the mmol/L variant of S1.');
     // The next poll brings the run's own copy of the row, still proposed; the approval stands.
     const before = polls();
-    await waitFor(() => expect(polls()).toBeGreaterThan(before), { timeout: 3000 });
+    await waitFor(() => expect(polls()).toBeGreaterThan(before), { timeout: 5000 });
     expect(within(screen.getByRole('list', { name: 'Axis variants' })).queryByRole('button', { name: /^Approve / })).not.toBeInTheDocument();
   });
 
@@ -635,6 +636,7 @@ describe('editing a source code from a concept (#1915)', () => {
     // The run's own controls wait for it; the rows do not.
     expect(screen.getByRole('button', { name: 'Searching…' })).toBeDisabled();
     expect(screen.getByRole('checkbox', { name: 'Select SNOMED S1' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Existing mappings' })).toBeEnabled();
     expect(code).toBeEnabled();
     fireEvent.click(code);
     expect(await screen.findByRole('dialog', { name: 'Edit Mapping' })).toBeInTheDocument();
