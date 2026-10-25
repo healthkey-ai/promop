@@ -1,6 +1,6 @@
 import { useState } from "react";
 import {
-  AXIS_BASIS_LABELS, LOINC_AXES, LOINC_AXIS_LABELS, axisVariantTitle, describeAxisValues,
+  AXIS_BASIS_LABELS, LOINC_AXES, LOINC_AXIS_LABELS, axisValueText, axisVariantTitle, describeAxisValues,
   type AxisExcludedCandidate, type AxisVariant, type AxisVerdict, type LoincAxis, type SourceAxes,
 } from "./loincAxes";
 import { isSnomedExcluded } from "./snomed";
@@ -84,8 +84,9 @@ export function SourceAxesSummary({ sourceAxes }: { sourceAxes?: SourceAxes | nu
     <span className="font-medium text-slate-700">Source axes: </span>
     {settled.length ? settled.map((axis, index) => {
       const entry = sourceAxes.axes[axis]!;
-      return <span key={axis} title={`${AXIS_BASIS_LABELS[entry.basis] ?? entry.basis}${entry.evidence ? `: ${entry.evidence}` : ""}`}>
-        {index > 0 && " · "}{LOINC_AXIS_LABELS[axis]} {entry.value === "" ? "(methodless)" : entry.value}
+      const basis = `${AXIS_BASIS_LABELS[entry.basis] ?? entry.basis}${entry.evidence ? `: ${entry.evidence}` : ""}`;
+      return <span key={axis} title={Array.isArray(entry.value) ? `${axisValueText(entry.value, { full: true })} — ${basis}` : basis}>
+        {index > 0 && " · "}{LOINC_AXIS_LABELS[axis]} {axisValueText(entry.value, { empty: "(methodless)" })}
       </span>;
     }) : "none settled"}
     {hints.length > 0 && <span className="ml-2 text-slate-500">

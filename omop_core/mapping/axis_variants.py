@@ -138,11 +138,16 @@ def detect(mapping, unit_counts=None, notes=True):
             # variant of its own would flag one test as two.
             unrecognised[unit] += count
             continue
-        prop = unit_property(unit)
-        # A unit with no single property is still a quantity, but nothing says
-        # which group it joins, so it is a variant of its own, keyed by unit.
-        values = {'property': prop, 'scale_type': 'Qn'} if prop else {'scale_type': 'Qn'}
-        key = axis_key(values) if prop else f'unit={unit}'
+        options = loinc_axes.unit_property_options(unit)
+        if len(options) == 1:
+            values = {'property': options[0], 'scale_type': 'Qn'}
+            key = axis_key(values)
+        else:
+            # A unit that fits several properties (%, U/L) is a variant of its
+            # own, keyed by unit, constrained to that set (#2029); one that
+            # fits none is still a quantity, and nothing more.
+            values = {'property': list(options), 'scale_type': 'Qn'} if options else {'scale_type': 'Qn'}
+            key = f'unit={unit}'
         groups[key]['units'][unit] += count
         groups[key]['axis_values'] = values
     variants = [
@@ -339,7 +344,7 @@ def variant_for(mapping, source_unit):
             return variant
     if prop:
         for variant in approved:
-            if (variant.axis_values or {}).get('property') == prop:
+            if prop in loinc_axes.options_of((variant.axis_values or {}).get('property')):
                 return variant
     return None
 

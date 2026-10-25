@@ -13430,13 +13430,15 @@ def code_mapping_suggest_one(request):
         return Response({'loinc_axes': str(exc)}, status=status.HTTP_400_BAD_REQUEST)
     axis_key = str(request.data.get('axis_key') or '')
     if axis_key:
-        variant = axes_mapping.axis_variants.filter(axis_key=axis_key).first() if axes_mapping else None
-        if variant is None:
-            from omop_core.mapping.axis_variants import detect
-            detected = {v['axis_key']: v for v in detect(axes_mapping)[0]} if axes_mapping else {}
-            values = (detected.get(axis_key) or {}).get('axis_values')
-        else:
-            values = variant.axis_values
+        # What the units imply now, so a row stored before the axis values it
+        # carries were derived (a % variant with no property set) is suggested
+        # with the current constraints; a stored variant the evidence no
+        # longer shows keeps its own.
+        detected = {v['axis_key']: v for v in axis_variants_module.detect(axes_mapping)[0]} if axes_mapping else {}
+        values = (detected.get(axis_key) or {}).get('axis_values')
+        if values is None:
+            variant = axes_mapping.axis_variants.filter(axis_key=axis_key).first() if axes_mapping else None
+            values = variant.axis_values if variant is not None else None
         if values is None:
             return Response({'axis_key': 'This code has no such axis variant.'},
                             status=status.HTTP_400_BAD_REQUEST)
