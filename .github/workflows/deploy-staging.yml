@@ -61,6 +61,7 @@ jobs:
         run: |
           docker build --platform linux/amd64 --provenance=false \
             -f Dockerfile.gcp \
+            --build-arg GIT_COMMIT=${IMAGE_TAG} \
             -t ${ARTIFACT_REPO}/ctomop:${IMAGE_TAG} \
             -t ${ARTIFACT_REPO}/ctomop:latest .
           docker push ${ARTIFACT_REPO}/ctomop:${IMAGE_TAG}

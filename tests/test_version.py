@@ -26,3 +26,14 @@ def test_a_checkout_answers_with_its_head(monkeypatch):
     monkeypatch.delenv('GIT_COMMIT', raising=False)
     monkeypatch.setattr(version, '_checkout_commit', lambda: 'abcdef1234567')
     assert APIClient().get('/api/v1/version/').data['short'] == 'abcdef12'
+
+
+def test_the_cloud_run_image_is_stamped_with_the_commit_it_was_built_from():
+    """Cloud Run has no git checkout and no RENDER_GIT_COMMIT (#2024)."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    dockerfile = (root / 'Dockerfile.gcp').read_text()
+    workflow = (root / '.github/workflows/deploy-staging.yml').read_text()
+    assert 'ARG GIT_COMMIT' in dockerfile and 'ENV GIT_COMMIT=${GIT_COMMIT}' in dockerfile
+    assert '--build-arg GIT_COMMIT=${IMAGE_TAG}' in workflow
