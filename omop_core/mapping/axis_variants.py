@@ -291,18 +291,23 @@ def multi_unit_keys():
     return keys
 
 
-def refresh_all(keys=None, batch_size=REFRESH_BATCH):
+def refresh_all(keys=None, batch_size=REFRESH_BATCH, on_batch=None):
     """Refresh ``keys`` (default :func:`multi_unit_keys`) a batch at a time.
 
     One transaction per batch: the whole backlog in one would hold its locks
     for minutes, and one OR over every key makes a statement the planner
-    chokes on. Returns the number of mappings refreshed.
+    chokes on. ``on_batch(done, refreshed)`` is called after each batch, which
+    is how the worker job records its progress. Returns the number of
+    mappings refreshed.
     """
     keys = sorted(multi_unit_keys() if keys is None else keys, key=lambda k: (k[0] or '', k[1] or ''))
     refreshed = 0
     for start in range(0, len(keys), batch_size):
+        batch = keys[start:start + batch_size]
         with transaction.atomic():
-            refreshed += refresh_codes(keys[start:start + batch_size])
+            refreshed += refresh_codes(batch)
+        if on_batch is not None:
+            on_batch(start + len(batch), refreshed)
     return refreshed
 
 

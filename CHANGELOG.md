@@ -150,6 +150,24 @@ All notable changes to PRomop are documented here.
 
 ### Fixed
 
+- **A deploy mid-walk no longer costs the axis variant refresh six hours** —
+  the request row now carries a `progress_at` heartbeat written after every
+  batch. A `running` request with no heartbeat for 15 minutes lost its worker
+  to the deploy that replaced the pool, and the next worker boot requeues it
+  and resumes at its `done` offset instead of waiting for the six-hour task
+  limit and starting over. (#2023)
+
+- **The bulk LOINC axis variant backfill no longer runs inside `migrate`** —
+  migrations 0300 and 0301 walked every multi-unit code during the release
+  step. On the HealthTree GCP instance, which holds the data with the most such
+  codes, the walk outlived the Cloud Run migrate job's one-hour task limit on
+  every attempt, so no deploy reached traffic between 21 and 24 October. Both
+  migrations are now no-ops and migration 0303 records an `axis_variant_refresh`
+  request that the Celery worker performs (`omop_core.refresh_axis_variants`,
+  six-hour limit, progress on the row). A worker publishes queued requests when
+  it starts, so a rolling deploy cannot lose one, and `manage.py
+  refresh_axis_variants --queue` records a request by hand. (#2021)
+
 - **A known line of therapy is no longer lost when its drugs are unknown** —
   the canonical writer now records that a line happened, independently of the
   exposures that describe it. A line named without a drug list (a mapped

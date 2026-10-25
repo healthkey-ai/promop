@@ -1,34 +1,13 @@
-import logging
-
-from django.db import DatabaseError, migrations
-
-logger = logging.getLogger(__name__)
-
-
-def backfill(apps, schema_editor):
-    # #1957. Detection is the living code in omop_core.mapping.axis_variants
-    # rather than a frozen copy: it reads LOINC axes, canonical units and unit
-    # evidence across several modules, and a copy would drift from what ingest
-    # flags. A fresh database has no multi-unit codes, so this does nothing
-    # there; ingest flags codes as they arrive.
-    from omop_core.mapping import axis_variants
-
-    try:
-        refreshed = axis_variants.refresh_all()
-    except DatabaseError:
-        # The living models can be ahead of this schema when a deployment
-        # migrates through several releases at once. The flags are curation
-        # evidence, so a failure must not block the deploy.
-        logger.warning(
-            'Axis variant backfill failed; run `manage.py refresh_axis_variants` '
-            'after migrating.', exc_info=True)
-        return
-    logger.info('Axis variant backfill refreshed %s mappings.', refreshed)
+from django.db import migrations
 
 
 class Migration(migrations.Migration):
-    # A transaction per batch (refresh_all), not one for the whole backlog:
-    # staging has ~40,000 candidate codes, minutes of work.
+    # #1957 ran axis_variants.refresh_all() here, inside migrate. On the
+    # HealthTree instance that outlived the Cloud Run migrate job's one-hour
+    # task limit on every attempt, and no deploy reached traffic for three days
+    # (#2021). The refresh is now a worker job that migration 0303 requests;
+    # this migration stays so that histories which already applied it agree
+    # with those that never could.
     atomic = False
 
     dependencies = [
@@ -36,5 +15,5 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.RunPython(backfill, migrations.RunPython.noop),
+        migrations.RunPython(migrations.RunPython.noop, migrations.RunPython.noop),
     ]

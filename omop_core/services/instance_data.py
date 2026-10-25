@@ -57,6 +57,7 @@ SYSTEM: frozenset[str] = frozenset({
     'patient_portal.AiExplanation',
     'omop_core.SuggestSynonymTerm',
     'omop_core.AthenaVocabularySync', 'omop_core.HospitalCodeImport',
+    'omop_core.AxisVariantRefresh',
     'omop_core.VocabularyRelease',
     'omop_core.VocabularyVersionHistory',
     # A task for a human about two Persons here, named by local id. It says

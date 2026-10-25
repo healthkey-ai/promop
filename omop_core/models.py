@@ -5078,6 +5078,51 @@ class HospitalCodeImport(models.Model):
         ordering = ['-created_at']
 
 
+class AxisVariantRefresh(models.Model):
+    """Durable request for one bulk LOINC axis variant refresh (#2021).
+
+    Written by a migration or ``manage.py refresh_axis_variants --queue`` and
+    performed by the worker, never by ``migrate``: on a large instance the
+    refresh outlives the Cloud Run migrate job's hour.
+    """
+
+    OUTCOME_CHOICES = [
+        ('queued', 'Queued'),
+        ('running', 'Running'),
+        ('done', 'Done'),
+        ('failed', 'Failed'),
+    ]
+
+    reason = models.TextField(blank=True)
+    outcome = models.CharField(
+        max_length=16, choices=OUTCOME_CHOICES, default='queued', db_index=True,
+    )
+    task_id = models.CharField(max_length=255, blank=True)
+    keys = models.PositiveIntegerField(default=0)
+    done = models.PositiveIntegerField(default=0)
+    refreshed = models.PositiveIntegerField(default=0)
+    failure_reason = models.TextField(blank=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    # Heartbeat: written on claim and after every batch. A running request
+    # whose heartbeat stops was killed with its worker (#2023).
+    progress_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'axis_variant_refresh'
+        ordering = ['-created_at']
+        constraints = [
+            # At most one queued and one running request: two callers racing
+            # request_refresh must not start two walks over the same codes.
+            models.UniqueConstraint(
+                fields=['outcome'],
+                condition=Q(outcome__in=('queued', 'running')),
+                name='uq_axis_variant_refresh_active',
+            ),
+        ]
+
+
 class SourceSystemFacility(models.Model):
     """An observed or curated name for an exact FHIR system, not ownership.
 
