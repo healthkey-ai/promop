@@ -45,6 +45,11 @@ FIELD_BINDINGS = {
     'monoclonal_protein_serum': ['monoclonalProteinSerum'],
     'monoclonal_protein_urine': ['monoclonalProteinUrine'],
     'measurable_disease_imwg': ['measurableDiseaseImwg', 'measurableDiseaseImwgRequired'],
+    # CB Trial Details names these two by their PatientRecord column in
+    # camelCase; without a binding the shared form cannot resolve the row even
+    # though migration 0160 makes the field writable.
+    'no_mental_health_disorder_status': ['noMentalHealthDisorderStatus'],
+    'no_substance_use_status': ['noSubstanceUseStatus'],
     'flipi_score': ['flipiScore'], 'gelf_criteria_status': ['gelfCriteriaStatus'],
     'tumor_grade': ['tumorGrade'], 'stage': ['stage'],
     'peripheral_neuropathy_grade': ['peripheralNeuropathyGrade'],
