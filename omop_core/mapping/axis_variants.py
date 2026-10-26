@@ -223,7 +223,7 @@ def _patient_fhir_codings(mapping):
         source_value=mapping.source_code,
         source_vocabulary_id=mapping.source_vocabulary_id,
     ).exclude(source_metadata={})
-    for metadata, count in rows.values_list('source_metadata', 'occurrence_count')[:2000]:
+    for metadata, count in rows.order_by('-occurrence_count').values_list('source_metadata', 'occurrence_count')[:2000]:
         resource = loinc_axes._resource(metadata)
         for coding in loinc_axes._codings(resource):
             if loinc_axes.is_loinc(coding.get('system')) and coding.get('code'):
@@ -258,7 +258,9 @@ def _store_fhir_codings(mappings):
         if not codings:
             continue
         meta = dict(meta)  # shallow copy
-        meta['fhir'] = {'code': {'coding': codings}}
+        existing_fhir = dict(meta.get('fhir') or {})
+        existing_fhir['code'] = {'coding': codings}
+        meta['fhir'] = existing_fhir
         m.source_metadata = meta
         updated.append(m)
     if updated:
