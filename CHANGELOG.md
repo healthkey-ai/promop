@@ -150,6 +150,14 @@ All notable changes to PRomop are documented here.
 
 ### Fixed
 
+- **A refresh whose worker was killed is picked up without a deploy** — the
+  stale-heartbeat sweep ran at worker boot and twice in the next three minutes,
+  then never again. Cloud Run shuts the old instance down after the new worker
+  is up, so a walk killed that way went stale after the last recheck and stayed
+  `running` until the next deploy; the redelivered message found a row that was
+  not `queued` and skipped it. A live worker now sweeps every five minutes, so
+  a stranded request is requeued and resumed within about one stale interval.
+  (#2048)
 - **Unit counts come from the instance's own patients** — migration 0307 asks
   the worker to rewrite every code's stored unit evidence from the source codes
   on its loaded patients and the stored measurements, then refresh its axis

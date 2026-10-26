@@ -11,6 +11,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from omop_core.models import AxisVariantRefresh, PatientSourceCode, SourceCodeConceptMapping
+from omop_core.mapping import axis_variants
 from omop_core.services import axis_variant_jobs
 from tests.factories import PersonFactory
 
@@ -390,3 +391,93 @@ def test_the_inline_command_completes_a_queued_request(two_unit_code):
     assert AxisVariantRefresh.objects.count() == 1
     call_command('refresh_axis_variants', '--dry-run', stdout=out)
     assert '1 source codes have more than one unit.' in out.getvalue()
+
+
+def test_a_recheck_requeues_and_publishes_a_request_whose_worker_was_killed(settings):
+    """The kill can come after the replacement worker booted (#2048)."""
+    settings.CELERY_BROKER_URL = 'redis://broker/0'
+    stranded = AxisVariantRefresh.objects.create(
+        reason='claimed by the instance Cloud Run shut down', outcome='running', rebuild_evidence=True,
+        task_id='axis-variant-refresh-2', started_at=timezone.now() - timedelta(minutes=16),
+        progress_at=timezone.now() - timedelta(minutes=16))
+    with patch(PUBLISH) as publish:
+        assert axis_variant_jobs.dispatch_queued_refreshes(republish=False) == 1
+    publish.assert_called_once_with(args=[stranded.pk], task_id=f'axis-variant-refresh-{stranded.pk}')
+    stranded.refresh_from_db()
+    assert (stranded.outcome, stranded.rebuild_evidence) == ('queued', True)
+
+
+def test_a_live_worker_keeps_rechecking_until_told_to_stop():
+    import threading
+
+    from omop_core import tasks
+
+    stop = threading.Event()
+    passes = []
+
+    def dispatch():
+        passes.append(1)
+        if len(passes) == 2:
+            stop.set()
+
+    thread = tasks.keep_rechecking(dispatch, 0.01, stop=stop)
+    thread.join(5)
+    assert not thread.is_alive() and passes == [1, 1]
+    assert thread.daemon, 'a recheck must not hold the worker open at shutdown'
+
+
+def test_a_recheck_that_fails_is_logged_and_the_next_still_runs(caplog):
+    import threading
+
+    from omop_core import tasks
+
+    stop = threading.Event()
+    passes = []
+
+    def dispatch():
+        passes.append(1)
+        if len(passes) == 1:
+            raise RuntimeError('database away')
+        stop.set()
+
+    thread = tasks.keep_rechecking(dispatch, 0.01, stop=stop)
+    thread.join(5)
+    assert not thread.is_alive() and len(passes) == 2
+    assert 'database away' in caplog.text
+
+
+def test_the_recheck_interval_is_under_the_stranded_cutoff():
+    from omop_core import tasks
+
+    assert tasks.RECHECK_INTERVAL < axis_variant_jobs.STALE
+
+
+def test_a_stranded_rebuild_is_carried_over_to_the_request_that_replaces_it(settings):
+    settings.CELERY_BROKER_URL = 'redis://broker/0'
+    stranded = AxisVariantRefresh.objects.create(
+        reason='worker died mid-rebuild', outcome='running', rebuild_evidence=True, cursor='A\x1f1',
+        started_at=timezone.now() - timedelta(hours=1), progress_at=timezone.now() - timedelta(hours=1))
+    waiting = AxisVariantRefresh.objects.create(reason='plain refresh asked for meanwhile')
+    with patch(PUBLISH):
+        assert axis_variant_jobs.dispatch_queued_refreshes() == 1
+    stranded.refresh_from_db(); waiting.refresh_from_db()
+    assert stranded.outcome == 'failed'
+    assert waiting.rebuild_evidence, 'the rebuild the stranded request was asked for is not dropped'
+
+
+def test_an_attempt_the_sweep_handed_on_writes_nothing_over_the_new_one(two_unit_code):
+    """The sweep can requeue a walk still alive; its writes then land nowhere (#2048)."""
+    request = AxisVariantRefresh.objects.create(reason='slow key collection')
+    original = axis_variants.refresh_all
+
+    def hand_on_then_walk(*args, **kwargs):
+        # The sweep requeues this request and a second worker claims it.
+        AxisVariantRefresh.objects.filter(pk=request.pk).update(
+            outcome='running', started_at=timezone.now() + timedelta(seconds=1), done=7, cursor='Z\x1fZ')
+        return original(*args, **kwargs)
+
+    with patch.object(axis_variants, 'refresh_all', side_effect=hand_on_then_walk):
+        assert axis_variant_jobs.run_refresh(request.pk)['outcome'] == 'done'
+    request.refresh_from_db()
+    assert (request.outcome, request.done, request.cursor) == ('running', 7, 'Z\x1fZ'), \
+        'the first attempt finished its walk but wrote nothing over the second'
