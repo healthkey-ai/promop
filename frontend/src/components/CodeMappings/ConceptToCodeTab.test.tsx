@@ -31,7 +31,7 @@ const run = (state = 'success') => ({
 beforeEach(() => {
   get.mockReset(); post.mockReset();
   get.mockImplementation((url: string) => Promise.resolve({ data: url === '/v1/concept-to-code/' ? page([concept])
-    : url === '/v1/concept-to-code/axis-variant-walk/' ? { active: null, last: null, patients_since: 0, walked_at: null } : page([source]) }));
+    : url === '/v1/concept-to-code/axis-variant-walk/' ? { active: null, last: null, completed: null, patients_since: 0, walked_at: null } : page([source]) }));
   post.mockResolvedValue({ data: { ...source, destination_concept_id: 123, status: 'approved' } });
 });
 

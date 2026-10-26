@@ -19,7 +19,13 @@ export type Walk = {
   created_at: string; started_at: string | null; progress_at: string | null; completed_at: string | null;
   axis_evidence: AxisEvidence | null;
 };
-export type WalkStatus = { active: Walk | null; last: Walk | null; patients_since: number; walked_at: string | null };
+export type WalkStatus = {
+  active: Walk | null; last: Walk | null;
+  /** The last completed rebuild: what the evidence table and the patient count are measured from. */
+  completed: Walk | null;
+  /** Not counted while a walk is active: the panel shows progress then. */
+  patients_since: number | null; walked_at: string | null;
+};
 
 export const WALK_URL = '/v1/concept-to-code/axis-variant-walk/';
 /** How often the panel re-reads a queued or running walk. */
@@ -65,11 +71,13 @@ export default function AxisVariantWalkPanel({ canApprove }: { canApprove: boole
   }, [load]);
 
   const active = status?.active ?? null;
+  // Keyed on the walk's id, not the object: every poll returns a fresh one.
+  const activeId = active?.id ?? null;
   useEffect(() => {
-    if (!active) return;
+    if (activeId === null) return;
     const timer = setInterval(() => { void load(); }, POLL_MS);
     return () => clearInterval(timer);
-  }, [active, load]);
+  }, [activeId, load]);
 
   const start = async () => {
     setStarting(true);
@@ -77,15 +85,18 @@ export default function AxisVariantWalkPanel({ canApprove }: { canApprove: boole
     try {
       const { data } = await api.post<WalkStatus & { created: boolean }>(WALK_URL);
       if (isStatus(data)) setStatus(data);
-    } catch {
-      setError('Could not start the walk.');
+    } catch (failure) {
+      const response = (failure as { response?: { status?: number; data?: { detail?: string } } })?.response;
+      if (response?.status === 409 && response.data && isStatus(response.data)) setStatus(response.data);
+      setError(response?.status === 409 && response.data?.detail ? response.data.detail : 'Could not start the walk.');
     } finally {
       setStarting(false);
     }
   };
 
   const last = status?.last ?? null;
-  const evidence = last?.axis_evidence ?? null;
+  const completed = status?.completed ?? null;
+  const evidence = completed?.axis_evidence ?? null;
   const patients = status?.patients_since ?? 0;
 
   return <section aria-label="Source-code walk" className="rounded border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700">
@@ -97,12 +108,14 @@ export default function AxisVariantWalkPanel({ canApprove }: { canApprove: boole
             {active.outcome === 'queued'
               ? 'Source-code walk queued, waiting for the worker.'
               : `Walking source codes: ${active.done.toLocaleString()} of ${active.keys.toLocaleString()} codes.`}
-            {' '}Each code's units are rebuilt from its patients and its axis variants refreshed.
+            {' '}{active.rebuild_evidence
+              ? "Each code's units are rebuilt from its patients and its axis variants refreshed."
+              : 'This walk refreshes axis variants only; ask again once it finishes to rebuild the units from patients.'}
           </p>
         : <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
             <span>
               {status.walked_at
-                ? <>Source codes walked {when(status.walked_at)}{last?.outcome === 'done' ? ` (${last.refreshed.toLocaleString()} refreshed)` : ''}.</>
+                ? <>Source codes walked {when(status.walked_at)}{completed ? ` (${completed.refreshed.toLocaleString()} refreshed)` : ''}.</>
                 : 'Source codes never walked.'}
               {' '}<strong>{patients.toLocaleString()}</strong> {patients === 1 ? 'patient' : 'patients'} loaded since.
             </span>
@@ -116,7 +129,7 @@ export default function AxisVariantWalkPanel({ canApprove }: { canApprove: boole
       </p>}
       {evidence && <details className="mt-1">
         <summary className="cursor-pointer text-slate-600">
-          Axis evidence across {evidence.codes.toLocaleString()} codes{active ? ' (last completed walk)' : ''}
+          Axis evidence across {evidence.codes.toLocaleString()} codes{active || last?.id !== completed?.id ? ' (last completed walk)' : ''}
         </summary>
         <table aria-label="LOINC axis evidence" className="mt-1 w-full text-left">
           <thead className="text-slate-500"><tr>

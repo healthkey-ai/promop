@@ -962,10 +962,17 @@ def _walk(**fields):
 def test_walk_status_counts_patients_loaded_since_the_last_completed_walk(client):
     from tests.factories import PersonFactory
     from omop_core.models import PatientSourceCode
+    from omop_core.models import AxisVariantRefresh
     before = timezone.now() - timezone.timedelta(days=2)
     done = _walk(reason='migration', outcome='done', rebuild_evidence=True, keys=40, done=40, refreshed=12,
-                 started_at=before, completed_at=before + timezone.timedelta(hours=3),
+                 started_at=before + timezone.timedelta(hours=1), completed_at=before + timezone.timedelta(hours=3),
                  axis_evidence={'codes': 40, 'axes': {'property': {'settled': 30, 'hint': 2, 'varies': 5, 'bases': {'unit': 30}}}})
+    # Asked for before it started: a resumed walk restarts its clock (#2049).
+    AxisVariantRefresh.objects.filter(pk=done.pk).update(created_at=before)
+    # A plain refresh since rewrote no evidence, and a failed walk is the last one.
+    _walk(reason='plain', outcome='done', started_at=timezone.now(), completed_at=timezone.now())
+    failed = _walk(reason='failed', outcome='failed', rebuild_evidence=True, failure_reason='Worker lost',
+                   started_at=timezone.now(), completed_at=timezone.now(), axis_evidence={'codes': 3})
     old, new = PersonFactory(), PersonFactory()
     PatientSourceCode.objects.create(person=old, source_value='A', source_vocabulary_id='LAB', omop_table='measurement')
     PatientSourceCode.objects.filter(person=old).update(first_seen=before - timezone.timedelta(days=1))
@@ -974,8 +981,9 @@ def test_walk_status_counts_patients_loaded_since_the_last_completed_walk(client
 
     status = client.get(WALK).data
     assert status['active'] is None
-    assert status['last']['id'] == done.pk and status['last']['outcome'] == 'done'
-    assert status['last']['axis_evidence']['axes']['property']['varies'] == 5
+    assert status['last']['id'] == failed.pk and status['last']['outcome'] == 'failed'
+    assert status['completed']['id'] == done.pk
+    assert status['completed']['axis_evidence']['axes']['property']['varies'] == 5
     assert status['patients_since'] == 1, 'one patient since, counted once for two codes'
     assert status['walked_at'] == before
 
@@ -986,7 +994,7 @@ def test_walk_status_with_no_completed_walk_counts_every_patient_with_source_cod
     PatientSourceCode.objects.create(person=PersonFactory(), source_value='A', source_vocabulary_id='LAB', omop_table='measurement')
     PersonFactory()
     status = client.get(WALK).data
-    assert (status['last'], status['walked_at'], status['patients_since']) == (None, None, 1)
+    assert (status['last'], status['completed'], status['walked_at'], status['patients_since']) == (None, None, None, 1)
 
 
 def test_an_approver_starts_a_rebuild_walk_and_a_second_ask_joins_the_active_one(client):
@@ -1000,6 +1008,25 @@ def test_an_approver_starts_a_rebuild_walk_and_a_second_ask_joins_the_active_one
     again = client.post(WALK)
     assert again.status_code == 200 and not again.data['created']
     assert again.data['request']['id'] == walk.pk and AxisVariantRefresh.objects.count() == 1
+    assert again.data['patients_since'] is None, 'not scanned while a walk is active'
+
+
+def test_a_rebuild_asked_for_while_a_plain_refresh_runs_is_refused_not_dropped(client):
+    from omop_core.models import AxisVariantRefresh
+    running = AxisVariantRefresh.objects.create(reason='plain', outcome='running', started_at=timezone.now(),
+                                                progress_at=timezone.now())
+    refused = client.post(WALK)
+    assert refused.status_code == 409 and 'Ask again' in refused.data['detail']
+    assert refused.data['active']['id'] == running.pk and not refused.data['created']
+    assert AxisVariantRefresh.objects.count() == 1
+    running.refresh_from_db()
+    assert not running.rebuild_evidence
+
+    queued = AxisVariantRefresh.objects.create(reason='plain queued')
+    AxisVariantRefresh.objects.filter(pk=running.pk).update(outcome='done')
+    assert client.post(WALK).status_code == 200
+    queued.refresh_from_db()
+    assert queued.rebuild_evidence, 'a queued plain refresh takes the rebuild'
 
 
 def test_a_professional_without_approval_rights_sees_the_walk_but_cannot_start_it(django_user_model):

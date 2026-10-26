@@ -245,9 +245,7 @@ def _specimen_systems(mapping):
         source_vocabulary_id=mapping.source_vocabulary_id,
     ).exclude(source_metadata={})
     for metadata, count in rows.values_list('source_metadata', 'occurrence_count')[:2000]:
-        resource = loinc_axes._resource(metadata)
-        specimen = loinc_axes._text_of(resource.get('specimen'))
-        system = loinc_axes.SPECIMEN_SYSTEMS.get(loinc_axes._norm(specimen)) if specimen else None
+        system, _specimen = loinc_axes.specimen_system(loinc_axes._resource(metadata))
         if system:
             systems[system] += max(1, count or 0)
     return systems
@@ -407,18 +405,28 @@ def refresh_codes(keys, rebuild_evidence=False, summary=None):
         counts = unit_counts_for(mappings)
     resources = axis_evidence.resources_by_code(mappings) if summary is not None else {}
     for mapping in mappings:
+        units = counts.get(mapping.pk, Counter())
         try:
             # A savepoint each, so one failed row cannot abort the rest.
             with transaction.atomic():
-                refresh(mapping, counts.get(mapping.pk, Counter()))
-                if summary is not None:
-                    summary.add(axis_evidence.code_evidence(
-                        mapping, list(counts.get(mapping.pk, Counter())), resources.get(mapping.pk, []),
-                        variant_count=mapping.axis_variant_count))
+                refresh(mapping, units)
             refreshed += 1
         except Exception:  # noqa: BLE001 - evidence must not fail ingest
             logging.getLogger(__name__).warning(
                 'Axis variant refresh failed for mapping %s.', mapping.pk, exc_info=True)
+            continue
+        if summary is None:
+            continue
+        try:
+            # The count is reporting (#2051): it must not undo the refresh,
+            # and a code it cannot read is left out of the summary.
+            variants, _notes = detect(mapping, units, notes=False)
+            summary.add(axis_evidence.code_evidence(
+                mapping, list(units), resources.get(mapping.pk, []), variant_count=len(variants)))
+        except Exception:  # noqa: BLE001 - reporting must not fail the walk
+            logging.getLogger(__name__).warning(
+                'Axis evidence count failed for mapping %s; it is left out of the summary.',
+                mapping.pk, exc_info=True)
     return refreshed
 
 

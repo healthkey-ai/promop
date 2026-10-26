@@ -98,3 +98,48 @@ def test_resources_are_read_per_code_in_one_query(django_assert_num_queries):
     assert sorted(r['specimen']['display'] for r in found[glu.pk]) == ['Serum', 'Urine'], 'empty metadata is not a row'
     assert [r['specimen']['display'] for r in found[alb.pk]] == ['Plasma']
     assert axis_evidence.resources_by_code([]) == {}
+
+
+def coding(code, display=''):
+    return {'system': 'http://loinc.org', 'code': code, 'display': display}
+
+
+@pytest.fixture()
+def loinc_axes_table():
+    from omop_core.models import LoincClass, LoincCodeClass
+    LoincClass.objects.create(code='CHEM', display_name='Chemistry')
+    for code, component, system in (('8716-3', 'Vital signs', '^Patient'), ('85354-9', 'Blood pressure panel', 'Arterial system'),
+                                    ('2345-7', 'Glucose', 'Ser/Plas'), ('2339-0', 'Glucose', 'Bld')):
+        LoincCodeClass.objects.create(loinc_num=code, loinc_class_id='CHEM', component=component, property='-', time_aspect='Pt',
+                                      system=system, scale_type='Qn', method_type='')
+
+
+def test_a_coding_pair_on_every_row_is_not_patients_disagreeing(loinc_axes_table):
+    """Epic attaches 'Vital signs' beside every vital sign; the first known coding is the row's."""
+    rows = [resource(code={'coding': [coding('85354-9'), coding('8716-3')]}) for _ in range(3)]
+    evidence = axis_evidence.code_evidence(mapping('BP'), [], rows)
+    assert loinc_axes.BASIS_FHIR_CODING in bases(evidence, 'component')
+    assert not evidence['component']['varies']
+
+
+def test_codings_that_differ_on_system_vary_the_system_not_the_component(loinc_axes_table):
+    rows = [resource(code={'coding': [coding('2345-7')]}), resource(code={'coding': [coding('2339-0')]})]
+    evidence = axis_evidence.code_evidence(mapping(), [], rows)
+    assert not evidence['component']['varies']
+    assert evidence['system']['varies']
+    assert bases(evidence, 'system') == {loinc_axes.BASIS_FHIR_CODING}
+
+
+def test_codings_naming_different_tests_vary_the_component(loinc_axes_table):
+    rows = [resource(code={'coding': [coding('2345-7')]}), resource(code={'coding': [coding('85354-9')]})]
+    assert axis_evidence.code_evidence(mapping(), [], rows)['component']['varies']
+
+
+def test_resources_are_bounded_per_code_in_sql(monkeypatch):
+    monkeypatch.setattr(axis_evidence, 'ROWS_PER_CODE', 2)
+    glu = mapping('GLU')
+    for n in range(4):
+        PatientSourceCode.objects.create(
+            person=PersonFactory(), source_value='GLU', source_vocabulary_id=LAB, omop_table='measurement',
+            source_metadata=resource(specimen={'display': f'S{n}'}))
+    assert len(axis_evidence.resources_by_code([glu])[glu.pk]) == 2

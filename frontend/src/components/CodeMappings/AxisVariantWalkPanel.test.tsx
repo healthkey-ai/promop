@@ -21,9 +21,10 @@ const done: Walk = {
     method_type: { settled: 0, hint: 0, varies: 0, bases: {} },
   } },
 };
-const idle: WalkStatus = { active: null, last: done, patients_since: 57, walked_at: done.started_at };
+const idle: WalkStatus = { active: null, last: done, completed: done, patients_since: 57, walked_at: done.created_at };
 const running: WalkStatus = {
-  ...idle, active: { ...done, id: 3, outcome: 'running', done: 1500, keys: 41200, completed_at: null, axis_evidence: null },
+  ...idle, patients_since: null,
+  active: { ...done, id: 3, outcome: 'running', done: 1500, keys: 41200, completed_at: null, axis_evidence: null },
 };
 
 beforeEach(() => { get.mockReset(); post.mockReset(); });
@@ -88,17 +89,37 @@ describe('AxisVariantWalkPanel', () => {
   });
 
   it('with no walk ever, says so and counts every patient', async () => {
-    get.mockResolvedValue({ data: { active: null, last: null, patients_since: 3, walked_at: null } });
+    get.mockResolvedValue({ data: { active: null, last: null, completed: null, patients_since: 3, walked_at: null } });
     await renderPanel();
     const panel = screen.getByRole('region', { name: 'Source-code walk' });
     expect(panel).toHaveTextContent('Source codes never walked. 3 patients loaded since.');
     expect(within(panel).queryByRole('table')).toBeNull();
   });
 
-  it('a failed last walk is reported with its reason', async () => {
-    get.mockResolvedValue({ data: { ...idle, last: { ...done, outcome: 'failed', failure_reason: 'Worker lost' } } });
+  it('a failed last walk is reported with its reason, and the evidence shown is the completed walk\'s', async () => {
+    const failed = { ...done, id: 4, outcome: 'failed' as const, failure_reason: 'Worker lost', axis_evidence: { codes: 5500, axes: {} } };
+    get.mockResolvedValue({ data: { ...idle, last: failed } });
     await renderPanel();
     expect(screen.getByRole('alert')).toHaveTextContent('The last walk failed: Worker lost. Starting another retries it.');
+    expect(screen.getByText('Axis evidence across 41,000 codes (last completed walk)')).toBeInTheDocument();
+  });
+
+  it('a plain refresh that is running says the units are not rebuilt', async () => {
+    get.mockResolvedValue({ data: { ...running, active: { ...running.active!, rebuild_evidence: false } } });
+    await renderPanel();
+    expect(screen.getByRole('status')).toHaveTextContent('This walk refreshes axis variants only');
+  });
+
+  it('a refused start shows the reason and the walk that refused it', async () => {
+    get.mockResolvedValue({ data: idle });
+    post.mockRejectedValue({ response: { status: 409, data: {
+      ...running, active: { ...running.active!, rebuild_evidence: false }, created: false,
+      detail: 'A refresh of the axis variants is running and cannot be turned into a rebuild. Ask again once it has finished.',
+    } } });
+    await renderPanel();
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Walk source codes' })); });
+    expect(screen.getByRole('alert')).toHaveTextContent('Ask again once it has finished.');
+    expect(screen.getByRole('status')).toHaveTextContent('Walking source codes: 1,500 of 41,200 codes.');
   });
 
   it('a failed start is reported and the button stays', async () => {
