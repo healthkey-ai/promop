@@ -74,7 +74,7 @@ of this port. The existing refresh query budget remains 21.
 
 ## Schema boundary
 
-`0309_cb_clinical_input_sources` depends on `0308_axis_evidence_summary` and adds
+`0310_cb_clinical_input_sources` depends on `0309_condition_context_mappings` and adds
 exactly three nullable columns. Existing `sct_date` is not re-added. The migration
 contains neither mapping approvals nor data backfill.
 
