@@ -110,6 +110,12 @@ Provenance can be supplied using the standard `X-Provenance-Source` and
 `X-Provenance-User-Id` headers. HealthTree's separate app still owns rendering
 and editing these fields on its diagnosis cards.
 
+For D04, stage, subtype and marker assertions are projected per cancer using
+explicit OMOP condition-event relationships. The primary PatientRecord remains
+a compatibility projection, with safeguards against secondary-cancer writes and
+clears. See [per-cancer diagnosis details](cancer_details_architecture.md) for the
+v1 authoring, source and legacy-data contracts.
+
 ## Provisioning
 
 PROMOP supports three patient account paths:

@@ -685,7 +685,8 @@ class FhirSyncView(APIView):
                 keys.append(('cid', date_value, datetime_value, concept_id, _norm_num(value)))
             return keys
         seen = set()
-        for d, dt, cid, sv, v in Measurement.objects.filter(person=person).values_list(
+        for d, dt, cid, sv, v in Measurement.objects.filter(person=person,
+                measurement_event_id__isnull=True, meas_event_field_concept_id__isnull=True).values_list(
                 'measurement_date', 'measurement_datetime', 'measurement_concept_id',
                 'measurement_source_value', 'value_as_number'):
             seen.update(identities(d, dt, cid, sv, v))
@@ -747,6 +748,7 @@ class FhirSyncView(APIView):
                     match |= Q(measurement_concept_id=cid)
                 existing_qs = Measurement.objects.filter(
                     match, person=person, measurement_date=obs_date,
+                    measurement_event_id__isnull=True, meas_event_field_concept_id__isnull=True,
                 )
                 existing = list(with_attribution(existing_qs).order_by('measurement_id'))
                 if not existing:
@@ -1083,13 +1085,18 @@ class FhirSyncView(APIView):
         set). Returns touched + inserted pk ids."""
         if not rows:
             return []
-        desired = {(getattr(r, sv_field), getattr(r, date_field)): r for r in rows}  # last wins
+        from omop_core.services.cancer_details import EVENT_FIELDS
+        event_fields = EVENT_FIELDS.get(model, ())
+        desired = {(getattr(r, sv_field), getattr(r, date_field)) + tuple(getattr(r, field) for field in event_fields): r
+                   for r in rows}  # last wins within the same diagnosis
         ct = ContentType.objects.get_for_model(model)
         touched, new_rows = [], []
         with suppress_patient_record_refresh():
-            for (sv, date), inst in desired.items():
+            for key, inst in desired.items():
+                sv, date = key[:2]
+                scope = dict(zip(event_fields, key[2:]))
                 existing = list(with_attribution(model.objects.filter(**{
-                    'person': person, sv_field: sv, date_field: date})).order_by(pk_field))
+                    'person': person, sv_field: sv, date_field: date, **scope})).order_by(pk_field))
                 if not existing:
                     new_rows.append(inst)
                     continue

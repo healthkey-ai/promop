@@ -715,6 +715,7 @@ class OmopSnapshot:
     # Raw source-input history, including tombstones. Generic filtering is keyed
     # by concept+source and cannot clear an older legacy SCT concept by source.
     clinical_input_observations: list | None = None
+    cancer_detail_rows: list = dataclasses.field(default_factory=list, compare=False)
 
 
 def _first_by_code(snapshot: OmopSnapshot, code: str, table: str = 'measurement'):
@@ -845,6 +846,7 @@ def _build_snapshot(person: Person) -> OmopSnapshot:
     from omop_core.services.clinical_input_contract import RECIPES
     clinical_sources = {recipe[0] for recipe in RECIPES.values()}
     clinical_input_observations = [o for o in observations if o.observation_source_value in clinical_sources]
+    cancer_detail_rows = measurements + observations
     measurements = without_cleared_history(measurements, 'measurement')
     observations = without_cleared_history(observations, 'observation')
 
@@ -877,6 +879,7 @@ def _build_snapshot(person: Person) -> OmopSnapshot:
         procedures=procedures,
         death=death,
         death_date_assertion=death_date_assertion,
+        cancer_detail_rows=cancer_detail_rows,
         cytogenetic_observations=cytogenetic_observations,
         breast_measurements=breast_measurements,
         clinical_input_observations=clinical_input_observations,
@@ -1010,6 +1013,8 @@ def refresh_patient_record(person: Person) -> PatientRecord:
 
         # Pre-fetch all OMOP rows once (~6 queries) instead of per-section.
         snapshot = _build_snapshot(person)
+        from omop_core.services.cancer_details import primary_snapshot
+        snapshot, linked_cancer_values = primary_snapshot(person, snapshot)
 
         # Explicit demo/local assessment codes are fallbacks. Real extractors
         # and approved mappings below retain precedence during imports.
@@ -1064,6 +1069,9 @@ def refresh_patient_record(person: Person) -> PatientRecord:
             # An older exact FCM row must not overwrite that latest result.
             if field not in lab_derived_fields:
                 setattr(patient_info, field, value)
+
+        for field, value in linked_cancer_values.items():
+            setattr(patient_info, field, value)
 
         # Pending edits (including explicit clears) win until OMOP actually
         # represents the saved value. A stale fact or a failed projection must
@@ -1525,26 +1533,23 @@ def _primary_cancer_condition(person, snapshot: OmopSnapshot, cancers: list):
     return max(cancers, key=rank)
 
 
+def _is_oncologic(cond):
+    """Shared cancer predicate for the primary selector and scoped projections."""
+    if cond.is_erroneous:
+        return False
+    cname = (cond.condition_concept.concept_name or '').lower() if cond.condition_concept else ''
+    src = (cond.condition_source_value or '').lower()
+    if 'screening' in cname or (not cond.condition_concept_id and 'screening' in src):
+        return False
+    return any(word in cname or word in src for word in (
+        'cancer', 'neoplasm', 'malignant', 'lymphoma', 'leukemia',
+        'myeloma', 'carcinoma', 'sarcoma', 'tumor',
+    ))
+
+
 def _get_disease_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     data = {}
     snapshot = snapshot or _build_snapshot(person)
-
-    # The primary cancer among the oncologic conditions — match common OMOP
-    # oncology terms in either the mapped concept_name OR the original
-    # condition_source_value (concept_id=0 rows store the disease name only in
-    # source_value).
-    _ONCO_KEYWORDS = [
-        'cancer', 'neoplasm', 'malignant', 'lymphoma', 'leukemia',
-        'myeloma', 'carcinoma', 'sarcoma', 'tumor',
-    ]
-
-    def _is_oncologic(cond):
-        cname = (cond.condition_concept.concept_name or '').lower() if cond.condition_concept else ''
-        src = (cond.condition_source_value or '').lower()
-        # A screening encounter is not a cancer diagnosis.
-        if 'screening' in cname or (not cond.condition_concept_id and 'screening' in src):
-            return False
-        return any(kw in cname or kw in src for kw in _ONCO_KEYWORDS)
 
     # snapshot.conditions is ordered -condition_start_date (newest first).
     cancers = [c for c in snapshot.conditions if _is_oncologic(c)]

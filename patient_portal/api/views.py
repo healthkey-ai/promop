@@ -148,6 +148,7 @@ from .provenance_org import (
     PROVENANCE_ORG_HEADER, ProvenanceContext, header_organization, raise_on_foreign_attribution,
     resolve_explicit_organization,
 )
+from .condition_serializers import V1MeasurementSerializer, V1ObservationSerializer
 from .serializers import (
     PrologSurveySerializer, PrologSurveyResponseSerializer,
     UserSerializer, PatientRecordSerializer, PatientListSerializer, ProvenanceRecordSerializer,
@@ -7070,11 +7071,13 @@ _UPSERT_KEYS = {
                             'drug_concept', ()),
     'Measurement':         ('measurement_source_value', 'measurement_date',
                             'measurement_concept',
-                            ('measurement_datetime', 'value_as_number')),
+                            ('measurement_datetime', 'value_as_number',
+                             'measurement_event_id', 'meas_event_field_concept_id')),
     'Observation':         ('observation_source_value', 'observation_date',
                             'observation_concept',
                             ('observation_datetime', 'value_as_number',
-                             'value_as_string', 'value_source_value')),
+                             'value_as_string', 'value_source_value',
+                             'observation_event_id', 'obs_event_field_concept_id')),
     'ProcedureOccurrence': ('procedure_source_value', 'procedure_date',
                             'procedure_concept', ()),
 }
@@ -7344,7 +7347,7 @@ def _check_concept_date_duplicates(model_cls, person, inserted_instances,
         cid = inst.measurement_concept_id
         d = inst.measurement_date
         if cid and cid != 0 and d is not None:
-            new_pairs.setdefault((cid, d), []).append(i)
+            new_pairs.setdefault((cid, d, inst.measurement_event_id, inst.meas_event_field_concept_id), []).append(i)
 
     if not new_pairs:
         return []
@@ -7352,7 +7355,7 @@ def _check_concept_date_duplicates(model_cls, person, inserted_instances,
     warnings = []
 
     # Intra-batch collisions: different rows in the same batch share concept+date.
-    for (cid, d), indices in new_pairs.items():
+    for (cid, d, event, kind), indices in new_pairs.items():
         if len(indices) > 1:
             svs = [inserted_instances[idx].measurement_source_value
                    for idx in indices]
@@ -7373,8 +7376,8 @@ def _check_concept_date_duplicates(model_cls, person, inserted_instances,
     # don't match any actual (concept, date) pair. The existing_by_key lookup
     # below discards those — correctness depends on that step, not this query
     # alone. Same trade-off as _plan_bulk_upsert: one query, bounded by batch.
-    concept_ids = {cid for cid, _ in new_pairs}
-    dates = {d for _, d in new_pairs}
+    concept_ids = {key[0] for key in new_pairs}
+    dates = {key[1] for key in new_pairs}
 
     qs = model_cls.objects.filter(
         person=person,
@@ -7388,17 +7391,18 @@ def _check_concept_date_duplicates(model_cls, person, inserted_instances,
     existing = qs.values_list(
         'measurement_concept_id', 'measurement_date',
         'measurement_id', 'measurement_source_value',
+        'measurement_event_id', 'meas_event_field_concept_id',
     )
 
     existing_by_key = {}
-    for cid, d, pk, sv in existing:
-        existing_by_key.setdefault((cid, d), []).append({
+    for cid, d, pk, sv, event, kind in existing:
+        existing_by_key.setdefault((cid, d, event, kind), []).append({
             'measurement_id': pk,
             'measurement_source_value': sv,
         })
 
-    for (cid, d), indices in new_pairs.items():
-        if (cid, d) in existing_by_key:
+    for (cid, d, event, kind), indices in new_pairs.items():
+        if (cid, d, event, kind) in existing_by_key:
             new_svs = [inserted_instances[idx].measurement_source_value
                        for idx in indices]
             date_str = d.isoformat() if hasattr(d, 'isoformat') else str(d)
@@ -7408,11 +7412,11 @@ def _check_concept_date_duplicates(model_cls, person, inserted_instances,
                 'measurement_date': date_str,
                 'batch_indices': indices,
                 'batch_source_values': new_svs,
-                'existing_rows': existing_by_key[(cid, d)],
+                'existing_rows': existing_by_key[(cid, d, event, kind)],
                 'message': (
                     f'New row(s) at indices {indices} '
                     f'(source: {new_svs}) resolve to concept {cid} on {d}, '
-                    f'which already has {len(existing_by_key[(cid, d)])} row(s).'
+                    f'which already has {len(existing_by_key[(cid, d, event, kind)])} row(s).'
                 ),
             })
 
@@ -8807,6 +8811,7 @@ class V1MeasurementViewSet(
         _OmopBulkUpdateMixin, _OmopBulkDeleteMixin, MeasurementViewSet):
     """Measurements on /api/v1/, with the batch actions."""
 
+    serializer_class = V1MeasurementSerializer
     source_organization_header = True
 
 
@@ -8815,6 +8820,7 @@ class V1ObservationViewSet(
         _OmopBulkUpdateMixin, _OmopBulkDeleteMixin, ObservationViewSet):
     """Observations on /api/v1/, with the batch actions."""
 
+    serializer_class = V1ObservationSerializer
     source_organization_header = True
 
 

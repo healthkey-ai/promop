@@ -306,9 +306,11 @@ def project_single_value(person, field_name, value, projection, *, acknowledge_e
     try:
         with transaction.atomic():
             Person.objects.select_for_update().get(pk=person.pk)
+            from omop_core.services.cancer_details import projection_scope
+            scope = projection_scope(person, field_name, model)
             candidates = model.objects.filter(
                 person=person, is_erroneous=False,
-                **{concept_field: concept_id, src_field: source_value, date_field: today},
+                **{concept_field: concept_id, src_field: source_value, date_field: today}, **scope,
             )
             if type_concept_id is not None:
                 candidates = candidates.filter(**{type_field: type_concept_id})
@@ -322,7 +324,7 @@ def project_single_value(person, field_name, value, projection, *, acknowledge_e
                 instance = model(**{
                     pk_field: next_pk(model, pk_field), 'person': person,
                     concept_field: concept_id, src_field: source_value,
-                    date_field: today, type_field: fact_type,
+                    date_field: today, type_field: fact_type, **scope,
                 })
             answer_fields = ('value_as_number', 'value_as_string', 'value_as_concept_id',
                              'value_source_value', 'unit_source_value', 'unit_concept_id')
@@ -356,6 +358,8 @@ def project_single_value(person, field_name, value, projection, *, acknowledge_e
                 instance.unit_concept_id = projection.get('unit_concept_id') or None
             if existing and not note_changed and all(getattr(instance, f) == v for f, v in previous.items()):
                 return acknowledge_existing
+            if scope and any(value is not None for value in scope.values()):
+                setattr(instance, f'{target}_datetime', timezone.now())
             instance._skip_patient_record_refresh = True
             instance.save()
             if patient_user_id:
@@ -402,8 +406,11 @@ def without_cleared_history(rows, target):
     _, _, concept_field, _, _, source_field, _, _ = _TARGET_CONFIG[target]
     cleared = set()
     result = []
+    event = 'measurement_event_id' if target == 'measurement' else 'observation_event_id'
+    kind = 'meas_event_field_concept_id' if target == 'measurement' else 'obs_event_field_concept_id'
     for row in rows:
-        key = (getattr(row, concept_field), getattr(row, source_field))
+        key = (getattr(row, concept_field), getattr(row, source_field),
+               getattr(row, event, None), getattr(row, kind, None))
         if row.value_source_value == CLEAR_VALUE:
             cleared.add(key)
         elif key not in cleared:
