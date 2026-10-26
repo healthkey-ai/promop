@@ -1753,6 +1753,46 @@ setting an assertion from 1 to 0 would silently stay true.
 
 ---
 
+## Therapy-Line Import
+
+The OMOP row endpoints never write an `Episode`, so an ETL writes lines of
+therapy separately, once per person (#1969):
+
+```
+POST /api/v1/therapy-lines/bulk_upsert/
+  {"person": 16813, "lines": [{"line_number": 3, "start_date": "2021-07-15",
+                               "ongoing": true, "regimen": "Dara-CyPd",
+                               "outcome": "stringent complete response"}]}
+  200 {"person_id": 16813, "created": 1, "updated": 0,
+       "lines": [{"line_number": 3, "episode_id": ..., "created": true,
+                  "regimen_concept_id": ..., "regimen_match": "unmatched"}]}
+```
+
+Code: `patient_portal/api/therapy_line_import.py`, which calls
+`episode_service.author_therapy_lines`.
+
+- **Permission.** `EtlWritePermission` plus `_authorize_person_write`, as on the
+  bulk row writes. The editor's `POST /v1/therapy-lines/` refuses
+  `system/etl.write` on purpose: it is a patient's write.
+- **Upsert per line** on (person, cancer, `line_number`) through the editor's own
+  writer. Omitted fields are left as stored. `end_date: null`, `ongoing: true`
+  and `outcome: null` clear. Lines the request does not name are untouched, and
+  so is any composition (drug exposures) a line already has. Assertions are
+  recorded with `source='import'`.
+- **Regimen labels are never guessed.** A label resolves through the curated
+  `TherapyRegimen` code/title, then an exact HemOnc regimen name (not a synonym:
+  "R" is lenalidomide in myeloma and rituximab in lymphoma), else it is
+  quarantined under HK-Regimen with a `RegimenMappingGap` (`therapy-lines-api`).
+  The label is always the line's name. `regimen_concept_id` overrides the label,
+  and must be a live HemOnc or HK-Regimen regimen (400 otherwise).
+- **Outcomes** match the disease's catalog case-insensitively and are stored in
+  its spelling. An unknown outcome is a 400.
+- **One transaction, one derivation.** A refused line fails the batch (400,
+  naming the line). `?skip_refresh=true` defers the derivation, as on the bulk
+  row writes.
+
+---
+
 ## FHIR Bundle Generator Architecture
 
 `omop_core/management/commands/generate_fhir_bundle.py`:
