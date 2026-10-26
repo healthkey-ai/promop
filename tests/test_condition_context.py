@@ -12,7 +12,7 @@ from tests.factories import ConceptFactory, PatientRecordFactory
 from tests.test_phr_read_model import condition, icd10, signed_in
 
 pytestmark = pytest.mark.django_db
-migration = import_module('omop_core.migrations.0298_condition_context_mappings')
+migration = import_module('omop_core.migrations.0309_condition_context_mappings')
 
 
 def run_migration():

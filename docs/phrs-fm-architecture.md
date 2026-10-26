@@ -94,7 +94,7 @@ Context from a previous condition event is never implicitly copied to another.
 strings under the existing condition permissions and patient write authorization.
 PATCH preserves omitted fields; blank/null explicitly clears a field. The
 approved field mappings determine the concepts and storage tables; migration
-[0298](../omop_core/migrations/0298_condition_context_mappings.py) deploys their
+[0309](../omop_core/migrations/0309_condition_context_mappings.py) deploys their
 domain-checked assignments. Missing vocabulary fails the write with HTTP 400
 instead of storing an unmapped or wrong-domain fact. Curator-approved nonzero
 assignments survive the migration.
