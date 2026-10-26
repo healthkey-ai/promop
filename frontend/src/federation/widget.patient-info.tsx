@@ -17,6 +17,7 @@ import { PatientInfo } from "./PatientInfo";
 import { injectStyles } from "./injectStyles";
 import { patientFormRuntime, retainPatientFormRuntime, type PatientFormConnection } from './patientFormRuntime';
 import PatientFieldEditor from './PatientFieldEditor';
+import TherapyLinesPanel from './TherapyLinesPanel';
 import type { PatientFormResult } from './patientFormStore';
 
 export interface MountOptions extends PatientFormConnection {
@@ -96,6 +97,25 @@ export function mountFields(el: HTMLElement, opts: MountOptions = {}): () => voi
       readOnly={opts.readOnly ?? true} infoHref={opts.infoHref} compact />,
     slot, String(index),
   ))}</StrictMode>);
+  return () => unmount(el);
+}
+
+/** The therapy-line editor only: a host with a modal (trial details) mounts
+ * this instead of the whole patient form. Same store, same editor as the
+ * Treatment tab, so authoring a line there and here are the same write. */
+export function mountTherapyLines(el: HTMLElement, opts: MountOptions = {}): () => void {
+  unmount(el);
+  injectStyles();
+  const runtime = patientFormRuntime(opts);
+  subscriptions.set(el, retainPatientFormRuntime(opts));
+  void runtime.store.load();
+  const root = createRoot(el);
+  roots.set(el, root);
+  root.render(
+    <StrictMode>
+      <TherapyLinesPanel store={runtime.store} readOnly={opts.readOnly ?? true} />
+    </StrictMode>,
+  );
   return () => unmount(el);
 }
 
