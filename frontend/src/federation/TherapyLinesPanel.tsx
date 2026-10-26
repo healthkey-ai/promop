@@ -14,6 +14,10 @@ import type { PatientFormStore } from './patientFormStore';
 interface Props {
   store: PatientFormStore;
   readOnly?: boolean;
+  /** Called after a mutation lands, so the host can reload the record and
+   *  invalidate whatever query rendered the row. `store.load()` alone does not:
+   *  it publishes a snapshot but never reaches the store's `onUpdated` set. */
+  onChanged?: () => void;
 }
 
 /** The therapy-line editor, mounted on its own by a host that only has a modal.
@@ -23,7 +27,7 @@ interface Props {
  * whole patient form. Values come from the shared patient-form store, which is
  * why authoring one line updates the host's row on the next `load()`.
  */
-export default function TherapyLinesPanel({ store, readOnly = false }: Props) {
+export default function TherapyLinesPanel({ store, readOnly = false, onChanged }: Props) {
   const state = usePatientFormSnapshot(store);
   const [dialog, setDialog] = useState<{ mode: 'add' } | { mode: 'edit'; line: EditableTherapyLine } | null>(null);
   const [busy, setBusy] = useState(false);
@@ -53,6 +57,7 @@ export default function TherapyLinesPanel({ store, readOnly = false }: Props) {
     try {
       await retractTherapyLine(line.episode_id);
       await store.load();
+      onChanged?.();
     } catch {
       setError('Could not remove that line. Try again.');
     } finally {
@@ -66,6 +71,7 @@ export default function TherapyLinesPanel({ store, readOnly = false }: Props) {
     try {
       await setTherapyHistoryCompleteness(personId, next);
       await store.load();
+      onChanged?.();
     } catch {
       setError('Could not update whether this history is complete.');
     } finally {
@@ -147,7 +153,7 @@ export default function TherapyLinesPanel({ store, readOnly = false }: Props) {
       line={dialog.mode === 'edit' ? dialog.line : undefined}
       diseaseCode={diseaseCode}
       onClose={() => setDialog(null)}
-      onAuthored={() => { setDialog(null); void store.load(); }}
+      onAuthored={() => { setDialog(null); void store.load(); onChanged?.(); }}
     />}
   </div>;
 }

@@ -16,6 +16,8 @@ import { createRoot, type Root } from "react-dom/client";
 import { PatientInfo } from "./PatientInfo";
 import { injectStyles } from "./injectStyles";
 import { patientFormRuntime, retainPatientFormRuntime, type PatientFormConnection } from './patientFormRuntime';
+import { resetClinicalTransport, setClinicalTransport } from '@/api/clinicalTransport';
+import { __resetWritableFieldsCache } from '@/hooks/useWritableFields';
 import PatientFieldEditor from './PatientFieldEditor';
 import TherapyLinesPanel from './TherapyLinesPanel';
 import type { PatientFormResult } from './patientFormStore';
@@ -29,7 +31,7 @@ export interface MountOptions extends PatientFormConnection {
   /** The host's write gate: display the record without offering edits. */
   readOnly?: boolean;
   infoHref?: string;
-  onPatientUpdated?: (result: PatientFormResult) => unknown;
+  onPatientUpdated?: (result?: PatientFormResult) => unknown;
   onSaveError?: () => unknown;
 }
 
@@ -107,13 +109,29 @@ export function mountTherapyLines(el: HTMLElement, opts: MountOptions = {}): () 
   unmount(el);
   injectStyles();
   const runtime = patientFormRuntime(opts);
-  subscriptions.set(el, retainPatientFormRuntime(opts));
+  const apiBasePath = (opts.apiBase ?? "").replace(/\/+$/, "");
+  // `api/therapyLines.ts` talks through the module-level clinical transport, not
+  // the store's client. Without this the panel writes to the standalone `/api`
+  // with no host token (or to whichever host mounted a widget last).
+  if (setClinicalTransport(runtime.client, apiBasePath)) __resetWritableFieldsCache();
+  const release = retainPatientFormRuntime(opts);
+  subscriptions.set(el, () => {
+    release();
+    if (resetClinicalTransport()) __resetWritableFieldsCache();
+  });
   void runtime.store.load();
   const root = createRoot(el);
   roots.set(el, root);
   root.render(
     <StrictMode>
-      <TherapyLinesPanel store={runtime.store} readOnly={opts.readOnly ?? true} />
+      <TherapyLinesPanel
+        store={runtime.store}
+        readOnly={opts.readOnly ?? true}
+        // Therapy mutations bypass the store's save queue, so `store.load()`
+        // alone never reaches the host's `onUpdated` listeners. The host still
+        // has to invalidate its own queries and re-render the row.
+        onChanged={() => { void runtime.store.load(); void opts.onPatientUpdated?.(); }}
+      />
     </StrictMode>,
   );
   return () => unmount(el);

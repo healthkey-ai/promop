@@ -1,9 +1,15 @@
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import type { AxiosInstance } from 'axios';
 
 import { PatientFormStore } from './patientFormStore';
 import TherapyLinesPanel from './TherapyLinesPanel';
+
+const completeTherapyHistory = vi.fn(async () => ({ therapy_history_complete: true, patient_info: {} }));
+vi.mock('@/api/therapyLines', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/api/therapyLines')>()),
+  setTherapyHistoryCompleteness: (...args: unknown[]) => completeTherapyHistory(...(args as [])),
+}));
 
 async function setup(patient: Record<string, unknown>, writeEnabled = true) {
   const get = vi.fn(async (url: string) => ({ data: url.includes('writable-fields') ? {
@@ -42,6 +48,17 @@ describe('therapy lines editor', () => {
 
     expect(screen.getByText('No therapy lines recorded.')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Add therapy line/i })).not.toBeInTheDocument();
+  });
+
+  it('tells the host after a mutation, because the store load alone does not', async () => {
+    const { store } = await setup({ therapy_lines_count: '1', lines_of_therapy: [], therapy_history_complete: false });
+    const onChanged = vi.fn();
+
+    render(<TherapyLinesPanel store={store} onChanged={onChanged} />);
+    fireEvent.click(screen.getByLabelText('Treatment history is complete'));
+
+    await waitFor(() => expect(completeTherapyHistory).toHaveBeenCalledWith(12, true));
+    await waitFor(() => expect(onChanged).toHaveBeenCalled());
   });
 
   it('shows the line count as a lower bound until the history is confirmed', async () => {
