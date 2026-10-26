@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
+import { Pencil } from 'lucide-react';
 import Field from '@/components/PatientInfo/Field';
 import { usePatientFormSnapshot } from './PatientFormContext';
 import type { PatientFormStore } from './patientFormStore';
@@ -49,8 +50,14 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
       {!compact && <div className="text-sm font-medium">{label}</div>}
       <div className="flex items-center gap-2"><span>{formatted}</span>
         <Dialog.Root open={open} onOpenChange={setOpen}>
-          <Dialog.Trigger asChild><button type="button" className="rounded border px-2 py-1 text-xs"
-            aria-label={`Edit ${label} inputs`}>Edit inputs</button></Dialog.Trigger>
+          {/* A pencil, not an "Edit inputs" label: the row already shows the
+              value, and the label widened the column enough to wrap "Your Value"
+              on narrow screens. The accessible name stays explicit. */}
+          <Dialog.Trigger asChild><button type="button"
+            className="shrink-0 rounded p-1 text-muted-foreground hover:text-foreground"
+            aria-label={`Edit ${label} inputs`} title={`Edit ${label} inputs`}>
+            <Pencil className="h-4 w-4" strokeWidth={1.67} />
+          </button></Dialog.Trigger>
           <Dialog.Portal><Dialog.Overlay className="fixed inset-0 z-[60] bg-black/40" />
             <Dialog.Content className="promop-root fixed left-1/2 top-1/2 z-[61] max-h-[85vh] w-[min(32rem,calc(100%-2rem))] -translate-x-1/2 -translate-y-1/2 space-y-4 overflow-y-auto rounded-xl bg-background p-6 shadow-xl">
               <Dialog.Title className="font-semibold">{label}</Dialog.Title>
