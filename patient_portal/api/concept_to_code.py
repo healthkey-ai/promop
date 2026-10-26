@@ -9,7 +9,10 @@ from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from omop_core.models import ConceptMappingPriority, FieldConceptMapping, SourceCodeConceptMapping, SuggestRun
+from omop_core.models import (
+    AxisVariantRefresh, ConceptMappingPriority, FieldConceptMapping, PatientSourceCode,
+    SourceCodeConceptMapping, SuggestRun,
+)
 from omop_core.services.concept_to_code import (
     browse_concepts, concept_payload, eligible_sources, source_payload, standard_destinations,
 )
@@ -400,3 +403,77 @@ def concept_to_code_apply(request, concept_id, mapping_id):
         'destination_vocabulary_id': concept.vocabulary_id,
     }, request.user, mapping=row)
     return Response({**source_payload(row), 'repoint': repoint})
+
+
+def _walk_payload(request):
+    if request is None:
+        return None
+    return {
+        'id': request.pk, 'outcome': request.outcome, 'reason': request.reason,
+        'rebuild_evidence': request.rebuild_evidence, 'keys': request.keys, 'done': request.done,
+        'refreshed': request.refreshed, 'failure_reason': request.failure_reason,
+        'created_at': request.created_at, 'started_at': request.started_at,
+        'progress_at': request.progress_at, 'completed_at': request.completed_at,
+        'axis_evidence': request.axis_evidence or None,
+    }
+
+
+def _walk_status():
+    """The active walk, the last finished one, the last completed rebuild, and
+    the patients loaded since.
+
+    ``patients_since`` counts the persons whose first source code was recorded
+    after the last completed rebuild was asked for, which is what a curator
+    weighs before asking for another (#2050); with no completed rebuild it is
+    every patient with source codes. Asked for, not started: a resumed walk
+    restarts its clock, and a plain refresh rewrites no evidence. It is a
+    scan of the source codes, so it is not counted while a walk is active,
+    when the panel shows progress instead and polls.
+    """
+    active = AxisVariantRefresh.objects.filter(outcome__in=('queued', 'running')).order_by('pk').first()
+    last = AxisVariantRefresh.objects.filter(outcome__in=('done', 'failed')).order_by('-completed_at', '-pk').first()
+    completed = AxisVariantRefresh.objects.filter(outcome='done', rebuild_evidence=True).order_by(
+        '-completed_at', '-pk').first()
+    patients = None
+    if active is None:
+        patients = PatientSourceCode.objects.all()
+        if completed is not None:
+            patients = patients.filter(first_seen__gt=completed.created_at)
+        patients = patients.values('person_id').distinct().count()
+    return {
+        'active': _walk_payload(active), 'last': _walk_payload(last), 'completed': _walk_payload(completed),
+        'patients_since': patients,
+        'walked_at': completed.created_at if completed is not None else None,
+    }
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def concept_to_code_axis_variant_walk(request):
+    """The axis variant walk a curator can ask for after loading patients (#2050).
+
+    ``POST`` records a rebuild request (#2043), which the worker performs: the
+    unit evidence of every mapped code is rewritten from the loaded patients,
+    its variants refreshed, and the axis evidence met on the way counted
+    (#2051). One walk at a time: a request while one is queued or running
+    returns that one with ``created: false``; a rebuild asked for while a
+    plain refresh is queued is folded into it, while one running cannot be
+    joined and is refused with 409, so the curator asks again when it is
+    done. Asking for a walk is an approver's action, as it costs the worker
+    hours on a large instance.
+    """
+    _authorize(request.user)
+    if request.method == 'GET':
+        return Response(_walk_status())
+    from patient_portal.api.views import _can_approve_mappings
+    if not _can_approve_mappings(request.user):
+        raise PermissionDenied('Approval rights are required to start a walk.')
+    from omop_core.services.axis_variant_jobs import request_refresh
+    who = getattr(request.user, 'email', '') or getattr(request.user, 'username', '') or str(request.user.pk)
+    walk, created = request_refresh(reason=f'Concept to Code: asked for by {who}', rebuild_evidence=True)
+    if not walk.rebuild_evidence:
+        return Response({**_walk_status(), 'created': False, 'request': _walk_payload(walk),
+                         'detail': 'A refresh of the axis variants is running and cannot be turned into a '
+                                   'rebuild. Ask again once it has finished.'}, status=409)
+    return Response({**_walk_status(), 'created': created, 'request': _walk_payload(walk)},
+                    status=202 if created else 200)

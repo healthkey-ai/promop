@@ -22,7 +22,7 @@ from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.utils import timezone
 
-from omop_core.mapping import axis_variants
+from omop_core.mapping import axis_evidence, axis_variants
 from omop_core.models import AxisVariantRefresh
 
 logger = logging.getLogger(__name__)
@@ -175,10 +175,15 @@ def run_refresh(request_id, batch_size=axis_variants.REFRESH_BATCH):
     # (#2048). The walk itself is idempotent, so running on costs only time.
     attempt = AxisVariantRefresh.objects.filter(pk=request_id, outcome='running', started_at=now)
 
+    # A rebuild also counts the axis evidence it meets (#2051); the summary
+    # is written with every batch, so a resumed walk continues its counts.
+    summary = axis_evidence.Summary(request.axis_evidence) if request.rebuild_evidence else None
+
     def progress(done, refreshed, last_key):
         attempt.update(
             done=offset + done, refreshed=already + refreshed, progress_at=timezone.now(),
-            cursor=axis_variants.key_text(last_key))
+            cursor=axis_variants.key_text(last_key),
+            **({'axis_evidence': summary.as_dict()} if summary is not None else {}))
 
     try:
         # A rebuild walks every code with evidence or patient data and rewrites
@@ -195,7 +200,7 @@ def run_refresh(request_id, batch_size=axis_variants.REFRESH_BATCH):
                         request_id, cursor.replace('\x1f', ':'), len(remaining))
         refreshed = already + axis_variants.refresh_all(
             remaining, batch_size=batch_size, on_batch=progress,
-            rebuild_evidence=request.rebuild_evidence)
+            rebuild_evidence=request.rebuild_evidence, summary=summary)
         keys = offset + len(remaining)
     except Exception as exc:
         attempt.update(outcome='failed', failure_reason=str(exc)[:2000], completed_at=timezone.now())
