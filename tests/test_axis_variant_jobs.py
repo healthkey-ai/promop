@@ -507,3 +507,38 @@ def test_a_resumed_rebuild_continues_its_axis_evidence_counts(two_unit_code):
     request.refresh_from_db()
     assert request.axis_evidence['codes'] == 4
     assert request.axis_evidence['axes']['property']['varies'] == 2
+
+
+# --- Graceful requeue on worker shutdown ---
+
+
+def test_worker_shutdown_requeues_a_running_refresh():
+    """A dying worker moves its running request back to queued so the replacement resumes it instantly."""
+    request = AxisVariantRefresh.objects.create(
+        reason='mid-walk', outcome='running', rebuild_evidence=True,
+        keys=40000, done=12500, refreshed=900, cursor='ACME-LAB\x1fGLU',
+        started_at=timezone.now() - timedelta(hours=1),
+        progress_at=timezone.now() - timedelta(seconds=30))
+    assert axis_variant_jobs.requeue_on_shutdown() == 1
+    request.refresh_from_db()
+    assert (request.outcome, request.task_id, request.started_at) == ('queued', '', None)
+    assert (request.done, request.refreshed, request.cursor) == (12500, 900, 'ACME-LAB\x1fGLU'), \
+        'the progress survives the requeue'
+    assert request.rebuild_evidence is True
+
+
+def test_worker_shutdown_is_a_noop_when_nothing_is_running():
+    AxisVariantRefresh.objects.create(reason='done', outcome='done')
+    AxisVariantRefresh.objects.create(reason='queued')
+    assert axis_variant_jobs.requeue_on_shutdown() == 0
+
+
+def test_the_boot_pass_publishes_a_request_the_shutdown_requeued(settings):
+    """Shutdown → requeue → boot pass → publish: the full cycle."""
+    settings.CELERY_BROKER_URL = 'redis://broker/0'
+    request = AxisVariantRefresh.objects.create(
+        reason='requeued by shutdown', outcome='queued', task_id='',
+        done=5000, cursor='ACME-LAB\x1fGLU')
+    with patch(PUBLISH) as publish:
+        assert axis_variant_jobs.dispatch_queued_refreshes(republish=True) == 1
+    publish.assert_called_once_with(args=[request.pk], task_id=f'axis-variant-refresh-{request.pk}')

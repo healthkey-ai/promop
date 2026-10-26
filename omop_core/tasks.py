@@ -4,11 +4,30 @@ from typing import Any
 
 import requests
 from celery import shared_task
-from celery.signals import worker_ready
+from celery.signals import worker_ready, worker_shutting_down
 from django.db import OperationalError, ProgrammingError
 
 from omop_core.models import Person
 from omop_core.services import axis_variant_jobs as _axis_variant_jobs
+
+
+@worker_shutting_down.connect
+def requeue_running_refresh_on_shutdown(**_kwargs):
+    """Move a running axis variant refresh back to queued so the next worker resumes it instantly."""
+    import logging
+
+    from django.db import connections
+
+    from omop_core.services.axis_variant_jobs import requeue_on_shutdown
+
+    try:
+        requeue_on_shutdown()
+    except Exception:
+        logging.getLogger(__name__).exception(
+            'Could not requeue axis variant refresh on shutdown; '
+            'the stale sweep will catch it.')
+    finally:
+        connections.close_all()
 
 
 @worker_ready.connect

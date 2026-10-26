@@ -131,6 +131,21 @@ def dispatch_queued_refreshes(republish=True):
     return dispatched
 
 
+def requeue_on_shutdown():
+    """Move a running refresh back to queued ahead of the stale sweep.
+
+    Called from ``worker_shutting_down``: the worker knows it is dying, so
+    waiting for the heartbeat to go stale wastes 15-20 minutes on the
+    replacement worker.  The cursor, done offset and rebuild flag are kept,
+    so the next worker resumes rather than restarts.
+    """
+    requeued = AxisVariantRefresh.objects.filter(outcome='running').update(
+        outcome='queued', task_id='', started_at=None)
+    if requeued:
+        logger.info('Worker shutting down: requeued %d running refresh request(s).', requeued)
+    return requeued
+
+
 def run_pending_inline(reason='', rebuild_evidence=False):
     """Perform the refresh here, completing a queued request if there is one.
 
