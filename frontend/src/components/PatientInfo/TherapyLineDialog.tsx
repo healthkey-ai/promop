@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Search, X, Plus, Trash2 } from 'lucide-react';
 import {
   searchDrugConcepts, authorTherapyLine, updateTherapyLine,
@@ -330,7 +331,10 @@ export default function TherapyLineDialog({
     }
   };
 
-  return (
+  // Portal to the body: a host may mount this inside a dialog positioned with a
+  // CSS `transform`, which becomes the containing block for `position: fixed` and
+  // would clip the editor to the host modal's box.
+  return createPortal((
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
       role="dialog"
@@ -665,5 +669,5 @@ export default function TherapyLineDialog({
         </div>
       </div>
     </div>
-  );
+  ), document.body);
 }
