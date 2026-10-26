@@ -32,7 +32,8 @@ ACTIVE_OUTCOMES = ('queued', 'running')
 TIME_LIMIT = 6 * 60 * 60
 #: A running request whose heartbeat is older than this lost its worker: a
 #: deploy replaced the pool mid-walk (#2023). A batch of 500 keys takes far
-#: less, so the next worker boot requeues it and the walk resumes from ``done``.
+#: less, so the next sweep, at worker boot or on the worker's five-minute
+#: recheck (#2048), requeues it and the walk resumes after its ``cursor``.
 STALE = 15 * 60
 #: Raised inside the task shortly before the hard limit, so an overrun is
 #: recorded as ``failed`` instead of a row stuck in ``running``.
@@ -102,7 +103,9 @@ def dispatch_queued_refreshes(republish=True):
     request waiting behind a busy worker is not sent three times. A request
     ``running`` with no heartbeat for :data:`STALE` lost its worker, most often
     to the deploy that booted this one, and is requeued with its ``done``
-    offset kept, so the walk resumes rather than restarts.
+    offset and ``cursor`` kept, so the walk resumes rather than restarts. The
+    rechecks repeat for the life of the worker (``tasks.keep_rechecking``),
+    because the kill can come after the replacement booted (#2048).
     """
     cutoff = timezone.now() - timedelta(seconds=STALE)
     stranded = AxisVariantRefresh.objects.filter(outcome='running').filter(

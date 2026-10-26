@@ -390,3 +390,64 @@ def test_the_inline_command_completes_a_queued_request(two_unit_code):
     assert AxisVariantRefresh.objects.count() == 1
     call_command('refresh_axis_variants', '--dry-run', stdout=out)
     assert '1 source codes have more than one unit.' in out.getvalue()
+
+
+def test_a_recheck_requeues_and_publishes_a_request_whose_worker_was_killed(settings):
+    """The kill can come after the replacement worker booted (#2048)."""
+    settings.CELERY_BROKER_URL = 'redis://broker/0'
+    stranded = AxisVariantRefresh.objects.create(
+        reason='claimed by the instance Cloud Run shut down', outcome='running', rebuild_evidence=True,
+        task_id='axis-variant-refresh-2', started_at=timezone.now() - timedelta(minutes=16),
+        progress_at=timezone.now() - timedelta(minutes=16))
+    with patch(PUBLISH) as publish:
+        assert axis_variant_jobs.dispatch_queued_refreshes(republish=False) == 1
+    publish.assert_called_once_with(args=[stranded.pk], task_id=f'axis-variant-refresh-{stranded.pk}')
+    stranded.refresh_from_db()
+    assert (stranded.outcome, stranded.rebuild_evidence) == ('queued', True)
+
+
+class _Timer:
+    """A threading.Timer that fires only when the test says so."""
+    armed = []
+
+    def __init__(self, interval, function):
+        self.interval, self.function, self.daemon, self.started = interval, function, False, False
+        _Timer.armed.append(self)
+
+    def start(self):
+        self.started = True
+
+
+def test_a_live_worker_keeps_rechecking():
+    from omop_core import tasks
+
+    _Timer.armed = []
+    passes = []
+    tasks.keep_rechecking(lambda: passes.append(1), 300, timer=_Timer)
+    first = _Timer.armed[-1]
+    assert (first.interval, first.daemon, first.started) == (300, True, True)
+    first.function()
+    assert passes == [1]
+    assert len(_Timer.armed) == 2 and _Timer.armed[-1].interval == 300, 'each pass arms the next'
+    _Timer.armed[-1].function()
+    assert passes == [1, 1]
+    assert len(_Timer.armed) == 3
+
+
+def test_a_recheck_that_fails_still_arms_the_next():
+    from omop_core import tasks
+
+    def dispatch():
+        raise RuntimeError('database away')
+
+    _Timer.armed = []
+    tasks.keep_rechecking(dispatch, 300, timer=_Timer)
+    with pytest.raises(RuntimeError):
+        _Timer.armed[-1].function()
+    assert len(_Timer.armed) == 2
+
+
+def test_the_recheck_interval_is_under_the_stranded_cutoff():
+    from omop_core import tasks
+
+    assert tasks.RECHECK_INTERVAL < axis_variant_jobs.STALE

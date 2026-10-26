@@ -50,6 +50,42 @@ def dispatch_hospital_code_imports_on_worker_ready(**_kwargs):
         timer = threading.Timer(delay, dispatch)
         timer.daemon = True
         timer.start()
+    keep_rechecking(dispatch, RECHECK_INTERVAL)
+
+
+#: How often a live worker looks for a request that lost its worker (#2048).
+#: Under the 15 minute stale cutoff, so a stranded request waits at most about
+#: one cutoff more; far above a sweep's cost, which is a few small queries.
+RECHECK_INTERVAL = 5 * 60
+
+
+def keep_rechecking(dispatch, interval, timer=None):
+    """Run ``dispatch`` every ``interval`` seconds for the life of the worker.
+
+    The boot pass and its two early rechecks only see what is stranded within
+    three minutes of a boot. A walk is killed when its instance is shut down
+    *after* the replacement worker is up, which is the order Cloud Run uses,
+    so its heartbeat goes stale with no boot to follow (#2048): on the
+    HealthTree instance the #2043 rebuild sat ``running`` for over an hour
+    with a dead worker. The lost message is no help either: Redis redelivers
+    it only after the visibility timeout, to a task that claims nothing but a
+    ``queued`` row. So a live worker keeps looking. Each pass re-arms the next
+    whatever ``dispatch`` did, and the timer is a daemon, so it never holds
+    the worker open at shutdown. ``timer`` is for tests.
+    """
+    import threading
+
+    timer = timer or threading.Timer
+
+    def tick():
+        try:
+            dispatch()
+        finally:
+            keep_rechecking(dispatch, interval, timer)
+
+    pending = timer(interval, tick)
+    pending.daemon = True
+    pending.start()
 
 
 @shared_task(name='omop_core.build_concept_embeddings')
