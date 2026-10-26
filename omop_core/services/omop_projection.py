@@ -323,6 +323,11 @@ def project_single_value(person, field_name, value, projection, *, acknowledge_e
                             instance.value_as_string, note_changed = store_cytogenetic_summary(instance, str(value))
                         else:
                             instance.value_as_string = str(value)
+                    elif kind == 'concept':
+                        instance.value_as_string = str(value)
+                        concept_pk = projection.get('value_concept_map', {}).get(str(value))
+                        if concept_pk is not None:
+                            instance.value_as_concept_id = concept_pk
                     else:
                         try:
                             instance.value_as_number = float(value)
