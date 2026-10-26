@@ -4261,7 +4261,8 @@ class FieldConceptMapping(models.Model):
     value_kind = models.CharField(
         max_length=10, blank=True, default='',
         choices=[('number', 'Number'), ('string', 'String'),
-                 ('date', 'Date'), ('boolean', 'Boolean'), ('json', 'Structured findings')],
+                 ('date', 'Date'), ('boolean', 'Boolean'), ('json', 'Structured findings'),
+                 ('concept', 'Concept')],
         help_text='Which value column the fact is written to.',
     )
     type_concept_id = models.IntegerField(

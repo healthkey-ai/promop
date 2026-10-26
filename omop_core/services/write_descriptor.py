@@ -473,6 +473,37 @@ def _curated_writes(choice_options=None, genomics_recipes=None, clinical_mapping
             from omop_core.services.cytogenetics import descriptor as cytogenetic_descriptor
             entry = cytogenetic_descriptor(mapping_approved=True)
         entries[row.field_name] = entry
+
+    # Attach value_concept_map for concept-valued fields so the projection
+    # engine can write value_as_concept_id from the choice's coded answer.
+    concept_fields = [
+        fn for fn, e in entries.items()
+        if e.get('value_kind') == 'concept' and e.get('projection')
+    ]
+    if concept_fields:
+        from omop_core.models import FieldChoiceCode
+        codes = list(
+            FieldChoiceCode.objects
+            .filter(choice__field_name__in=concept_fields, is_primary=True)
+            .values_list('choice__field_name', 'choice__display',
+                         'vocabulary_id', 'code')
+        )
+        if codes:
+            # Resolve (vocabulary_id, code) pairs → concept_id.  Group by
+            # vocabulary so the existing helper works.
+            by_vocab: dict[str, set[str]] = {}
+            for _, _, vid, code in codes:
+                by_vocab.setdefault(vid, set()).add(code)
+            resolved: dict[tuple[str, str], int] = {}
+            for vid, code_set in by_vocab.items():
+                for code, cid in _resolve_concept_ids(code_set, vid).items():
+                    resolved[(vid, code)] = cid
+            for fn, display, vid, code in codes:
+                pk = resolved.get((vid, code))
+                if pk is not None:
+                    proj = entries[fn].get('projection')
+                    if proj is not None:
+                        proj.setdefault('value_concept_map', {})[display] = pk
     return entries
 
 
