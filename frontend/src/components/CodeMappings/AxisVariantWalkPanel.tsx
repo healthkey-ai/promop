@@ -103,27 +103,26 @@ export default function AxisVariantWalkPanel({ canApprove }: { canApprove: boole
     {!status && !error && <p role="status">Reading the source-code walk…</p>}
     {error && <p role="alert" className="text-rose-700">{error}</p>}
     {status && <>
-      {active
-        ? <p role="status" aria-live="polite">
-            {active.outcome === 'queued'
-              ? 'Source-code walk queued, waiting for the worker.'
-              : `Walking source codes: ${active.done.toLocaleString()} of ${active.keys.toLocaleString()} codes.`}
-            {' '}{active.rebuild_evidence
-              ? "Each code's units are rebuilt from its patients and its axis variants refreshed."
-              : 'This walk refreshes axis variants only; ask again once it finishes to rebuild the units from patients.'}
-          </p>
-        : <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-            <span>
-              {status.walked_at
-                ? <>Source codes walked {when(status.walked_at)}{completed ? ` (${completed.refreshed.toLocaleString()} refreshed)` : ''}.</>
-                : 'Source codes never walked.'}
-              {' '}<strong>{patients.toLocaleString()}</strong> {patients === 1 ? 'patient' : 'patients'} loaded since.
-            </span>
-            <button type="button" className={button} disabled={!canApprove || starting}
-              title={canApprove ? 'Rebuild every code\'s units from the loaded patients and refresh its axis variants'
-                : 'Approval rights are required to start a walk'}
-              onClick={() => void start()}>{starting ? 'Starting…' : 'Walk source codes'}</button>
-          </div>}
+      {active && <p role="status" aria-live="polite">
+        {active.outcome === 'queued'
+          ? 'Source-code walk queued, waiting for the worker.'
+          : `Walking source codes: ${active.done.toLocaleString()} of ${active.keys.toLocaleString()} codes.`}
+        {' '}{active.rebuild_evidence
+          ? "Each code's units are rebuilt from its patients and its axis variants refreshed."
+          : 'This walk refreshes axis variants only; ask again once it finishes to rebuild the units from patients.'}
+      </p>}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        {!active && <span>
+          {status.walked_at
+            ? <>Source codes walked {when(status.walked_at)}{completed ? ` (${completed.refreshed.toLocaleString()} refreshed)` : ''}.</>
+            : 'Source codes never walked.'}
+          {' '}<strong>{patients.toLocaleString()}</strong> {patients === 1 ? 'patient' : 'patients'} loaded since.
+        </span>}
+        <button type="button" className={button} disabled={!canApprove || starting}
+          title={canApprove ? 'Rebuild every code\'s units from the loaded patients and refresh its axis variants'
+            : 'Approval rights are required to start a walk'}
+          onClick={() => void start()}>{starting ? 'Starting…' : 'Walk source codes'}</button>
+      </div>
       {!active && last?.outcome === 'failed' && <p role="alert" className="mt-1 text-rose-700">
         The last walk failed{last.failure_reason ? `: ${last.failure_reason}` : ''}. Starting another retries it.
       </p>}
