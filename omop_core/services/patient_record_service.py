@@ -67,7 +67,7 @@ def _usable_concept_name(concept) -> str | None:
 
 # Bump this whenever aggregation or computation logic changes in any section
 # extractor or in _compute_derived_fields.  See DERIVATION_CHANGELOG.md.
-DERIVATION_VERSION = 18
+DERIVATION_VERSION = 19
 
 # These PatientRecord columns are projections of PersonLanguageSkill, never
 # independent edits. Older PATCH requests could mark them as user-edited and
@@ -143,6 +143,8 @@ _OMOP_DERIVED_FIELDS = [
     # These FHIR Observations are persisted as OMOP Measurements and must not
     # retain a projection-only copy after their source is removed.
     'inr', 'pt_seconds', 'ptt_seconds', 'cea_ng_ml', 'ca19_9_u_ml',
+    'prothrombin_time_uln', 'activated_partial_thromboplastin_time_uln',
+    'able_to_swallow_tablets_capsules',
     'psa_ng_ml', 'phosphorus',
     # Remaining numeric Measurement projections (#504).
     'heartrate_variability', 'ejection_fraction', 'qtcf_value',
@@ -710,6 +712,9 @@ class OmopSnapshot:
     # Per-refresh memo of (disease slug, end date) per line of therapy, read
     # only when the person has more than one cancer to choose the primary from.
     cancer_lines: dict = dataclasses.field(default_factory=dict, compare=False)
+    # Raw source-input history, including tombstones. Generic filtering is keyed
+    # by concept+source and cannot clear an older legacy SCT concept by source.
+    clinical_input_observations: list | None = None
 
 
 def _first_by_code(snapshot: OmopSnapshot, code: str, table: str = 'measurement'):
@@ -837,6 +842,9 @@ def _build_snapshot(person: Person) -> OmopSnapshot:
     breast_measurements = [m for m in measurements if
         m.measurement_source_value in ('29593-1', '85069-3')
         or getattr(m.measurement_concept, 'concept_code', None) in ('29593-1', '85069-3')]
+    from omop_core.services.clinical_input_contract import RECIPES
+    clinical_sources = {recipe[0] for recipe in RECIPES.values()}
+    clinical_input_observations = [o for o in observations if o.observation_source_value in clinical_sources]
     measurements = without_cleared_history(measurements, 'measurement')
     observations = without_cleared_history(observations, 'observation')
 
@@ -871,6 +879,7 @@ def _build_snapshot(person: Person) -> OmopSnapshot:
         death_date_assertion=death_date_assertion,
         cytogenetic_observations=cytogenetic_observations,
         breast_measurements=breast_measurements,
+        clinical_input_observations=clinical_input_observations,
         meas_by_code=dict(meas_by_code),
         obs_by_code=dict(obs_by_code),
         meas_by_source=dict(meas_by_source),
@@ -1046,7 +1055,10 @@ def refresh_patient_record(person: Person) -> PatientRecord:
 
         patient_info.custom_fields = _get_custom_patient_field_data(snapshot)
         from omop_core.services.omop_projection import curated_values_from_snapshot
-        for field, value in curated_values_from_snapshot(snapshot).items():
+        confirmed_inputs = set()
+        for field, value in curated_values_from_snapshot(
+            snapshot, confirmed_clinical_fields=confirmed_inputs,
+        ).items():
             # The lab extractor has already selected the latest code across
             # canonical and approved-alias results (including unit handling).
             # An older exact FCM row must not overwrite that latest result.
@@ -1056,10 +1068,16 @@ def refresh_patient_record(person: Person) -> PatientRecord:
         # Pending edits (including explicit clears) win until OMOP actually
         # represents the saved value. A stale fact or a failed projection must
         # not silently undo a user's change.
+        from omop_core.services.clinical_input_contract import (
+            NEW_INPUT_FIELDS, values_from_snapshot,
+        )
+        clinical_values = values_from_snapshot(snapshot) if preserved else {}
         still_orphaned = []
         for field, value in preserved.items():
             derived_value = getattr(patient_info, field, None)
             matches = _derived_value_matches(field, derived_value, value)
+            if field in NEW_INPUT_FIELDS or field in clinical_values:
+                matches = matches and field in confirmed_inputs
             if (field == 'flipi_score_options' and value is None
                     and patient_info.flipi_score is not None):
                 # A pending explicit clear also supersedes a legacy numeric
@@ -3713,7 +3731,11 @@ def _get_sct_cytogenetic_data(person: Person, snapshot: OmopSnapshot = None) -> 
     """
     snapshot = snapshot or _build_snapshot(person)
     data = {}
-    _SOURCE_KEYS = ('mm-cytogenetic-markers', 'mm-sct-date',
+    from omop_core.services.clinical_input_contract import native_sct_source
+    sct = native_sct_source(snapshot)
+    if sct.has_value:
+        data['sct_date'] = sct.value
+    _SOURCE_KEYS = ('mm-cytogenetic-markers',
         'mm-sct-history', 'mm-sct-eligibility')
     # Use index lookups instead of scanning all observations
     obs_qs = _rows_by_sources(snapshot, _SOURCE_KEYS, table='observation')
@@ -3732,11 +3754,6 @@ def _get_sct_cytogenetic_data(person: Person, snapshot: OmopSnapshot = None) -> 
                 normalise_cytogenetic_markers, read_cytogenetic_summary,
             )
             data['cytogenetic_markers'] = normalise_cytogenetic_markers(read_cytogenetic_summary(obs))
-        elif src == 'mm-sct-date':
-            try:
-                data['sct_date'] = datetime.strptime(val[:10], '%Y-%m-%d').date()
-            except (ValueError, TypeError):
-                pass
         elif src == 'mm-sct-history':
             data['stem_cell_transplant_history'] = [
                 t.strip() for t in val.split(',') if t.strip()

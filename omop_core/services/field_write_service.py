@@ -18,6 +18,9 @@ import logging
 from datetime import date
 from decimal import Decimal, InvalidOperation
 
+from django.core.exceptions import ValidationError
+from django.db import transaction
+
 from omop_core.models import Concept, Location, Measurement, Observation, PatientRecord, Person
 from omop_core.services.patient_record_service import _ASSERTION_FIELDS, refresh_patient_record
 from omop_core.services.pk import next_pk
@@ -221,6 +224,7 @@ class FieldWriteResult:
         return bool(self.applied)
 
 
+@transaction.atomic
 def apply_field_writes(person, changes, today=None, descriptor=None):
     """Apply {projection_field: value} edits to `person` as descriptor-driven OMOP facts.
 
@@ -235,6 +239,26 @@ def apply_field_writes(person, changes, today=None, descriptor=None):
         descriptor = build_writable_field_descriptor()
 
     result = FieldWriteResult()
+    from omop_core.services.clinical_input_contract import (
+        uses_dedicated_writer, validated_values, write_clinical_inputs,
+    )
+    clinical = {
+        field: value for field, value in changes.items()
+        if uses_dedicated_writer(field) or descriptor.get(field, {}).get('clinical_input_contract')
+    }
+    denied = {
+        field: 'Clinical input is not writable for this caller.'
+        for field in clinical
+        if (not descriptor.get(field) or not descriptor[field].get('writable')
+            or descriptor[field].get('read_only_for_caller'))
+    }
+    if denied:
+        # Unlike legacy scalar partial rejection, one denied clinical command
+        # rejects the whole batch. Descriptors can narrow, never grant approval.
+        raise ValidationError(denied)
+    # Before scalar clear handling, and before any nonclinical writes. A supplied
+    # descriptor is an envelope, never approval for a source recipe.
+    validated_values(clinical)
     person_dirty = set()      # Person columns changed by demographic writes
     location_updates = {}     # OMOP Location column -> value, applied once as an upsert
 
@@ -251,6 +275,8 @@ def apply_field_writes(person, changes, today=None, descriptor=None):
         list(Person.objects.select_for_update().filter(pk=person.pk))
 
     for field, value in changes.items():
+        if field in clinical:
+            continue
         if field == 'genetic_mutations':
             # A LIST field (one Measurement per gene), so it takes the list-diff path rather than the
             # scalar descriptor kinds below. An empty list is a valid "no mutations" (clears our rows),
@@ -318,8 +344,13 @@ def apply_field_writes(person, changes, today=None, descriptor=None):
         _apply_location(person, location_updates, person_dirty)
     if person_dirty:
         person.save(update_fields=sorted(person_dirty))
-    if result.applied:
+    # write_clinical_inputs derives for its readback, from the fully-applied
+    # state, so a batch that carries a clinical field must not derive twice.
+    if result.applied and not clinical:
         refresh_patient_record(person)
+    if clinical:
+        write_clinical_inputs(person, clinical, today=today)
+        result.applied.extend(clinical)
     return result
 
 
