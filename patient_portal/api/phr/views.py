@@ -23,6 +23,7 @@ from omop_core.models import (
     ProcedureOccurrence,
 )
 from patient_portal.models import PatientStatement, PatientUser
+from omop_core.services.condition_context import condition_contexts
 
 from .labs import blood_type, lab_history, labs
 from .records import genetics, medication_detail, medications, procedures
@@ -291,6 +292,7 @@ def _transitions(rows) -> list[dict]:
 
 def diagnoses(person, record: PatientRecord | None) -> dict[str, Any]:
     rows = _condition_rows(person)
+    contexts = condition_contexts(person.pk, [row.pk for row in rows])
     sources = row_sources(
         ConditionOccurrence, rows, type_attr='condition_type_concept', date_attr='condition_start_date'
     )
@@ -308,6 +310,9 @@ def diagnoses(person, record: PatientRecord | None) -> dict[str, Any]:
     primary_rows = families.pop(primary_family, [])
     primary = primary_cancer(record, _transitions(primary_rows)) if record else None
     if primary:
+        if primary_rows:
+            primary['condition_id'] = primary_rows[-1].pk
+            primary.update(contexts.get(primary_rows[-1].pk, {}))
         if 'status' not in primary and primary_rows and all(r.condition_end_date for r in primary_rows):
             primary['status'] = 'Resolved'
         cancer.append(primary)
@@ -322,6 +327,7 @@ def diagnoses(person, record: PatientRecord | None) -> dict[str, Any]:
         current_start = next(r for r in family_rows if _condition_name(r) == name).condition_start_date
         entry = {
             'id': f'condition-{latest.pk}',
+            **contexts.get(latest.pk, {}),
             'name': name,
             'date': current_start.isoformat(),
             'status': 'Resolved' if resolved else _text(latest.condition_status_source_value),
@@ -350,6 +356,7 @@ def diagnoses(person, record: PatientRecord | None) -> dict[str, Any]:
         dated = str(row.pk) not in undated
         entry = {
             'id': f'condition-{row.pk}',
+            **contexts.get(row.pk, {}),
             'name': name,
             'date': row.condition_start_date.isoformat() if dated else None,
             'status': 'Resolved' if row.condition_end_date else _text(row.condition_status_source_value),

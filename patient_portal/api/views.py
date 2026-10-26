@@ -151,7 +151,7 @@ from .provenance_org import (
 from .serializers import (
     PrologSurveySerializer, PrologSurveyResponseSerializer,
     UserSerializer, PatientRecordSerializer, PatientListSerializer, ProvenanceRecordSerializer,
-    ConditionOccurrenceSerializer, DrugExposureSerializer, MeasurementSerializer,
+    ConditionOccurrenceSerializer, ConditionContextSerializer, DrugExposureSerializer, MeasurementSerializer,
     ObservationSerializer, ProcedureOccurrenceSerializer,
     EpisodeSerializer, EpisodeEventSerializer,
     PatientDocumentSerializer, PatientTrialEnrollmentSerializer,
@@ -8758,9 +8758,23 @@ _PROVENANCE_ORG_SCHEMA = extend_schema_view(**{
 @_PROVENANCE_ORG_SCHEMA
 class V1ConditionOccurrenceViewSet(
         _OmopBulkUpdateMixin, _OmopBulkDeleteMixin, ConditionOccurrenceViewSet):
-    """Conditions on /api/v1/, with the batch actions."""
+    """Conditions on /api/v1/, with batch actions and diagnosis context."""
 
     source_organization_header = True
+
+    @extend_schema(request=ConditionContextSerializer, responses=ConditionContextSerializer)
+    @action(detail=True, methods=['get', 'patch'], url_path='context')
+    def context(self, request, pk=None):
+        from omop_core.services.condition_context import condition_contexts, save_condition_context
+
+        condition = self.get_object()
+        if request.method == 'GET':
+            return Response(condition_contexts(condition.person_id, [condition.pk]).get(condition.pk, {}))
+        _authorize_person_write(request, condition.person)
+        data = ConditionContextSerializer(data=request.data)
+        data.is_valid(raise_exception=True)
+        self._provenance(request)  # Reject invalid provenance before allocating facts.
+        return Response(save_condition_context(condition, data.validated_data, record_provenance=self._prov))
 
 
 @_PROVENANCE_ORG_SCHEMA

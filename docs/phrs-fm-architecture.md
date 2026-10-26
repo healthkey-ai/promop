@@ -82,6 +82,34 @@ fields. The flat custom field has no per-disease association, so secondary
 cancer cards do not inherit it. Shared diagnoses use the same presentation.
 HealthTree's PHR app owns card rendering.
 
+For D03 ([#1857](https://github.com/healthkey-ai/promop/issues/1857)), diagnosis
+cards also return `note` and `care_team` when recorded against that exact
+ConditionOccurrence. The primary card exposes `condition_id` for its latest
+condition row; other cards already identify their condition in `id`. A primary
+card without a condition row cannot carry per-condition context. Grouped cancer
+cards use their latest condition row; other conditions use the displayed row.
+Context from a previous condition event is never implicitly copied to another.
+
+`GET/PATCH /api/v1/conditions/{condition_id}/context/` reads or edits these two
+strings under the existing condition permissions and patient write authorization.
+PATCH preserves omitted fields; blank/null explicitly clears a field. The
+approved field mappings determine the concepts and storage tables; migration
+[0309](../omop_core/migrations/0309_condition_context_mappings.py) deploys their
+domain-checked assignments. Missing vocabulary fails the write with HTTP 400
+instead of storing an unmapped or wrong-domain fact. Curator-approved nonzero
+assignments survive the migration.
+
+Facts use the CDM condition field concept alongside their event ID, preventing
+ID collisions with other OMOP tables. Edits append snapshots under stable source
+keys, with overflow text in owned Note rows. Readers batch-load patient-scoped
+facts, exclude entered-in-error rows, and respect the latest blank value. Legacy
+concept-0 observations under those keys remain readable. Narrative measurements
+are excluded from PHR lab results and lab activity counts. Shared diagnosis
+cards use the same reader and the existing diagnosis selection controls.
+Provenance can be supplied using the standard `X-Provenance-Source` and
+`X-Provenance-User-Id` headers. HealthTree's separate app still owns rendering
+and editing these fields on its diagnosis cards.
+
 ## Provisioning
 
 PROMOP supports three patient account paths:
