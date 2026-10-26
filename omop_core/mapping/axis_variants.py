@@ -70,28 +70,28 @@ PATIENT_DATA_SOURCE = 'patient-data'
 def unit_counts_for(mappings, include_imported=True):
     """``{mapping_id: Counter}`` of normalized units, in a fixed number of queries.
 
-    The Measurement read is the approval unit check's own batched aggregate
-    (one query, plus one per hospital), so a 50-code Suggest run pays for one
-    scan, not fifty. Per-patient source codes are one query for the batch.
-    ``include_imported=False`` reads only what this instance's patients say,
-    which is what a rebuild of the stored evidence writes.
+    Per-patient source codes (keyed by ``(source_vocabulary_id, source_code)``)
+    are the primary evidence: one query for the batch.  Imported inventory
+    evidence (``source_unit_evidence``) is unioned unless ``include_imported``
+    is False. ``include_imported=False`` reads only what this instance's
+    patients say, which is what a rebuild of the stored evidence writes.
+
+    The Measurement aggregate (``mapping_unit_consistency._unit_counts``) is
+    deliberately excluded: it groups only on ``measurement_source_value``, so
+    every hospital code sharing the same test name gets the same inflated
+    global count. PSC rows give the correct per-code counts.
     """
     from django.db.models import Q
 
     from omop_core.models import PatientSourceCode
-    from omop_core.services.mapping_unit_consistency import (
-        _imported_unit_counts, _unit_counts as live_unit_counts,
-    )
+    from omop_core.services.mapping_unit_consistency import _imported_unit_counts
 
     mappings = [m for m in mappings if m is not None]
     if not mappings:
         return {}
     measured = [m for m in mappings if m.omop_table == 'measurement']
-    # Union, not sum: the inventory and the stored rows can describe the same
-    # records, as the approval unit check documents.
-    live = live_unit_counts(measured) if measured else {}
     imported = _imported_unit_counts(measured) if measured and include_imported else {}
-    result = {m.pk: live.get(m.pk, Counter()) | imported.get(m.pk, Counter()) for m in mappings}
+    result = {m.pk: imported.get(m.pk, Counter()) for m in mappings}
 
     match = Q()
     for m in mappings:
@@ -123,23 +123,25 @@ def patient_unit_evidence(mappings):
     """``({mapping_id: entries}, {mapping_id: Counter})`` from this instance's
     own patient data (#2043).
 
-    The units come from the source codes recorded on each loaded patient and
-    the stored Measurement rows; seeded evidence is not read. One entry per
-    normalized unit, largest first: ``count`` records, ``patients`` distinct
-    people where the per-patient source codes say, ``source`` = ``patient-data``.
-    One Measurement aggregate and one per-patient query for the batch; the
-    Counter is what the entries say, for the caller to refresh variants with.
+    The units come from the per-patient source codes recorded on each loaded
+    patient; seeded evidence is not read. One entry per normalized unit,
+    largest first: ``count`` records, ``patients`` distinct people,
+    ``source`` = ``patient-data``. The Counter is what the entries say, for the
+    caller to refresh variants with.
+
+    The Measurement aggregate (``_unit_counts``) is deliberately excluded: it
+    groups only on ``measurement_source_value``, not on
+    ``(source_vocabulary_id, source_code)``, so every hospital code that shares
+    the same test name gets the same inflated global count. PSC rows are keyed
+    per hospital code and give the correct per-code evidence.
     """
     from django.db.models import Q, Sum
 
     from omop_core.models import PatientSourceCode
-    from omop_core.services.mapping_unit_consistency import _unit_counts as live_unit_counts
 
     mappings = [m for m in mappings if m is not None]
     if not mappings:
         return {}, {}
-    measured = [m for m in mappings if m.omop_table == 'measurement']
-    live = live_unit_counts(measured) if measured else {}
     match = Q()
     for m in mappings:
         match |= Q(source_value=m.source_code, source_vocabulary_id=m.source_vocabulary_id,
@@ -165,8 +167,7 @@ def patient_unit_evidence(mappings):
                 people[m.pk][normalized].add(person_id)
     entries, counts = {}, {}
     for m in mappings:
-        # Union, not sum, as unit_counts_for: the two sources can describe the same records.
-        counts[m.pk] = live.get(m.pk, Counter()) | recorded.get(m.pk, Counter())
+        counts[m.pk] = recorded.get(m.pk, Counter())
         entries[m.pk] = []
         for unit, count in sorted(counts[m.pk].items(), key=lambda item: (-item[1], item[0])):
             entry = {'display': unit, 'code': unit, 'normalized': unit, 'count': count,

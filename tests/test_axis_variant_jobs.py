@@ -533,6 +533,63 @@ def test_worker_shutdown_is_a_noop_when_nothing_is_running():
     assert axis_variant_jobs.requeue_on_shutdown() == 0
 
 
+def test_rebuild_evidence_counts_per_hospital_code():
+    """Two hospital codes sharing the same source text get their own PSC counts, not the
+    global Measurement aggregate that groups only on measurement_source_value."""
+    from collections import Counter
+    from datetime import date
+
+    from omop_core.models import Measurement
+    from tests.factories import ConceptFactory
+
+    concept = ConceptFactory()
+    person_a = PersonFactory()
+    person_b = PersonFactory()
+    # Two hospital codes that share source text 'ALB' (like albumin from two hospitals).
+    hosp_a = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id='HOSP-A', source_code='ALB', omop_table='measurement',
+        source_unit_evidence=SEEDED)
+    hosp_b = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id='HOSP-B', source_code='ALB', omop_table='measurement',
+        source_unit_evidence=SEEDED)
+    # Hospital A: 100 g/dL from person_a, 5 mg/dL from person_b (unique constraint
+    # is per person+source_value+vocab+table, so two units need two persons).
+    PatientSourceCode.objects.create(
+        person=person_a, source_value='ALB', source_vocabulary_id='HOSP-A',
+        omop_table='measurement', source_unit='g/dL', occurrence_count=100)
+    PatientSourceCode.objects.create(
+        person=person_b, source_value='ALB', source_vocabulary_id='HOSP-A',
+        omop_table='measurement', source_unit='mg/dL', occurrence_count=5)
+    # Hospital B: 3 records in g/dL only.
+    PatientSourceCode.objects.create(
+        person=person_a, source_value='ALB', source_vocabulary_id='HOSP-B',
+        omop_table='measurement', source_unit='g/dL', occurrence_count=3)
+    # Measurement rows for 'ALB' — a large global total that must not leak into evidence.
+    for i in range(50):
+        Measurement.objects.create(
+            measurement_id=70000 + i, person=person_a,
+            measurement_concept=concept, measurement_date=date(2025, 1, 1),
+            measurement_type_concept=concept,
+            measurement_source_value='ALB', unit_source_value='g/dL')
+
+    # The live path (unit_counts_for) must also be per-hospital, not the global
+    # Measurement aggregate.
+    live = axis_variants.unit_counts_for([hosp_a, hosp_b], include_imported=False)
+    assert live[hosp_a.pk] == Counter({'g/dL': 100, 'mg/dL': 5}), \
+        f'Live counts for Hospital A wrong: {live[hosp_a.pk]}'
+    assert live[hosp_b.pk] == Counter({'g/dL': 3}), \
+        f'Live counts for Hospital B wrong: {live[hosp_b.pk]}'
+
+    # The rebuild path stores the same per-hospital evidence.
+    axis_variants.rebuild_unit_evidence([hosp_a, hosp_b])
+    hosp_a.refresh_from_db()
+    hosp_b.refresh_from_db()
+    a_by_unit = {e['display']: e['count'] for e in hosp_a.source_unit_evidence}
+    assert a_by_unit == {'g/dL': 100, 'mg/dL': 5}, f'Hospital A evidence wrong: {a_by_unit}'
+    b_by_unit = {e['display']: e['count'] for e in hosp_b.source_unit_evidence}
+    assert b_by_unit == {'g/dL': 3}, f'Hospital B evidence wrong: {b_by_unit}'
+
+
 # --- FHIR codings extraction ---
 
 
