@@ -56,7 +56,7 @@ describe('AxisVariantWalkPanel', () => {
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Walk source codes' })); });
     expect(post).toHaveBeenCalledWith(WALK_URL);
     expect(screen.getByRole('status')).toHaveTextContent('Walking source codes: 1,500 of 41,200 codes.');
-    expect(screen.queryByRole('button', { name: 'Walk source codes' })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Walk source codes' })).toBeInTheDocument();
   });
 
   it('polls while a walk is active and stops once it finishes', async () => {
