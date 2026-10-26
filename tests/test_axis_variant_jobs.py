@@ -536,6 +536,7 @@ def test_worker_shutdown_is_a_noop_when_nothing_is_running():
 def test_rebuild_evidence_counts_per_hospital_code():
     """Two hospital codes sharing the same source text get their own PSC counts, not the
     global Measurement aggregate that groups only on measurement_source_value."""
+    from collections import Counter
     from datetime import date
 
     from omop_core.models import Measurement
@@ -571,13 +572,20 @@ def test_rebuild_evidence_counts_per_hospital_code():
             measurement_type_concept=concept,
             measurement_source_value='ALB', unit_source_value='g/dL')
 
+    # The live path (unit_counts_for) must also be per-hospital, not the global
+    # Measurement aggregate.
+    live = axis_variants.unit_counts_for([hosp_a, hosp_b], include_imported=False)
+    assert live[hosp_a.pk] == Counter({'g/dL': 100, 'mg/dL': 5}), \
+        f'Live counts for Hospital A wrong: {live[hosp_a.pk]}'
+    assert live[hosp_b.pk] == Counter({'g/dL': 3}), \
+        f'Live counts for Hospital B wrong: {live[hosp_b.pk]}'
+
+    # The rebuild path stores the same per-hospital evidence.
     axis_variants.rebuild_unit_evidence([hosp_a, hosp_b])
     hosp_a.refresh_from_db()
     hosp_b.refresh_from_db()
-    # Hospital A sees its own 100 + 5, not the 50 Measurement rows.
     a_by_unit = {e['display']: e['count'] for e in hosp_a.source_unit_evidence}
     assert a_by_unit == {'g/dL': 100, 'mg/dL': 5}, f'Hospital A evidence wrong: {a_by_unit}'
-    # Hospital B sees only its own 3.
     b_by_unit = {e['display']: e['count'] for e in hosp_b.source_unit_evidence}
     assert b_by_unit == {'g/dL': 3}, f'Hospital B evidence wrong: {b_by_unit}'
 

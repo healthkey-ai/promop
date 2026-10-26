@@ -96,6 +96,41 @@ def _unit_counts(mappings):
     return result
 
 
+def _patient_unit_counts(mappings):
+    """Return normalized source-unit counts from PatientSourceCode rows.
+
+    Unlike ``_unit_counts`` (which groups on ``measurement_source_value``),
+    this is keyed by ``(source_vocabulary_id, source_code)`` and gives the
+    correct per-hospital-code counts.
+    """
+    from django.db.models import Q, Sum
+
+    from omop_core.models import PatientSourceCode
+
+    if not mappings:
+        return {}
+    match = Q()
+    by_key = defaultdict(list)
+    for m in mappings:
+        match |= Q(source_value=m.source_code, source_vocabulary_id=m.source_vocabulary_id,
+                   **({'omop_table': m.omop_table} if m.omop_table else {}))
+        by_key[(m.source_vocabulary_id, m.source_code)].append(m)
+    result = defaultdict(Counter)
+    for vocab, code, table, unit, override, records in (
+        PatientSourceCode.objects.filter(match)
+        .values_list('source_vocabulary_id', 'source_value', 'omop_table',
+                     'source_unit', 'source_unit_override')
+        .annotate(records=Sum('occurrence_count'))
+    ):
+        normalized = unit_code(override if override is not None else unit)
+        if not normalized:
+            continue
+        for m in by_key.get((vocab, code), ()):
+            if not m.omop_table or m.omop_table == table:
+                result[m.pk][normalized] += max(1, records or 0)
+    return dict(result)
+
+
 def _imported_unit_counts(mappings):
     """Normalize unit evidence carried by an imported source-code inventory."""
     result = {}
@@ -141,13 +176,13 @@ def unit_consistency_for_mappings(mappings, *, destination=None):
     measurement_mappings = [
         mapping for mapping in mappings if mapping.omop_table == 'measurement'
     ]
-    live_units = _unit_counts(measurement_mappings)
+    patient_units = _patient_unit_counts(measurement_mappings)
     imported_units = _imported_unit_counts(measurement_mappings)
     # Independent exports can describe the same clinical records. Counter's
-    # union takes the larger count per normalized unit, retaining new live
+    # union takes the larger count per normalized unit, retaining new
     # units without inflating overlapping evidence by summing it twice.
     observed_by_mapping = {
-        mapping.pk: live_units.get(mapping.pk, Counter())
+        mapping.pk: patient_units.get(mapping.pk, Counter())
         | imported_units.get(mapping.pk, Counter())
         for mapping in measurement_mappings
     }
