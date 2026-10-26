@@ -2,7 +2,7 @@ import { useEffect, useMemo, type ReactNode } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { AxiosInstance } from "axios";
 import { PatientInfoContext } from "./PatientInfoContext";
-import { setClinicalTransport, resetClinicalTransport } from "@/api/clinicalTransport";
+import { pushClinicalTransport, setClinicalTransport } from "@/api/clinicalTransport";
 import { __resetWritableFieldsCache } from "@/hooks/useWritableFields";
 import type { LabsThemeTokens } from "./types";
 import { injectStyles } from "./injectStyles";
@@ -63,12 +63,18 @@ export function PatientInfoProvider({
     if (setClinicalTransport(apiClient, apiBasePath)) __resetWritableFieldsCache();
   }, [apiClient, apiBasePath]);
 
-  useEffect(
-    () => () => {
-      if (resetClinicalTransport()) __resetWritableFieldsCache();
-    },
-    [],
-  );
+  // Own the transport for this provider's lifetime instead of resetting it on
+  // unmount: a page can also mount a therapy-only widget (trial details), and an
+  // unconditional reset here — or a later widget's reset — used to strip the host
+  // client from whoever was still open.
+  useEffect(() => {
+    const release = pushClinicalTransport(apiClient, apiBasePath);
+    __resetWritableFieldsCache();
+    return () => {
+      release();
+      __resetWritableFieldsCache();
+    };
+  }, [apiClient, apiBasePath]);
 
   const internalQC = useMemo(
     () => new QueryClient({
