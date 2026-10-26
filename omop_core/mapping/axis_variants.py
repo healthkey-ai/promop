@@ -204,7 +204,68 @@ def rebuild_unit_evidence(mappings):
             counts[m.pk] = counts.get(m.pk, Counter()) | _imported_unit_counts([m]).get(m.pk, Counter())
     if changed:
         SourceCodeConceptMapping.objects.bulk_update(changed, ['source_unit_evidence'], batch_size=500)
+    _store_fhir_codings(mappings)
     return len(changed), counts
+
+
+def _patient_fhir_codings(mapping):
+    """LOINC codings the per-patient metadata carries for this code.
+
+    Returns a list of ``{'system': ..., 'code': ..., 'display': ...}`` dicts,
+    deduplicated by code and ordered by total occurrence count (most common
+    first).  Only LOINC codings are collected: they are the ones
+    ``loinc_axes.infer()`` uses to settle axes.
+    """
+    from omop_core.models import PatientSourceCode
+
+    seen = {}  # code → {coding dict, total count}
+    rows = PatientSourceCode.objects.filter(
+        source_value=mapping.source_code,
+        source_vocabulary_id=mapping.source_vocabulary_id,
+    ).exclude(source_metadata={})
+    for metadata, count in rows.order_by('-occurrence_count').values_list('source_metadata', 'occurrence_count')[:2000]:
+        resource = loinc_axes._resource(metadata)
+        for coding in loinc_axes._codings(resource):
+            if loinc_axes.is_loinc(coding.get('system')) and coding.get('code'):
+                code = coding['code']
+                if code not in seen:
+                    seen[code] = {
+                        'coding': {k: coding[k] for k in ('system', 'code', 'display')
+                                   if k in coding},
+                        'count': 0,
+                    }
+                seen[code]['count'] += max(1, count or 0)
+    return [entry['coding'] for entry in
+            sorted(seen.values(), key=lambda e: -e['count'])]
+
+
+def _store_fhir_codings(mappings):
+    """Copy LOINC codings from per-patient metadata onto the mapping row.
+
+    Stored under ``source_metadata['fhir']['code']['coding']`` so
+    ``loinc_axes._resource()`` → ``_codings()`` finds them naturally.
+    Only writes mappings whose metadata is missing the codings.
+    """
+    from omop_core.models import SourceCodeConceptMapping
+
+    updated = []
+    for m in mappings:
+        meta = m.source_metadata or {}
+        # Already has fhir codings — a previous walk or a direct FHIR ingest.
+        if isinstance(meta.get('fhir'), dict) and meta['fhir'].get('code', {}).get('coding'):
+            continue
+        codings = _patient_fhir_codings(m)
+        if not codings:
+            continue
+        meta = dict(meta)  # shallow copy
+        existing_fhir = dict(meta.get('fhir') or {})
+        existing_fhir['code'] = {'coding': codings}
+        meta['fhir'] = existing_fhir
+        m.source_metadata = meta
+        updated.append(m)
+    if updated:
+        SourceCodeConceptMapping.objects.bulk_update(updated, ['source_metadata'], batch_size=500)
+    return len(updated)
 
 
 def is_patient_evidence(evidence):
