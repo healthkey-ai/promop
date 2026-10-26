@@ -16,7 +16,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { PatientInfo } from "./PatientInfo";
 import { injectStyles } from "./injectStyles";
 import { patientFormRuntime, retainPatientFormRuntime, type PatientFormConnection } from './patientFormRuntime';
-import { resetClinicalTransport, setClinicalTransport } from '@/api/clinicalTransport';
+import { pushClinicalTransport } from '@/api/clinicalTransport';
 import { __resetWritableFieldsCache } from '@/hooks/useWritableFields';
 import PatientFieldEditor from './PatientFieldEditor';
 import TherapyLinesPanel from './TherapyLinesPanel';
@@ -113,11 +113,13 @@ export function mountTherapyLines(el: HTMLElement, opts: MountOptions = {}): () 
   // `api/therapyLines.ts` talks through the module-level clinical transport, not
   // the store's client. Without this the panel writes to the standalone `/api`
   // with no host token (or to whichever host mounted a widget last).
-  if (setClinicalTransport(runtime.client, apiBasePath)) __resetWritableFieldsCache();
-  const release = retainPatientFormRuntime(opts);
+  const releaseTransport = pushClinicalTransport(runtime.client, apiBasePath);
+  __resetWritableFieldsCache();
+  const releaseRuntime = retainPatientFormRuntime(opts);
   subscriptions.set(el, () => {
-    release();
-    if (resetClinicalTransport()) __resetWritableFieldsCache();
+    releaseRuntime();
+    releaseTransport();
+    __resetWritableFieldsCache();
   });
   void runtime.store.load();
   const root = createRoot(el);
@@ -130,7 +132,7 @@ export function mountTherapyLines(el: HTMLElement, opts: MountOptions = {}): () 
         // Therapy mutations bypass the store's save queue, so `store.load()`
         // alone never reaches the host's `onUpdated` listeners. The host still
         // has to invalidate its own queries and re-render the row.
-        onChanged={() => { void runtime.store.load(); void opts.onPatientUpdated?.(); }}
+        onChanged={() => { void opts.onPatientUpdated?.(); }}
       />
     </StrictMode>,
   );
