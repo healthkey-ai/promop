@@ -23,24 +23,33 @@ def dispatch_hospital_code_imports_on_worker_ready(**_kwargs):
     import logging
     import threading
 
+    from django.db import connections
+
     from omop_core.services.axis_variant_jobs import dispatch_queued_refreshes
     from omop_core.services.hospital_code_seed import dispatch_queued_imports
 
     log = logging.getLogger(__name__)
 
-    def dispatch(first=False):
+    def dispatch(first=False, imports=True):
         # The boot pass republishes refresh requests an older worker may have
         # dropped; the rechecks only publish what nothing has published yet.
-        for label, publish in (('hospital-code import', dispatch_queued_imports),
-                               ('axis variant refresh', lambda: dispatch_queued_refreshes(republish=first))):
-            try:
-                publish()
-            except (OperationalError, ProgrammingError):
-                log.exception('%s dispatch deferred until the database is ready.', label)
-            except Exception:
-                # Never make the worker unavailable because the broker job cannot
-                # be published. The queued database row remains retryable.
-                log.exception('Could not dispatch %s.', label)
+        passes = [('axis variant refresh', lambda: dispatch_queued_refreshes(republish=first))]
+        if imports:
+            passes.insert(0, ('hospital-code import', dispatch_queued_imports))
+        try:
+            for label, publish in passes:
+                try:
+                    publish()
+                except (OperationalError, ProgrammingError):
+                    log.exception('%s dispatch deferred until the database is ready.', label)
+                except Exception:
+                    # Never make the worker unavailable because the broker job cannot
+                    # be published. The queued database row remains retryable.
+                    log.exception('Could not dispatch %s.', label)
+        finally:
+            # A timer thread's connection is its own and would otherwise stay
+            # open until the dead thread is collected.
+            connections.close_all()
 
     dispatch(first=True)
     # Render can bring the worker up while the web service is still running its
@@ -50,7 +59,11 @@ def dispatch_hospital_code_imports_on_worker_ready(**_kwargs):
         timer = threading.Timer(delay, dispatch)
         timer.daemon = True
         timer.start()
-    keep_rechecking(dispatch, RECHECK_INTERVAL)
+    # Only the refresh sweep repeats: a hospital-code import stranded in
+    # ``running`` is told from a live one by the advisory lock alone, which a
+    # live import takes only once its download is validated, so a repeating
+    # pass would requeue a live import over itself.
+    keep_rechecking(lambda: dispatch(imports=False), RECHECK_INTERVAL)
 
 
 #: How often a live worker looks for a request that lost its worker (#2048).
@@ -59,8 +72,8 @@ def dispatch_hospital_code_imports_on_worker_ready(**_kwargs):
 RECHECK_INTERVAL = 5 * 60
 
 
-def keep_rechecking(dispatch, interval, timer=None):
-    """Run ``dispatch`` every ``interval`` seconds for the life of the worker.
+def keep_rechecking(dispatch, interval, stop=None):
+    """Run ``dispatch`` every ``interval`` seconds until ``stop`` is set.
 
     The boot pass and its two early rechecks only see what is stranded within
     three minutes of a boot. A walk is killed when its instance is shut down
@@ -69,23 +82,26 @@ def keep_rechecking(dispatch, interval, timer=None):
     HealthTree instance the #2043 rebuild sat ``running`` for over an hour
     with a dead worker. The lost message is no help either: Redis redelivers
     it only after the visibility timeout, to a task that claims nothing but a
-    ``queued`` row. So a live worker keeps looking. Each pass re-arms the next
-    whatever ``dispatch`` did, and the timer is a daemon, so it never holds
-    the worker open at shutdown. ``timer`` is for tests.
+    ``queued`` row. So a live worker keeps looking, on one daemon thread that
+    never holds the worker open at shutdown. A pass that raises is logged and
+    the next still runs. Returns the thread; ``stop`` is for tests.
     """
+    import logging
     import threading
 
-    timer = timer or threading.Timer
+    log = logging.getLogger(__name__)
+    stop = stop if stop is not None else threading.Event()
 
-    def tick():
-        try:
-            dispatch()
-        finally:
-            keep_rechecking(dispatch, interval, timer)
+    def loop():
+        while not stop.wait(interval):
+            try:
+                dispatch()
+            except Exception:
+                log.exception('The queued-job recheck failed; it runs again in %ss.', interval)
 
-    pending = timer(interval, tick)
-    pending.daemon = True
-    pending.start()
+    thread = threading.Thread(target=loop, name='queued-job-recheck', daemon=True)
+    thread.start()
+    return thread
 
 
 @shared_task(name='omop_core.build_concept_embeddings')

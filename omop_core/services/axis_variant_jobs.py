@@ -113,7 +113,10 @@ def dispatch_queued_refreshes(republish=True):
     waiting = AxisVariantRefresh.objects.filter(outcome='queued').order_by('pk').first()
     if waiting is not None:
         # Only one request may be queued, and the waiting one will walk the
-        # same codes, so the stranded one is closed rather than requeued.
+        # same codes, so the stranded one is closed rather than requeued. A
+        # rebuild it was asked for is carried over, not dropped (#2048).
+        if stranded.filter(rebuild_evidence=True).exists():
+            AxisVariantRefresh.objects.filter(pk=waiting.pk, outcome='queued').update(rebuild_evidence=True)
         stranded.update(outcome='failed', completed_at=timezone.now(),
                         failure_reason=f'Worker lost; request {waiting.pk} replaces it.')
     else:
@@ -166,9 +169,14 @@ def run_refresh(request_id, batch_size=axis_variants.REFRESH_BATCH):
                 'outcome': request.outcome if request is not None else 'missing'}
     request = AxisVariantRefresh.objects.get(pk=request_id)
     offset, already, cursor = request.done, request.refreshed, request.cursor
+    # Every write below is this attempt's: should the sweep decide this walk
+    # is dead and hand the request to another worker, the other attempt
+    # claims it with a new ``started_at`` and this one's writes land nowhere
+    # (#2048). The walk itself is idempotent, so running on costs only time.
+    attempt = AxisVariantRefresh.objects.filter(pk=request_id, outcome='running', started_at=now)
 
     def progress(done, refreshed, last_key):
-        AxisVariantRefresh.objects.filter(pk=request_id).update(
+        attempt.update(
             done=offset + done, refreshed=already + refreshed, progress_at=timezone.now(),
             cursor=axis_variants.key_text(last_key))
 
@@ -179,7 +187,9 @@ def run_refresh(request_id, batch_size=axis_variants.REFRESH_BATCH):
         keys = axis_variants.evidence_keys() if request.rebuild_evidence else axis_variants.multi_unit_keys()
         keys = sorted(keys, key=axis_variants.key_text)
         remaining = [k for k in keys if axis_variants.key_text(k) > cursor] if cursor else keys
-        AxisVariantRefresh.objects.filter(pk=request_id).update(keys=offset + len(remaining))
+        # Collecting the keys is the longest stretch with no batch to report,
+        # so it is a heartbeat of its own.
+        attempt.update(keys=offset + len(remaining), progress_at=timezone.now())
         if cursor:
             logger.info('Axis variant refresh %s resumes after %s with %s codes left.',
                         request_id, cursor.replace('\x1f', ':'), len(remaining))
@@ -188,11 +198,9 @@ def run_refresh(request_id, batch_size=axis_variants.REFRESH_BATCH):
             rebuild_evidence=request.rebuild_evidence)
         keys = offset + len(remaining)
     except Exception as exc:
-        AxisVariantRefresh.objects.filter(pk=request_id).update(
-            outcome='failed', failure_reason=str(exc)[:2000], completed_at=timezone.now())
+        attempt.update(outcome='failed', failure_reason=str(exc)[:2000], completed_at=timezone.now())
         raise
-    AxisVariantRefresh.objects.filter(pk=request_id).update(
-        outcome='done', completed_at=timezone.now())
+    attempt.update(outcome='done', completed_at=timezone.now())
     logger.info('Axis variant refresh %s walked %s codes and refreshed %s mappings%s.',
                 request_id, keys, refreshed,
                 ', rebuilding their unit evidence from patient data' if request.rebuild_evidence else '')
