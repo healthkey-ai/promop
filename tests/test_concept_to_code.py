@@ -947,3 +947,73 @@ def test_reverse_run_without_a_ranker_lists_variants_but_suggests_nothing(client
     suggest.assert_not_called()
     candidate = client.get(f'{BASE}suggest-runs/{run_id}/').data['activity'][0]['candidates'][0]
     assert [v['axis_key'] for v in candidate['axis_variants']] == ['property=MCnc|scale_type=Qn']
+
+
+# --- The axis variant walk a curator can ask for (#2050, #2051) ---------------
+
+WALK = f'{BASE}axis-variant-walk/'
+
+
+def _walk(**fields):
+    from omop_core.models import AxisVariantRefresh
+    return AxisVariantRefresh.objects.create(**fields)
+
+
+def test_walk_status_counts_patients_loaded_since_the_last_completed_walk(client):
+    from tests.factories import PersonFactory
+    from omop_core.models import PatientSourceCode
+    before = timezone.now() - timezone.timedelta(days=2)
+    done = _walk(reason='migration', outcome='done', rebuild_evidence=True, keys=40, done=40, refreshed=12,
+                 started_at=before, completed_at=before + timezone.timedelta(hours=3),
+                 axis_evidence={'codes': 40, 'axes': {'property': {'settled': 30, 'hint': 2, 'varies': 5, 'bases': {'unit': 30}}}})
+    old, new = PersonFactory(), PersonFactory()
+    PatientSourceCode.objects.create(person=old, source_value='A', source_vocabulary_id='LAB', omop_table='measurement')
+    PatientSourceCode.objects.filter(person=old).update(first_seen=before - timezone.timedelta(days=1))
+    for code in ('A', 'B'):
+        PatientSourceCode.objects.create(person=new, source_value=code, source_vocabulary_id='LAB', omop_table='measurement')
+
+    status = client.get(WALK).data
+    assert status['active'] is None
+    assert status['last']['id'] == done.pk and status['last']['outcome'] == 'done'
+    assert status['last']['axis_evidence']['axes']['property']['varies'] == 5
+    assert status['patients_since'] == 1, 'one patient since, counted once for two codes'
+    assert status['walked_at'] == before
+
+
+def test_walk_status_with_no_completed_walk_counts_every_patient_with_source_codes(client):
+    from tests.factories import PersonFactory
+    from omop_core.models import PatientSourceCode
+    PatientSourceCode.objects.create(person=PersonFactory(), source_value='A', source_vocabulary_id='LAB', omop_table='measurement')
+    PersonFactory()
+    status = client.get(WALK).data
+    assert (status['last'], status['walked_at'], status['patients_since']) == (None, None, 1)
+
+
+def test_an_approver_starts_a_rebuild_walk_and_a_second_ask_joins_the_active_one(client):
+    from omop_core.models import AxisVariantRefresh
+    first = client.post(WALK)
+    assert first.status_code == 202 and first.data['created']
+    walk = AxisVariantRefresh.objects.get(pk=first.data['request']['id'])
+    assert walk.rebuild_evidence and walk.outcome == 'queued' and 'concept-curator@test.com' in walk.reason
+    assert first.data['active']['id'] == walk.pk
+
+    again = client.post(WALK)
+    assert again.status_code == 200 and not again.data['created']
+    assert again.data['request']['id'] == walk.pk and AxisVariantRefresh.objects.count() == 1
+
+
+def test_a_professional_without_approval_rights_sees_the_walk_but_cannot_start_it(django_user_model):
+    from omop_core.models import GroupAccess
+    from tests.factories import OrganizationFactory
+    analyst = django_user_model.objects.create_user(email='analyst@test.com')
+    GroupAccess.objects.create(identity=analyst, org=OrganizationFactory(), role='analyst')
+    api = APIClient()
+    api.force_authenticate(analyst)
+    assert api.get(WALK).status_code == 200
+    assert api.post(WALK).status_code == 403
+
+
+def test_a_patient_cannot_see_the_walk(django_user_model):
+    api = APIClient()
+    api.force_authenticate(django_user_model.objects.create_user(email='patient@test.com'))
+    assert api.get(WALK).status_code == 403

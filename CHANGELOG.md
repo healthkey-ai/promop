@@ -8,6 +8,17 @@ All notable changes to PRomop are documented here.
 
 ### Added
 
+- **A curator can walk the source codes again after loading patients** — the
+  Concept to Code tab's Source-code coverage heading now carries the walk
+  panel: when the last walk began, how many patients have source codes first
+  seen since, and a button (approval rights) that records a rebuild request
+  for the worker. While a walk is queued or running the panel shows its
+  progress. (#2050)
+- **The walk reports how much LOINC axis evidence the data holds** — a rebuild
+  counts, over the codes it walks, how many have each axis settled and from
+  what, how many carry only a hint, and how many have patients that disagree
+  on it. The panel shows the table, so whether anything beyond units ever
+  settles an axis is visible at a glance. (#2051)
 - **The patient can confirm that the recorded treatment history is complete** —
   the Treatment tab now carries "This is my complete treatment history". Until it
   is ticked, the number of recorded lines is a lower bound ("at least N"); the

@@ -26,7 +26,7 @@ from collections import Counter, defaultdict
 from django.db import transaction
 from django.utils import timezone
 
-from omop_core.mapping import loinc_axes
+from omop_core.mapping import axis_evidence, loinc_axes
 from omop_core.services.canonical_units import unit_code
 
 #: Codes with this many variants or more are flagged in the queue.
@@ -376,13 +376,15 @@ def refresh(mapping, unit_counts=None):
     return list(mapping.axis_variants.select_related('target_concept').order_by('-occurrence_count', 'axis_key'))
 
 
-def refresh_codes(keys, rebuild_evidence=False):
+def refresh_codes(keys, rebuild_evidence=False, summary=None):
     """Refresh every mapping for ``(source_vocabulary_id, source_code)`` keys.
 
     Failures are logged, not raised: this runs after ingest writes, and a
     variant count is curation evidence, not a reason to fail an upload. With
     ``rebuild_evidence`` the batch's stored unit evidence is first rewritten
-    from the instance's patient data (#2043).
+    from the instance's patient data (#2043). A ``summary``
+    (``axis_evidence.Summary``) is given the axis evidence of every mapping
+    refreshed (#2051).
     """
     import logging
 
@@ -403,11 +405,16 @@ def refresh_codes(keys, rebuild_evidence=False):
         _changed, counts = rebuild_unit_evidence(mappings)
     else:
         counts = unit_counts_for(mappings)
+    resources = axis_evidence.resources_by_code(mappings) if summary is not None else {}
     for mapping in mappings:
         try:
             # A savepoint each, so one failed row cannot abort the rest.
             with transaction.atomic():
                 refresh(mapping, counts.get(mapping.pk, Counter()))
+                if summary is not None:
+                    summary.add(axis_evidence.code_evidence(
+                        mapping, list(counts.get(mapping.pk, Counter())), resources.get(mapping.pk, []),
+                        variant_count=mapping.axis_variant_count))
             refreshed += 1
         except Exception:  # noqa: BLE001 - evidence must not fail ingest
             logging.getLogger(__name__).warning(
@@ -466,7 +473,7 @@ def multi_unit_keys():
     return keys
 
 
-def refresh_all(keys=None, batch_size=REFRESH_BATCH, on_batch=None, rebuild_evidence=False):
+def refresh_all(keys=None, batch_size=REFRESH_BATCH, on_batch=None, rebuild_evidence=False, summary=None):
     """Refresh ``keys`` (default :func:`multi_unit_keys`, or :func:`evidence_keys`
     with ``rebuild_evidence``) a batch at a time.
 
@@ -483,7 +490,7 @@ def refresh_all(keys=None, batch_size=REFRESH_BATCH, on_batch=None, rebuild_evid
     for start in range(0, len(keys), batch_size):
         batch = keys[start:start + batch_size]
         with transaction.atomic():
-            refreshed += refresh_codes(batch, rebuild_evidence=rebuild_evidence)
+            refreshed += refresh_codes(batch, rebuild_evidence=rebuild_evidence, summary=summary)
         if on_batch is not None:
             on_batch(start + len(batch), refreshed, batch[-1])
     return refreshed

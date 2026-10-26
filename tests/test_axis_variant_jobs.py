@@ -481,3 +481,29 @@ def test_an_attempt_the_sweep_handed_on_writes_nothing_over_the_new_one(two_unit
     request.refresh_from_db()
     assert (request.outcome, request.done, request.cursor) == ('running', 7, 'Z\x1fZ'), \
         'the first attempt finished its walk but wrote nothing over the second'
+
+
+def test_a_rebuild_stores_the_axis_evidence_it_met_and_a_plain_refresh_does_not(two_unit_code):
+    """The walk counts the axis evidence across the codes it rebuilds (#2051)."""
+    rebuild = AxisVariantRefresh.objects.create(reason='rebuild', rebuild_evidence=True)
+    assert axis_variant_jobs.run_refresh(rebuild.pk)['outcome'] == 'done'
+    rebuild.refresh_from_db()
+    assert rebuild.axis_evidence['codes'] == 1
+    assert rebuild.axis_evidence['axes']['property']['varies'] == 1, 'mg/dL and mmol/L are two properties'
+    assert rebuild.axis_evidence['axes']['scale_type']['bases'] == {'value_type': 1}
+    assert rebuild.axis_evidence['axes']['system'] == {'settled': 0, 'hint': 0, 'varies': 0, 'bases': {}}
+
+    plain = AxisVariantRefresh.objects.create(reason='plain')
+    assert axis_variant_jobs.run_refresh(plain.pk)['outcome'] == 'done'
+    plain.refresh_from_db()
+    assert plain.axis_evidence == {}
+
+
+def test_a_resumed_rebuild_continues_its_axis_evidence_counts(two_unit_code):
+    stored = {'codes': 3, 'axes': {'property': {'settled': 2, 'hint': 1, 'varies': 1, 'bases': {'unit': 2}}}}
+    request = AxisVariantRefresh.objects.create(
+        reason='resumed', rebuild_evidence=True, done=3, cursor='A\x1fA', axis_evidence=stored)
+    assert axis_variant_jobs.run_refresh(request.pk)['outcome'] == 'done'
+    request.refresh_from_db()
+    assert request.axis_evidence['codes'] == 4
+    assert request.axis_evidence['axes']['property']['varies'] == 2
