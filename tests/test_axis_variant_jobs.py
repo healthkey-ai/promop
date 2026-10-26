@@ -533,6 +533,81 @@ def test_worker_shutdown_is_a_noop_when_nothing_is_running():
     assert axis_variant_jobs.requeue_on_shutdown() == 0
 
 
+# --- FHIR codings extraction ---
+
+
+def test_rebuild_stores_fhir_codings_from_patient_metadata():
+    """Per-patient LOINC codings are copied onto the mapping's source_metadata."""
+    from omop_core.models import LoincClass, LoincCodeClass
+
+    LoincClass.objects.get_or_create(code='CHEM', defaults={'display_name': 'Chemistry'})
+    LoincCodeClass.objects.create(
+        loinc_num='1751-7', loinc_class_id='CHEM', component='Albumin',
+        property='MCnc', time_aspect='Pt', system='Ser/Plas', scale_type='Qn', method_type='')
+    mapping = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id=LAB, source_code='ALB', omop_table='measurement',
+        source_metadata={'record_count': 42})
+    PatientSourceCode.objects.create(
+        person=PersonFactory(), source_value='ALB', source_vocabulary_id=LAB,
+        omop_table='measurement', source_unit='g/dL', occurrence_count=5,
+        source_metadata={'fhir': {'code': {'coding': [
+            {'system': 'http://loinc.org', 'code': '1751-7', 'display': 'Albumin [Mass/volume] in Serum or Plasma'},
+        ]}}})
+    axis_variants.rebuild_unit_evidence([mapping])
+    mapping.refresh_from_db()
+    codings = mapping.source_metadata.get('fhir', {}).get('code', {}).get('coding', [])
+    assert len(codings) == 1
+    assert codings[0]['code'] == '1751-7'
+    assert codings[0]['system'] == 'http://loinc.org'
+
+
+def test_rebuild_does_not_overwrite_existing_fhir_codings():
+    """A mapping that already carries FHIR codings is left alone."""
+    existing_fhir = {'code': {'coding': [
+        {'system': 'http://loinc.org', 'code': '9999-9', 'display': 'Existing'}]}}
+    mapping = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id=LAB, source_code='EXIST', omop_table='measurement',
+        source_metadata={'fhir': existing_fhir})
+    PatientSourceCode.objects.create(
+        person=PersonFactory(), source_value='EXIST', source_vocabulary_id=LAB,
+        omop_table='measurement', source_unit='mg/dL', occurrence_count=3,
+        source_metadata={'fhir': {'code': {'coding': [
+            {'system': 'http://loinc.org', 'code': '1751-7', 'display': 'Albumin'},
+        ]}}})
+    axis_variants.rebuild_unit_evidence([mapping])
+    mapping.refresh_from_db()
+    codings = mapping.source_metadata['fhir']['code']['coding']
+    assert len(codings) == 1
+    assert codings[0]['code'] == '9999-9', 'existing codings must not be overwritten'
+
+
+def test_fhir_codings_enable_axis_settling():
+    """After storing codings, loinc_axes.infer() settles axes from them."""
+    from omop_core.mapping import loinc_axes
+    from omop_core.models import LoincClass, LoincCodeClass
+
+    LoincClass.objects.get_or_create(code='CHEM', defaults={'display_name': 'Chemistry'})
+    LoincCodeClass.objects.create(
+        loinc_num='1751-7', loinc_class_id='CHEM', component='Albumin',
+        property='MCnc', time_aspect='Pt', system='Ser/Plas', scale_type='Qn', method_type='')
+    mapping = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id=LAB, source_code='ALB2', omop_table='measurement',
+        source_metadata={'record_count': 10})
+    PatientSourceCode.objects.create(
+        person=PersonFactory(), source_value='ALB2', source_vocabulary_id=LAB,
+        omop_table='measurement', source_unit='g/dL', occurrence_count=5,
+        source_metadata={'fhir': {'code': {'coding': [
+            {'system': 'http://loinc.org', 'code': '1751-7', 'display': 'Albumin [Mass/volume] in Serum or Plasma'},
+        ]}}})
+    axis_variants.rebuild_unit_evidence([mapping])
+    mapping.refresh_from_db()
+    axes, _hints = loinc_axes.infer(
+        mapping.source_vocabulary_id, mapping.source_code, mapping.source_metadata)
+    assert axes.get('component', {}).get('value') == 'Albumin'
+    assert axes.get('property', {}).get('value') == 'MCnc'
+    assert axes.get('component', {}).get('basis') == loinc_axes.BASIS_FHIR_CODING
+
+
 def test_the_boot_pass_publishes_a_request_the_shutdown_requeued(settings):
     """Shutdown → requeue → boot pass → publish: the full cycle."""
     settings.CELERY_BROKER_URL = 'redis://broker/0'
