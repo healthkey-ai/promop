@@ -287,6 +287,28 @@ def test_one_denied_clinical_field_rolls_back_allowed_clinical_and_profile_edits
     assert not Observation.objects.filter(person=patient).exists()
 
 
+def test_mixed_profile_and_clinical_batch_derives_once(patient, monkeypatch):
+    from omop_core.services import field_write_service
+    from omop_core.services import patient_record_service
+    from omop_core.services.field_write_service import apply_field_writes
+    approve(RATIO)
+    calls = []
+    real_refresh = patient_record_service.refresh_patient_record
+
+    def counted(person, *args, **kwargs):
+        calls.append(person.pk)
+        return real_refresh(person, *args, **kwargs)
+
+    monkeypatch.setattr(field_write_service, 'refresh_patient_record', counted)
+    monkeypatch.setattr(patient_record_service, 'refresh_patient_record', counted)
+    result = apply_field_writes(patient, {'gender': 'Female', RATIO: '1.2'})
+    assert sorted(result.applied) == sorted(['gender', RATIO])
+    assert calls == [patient.pk]
+    patient.refresh_from_db()
+    assert patient.gender_source_value == 'Female'
+    assert getattr(PatientRecord.objects.get(person=patient), RATIO) == Decimal('1.2')
+
+
 @pytest.fixture
 def staff_client():
     from patient_portal.models import Identity
