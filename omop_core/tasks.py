@@ -8,29 +8,50 @@ from celery.signals import worker_ready
 from django.db import OperationalError, ProgrammingError
 
 from omop_core.models import Person
+from omop_core.services import axis_variant_jobs as _axis_variant_jobs
 
 
 @worker_ready.connect
 def dispatch_hospital_code_imports_on_worker_ready(**_kwargs):
-    """Publish durable migration-created imports from a worker that knows the task."""
+    """Publish durable migration-created jobs from a worker that knows the tasks.
+
+    Hospital-code imports and axis variant refreshes (#2021) are written by
+    migrations as database rows. An older worker would discard their task
+    messages as unregistered during a rolling deployment, so the worker that
+    registers the tasks is the one that publishes them.
+    """
     import logging
     import threading
 
+    from django.db import connections
+
+    from omop_core.services.axis_variant_jobs import dispatch_queued_refreshes
     from omop_core.services.hospital_code_seed import dispatch_queued_imports
 
-    def dispatch():
-        try:
-            dispatch_queued_imports()
-        except (OperationalError, ProgrammingError):
-            logging.getLogger(__name__).exception(
-                'Hospital-code import dispatch deferred until the database is ready.'
-            )
-        except Exception:
-            # Never make the worker unavailable because the broker job cannot
-            # be published. The queued database row remains retryable.
-            logging.getLogger(__name__).exception('Could not dispatch hospital-code import.')
+    log = logging.getLogger(__name__)
 
-    dispatch()
+    def dispatch(first=False, imports=True):
+        # The boot pass republishes refresh requests an older worker may have
+        # dropped; the rechecks only publish what nothing has published yet.
+        passes = [('axis variant refresh', lambda: dispatch_queued_refreshes(republish=first))]
+        if imports:
+            passes.insert(0, ('hospital-code import', dispatch_queued_imports))
+        try:
+            for label, publish in passes:
+                try:
+                    publish()
+                except (OperationalError, ProgrammingError):
+                    log.exception('%s dispatch deferred until the database is ready.', label)
+                except Exception:
+                    # Never make the worker unavailable because the broker job cannot
+                    # be published. The queued database row remains retryable.
+                    log.exception('Could not dispatch %s.', label)
+        finally:
+            # A timer thread's connection is its own and would otherwise stay
+            # open until the dead thread is collected.
+            connections.close_all()
+
+    dispatch(first=True)
     # Render can bring the worker up while the web service is still running its
     # release migration. Recheck without blocking worker readiness; once a task
     # id is recorded these passes are no-ops.
@@ -38,6 +59,49 @@ def dispatch_hospital_code_imports_on_worker_ready(**_kwargs):
         timer = threading.Timer(delay, dispatch)
         timer.daemon = True
         timer.start()
+    # Only the refresh sweep repeats: a hospital-code import stranded in
+    # ``running`` is told from a live one by the advisory lock alone, which a
+    # live import takes only once its download is validated, so a repeating
+    # pass would requeue a live import over itself.
+    keep_rechecking(lambda: dispatch(imports=False), RECHECK_INTERVAL)
+
+
+#: How often a live worker looks for a request that lost its worker (#2048).
+#: Under the 15 minute stale cutoff, so a stranded request waits at most about
+#: one cutoff more; far above a sweep's cost, which is a few small queries.
+RECHECK_INTERVAL = 5 * 60
+
+
+def keep_rechecking(dispatch, interval, stop=None):
+    """Run ``dispatch`` every ``interval`` seconds until ``stop`` is set.
+
+    The boot pass and its two early rechecks only see what is stranded within
+    three minutes of a boot. A walk is killed when its instance is shut down
+    *after* the replacement worker is up, which is the order Cloud Run uses,
+    so its heartbeat goes stale with no boot to follow (#2048): on the
+    HealthTree instance the #2043 rebuild sat ``running`` for over an hour
+    with a dead worker. The lost message is no help either: Redis redelivers
+    it only after the visibility timeout, to a task that claims nothing but a
+    ``queued`` row. So a live worker keeps looking, on one daemon thread that
+    never holds the worker open at shutdown. A pass that raises is logged and
+    the next still runs. Returns the thread; ``stop`` is for tests.
+    """
+    import logging
+    import threading
+
+    log = logging.getLogger(__name__)
+    stop = stop if stop is not None else threading.Event()
+
+    def loop():
+        while not stop.wait(interval):
+            try:
+                dispatch()
+            except Exception:
+                log.exception('The queued-job recheck failed; it runs again in %ss.', interval)
+
+    thread = threading.Thread(target=loop, name='queued-job-recheck', daemon=True)
+    thread.start()
+    return thread
 
 
 @shared_task(name='omop_core.build_concept_embeddings')
@@ -237,3 +301,26 @@ def import_hospital_code_seed_task(self, import_id: int) -> dict[str, Any]:
             outcome='queued', failure_reason=str(exc), completed_at=None,
         )
         raise self.retry(exc=exc, countdown=min(60 * (2 ** self.request.retries), 300))
+
+
+@shared_task(
+    bind=True,
+    name='omop_core.refresh_axis_variants',
+    # One request walks every multi-unit code on the instance. HealthTree's did
+    # not finish inside the Cloud Run migrate job's hour (#2021); give it the
+    # Athena sync's limit, which the Redis visibility timeout (25200s) exceeds.
+    # The soft limit fires first, inside run_refresh's try, so an overrun is
+    # recorded as failed instead of leaving the row running forever.
+    time_limit=_axis_variant_jobs.TIME_LIMIT,
+    soft_time_limit=_axis_variant_jobs.SOFT_TIME_LIMIT,
+    acks_late=True,
+    reject_on_worker_lost=True,
+)
+def refresh_axis_variants_task(self, request_id: int) -> dict[str, Any]:
+    """Perform one durable axis variant refresh request.
+
+    The request row is claimed atomically, so a redelivery or a duplicate
+    publish from the worker-ready sweep runs nothing twice. A failure is
+    recorded on the row and raised, so Celery reports FAILURE as well.
+    """
+    return _axis_variant_jobs.run_refresh(request_id)

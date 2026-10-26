@@ -15,6 +15,26 @@ All notable changes to PRomop are documented here.
   Existing INR/seconds and native SCT behavior remain distinct; see
   [the contract](docs/cb_clinical_inputs_architecture.md) and
   [rollout gates](docs/cb_clinical_inputs_plan.md).
+- **A curator can walk the source codes again after loading patients** — the
+  Concept to Code tab's Source-code coverage heading now carries the walk
+  panel: when the last walk began, how many patients have source codes first
+  seen since, and a button (approval rights) that records a rebuild request
+  for the worker. While a walk is queued or running the panel shows its
+  progress. (#2050)
+- **The walk reports how much LOINC axis evidence the data holds** — a rebuild
+  counts, over the codes it walks, how many have each axis settled and from
+  what, how many carry only a hint, and how many have patients that disagree
+  on it. The panel shows the table, so whether anything beyond units ever
+  settles an axis is visible at a glance. (#2051)
+- **The patient can confirm that the recorded treatment history is complete** —
+  the Treatment tab now carries "This is my complete treatment history". Until it
+  is ticked, the number of recorded lines is a lower bound ("at least N"); the
+  projection exposes `therapy_history_complete` as null, and only an explicit
+  confirmation makes it true. Confirming is a statement about the list, not a
+  clinical fact: withdrawing it returns the record to the lower bound, and a
+  patient copy carries the confirmation with the record. The write goes through
+  the packaged endpoint, so an embedding host applies its own write gate and
+  per-person authorization (#1924).
 
 - **A recorded line no longer has to name its drugs, and a wrong line can be
   withdrawn** — the therapy editor offers "I don't know which drugs were given",
@@ -86,6 +106,45 @@ All notable changes to PRomop are documented here.
 
 ### Changed
 
+- **The deployed commit sits under the PRomop logo** — in tiny type, with
+  the full SHA as a tooltip, so a report from staging names its build. It
+  comes from the new public `GET /api/v1/version/`, which answers with
+  Render's `RENDER_GIT_COMMIT` (or a checkout's `HEAD`) only when it is a Git
+  commit (#2016).
+
+- **LOINC axes read the record units first, and lead with the variants** —
+  a code whose records all arrive in mass-concentration units showed every
+  axis as "Not settled" when its stored metadata carried only a reference-range
+  unit; record units now settle Property (when they agree) and Scale (whenever
+  records carry units) ahead of the metadata's one sample. When the units
+  imply several axis sets, the LOINC axes panel leads with the variants, their
+  units and destinations, and folds the shared axes under them. The SNOMED
+  evidence section is hidden on any LOINC axis evidence, not only a settled
+  lab property (`snomed-attributes` answers `applies: false` with
+  `loinc_evidence`) (#2014).
+
+- **Suggest fills in a LOINC for each axis variant** — a source code whose
+  units imply several LOINC axis sets no longer needs one Suggest click and
+  one pick per variant. In Edit Mapping, Suggest also posts to
+  `code-mappings/<id>/axis-variants/suggest/`, which suggests a standard LOINC
+  for every variant without a destination under that variant's axes and
+  stores it as proposed; the LOINC axes panel then shows each with Approve.
+  The Concept to Code preview does the same for each flagged candidate and
+  lists the variants, with their units and destinations, under the code, where
+  an approver can approve them. The SNOMED evidence section is hidden when
+  the source's evidence says it is a lab value, since its destination is a
+  LOINC (`snomed-attributes` answers `applies: false` with `lab_signal`)
+  (#2012).
+
+- **The concept's source-code dialog opens on Suggested source codes** — and
+  has two views instead of three: the Find source codes list is gone, since
+  Suggest reaches the same rows with the ranker's evidence attached. Existing
+  mappings is grouped by status: approved first and folded, then the proposals
+  open for review, then rejected, folded, each group fetched and paged on its
+  own (`status=` on the detail endpoint, with `status_counts` for the headers).
+  Propose selected is gone too; Approve selected proposes a vocabulary-only
+  candidate from its preview and approves it in the same click (#2010).
+
 - **Mapping saves return immediately** — approving or re-pointing a code
   mapping (Concept to Code, Code to Concept, group approve, CSV upload) writes the mapping
   and returns; the stored clinical rows move to the new concept in a background
@@ -108,6 +167,91 @@ All notable changes to PRomop are documented here.
   counts explicitly (#1691).
 
 ### Fixed
+
+- **A refresh whose worker was killed is picked up without a deploy** — the
+  stale-heartbeat sweep ran at worker boot and twice in the next three minutes,
+  then never again. Cloud Run shuts the old instance down after the new worker
+  is up, so a walk killed that way went stale after the last recheck and stayed
+  `running` until the next deploy; the redelivered message found a row that was
+  not `queued` and skipped it. A live worker now sweeps every five minutes, so
+  a stranded request is requeued and resumed within about one stale interval.
+  (#2048)
+- **Unit counts come from the instance's own patients** — migration 0307 asks
+  the worker to rewrite every code's stored unit evidence from the source codes
+  on its loaded patients and the stored measurements, then refresh its axis
+  variants, through the same durable request as the variant walk. The seeded
+  label-level counts (#2041) are replaced, a variant the evidence no longer
+  shows is deleted unless a curator decided it, and a later seed or inventory
+  load leaves patient-derived evidence alone. `manage.py refresh_axis_variants
+  --rebuild-evidence` does the same by hand. (#2043)
+- **Unit counts in the axis variants table are the code's own** — the
+  hospital code seed took each unit's count from the inventory CSV, whose unit
+  rows are a label-level join repeated for every code with the label, so every
+  albumin code of a hospital showed the same `g/dL 10, % 1`. The seed build now
+  takes the per-code count, patients and values from the v2 extract and leaves
+  out a unit the CSV knows only for the label, so nothing reads it as the
+  code's evidence. Instances seeded before this need the seed rebuilt and
+  reloaded. (#2041)
+- **A variant's suggestion candidates say how to use them** — the blue
+  candidates area names the variant it is for ("Suggestion candidates for the
+  % variant"), every row has a **Use** button (the winner's reads **Use
+  winner**), the variant's current destination is marked, and the confirmation
+  appears with the variants. The variant row's search button reads **Search
+  destination**, so it is not mistaken for applying the suggestion. (#2036)
+- **The "Axes shared by every variant" fold is gone** — on every instance
+  measured it settled nothing but Scale, which each variant row shows, and no
+  curator had ever entered a shared axis; the six-axis table stays for a code
+  with one axis set. Saved entries still reach Suggest. (#2037)
+- **Concept to Code Suggest moves on instead of repeating declined codes** — a
+  run used to retrieve the same best-`limit` sources every time, so when the
+  ranker declined all of them ("25 without a confidence score hidden") the next
+  click found nothing new. Declines are now remembered per concept and skipped
+  by later runs and by the estimate, which says how many are skipped; "Retry
+  declined" searches them again. The Suggest button sits on the same line as
+  the ranker and the limit, and the run summary says the hidden codes were
+  declined and that the next run moves on. (#2034)
+- **A `%` variant is no longer suggested the mass-concentration LOINC** — a
+  unit that fits several LOINC properties (`%`, `U/L`, `IU/L`, `{ratio}`) now
+  settles the property to that set instead of none, so albumin in `%` keeps
+  the fraction codes and excludes 1751-7 the way the `mmol/L` variant already
+  did. The sets come from the properties of the LOINC codes that list the unit
+  among their example units; `mIU/L`, `mIU/mL` and `g/g` turned out to name one
+  property each and now settle it; on a loaded instance the sets are read from
+  the LOINC table's example units, so a new release is followed. Units with the
+  same set (`U/L`, `IU/L`) are one variant. Suggesting a variant reads the axis
+  values its units imply now, not the ones stored before this change, and a
+  variant stored under the older per-unit key is re-keyed, keeping its
+  destination. The dialog shows a set as "any of …". (#2029)
+- **A running Suggest no longer locks the Concept to Code list** — opening a
+  source code to edit it, approving a variant in place, folding a group and
+  paging wait only for a write in progress; the search's own controls and the
+  batch selection still wait for the run. An edit saved while the run streams
+  is kept when the next poll replaces the run's candidates. (#2028)
+- **The Edit Mapping dialog says it is loading the LOINC axes** — the section
+  is on screen as soon as the dialog opens, with a status line that names how
+  many axis values the queue flagged, instead of appearing without warning once
+  the unit evidence has been scanned. (#2030)
+- **A deploy mid-walk no longer costs the axis variant refresh six hours** —
+  the request row now carries a `progress_at` heartbeat written after every
+  batch. A `running` request with no heartbeat for 15 minutes lost its worker
+  to the deploy that replaced the pool, and the next worker boot requeues it
+  and resumes at its `done` offset instead of waiting for the six-hour task
+  limit and starting over. (#2023)
+- **The commit stamp is filled in on HealthTree GCP** — the Cloud Run image
+  now carries `GIT_COMMIT`, passed by the deploy workflow as a build argument,
+  so `/api/v1/version/` and the line under the logo show the deployed commit
+  there as well as on Render. (#2024)
+
+- **The bulk LOINC axis variant backfill no longer runs inside `migrate`** —
+  migrations 0300 and 0301 walked every multi-unit code during the release
+  step. On the HealthTree GCP instance, which holds the data with the most such
+  codes, the walk outlived the Cloud Run migrate job's one-hour task limit on
+  every attempt, so no deploy reached traffic between 21 and 24 October. Both
+  migrations are now no-ops and migration 0303 records an `axis_variant_refresh`
+  request that the Celery worker performs (`omop_core.refresh_axis_variants`,
+  six-hour limit, progress on the row). A worker publishes queued requests when
+  it starts, so a rolling deploy cannot lose one, and `manage.py
+  refresh_axis_variants --queue` records a request by hand. (#2021)
 
 - **A known line of therapy is no longer lost when its drugs are unknown** —
   the canonical writer now records that a line happened, independently of the

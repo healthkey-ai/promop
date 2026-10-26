@@ -134,6 +134,52 @@ re-run is explainable. A term seen in a second unit is flagged with axis
 variants in the queue, exactly as a hospital code is, and a curator can give
 each unit its own LOINC.
 
+### Axis variants and Suggest
+
+`GET /api/v1/code-mappings/<id>/loinc-axes/` lists a code's axis variants;
+`POST .../axis-variants/` points one at a destination (`approve: true`
+re-points its stored rows). `POST .../axis-variants/suggest/` (#2012) takes
+`{strategies?, ranking_model?, loinc_axes?, replace?}` and suggests a standard
+LOINC for every variant without a destination (every proposed one with
+`replace`), storing each as proposed; approved variants are never touched.
+Each variant is suggested as the code would be with that variant's axis
+values added to the curator's entries, so the mmol/L variant of a glucose
+code is only ever offered a substance concentration. A winner that is not a
+standard LOINC in the mapping's domain is dropped and reported in `note`. The
+response is the axes payload plus `suggestions`, one per variant considered.
+At most five variants are suggested per call. The Edit Mapping dialog calls
+this from its Suggest button when the code has two or more variants, and the
+Concept to Code preview calls it for each flagged candidate.
+
+Flags refresh after each source-code upload for the codes it touched. The bulk
+refresh of every multi-unit code on the instance is a worker job (#2021):
+`manage.py refresh_axis_variants --rebuild-evidence` or migration `0307` has the
+walk first rewrite each code's stored unit evidence from the instance's own
+patient data (#2043).
+`manage.py refresh_axis_variants --queue` or migration `0303` records an
+`axis_variant_refresh` request and the Celery worker performs it, with `keys`,
+`done`, `refreshed` and a `progress_at` heartbeat on the row as it goes. A
+deploy that replaces the worker mid-walk kills the task; the next sweep, at
+worker boot or on a live worker's five-minute recheck (#2048), sees the stale
+heartbeat, requeues the request and resumes it after its `cursor` (#2023). It never runs inside `migrate`:
+on the HealthTree instance it outlived the Cloud Run migrate job's hour, and
+no deploy reached traffic until the walk was moved off the release step. A
+worker publishes any request still queued when it starts, so a request a
+pre-upgrade worker dropped as an unknown task is picked up by the next one.
+
+A source with LOINC axis evidence has no SNOMED evidence: an axis the records
+or a curator settled, units that imply several axis sets (variants), or a lab
+signal (a LOINC code or coding, a laboratory category). `GET
+.../snomed-attributes/` answers `applies: false` with the reason in
+`loinc_evidence`, and the dialog hides the SNOMED section (#2014).
+
+Record units settle the shared axes before the metadata's one sample does:
+every record in a mass-concentration unit settles Property `MCnc`, and
+records carrying any unit settle Scale `Qn`, even when the stored metadata
+holds only a reference-range unit. When the units imply several axis sets the
+panel leads with the variants, their units and destinations, and folds the
+shared axes under them.
+
 The term is never written to a log.
 
 The endpoint is an ingest encounter operation, not a cacheable reference GET:

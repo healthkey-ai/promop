@@ -4812,21 +4812,47 @@ class AuditLogMiddlewareTest(_SmartBase):
     # ------------------------------------------------------------------
 
     def test_logging_failure_does_not_block_response(self):
-        """If the audit logger raises, the API response must still be returned."""
+        """If the audit logger raises, the API response must still be returned,
+        and the failure warning must not be written to the JSON audit stream."""
         import logging as _logging
         from unittest.mock import patch as mock_patch
 
         _, pi = self._make_person_and_pi(88807)
 
-        with mock_patch.object(_logging.getLogger('audit'), 'info', side_effect=RuntimeError('log exploded')):
-            response = self.write_client.patch(
-                f'/api/patient-info/{pi.pk}/',
-                {'ecog_status': '1'},
-                format='json',
-            )
+        audit_records, ops_records = [], []
+
+        class _Capture(_logging.Handler):
+            def __init__(self, records):
+                super().__init__()
+                self.records = records
+
+            def emit(self, record):
+                self.records.append(record.getMessage())
+
+        audit_capture = _Capture(audit_records)
+        ops_capture = _Capture(ops_records)
+        audit_logger = _logging.getLogger('audit')
+        ops_logger = _logging.getLogger('omop.ops')
+        audit_logger.addHandler(audit_capture)
+        ops_logger.addHandler(ops_capture)
+        try:
+            with mock_patch.object(audit_logger, 'info', side_effect=RuntimeError('log exploded')):
+                response = self.write_client.patch(
+                    f'/api/patient-info/{pi.pk}/',
+                    {'ecog_status': '1'},
+                    format='json',
+                )
+        finally:
+            audit_logger.removeHandler(audit_capture)
+            ops_logger.removeHandler(ops_capture)
 
         # Response must be returned regardless of logging failure
         self.assertIn(response.status_code, range(200, 600))
+        # The failure warning belongs to the operational stream, not `audit`.
+        self.assertFalse(any('stdout write failed' in r for r in audit_records))
+        self.assertTrue(any('stdout write failed' in r for r in ops_records))
+        for raw in audit_records:
+            json.loads(raw)
 
 
 class PatientNameRenameTest(_SmartBase):
@@ -5371,6 +5397,36 @@ class RxNavServiceTest(TestCase):
         with patch('urllib.request.urlopen', side_effect=Exception('network error')):
             result = resolve_drug('anything')
         self.assertIsNone(result)
+
+    def test_rxnav_error_log_is_valid_json(self):
+        """A drug name or error text with quotes/newlines must not break the log."""
+        import logging
+        from unittest.mock import patch
+        from omop_core.services.rxnav_service import resolve_drug
+
+        records = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record):
+                records.append(record.getMessage())
+
+        capture = _Capture()
+        ops_logger = logging.getLogger('omop.ops')
+        ops_logger.addHandler(capture)
+        try:
+            with patch(
+                'omop_core.services.rxnav_service._rxnav_lookup',
+                side_effect=RuntimeError('bad "quote"\nsecond line'),
+            ):
+                self.assertIsNone(resolve_drug('Drug "X"\nY'))
+        finally:
+            ops_logger.removeHandler(capture)
+
+        self.assertEqual(len(records), 1)
+        parsed = json.loads(records[0])
+        self.assertEqual(parsed['event'], 'rxnav_lookup_error')
+        self.assertEqual(parsed['drug'], 'Drug "X"\nY')
+        self.assertIn('bad "quote"', parsed['error'])
 
     def test_second_call_uses_cached_concept(self):
         """After first call caches a Concept, second call returns it without API hit."""
@@ -23884,6 +23940,70 @@ class FieldSynonymBatchTest(TestCase):
         resp = self.client.get('/api/v1/field-synonyms/batch/?fields=hemoglobin_g_dl')
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(len(resp.data['hemoglobin_g_dl']), 5)
+
+
+class TherapyHistoryCompletenessTest(TestCase):
+    """POST /api/v1/therapy-history/completeness/ under PROMOP's own policy (#1924).
+
+    The packaged endpoint is mounted here with the same gate as therapy-line
+    authoring, and who is speaking is read off the request, not the body.
+    """
+
+    def setUp(self):
+        self.person = Person.objects.create(person_id=77101, year_of_birth=1961)
+        self.other = Person.objects.create(person_id=77102, year_of_birth=1962)
+        PatientRecord.objects.get_or_create(person=self.person)
+        PatientRecord.objects.get_or_create(person=self.other)
+        self.staff = Identity.objects.create_user(
+            email='history_staff@test.com', password='pw', is_staff=True,
+        )
+        self.patient = Identity.objects.create_user(
+            email='history_patient@test.com', password='pw',
+        )
+        PatientUser.objects.create(identity=self.patient, person=self.person)
+        self.client = APIClient()
+
+    def _confirm(self, person, complete=True, **extra):
+        return self.client.post(
+            '/api/v1/therapy-history/completeness/',
+            {'person': person.person_id, 'complete': complete, **extra}, format='json',
+        )
+
+    def test_the_patient_confirms_their_own_history(self):
+        from omop_core.models import TherapyHistoryAttestation
+
+        self.client.force_authenticate(user=self.patient)
+        resp = self._confirm(self.person, source='clinician')
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertIs(resp.data['therapy_history_complete'], True)
+        self.assertIs(resp.data['patient_info']['therapy_history_complete'], True)
+        self.assertIs(PatientRecord.objects.get(person=self.person).therapy_history_complete, True)
+        # The body's claim to be a clinician is ignored.
+        self.assertEqual(TherapyHistoryAttestation.objects.get(person=self.person).source, 'patient')
+
+        resp = self._confirm(self.person, complete=False)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertIsNone(PatientRecord.objects.get(person=self.person).therapy_history_complete)
+
+    def test_a_patient_cannot_confirm_for_somebody_else(self):
+        from omop_core.models import TherapyHistoryAttestation
+
+        self.client.force_authenticate(user=self.patient)
+        resp = self._confirm(self.other)
+        self.assertEqual(resp.status_code, 403, resp.data)
+        self.assertFalse(TherapyHistoryAttestation.objects.filter(person=self.other).exists())
+
+    def test_staff_confirm_as_a_clinician(self):
+        from omop_core.models import TherapyHistoryAttestation
+
+        self.client.force_authenticate(user=self.staff)
+        resp = self._confirm(self.other)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(TherapyHistoryAttestation.objects.get(person=self.other).source, 'clinician')
+
+    def test_unauthenticated_callers_are_refused(self):
+        resp = self._confirm(self.person)
+        self.assertIn(resp.status_code, (401, 403))
 
 
 class TherapyLineAuthoringTest(TestCase):

@@ -205,6 +205,146 @@ def test_suggest_dispatch_persisted_poll_and_no_mapping_mutations(client, concep
         retrieval.assert_not_called()
 
 
+def _declining_ranker():
+    return patch('omop_core.mapping.suggestions.rank_candidates_dispatch',
+                 return_value=(None, 'No suitable concept (Jev ranking).', [], {}))
+
+
+def _unavailable_ranker():
+    return patch('omop_core.mapping.suggestions.rank_candidates_dispatch',
+                 return_value=(None, 'Ranking model unavailable; expanded search remains unresolved. Details: JEV_API_KEY is not configured.', None, {}))
+
+
+def _run(client, concept, dispatcher, ranker, **body):
+    with use_dispatcher(dispatcher):
+        response = client.post(f'{BASE}suggest/', {'concept_ids': [concept.pk], 'strategies': ['lexical'], **body}, format='json')
+        assert response.status_code == 202, response.data
+        run_id, params = dispatcher.calls[-1]
+        with ranker():
+            execute_run(run_id, params)
+    return client.get(f'{BASE}suggest-runs/{run_id}/').data['activity'][0], params
+
+
+def test_a_ranked_run_remembers_what_the_ranker_declined_and_the_next_run_moves_on(client, concept):
+    """The ranker declined every one of the best ``limit`` sources; the next run must not rank them again (#2034)."""
+    from omop_core.models import ReverseSuggestDecline
+    first = [source(f'A{n}', occurrence_count=10 - n) for n in range(3)]
+    rest = [source(f'B{n}', occurrence_count=2) for n in range(2)]
+    dispatcher = FakeDispatcher()
+    body = {'concept_ids': [concept.pk], 'strategies': ['lexical'], 'limit': 3, 'ranking_model': 'jev'}
+    with use_dispatcher(dispatcher):
+        run_id, params = dispatcher.calls[-1] if dispatcher.calls else (None, None)
+        response = client.post(f'{BASE}suggest/', body, format='json')
+        assert response.status_code == 202
+        run_id, params = dispatcher.calls[-1]
+        with _declining_ranker():
+            execute_run(run_id, params)
+    event = client.get(f'{BASE}suggest-runs/{run_id}/').data['activity'][0]
+    assert [c['source_code'] for c in event['candidates']] == ['A0', 'A1', 'A2']
+    assert all(c['confidence'] is None and c['declined'] is True for c in event['candidates'])
+    assert event['declined'] == 3
+    assert set(ReverseSuggestDecline.objects.filter(concept=concept).values_list('source_code', flat=True)) == {'A0', 'A1', 'A2'}
+    assert ReverseSuggestDecline.objects.get(source_code='A0').mapping_id == first[0].pk
+
+    # The estimate skips them and says so.
+    estimate = client.get(f'{BASE}{concept.pk}/estimate/', {'strategies': 'lexical'}).data
+    assert estimate['total'] == 2 and estimate['declined_skipped'] == 3
+    retry = client.get(f'{BASE}{concept.pk}/estimate/', {'strategies': 'lexical', 'include_declined': '1'}).data
+    assert retry['total'] == 5 and retry['declined_skipped'] == 0
+    # Only declines still in the pool count as skipped: an approved row left it anyway.
+    first[2].status = 'approved'
+    first[2].save(update_fields=['status'])
+    assert client.get(f'{BASE}{concept.pk}/estimate/', {'strategies': 'lexical'}).data['declined_skipped'] == 2
+    first[2].status = 'proposed'
+    first[2].save(update_fields=['status'])
+
+    # The next run reaches the rest of the pool.
+    with use_dispatcher(dispatcher):
+        client.post(f'{BASE}suggest/', body, format='json')
+        run_id, params = dispatcher.calls[-1]
+        with _declining_ranker():
+            execute_run(run_id, params)
+    event = client.get(f'{BASE}suggest-runs/{run_id}/').data['activity'][0]
+    assert sorted(c['source_code'] for c in event['candidates']) == ['B0', 'B1']
+    assert ReverseSuggestDecline.objects.filter(concept=concept).count() == 5
+
+    # Retrying declined codes brings the first three back, best first.
+    with use_dispatcher(dispatcher):
+        client.post(f'{BASE}suggest/', {**body, 'include_declined': True}, format='json')
+        run_id, params = dispatcher.calls[-1]
+        assert params['include_declined'] is True
+        with _declining_ranker():
+            execute_run(run_id, params)
+    event = client.get(f'{BASE}suggest-runs/{run_id}/').data['activity'][0]
+    assert [c['source_code'] for c in event['candidates']] == ['A0', 'A1', 'A2']
+    assert rest  # the B rows exist throughout
+
+
+def test_an_unavailable_ranker_declines_nothing(client, concept):
+    """A missing key or a failed request is not the ranker's answer; the sources stay in the pool."""
+    from omop_core.models import ReverseSuggestDecline
+    source('A')
+    event, _ = _run(client, concept, FakeDispatcher(), _unavailable_ranker, ranking_model='jev')
+    assert event['candidates'][0]['confidence'] is None and event['candidates'][0]['declined'] is False
+    assert event['declined'] == 0 and ReverseSuggestDecline.objects.count() == 0
+    # The same source comes back next time.
+    event, _ = _run(client, concept, FakeDispatcher(), _unavailable_ranker, ranking_model='jev')
+    assert [c['source_code'] for c in event['candidates']] == ['A']
+
+
+def test_every_hospitals_row_of_a_declined_code_is_skipped(client, concept):
+    """Hospital codes have one row per organization; a decline is about the code."""
+    from omop_core.models import Organization
+    orgs = [Organization.objects.create(name=f'Hospital {n}', slug=f'hospital-{n}') for n in range(2)]
+    rows = [source('HOSP-1', organization=org, occurrence_count=5) for org in orgs]
+    other = source('OTHER', occurrence_count=1)
+    event, _ = _run(client, concept, FakeDispatcher(), _declining_ranker, ranking_model='jev', limit=2)
+    assert [c['mapping_id'] for c in event['candidates']] == [rows[0].pk, rows[1].pk]
+    event, _ = _run(client, concept, FakeDispatcher(), _declining_ranker, ranking_model='jev', limit=2)
+    assert [c['mapping_id'] for c in event['candidates']] == [other.pk]
+
+
+def test_a_source_the_ranker_supports_on_a_retry_is_no_longer_declined(client, concept):
+    from omop_core.models import ReverseSuggestDecline
+    source('A')
+    _run(client, concept, FakeDispatcher(), _declining_ranker, ranking_model='jev')
+    assert ReverseSuggestDecline.objects.filter(source_code='A').exists()
+    chosen = {'concept_id': concept.pk, 'confidence': 0.9}
+    supporting = lambda: patch('omop_core.mapping.suggestions.rank_candidates_dispatch',  # noqa: E731
+                               return_value=(chosen, 'high', [chosen], {}))
+    event, _ = _run(client, concept, FakeDispatcher(), supporting, ranking_model='anthropic', include_declined=True)
+    assert event['candidates'][0]['confidence'] == 0.9
+    assert not ReverseSuggestDecline.objects.filter(source_code='A').exists()
+    # ... so a normal run shows it again.
+    event, _ = _run(client, concept, FakeDispatcher(), supporting, ranking_model='anthropic')
+    assert [c['source_code'] for c in event['candidates']] == ['A']
+
+
+def test_a_confident_candidate_and_curator_review_are_not_declines(client, concept):
+    from omop_core.models import ReverseSuggestDecline
+    source('A')
+    dispatcher = FakeDispatcher()
+    with use_dispatcher(dispatcher):
+        client.post(f'{BASE}suggest/', {'concept_ids': [concept.pk], 'strategies': ['lexical']}, format='json')
+        run_id, params = dispatcher.calls[-1]
+        execute_run(run_id, params)  # ranking_model 'none'
+    assert ReverseSuggestDecline.objects.count() == 0
+    chosen = {'concept_id': concept.pk, 'confidence': 0.9}
+    with use_dispatcher(dispatcher):
+        client.post(f'{BASE}suggest/', {'concept_ids': [concept.pk], 'strategies': ['lexical'], 'ranking_model': 'jev'}, format='json')
+        run_id, params = dispatcher.calls[-1]
+        with patch('omop_core.mapping.suggestions.rank_candidates_dispatch', return_value=(chosen, 'high', [chosen], {})):
+            execute_run(run_id, params)
+    assert ReverseSuggestDecline.objects.count() == 0
+    event = client.get(f'{BASE}suggest-runs/{run_id}/').data['activity'][0]
+    assert event['candidates'][0]['confidence'] == 0.9 and event['declined'] == 0
+
+
+def test_include_declined_must_be_a_boolean(client, concept):
+    response = client.post(f'{BASE}suggest/', {'concept_ids': [concept.pk], 'include_declined': 'yes'}, format='json')
+    assert response.status_code == 400 and 'include_declined' in response.data
+
+
 def test_ranker_cannot_fallback_to_first_candidate_without_model_selection(concept):
     with patch('omop_core.mapping.suggestions.rank_candidates_dispatch', return_value=(None, 'Unavailable', [], {})) as rank:
         candidate = reverse_rank_candidate(concept, {'source_code': 'A', 'source_code_description': 'Albumin', 'source_vocabulary_id': 'SNOMED'}, 'anthropic')
@@ -321,7 +461,7 @@ def test_estimate_counts_every_source_a_run_could_return(client, concept):
     data = client.get(f'{BASE}{concept.pk}/estimate/').data
     # More than one run's worth: 30 by name, one by UMLS, none counted twice.
     assert data == {'total': 31, 'umls': 1, 'lexical': 30, 'capped': False, 'partial': False,
-                    'approximate': None, 'timed_out': False}
+                    'approximate': None, 'timed_out': False, 'declined_skipped': 0}
     assert len(reverse_retrieval_pool(concept, strategies=['umls', 'lexical'], limit=25)) == 25
     assert client.get(f'{BASE}{concept.pk}/estimate/', {'include_zero_seen': '1'}).data['total'] == 32
     assert client.get(f'{BASE}{concept.pk}/estimate/', {'strategies': 'umls'}).data['total'] == 1
@@ -412,7 +552,7 @@ def test_a_timed_out_estimate_with_no_earlier_count_is_sampled(client, concept):
         data = client.get(f'{BASE}{concept.pk}/estimate/').data
         zero_seen = client.get(f'{BASE}{concept.pk}/estimate/', {'include_zero_seen': '1'}).data
     assert data == {'total': 31, 'umls': 1, 'lexical': 30, 'capped': False, 'partial': False,
-                    'approximate': 'sample', 'timed_out': False}
+                    'approximate': 'sample', 'timed_out': False, 'declined_skipped': 0}
     # Never-seen vocabulary codes are not sampled, so that total is a floor.
     assert zero_seen['partial'] is True
 
@@ -723,3 +863,184 @@ def test_source_examples_do_not_write(client):
     assert client.get(EXAMPLES, {'source_vocabulary_id': 'SNOMED', 'source_code': 'ALB'}).status_code == 200
     assert client.post(EXAMPLES, {'source_vocabulary_id': 'SNOMED', 'source_code': 'ALB'}, format='json').status_code == 405
     assert PatientSourceCode.objects.values().get(pk=row.pk) == before
+
+
+def test_linked_sources_filter_by_status_and_count_every_status(client, concept):
+    source('OK', target_concept=concept, status='approved', occurrence_count=5)
+    source('MAYBE', target_concept=concept, status='proposed')
+    source('NO', target_concept=concept, status='rejected')
+    source('UNSEEN', target_concept=concept, status='approved', occurrence_count=0)
+    data = client.get(f'{BASE}{concept.pk}/', {'status': 'proposed', 'seen_only': '1'}).data
+    assert [row['source_code'] for row in data['results']] == ['MAYBE']
+    assert data['total'] == 1
+    # Counts follow the Seen filter, so a collapsed group announces what it would show.
+    assert data['status_counts'] == {'approved': 1, 'proposed': 1, 'rejected': 1}
+    unfiltered = client.get(f'{BASE}{concept.pk}/', {'seen_only': '0'}).data
+    assert unfiltered['total'] == 4
+    assert unfiltered['status_counts'] == {'approved': 2, 'proposed': 1, 'rejected': 1}
+    assert client.get(f'{BASE}{concept.pk}/', {'status': 'bogus'}).status_code == 400
+    assert client.get(f'{BASE}{concept.pk}/', {'mode': 'available'}).data['status_counts'] is None
+
+
+def django_user_model_for(client):
+    return type(client.user).objects.create_user(email='other-curator@test.com', is_staff=True)
+
+
+def test_reverse_run_fills_a_flagged_candidates_axis_variants(client, concept):
+    """A candidate whose units imply several LOINC axis sets carries its variants,
+    each suggested a destination with the run's ranker (#2012)."""
+    from omop_core.models import SourceCodeAxisVariant
+    row = source('GLU', axis_variant_count=2)
+    SourceCodeAxisVariant.objects.create(mapping=row, axis_key='property=MCnc|scale_type=Qn',
+                                         axis_values={'property': 'MCnc', 'scale_type': 'Qn'}, units=['mg/dL'],
+                                         occurrence_count=10)
+    SourceCodeAxisVariant.objects.create(mapping=row, axis_key='property=SCnc|scale_type=Qn',
+                                         axis_values={'property': 'SCnc', 'scale_type': 'Qn'}, units=['mmol/L'],
+                                         occurrence_count=4)
+    plain = source('ALB')
+    # Another hospital's code, locked by its own curator: listed, never written.
+    other = django_user_model_for(client)
+    locked = source('GLU2', axis_variant_count=2, locked_by=other, locked_at=timezone.now())
+    SourceCodeAxisVariant.objects.create(mapping=locked, axis_key='property=MCnc|scale_type=Qn',
+                                         axis_values={'property': 'MCnc'}, units=['mg/dL'], occurrence_count=1)
+
+    def fill(mapping, **kwargs):
+        variant = mapping.axis_variants.get(axis_key='property=SCnc|scale_type=Qn')
+        variant.target_concept = concept
+        variant.save()
+        return [{'axis_key': variant.axis_key, 'suggested': {'concept_id': concept.pk}, 'note': ''}]
+
+    dispatcher = FakeDispatcher()
+    with use_dispatcher(dispatcher):
+        response = client.post(f'{BASE}suggest/', {
+            'concept_ids': [concept.pk], 'strategies': ['lexical'], 'ranking_model': 'anthropic'}, format='json')
+    run_id, params = dispatcher.calls[0]
+    with patch('omop_core.mapping.axis_variants.suggest_destinations', side_effect=fill) as suggest, \
+            patch('omop_core.mapping.suggestions.rank_candidates_dispatch', return_value=(None, 'review', [], {})):
+        execute_run(run_id, params)
+    assert [call.args[0].pk for call in suggest.call_args_list] == [row.pk]
+    assert suggest.call_args.kwargs['ranking_model'] == 'anthropic'
+    assert suggest.call_args.kwargs['user'] == client.user
+    # The run's own limit bounds the variants it may suggest.
+    assert suggest.call_args.kwargs['limit'] <= params['limit']
+
+    candidates = {c['source_code']: c for c in client.get(f'{BASE}suggest-runs/{run_id}/').data['activity'][0]['candidates']}
+    variants = {v['axis_key']: v for v in candidates['GLU']['axis_variants']}
+    assert variants['property=SCnc|scale_type=Qn']['target_concept']['concept_id'] == concept.pk
+    assert variants['property=MCnc|scale_type=Qn']['target_concept'] is None
+    assert 'axis_variants' not in candidates['ALB']
+    assert plain.axis_variant_count == 0
+    assert [v['axis_key'] for v in candidates['GLU2']['axis_variants']] == ['property=MCnc|scale_type=Qn']
+
+
+def test_reverse_run_without_a_ranker_lists_variants_but_suggests_nothing(client, concept):
+    from omop_core.models import SourceCodeAxisVariant
+    row = source('GLU', axis_variant_count=2)
+    SourceCodeAxisVariant.objects.create(mapping=row, axis_key='property=MCnc|scale_type=Qn',
+                                         axis_values={'property': 'MCnc'}, units=['mg/dL'], occurrence_count=1)
+    dispatcher = FakeDispatcher()
+    with use_dispatcher(dispatcher):
+        client.post(f'{BASE}suggest/', {'concept_ids': [concept.pk], 'strategies': ['lexical']}, format='json')
+    run_id, params = dispatcher.calls[0]
+    with patch('omop_core.mapping.axis_variants.suggest_destinations') as suggest:
+        execute_run(run_id, params)
+    suggest.assert_not_called()
+    candidate = client.get(f'{BASE}suggest-runs/{run_id}/').data['activity'][0]['candidates'][0]
+    assert [v['axis_key'] for v in candidate['axis_variants']] == ['property=MCnc|scale_type=Qn']
+
+
+# --- The axis variant walk a curator can ask for (#2050, #2051) ---------------
+
+WALK = f'{BASE}axis-variant-walk/'
+
+
+def _walk(**fields):
+    from omop_core.models import AxisVariantRefresh
+    return AxisVariantRefresh.objects.create(**fields)
+
+
+def test_walk_status_counts_patients_loaded_since_the_last_completed_walk(client):
+    from tests.factories import PersonFactory
+    from omop_core.models import PatientSourceCode
+    from omop_core.models import AxisVariantRefresh
+    before = timezone.now() - timezone.timedelta(days=2)
+    done = _walk(reason='migration', outcome='done', rebuild_evidence=True, keys=40, done=40, refreshed=12,
+                 started_at=before + timezone.timedelta(hours=1), completed_at=before + timezone.timedelta(hours=3),
+                 axis_evidence={'codes': 40, 'axes': {'property': {'settled': 30, 'hint': 2, 'varies': 5, 'bases': {'unit': 30}}}})
+    # Asked for before it started: a resumed walk restarts its clock (#2049).
+    AxisVariantRefresh.objects.filter(pk=done.pk).update(created_at=before)
+    # A plain refresh since rewrote no evidence, and a failed walk is the last one.
+    _walk(reason='plain', outcome='done', started_at=timezone.now(), completed_at=timezone.now())
+    failed = _walk(reason='failed', outcome='failed', rebuild_evidence=True, failure_reason='Worker lost',
+                   started_at=timezone.now(), completed_at=timezone.now(), axis_evidence={'codes': 3})
+    old, new = PersonFactory(), PersonFactory()
+    PatientSourceCode.objects.create(person=old, source_value='A', source_vocabulary_id='LAB', omop_table='measurement')
+    PatientSourceCode.objects.filter(person=old).update(first_seen=before - timezone.timedelta(days=1))
+    for code in ('A', 'B'):
+        PatientSourceCode.objects.create(person=new, source_value=code, source_vocabulary_id='LAB', omop_table='measurement')
+
+    status = client.get(WALK).data
+    assert status['active'] is None
+    assert status['last']['id'] == failed.pk and status['last']['outcome'] == 'failed'
+    assert status['completed']['id'] == done.pk
+    assert status['completed']['axis_evidence']['axes']['property']['varies'] == 5
+    assert status['patients_since'] == 1, 'one patient since, counted once for two codes'
+    assert status['walked_at'] == before
+
+
+def test_walk_status_with_no_completed_walk_counts_every_patient_with_source_codes(client):
+    from tests.factories import PersonFactory
+    from omop_core.models import PatientSourceCode
+    PatientSourceCode.objects.create(person=PersonFactory(), source_value='A', source_vocabulary_id='LAB', omop_table='measurement')
+    PersonFactory()
+    status = client.get(WALK).data
+    assert (status['last'], status['completed'], status['walked_at'], status['patients_since']) == (None, None, None, 1)
+
+
+def test_an_approver_starts_a_rebuild_walk_and_a_second_ask_joins_the_active_one(client):
+    from omop_core.models import AxisVariantRefresh
+    first = client.post(WALK)
+    assert first.status_code == 202 and first.data['created']
+    walk = AxisVariantRefresh.objects.get(pk=first.data['request']['id'])
+    assert walk.rebuild_evidence and walk.outcome == 'queued' and 'concept-curator@test.com' in walk.reason
+    assert first.data['active']['id'] == walk.pk
+
+    again = client.post(WALK)
+    assert again.status_code == 200 and not again.data['created']
+    assert again.data['request']['id'] == walk.pk and AxisVariantRefresh.objects.count() == 1
+    assert again.data['patients_since'] is None, 'not scanned while a walk is active'
+
+
+def test_a_rebuild_asked_for_while_a_plain_refresh_runs_is_refused_not_dropped(client):
+    from omop_core.models import AxisVariantRefresh
+    running = AxisVariantRefresh.objects.create(reason='plain', outcome='running', started_at=timezone.now(),
+                                                progress_at=timezone.now())
+    refused = client.post(WALK)
+    assert refused.status_code == 409 and 'Ask again' in refused.data['detail']
+    assert refused.data['active']['id'] == running.pk and not refused.data['created']
+    assert AxisVariantRefresh.objects.count() == 1
+    running.refresh_from_db()
+    assert not running.rebuild_evidence
+
+    queued = AxisVariantRefresh.objects.create(reason='plain queued')
+    AxisVariantRefresh.objects.filter(pk=running.pk).update(outcome='done')
+    assert client.post(WALK).status_code == 200
+    queued.refresh_from_db()
+    assert queued.rebuild_evidence, 'a queued plain refresh takes the rebuild'
+
+
+def test_a_professional_without_approval_rights_sees_the_walk_but_cannot_start_it(django_user_model):
+    from omop_core.models import GroupAccess
+    from tests.factories import OrganizationFactory
+    analyst = django_user_model.objects.create_user(email='analyst@test.com')
+    GroupAccess.objects.create(identity=analyst, org=OrganizationFactory(), role='analyst')
+    api = APIClient()
+    api.force_authenticate(analyst)
+    assert api.get(WALK).status_code == 200
+    assert api.post(WALK).status_code == 403
+
+
+def test_a_patient_cannot_see_the_walk(django_user_model):
+    api = APIClient()
+    api.force_authenticate(django_user_model.objects.create_user(email='patient@test.com'))
+    assert api.get(WALK).status_code == 403

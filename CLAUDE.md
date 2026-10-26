@@ -1193,7 +1193,16 @@ Source axes come from, strongest first: a curator's entry
 `method_type` means methodless), the source code itself when it is LOINC, a
 LOINC coding in the resource's `code.coding`, then the metadata -- a UCUM unit
 names a property, `valueQuantity` names scale `Qn`, an exact specimen display
-names a system. Free-text method and `effectivePeriod` are hints only: a wrong
+names a system. A unit that fits several properties (`%` is a mass, number,
+volume or other fraction; `U/L` is catalytic or arbitrary concentration)
+settles the property to that **set**: the properties of the LOINC codes that
+give the unit as an example unit, read from the loaded `LoincCodeClass` table
+(`loinc_axes.loaded_unit_properties`, cached per process) with
+`AMBIGUOUS_UNIT_PROPERTIES` as the fallback. A candidate with any of them is
+eligible; a mass concentration for a `%` is excluded. Sets are sorted, so
+`U/L` and `IU/L` are one variant, keyed `property=ACnc,CCnc|scale_type=Qn`;
+a row stored under the older `unit=%` key is re-keyed on refresh. A set reads
+"any of …" in the dialog and "one of …" to the rankers. Free-text method and `effectivePeriod` are hints only: a wrong
 constraint hides the right answer. Inference reads the metadata *as stored*,
 because de-identification drops `specimen` (a Reference).
 
@@ -1250,7 +1259,30 @@ its units (`repoint_clinical_rows(units=...)`). Specimen variation is reported
 but cannot be routed.
 
 Counts refresh after each source-code upload for codes seen in two or more
-units, and in bulk with `manage.py refresh_axis_variants`.
+units, and in bulk with `manage.py refresh_axis_variants`. The bulk walk is a
+worker job, never a migration step: `--queue` (or migration `0303`) records an
+`AxisVariantRefresh` request that `omop_core.refresh_axis_variants` performs.
+Migrations 0300 and 0301 ran it inline and could not finish inside the Cloud
+Run migrate job's hour on the HealthTree instance (#2021).
+
+The stored unit evidence (`SourceCodeConceptMapping.source_unit_evidence`) is
+the instance's own: `--rebuild-evidence` (or migration `0307`) sets
+`rebuild_evidence` on the request and the walk first rewrites every code's
+units from the source codes on its loaded patients and the stored Measurement
+rows (`axis_variants.rebuild_unit_evidence`, entries with `source:
+"patient-data"`; a text term's own recorded units, which name no source, are
+kept), then refreshes the variants, deleting one the evidence no longer shows
+unless a curator decided it. The walk resumes after its stored `cursor`, not
+an offset, because the key set shrinks as codes are rebuilt. Once an instance
+has completed a rebuild, a seed or inventory load writes no unit evidence
+over existing rows. The hospital code seed used to carry the inventory's
+label-level counts on every code with the label (#2041).
+A curator asks for the walk again after loading patients from the panel on
+the Concept to Code tab (`POST concept-to-code/axis-variant-walk/`, #2050),
+which also shows how many patients have source codes since the last walk
+began. A rebuild counts the axis evidence it meets (`axis_evidence.Summary`,
+stored on the request) so the panel can show whether any axis beyond property
+and scale is ever settled or varies across patients (#2051).
 
 ### Concept embeddings
 

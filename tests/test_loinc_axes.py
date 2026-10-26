@@ -24,6 +24,17 @@ from tests.factories import (
 
 pytestmark = pytest.mark.django_db
 
+PERCENT = tuple(sorted(loinc_axes.AMBIGUOUS_UNIT_PROPERTIES['%']))
+PERCENT_KEY = axis_variants.axis_key({'property': list(PERCENT), 'scale_type': 'Qn'})
+
+
+@pytest.fixture(autouse=True)
+def _fresh_unit_properties():
+    """The sets read from the LOINC table are cached per process."""
+    loinc_axes.reset_loaded_unit_properties()
+    yield
+    loinc_axes.reset_loaded_unit_properties()
+
 LAB = 'ACME-LAB'
 GLUCOSE = {
     #          concept_id component    property time  system      scale  method
@@ -87,6 +98,13 @@ class TestCompare:
         assert loinc_axes.compare('method_type', None, 'Glucometer') == loinc_axes.UNKNOWN
         assert loinc_axes.compare('method_type', '', None) == loinc_axes.UNKNOWN
 
+    def test_a_set_of_values_matches_any_member_and_conflicts_outside_it(self):
+        assert loinc_axes.compare('property', ['NFr', 'MFr'], 'MFr') == loinc_axes.MATCH
+        assert loinc_axes.compare('property', ['NFr', 'MFr'], 'MCnc') == loinc_axes.CONFLICT
+        assert loinc_axes.compare('system', ['Ser', 'Urine'], 'Ser/Plas') == loinc_axes.COMPATIBLE
+        # An empty set settles nothing, like no value at all.
+        assert loinc_axes.compare('property', [], 'MCnc') == loinc_axes.UNKNOWN
+
     def test_methodless_conflicts_with_a_method(self):
         assert loinc_axes.compare('method_type', '', 'Glucometer') == loinc_axes.CONFLICT
         assert loinc_axes.compare('method_type', '', '') == loinc_axes.MATCH
@@ -134,6 +152,26 @@ class TestApply:
 
 # --- the source side --------------------------------------------------------------
 
+def test_a_source_in_percent_keeps_fractions_and_excludes_concentrations(glucose):
+    g = glucose['2345-7']
+    fraction = ConceptFactory(
+        concept_id=3024561, concept_name='Albumin/Protein.total [Mass fraction] in Serum or Plasma',
+        concept_code='13980-8', vocabulary=g.vocabulary, domain=g.domain, concept_class=g.concept_class,
+        standard_concept='S',
+    )
+    LoincCodeClass.objects.create(
+        loinc_num='13980-8', loinc_class_id='CHEM', component='Albumin/Protein.total', property='MFr',
+        time_aspect='Pt', system='Ser/Plas', scale_type='Qn', method_type='Electrophoresis',
+    )
+    axes, _ = loinc_axes.infer(LAB, 'ALB', {}, observed_units=['%'])
+    eligible, excluded = loinc_axes.apply(
+        [candidate(fraction), candidate(glucose['2345-7']), candidate(glucose['14749-6'])], axes)
+    assert [c['concept_code'] for c in eligible] == ['13980-8']
+    assert eligible[0]['axis_match']['property'] == loinc_axes.MATCH
+    assert {c['concept_code'] for c in excluded} == {'2345-7', '14749-6'}
+    assert all(c['axis_conflicts'] == ['property'] for c in excluded)
+
+
 class TestInfer:
     def test_a_loinc_source_code_settles_all_six(self, glucose):
         axes, _ = loinc_axes.infer('LOINC', '41653-7', {})
@@ -157,9 +195,22 @@ class TestInfer:
         assert loinc_axes.values(axes) == {'property': 'SCnc', 'scale_type': 'Qn'}
         assert axes['property']['evidence'] == 'valueQuantity.unit = mmol/L'
 
-    def test_an_ambiguous_unit_settles_only_the_scale(self):
+    def test_an_ambiguous_unit_settles_the_property_to_the_set_it_fits(self):
+        # "%" is a fraction or a relative quantity, never a mass concentration (#2029).
         axes, _ = loinc_axes.infer(LAB, 'A1C', {'fhir': {'valueQuantity': {'value': 6.1, 'unit': '%'}}})
-        assert loinc_axes.values(axes) == {'scale_type': 'Qn'}
+        assert axes['scale_type']['value'] == 'Qn'
+        assert axes['property']['value'] == list(PERCENT)
+        assert 'MFr' in axes['property']['value'] and 'MCnc' not in axes['property']['value']
+        assert axes['property']['basis'] == loinc_axes.BASIS_UNIT
+
+    def test_a_variants_property_set_overrides_as_a_set(self):
+        # Sorted, like every set: the order never means anything.
+        axes, _ = loinc_axes.resolve(LAB, 'ALB', {}, {'property': ['NFr', 'MFr']})
+        assert axes['property']['value'] == ['MFr', 'NFr']
+        axes, _ = loinc_axes.resolve(LAB, 'ALB', {}, {'property': ['MFr']})
+        assert axes['property']['value'] == 'MFr'
+        axes, _ = loinc_axes.resolve(LAB, 'ALB', {}, {'property': []})
+        assert 'property' not in axes
 
     def test_the_code_level_aggregate_settles_scale_from_value_types(self):
         axes, _ = loinc_axes.infer(LAB, 'GLU', {'value_types': {'quantity': 99.5}})
@@ -208,6 +259,15 @@ def test_axis_retrieval_finds_the_code_the_axes_describe(glucose):
 
 
 # --- the pipeline -----------------------------------------------------------------
+
+def test_axis_retrieval_accepts_any_property_in_a_set(glucose):
+    hits = loinc_axes.axis_candidates(
+        settled(component='Glucose', property=['SCnc', 'NFr'], system='Ser/Plas'), 'Measurement')
+    assert [h['concept_code'] for h in hits] == ['14749-6']
+    # Case-insensitive, as a single value is.
+    hits = loinc_axes.axis_candidates(settled(component='glucose', property=['scnc', 'nfr']), 'Measurement')
+    assert [h['concept_code'] for h in hits] == ['14749-6']
+
 
 @pytest.fixture()
 def pipeline(glucose, monkeypatch):
@@ -325,6 +385,19 @@ def test_one_property_in_two_spellings_is_one_variant(glucose):
     assert mapping.axis_variant_count == 0
 
 
+def test_refresh_deletes_an_unseen_variant_with_nothing_decided_and_keeps_a_decided_one(two_unit_code, glucose):
+    undecided = SourceCodeAxisVariant.objects.create(
+        mapping=two_unit_code, axis_key='property=NCnc|scale_type=Qn', axis_values={'property': 'NCnc'}, units=['/uL'])
+    decided = SourceCodeAxisVariant.objects.create(
+        mapping=two_unit_code, axis_key='property=ACnc|scale_type=Qn', axis_values={'property': 'ACnc'}, units=['U/L'],
+        target_concept=glucose['2345-7'])
+    stored = axis_variants.refresh(two_unit_code)
+    assert not SourceCodeAxisVariant.objects.filter(pk=undecided.pk).exists()
+    assert SourceCodeAxisVariant.objects.filter(pk=decided.pk).exists()
+    assert sorted(v.axis_key for v in stored) == [
+        'property=ACnc|scale_type=Qn', 'property=MCnc|scale_type=Qn', 'property=SCnc|scale_type=Qn']
+
+
 def test_refresh_flags_the_code_and_keeps_a_curators_choice(two_unit_code, glucose):
     stored = axis_variants.refresh(two_unit_code)
     two_unit_code.refresh_from_db()
@@ -387,25 +460,6 @@ def test_one_failing_code_does_not_stop_the_rest(second_two_unit_code):
     with patch.object(axis_variants, 'refresh', refresh):
         assert axis_variants.refresh_all() == 2
     assert _counts(*second_two_unit_code) == [0, 2, 0]
-
-
-def _backfill():
-    import importlib
-
-    return importlib.import_module('omop_core.migrations.0300_backfill_axis_variants').backfill
-
-
-def test_the_migration_backfills_existing_codes(second_two_unit_code):
-    _backfill()(None, None)
-    assert _counts(*second_two_unit_code) == [2, 2, 0]
-
-
-def test_the_migration_does_not_block_a_deploy_on_a_database_error(two_unit_code):
-    from django.db import ProgrammingError
-
-    with patch.object(axis_variants, 'refresh_all', side_effect=ProgrammingError('no column')):
-        _backfill()(None, None)
-    assert _counts(two_unit_code) == [0]
 
 
 def test_the_command_reports_and_refreshes(second_two_unit_code):
@@ -740,22 +794,171 @@ def test_a_lab_spelling_can_make_a_code_multi_property(glucose):
     assert mapping.axis_variant_count == 2
 
 
-def test_migration_0301_regroups_stored_variants(two_unit_code):
-    import importlib
-
-    backfill = importlib.import_module('omop_core.migrations.0301_regroup_axis_variant_unit_spellings').backfill
+def test_a_bulk_refresh_regroups_stored_variants(two_unit_code):
     axis_variants.refresh(two_unit_code)
     PatientSourceCode.objects.create(person=PersonFactory(), source_value='GLU', source_vocabulary_id=LAB,
                                      omop_table='measurement', source_unit='GM/DL', occurrence_count=5)
-    backfill(None, None)
+    axis_variants.refresh_all()
     mass = SourceCodeAxisVariant.objects.get(mapping=two_unit_code, axis_key='property=MCnc|scale_type=Qn')
     assert mass.occurrence_count == 15
 
 
 @pytest.mark.parametrize('unit', ['U/mL', 'U/L', 'IU/L', '%'])
-def test_a_unit_that_fits_several_properties_settles_none(unit):
+def test_a_unit_that_fits_several_properties_settles_the_set(unit):
     axes, _ = loinc_axes.infer(LAB, 'CA125', {'fhir': {'valueQuantity': {'value': 35, 'unit': unit}}})
-    assert 'property' not in axes and axes['scale_type']['value'] == 'Qn'
+    assert axes['property']['value'] == list(loinc_axes.AMBIGUOUS_UNIT_PROPERTIES[unit])
+    assert axes['scale_type']['value'] == 'Qn'
+    assert loinc_axes.unit_property(unit) == ''
+    assert loinc_axes.unit_property_options(unit) == loinc_axes.AMBIGUOUS_UNIT_PROPERTIES[unit]
+    assert list(loinc_axes.AMBIGUOUS_UNIT_PROPERTIES[unit]) == sorted(loinc_axes.AMBIGUOUS_UNIT_PROPERTIES[unit])
+
+
+def test_a_dimensionless_unit_settles_only_the_scale():
+    axes, _ = loinc_axes.infer(LAB, 'RATIO', {'fhir': {'valueQuantity': {'value': 1.2, 'unit': '1'}}})
+    assert loinc_axes.values(axes) == {'scale_type': 'Qn'}
+    assert loinc_axes.unit_property_options('1') == ()
+
+
+@pytest.fixture()
+def albumin_percent_code(glucose):
+    """A hospital albumin code reported in g/dL for most patients and in % for a few."""
+    mapping = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id=LAB, source_code='ALB', source_code_description='Albumin',
+        omop_table='measurement', domain_id='Measurement', status='approved',
+        target_concept=glucose['2345-7'],
+    )
+    for unit, count in (('g/dL', 10), ('%', 3)):
+        PatientSourceCode.objects.create(
+            person=PersonFactory(), source_value='ALB', source_vocabulary_id=LAB,
+            omop_table='measurement', source_unit=unit, occurrence_count=count,
+        )
+    return mapping
+
+
+def test_a_percent_unit_is_its_own_variant_constrained_to_fractions(albumin_percent_code):
+    variants, notes = axis_variants.detect(albumin_percent_code)
+    assert [(v['axis_key'], v['units'], v['occurrence_count']) for v in variants] == [
+        ('property=MCnc|scale_type=Qn', ['g/dL'], 10), (PERCENT_KEY, ['%'], 3)]
+    assert variants[1]['axis_values'] == {'property': list(PERCENT), 'scale_type': 'Qn'}
+    assert PERCENT_KEY.startswith('property=AFr,CFr,') and PERCENT_KEY.endswith('|scale_type=Qn')
+    assert notes == []
+
+
+def test_units_with_the_same_property_set_are_one_variant(glucose):
+    """U/L and IU/L both fit catalytic or arbitrary concentration: one enzyme test."""
+    assert loinc_axes.unit_property_options('U/L') == loinc_axes.unit_property_options('IU/L') == ('ACnc', 'CCnc')
+    assert loinc_axes.unit_property_options('u/l') == ('ACnc', 'CCnc')
+    mapping = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id=LAB, source_code='ALT', source_code_description='ALT',
+        omop_table='measurement', domain_id='Measurement', status='approved', target_concept=glucose['2345-7'])
+    for unit, count in (('U/L', 900), ('IU/L', 40)):
+        PatientSourceCode.objects.create(
+            person=PersonFactory(), source_value='ALT', source_vocabulary_id=LAB,
+            omop_table='measurement', source_unit=unit, occurrence_count=count)
+    variants, _ = axis_variants.detect(mapping)
+    assert [(v['axis_key'], v['units']) for v in variants] == [('property=ACnc,CCnc|scale_type=Qn', ['U/L', 'IU/L'])]
+    axes, hints = loinc_axes.infer(LAB, 'ALT', {}, observed_units=['U/L', 'IU/L'])
+    assert axes['property']['value'] == ['ACnc', 'CCnc'] and 'property' not in hints
+
+
+def test_a_legacy_per_unit_row_is_rekeyed_and_keeps_its_destination(albumin_percent_code, glucose):
+    legacy = SourceCodeAxisVariant.objects.create(
+        mapping=albumin_percent_code, axis_key='unit=%', axis_values={'scale_type': 'Qn'}, units=['%'],
+        occurrence_count=3, target_concept=glucose['14749-6'])
+    stored = axis_variants.refresh(albumin_percent_code)
+    assert [v.axis_key for v in stored] == ['property=MCnc|scale_type=Qn', PERCENT_KEY]
+    rekeyed = SourceCodeAxisVariant.objects.get(pk=legacy.pk)
+    assert rekeyed.axis_key == PERCENT_KEY and rekeyed.target_concept == glucose['14749-6']
+    assert rekeyed.axis_values == {'property': list(PERCENT), 'scale_type': 'Qn'}
+
+
+def test_the_sets_follow_the_loaded_loinc_table(glucose):
+    """The static sets are the fallback; a loaded table's example units decide."""
+    assert loinc_axes.loaded_unit_properties() == {}
+    loinc_axes.reset_loaded_unit_properties()
+    for n, prop in enumerate(['MFr', 'MFr', 'NFr', 'NFr', 'VFr']):  # VFr once: noise
+        LoincCodeClass.objects.create(loinc_num=f'9{n}-0', loinc_class_id='CHEM', component=f'X{n}',
+                                      property=prop, example_units='%' if n else 'g/dL;%')
+    LoincCodeClass.objects.create(loinc_num='99-9', loinc_class_id='CHEM', component='Y', property='MCnc',
+                                  example_units='mg/dL')
+    assert loinc_axes.loaded_unit_properties() == {'%': ('MFr', 'NFr')}
+    assert loinc_axes.unit_property_options('%') == ('MFr', 'NFr')
+    assert loinc_axes.unit_property_options('U/L') == ('ACnc', 'CCnc')  # not in the table: fallback
+
+
+def _suggest_variant(mapping, axis_key):
+    from patient_portal.models import Identity
+    client = APIClient()
+    client.force_authenticate(Identity.objects.create_user(
+        email=f'{axis_key}-{mapping.pk}@example.test', is_staff=True, is_superuser=True))
+    return client.post('/api/v1/code-mappings/suggest-one/', {
+        'source_code': mapping.source_code, 'source_vocabulary_id': mapping.source_vocabulary_id,
+        'omop_table': 'measurement', 'source_code_description': mapping.source_code_description,
+        'axis_key': axis_key, 'mapping_id': mapping.pk,
+    }, format='json')
+
+
+def test_the_percent_variant_is_never_given_a_mass_concentration(pipeline, albumin_percent_code):
+    # Retrieval offers only concentrations (the glucose codes); every one is a
+    # different test from a fraction, so nothing is suggested rather than 1751-7.
+    response = _suggest_variant(albumin_percent_code, PERCENT_KEY)
+    assert response.status_code == 200, response.data
+    assert response.data['suggested'] is None
+    assert {c['concept_code'] for c in response.data['axis_excluded']} == {'2339-0', '41653-7', '2345-7', '14749-6'}
+    assert 'Property' in response.data['note']
+    assert response.data['source_axes']['axes']['property']['value'] == list(PERCENT)
+    # The g/dL variant is a mass concentration and is suggested as before:
+    # the ranker chooses among the MCnc codes, the SCnc one is excluded.
+    response = _suggest_variant(albumin_percent_code, 'property=MCnc|scale_type=Qn')
+    assert response.data['suggested']['concept_code'] in {'2345-7', '2339-0', '41653-7'}
+    assert {c['concept_code'] for c in response.data['axis_excluded']} == {'14749-6'}
+
+
+def test_a_stored_variant_is_suggested_with_the_axes_its_units_imply_now(pipeline, albumin_percent_code):
+    # Stored before % settled a property: the request must not reuse its stale values.
+    SourceCodeAxisVariant.objects.create(
+        mapping=albumin_percent_code, axis_key=PERCENT_KEY, axis_values={'scale_type': 'Qn'}, units=['%'],
+        occurrence_count=3)
+    response = _suggest_variant(albumin_percent_code, PERCENT_KEY)
+    assert response.status_code == 200, response.data
+    assert response.data['suggested'] is None
+    assert response.data['source_axes']['axes']['property']['value'] == list(PERCENT)
+
+
+def test_a_record_in_a_unit_of_the_set_routes_to_the_sets_variant(glucose):
+    mapping = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id=LAB, source_code='ALT', source_code_description='ALT',
+        omop_table='measurement', domain_id='Measurement', status='approved', target_concept=glucose['2345-7'],
+        axis_variant_count=2,
+    )
+    enzyme = SourceCodeAxisVariant.objects.create(
+        mapping=mapping, axis_key='property=ACnc,CCnc|scale_type=Qn',
+        axis_values={'property': ['ACnc', 'CCnc'], 'scale_type': 'Qn'},
+        units=['U/L'], occurrence_count=50, status='approved', target_concept=glucose['14749-6'])
+    assert axis_variants.variant_for(mapping, 'U/L') == enzyme
+    # kat/L is a catalytic concentration, one of the properties the U/L variant fits.
+    assert axis_variants.variant_for(mapping, 'kat/L') == enzyme
+    assert axis_variants.variant_for(mapping, 'mg/dL') is None
+    # A variant for exactly the record's property beats a set that includes it,
+    # whatever the order the rows come back in.
+    arbitrary = SourceCodeAxisVariant.objects.create(
+        mapping=mapping, axis_key='property=ACnc|scale_type=Qn', axis_values={'property': 'ACnc', 'scale_type': 'Qn'},
+        units=['mIU/L'], occurrence_count=2, status='approved', target_concept=glucose['2339-0'])
+    assert axis_variants.variant_for(mapping, 'mIU/mL') == arbitrary
+    assert axis_variants.variant_for(mapping, 'kat/L') == enzyme
+
+
+def test_jev_reads_a_property_set_as_one_of(settings):
+    from omop_core.mapping.suggestions import rank_candidates_jev
+
+    settings.JEV_API_KEY = 'key'
+    with patch('requests.post') as post:
+        post.return_value.json.return_value = {'answers': {'best_match': {'choice': 'none'}}}
+        rank_candidates_jev('ALB', [{
+            'concept_id': 1, 'concept_code': '13980-8', 'concept_name': 'Albumin/Protein.total',
+            'vocabulary_id': 'LOINC', 'loinc_axes': {'property': 'MFr'},
+        }], source_context={'code': 'ALB', 'loinc_axes': {'property': ['NFr', 'MFr']}})
+    assert 'Property=one of NFr, MFr' in post.call_args.kwargs['json']['state']
 
 
 def test_unit_evidence_is_read_once_for_a_batch(two_unit_code, monkeypatch):
@@ -907,3 +1110,161 @@ def test_jev_is_told_loinc_is_expected(settings):
                             source_context={'code': 'GLU', 'expected_vocabulary': {
                                 'vocabulary_id': 'LOINC', 'reason': 'filed as a laboratory result'}})
     assert 'laboratory-style test (filed as a laboratory result): prefer a LOINC' in post.call_args.kwargs['json']['state']
+
+
+# --- Suggest fills in the variants (#2012) --------------------------------------------
+
+def test_suggest_destinations_proposes_a_loinc_per_variant(pipeline, two_unit_code, glucose):
+    results = axis_variants.suggest_destinations(two_unit_code, ranking_model='anthropic', user=None)
+
+    by_key = {r['axis_key']: r for r in results}
+    # Nothing settles the specimen, so any mass concentration may win the mg/dL
+    # variant; the mmol/L variant can only be the substance concentration.
+    mass = {'2345-7', '2339-0', '41653-7'}
+    assert by_key['property=MCnc|scale_type=Qn']['suggested']['concept_code'] in mass
+    assert by_key['property=SCnc|scale_type=Qn']['suggested']['concept_code'] == '14749-6'
+    # The ranker saw only the candidates each variant's axes allow.
+    assert pipeline['context']['loinc_axes']['property'] == 'SCnc'
+    assert {c['concept_code'] for c in pipeline['candidates']} == {'14749-6'}
+    stored = {v.axis_key: v for v in two_unit_code.axis_variants.select_related('target_concept')}
+    assert stored['property=SCnc|scale_type=Qn'].target_concept == glucose['14749-6']
+    assert stored['property=SCnc|scale_type=Qn'].status == 'proposed'
+    assert stored['property=MCnc|scale_type=Qn'].target_concept.concept_code in mass
+
+
+def test_suggest_destinations_never_touches_a_variant_that_has_a_destination(pipeline, two_unit_code, glucose):
+    variant = {v.axis_key: v for v in axis_variants.refresh(two_unit_code)}['property=SCnc|scale_type=Qn']
+    axis_variants.set_destination(variant, glucose['2339-0'], approve=False, user=None)
+    approved = {v.axis_key: v for v in axis_variants.refresh(two_unit_code)}['property=MCnc|scale_type=Qn']
+    axis_variants.set_destination(approved, glucose['2345-7'], approve=True, user=None)
+
+    # A curator's pick and an approval both look the same to a ranker: left alone.
+    assert axis_variants.suggest_destinations(two_unit_code, ranking_model='anthropic', user=None) == []
+    variant.refresh_from_db()
+    assert variant.target_concept == glucose['2339-0']
+
+
+def test_suggest_destinations_respects_its_limit(pipeline, two_unit_code):
+    results = axis_variants.suggest_destinations(two_unit_code, ranking_model='anthropic', user=None, limit=1)
+    assert len(results) == 1
+    assert two_unit_code.axis_variants.filter(target_concept__isnull=False).count() == 1
+
+
+def test_a_code_without_a_table_reports_why_nothing_was_suggested(pipeline, two_unit_code):
+    two_unit_code.omop_table = ''
+    two_unit_code.save(update_fields=['omop_table'])
+    results = axis_variants.suggest_destinations(two_unit_code, ranking_model='anthropic', user=None)
+    assert results and all(r['suggested'] is None and 'quarantine' in r['note'] for r in results)
+
+
+def test_a_non_loinc_winner_leaves_the_variant_for_a_curator(pipeline, two_unit_code, glucose, monkeypatch):
+    snomed = ConceptFactory(concept_name='Glucose measurement', concept_code='33747003',
+                            vocabulary=VocabularyFactory(vocabulary_id='SNOMED'), domain=glucose['2345-7'].domain)
+    monkeypatch.setattr('omop_core.mapping.suggestions.lexical_candidates', lambda *a, **k: [candidate(snomed)])
+    monkeypatch.setattr('omop_core.mapping.suggestions.rank_candidates',
+                        lambda source_value, candidates, source_description='', **kwargs: (candidates[0], 'ok', []))
+
+    results = axis_variants.suggest_destinations(two_unit_code, ranking_model='anthropic', user=None)
+
+    assert all(r['suggested'] is None for r in results)
+    assert all('not a standard LOINC' in r['note'] for r in results)
+    assert not two_unit_code.axis_variants.filter(target_concept__isnull=False).exists()
+
+
+def test_the_suggest_endpoint_queues_a_run_that_fills_the_variants(pipeline, two_unit_code, glucose):
+    from omop_core.services.suggest_jobs import InlineDispatcher, use_dispatcher
+    from patient_portal.models import Identity
+    client = APIClient()
+    user = Identity.objects.create_user(email='variants@example.test', is_staff=True, is_superuser=True)
+    client.force_authenticate(user)
+    url = f'/api/v1/code-mappings/{two_unit_code.pk}/axis-variants/suggest/'
+
+    assert client.post(url, {'ranking_model': 'bogus'}, format='json').status_code == 400
+    with use_dispatcher(InlineDispatcher()):
+        response = client.post(url, {'strategies': ['lexical'], 'ranking_model': 'jev'}, format='json')
+
+    assert response.status_code == 202, response.data
+    assert response.data['state'] == 'success'
+    result = next(event for event in response.data['activity'] if event['stage'] == 'result')
+    suggested = {s['axis_key']: s['suggested']['concept_code'] for s in result['suggestions']}
+    assert suggested['property=SCnc|scale_type=Qn'] == '14749-6'
+    assert suggested['property=MCnc|scale_type=Qn'] in {'2345-7', '2339-0', '41653-7'}
+    variants = {v['axis_key']: v for v in result['variants']}
+    assert variants['property=SCnc|scale_type=Qn']['target_concept']['concept_code'] == '14749-6'
+    assert variants['property=SCnc|scale_type=Qn']['status'] == 'proposed'
+    # The panel reads the same variants back.
+    axes = client.get(f'/api/v1/code-mappings/{two_unit_code.pk}/loinc-axes/').data
+    assert {v['axis_key'] for v in axes['variants'] if v['target_concept']} == set(variants)
+
+    viewer = APIClient()
+    viewer.force_authenticate(Identity.objects.create_user(email='viewer@example.test'))
+    assert viewer.post(url, {}, format='json').status_code == 403
+
+
+def test_loinc_axis_evidence_hides_the_snomed_evidence(two_unit_code, glucose):
+    """The SNOMED panel does not apply to a code LOINC should name (#2012, #2014)."""
+    from patient_portal.models import Identity
+    from patient_portal.api.loinc_axes import _snomed_payload
+    client = APIClient()
+    client.force_authenticate(Identity.objects.create_user(
+        email='lab@example.test', is_staff=True, is_superuser=True))
+
+    # Two units implying different properties: the variants are the evidence.
+    response = client.get(f'/api/v1/code-mappings/{two_unit_code.pk}/snomed-attributes/')
+    assert response.status_code == 200, response.data
+    assert response.data['applies'] is False
+    assert response.data['loinc_evidence'] == 'Its units imply 2 LOINC axis sets'
+    # One property across every record: the settled property is the evidence,
+    # whatever the metadata's own sample says.
+    PatientSourceCode.objects.filter(source_unit='mmol/L').delete()
+    two_unit_code.source_metadata = {'reference_range': {'unit': '%'}}
+    two_unit_code.save(update_fields=['source_metadata'])
+    payload = _snomed_payload(two_unit_code)
+    assert payload['applies'] is False
+    assert payload['loinc_evidence'].startswith('Its property is settled (every record unit implies it')
+    # A LOINC source code names the code system, not an axis.
+    two_unit_code.source_vocabulary_id = 'LOINC'
+    two_unit_code.save(update_fields=['source_vocabulary_id'])
+    assert _snomed_payload(two_unit_code)['loinc_evidence'] == 'The source code is LOINC'
+    two_unit_code.source_vocabulary_id = LAB
+    two_unit_code.save(update_fields=['source_vocabulary_id'])
+    # An axis a curator settled is evidence too: the curator means LOINC.
+    PatientSourceCode.objects.all().delete()
+    two_unit_code.source_metadata = {}
+    two_unit_code.loinc_axes = {'system': 'Ser'}
+    two_unit_code.save(update_fields=['source_metadata', 'loinc_axes'])
+    assert _snomed_payload(two_unit_code)['loinc_evidence'] == 'LOINC axis evidence: System Ser (Set by a curator)'
+    two_unit_code.loinc_axes = {}
+    two_unit_code.save(update_fields=['loinc_axes'])
+    # A lab category alone is enough too.
+    PatientSourceCode.objects.all().delete()
+    two_unit_code.source_metadata = {'fhir': {'category': [{'coding': [{'code': 'laboratory'}]}]}}
+    two_unit_code.save(update_fields=['source_metadata'])
+    payload = _snomed_payload(two_unit_code)
+    assert payload['applies'] is False and 'laboratory result' in payload['loinc_evidence']
+    # No units, no category, no coding: the measurement keeps its SNOMED evidence.
+    two_unit_code.source_metadata = {}
+    two_unit_code.save(update_fields=['source_metadata'])
+    payload = _snomed_payload(two_unit_code)
+    assert payload['loinc_evidence'] is None and payload['applies'] is True
+
+
+def test_record_units_settle_the_axes_whatever_the_metadata_sample_says():
+    """A reference-range unit in the metadata used to blank every axis (#2014)."""
+    axes, _ = loinc_axes.infer(LAB, 'ALB', {'reference_range': {'unit': 'g/dL'}},
+                               observed_units=['g/dL', 'g/L', 'mg/dL', 'G/DL'])
+    assert axes['property']['value'] == 'MCnc' and axes['property']['basis'] == loinc_axes.BASIS_UNIT
+    assert axes['scale_type']['value'] == 'Qn'
+    # A sample unit of its own still speaks when the records are silent ...
+    axes, _ = loinc_axes.infer(LAB, 'ALB', {'fhir': {'valueQuantity': {'value': 4, 'unit': 'g/dL'}}})
+    assert axes['property']['value'] == 'MCnc' and axes['scale_type']['value'] == 'Qn'
+    # ... but a sample that disagrees with every record does not override them ...
+    axes, _ = loinc_axes.infer(LAB, 'ALB', {'fhir': {'valueQuantity': {'value': 40, 'unit': 'g/L'}}},
+                               observed_units=['mmol/L', 'umol/L'])
+    assert axes['property']['value'] == 'SCnc'
+    # ... and records in % settle the set a % can mean; a g/dL sample does not
+    # pick a mass concentration for them (#2029).
+    axes, _ = loinc_axes.infer(LAB, 'HCT', {'fhir': {'valueQuantity': {'value': 40, 'unit': 'g/dL'}}},
+                               observed_units=['%'])
+    assert axes['property']['value'] == list(loinc_axes.AMBIGUOUS_UNIT_PROPERTIES['%'])
+    assert axes['scale_type']['value'] == 'Qn'

@@ -8,7 +8,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ('omop_core', '0302_relevance_signal'),
+        ('omop_core', '0308_axis_evidence_summary'),
     ]
 
     operations = [

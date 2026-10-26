@@ -107,6 +107,9 @@ _OMOP_DERIVED_FIELDS = [
     'later_therapy_type_ids', 'therapy_type_ids',
     'therapy_ids_provenance',
     'therapy_lines_count', 'last_treatment',
+    # Set only when the patient has confirmed the list is complete (#1924), so a
+    # withdrawn confirmation must clear it on the next refresh.
+    'therapy_history_complete',
     'concomitant_medications',
     # Treatment assertions and summaries. These are set from dated OMOP rows
     # below; clearing them prevents legacy PatientRecord patches surviving a
@@ -1713,6 +1716,12 @@ def _disease_name_to_slug(name: str) -> str:
 def _get_treatment_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     data = {}
     snapshot = snapshot or _build_snapshot(person)
+
+    # An explicit confirmation is the only thing that makes the recorded line
+    # count exact; without it the projection leaves the flag NULL (#1924).
+    from omop_core.models import TherapyHistoryAttestation
+    if TherapyHistoryAttestation.objects.filter(person=person).exists():
+        data['therapy_history_complete'] = True
 
     drug_exposures = snapshot.drug_exposures  # already ordered by start_date, id
 

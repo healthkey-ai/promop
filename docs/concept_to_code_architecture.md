@@ -22,13 +22,26 @@ counts describe stored mappings, not proof of clinical equivalence.
 
 ## Reviewing sources
 
-The selected concept has three views:
+The selected concept has two views, and opens on the second (#2010):
 
-- Existing mappings: SCCM rows already targeting that concept.
-- Find source codes: other proposed rows with compatible or unspecified source
-  domain/table, including imported proposals with nonstandard destinations.
+- Existing mappings: SCCM rows already targeting that concept, grouped by
+  status. Approved mappings come first, folded, then the proposed mappings
+  open for review, then rejected ones, folded. Each group is fetched and paged
+  on its own; the group headers carry the counts of all three under the current
+  search and Seen filter.
 - Suggested source codes: a saved preview retrieved from local vocabulary
-  evidence. No SCCM rows change when this search runs.
+  evidence. No SCCM rows change when this search runs, with one exception: a
+  candidate whose units imply several LOINC axis sets (the blue "n axis
+  values") has each axis variant without a destination suggested a standard
+  LOINC with the run's ranker, stored as proposed (#2012). The variants are
+  listed under the code with their axes, units and destination, and an
+  approver can approve each from the row; approving re-points that variant's
+  stored rows. Curator review (no ranker) lists the variants and suggests
+  nothing.
+
+The API still serves `mode=available` (other proposed rows with a compatible or
+unspecified source domain/table); the dialog no longer shows that list, since
+Suggest reaches the same rows with the ranker's evidence attached.
 
 Source rows default to Seen > 0 and sort by Seen descending. The checkbox above
 the Seen header includes zero-Seen rows when unchecked. Seen represents the
@@ -72,15 +85,18 @@ the curator can retry. A redelivery before the run started still executes it.
 
 ## Saving and approving
 
-Curators select displayed sources and choose Propose selected or, for staff and
-organization admins, Approve selected. The client processes one source per
-request and reports successes and failures separately. Each request locks the
+Staff and organization admins select displayed sources and choose Approve
+selected; there is no separate Propose step (#2010). Other curators open one
+code at a time in Edit Mapping. The client processes one source per request and
+reports successes and failures separately. Each request locks the
 SCCM row in a transaction and requires its exact `updated_at` revision from the
 preview. Concurrent edits, approved/rejected rows, Athena reference rows,
 active locks held by another user and domain mismatches prevent the write.
 
-A vocabulary-only candidate must first be proposed using its saved reverse
-preview run and source identity. The server reloads the installed source and
+A vocabulary-only candidate is first proposed using its saved reverse preview
+run and source identity, then approved on the revision that proposal returned;
+Approve selected makes both requests, and a proposal that fails leaves the row
+as it was. The server reloads the installed source and
 checks its revision, current validity and domain compatibility. Changed sources
 or a mapping created since the preview require a refreshed search. A successful
 proposal creates one SCCM row, with the full label retained in notes if it
@@ -109,14 +125,53 @@ All endpoints require an authenticated professional role:
 | Endpoint under `/api/v1/` | Purpose |
 | --- | --- |
 | `GET concept-to-code/` | Concept catalog, fields and coverage counts |
-| `GET concept-to-code/<concept_id>/` | Paginated linked or available sources |
+| `GET concept-to-code/<concept_id>/` | Paginated linked or available sources; `status=` filters one status and `status_counts` counts all three |
 | `POST concept-to-code/suggest/` | Queue a reverse preview; returns 202 |
 | `GET concept-to-code/suggest-runs/<run_id>/` | Preview progress and candidates |
 | `POST concept-to-code/<concept_id>/mappings/` | Propose one vocabulary source from a saved preview |
 | `POST concept-to-code/<concept_id>/mappings/<mapping_id>/` | Propose or approve one reviewed source with a revision precondition |
+| `GET concept-to-code/axis-variant-walk/` | The active axis variant walk, the last one, the patients loaded since it began, and the axis evidence it counted (#2050, #2051) |
+| `POST concept-to-code/axis-variant-walk/` | Ask for a rebuild walk; 202 with `created: true`, or 200 with the walk already queued or running. Approval rights required |
+
+### A run moves on
+
+A run retrieves the best `limit` sources for the concept and asks the ranker
+about each. One the ranker declines gets no confidence and the tab hides it.
+Each decline is recorded (`ReverseSuggestDecline`: concept, mapping or
+vocabulary key, ranker, run), and later runs and the estimate skip declined
+sources in the query itself, so the next Suggest reaches the sources the last
+one did not. The estimate reports `declined` and `declined_skipped`; the run
+event carries `declined`. `include_declined` on the suggest and estimate
+requests ("Retry declined" on the tab) searches them again. Curator review
+(no ranker) declines nothing, and a decision on the mapping takes the source
+out of the pool anyway (#2034).
 
 Migration 0264 adds the run direction and pending destination IDs with database
 defaults for older writers, and builds a GIN trigram index on uppercase source
 descriptions concurrently.
 It changes no mappings. The remaining visualization work is tracked in the
 [concept-to-code plan](concept_to_code_plan.md).
+
+### The source-code walk panel
+
+Unit counts and axis variants are what the last walk left (#2043): nothing
+re-runs it when patients are loaded. The panel beside the Source-code coverage
+heading shows when the last walk began, how many patients have source codes
+first seen since then, and a button that records a rebuild request
+(`axis_variant_jobs.request_refresh(rebuild_evidence=True)`) for the worker.
+One walk at a time: while one is queued or running the panel shows its
+progress instead and polls every ten seconds. Starting a walk needs approval
+rights, because it costs the worker hours on a large instance; every
+professional role sees the panel.
+
+A rebuild also counts, over the codes it walks, how much evidence each LOINC
+axis has (`omop_core/mapping/axis_evidence.py`, stored on the request as
+`axis_evidence` with every batch): codes with the axis settled and from what
+(curator entry, LOINC source code, LOINC coding, unit, quantitative value,
+specimen), codes with only a hint for it, and codes whose patients disagree on
+it (units implying different properties, codings naming different tests,
+specimens naming different systems, different method texts). The panel shows
+the last completed walk's table. Units settle property and scale; if no other
+axis is ever settled or varies, the data holds no evidence for more than one
+LOINC per unit variant, which is what decides whether the multi-axis
+capability is worth extending (#2051).

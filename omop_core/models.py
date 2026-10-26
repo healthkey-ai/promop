@@ -3211,6 +3211,30 @@ class WearableUpload(models.Model):
         return f'{self.device_type} upload {self.filename} ({self.samples_created} samples)'
 
 
+class TherapyHistoryAttestation(models.Model):
+    """The patient's explicit confirmation that the listed lines are complete.
+
+    Absence of a row means "not confirmed" — not "incomplete history". The two
+    are different claims and only the patient can make either, so the projection
+    leaves ``PatientRecord.therapy_history_complete`` NULL until this row exists
+    (#1924). Confirming is a statement about the list, not clinical data: deleting
+    the row withdraws it.
+    """
+    person = models.OneToOneField(
+        Person, on_delete=models.CASCADE, related_name='therapy_history_attestation',
+    )
+    confirmed_at = models.DateTimeField()
+    # Where the confirmation came from ('patient', 'clinician', 'host'); provenance
+    # only, never a clinical decision.
+    source = models.CharField(max_length=20, default='patient')
+
+    class Meta:
+        db_table = 'therapy_history_attestation'
+
+    def __str__(self):
+        return f'Person {self.person_id} therapy history confirmed {self.confirmed_at:%Y-%m-%d}'
+
+
 class PatientRecord(models.Model):
     """
     Comprehensive patient information model — OMOP CDM–aligned PatientRecord projection.
@@ -3419,6 +3443,11 @@ class PatientRecord(models.Model):
 
     # Legacy therapy fields
     therapy_lines_count = models.IntegerField(blank=True, null=True)
+    # True only when the patient explicitly confirmed that the recorded lines are
+    # their full history (#1924). Until then `therapy_lines_count` is a lower
+    # bound ("at least N"), not an exact count, and consumers must not exclude on
+    # a maximum it cannot prove.
+    therapy_history_complete = models.BooleanField(blank=True, null=True)
     line_of_therapy = models.TextField(blank=True, null=True)
 
     # Blood work with units
@@ -5061,6 +5090,61 @@ class HospitalCodeImport(models.Model):
         ordering = ['-created_at']
 
 
+class AxisVariantRefresh(models.Model):
+    """Durable request for one bulk LOINC axis variant refresh (#2021).
+
+    Written by a migration or ``manage.py refresh_axis_variants --queue`` and
+    performed by the worker, never by ``migrate``: on a large instance the
+    refresh outlives the Cloud Run migrate job's hour.
+    """
+
+    OUTCOME_CHOICES = [
+        ('queued', 'Queued'),
+        ('running', 'Running'),
+        ('done', 'Done'),
+        ('failed', 'Failed'),
+    ]
+
+    reason = models.TextField(blank=True)
+    #: Rewrite every code's unit evidence from this instance's own patient
+    #: data before refreshing its variants (#2043), rather than only refresh
+    #: the variants of codes seen in several units.
+    rebuild_evidence = models.BooleanField(default=False)
+    outcome = models.CharField(
+        max_length=16, choices=OUTCOME_CHOICES, default='queued', db_index=True,
+    )
+    task_id = models.CharField(max_length=255, blank=True)
+    keys = models.PositiveIntegerField(default=0)
+    done = models.PositiveIntegerField(default=0)
+    refreshed = models.PositiveIntegerField(default=0)
+    #: The last key walked, as ``vocabulary\x1fcode``; a requeued request resumes
+    #: after it, whatever the key set looks like by then (#2043).
+    cursor = models.TextField(blank=True)
+    #: What a rebuild found of the six LOINC axes across the codes it walked
+    #: (``axis_evidence.Summary``), written with every batch (#2051).
+    axis_evidence = models.JSONField(default=dict, blank=True)
+    failure_reason = models.TextField(blank=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    # Heartbeat: written on claim and after every batch. A running request
+    # whose heartbeat stops was killed with its worker (#2023).
+    progress_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'axis_variant_refresh'
+        ordering = ['-created_at']
+        constraints = [
+            # At most one queued and one running request: two callers racing
+            # request_refresh must not start two walks over the same codes.
+            models.UniqueConstraint(
+                fields=['outcome'],
+                condition=Q(outcome__in=('queued', 'running')),
+                name='uq_axis_variant_refresh_active',
+            ),
+        ]
+
+
 class SourceSystemFacility(models.Model):
     """An observed or curated name for an exact FHIR system, not ownership.
 
@@ -5190,6 +5274,42 @@ class SuggestRun(models.Model):
     def __str__(self):
         return (f'SuggestRun {self.id} ({self.state} {self.done}/{self.total}, '
                 f'{self.destinations} destination(s))')
+
+
+class ReverseSuggestDecline(models.Model):
+    """A source code a ranker declined for a concept on the Concept to Code tab (#2034).
+
+    A Concept to Code run retrieves the best ``limit`` sources for a concept
+    and asks the ranker about each. One it declines gets no confidence and is
+    hidden, and nothing used to remember that, so the next run retrieved and
+    ranked the same codes and never reached the rest of the pool. A decline is
+    recorded here and skipped by later runs and by the estimate; a run with
+    ``include_declined`` retries them. A decision on the mapping itself
+    (approved, rejected) takes the source out of the pool anyway.
+    """
+    concept = models.ForeignKey(Concept, on_delete=models.CASCADE, related_name='+')
+    #: The mapping row the candidate came from, for reference; None for an
+    #: unregistered vocabulary code the catalog search found. Runs skip by the
+    #: vocabulary and code, which every hospital's row of the code shares.
+    mapping = models.ForeignKey(
+        SourceCodeConceptMapping, on_delete=models.CASCADE, null=True, blank=True, related_name='+',
+    )
+    source_vocabulary_id = models.CharField(max_length=255, blank=True, default='')
+    source_code = models.CharField(max_length=255)
+    ranking_model = models.CharField(max_length=20)
+    run = models.ForeignKey(SuggestRun, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'reverse_suggest_decline'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['concept', 'source_vocabulary_id', 'source_code'], name='uq_reverse_suggest_decline',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.concept_id} declined {self.source_vocabulary_id}:{self.source_code} ({self.ranking_model})'
 
 
 class SuggestEmbeddingSnapshot(models.Model):

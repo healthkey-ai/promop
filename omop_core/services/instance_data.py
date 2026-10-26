@@ -47,6 +47,8 @@ SYSTEM: frozenset[str] = frozenset({
     # caller's own ids, which mean nothing on another instance.
     'omop_core.PatientSourceCodeUpload',
     'omop_core.SuggestEmbeddingSnapshot', 'omop_core.SuggestRun',
+    # What a ranker declined on this instance's Concept to Code runs.
+    'omop_core.ReverseSuggestDecline',
     # Historical model-quality feedback for this instance, not a live mapping.
     'omop_core.CodeMappingUpload', 'omop_core.MappingSuggestionReview',
     # Counts from this instance's own documents, and its curators' decisions on them.
@@ -57,6 +59,7 @@ SYSTEM: frozenset[str] = frozenset({
     'patient_portal.AiExplanation',
     'omop_core.SuggestSynonymTerm',
     'omop_core.AthenaVocabularySync', 'omop_core.HospitalCodeImport',
+    'omop_core.AxisVariantRefresh',
     'omop_core.VocabularyRelease',
     'omop_core.VocabularyVersionHistory',
     # A task for a human about two Persons here, named by local id. It says
@@ -123,6 +126,8 @@ PATIENT: frozenset[str] = frozenset({
     'omop_core.ObservationPeriod', 'omop_core.PatientDocument', 'omop_core.PatientRecord',
     'omop_core.PatientSourceCode',
     'omop_core.PatientTrialEnrollment', 'omop_core.Person', 'omop_core.PersonLanguageSkill',
+    # The patient's own confirmation that the treatment list is complete (#1924).
+    'omop_core.TherapyHistoryAttestation',
     'omop_core.ProcedureOccurrence', 'omop_core.ProvenanceRecord', 'omop_core.RecordRevision',
     'omop_core.Specimen', 'omop_core.SupportiveTherapyCourse', 'omop_core.TrialSearchPreferences',
     'omop_core.VisitDetail', 'omop_core.VisitOccurrence', 'omop_core.WearableUpload',

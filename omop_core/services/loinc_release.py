@@ -245,6 +245,9 @@ def load_from_archive(chunks, stdout=None):
         update_fields=['loinc_class_id', 'example_units', *AXIS_COLUMNS.values()],
         batch_size=2000,
     )
+    # The property sets ambiguous units settle are read from these rows.
+    from omop_core.mapping import loinc_axes
+    loinc_axes.reset_loaded_unit_properties()
     return len(classes), len(code_rows)
 
 

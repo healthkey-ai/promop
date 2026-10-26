@@ -1,13 +1,16 @@
 from .canonical_units import canonical_unit
 from django.urls import include, path
 from .loinc_axes import (
-    code_mapping_axis_variant, code_mapping_loinc_axes, code_mapping_snomed_attributes, loinc_axis_values,
+    code_mapping_axis_variant, code_mapping_axis_variant_suggest, code_mapping_loinc_axes,
+    code_mapping_snomed_attributes, loinc_axis_values,
 )
 from .relevance import disease_relevance_view, relevance_signal_review, relevance_signals
+from .version import version_view
 from .concept_to_code import (
     concept_to_code_list, concept_to_code_detail, concept_to_code_suggest,
     concept_to_code_run, concept_to_code_apply, concept_to_code_propose,
     concept_to_code_source_examples, concept_to_code_priority, concept_to_code_estimate,
+    concept_to_code_axis_variant_walk,
 )
 from rest_framework.routers import DefaultRouter
 from .concept_mint import mint_destination
@@ -26,7 +29,7 @@ from .views import (
     resolve_run_status,
     V1ConditionOccurrenceViewSet, V1DrugExposureViewSet, V1MeasurementViewSet,
     V1ObservationViewSet, V1ProcedureOccurrenceViewSet, EpisodeViewSet, EpisodeEventViewSet,
-    TherapyLineViewSet,
+    TherapyLineViewSet, TherapyHistoryCompletenessViewSet,
     PatientDocumentViewSet,
     PatientTrialEnrollmentViewSet,
     TrialSearchPreferencesViewSet,
@@ -102,6 +105,9 @@ router.register(r'episode-events', EpisodeEventViewSet, basename='v1-episode-eve
 # than any single row. See TherapyLineViewSet.
 router.register(r'supportive-therapies', SupportiveTherapyViewSet, basename='v1-supportive-therapies')
 router.register(r'therapy-lines', TherapyLineViewSet, basename='v1-therapy-lines')
+# The patient's statement that the recorded lines are their whole history (#1924).
+router.register(r'therapy-history/completeness', TherapyHistoryCompletenessViewSet,
+                basename='v1-therapy-history-completeness')
 router.register(r'documents', PatientDocumentViewSet, basename='v1-documents')
 router.register(r'trial-enrollments', PatientTrialEnrollmentViewSet, basename='v1-trial-enrollments')
 router.register(r'trial-search-preferences', TrialSearchPreferencesViewSet, basename='v1-trial-search-preferences')
@@ -121,6 +127,7 @@ urlpatterns = [
     # The surveys the PROlog runner serves, for the portal's Surveys tab.
     path('prolog-surveys/', PrologSurveyListView.as_view(), name='v1-prolog-surveys'),
     path('', include(router.urls)),
+    path('version/', version_view, name='v1-version'),
     path('auth/login/', login_view, name='v1-login'),
     path('auth/logout/', logout_view, name='v1-logout'),
     path('auth/change-password/', change_password, name='v1-change-password'),
@@ -180,6 +187,7 @@ urlpatterns = [
     path('concept-to-code/suggest/', concept_to_code_suggest, name='v1-concept-to-code-suggest'),
     path('concept-to-code/suggest-runs/<uuid:run_id>/', concept_to_code_run, name='v1-concept-to-code-run'),
     path('concept-to-code/priority/', concept_to_code_priority, name='v1-concept-to-code-priority'),
+    path('concept-to-code/axis-variant-walk/', concept_to_code_axis_variant_walk, name='v1-concept-to-code-axis-variant-walk'),
     path('concept-to-code/source-examples/', concept_to_code_source_examples, name='v1-concept-to-code-source-examples'),
     path('concept-to-code/<int:concept_id>/', concept_to_code_detail, name='v1-concept-to-code-detail'),
     path('concept-to-code/<int:concept_id>/mappings/<int:mapping_id>/', concept_to_code_apply, name='v1-concept-to-code-apply'),
@@ -211,6 +219,7 @@ urlpatterns = [
     path('code-mappings/<int:mapping_id>/lock/', code_mapping_lock, name='v1-code-mapping-lock'),
     path('code-mappings/<int:mapping_id>/loinc-axes/', code_mapping_loinc_axes, name='v1-code-mapping-loinc-axes'),
     path('code-mappings/<int:mapping_id>/axis-variants/', code_mapping_axis_variant, name='v1-code-mapping-axis-variant'),
+    path('code-mappings/<int:mapping_id>/axis-variants/suggest/', code_mapping_axis_variant_suggest, name='v1-code-mapping-axis-variant-suggest'),
     path('code-mappings/<int:mapping_id>/snomed-attributes/', code_mapping_snomed_attributes, name='v1-code-mapping-snomed-attributes'),
     path('loinc/axis-values/', loinc_axis_values, name='v1-loinc-axis-values'),
     path('custom-patient-fields/', custom_patient_field_list, name='v1-custom-patient-field-list'),

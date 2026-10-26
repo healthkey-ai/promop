@@ -30,13 +30,20 @@ const run = (state = 'success') => ({
 
 beforeEach(() => {
   get.mockReset(); post.mockReset();
-  get.mockImplementation((url: string) => Promise.resolve({ data: url === '/v1/concept-to-code/' ? page([concept]) : page([source]) }));
+  get.mockImplementation((url: string) => Promise.resolve({ data: url === '/v1/concept-to-code/' ? page([concept])
+    : url === '/v1/concept-to-code/axis-variant-walk/' ? { active: null, last: null, completed: null, patients_since: 0, walked_at: null } : page([source]) }));
   post.mockResolvedValue({ data: { ...source, destination_concept_id: 123, status: 'approved' } });
 });
+
+/** The dialog opens on Suggested source codes (#2010); stored rows are under Existing mappings. */
+async function showExisting(dialog: HTMLElement = screen.getByRole('dialog')) {
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Existing mappings' }));
+}
 
 async function selectConcept(canApprove = true) {
   render(<ConceptToCodeTab canApprove={canApprove} />);
   fireEvent.click(await screen.findByRole('button', { name: 'Serum albumin' }));
+  await showExisting();
   await screen.findByText('SNOMED:S1');
 }
 
@@ -55,6 +62,7 @@ describe('concept-first curation', () => {
     expect(dialog).toHaveAttribute('aria-modal', 'true');
     expect(within(dialog).getByText('Standard LOINC:A1 · OMOP 123 · Measurement')).toBeInTheDocument();
     expect(screen.queryByRole('table', { name: 'Standard concept coverage' })).not.toBeInTheDocument();
+    await showExisting(dialog);
     expect(await within(dialog).findByRole('alert')).toHaveTextContent('Could not load source codes.');
     fireEvent.click(within(dialog).getByRole('button', { name: 'Close' }));
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
@@ -71,7 +79,9 @@ describe('concept-first curation', () => {
     const dialog = screen.getByRole('dialog', { name: 'Source codes for Serum albumin' });
     const close = within(dialog).getByRole('button', { name: 'Close' });
     expect(close).toHaveFocus();
+    await showExisting(dialog);
     await within(dialog).findByText('SNOMED:S1');
+    close.focus();
     await user.tab({ shift: true });
     expect(dialog).toContainElement(document.activeElement as HTMLElement);
     await user.tab();
@@ -91,6 +101,7 @@ describe('concept-first curation', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Close' }));
     fireEvent.click(await screen.findByRole('button', { name: 'Total protein' }));
     const dialog = screen.getByRole('dialog', { name: 'Source codes for Total protein' });
+    await showExisting(dialog);
     await within(dialog).findByText('SNOMED:S2');
     expect(within(dialog).queryByText('SNOMED:S1')).not.toBeInTheDocument();
     expect(within(dialog).getByRole('checkbox', { name: 'Only source codes with Seen greater than zero' })).toBeChecked();
@@ -106,6 +117,7 @@ describe('concept-first curation', () => {
       ? page([concept]) : page([source, { ...source, mapping_id: 8, source_code: 'S2' }]) }));
     render(<ConceptToCodeTab canApprove onWritingChange={onWritingChange} />);
     fireEvent.click(await screen.findByRole('button', { name: 'Serum albumin' }));
+    await showExisting();
     await screen.findByText('SNOMED:S1');
     fireEvent.click(screen.getByRole('checkbox', { name: 'Select displayed proposed sources' }));
     fireEvent.click(screen.getByRole('button', { name: 'Approve selected (2)' }));
@@ -149,11 +161,10 @@ describe('concept-first curation', () => {
     await waitFor(() => expect(get).toHaveBeenCalledWith('/v1/concept-to-code/123/', expect.objectContaining({ params: expect.objectContaining({ seen_only: '0', page: 1 }) })));
   });
 
-  it('finds new source codes and approves only reviewed selections with revision guards', async () => {
+  it('approves only reviewed selections, with revision guards, and has no Find view (#2010)', async () => {
     await selectConcept();
-    fireEvent.click(screen.getByRole('button', { name: 'Find source codes' }));
-    await waitFor(() => expect(get).toHaveBeenCalledWith('/v1/concept-to-code/123/', expect.objectContaining({ params: expect.objectContaining({ mode: 'available' }) })));
-    await screen.findByText('SNOMED:S1');
+    expect(screen.queryByRole('button', { name: 'Find source codes' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Propose selected/ })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Approve selected (0)' })).toBeDisabled();
     fireEvent.click(screen.getByRole('checkbox', { name: 'Select SNOMED S1' }));
     fireEvent.click(screen.getByRole('button', { name: 'Approve selected (1)' }));
@@ -163,12 +174,97 @@ describe('concept-first curation', () => {
     });
   });
 
-  it('allows proposals but hides approval for non-admin curators', async () => {
+  it('hides batch approval for non-admin curators, who edit one code at a time', async () => {
     await selectConcept(false);
     expect(screen.queryByRole('button', { name: /Approve selected/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Propose selected/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'SNOMED:S1' })).toBeEnabled();
+  });
+
+  it('groups existing mappings by status, approved first and folded (#2010)', async () => {
+    const rows = [
+      { ...source, mapping_id: 1, source_code: 'OK1', status: 'approved' }, { ...source, mapping_id: 2, source_code: 'OK2', status: 'approved' },
+      { ...source, mapping_id: 3, source_code: 'MAYBE', status: 'proposed' }, { ...source, mapping_id: 4, source_code: 'NO', status: 'rejected' },
+    ];
+    get.mockImplementation((url: string, config?: { params?: { status?: string } }) => Promise.resolve({ data: url === '/v1/concept-to-code/'
+      ? page([concept]) : { ...page(rows.filter(row => row.status === config?.params?.status)), status_counts: { approved: 2, proposed: 1, rejected: 1 } } }));
+    render(<ConceptToCodeTab canApprove />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Serum albumin' }));
+    await showExisting();
+    await screen.findByText('SNOMED:MAYBE');
+    // Only the proposed group was fetched; the others announce their counts.
+    const sourceGets = () => get.mock.calls.filter(([url]) => url === '/v1/concept-to-code/123/').map(([, config]) => config.params.status);
+    expect(sourceGets()).toEqual(['proposed']);
+    const approved = screen.getByRole('button', { name: 'Approved mappings (2)' });
+    const proposed = screen.getByRole('button', { name: 'Proposed mappings (1)' });
+    const rejected = screen.getByRole('button', { name: 'Rejected mappings (1)' });
+    expect(approved).toHaveAttribute('aria-expanded', 'false');
+    expect(proposed).toHaveAttribute('aria-expanded', 'true');
+    expect(rejected).toHaveAttribute('aria-expanded', 'false');
+    expect(approved.compareDocumentPosition(proposed) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(proposed.compareDocumentPosition(rejected) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.queryByText('SNOMED:OK1')).not.toBeInTheDocument();
+    expect(screen.getByText('4 matching sources · 3 zero-Seen codes excluded')).toBeInTheDocument();
+
+    fireEvent.click(approved);
+    await screen.findByText('SNOMED:OK1');
+    expect(screen.getByText('SNOMED:OK2')).toBeInTheDocument();
+    expect(approved).toHaveAttribute('aria-expanded', 'true');
+    expect(sourceGets()).toEqual(['proposed', 'approved']);
+    // Approved rows are done: they cannot join a batch.
+    expect(screen.getByRole('checkbox', { name: 'Select SNOMED OK1' })).toBeDisabled();
+    fireEvent.click(approved);
+    expect(screen.queryByText('SNOMED:OK1')).not.toBeInTheDocument();
+  });
+
+  it('forgets a folded group\'s failure and stale counts; a write refreshes the open groups', async () => {
+    let approvedFails = true;
+    let counts = { approved: 2, proposed: 1, rejected: 0 };
+    get.mockImplementation((url: string, config?: { params?: { status?: string } }) => {
+      if (url === '/v1/concept-to-code/') return Promise.resolve({ data: page([concept]) });
+      if (config?.params?.status === 'approved' && approvedFails) return Promise.reject(new Error('Unavailable'));
+      return Promise.resolve({ data: { ...page(config?.params?.status === 'proposed' ? [source] : []), status_counts: counts } });
+    });
+    render(<ConceptToCodeTab canApprove />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Serum albumin' }));
+    await showExisting();
+    await screen.findByText('SNOMED:S1');
+    fireEvent.click(screen.getByRole('button', { name: 'Approved mappings (2)' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not load source codes.');
+    // Folding the group that failed clears the failure; the proposed group loaded fine.
+    fireEvent.click(screen.getByRole('button', { name: 'Approved mappings (2)' }));
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Loading source codes/)).not.toBeInTheDocument();
+
+    // Approving the proposed row reloads the open group, whose counts then win.
+    approvedFails = false;
+    counts = { approved: 3, proposed: 0, rejected: 0 };
     fireEvent.click(screen.getByRole('checkbox', { name: 'Select SNOMED S1' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Propose selected (1)' }));
-    await waitFor(() => expect(post).toHaveBeenCalledWith('/v1/concept-to-code/123/mappings/7/', expect.objectContaining({ status: 'proposed' })));
+    fireEvent.click(screen.getByRole('button', { name: 'Approve selected (1)' }));
+    await screen.findByText('Approved 1 of 1 selected mappings.');
+    expect(await screen.findByRole('button', { name: 'Approved mappings (3)' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Proposed mappings (0)' })).toBeInTheDocument();
+  });
+
+  it('refreshes the concept when a candidate was proposed but its approval failed', async () => {
+    const fresh = { ...source, mapping_id: null, status: 'unmapped', occurrence_count: 0, source_code: 'NEW1' };
+    post.mockResolvedValueOnce({ data: { ...run(), selection: { limit: 25, include_zero_seen: true },
+      activity: [{ concept: { concept_id: 123 }, candidates: [fresh] }] } });
+    await selectConcept();
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Only source codes with Seen greater than zero' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Suggest source codes' }));
+    await screen.findByText('Not yet mapped');
+    const listLoads = () => get.mock.calls.filter(([url]) => url === '/v1/concept-to-code/').length;
+    const before = listLoads();
+    fireEvent.click(screen.getByRole('checkbox', { name: 'Select SNOMED NEW1' }));
+    post.mockResolvedValueOnce({ data: { ...fresh, mapping_id: 21, status: 'proposed', updated_at: 'r2' } })
+      .mockRejectedValueOnce({ response: { status: 409, data: { detail: 'Locked by another curator.' } } });
+    fireEvent.click(screen.getByRole('button', { name: 'Approve selected (1)' }));
+    await screen.findByText('Approved 0 of 1 selected mappings.');
+    expect(screen.getByRole('alert')).toHaveTextContent('Locked by another curator.');
+    // The row is now a stored proposal, so the coverage counts reload.
+    expect(screen.getByText('proposed')).toBeInTheDocument();
+    await waitFor(() => expect(listLoads()).toBeGreaterThan(before));
   });
 
   it('reports partial batch failures without claiming every row was approved', async () => {
@@ -201,9 +297,59 @@ describe('concept-first curation', () => {
     await screen.findByText('1 candidates retrieved (limit 25).');
     expect(post).toHaveBeenCalledTimes(1);
     expect(post).toHaveBeenCalledWith('/v1/concept-to-code/suggest/', {
-      concept_ids: [123], strategies: ['umls', 'lexical'], limit: 25, include_zero_seen: false, ranking_model: 'jev',
+      concept_ids: [123], strategies: ['umls', 'lexical'], limit: 25, include_zero_seen: false, ranking_model: 'jev', include_declined: false,
     });
     expect(screen.getByRole('button', { name: 'Approve selected (0)' })).toBeDisabled();
+  });
+
+  it('keeps the Suggest button on the same line as the ranker and the limit, and sends Retry declined (#2034)', async () => {
+    post.mockResolvedValue({ data: run() });
+    await selectConcept();
+    const settings = screen.getByRole('group', { name: 'Suggest settings' });
+    const ranker = within(settings).getByLabelText('Source suggestion ranker');
+    const limit = within(settings).getByLabelText('Maximum source candidates');
+    const suggest = within(settings).getByRole('button', { name: 'Suggest source codes' });
+    // One non-wrapping row holds all three.
+    expect(ranker.parentElement).toBe(limit.parentElement);
+    expect(suggest.parentElement).toBe(ranker.parentElement);
+    expect(ranker.parentElement).toHaveClass('flex-nowrap');
+    fireEvent.click(within(settings).getByRole('checkbox', { name: 'Retry declined' }));
+    await waitFor(() => expect(get).toHaveBeenCalledWith('/v1/concept-to-code/123/estimate/', expect.objectContaining({
+      params: expect.objectContaining({ include_declined: '1' }) })));
+    fireEvent.click(suggest);
+    await waitFor(() => expect(post).toHaveBeenCalledWith('/v1/concept-to-code/suggest/', expect.objectContaining({ include_declined: true })));
+  });
+
+  it('says hidden candidates were declined and that the next run moves on, and how many the estimate skips (#2034)', async () => {
+    get.mockImplementation((url: string) => Promise.resolve({ data: url.includes('/estimate/')
+      ? { total: 29, lexical: 29, declined_skipped: 25, timed_out: false, approximate: null }
+      : url === '/v1/concept-to-code/' ? page([concept]) : page([source]) }));
+    post.mockResolvedValue({ data: { ...run(), selection: { limit: 25, include_zero_seen: false, ranking_model: 'jev' },
+      activity: [{ concept: { concept_id: 123 }, candidates: [{ ...source, evidence: ['lexical'], verdict: 'review', confidence: null, declined: true }] }] } });
+    await selectConcept();
+    expect(await screen.findByTestId('source-estimate')).toHaveTextContent(
+      'About 29 candidate source codes (29 by name) · about 2 runs of 25. 25 a ranker already declined are skipped.');
+    const estimates = () => get.mock.calls.filter(([url]) => String(url).includes('/estimate/')).length;
+    const before = estimates();
+    fireEvent.click(screen.getByRole('button', { name: 'Suggest source codes' }));
+    expect(await screen.findByText(/1 candidates retrieved \(limit 25\)\. 1 declined by the ranker and hidden; the next run moves on to other codes\./)).toBeInTheDocument();
+    expect(screen.queryByText('SNOMED:S1')).not.toBeInTheDocument();
+    // The finished run recorded declines, so the estimate is read again.
+    await waitFor(() => expect(estimates()).toBeGreaterThan(before));
+  });
+
+  it('tells an unavailable ranker apart from a decline, and does not promise to move on past retried codes (#2034)', async () => {
+    post.mockResolvedValue({ data: { ...run(), selection: { limit: 25, include_zero_seen: false, ranking_model: 'jev', include_declined: true },
+      activity: [{ concept: { concept_id: 123 }, candidates: [
+        { ...source, evidence: ['lexical'], verdict: 'review', confidence: null, declined: true },
+        { ...source, source_code: 'S2', mapping_id: 8, evidence: ['lexical'], verdict: 'review', confidence: null, declined: false, note: 'Ranking model unavailable' },
+      ] }] } });
+    await selectConcept();
+    fireEvent.click(screen.getByRole('button', { name: 'Suggest source codes' }));
+    const status = await screen.findByText(/2 candidates retrieved/);
+    expect(status).toHaveTextContent('1 declined by the ranker and hidden.');
+    expect(status).not.toHaveTextContent('moves on');
+    expect(status).toHaveTextContent('1 could not be ranked (the ranker was unavailable) and is hidden.');
   });
 
   it('polls queued jobs and retains failure information', async () => {
@@ -218,7 +364,7 @@ describe('concept-first curation', () => {
     expect(screen.getByRole('button', { name: 'Suggest source codes' })).toBeEnabled();
   });
 
-  it('keeps new vocabulary candidates distinct and requires proposal before approval', async () => {
+  it('approves a new vocabulary candidate in one click: proposed from its preview, then approved (#2010)', async () => {
     const fresh = { ...source, mapping_id: null, status: 'unmapped', occurrence_count: 0,
       source_code: 'NEW1', origin_system: 'vocabulary', destination_concept_id: null, destination_concept_name: '' };
     const second = { ...fresh, source_code: 'NEW2' };
@@ -230,44 +376,108 @@ describe('concept-first curation', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Suggest source codes' }));
     await screen.findByText('2 candidates retrieved (limit 25).');
     expect(post).toHaveBeenCalledWith('/v1/concept-to-code/suggest/', expect.objectContaining({ include_zero_seen: true }));
+    expect(screen.getByRole('button', { name: 'Approve selected (0)' })).toBeDisabled();
     fireEvent.click(screen.getByRole('checkbox', { name: 'Select SNOMED NEW1' }));
     expect(screen.getByRole('checkbox', { name: 'Select SNOMED NEW2' })).not.toBeChecked();
-    expect(screen.getByRole('button', { name: 'Approve selected (0)' })).toBeDisabled();
     const proposed = { ...fresh, mapping_id: 17, status: 'proposed', updated_at: 'new-revision', destination_concept_id: 123 };
-    post.mockResolvedValueOnce({ data: proposed });
-    fireEvent.click(screen.getByRole('button', { name: 'Propose selected (1)' }));
-    await screen.findByText('Proposed 1 of 1 selected mappings.');
-    expect(post).toHaveBeenLastCalledWith('/v1/concept-to-code/123/mappings/', {
-      run_id: 'run-1', source_vocabulary_id: 'SNOMED', source_code: 'NEW1', status: 'proposed',
-    });
-    expect(screen.getAllByText('Not yet mapped')).toHaveLength(1);
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Select displayed proposed sources' }));
-    expect(screen.getByRole('button', { name: 'Propose selected (2)' })).toBeEnabled();
-    expect(screen.getByRole('button', { name: 'Approve selected (1)' })).toBeEnabled();
-    post.mockResolvedValueOnce({ data: { ...proposed, status: 'approved' } });
+    post.mockResolvedValueOnce({ data: proposed }).mockResolvedValueOnce({ data: { ...proposed, status: 'approved' } });
     fireEvent.click(screen.getByRole('button', { name: 'Approve selected (1)' }));
     await screen.findByText('Approved 1 of 1 selected mappings.');
-    expect(post).toHaveBeenLastCalledWith('/v1/concept-to-code/123/mappings/17/', {
+    expect(post).toHaveBeenNthCalledWith(2, '/v1/concept-to-code/123/mappings/', {
+      run_id: 'run-1', source_vocabulary_id: 'SNOMED', source_code: 'NEW1', status: 'proposed',
+    });
+    // The approval carries the revision the proposal returned, not the preview's.
+    expect(post).toHaveBeenNthCalledWith(3, '/v1/concept-to-code/123/mappings/17/', {
       status: 'approved', expected_updated_at: 'new-revision',
     });
     expect(post).toHaveBeenCalledTimes(3);
-    expect(screen.getByText('Not yet mapped')).toBeInTheDocument();
+    expect(screen.getByText('approved')).toBeInTheDocument();
+    expect(screen.getAllByText('Not yet mapped')).toHaveLength(1);
   });
 
   it('retains a new vocabulary candidate when its preview is stale', async () => {
     post.mockResolvedValueOnce({ data: { ...run(), selection: { limit: 25, include_zero_seen: true },
       activity: [{ concept: { concept_id: 123 }, candidates: [{ ...source, mapping_id: null, status: 'unmapped', occurrence_count: 0 }] }] } });
-    await selectConcept(false);
+    await selectConcept();
     fireEvent.click(screen.getByRole('checkbox', { name: 'Only source codes with Seen greater than zero' }));
     fireEvent.click(screen.getByRole('button', { name: 'Suggest source codes' }));
     await screen.findByText('Not yet mapped');
     fireEvent.click(screen.getByRole('checkbox', { name: 'Select SNOMED S1' }));
     post.mockRejectedValueOnce({ response: { status: 409, data: { detail: 'The source vocabulary changed after the preview.' } } });
-    fireEvent.click(screen.getByRole('button', { name: 'Propose selected (1)' }));
-    await screen.findByText('Proposed 0 of 1 selected mappings.');
+    fireEvent.click(screen.getByRole('button', { name: 'Approve selected (1)' }));
+    await screen.findByText('Approved 0 of 1 selected mappings.');
     expect(screen.getByRole('alert')).toHaveTextContent('The source vocabulary changed after the preview.');
     expect(screen.getByText('Not yet mapped')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /Approve selected/ })).not.toBeInTheDocument();
+    // The proposal failed, so no approval was attempted.
+    expect(post.mock.calls.filter(([url]) => String(url).includes('/mappings/'))).toHaveLength(1);
+  });
+});
+
+describe('axis variants on a source code (#2012)', () => {
+  const glucose = { concept_id: 3020491, concept_name: 'Glucose [Moles/volume] in Serum or Plasma', concept_code: '14749-6', vocabulary_id: 'LOINC' };
+  const variants = [
+    { id: 1, axis_key: 'property=MCnc', axis_values: { property: 'MCnc', scale_type: 'Qn' }, units: ['mg/dL'], occurrence_count: 7,
+      status: 'approved', target_concept: { ...glucose, concept_id: 3004501, concept_code: '2345-7', concept_name: 'Glucose [Mass/volume] in Serum or Plasma' }, reviewed_at: null },
+    { id: 2, axis_key: 'property=SCnc', axis_values: { property: 'SCnc', scale_type: 'Qn' }, units: ['mmol/L'], occurrence_count: 4,
+      status: 'proposed', target_concept: glucose, reviewed_at: null },
+  ];
+  const flagged = { ...source, axis_variant_count: 2, axis_variants: variants };
+
+  it('lists each variant with its units and suggested LOINC under the code, and approves one in place', async () => {
+    post.mockImplementation((url: string) => Promise.resolve({ data: url.endsWith('/axis-variants/')
+      ? { mapping_id: 7, applies: true, variants: variants.map(v => ({ ...v, status: 'approved' })) }
+      : { ...run(), activity: [{ concept: { concept_id: 123 }, candidates: [flagged] }] } }));
+    await selectConcept();
+    fireEvent.click(screen.getByRole('button', { name: 'Suggest source codes' }));
+    const list = await screen.findByRole('list', { name: 'Axis variants' });
+    expect(within(list).getAllByRole('listitem')).toHaveLength(2);
+    expect(list).toHaveTextContent('Property SCnc · Scale Qn');
+    expect(list).toHaveTextContent('mmol/L');
+    expect(list).toHaveTextContent(glucose.concept_name);
+    // Only the proposed variant can be approved; the approved one is a decision.
+    const approve = within(list).getAllByRole('button', { name: /^Approve / });
+    expect(approve).toHaveLength(1);
+    expect(approve[0]).toHaveAccessibleName('Approve Property SCnc · Scale Qn');
+    fireEvent.click(approve[0]);
+    await waitFor(() => expect(post).toHaveBeenCalledWith('/v1/code-mappings/7/axis-variants/', {
+      axis_key: 'property=SCnc', target_concept_id: glucose.concept_id, approve: true }));
+    await screen.findByText('Approved the mmol/L variant of S1.');
+    expect(within(list).queryByRole('button', { name: /^Approve / })).not.toBeInTheDocument();
+    // Approving a variant never opened the editor.
+    expect(screen.queryByRole('dialog', { name: 'Edit Mapping' })).not.toBeInTheDocument();
+  });
+
+  it('keeps a variant approved while the run streams when the next poll replaces the run (#2028)', async () => {
+    const streaming = { ...run('running'), activity: [{ concept: { concept_id: 123 }, candidates: [flagged] }] };
+    post.mockImplementation((url: string) => Promise.resolve({ data: url.endsWith('/axis-variants/')
+      ? { mapping_id: 7, applies: true, variants: variants.map(v => ({ ...v, status: 'approved' })) }
+      : streaming }));
+    const polls = () => get.mock.calls.filter(([url]) => String(url).includes('suggest-runs')).length;
+    // Each poll answers with a fresh object, as the server does, so the run really is replaced.
+    get.mockImplementation((url: string) => Promise.resolve({ data: url.includes('suggest-runs') ? { ...streaming, done: polls() }
+      : url === '/v1/concept-to-code/' ? page([concept]) : page([source]) }));
+    await selectConcept();
+    fireEvent.click(screen.getByRole('button', { name: 'Suggest source codes' }));
+    const list = await screen.findByRole('list', { name: 'Axis variants' });
+    expect(screen.getByRole('button', { name: 'Searching…' })).toBeDisabled();
+    // Approving in place is an individual edit, so the running search does not block it.
+    const approve = within(list).getByRole('button', { name: /^Approve / });
+    expect(approve).toBeEnabled();
+    fireEvent.click(approve);
+    await screen.findByText('Approved the mmol/L variant of S1.');
+    // The next poll brings the run's own copy of the row, still proposed; the approval stands.
+    const before = polls();
+    await waitFor(() => expect(polls()).toBeGreaterThan(before), { timeout: 5000 });
+    expect(within(screen.getByRole('list', { name: 'Axis variants' })).queryByRole('button', { name: /^Approve / })).not.toBeInTheDocument();
+  });
+
+  it('shows variants on an existing mapping too, without Approve for curators who cannot approve', async () => {
+    get.mockImplementation((url: string) => Promise.resolve({ data: url === '/v1/concept-to-code/' ? page([concept]) : page([flagged]) }));
+    await selectConcept(false);
+    const list = screen.getByRole('list', { name: 'Axis variants' });
+    expect(screen.getByText('2 axis values')).toBeInTheDocument();
+    expect(list).toHaveTextContent('mg/dL');
+    expect(within(list).queryByRole('button')).not.toBeInTheDocument();
   });
 });
 
@@ -289,6 +499,7 @@ describe('suggestion confidence', () => {
   async function openScored() {
     render(<ConceptToCodeTab canApprove />);
     fireEvent.click(await screen.findByRole('button', { name: 'Serum albumin' }));
+    await showExisting();
     return screen.findByText('SNOMED:HIGH');
   }
 
@@ -390,18 +601,15 @@ describe('opening a linked concept', () => {
     });
   });
 
-  it('opens the concept\'s source codes ready to find more, by id', async () => {
+  it('opens the concept\'s source codes ready to suggest more, by id', async () => {
     const handled = vi.fn();
     render(<ConceptToCodeTab canApprove initialConceptId={123} onInitialConceptHandled={handled} />);
     const dialog = await screen.findByRole('dialog', { name: 'Source codes for Serum albumin' });
-    expect(within(dialog).getByRole('button', { name: 'Find source codes' })).toHaveAttribute('aria-pressed', 'true');
+    expect(within(dialog).getByRole('button', { name: 'Suggested source codes' })).toHaveAttribute('aria-pressed', 'true');
     expect(get).toHaveBeenCalledWith('/v1/concept-to-code/123/');
     // Never the list's text search, which matches the digits in names and codes.
     expect(get).not.toHaveBeenCalledWith('/v1/concept-to-code/', expect.objectContaining({
       params: expect.objectContaining({ search: '123' }) }));
-    await waitFor(() => expect(get).toHaveBeenCalledWith('/v1/concept-to-code/123/', expect.objectContaining({
-      params: expect.objectContaining({ mode: 'available' }),
-    })));
     expect(handled).toHaveBeenCalledTimes(1);
   });
 
@@ -413,9 +621,17 @@ describe('opening a linked concept', () => {
     expect(handled).toHaveBeenCalledTimes(1);
   });
 
-  it('opens a concept clicked in the list on its existing mappings', async () => {
-    await selectConcept();
-    expect(screen.getByRole('button', { name: 'Existing mappings' })).toHaveAttribute('aria-pressed', 'true');
+  it('opens a concept clicked in the list on Suggested source codes, with Existing mappings a click away (#2010)', async () => {
+    render(<ConceptToCodeTab canApprove />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Serum albumin' }));
+    const dialog = screen.getByRole('dialog', { name: 'Source codes for Serum albumin' });
+    expect(within(dialog).getByRole('button', { name: 'Suggested source codes' })).toHaveAttribute('aria-pressed', 'true');
+    expect(within(dialog).getByText(/Run Suggest source codes to search/)).toBeInTheDocument();
+    expect(get).not.toHaveBeenCalledWith('/v1/concept-to-code/123/', expect.anything());
+    await showExisting(dialog);
+    expect(within(dialog).getByRole('button', { name: 'Existing mappings' })).toHaveAttribute('aria-pressed', 'true');
+    await waitFor(() => expect(get).toHaveBeenCalledWith('/v1/concept-to-code/123/', expect.objectContaining({
+      params: expect.objectContaining({ mode: 'linked', status: 'proposed' }) })));
   });
 });
 
@@ -460,6 +676,22 @@ describe('editing a source code from a concept (#1915)', () => {
     fireEvent.click(within(editor).getByRole('button', { name: 'Close' }));
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Edit Mapping' })).not.toBeInTheDocument());
     expect(screen.getByRole('dialog', { name: 'Source codes for Serum albumin' })).toBeInTheDocument();
+  });
+
+  it('opens a source code for editing while the Suggest run is still running (#2028)', async () => {
+    post.mockResolvedValue({ data: run('running') });
+    get.mockImplementation(routes({ '/v1/concept-to-code/suggest-runs/run-1/': () => Promise.resolve({ data: run('running') }) }));
+    await selectConcept();
+    fireEvent.click(screen.getByRole('button', { name: 'Suggest source codes' }));
+    const code = await screen.findByRole('button', { name: 'SNOMED:S1' });
+    // The run's own controls wait for it; the rows do not.
+    expect(screen.getByRole('button', { name: 'Searching…' })).toBeDisabled();
+    expect(screen.getByRole('checkbox', { name: 'Select SNOMED S1' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Existing mappings' })).toBeEnabled();
+    expect(code).toBeEnabled();
+    fireEvent.click(code);
+    expect(await screen.findByRole('dialog', { name: 'Edit Mapping' })).toBeInTheDocument();
+    expect(get).toHaveBeenCalledWith('/v1/code-mappings/7/');
   });
 
   it('opens from a click anywhere on the row, but not from its checkbox', async () => {
@@ -527,7 +759,7 @@ describe('editing a source code from a concept (#1915)', () => {
 describe('suggestions without a confidence score (#1915)', () => {
   const candidates = [
     { ...source, source_code: 'SCORED', confidence: 0.72 },
-    { ...source, source_code: 'UNSCORED', confidence: null },
+    { ...source, source_code: 'UNSCORED', confidence: null, declined: true },
   ];
   const suggest = (ranking_model: string) => {
     post.mockResolvedValue({ data: { ...run(), selection: { limit: 25, include_zero_seen: false, ranking_model },
@@ -540,7 +772,7 @@ describe('suggestions without a confidence score (#1915)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Suggest source codes' }));
     expect(await screen.findByText('SNOMED:SCORED')).toBeInTheDocument();
     expect(screen.queryByText('SNOMED:UNSCORED')).not.toBeInTheDocument();
-    expect(screen.getByText(/1 without a confidence score hidden/)).toBeInTheDocument();
+    expect(screen.getByText(/1 declined by the ranker and hidden; the next run moves on to other codes/)).toBeInTheDocument();
   });
 
   it('shows every suggestion after an unranked run', async () => {
@@ -549,7 +781,7 @@ describe('suggestions without a confidence score (#1915)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Suggest source codes' }));
     expect(await screen.findByText('SNOMED:SCORED')).toBeInTheDocument();
     expect(screen.getByText('SNOMED:UNSCORED')).toBeInTheDocument();
-    expect(screen.queryByText(/without a confidence score hidden/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/declined by the ranker and hidden/)).not.toBeInTheDocument();
   });
 
   it('leaves existing mappings visible whether or not they were scored', async () => {
@@ -557,6 +789,7 @@ describe('suggestions without a confidence score (#1915)', () => {
       ? page([concept]) : page(candidates) }));
     render(<ConceptToCodeTab canApprove />);
     fireEvent.click(await screen.findByRole('button', { name: 'Serum albumin' }));
+    await showExisting();
     expect(await screen.findByText('SNOMED:SCORED')).toBeInTheDocument();
     expect(screen.getByText('SNOMED:UNSCORED')).toBeInTheDocument();
   });
@@ -666,7 +899,7 @@ describe('concept priority (#1914)', () => {
     await selectConcept();
     const estimate = await screen.findByTestId('source-estimate');
     expect(estimate).toHaveTextContent('About 60 candidate source codes (57 by name, 4 by UMLS) · about 3 runs of 25.');
-    expect(estimates[0]).toEqual({ strategies: 'umls,lexical', include_zero_seen: '0' });
+    expect(estimates[0]).toEqual({ strategies: 'umls,lexical', include_zero_seen: '0', include_declined: '0' });
     // The run count follows the limit as it is typed.
     fireEvent.change(screen.getByLabelText('Maximum source candidates'), { target: { value: '60' } });
     expect(estimate).toHaveTextContent('about 1 run of 60.');
@@ -674,9 +907,9 @@ describe('concept priority (#1914)', () => {
     fireEvent.click(screen.getByRole('checkbox', { name: 'Names and synonyms' }));
     await waitFor(() => expect(screen.getByTestId('source-estimate'))
       .toHaveTextContent('Suggest source codes would find no candidate source codes with these settings.'));
-    expect(estimates.at(-1)).toEqual({ strategies: 'umls', include_zero_seen: '0' });
+    expect(estimates.at(-1)).toEqual({ strategies: 'umls', include_zero_seen: '0', include_declined: '0' });
     fireEvent.click(screen.getByRole('checkbox', { name: 'Only source codes with Seen greater than zero' }));
-    await waitFor(() => expect(estimates.at(-1)).toEqual({ strategies: 'umls', include_zero_seen: '1' }));
+    await waitFor(() => expect(estimates.at(-1)).toEqual({ strategies: 'umls', include_zero_seen: '1', include_declined: '0' }));
   });
 
   it('marks a capped estimate as a floor and says when the estimate timed out', async () => {
@@ -719,6 +952,7 @@ describe('concept priority (#1914)', () => {
         : fail ? Promise.reject(new Error('Unavailable')) : Promise.resolve({ data: page([source]) }));
     render(<ConceptToCodeTab canApprove />);
     fireEvent.click(await screen.findByRole('button', { name: 'Serum albumin' }));
+    await showExisting();
     expect(await screen.findByRole('alert')).toHaveTextContent('Could not load source codes.');
     expect(screen.queryByRole('button', { name: 'Refresh' })).not.toBeInTheDocument();
     fail = false;
