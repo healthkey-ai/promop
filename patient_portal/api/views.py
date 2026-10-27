@@ -172,6 +172,27 @@ def _genomics_type_concept(user, person):
     return 32865 if get_actor_role(user, person.person_id) in ('self', 'representative') else 32817
 
 
+def _patient_authorship(actor, person):
+    """project_single_value keywords for the author of a PatientRecord save.
+
+    The patient or a verified representative writes patient self-report; the
+    patient's own facts also carry PATIENT_SELF provenance. Anyone else, or a
+    service credential with no Identity, writes with the recipe's type.
+    """
+    from omop_core.authorization import get_actor_role
+    from omop_core.services.omop_projection import patient_self_report_type
+
+    if not getattr(actor, 'is_authenticated', False):
+        return {}
+    role = get_actor_role(actor, person.person_id)
+    if role not in ('self', 'representative') or not (self_report := patient_self_report_type()):
+        return {}
+    authorship = {'type_concept_id': self_report}
+    if role == 'self':
+        authorship['patient_user_id'] = f'{actor.issuer}|{actor.sub}'
+    return authorship
+
+
 def _write_genetic_mutations(person, mutations, type_concept_id):
     from omop_core.services.genomics import replace_variants
     replace_variants(person, mutations, type_concept_id=type_concept_id)
@@ -1335,7 +1356,9 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             if clinical_fields:
                 from omop_core.services.patient_record_service import recompute_patient_record_fields
 
-                projected = self._project_mapped_fields(person, clinical_fields, serializer.validated_data)
+                projected = self._project_mapped_fields(
+                    person, clinical_fields, serializer.validated_data, actor=request.user,
+                )
                 patient_info.user_edited_fields = sorted(
                     set(patient_info.user_edited_fields or []) - projected
                 )
@@ -1349,13 +1372,17 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         return Response({**PatientRecordSerializer(patient_info).data, 'previous_values': previous_values})
 
     @staticmethod
-    def _project_mapped_fields(person, direct_fields, patch_data):
+    def _project_mapped_fields(person, direct_fields, patch_data, actor=None):
         """Project validated edits using the editor's curated or built-in recipe.
 
         Each projection uses a savepoint so failure preserves the PatientRecord
         edit for a later retry. Return fields backed by OMOP, including an
         identical existing fact. PatientRecord already has these values, so
         there is no OMOP-to-PatientRecord refresh on a direct save.
+
+        A patient's or representative's edit is typed patient self-report
+        (32865), as genomics edits are; the patient's own also gets a
+        PATIENT_SELF provenance row. Anyone else's keeps the recipe's type.
         """
         from omop_core.services.omop_projection import project_single_value, projection_for_descriptor
         from omop_core.services.write_descriptor import build_writable_field_descriptor
@@ -1367,11 +1394,14 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             logger.warning('Could not resolve OMOP projections')
             return set()
         projected = set()
+        authorship = None
         for field in direct_fields:
             projection = projection_for_descriptor(descriptors.get(field))
             if projection:
+                if authorship is None:
+                    authorship = _patient_authorship(actor, person)
                 if project_single_value(person, field, patch_data[field], projection,
-                                        acknowledge_existing=True):
+                                        acknowledge_existing=True, **authorship):
                     # Occurrences and structured answers need their dedicated
                     # extractors before their saved values can be acknowledged.
                     if (projection['omop_table'] in ('measurement', 'observation')
