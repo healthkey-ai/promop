@@ -30,6 +30,9 @@ class ConditionFactMixin:
         if not supplied and linked:
             condition_id = getattr(self.instance, event)
         if condition_id is not None:
+            if (supplied and self.instance is not None and getattr(self.instance, event) is not None
+                    and getattr(self.instance, kind) not in self._field_ids()):
+                raise serializers.ValidationError({'condition_occurrence': 'This fact belongs to another OMOP event. Link its parent report to the diagnosis instead.'})
             cache = self.context.setdefault('condition_fact_parents', {})
             key = (person.pk if person else None, condition_id)
             if key not in cache:

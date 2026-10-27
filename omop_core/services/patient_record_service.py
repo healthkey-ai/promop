@@ -1071,7 +1071,9 @@ def refresh_patient_record(person: Person) -> PatientRecord:
                 setattr(patient_info, field, value)
 
         for field, value in linked_cancer_values.items():
-            setattr(patient_info, field, value)
+            width = PatientRecord._meta.get_field(field).max_length
+            # Preserve the complete source fact; this is the legacy-width mirror.
+            setattr(patient_info, field, value[:width] if width and isinstance(value, str) else value)
 
         # Pending edits (including explicit clears) win until OMOP actually
         # represents the saved value. A stale fact or a failed projection must

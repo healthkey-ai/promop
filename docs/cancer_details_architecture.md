@@ -28,7 +28,9 @@ For example, a staging fact uses the existing approved stage concept:
 ```
 
 POST to `/api/v1/measurements/` creates/upserts the fact. PATCH the returned fact
-ID to correct its value or diagnosis link. ETL batches can supply the same link
+ID to correct its value or diagnosis link. For a component already linked to a
+parent Measurement, associate the parent report with the diagnosis; the existing
+report relationship is preserved and its components inherit the cancer scope. ETL batches can supply the same link
 per row. The ordinary person/organization permissions still apply; the diagnosis
 must be non-erroneous and belong to that person. A missing CDM field vocabulary
 rejects the link rather than creating an untyped event ID. A link is corrected
@@ -58,6 +60,9 @@ in time or backfill relationships on old patient data.
 `GET /api/v1/phr/diagnoses/` groups cancer condition events as before and projects
 explicitly linked stage, subtype and marker assertions for every cancer. The
 latest dated assertion wins within that cancer, across both clinical tables;
+components of a condition-linked Measurement report inherit its cancer through
+the typed Measurement event relationship. Missing, foreign and cyclic report
+links cannot supply diagnosis details;
 entered-in-error rows are excluded. Source-keyed unmapped staging assertions are
 also readable. Cytogenetic markers are a collection with individual dated clears.
 Approved mappings are read on each request, including distinct source keys when
@@ -75,7 +80,9 @@ An explicit `PatientRecord:cleared` assertion suppresses the older value for tha
 cancer. Clear/history identity also includes the typed event relationship.
 An absent answer does not clear an earlier result.
 
-PatientRecord remains the compatibility projection of the primary cancer.
+PatientRecord remains the compatibility projection of the primary cancer. Its
+existing column widths are respected; diagnosis cards retain the full canonical
+OMOP value.
 Refreshing it filters out another cancer's linked disease-specific facts,
 while shared patient-wide lab values remain available. Explicit linked details
 then override the primary's legacy fallback, including explicit clears. Existing

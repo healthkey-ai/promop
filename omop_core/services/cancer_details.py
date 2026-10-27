@@ -69,6 +69,55 @@ def condition_field_concepts():
         Q(concept_code=CONDITION_FIELD) | Q(concept_name=CONDITION_FIELD)).order_by('pk')
 
 
+MEASUREMENT_FIELD = 'measurement.measurement_id'
+_UNLINKED = object()
+_INVALID = object()
+
+
+def event_namespaces():
+    rows = Concept.objects.filter(vocabulary_id='CDM', domain_id='Metadata', invalid_reason__isnull=True).filter(
+        Q(concept_code__in=(CONDITION_FIELD, MEASUREMENT_FIELD)) | Q(concept_name__in=(CONDITION_FIELD, MEASUREMENT_FIELD)))
+    return ({r.pk for r in rows if r.concept_code == CONDITION_FIELD or r.concept_name == CONDITION_FIELD},
+            {r.pk for r in rows if r.concept_code == MEASUREMENT_FIELD or r.concept_name == MEASUREMENT_FIELD})
+
+
+def fact_owners(rows, groups, condition_concepts, measurement_concepts):
+    """Resolve typed report ancestry in memory; missing parents/cycles are invalid.
+
+    Ownership is never followed into another person's rows: callers load only
+    this person's facts. An unlinked legacy report remains primary-only fallback.
+    """
+    measurements = {row.pk: row for row in rows if isinstance(row, Measurement)}
+    owners, pending = {}, {}
+    for pk, row in measurements.items():
+        if row.meas_event_field_concept_id in condition_concepts:
+            owners[pk] = groups.get(row.measurement_event_id, _INVALID)
+        elif row.meas_event_field_concept_id in measurement_concepts:
+            pending[pk] = row.measurement_event_id
+        else:
+            owners[pk] = _UNLINKED
+    while pending:
+        resolved = {pk: owners[parent] for pk, parent in pending.items() if parent in owners}
+        if not resolved:
+            break
+        owners.update(resolved)
+        pending = {pk: parent for pk, parent in pending.items() if pk not in resolved}
+    owners.update({pk: _INVALID for pk in pending})
+    result = {}
+    for row in rows:
+        event, kind = EVENT_FIELDS[type(row)]
+        if isinstance(row, Measurement):
+            owner = owners[row.pk]
+        elif getattr(row, kind) in condition_concepts:
+            owner = groups.get(getattr(row, event), _INVALID)
+        elif getattr(row, kind) in measurement_concepts:
+            owner = owners.get(getattr(row, event), _INVALID)
+        else:
+            owner = _UNLINKED
+        result[type(row), row.pk] = owner
+    return result
+
+
 class DetailFields:
     def __init__(self):
         self.codes = {pair: field for field, pairs in CODES.items() for pair in pairs}
@@ -131,19 +180,19 @@ def recency(row):
     return on, at, table, row.pk
 
 
-def select_details(rows, groups, event_concepts, fields):
+def select_details(rows, groups, event_concepts, fields, measurement_concepts=()):
     """group -> field -> (value, source row); query-free and patient-scoped by caller."""
     selected = defaultdict(dict)
     marker_rows = defaultdict(list)
+    owners = fact_owners(rows, groups, event_concepts, measurement_concepts)
     for row in rows:
-        event, kind = EVENT_FIELDS[type(row)]
-        if getattr(row, kind) not in event_concepts or getattr(row, event) not in groups:
+        group = owners[type(row), row.pk]
+        if group is _UNLINKED or group is _INVALID:
             continue
         field = fields.field(row)
         text = value(row)
         if not field or text is None:
             continue
-        group = groups[getattr(row, event)]
         if field == 'cytogenetic_markers':
             marker_rows[group].append(row)
             continue
@@ -191,14 +240,14 @@ def cancer_details(person_id, groups):
     """Read all requested cancers in batches, with source metadata per value."""
     if not groups:
         return {}
-    event_concepts = set(condition_field_concepts().values_list('pk', flat=True))
+    event_concepts, measurement_concepts = event_namespaces()
     rows = []
     for model, (event, kind) in EVENT_FIELDS.items():
         table = model._meta.db_table
         rows.extend(model.objects.filter(person_id=person_id, is_erroneous=False,
-            **{f'{event}__in': groups, f'{kind}__in': event_concepts}).select_related(
+            **{f'{kind}__in': event_concepts | measurement_concepts}).select_related(
                 f'{table}_concept', 'value_as_concept', 'visit_occurrence'))
-    return select_details(rows, groups, event_concepts, DetailFields())
+    return select_details(rows, groups, event_concepts, DetailFields(), measurement_concepts)
 
 
 def primary_snapshot(person, snapshot):
@@ -211,20 +260,26 @@ def primary_snapshot(person, snapshot):
     raw = snapshot.cancer_detail_rows or (snapshot.measurements + snapshot.observations)
     if not any(getattr(r, EVENT_FIELDS[type(r)][0]) is not None for r in raw):
         return snapshot, {}
-    event_concepts = set(condition_field_concepts().values_list('pk', flat=True))
-    linked = [r for r in raw if getattr(r, EVENT_FIELDS[type(r)][1]) in event_concepts]
+    event_concepts, measurement_concepts = event_namespaces()
+    linked = [r for r in raw if getattr(r, EVENT_FIELDS[type(r)][1]) in event_concepts | measurement_concepts]
     if not linked:
         return snapshot, {}
+    if not any(getattr(r, EVENT_FIELDS[type(r)][1]) in event_concepts for r in linked):
+        legacy_owners = fact_owners(raw, {}, event_concepts, measurement_concepts)
+        if all(owner is _UNLINKED for owner in legacy_owners.values()):
+            return snapshot, {}
     from omop_core.services.patient_record_service import _is_oncologic, _primary_cancer_condition
     cancers = [c for c in snapshot.conditions if not c.is_erroneous and _is_oncologic(c)]
     primary = _primary_cancer_condition(person, snapshot, cancers) if cancers else None
     own = {c.pk for c in cancers if primary and cancer_family(c) == cancer_family(primary)}
     fields = DetailFields()
-    selected = select_details(raw, {pk: 'primary' for pk in own}, event_concepts, fields).get('primary', {})
+    groups = {pk: 'primary' for pk in own}
+    owners = fact_owners(raw, groups, event_concepts, measurement_concepts)
+    selected = select_details(raw, groups, event_concepts, fields, measurement_concepts).get('primary', {})
 
     def keep(row):
-        event, kind = EVENT_FIELDS[type(row)]
-        return (getattr(row, kind) not in event_concepts or getattr(row, event) in own or not fields.field(row))
+        owner = owners[type(row), row.pk]
+        return owner is _UNLINKED or owner == 'primary' or not fields.field(row)
 
     measurements = [r for r in snapshot.measurements if keep(r)]
     observations = [r for r in snapshot.observations if keep(r)]

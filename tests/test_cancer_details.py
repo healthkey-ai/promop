@@ -339,3 +339,54 @@ def test_linked_fact_can_be_retired_after_its_diagnosis_but_not_reactivated(canc
     assert row.is_erroneous
     response = client.patch(f'/api/v1/measurements/{row.pk}/?include_erroneous=true', {'is_erroneous': False}, format='json')
     assert response.status_code == 400
+
+
+def test_report_components_inherit_cancer_and_preserve_the_report_link(cancers):
+    record, mine, other, event, _, client = cancers
+    measurement_field = ConceptFactory(vocabulary__vocabulary_id='CDM', domain__domain_id='Metadata',
+        concept_code='CDM-measurement', concept_name='measurement.measurement_id')
+    report = fact(cancers, other, 'histologic_type', 'Ductal')
+    component = fact(cancers, other, 'mrd_status', 'Negative', measurement_event_id=report.pk,
+        meas_event_field_concept=measurement_field)
+    assert {b['label']: b['value'] for b in cards(client)['Breast cancer']['biomarkers']} == {'MRD': 'Negative'}
+    response = client.patch(f'/api/v1/measurements/{component.pk}/?skip_refresh=true',
+        {'condition_occurrence': mine.pk}, format='json')
+    assert response.status_code == 400
+    component.refresh_from_db()
+    assert component.measurement_event_id == report.pk
+    refresh_patient_record(record.person)
+    record.refresh_from_db()
+    assert not record.mrd_status
+
+
+def test_missing_foreign_or_cyclic_report_links_cannot_supply_details(cancers):
+    record, mine, other, event, _, client = cancers
+    measurement_field = ConceptFactory(vocabulary__vocabulary_id='CDM', domain__domain_id='Metadata',
+        concept_code='CDM-measurement', concept_name='measurement.measurement_id')
+    missing = fact(cancers, other, 'mrd_status', 'Missing', measurement_event_id=999999,
+        meas_event_field_concept=measurement_field)
+    cycle = fact(cancers, other, 'mrd_status', 'Cycle', meas_event_field_concept=measurement_field)
+    Measurement.objects.filter(pk=cycle.pk).update(measurement_event_id=cycle.pk)
+    foreign = fact(cancers, other, 'histologic_type', 'Private report')
+    Measurement.objects.filter(pk=foreign.pk).update(person=PatientRecordFactory().person)
+    fact(cancers, other, 'mrd_status', 'Foreign', measurement_event_id=foreign.pk,
+        meas_event_field_concept=measurement_field)
+    assert 'biomarkers' not in cards(client)['Breast cancer']
+    FieldConceptMapping.objects.update_or_create(field_name='mrd_status', defaults={
+        'concept': missing.measurement_concept, 'source_value': missing.measurement_source_value,
+        'vocabulary_id': 'LOINC', 'concept_code': '105941-9', 'status': 'approved', 'omop_table': 'measurement'})
+    refresh_patient_record(record.person)
+    record.refresh_from_db()
+    assert not record.mrd_status
+
+
+def test_full_linked_value_survives_the_narrow_legacy_mirror(cancers):
+    record, mine, other, _, _, client = cancers
+    width = PatientRecord._meta.get_field('mrd_status').max_length
+    text = 'MRD: ' + 'x' * width
+    fact(cancers, mine, 'mrd_status', text)
+    refresh_patient_record(record.person)
+    record.refresh_from_db()
+    assert record.mrd_status == text[:width]
+    primary = next(c for c in cards(client).values() if c['id'] == 'primary')
+    assert next(b for b in primary['biomarkers'] if b['label'] == 'MRD')['value'] == text
