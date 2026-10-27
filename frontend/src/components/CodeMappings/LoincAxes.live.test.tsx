@@ -31,7 +31,7 @@ describeLive("LOINC axes against a live backend", () => {
   });
 
   const openRow = async () => {
-    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={["/code-mappings?direction=forward"]}><CodeMappingPage /></MemoryRouter>);
     // The queue opens on its first vocabulary tab; the seeded code has its own.
     fireEvent.click(await screen.findByRole("tab", { name: /AXRT/ }, { timeout: 30000 }));
     // Unmapped codes are rolled up by description; the group carries the flag too.

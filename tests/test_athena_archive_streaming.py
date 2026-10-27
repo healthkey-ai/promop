@@ -90,6 +90,7 @@ def test_folder_resolution_exposes_stable_file_identity_without_download(monkeyp
     assert selected == {
         'id': 'selected-zip', 'name': 'athena.zip',
         'identity': 'gdrive-file:selected-zip:athena.zip',
+        'loinc_archive_id': None, 'loinc_archive_name': None,
     }
     download.assert_not_called()
 
