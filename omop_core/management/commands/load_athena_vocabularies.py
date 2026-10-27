@@ -172,6 +172,11 @@ class _VocabularyArchive:
             log(f'  Found multiple CONCEPT.csv files; using {candidates[0]}.')
         log(f'  Streaming CSVs from {self.path.name}; no extraction needed.')
 
+    def has(self, filename):
+        """Whether the archive contains the named file under its prefix."""
+        with zipfile.ZipFile(self.path) as zf:
+            return (self.prefix + filename) in zf.namelist()
+
     def open(self, filename):
         # ZipExtFile retains its own reference to the underlying file until the
         # returned text stream closes. Each call can independently reread a CSV
@@ -213,6 +218,11 @@ def _resolve_gdrive_vocabulary(url, log):
                 'Pass a direct Google Drive file URL to select a specific zip.'
             )
         name = Path(zips[0].path).name
+        loinc_csv = next(
+            (item for item in result
+             if PurePosixPath(item.path).name == 'Loinc.csv'),
+            None,
+        )
         return {
             'id': zips[0].id,
             'name': name,
@@ -221,6 +231,7 @@ def _resolve_gdrive_vocabulary(url, log):
             # replacement upload or a renamed in-place revision invalidates
             # the cheap deploy-time check. SHA-256 is recorded after download.
             'identity': f'gdrive-file:{zips[0].id}:{name}',
+            'loinc_csv_id': loinc_csv.id if loinc_csv else None,
         }
 
     match = re.search(r'(?:/d/|[?&]id=)([-\w]+)', url)
@@ -261,6 +272,73 @@ def _download_gdrive_vocabulary(url, download_dir, log, selection=None):
     if not filename:
         raise CommandError(f'Google Drive file download failed: {url}')
     return Path(filename)
+
+
+def _download_gdrive_loinc_csv(loinc_csv_id, download_dir, log):
+    """Download Loinc.csv from Google Drive when present in the vocabulary folder."""
+    try:
+        import gdown
+    except ImportError:
+        return None
+    dest = download_dir / 'Loinc.csv'
+    log(f'  Downloading Loinc.csv from Google Drive (id={loinc_csv_id})...')
+    filename = gdown.download(
+        id=loinc_csv_id, output=str(dest),
+        quiet=True, use_cookies=False,
+    )
+    if not filename or not dest.is_file():
+        log('  WARNING: Loinc.csv download failed; LOINC axes will not be loaded.')
+        return None
+    return dest
+
+
+def load_loinc_axes_from_csv(loinc_csv_path, log):
+    """Load LoincCodeClass axes from a standalone Loinc.csv file.
+
+    Reuses the column mapping from ``loinc_release``. Updates the axis columns,
+    ``example_units`` and ``loinc_class_id`` (the CLASS column is NOT NULL).
+    Rows whose LOINC_NUM already exists are updated; new rows are inserted.
+    """
+    import csv
+
+    from omop_core.models import LoincCodeClass
+    from omop_core.services.loinc_release import AXIS_COLUMNS
+
+    update_fields = ['loinc_class_id', 'example_units', *AXIS_COLUMNS.values()]
+
+    count = 0
+    batch = []
+    for row in csv.DictReader(loinc_csv_path.open('r', encoding='utf-8')):
+        loinc_num = (row.get('LOINC_NUM') or '').strip()
+        loinc_class = (row.get('CLASS') or '').strip()
+        if not loinc_num or not loinc_class:
+            continue
+        batch.append(LoincCodeClass(
+            loinc_num=loinc_num,
+            loinc_class_id=loinc_class,
+            example_units=(row.get('EXAMPLE_UNITS') or '').strip(),
+            **{field: (row.get(column) or '').strip()
+               for column, field in AXIS_COLUMNS.items()},
+        ))
+        if len(batch) >= 2000:
+            LoincCodeClass.objects.bulk_create(
+                batch, update_conflicts=True,
+                unique_fields=['loinc_num'], update_fields=update_fields,
+                batch_size=2000,
+            )
+            count += len(batch)
+            batch = []
+    if batch:
+        LoincCodeClass.objects.bulk_create(
+            batch, update_conflicts=True,
+            unique_fields=['loinc_num'], update_fields=update_fields,
+            batch_size=2000,
+        )
+        count += len(batch)
+    log(f'  Loaded LOINC axes for {count:,} codes from {loinc_csv_path.name}.')
+    from omop_core.mapping import loinc_axes
+    loinc_axes.reset_loaded_unit_properties()
+    return count
 
 
 def _release_version_from_url(url):
@@ -489,6 +567,15 @@ class Command(EmbeddingLoadCommand):
                             ))
         parser.add_argument('--skip-umls-cache', action='store_true',
                             help='Skip optional UMLS archive caching even when UMLS_API_KEY is set.')
+        parser.add_argument('--loinc-csv',
+                            help=(
+                                'Path to a standalone Loinc.csv file. When provided, '
+                                'the six LOINC axis columns (component, property, '
+                                'time_aspect, system, scale_type, method_type) are '
+                                'loaded into LoincCodeClass after the main vocabulary '
+                                'load. The file is the LoincTable/Loinc.csv from a '
+                                'loinc.org release archive.'
+                            ))
         parser.add_argument('--migration-bootstrap', action='store_true', help=(
             'Load only the LOINC concepts required by migration 0201, verify '
             'all are present, and stop before release publication. Intended '
@@ -509,9 +596,11 @@ class Command(EmbeddingLoadCommand):
         gdrive_url = options['gdrive']
         replace = options['replace']
         dry_run = options['dry_run']
+        loinc_csv = options.get('loinc_csv')
         migration_bootstrap = options.get('migration_bootstrap', False)
         skip_clinical_vocabulary_verification = options['skip_clinical_vocabulary_verification']
         self._umls_release = None
+        self._loinc_csv_path = Path(loinc_csv) if loinc_csv else None
 
         if migration_bootstrap and (replace or dry_run):
             raise CommandError('--migration-bootstrap cannot be combined with --replace or --dry-run')
@@ -616,6 +705,7 @@ class Command(EmbeddingLoadCommand):
                 self._log('  --skip-code-mappings: skipping code mapping artifact load.')
             else:
                 self._load_code_mappings(options['verbosity'])
+            self._load_loinc_axes()
             self._publish_release(counts)
         elapsed = time.monotonic() - t0
         verb = 'would load' if dry_run else 'loaded'
@@ -639,6 +729,60 @@ class Command(EmbeddingLoadCommand):
     def _log(self, msg):
         self.stdout.write(msg)
         self.stdout.flush()
+
+    def _load_loinc_axes(self):
+        """Load LOINC axes from Loinc.csv when available.
+
+        Sources, in order of preference:
+        1. ``--loinc-csv`` command-line argument (explicit path)
+        2. ``Loinc.csv`` inside the vocabulary archive
+        """
+        if self._loinc_csv_path:
+            if not self._loinc_csv_path.is_file():
+                self._log(f'  WARNING: --loinc-csv path does not exist: {self._loinc_csv_path}')
+                return
+            load_loinc_axes_from_csv(self._loinc_csv_path, self._log)
+            return
+        if getattr(self, '_archive', None) and self._archive.has('Loinc.csv'):
+            self._log('  Found Loinc.csv in vocabulary archive; loading LOINC axes...')
+            import csv
+            from omop_core.models import LoincCodeClass
+            from omop_core.services.loinc_release import AXIS_COLUMNS
+            update_fields = ['loinc_class_id', 'example_units', *AXIS_COLUMNS.values()]
+            stream = self._archive.open('Loinc.csv')
+            count = 0
+            batch = []
+            for row in csv.DictReader(stream):
+                loinc_num = (row.get('LOINC_NUM') or '').strip()
+                loinc_class = (row.get('CLASS') or '').strip()
+                if not loinc_num or not loinc_class:
+                    continue
+                batch.append(LoincCodeClass(
+                    loinc_num=loinc_num,
+                    loinc_class_id=loinc_class,
+                    example_units=(row.get('EXAMPLE_UNITS') or '').strip(),
+                    **{field: (row.get(column) or '').strip()
+                       for column, field in AXIS_COLUMNS.items()},
+                ))
+                if len(batch) >= 2000:
+                    LoincCodeClass.objects.bulk_create(
+                        batch, update_conflicts=True,
+                        unique_fields=['loinc_num'], update_fields=update_fields,
+                        batch_size=2000,
+                    )
+                    count += len(batch)
+                    batch = []
+            if batch:
+                LoincCodeClass.objects.bulk_create(
+                    batch, update_conflicts=True,
+                    unique_fields=['loinc_num'], update_fields=update_fields,
+                    batch_size=2000,
+                )
+                count += len(batch)
+            self._log(f'  Loaded LOINC axes for {count:,} codes from archive Loinc.csv.')
+            from omop_core.mapping import loinc_axes
+            loinc_axes.reset_loaded_unit_properties()
+            return
 
     def _verify_required_clinical_vocabularies(self):
         """Fail the load when a partial Athena bundle omits core clinical vocabularies."""
