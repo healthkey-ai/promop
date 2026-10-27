@@ -222,6 +222,7 @@ _OMOP_DERIVED_FIELDS = [
     # Lymphoma
     'flipi_score', 'gelf_criteria_status', 'tumor_grade',
     'flipi_risk_category', 'number_of_nodal_sites', 'bulky_disease', 'b_symptoms',
+    'b_symptom_fever', 'b_symptom_night_sweats', 'b_symptom_weight_loss',
     'gelf_criteria_options', 'ldh_upper_limit_normal',
     'transformed_to_dlbcl', 'dlbcl_transformation_date', 'post_transformation_outcome',
     # Assessment
@@ -582,6 +583,11 @@ _ASSERTION_FIELDS = {
     # exposures; a row here supersedes that — see _CURATED_REFRACTORY_CODES.
     'hko:btk-inhibitor-refractory': ('btk_inhibitor_refractory', 'boolean'),
     'hko:bcl2-inhibitor-refractory': ('bcl2_inhibitor_refractory', 'boolean'),
+    # B symptoms (FL, #slice3). Each symptom is its own SNOMED Observation;
+    # the composite b_symptoms boolean is derived in recompute_patient_record_fields.
+    '386661006': ('b_symptom_fever', 'boolean'),
+    '42984000': ('b_symptom_night_sweats', 'boolean'),
+    '262285001': ('b_symptom_weight_loss', 'boolean'),
 }
 
 # The curated codes above, by the field each answers. _get_cll_data runs after
@@ -1161,6 +1167,15 @@ def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fiel
         patient_info.gelf_criteria_status = 'Met' if patient_info.gelf_criteria_options.strip() else 'Not Met'
     elif 'gelf_criteria_options' in changed_fields:
         patient_info.gelf_criteria_status = None
+    # Derive composite b_symptoms from the three individual B-symptom fields.
+    _vals = [patient_info.b_symptom_fever, patient_info.b_symptom_night_sweats,
+             patient_info.b_symptom_weight_loss]
+    if any(v is True for v in _vals):
+        patient_info.b_symptoms = True
+    elif all(v is False for v in _vals):
+        patient_info.b_symptoms = False
+    else:
+        patient_info.b_symptoms = None
     _compute_derived_fields(patient_info, apply_formulas=False)
     _clear_overflowing_decimal_fields(patient_info)
     patient_info.save()

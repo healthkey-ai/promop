@@ -5975,6 +5975,63 @@
       "status": "proposed",
       "reviewed_at": null,
       "notes": "SUGGESTED, NOT REVIEWED BY A CLINICIAN. Chosen for meaning rather than spelling: \"White blood cell count\" is the same quantity under the same name; the narrower \"in blood\" and \"in CSF\" variants name a specimen this field does not carry. Set source_value before approving; derivation matches on it."
+    },
+    {
+      "field_name": "b_symptom_fever",
+      "concept_vocabulary_id": "SNOMED",
+      "concept_code_resolved": "386661006",
+      "concept_id": 4158517,
+      "provenance": "system_generated",
+      "vocabulary_id": "SNOMED",
+      "concept_code": "386661006",
+      "unit": "",
+      "omop_table": "observation",
+      "source_value": "386661006",
+      "value_kind": "boolean",
+      "type_concept_id": 32817,
+      "value_vocabulary": "",
+      "multiple": false,
+      "status": "approved",
+      "reviewed_at": null,
+      "notes": "B symptom: Fever (SNOMED 386661006)"
+    },
+    {
+      "field_name": "b_symptom_night_sweats",
+      "concept_vocabulary_id": "SNOMED",
+      "concept_code_resolved": "42984000",
+      "concept_id": 4196900,
+      "provenance": "system_generated",
+      "vocabulary_id": "SNOMED",
+      "concept_code": "42984000",
+      "unit": "",
+      "omop_table": "observation",
+      "source_value": "42984000",
+      "value_kind": "boolean",
+      "type_concept_id": 32817,
+      "value_vocabulary": "",
+      "multiple": false,
+      "status": "approved",
+      "reviewed_at": null,
+      "notes": "B symptom: Night sweats (SNOMED 42984000)"
+    },
+    {
+      "field_name": "b_symptom_weight_loss",
+      "concept_vocabulary_id": "SNOMED",
+      "concept_code_resolved": "262285001",
+      "concept_id": 4177808,
+      "provenance": "system_generated",
+      "vocabulary_id": "SNOMED",
+      "concept_code": "262285001",
+      "unit": "",
+      "omop_table": "observation",
+      "source_value": "262285001",
+      "value_kind": "boolean",
+      "type_concept_id": 32817,
+      "value_vocabulary": "",
+      "multiple": false,
+      "status": "approved",
+      "reviewed_at": null,
+      "notes": "B symptom: Weight loss (SNOMED 262285001)"
     }
   ],
   "custom_fields": [],
@@ -8031,6 +8088,60 @@
       "field_name": "tumor_stage",
       "display": "T4d: Inflammatory carcinoma",
       "sort_order": 14,
+      "codes": []
+    },
+    {
+      "field_name": "b_symptom_fever",
+      "display": "Yes",
+      "sort_order": 0,
+      "codes": []
+    },
+    {
+      "field_name": "b_symptom_fever",
+      "display": "No",
+      "sort_order": 1,
+      "codes": []
+    },
+    {
+      "field_name": "b_symptom_fever",
+      "display": "Unknown",
+      "sort_order": 2,
+      "codes": []
+    },
+    {
+      "field_name": "b_symptom_night_sweats",
+      "display": "Yes",
+      "sort_order": 0,
+      "codes": []
+    },
+    {
+      "field_name": "b_symptom_night_sweats",
+      "display": "No",
+      "sort_order": 1,
+      "codes": []
+    },
+    {
+      "field_name": "b_symptom_night_sweats",
+      "display": "Unknown",
+      "sort_order": 2,
+      "codes": []
+    },
+    {
+      "field_name": "b_symptom_weight_loss",
+      "display": "Yes",
+      "sort_order": 0,
+      "codes": []
+    },
+    {
+      "field_name": "b_symptom_weight_loss",
+      "display": "No",
+      "sort_order": 1,
+      "codes": []
+    },
+    {
+      "field_name": "b_symptom_weight_loss",
+      "display": "Unknown",
+      "sort_order": 2,
       "codes": []
     }
   ],

@@ -3874,6 +3874,12 @@ class PatientRecord(models.Model):
     number_of_nodal_sites = models.PositiveSmallIntegerField(blank=True, null=True)
     bulky_disease = models.BooleanField(blank=True, null=True)
     b_symptoms = models.BooleanField(blank=True, null=True)
+    b_symptom_fever = models.BooleanField(blank=True, null=True,
+        help_text="B symptom: unexplained fever > 38\u00b0C")
+    b_symptom_night_sweats = models.BooleanField(blank=True, null=True,
+        help_text="B symptom: drenching night sweats")
+    b_symptom_weight_loss = models.BooleanField(blank=True, null=True,
+        help_text="B symptom: unintentional weight loss > 10% in 6 months")
     gelf_criteria_options = models.TextField(blank=True, null=True)
     ldh_upper_limit_normal = models.PositiveIntegerField(blank=True, null=True)
     # Histologic transformation of FL to DLBCL — derived from OMOP (DLBCL
