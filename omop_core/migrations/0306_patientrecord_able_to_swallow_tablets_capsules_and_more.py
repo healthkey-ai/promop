@@ -12,11 +12,22 @@ import django.core.validators
 from decimal import Decimal
 from django.db import migrations, models
 
-CLINICAL_INPUT_FIELDS = (
-    'able_to_swallow_tablets_capsules',
-    'activated_partial_thromboplastin_time_uln',
-    'prothrombin_time_uln',
-)
+# Declared here rather than taken from the historical model: inside
+# `SeparateDatabaseAndState` the database operations run against the state from
+# *before* the state operations below, so the fields are not on that model yet.
+CLINICAL_INPUT_FIELDS = {
+    'able_to_swallow_tablets_capsules': models.BooleanField(blank=True, null=True),
+    'activated_partial_thromboplastin_time_uln': models.DecimalField(
+        blank=True, decimal_places=5, max_digits=10, null=True,
+        help_text='aPTT ratio to laboratory ULN, not seconds',
+        validators=[django.core.validators.MinValueValidator(Decimal('0.00001'))],
+    ),
+    'prothrombin_time_uln': models.DecimalField(
+        blank=True, decimal_places=5, max_digits=10, null=True,
+        help_text='Prothrombin time ratio to laboratory ULN, not INR or seconds',
+        validators=[django.core.validators.MinValueValidator(Decimal('0.00001'))],
+    ),
+}
 
 
 def add_missing_columns(apps, schema_editor):
@@ -28,9 +39,11 @@ def add_missing_columns(apps, schema_editor):
             column.name
             for column in schema_editor.connection.introspection.get_table_description(cursor, table)
         }
-    for name in CLINICAL_INPUT_FIELDS:
-        if name not in existing:
-            schema_editor.add_field(PatientRecord, PatientRecord._meta.get_field(name))
+    for name, field in CLINICAL_INPUT_FIELDS.items():
+        if name in existing:
+            continue
+        field.set_attributes_from_name(name)
+        schema_editor.add_field(PatientRecord, field)
 
 
 class Migration(migrations.Migration):
