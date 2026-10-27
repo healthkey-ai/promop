@@ -54,6 +54,9 @@ export interface PatientInfo {
   flipi_score?: number;
   flipi_score_options?: string;
   tumor_grade?: string;
+  b_symptom_fever?: boolean | null;
+  b_symptom_night_sweats?: boolean | null;
+  b_symptom_weight_loss?: boolean | null;
   transformed_to_dlbcl?: boolean;
   dlbcl_transformation_date?: string;
   post_transformation_outcome?: string;

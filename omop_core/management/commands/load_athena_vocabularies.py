@@ -201,8 +201,11 @@ def _resolve_gdrive_vocabulary(url, log):
         )
         if result is None:
             raise CommandError(f'Google Drive folder listing failed: {url}')
+        _loinc_re = re.compile(r'(?i)loinc.*\.zip$')
         zips = sorted(
-            (item for item in result if Path(item.path).suffix.lower() == '.zip'),
+            (item for item in result
+             if Path(item.path).suffix.lower() == '.zip'
+             and not _loinc_re.match(PurePosixPath(item.path).name)),
             key=lambda item: item.path,
         )
         if not zips:
@@ -213,6 +216,17 @@ def _resolve_gdrive_vocabulary(url, log):
                 'Pass a direct Google Drive file URL to select a specific zip.'
             )
         name = Path(zips[0].path).name
+        loinc_zips = sorted(
+            (item for item in result
+             if re.match(r'(?i)loinc.*\.zip$', PurePosixPath(item.path).name)),
+            key=lambda item: item.path,
+            reverse=True,
+        )
+        loinc_id = loinc_zips[0].id if loinc_zips else None
+        loinc_name = PurePosixPath(loinc_zips[0].path).name if loinc_zips else None
+        # Include LOINC archive identity so a new LOINC release (even with the
+        # same Athena vocabulary) invalidates the deploy-time sync check.
+        loinc_suffix = f'+loinc:{loinc_id}:{loinc_name}' if loinc_id else ''
         return {
             'id': zips[0].id,
             'name': name,
@@ -220,7 +234,9 @@ def _resolve_gdrive_vocabulary(url, log):
             # build timestamp. Include both provider ID and name so either a
             # replacement upload or a renamed in-place revision invalidates
             # the cheap deploy-time check. SHA-256 is recorded after download.
-            'identity': f'gdrive-file:{zips[0].id}:{name}',
+            'identity': f'gdrive-file:{zips[0].id}:{name}{loinc_suffix}',
+            'loinc_archive_id': loinc_id,
+            'loinc_archive_name': loinc_name,
         }
 
     match = re.search(r'(?:/d/|[?&]id=)([-\w]+)', url)
@@ -261,6 +277,60 @@ def _download_gdrive_vocabulary(url, download_dir, log, selection=None):
     if not filename:
         raise CommandError(f'Google Drive file download failed: {url}')
     return Path(filename)
+
+
+def _download_gdrive_loinc_archive(loinc_archive_id, loinc_archive_name, download_dir, log):
+    """Download a LOINC release ZIP from Google Drive when present in the vocabulary folder."""
+    import gdown
+
+    dest = download_dir / (loinc_archive_name or 'loinc-release.zip')
+    log(f'  Downloading {loinc_archive_name or "LOINC archive"} from Google Drive (id={loinc_archive_id})...')
+    filename = gdown.download(
+        id=loinc_archive_id, output=str(dest),
+        quiet=True, use_cookies=False,
+    )
+    if not filename or not dest.is_file():
+        log('  WARNING: LOINC archive download failed; LOINC axes will not be loaded.')
+        return None
+    return dest
+
+
+def load_loinc_axes_from_archive(loinc_archive_path, log):
+    """Load LoincClass and LoincCodeClass from a LOINC release ZIP.
+
+    Delegates to ``loinc_release.load_from_archive`` which handles Part.csv
+    (LoincClass) and Loinc.csv (LoincCodeClass with all six axes), including
+    FK validation and unknown-class reporting.
+
+    ``log`` is a callable (e.g. ``self.stdout.write``); it is wrapped in an
+    object with a ``.write()`` method for ``load_from_archive``'s ``stdout``
+    parameter.
+    """
+    from omop_core.services.loinc_release import LoincReleaseUnavailable, load_from_archive
+
+    def _file_chunks(path, chunk_size=4 * 1024 * 1024):
+        with open(path, 'rb') as handle:
+            while True:
+                block = handle.read(chunk_size)
+                if not block:
+                    return
+                yield block
+
+    class _LogWriter:
+        """Adapt a callable to an object with .write() for load_from_archive."""
+        def __init__(self, fn):
+            self._fn = fn
+        def write(self, msg):
+            self._fn(msg)
+
+    try:
+        class_count, code_count = load_from_archive(
+            _file_chunks(loinc_archive_path), stdout=_LogWriter(log),
+        )
+    except LoincReleaseUnavailable as exc:
+        log(f'  WARNING: LOINC archive unusable: {exc}')
+        return 0
+    return code_count
 
 
 def _release_version_from_url(url):
@@ -489,6 +559,14 @@ class Command(EmbeddingLoadCommand):
                             ))
         parser.add_argument('--skip-umls-cache', action='store_true',
                             help='Skip optional UMLS archive caching even when UMLS_API_KEY is set.')
+        parser.add_argument('--loinc-archive',
+                            help=(
+                                'Path to a LOINC release ZIP (e.g. Loinc_2.83.zip '
+                                'from loinc.org). Loads LoincClass (from Part.csv) '
+                                'and LoincCodeClass axis columns (component, property, '
+                                'time_aspect, system, scale_type, method_type) from '
+                                'LoincTable/Loinc.csv inside the archive.'
+                            ))
         parser.add_argument('--migration-bootstrap', action='store_true', help=(
             'Load only the LOINC concepts required by migration 0201, verify '
             'all are present, and stop before release publication. Intended '
@@ -509,9 +587,11 @@ class Command(EmbeddingLoadCommand):
         gdrive_url = options['gdrive']
         replace = options['replace']
         dry_run = options['dry_run']
+        loinc_archive = options.get('loinc_archive')
         migration_bootstrap = options.get('migration_bootstrap', False)
         skip_clinical_vocabulary_verification = options['skip_clinical_vocabulary_verification']
         self._umls_release = None
+        self._loinc_archive_path = Path(loinc_archive) if loinc_archive else None
 
         if migration_bootstrap and (replace or dry_run):
             raise CommandError('--migration-bootstrap cannot be combined with --replace or --dry-run')
@@ -616,6 +696,7 @@ class Command(EmbeddingLoadCommand):
                 self._log('  --skip-code-mappings: skipping code mapping artifact load.')
             else:
                 self._load_code_mappings(options['verbosity'])
+            self._load_loinc_axes()
             self._publish_release(counts)
         elapsed = time.monotonic() - t0
         verb = 'would load' if dry_run else 'loaded'
@@ -639,6 +720,22 @@ class Command(EmbeddingLoadCommand):
     def _log(self, msg):
         self.stdout.write(msg)
         self.stdout.flush()
+
+    def _load_loinc_axes(self):
+        """Load LOINC axes from a LOINC release archive when available.
+
+        Uses ``loinc_release.load_from_archive`` which handles both Part.csv
+        (LoincClass) and Loinc.csv (LoincCodeClass axes), including FK
+        validation and unknown-class reporting.
+
+        Source: ``--loinc-archive`` command-line argument (explicit path).
+        """
+        if not self._loinc_archive_path:
+            return
+        if not self._loinc_archive_path.is_file():
+            self._log(f'  WARNING: --loinc-archive path does not exist: {self._loinc_archive_path}')
+            return
+        load_loinc_axes_from_archive(self._loinc_archive_path, self._log)
 
     def _verify_required_clinical_vocabularies(self):
         """Fail the load when a partial Athena bundle omits core clinical vocabularies."""

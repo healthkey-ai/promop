@@ -130,6 +130,8 @@ All endpoints require an authenticated professional role:
 | `GET concept-to-code/suggest-runs/<run_id>/` | Preview progress and candidates |
 | `POST concept-to-code/<concept_id>/mappings/` | Propose one vocabulary source from a saved preview |
 | `POST concept-to-code/<concept_id>/mappings/<mapping_id>/` | Propose or approve one reviewed source with a revision precondition |
+| `GET concept-to-code/axis-variant-walk/` | The active axis variant walk, the last one, the patients loaded since it began, and the axis evidence it counted (#2050, #2051) |
+| `POST concept-to-code/axis-variant-walk/` | Ask for a rebuild walk; 202 with `created: true`, or 200 with the walk already queued or running. Approval rights required |
 
 ### A run moves on
 
@@ -149,3 +151,27 @@ defaults for older writers, and builds a GIN trigram index on uppercase source
 descriptions concurrently.
 It changes no mappings. The remaining visualization work is tracked in the
 [concept-to-code plan](concept_to_code_plan.md).
+
+### The source-code walk panel
+
+Unit counts and axis variants are what the last walk left (#2043): nothing
+re-runs it when patients are loaded. The panel beside the Source-code coverage
+heading shows when the last walk began, how many patients have source codes
+first seen since then, and a button that records a rebuild request
+(`axis_variant_jobs.request_refresh(rebuild_evidence=True)`) for the worker.
+One walk at a time: while one is queued or running the panel shows its
+progress instead and polls every ten seconds. Starting a walk needs approval
+rights, because it costs the worker hours on a large instance; every
+professional role sees the panel.
+
+A rebuild also counts, over the codes it walks, how much evidence each LOINC
+axis has (`omop_core/mapping/axis_evidence.py`, stored on the request as
+`axis_evidence` with every batch): codes with the axis settled and from what
+(curator entry, LOINC source code, LOINC coding, unit, quantitative value,
+specimen), codes with only a hint for it, and codes whose patients disagree on
+it (units implying different properties, codings naming different tests,
+specimens naming different systems, different method texts). The panel shows
+the last completed walk's table. Units settle property and scale; if no other
+axis is ever settled or varies, the data holds no evidence for more than one
+LOINC per unit variant, which is what decides whether the multi-axis
+capability is worth extending (#2051).

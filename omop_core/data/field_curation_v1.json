@@ -943,22 +943,22 @@
     },
     {
       "field_name": "disease_activity",
-      "concept_vocabulary_id": "SNOMED",
-      "concept_code_resolved": "246456005",
-      "concept_id": 2100000002,
+      "concept_vocabulary_id": "LOINC",
+      "concept_code_resolved": "97509-4",
+      "concept_id": 1617595,
       "provenance": "system_generated",
-      "vocabulary_id": "SNOMED",
-      "concept_code": "246456005",
+      "vocabulary_id": "LOINC",
+      "concept_code": "97509-4",
       "unit": "",
       "omop_table": "Observation",
       "source_value": "",
-      "value_kind": "",
+      "value_kind": "concept",
       "type_concept_id": null,
       "value_vocabulary": "",
       "multiple": false,
       "status": "approved",
       "reviewed_at": "2026-08-30 11:30:55.403061+00:00",
-      "notes": "Auto-proposed from field suggestion."
+      "notes": "LOINC 97509-4 \"Cancer disease progression\" (standard, Observation). Fixed by migration 0311."
     },
     {
       "field_name": "distant_metastasis_stage",
@@ -4269,11 +4269,11 @@
     {
       "field_name": "planned_therapies",
       "concept_vocabulary_id": "SNOMED",
-      "concept_code_resolved": "410942007",
-      "concept_id": 4254051,
+      "concept_code_resolved": "405613005",
+      "concept_id": 4226140,
       "provenance": "system_generated",
       "vocabulary_id": "SNOMED",
-      "concept_code": "410942007",
+      "concept_code": "405613005",
       "unit": "",
       "omop_table": "Observation",
       "source_value": "",
@@ -4281,9 +4281,9 @@
       "type_concept_id": null,
       "value_vocabulary": "",
       "multiple": false,
-      "status": "proposed",
+      "status": "approved",
       "reviewed_at": null,
-      "notes": "Auto-proposed from field suggestion."
+      "notes": "SNOMED 405613005 \"Planned procedure\" (standard, Observation). Fixed by migration 0311."
     },
     {
       "field_name": "plasma_cell_leukemia",
@@ -5852,7 +5852,7 @@
       "vocabulary_id": "SNOMED",
       "concept_code": "371469007",
       "unit": "",
-      "omop_table": "Measurement",
+      "omop_table": "Observation",
       "source_value": "",
       "value_kind": "",
       "type_concept_id": null,
@@ -5975,6 +5975,63 @@
       "status": "proposed",
       "reviewed_at": null,
       "notes": "SUGGESTED, NOT REVIEWED BY A CLINICIAN. Chosen for meaning rather than spelling: \"White blood cell count\" is the same quantity under the same name; the narrower \"in blood\" and \"in CSF\" variants name a specimen this field does not carry. Set source_value before approving; derivation matches on it."
+    },
+    {
+      "field_name": "b_symptom_fever",
+      "concept_vocabulary_id": "SNOMED",
+      "concept_code_resolved": "386661006",
+      "concept_id": 4158517,
+      "provenance": "system_generated",
+      "vocabulary_id": "SNOMED",
+      "concept_code": "386661006",
+      "unit": "",
+      "omop_table": "observation",
+      "source_value": "386661006",
+      "value_kind": "boolean",
+      "type_concept_id": 32817,
+      "value_vocabulary": "",
+      "multiple": false,
+      "status": "approved",
+      "reviewed_at": null,
+      "notes": "B symptom: Fever (SNOMED 386661006)"
+    },
+    {
+      "field_name": "b_symptom_night_sweats",
+      "concept_vocabulary_id": "SNOMED",
+      "concept_code_resolved": "42984000",
+      "concept_id": 4196900,
+      "provenance": "system_generated",
+      "vocabulary_id": "SNOMED",
+      "concept_code": "42984000",
+      "unit": "",
+      "omop_table": "observation",
+      "source_value": "42984000",
+      "value_kind": "boolean",
+      "type_concept_id": 32817,
+      "value_vocabulary": "",
+      "multiple": false,
+      "status": "approved",
+      "reviewed_at": null,
+      "notes": "B symptom: Night sweats (SNOMED 42984000)"
+    },
+    {
+      "field_name": "b_symptom_weight_loss",
+      "concept_vocabulary_id": "SNOMED",
+      "concept_code_resolved": "262285001",
+      "concept_id": 4177808,
+      "provenance": "system_generated",
+      "vocabulary_id": "SNOMED",
+      "concept_code": "262285001",
+      "unit": "",
+      "omop_table": "observation",
+      "source_value": "262285001",
+      "value_kind": "boolean",
+      "type_concept_id": 32817,
+      "value_vocabulary": "",
+      "multiple": false,
+      "status": "approved",
+      "reviewed_at": null,
+      "notes": "B symptom: Weight loss (SNOMED 262285001)"
     }
   ],
   "custom_fields": [],
@@ -6424,33 +6481,61 @@
     },
     {
       "field_name": "disease_activity",
-      "display": "Active",
+      "display": "Watch and wait",
       "sort_order": 0,
-      "codes": []
+      "codes": [
+        {
+          "code": "373818007",
+          "vocabulary_id": "SNOMED",
+          "display": "Watch and wait",
+          "is_primary": true
+        }
+      ]
     },
     {
       "field_name": "disease_activity",
-      "display": "Inactive",
+      "display": "On treatment",
       "sort_order": 1,
       "codes": []
     },
     {
       "field_name": "disease_activity",
-      "display": "Remission",
+      "display": "Finished treatment and in remission",
       "sort_order": 2,
-      "codes": []
+      "codes": [
+        {
+          "code": "103338009",
+          "vocabulary_id": "SNOMED",
+          "display": "Finished treatment and in remission",
+          "is_primary": true
+        }
+      ]
     },
     {
       "field_name": "disease_activity",
-      "display": "Relapsed",
+      "display": "Came back after treatment",
       "sort_order": 3,
-      "codes": []
+      "codes": [
+        {
+          "code": "263855007",
+          "vocabulary_id": "SNOMED",
+          "display": "Came back after treatment",
+          "is_primary": true
+        }
+      ]
     },
     {
       "field_name": "disease_activity",
-      "display": "Refractory",
+      "display": "Not sure",
       "sort_order": 4,
-      "codes": []
+      "codes": [
+        {
+          "code": "LA12693-0",
+          "vocabulary_id": "LOINC",
+          "display": "Not sure",
+          "is_primary": true
+        }
+      ]
     },
     {
       "field_name": "distant_metastasis_stage",
@@ -8003,6 +8088,60 @@
       "field_name": "tumor_stage",
       "display": "T4d: Inflammatory carcinoma",
       "sort_order": 14,
+      "codes": []
+    },
+    {
+      "field_name": "b_symptom_fever",
+      "display": "Yes",
+      "sort_order": 0,
+      "codes": []
+    },
+    {
+      "field_name": "b_symptom_fever",
+      "display": "No",
+      "sort_order": 1,
+      "codes": []
+    },
+    {
+      "field_name": "b_symptom_fever",
+      "display": "Unknown",
+      "sort_order": 2,
+      "codes": []
+    },
+    {
+      "field_name": "b_symptom_night_sweats",
+      "display": "Yes",
+      "sort_order": 0,
+      "codes": []
+    },
+    {
+      "field_name": "b_symptom_night_sweats",
+      "display": "No",
+      "sort_order": 1,
+      "codes": []
+    },
+    {
+      "field_name": "b_symptom_night_sweats",
+      "display": "Unknown",
+      "sort_order": 2,
+      "codes": []
+    },
+    {
+      "field_name": "b_symptom_weight_loss",
+      "display": "Yes",
+      "sort_order": 0,
+      "codes": []
+    },
+    {
+      "field_name": "b_symptom_weight_loss",
+      "display": "No",
+      "sort_order": 1,
+      "codes": []
+    },
+    {
+      "field_name": "b_symptom_weight_loss",
+      "display": "Unknown",
+      "sort_order": 2,
       "codes": []
     }
   ],

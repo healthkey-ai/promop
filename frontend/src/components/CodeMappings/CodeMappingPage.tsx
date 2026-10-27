@@ -328,7 +328,7 @@ export default function CodeMappingPage() {
   const [linkedConceptId, setLinkedConceptId] = useState<number | undefined>(
     Number.isInteger(linkedConcept) && linkedConcept > 0 ? linkedConcept : undefined);
   const [direction, setDirection] = useState<'forward' | 'reverse'>(
-    searchParams.get('direction') === 'reverse' ? 'reverse' : 'forward');
+    searchParams.get('direction') === 'forward' ? 'forward' : 'reverse');
   const [reverseWriting, setReverseWriting] = useState(false);
   const [browse, setBrowse] = useState<BrowseResponse | null>(null);
   const [pages, setPages] = useState<Partial<Record<MappingSection, number>>>({});
@@ -1252,7 +1252,7 @@ export default function CodeMappingPage() {
   };
 
   const directionControls = <div role="group" aria-label="Mapping direction" className="mb-5 flex gap-2 border-b border-slate-200 pb-3">
-    {([['forward', 'Source Code → Concept'], ['reverse', 'Concept → Source Code']] as const).map(([value, label]) =>
+    {([['reverse', 'Concept → Source Code'], ['forward', 'Source Code → Concept']] as const).map(([value, label]) =>
       <button key={value} type="button" disabled={reverseWriting} aria-pressed={direction === value}
         onClick={() => setDirection(value)}
         className={`rounded px-3 py-2 text-sm font-medium disabled:opacity-50 ${direction === value ? 'bg-slate-950 text-white' : 'text-slate-600 hover:bg-slate-100'}`}>{label}</button>)}

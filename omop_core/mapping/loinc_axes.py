@@ -326,6 +326,16 @@ def _quantitative(metadata, resource):
     return None
 
 
+def specimen_system(resource):
+    """``(system, specimen_text)`` the resource's specimen names: the LOINC
+    system when the display is a known specimen, else ``None`` and the text,
+    which is a hint. One rule for inference, the queue's specimen note and the
+    walk's evidence count."""
+    specimen = _text_of(resource.get('specimen'))
+    system = SPECIMEN_SYSTEMS.get(_norm(specimen)) if specimen else None
+    return system, specimen
+
+
 def infer(source_vocabulary_id, source_code, metadata, *, observed_units=None):
     """``(axes, hints)`` the source code settles before any curator input.
 
@@ -393,8 +403,7 @@ def infer(source_vocabulary_id, source_code, metadata, *, observed_units=None):
     if quantitative:
         settle({'scale_type': 'Qn'}, BASIS_VALUE_TYPE, quantitative)
 
-    specimen = _text_of(resource.get('specimen'))
-    system = SPECIMEN_SYSTEMS.get(_norm(specimen)) if specimen else None
+    system, specimen = specimen_system(resource)
     if system:
         settle({'system': system}, BASIS_SPECIMEN, f'specimen = {specimen}')
 

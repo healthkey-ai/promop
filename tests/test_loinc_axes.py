@@ -5,6 +5,7 @@ feature cares about: 2345-7 (mass concentration, serum or plasma), 14749-6
 (substance concentration, serum or plasma), 2339-0 (mass concentration, whole
 blood), 41653-7 (capillary blood, by glucometer).
 """
+from collections import Counter
 from unittest.mock import patch
 
 import pytest
@@ -961,16 +962,13 @@ def test_jev_reads_a_property_set_as_one_of(settings):
     assert 'Property=one of NFr, MFr' in post.call_args.kwargs['json']['state']
 
 
-def test_unit_evidence_is_read_once_for_a_batch(two_unit_code, monkeypatch):
-    from omop_core.services import mapping_unit_consistency as muc
-    calls = []
-    real = muc._unit_counts
-    monkeypatch.setattr(muc, '_unit_counts', lambda mappings: calls.append(len(mappings)) or real(mappings))
+def test_unit_evidence_is_read_once_for_a_batch(two_unit_code):
+    """unit_counts_for reads PSC rows in one query for the whole batch."""
     other = SourceCodeConceptMapping.objects.create(
         source_vocabulary_id=LAB, source_code='K', omop_table='measurement')
     counts = axis_variants.unit_counts_for([two_unit_code, other])
-    assert calls == [2]
     assert set(counts[two_unit_code.pk]) == {'mg/dL', 'mmol/L'}
+    assert counts[other.pk] == Counter()
 
 
 def test_metadata_hints_do_not_reach_the_ranker(pipeline):

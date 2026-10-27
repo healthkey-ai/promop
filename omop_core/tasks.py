@@ -4,11 +4,30 @@ from typing import Any
 
 import requests
 from celery import shared_task
-from celery.signals import worker_ready
+from celery.signals import worker_ready, worker_shutting_down
 from django.db import OperationalError, ProgrammingError
 
 from omop_core.models import Person
 from omop_core.services import axis_variant_jobs as _axis_variant_jobs
+
+
+@worker_shutting_down.connect
+def requeue_running_refresh_on_shutdown(**_kwargs):
+    """Move a running axis variant refresh back to queued so the next worker resumes it instantly."""
+    import logging
+
+    from django.db import connections
+
+    from omop_core.services.axis_variant_jobs import requeue_on_shutdown
+
+    try:
+        requeue_on_shutdown()
+    except Exception:
+        logging.getLogger(__name__).exception(
+            'Could not requeue axis variant refresh on shutdown; '
+            'the stale sweep will catch it.')
+    finally:
+        connections.close_all()
 
 
 @worker_ready.connect
@@ -23,24 +42,33 @@ def dispatch_hospital_code_imports_on_worker_ready(**_kwargs):
     import logging
     import threading
 
+    from django.db import connections
+
     from omop_core.services.axis_variant_jobs import dispatch_queued_refreshes
     from omop_core.services.hospital_code_seed import dispatch_queued_imports
 
     log = logging.getLogger(__name__)
 
-    def dispatch(first=False):
+    def dispatch(first=False, imports=True):
         # The boot pass republishes refresh requests an older worker may have
         # dropped; the rechecks only publish what nothing has published yet.
-        for label, publish in (('hospital-code import', dispatch_queued_imports),
-                               ('axis variant refresh', lambda: dispatch_queued_refreshes(republish=first))):
-            try:
-                publish()
-            except (OperationalError, ProgrammingError):
-                log.exception('%s dispatch deferred until the database is ready.', label)
-            except Exception:
-                # Never make the worker unavailable because the broker job cannot
-                # be published. The queued database row remains retryable.
-                log.exception('Could not dispatch %s.', label)
+        passes = [('axis variant refresh', lambda: dispatch_queued_refreshes(republish=first))]
+        if imports:
+            passes.insert(0, ('hospital-code import', dispatch_queued_imports))
+        try:
+            for label, publish in passes:
+                try:
+                    publish()
+                except (OperationalError, ProgrammingError):
+                    log.exception('%s dispatch deferred until the database is ready.', label)
+                except Exception:
+                    # Never make the worker unavailable because the broker job cannot
+                    # be published. The queued database row remains retryable.
+                    log.exception('Could not dispatch %s.', label)
+        finally:
+            # A timer thread's connection is its own and would otherwise stay
+            # open until the dead thread is collected.
+            connections.close_all()
 
     dispatch(first=True)
     # Render can bring the worker up while the web service is still running its
@@ -50,6 +78,49 @@ def dispatch_hospital_code_imports_on_worker_ready(**_kwargs):
         timer = threading.Timer(delay, dispatch)
         timer.daemon = True
         timer.start()
+    # Only the refresh sweep repeats: a hospital-code import stranded in
+    # ``running`` is told from a live one by the advisory lock alone, which a
+    # live import takes only once its download is validated, so a repeating
+    # pass would requeue a live import over itself.
+    keep_rechecking(lambda: dispatch(imports=False), RECHECK_INTERVAL)
+
+
+#: How often a live worker looks for a request that lost its worker (#2048).
+#: Under the 15 minute stale cutoff, so a stranded request waits at most about
+#: one cutoff more; far above a sweep's cost, which is a few small queries.
+RECHECK_INTERVAL = 5 * 60
+
+
+def keep_rechecking(dispatch, interval, stop=None):
+    """Run ``dispatch`` every ``interval`` seconds until ``stop`` is set.
+
+    The boot pass and its two early rechecks only see what is stranded within
+    three minutes of a boot. A walk is killed when its instance is shut down
+    *after* the replacement worker is up, which is the order Cloud Run uses,
+    so its heartbeat goes stale with no boot to follow (#2048): on the
+    HealthTree instance the #2043 rebuild sat ``running`` for over an hour
+    with a dead worker. The lost message is no help either: Redis redelivers
+    it only after the visibility timeout, to a task that claims nothing but a
+    ``queued`` row. So a live worker keeps looking, on one daemon thread that
+    never holds the worker open at shutdown. A pass that raises is logged and
+    the next still runs. Returns the thread; ``stop`` is for tests.
+    """
+    import logging
+    import threading
+
+    log = logging.getLogger(__name__)
+    stop = stop if stop is not None else threading.Event()
+
+    def loop():
+        while not stop.wait(interval):
+            try:
+                dispatch()
+            except Exception:
+                log.exception('The queued-job recheck failed; it runs again in %ss.', interval)
+
+    thread = threading.Thread(target=loop, name='queued-job-recheck', daemon=True)
+    thread.start()
+    return thread
 
 
 @shared_task(name='omop_core.build_concept_embeddings')

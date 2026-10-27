@@ -2508,8 +2508,7 @@ class SourceCodeAxisVariant(models.Model):
         SourceCodeConceptMapping, on_delete=models.CASCADE,
         related_name='axis_variants',
     )
-    axis_key = models.CharField(
-        max_length=255,
+    axis_key = models.TextField(
         help_text="Canonical form of axis_values, e.g. 'property=SCnc', or 'unit=%' "
                   'for a unit that implies no single property.',
     )
@@ -3899,6 +3898,12 @@ class PatientRecord(models.Model):
     number_of_nodal_sites = models.PositiveSmallIntegerField(blank=True, null=True)
     bulky_disease = models.BooleanField(blank=True, null=True)
     b_symptoms = models.BooleanField(blank=True, null=True)
+    b_symptom_fever = models.BooleanField(blank=True, null=True,
+        help_text="B symptom: unexplained fever > 38\u00b0C")
+    b_symptom_night_sweats = models.BooleanField(blank=True, null=True,
+        help_text="B symptom: drenching night sweats")
+    b_symptom_weight_loss = models.BooleanField(blank=True, null=True,
+        help_text="B symptom: unintentional weight loss > 10% in 6 months")
     gelf_criteria_options = models.TextField(blank=True, null=True)
     ldh_upper_limit_normal = models.PositiveIntegerField(blank=True, null=True)
     # Histologic transformation of FL to DLBCL — derived from OMOP (DLBCL
@@ -4286,7 +4291,8 @@ class FieldConceptMapping(models.Model):
     value_kind = models.CharField(
         max_length=10, blank=True, default='',
         choices=[('number', 'Number'), ('string', 'String'),
-                 ('date', 'Date'), ('boolean', 'Boolean'), ('json', 'Structured findings')],
+                 ('date', 'Date'), ('boolean', 'Boolean'), ('json', 'Structured findings'),
+                 ('concept', 'Concept')],
         help_text='Which value column the fact is written to.',
     )
     type_concept_id = models.IntegerField(
@@ -5145,6 +5151,9 @@ class AxisVariantRefresh(models.Model):
     #: The last key walked, as ``vocabulary\x1fcode``; a requeued request resumes
     #: after it, whatever the key set looks like by then (#2043).
     cursor = models.TextField(blank=True)
+    #: What a rebuild found of the six LOINC axes across the codes it walked
+    #: (``axis_evidence.Summary``), written with every batch (#2051).
+    axis_evidence = models.JSONField(default=dict, blank=True)
     failure_reason = models.TextField(blank=True)
     started_at = models.DateTimeField(null=True, blank=True)
     # Heartbeat: written on claim and after every batch. A running request

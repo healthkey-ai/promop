@@ -26,7 +26,7 @@ from collections import Counter, defaultdict
 from django.db import transaction
 from django.utils import timezone
 
-from omop_core.mapping import loinc_axes
+from omop_core.mapping import axis_evidence, loinc_axes
 from omop_core.services.canonical_units import unit_code
 
 #: Codes with this many variants or more are flagged in the queue.
@@ -70,28 +70,28 @@ PATIENT_DATA_SOURCE = 'patient-data'
 def unit_counts_for(mappings, include_imported=True):
     """``{mapping_id: Counter}`` of normalized units, in a fixed number of queries.
 
-    The Measurement read is the approval unit check's own batched aggregate
-    (one query, plus one per hospital), so a 50-code Suggest run pays for one
-    scan, not fifty. Per-patient source codes are one query for the batch.
-    ``include_imported=False`` reads only what this instance's patients say,
-    which is what a rebuild of the stored evidence writes.
+    Per-patient source codes (keyed by ``(source_vocabulary_id, source_code)``)
+    are the primary evidence: one query for the batch.  Imported inventory
+    evidence (``source_unit_evidence``) is unioned unless ``include_imported``
+    is False. ``include_imported=False`` reads only what this instance's
+    patients say, which is what a rebuild of the stored evidence writes.
+
+    The Measurement aggregate (``mapping_unit_consistency._unit_counts``) is
+    deliberately excluded: it groups only on ``measurement_source_value``, so
+    every hospital code sharing the same test name gets the same inflated
+    global count. PSC rows give the correct per-code counts.
     """
     from django.db.models import Q
 
     from omop_core.models import PatientSourceCode
-    from omop_core.services.mapping_unit_consistency import (
-        _imported_unit_counts, _unit_counts as live_unit_counts,
-    )
+    from omop_core.services.mapping_unit_consistency import _imported_unit_counts
 
     mappings = [m for m in mappings if m is not None]
     if not mappings:
         return {}
     measured = [m for m in mappings if m.omop_table == 'measurement']
-    # Union, not sum: the inventory and the stored rows can describe the same
-    # records, as the approval unit check documents.
-    live = live_unit_counts(measured) if measured else {}
     imported = _imported_unit_counts(measured) if measured and include_imported else {}
-    result = {m.pk: live.get(m.pk, Counter()) | imported.get(m.pk, Counter()) for m in mappings}
+    result = {m.pk: imported.get(m.pk, Counter()) for m in mappings}
 
     match = Q()
     for m in mappings:
@@ -123,23 +123,25 @@ def patient_unit_evidence(mappings):
     """``({mapping_id: entries}, {mapping_id: Counter})`` from this instance's
     own patient data (#2043).
 
-    The units come from the source codes recorded on each loaded patient and
-    the stored Measurement rows; seeded evidence is not read. One entry per
-    normalized unit, largest first: ``count`` records, ``patients`` distinct
-    people where the per-patient source codes say, ``source`` = ``patient-data``.
-    One Measurement aggregate and one per-patient query for the batch; the
-    Counter is what the entries say, for the caller to refresh variants with.
+    The units come from the per-patient source codes recorded on each loaded
+    patient; seeded evidence is not read. One entry per normalized unit,
+    largest first: ``count`` records, ``patients`` distinct people,
+    ``source`` = ``patient-data``. The Counter is what the entries say, for the
+    caller to refresh variants with.
+
+    The Measurement aggregate (``_unit_counts``) is deliberately excluded: it
+    groups only on ``measurement_source_value``, not on
+    ``(source_vocabulary_id, source_code)``, so every hospital code that shares
+    the same test name gets the same inflated global count. PSC rows are keyed
+    per hospital code and give the correct per-code evidence.
     """
     from django.db.models import Q, Sum
 
     from omop_core.models import PatientSourceCode
-    from omop_core.services.mapping_unit_consistency import _unit_counts as live_unit_counts
 
     mappings = [m for m in mappings if m is not None]
     if not mappings:
         return {}, {}
-    measured = [m for m in mappings if m.omop_table == 'measurement']
-    live = live_unit_counts(measured) if measured else {}
     match = Q()
     for m in mappings:
         match |= Q(source_value=m.source_code, source_vocabulary_id=m.source_vocabulary_id,
@@ -165,8 +167,7 @@ def patient_unit_evidence(mappings):
                 people[m.pk][normalized].add(person_id)
     entries, counts = {}, {}
     for m in mappings:
-        # Union, not sum, as unit_counts_for: the two sources can describe the same records.
-        counts[m.pk] = live.get(m.pk, Counter()) | recorded.get(m.pk, Counter())
+        counts[m.pk] = recorded.get(m.pk, Counter())
         entries[m.pk] = []
         for unit, count in sorted(counts[m.pk].items(), key=lambda item: (-item[1], item[0])):
             entry = {'display': unit, 'code': unit, 'normalized': unit, 'count': count,
@@ -195,7 +196,7 @@ def rebuild_unit_evidence(mappings):
     patient, counts = patient_unit_evidence(mappings)
     changed = []
     for m in mappings:
-        kept = [e for e in (m.source_unit_evidence or []) if isinstance(e, dict) and not _is_imported(e)]
+        kept = [e for e in (m.source_unit_evidence or []) if isinstance(e, dict) and not e.get('source')]
         rebuilt = patient.get(m.pk, []) + kept
         if (m.source_unit_evidence or []) != rebuilt:
             m.source_unit_evidence = rebuilt
@@ -204,7 +205,68 @@ def rebuild_unit_evidence(mappings):
             counts[m.pk] = counts.get(m.pk, Counter()) | _imported_unit_counts([m]).get(m.pk, Counter())
     if changed:
         SourceCodeConceptMapping.objects.bulk_update(changed, ['source_unit_evidence'], batch_size=500)
+    _store_fhir_codings(mappings)
     return len(changed), counts
+
+
+def _patient_fhir_codings(mapping):
+    """LOINC codings the per-patient metadata carries for this code.
+
+    Returns a list of ``{'system': ..., 'code': ..., 'display': ...}`` dicts,
+    deduplicated by code and ordered by total occurrence count (most common
+    first).  Only LOINC codings are collected: they are the ones
+    ``loinc_axes.infer()`` uses to settle axes.
+    """
+    from omop_core.models import PatientSourceCode
+
+    seen = {}  # code → {coding dict, total count}
+    rows = PatientSourceCode.objects.filter(
+        source_value=mapping.source_code,
+        source_vocabulary_id=mapping.source_vocabulary_id,
+    ).exclude(source_metadata={})
+    for metadata, count in rows.order_by('-occurrence_count').values_list('source_metadata', 'occurrence_count')[:2000]:
+        resource = loinc_axes._resource(metadata)
+        for coding in loinc_axes._codings(resource):
+            if loinc_axes.is_loinc(coding.get('system')) and coding.get('code'):
+                code = coding['code']
+                if code not in seen:
+                    seen[code] = {
+                        'coding': {k: coding[k] for k in ('system', 'code', 'display')
+                                   if k in coding},
+                        'count': 0,
+                    }
+                seen[code]['count'] += max(1, count or 0)
+    return [entry['coding'] for entry in
+            sorted(seen.values(), key=lambda e: -e['count'])]
+
+
+def _store_fhir_codings(mappings):
+    """Copy LOINC codings from per-patient metadata onto the mapping row.
+
+    Stored under ``source_metadata['fhir']['code']['coding']`` so
+    ``loinc_axes._resource()`` → ``_codings()`` finds them naturally.
+    Only writes mappings whose metadata is missing the codings.
+    """
+    from omop_core.models import SourceCodeConceptMapping
+
+    updated = []
+    for m in mappings:
+        meta = m.source_metadata or {}
+        # Already has fhir codings — a previous walk or a direct FHIR ingest.
+        if isinstance(meta.get('fhir'), dict) and meta['fhir'].get('code', {}).get('coding'):
+            continue
+        codings = _patient_fhir_codings(m)
+        if not codings:
+            continue
+        meta = dict(meta)  # shallow copy
+        existing_fhir = dict(meta.get('fhir') or {})
+        existing_fhir['code'] = {'coding': codings}
+        meta['fhir'] = existing_fhir
+        m.source_metadata = meta
+        updated.append(m)
+    if updated:
+        SourceCodeConceptMapping.objects.bulk_update(updated, ['source_metadata'], batch_size=500)
+    return len(updated)
 
 
 def is_patient_evidence(evidence):
@@ -245,9 +307,7 @@ def _specimen_systems(mapping):
         source_vocabulary_id=mapping.source_vocabulary_id,
     ).exclude(source_metadata={})
     for metadata, count in rows.values_list('source_metadata', 'occurrence_count')[:2000]:
-        resource = loinc_axes._resource(metadata)
-        specimen = loinc_axes._text_of(resource.get('specimen'))
-        system = loinc_axes.SPECIMEN_SYSTEMS.get(loinc_axes._norm(specimen)) if specimen else None
+        system, _specimen = loinc_axes.specimen_system(loinc_axes._resource(metadata))
         if system:
             systems[system] += max(1, count or 0)
     return systems
@@ -376,13 +436,15 @@ def refresh(mapping, unit_counts=None):
     return list(mapping.axis_variants.select_related('target_concept').order_by('-occurrence_count', 'axis_key'))
 
 
-def refresh_codes(keys, rebuild_evidence=False):
+def refresh_codes(keys, rebuild_evidence=False, summary=None):
     """Refresh every mapping for ``(source_vocabulary_id, source_code)`` keys.
 
     Failures are logged, not raised: this runs after ingest writes, and a
     variant count is curation evidence, not a reason to fail an upload. With
     ``rebuild_evidence`` the batch's stored unit evidence is first rewritten
-    from the instance's patient data (#2043).
+    from the instance's patient data (#2043). A ``summary``
+    (``axis_evidence.Summary``) is given the axis evidence of every mapping
+    refreshed (#2051).
     """
     import logging
 
@@ -403,15 +465,30 @@ def refresh_codes(keys, rebuild_evidence=False):
         _changed, counts = rebuild_unit_evidence(mappings)
     else:
         counts = unit_counts_for(mappings)
+    resources = axis_evidence.resources_by_code(mappings) if summary is not None else {}
     for mapping in mappings:
+        units = counts.get(mapping.pk, Counter())
         try:
             # A savepoint each, so one failed row cannot abort the rest.
             with transaction.atomic():
-                refresh(mapping, counts.get(mapping.pk, Counter()))
+                refresh(mapping, units)
             refreshed += 1
         except Exception:  # noqa: BLE001 - evidence must not fail ingest
             logging.getLogger(__name__).warning(
                 'Axis variant refresh failed for mapping %s.', mapping.pk, exc_info=True)
+            continue
+        if summary is None:
+            continue
+        try:
+            # The count is reporting (#2051): it must not undo the refresh,
+            # and a code it cannot read is left out of the summary.
+            variants, _notes = detect(mapping, units, notes=False)
+            summary.add(axis_evidence.code_evidence(
+                mapping, list(units), resources.get(mapping.pk, []), variant_count=len(variants)))
+        except Exception:  # noqa: BLE001 - reporting must not fail the walk
+            logging.getLogger(__name__).warning(
+                'Axis evidence count failed for mapping %s; it is left out of the summary.',
+                mapping.pk, exc_info=True)
     return refreshed
 
 
@@ -466,7 +543,7 @@ def multi_unit_keys():
     return keys
 
 
-def refresh_all(keys=None, batch_size=REFRESH_BATCH, on_batch=None, rebuild_evidence=False):
+def refresh_all(keys=None, batch_size=REFRESH_BATCH, on_batch=None, rebuild_evidence=False, summary=None):
     """Refresh ``keys`` (default :func:`multi_unit_keys`, or :func:`evidence_keys`
     with ``rebuild_evidence``) a batch at a time.
 
@@ -483,7 +560,7 @@ def refresh_all(keys=None, batch_size=REFRESH_BATCH, on_batch=None, rebuild_evid
     for start in range(0, len(keys), batch_size):
         batch = keys[start:start + batch_size]
         with transaction.atomic():
-            refreshed += refresh_codes(batch, rebuild_evidence=rebuild_evidence)
+            refreshed += refresh_codes(batch, rebuild_evidence=rebuild_evidence, summary=summary)
         if on_batch is not None:
             on_batch(start + len(batch), refreshed, batch[-1])
     return refreshed

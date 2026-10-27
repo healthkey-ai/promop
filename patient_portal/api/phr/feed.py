@@ -16,6 +16,7 @@ from django.utils import timezone
 from omop_core.models import ConditionOccurrence, DrugExposure, Measurement, PatientDocument, ProcedureOccurrence
 
 from .labs import NOT_LABS, effective_concept
+from omop_core.services.condition_context import measurement_context_filter
 from .records import GENETIC_DOC_LABELS
 from .sources import care_site_names, row_sources, source
 
@@ -32,10 +33,10 @@ def whats_new(person, record) -> dict[str, Any]:
     counts: Counter = Counter()
 
     def tally(model, date_field, section, extra=None, **filters):
-        rows = list(
-            model.objects.filter(person=person, is_erroneous=False, **{f'{date_field}__gte': since}, **filters)
-            .select_related('visit_occurrence', *(extra or []))
-        )
+        query = model.objects.filter(person=person, is_erroneous=False, **{f'{date_field}__gte': since}, **filters)
+        if model is Measurement:
+            query = query.exclude(measurement_context_filter())
+        rows = list(query.select_related('visit_occurrence', *(extra or [])))
         sites = care_site_names(rows)
         for row in rows:
             if section == 'labs':

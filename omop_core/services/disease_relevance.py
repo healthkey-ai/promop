@@ -46,7 +46,9 @@ DISEASE_FIELDS: dict[str, frozenset[str]] = {
         'pd_l1_combined_positive_score', 'pd_l1_ic_percentage', 'pd_l1_assay',
     }),
     'FL': frozenset({
-        'stage', 'tumor_grade', 'bulky_disease', 'b_symptoms', 'transformed_to_dlbcl',
+        'stage', 'tumor_grade', 'bulky_disease',
+        'b_symptom_fever', 'b_symptom_night_sweats', 'b_symptom_weight_loss',
+        'transformed_to_dlbcl',
         'dlbcl_transformation_date', 'post_transformation_outcome', 'bone_marrow_involvement',
         'clonal_bone_marrow_b_lymphocytes', 'ldh_upper_limit_normal', 'number_of_nodal_sites',
     }),

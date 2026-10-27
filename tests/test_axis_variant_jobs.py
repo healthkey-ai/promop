@@ -10,7 +10,11 @@ from django.core.management import call_command
 from django.db import transaction
 from django.utils import timezone
 
-from omop_core.models import AxisVariantRefresh, PatientSourceCode, SourceCodeConceptMapping
+from omop_core.models import (
+    AxisVariantRefresh, PatientSourceCode, SourceCodeAxisVariant,
+    SourceCodeConceptMapping,
+)
+from omop_core.mapping import axis_variants
 from omop_core.services import axis_variant_jobs
 from tests.factories import PersonFactory
 
@@ -390,3 +394,320 @@ def test_the_inline_command_completes_a_queued_request(two_unit_code):
     assert AxisVariantRefresh.objects.count() == 1
     call_command('refresh_axis_variants', '--dry-run', stdout=out)
     assert '1 source codes have more than one unit.' in out.getvalue()
+
+
+def test_a_recheck_requeues_and_publishes_a_request_whose_worker_was_killed(settings):
+    """The kill can come after the replacement worker booted (#2048)."""
+    settings.CELERY_BROKER_URL = 'redis://broker/0'
+    stranded = AxisVariantRefresh.objects.create(
+        reason='claimed by the instance Cloud Run shut down', outcome='running', rebuild_evidence=True,
+        task_id='axis-variant-refresh-2', started_at=timezone.now() - timedelta(minutes=16),
+        progress_at=timezone.now() - timedelta(minutes=16))
+    with patch(PUBLISH) as publish:
+        assert axis_variant_jobs.dispatch_queued_refreshes(republish=False) == 1
+    publish.assert_called_once_with(args=[stranded.pk], task_id=f'axis-variant-refresh-{stranded.pk}')
+    stranded.refresh_from_db()
+    assert (stranded.outcome, stranded.rebuild_evidence) == ('queued', True)
+
+
+def test_a_live_worker_keeps_rechecking_until_told_to_stop():
+    import threading
+
+    from omop_core import tasks
+
+    stop = threading.Event()
+    passes = []
+
+    def dispatch():
+        passes.append(1)
+        if len(passes) == 2:
+            stop.set()
+
+    thread = tasks.keep_rechecking(dispatch, 0.01, stop=stop)
+    thread.join(5)
+    assert not thread.is_alive() and passes == [1, 1]
+    assert thread.daemon, 'a recheck must not hold the worker open at shutdown'
+
+
+def test_a_recheck_that_fails_is_logged_and_the_next_still_runs(caplog):
+    import threading
+
+    from omop_core import tasks
+
+    stop = threading.Event()
+    passes = []
+
+    def dispatch():
+        passes.append(1)
+        if len(passes) == 1:
+            raise RuntimeError('database away')
+        stop.set()
+
+    thread = tasks.keep_rechecking(dispatch, 0.01, stop=stop)
+    thread.join(5)
+    assert not thread.is_alive() and len(passes) == 2
+    assert 'database away' in caplog.text
+
+
+def test_the_recheck_interval_is_under_the_stranded_cutoff():
+    from omop_core import tasks
+
+    assert tasks.RECHECK_INTERVAL < axis_variant_jobs.STALE
+
+
+def test_a_stranded_rebuild_is_carried_over_to_the_request_that_replaces_it(settings):
+    settings.CELERY_BROKER_URL = 'redis://broker/0'
+    stranded = AxisVariantRefresh.objects.create(
+        reason='worker died mid-rebuild', outcome='running', rebuild_evidence=True, cursor='A\x1f1',
+        started_at=timezone.now() - timedelta(hours=1), progress_at=timezone.now() - timedelta(hours=1))
+    waiting = AxisVariantRefresh.objects.create(reason='plain refresh asked for meanwhile')
+    with patch(PUBLISH):
+        assert axis_variant_jobs.dispatch_queued_refreshes() == 1
+    stranded.refresh_from_db(); waiting.refresh_from_db()
+    assert stranded.outcome == 'failed'
+    assert waiting.rebuild_evidence, 'the rebuild the stranded request was asked for is not dropped'
+
+
+def test_an_attempt_the_sweep_handed_on_writes_nothing_over_the_new_one(two_unit_code):
+    """The sweep can requeue a walk still alive; its writes then land nowhere (#2048)."""
+    request = AxisVariantRefresh.objects.create(reason='slow key collection')
+    original = axis_variants.refresh_all
+
+    def hand_on_then_walk(*args, **kwargs):
+        # The sweep requeues this request and a second worker claims it.
+        AxisVariantRefresh.objects.filter(pk=request.pk).update(
+            outcome='running', started_at=timezone.now() + timedelta(seconds=1), done=7, cursor='Z\x1fZ')
+        return original(*args, **kwargs)
+
+    with patch.object(axis_variants, 'refresh_all', side_effect=hand_on_then_walk):
+        assert axis_variant_jobs.run_refresh(request.pk)['outcome'] == 'done'
+    request.refresh_from_db()
+    assert (request.outcome, request.done, request.cursor) == ('running', 7, 'Z\x1fZ'), \
+        'the first attempt finished its walk but wrote nothing over the second'
+
+
+def test_a_rebuild_stores_the_axis_evidence_it_met_and_a_plain_refresh_does_not(two_unit_code):
+    """The walk counts the axis evidence across the codes it rebuilds (#2051)."""
+    rebuild = AxisVariantRefresh.objects.create(reason='rebuild', rebuild_evidence=True)
+    assert axis_variant_jobs.run_refresh(rebuild.pk)['outcome'] == 'done'
+    rebuild.refresh_from_db()
+    assert rebuild.axis_evidence['codes'] == 1
+    assert rebuild.axis_evidence['axes']['property']['varies'] == 1, 'mg/dL and mmol/L are two properties'
+    assert rebuild.axis_evidence['axes']['scale_type']['bases'] == {'value_type': 1}
+    assert rebuild.axis_evidence['axes']['system'] == {'settled': 0, 'hint': 0, 'varies': 0, 'bases': {}}
+
+    plain = AxisVariantRefresh.objects.create(reason='plain')
+    assert axis_variant_jobs.run_refresh(plain.pk)['outcome'] == 'done'
+    plain.refresh_from_db()
+    assert plain.axis_evidence == {}
+
+
+def test_a_resumed_rebuild_continues_its_axis_evidence_counts(two_unit_code):
+    stored = {'codes': 3, 'axes': {'property': {'settled': 2, 'hint': 1, 'varies': 1, 'bases': {'unit': 2}}}}
+    request = AxisVariantRefresh.objects.create(
+        reason='resumed', rebuild_evidence=True, done=3, cursor='A\x1fA', axis_evidence=stored)
+    assert axis_variant_jobs.run_refresh(request.pk)['outcome'] == 'done'
+    request.refresh_from_db()
+    assert request.axis_evidence['codes'] == 4
+    assert request.axis_evidence['axes']['property']['varies'] == 2
+
+
+# --- Graceful requeue on worker shutdown ---
+
+
+def test_worker_shutdown_requeues_a_running_refresh():
+    """A dying worker moves its running request back to queued so the replacement resumes it instantly."""
+    request = AxisVariantRefresh.objects.create(
+        reason='mid-walk', outcome='running', rebuild_evidence=True,
+        keys=40000, done=12500, refreshed=900, cursor='ACME-LAB\x1fGLU',
+        started_at=timezone.now() - timedelta(hours=1),
+        progress_at=timezone.now() - timedelta(seconds=30))
+    assert axis_variant_jobs.requeue_on_shutdown() == 1
+    request.refresh_from_db()
+    assert (request.outcome, request.task_id, request.started_at) == ('queued', '', None)
+    assert (request.done, request.refreshed, request.cursor) == (12500, 900, 'ACME-LAB\x1fGLU'), \
+        'the progress survives the requeue'
+    assert request.rebuild_evidence is True
+
+
+def test_worker_shutdown_is_a_noop_when_nothing_is_running():
+    AxisVariantRefresh.objects.create(reason='done', outcome='done')
+    AxisVariantRefresh.objects.create(reason='queued')
+    assert axis_variant_jobs.requeue_on_shutdown() == 0
+
+
+def test_rebuild_evidence_counts_per_hospital_code():
+    """Two hospital codes sharing the same source text get their own PSC counts, not the
+    global Measurement aggregate that groups only on measurement_source_value."""
+    from collections import Counter
+    from datetime import date
+
+    from omop_core.models import Measurement
+    from tests.factories import ConceptFactory
+
+    concept = ConceptFactory()
+    person_a = PersonFactory()
+    person_b = PersonFactory()
+    # Two hospital codes that share source text 'ALB' (like albumin from two hospitals).
+    hosp_a = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id='HOSP-A', source_code='ALB', omop_table='measurement',
+        source_unit_evidence=SEEDED)
+    hosp_b = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id='HOSP-B', source_code='ALB', omop_table='measurement',
+        source_unit_evidence=SEEDED)
+    # Hospital A: 100 g/dL from person_a, 5 mg/dL from person_b (unique constraint
+    # is per person+source_value+vocab+table, so two units need two persons).
+    PatientSourceCode.objects.create(
+        person=person_a, source_value='ALB', source_vocabulary_id='HOSP-A',
+        omop_table='measurement', source_unit='g/dL', occurrence_count=100)
+    PatientSourceCode.objects.create(
+        person=person_b, source_value='ALB', source_vocabulary_id='HOSP-A',
+        omop_table='measurement', source_unit='mg/dL', occurrence_count=5)
+    # Hospital B: 3 records in g/dL only.
+    PatientSourceCode.objects.create(
+        person=person_a, source_value='ALB', source_vocabulary_id='HOSP-B',
+        omop_table='measurement', source_unit='g/dL', occurrence_count=3)
+    # Measurement rows for 'ALB' — a large global total that must not leak into evidence.
+    for i in range(50):
+        Measurement.objects.create(
+            measurement_id=70000 + i, person=person_a,
+            measurement_concept=concept, measurement_date=date(2025, 1, 1),
+            measurement_type_concept=concept,
+            measurement_source_value='ALB', unit_source_value='g/dL')
+
+    # The live path (unit_counts_for) must also be per-hospital, not the global
+    # Measurement aggregate.
+    live = axis_variants.unit_counts_for([hosp_a, hosp_b], include_imported=False)
+    assert live[hosp_a.pk] == Counter({'g/dL': 100, 'mg/dL': 5}), \
+        f'Live counts for Hospital A wrong: {live[hosp_a.pk]}'
+    assert live[hosp_b.pk] == Counter({'g/dL': 3}), \
+        f'Live counts for Hospital B wrong: {live[hosp_b.pk]}'
+
+    # The rebuild path stores the same per-hospital evidence.
+    axis_variants.rebuild_unit_evidence([hosp_a, hosp_b])
+    hosp_a.refresh_from_db()
+    hosp_b.refresh_from_db()
+    a_by_unit = {e['display']: e['count'] for e in hosp_a.source_unit_evidence}
+    assert a_by_unit == {'g/dL': 100, 'mg/dL': 5}, f'Hospital A evidence wrong: {a_by_unit}'
+    b_by_unit = {e['display']: e['count'] for e in hosp_b.source_unit_evidence}
+    assert b_by_unit == {'g/dL': 3}, f'Hospital B evidence wrong: {b_by_unit}'
+
+
+def test_rebuild_replaces_stale_patient_data_entries():
+    """A prior buggy walk stamped global Measurement counts as source: 'patient-data'.
+    The rebuild must replace them with fresh PSC evidence, not concatenate old + new (#2057)."""
+    stale_patient_data = [
+        {'display': 'g/dL', 'code': 'g/dL', 'normalized': 'g/dL', 'count': 277000, 'patients': 500, 'source': 'patient-data'},
+        {'display': 'g/L', 'code': 'g/L', 'normalized': 'g/L', 'count': 237, 'patients': 50, 'source': 'patient-data'},
+    ]
+    mapping = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id=LAB, source_code='ALB-STALE', omop_table='measurement',
+        source_unit_evidence=stale_patient_data)
+    PatientSourceCode.objects.create(
+        person=PersonFactory(), source_value='ALB-STALE', source_vocabulary_id=LAB,
+        omop_table='measurement', source_unit='g/dL', occurrence_count=10)
+    axis_variants.rebuild_unit_evidence([mapping])
+    mapping.refresh_from_db()
+    assert len(mapping.source_unit_evidence) == 1, \
+        f'Stale patient-data entries should be replaced, not kept: {mapping.source_unit_evidence}'
+    assert mapping.source_unit_evidence[0]['display'] == 'g/dL'
+    assert mapping.source_unit_evidence[0]['count'] == 10
+    assert mapping.source_unit_evidence[0]['source'] == 'patient-data'
+
+
+# --- FHIR codings extraction ---
+
+
+def test_rebuild_stores_fhir_codings_from_patient_metadata():
+    """Per-patient LOINC codings are copied onto the mapping's source_metadata."""
+    from omop_core.models import LoincClass, LoincCodeClass
+
+    LoincClass.objects.get_or_create(code='CHEM', defaults={'display_name': 'Chemistry'})
+    LoincCodeClass.objects.create(
+        loinc_num='1751-7', loinc_class_id='CHEM', component='Albumin',
+        property='MCnc', time_aspect='Pt', system='Ser/Plas', scale_type='Qn', method_type='')
+    mapping = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id=LAB, source_code='ALB', omop_table='measurement',
+        source_metadata={'record_count': 42})
+    PatientSourceCode.objects.create(
+        person=PersonFactory(), source_value='ALB', source_vocabulary_id=LAB,
+        omop_table='measurement', source_unit='g/dL', occurrence_count=5,
+        source_metadata={'fhir': {'code': {'coding': [
+            {'system': 'http://loinc.org', 'code': '1751-7', 'display': 'Albumin [Mass/volume] in Serum or Plasma'},
+        ]}}})
+    axis_variants.rebuild_unit_evidence([mapping])
+    mapping.refresh_from_db()
+    codings = mapping.source_metadata.get('fhir', {}).get('code', {}).get('coding', [])
+    assert len(codings) == 1
+    assert codings[0]['code'] == '1751-7'
+    assert codings[0]['system'] == 'http://loinc.org'
+
+
+def test_rebuild_does_not_overwrite_existing_fhir_codings():
+    """A mapping that already carries FHIR codings is left alone."""
+    existing_fhir = {'code': {'coding': [
+        {'system': 'http://loinc.org', 'code': '9999-9', 'display': 'Existing'}]}}
+    mapping = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id=LAB, source_code='EXIST', omop_table='measurement',
+        source_metadata={'fhir': existing_fhir})
+    PatientSourceCode.objects.create(
+        person=PersonFactory(), source_value='EXIST', source_vocabulary_id=LAB,
+        omop_table='measurement', source_unit='mg/dL', occurrence_count=3,
+        source_metadata={'fhir': {'code': {'coding': [
+            {'system': 'http://loinc.org', 'code': '1751-7', 'display': 'Albumin'},
+        ]}}})
+    axis_variants.rebuild_unit_evidence([mapping])
+    mapping.refresh_from_db()
+    codings = mapping.source_metadata['fhir']['code']['coding']
+    assert len(codings) == 1
+    assert codings[0]['code'] == '9999-9', 'existing codings must not be overwritten'
+
+
+def test_fhir_codings_enable_axis_settling():
+    """After storing codings, loinc_axes.infer() settles axes from them."""
+    from omop_core.mapping import loinc_axes
+    from omop_core.models import LoincClass, LoincCodeClass
+
+    LoincClass.objects.get_or_create(code='CHEM', defaults={'display_name': 'Chemistry'})
+    LoincCodeClass.objects.create(
+        loinc_num='1751-7', loinc_class_id='CHEM', component='Albumin',
+        property='MCnc', time_aspect='Pt', system='Ser/Plas', scale_type='Qn', method_type='')
+    mapping = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id=LAB, source_code='ALB2', omop_table='measurement',
+        source_metadata={'record_count': 10})
+    PatientSourceCode.objects.create(
+        person=PersonFactory(), source_value='ALB2', source_vocabulary_id=LAB,
+        omop_table='measurement', source_unit='g/dL', occurrence_count=5,
+        source_metadata={'fhir': {'code': {'coding': [
+            {'system': 'http://loinc.org', 'code': '1751-7', 'display': 'Albumin [Mass/volume] in Serum or Plasma'},
+        ]}}})
+    axis_variants.rebuild_unit_evidence([mapping])
+    mapping.refresh_from_db()
+    axes, _hints = loinc_axes.infer(
+        mapping.source_vocabulary_id, mapping.source_code, mapping.source_metadata)
+    assert axes.get('component', {}).get('value') == 'Albumin'
+    assert axes.get('property', {}).get('value') == 'MCnc'
+    assert axes.get('component', {}).get('basis') == loinc_axes.BASIS_FHIR_CODING
+
+
+def test_the_boot_pass_publishes_a_request_the_shutdown_requeued(settings):
+    """Shutdown → requeue → boot pass → publish: the full cycle."""
+    settings.CELERY_BROKER_URL = 'redis://broker/0'
+    request = AxisVariantRefresh.objects.create(
+        reason='requeued by shutdown', outcome='queued', task_id='',
+        done=5000, cursor='ACME-LAB\x1fGLU')
+    with patch(PUBLISH) as publish:
+        assert axis_variant_jobs.dispatch_queued_refreshes(republish=True) == 1
+    publish.assert_called_once_with(args=[request.pk], task_id=f'axis-variant-refresh-{request.pk}')
+
+
+def test_long_axis_key_round_trips():
+    """axis_key longer than 255 chars stores and retrieves correctly (#2069)."""
+    mapping = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id=LAB, source_code='LONG-KEY', omop_table='measurement')
+    long_key = 'property=' + ','.join(f'Prop{i}' for i in range(80))
+    assert len(long_key) > 255
+    variant = SourceCodeAxisVariant.objects.create(
+        mapping=mapping, axis_key=long_key, axis_values={}, units=['%'])
+    variant.refresh_from_db()
+    assert variant.axis_key == long_key

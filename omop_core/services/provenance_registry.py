@@ -440,12 +440,12 @@ _MANUAL_ENTRIES: dict[str, FieldProvenance] = {
         description="SCT history from FHIR extensions / Observation",
     ),
     "sct_date": FieldProvenance(
-        omop_table="Observation",
+        omop_table="Observation,Measurement",
         lookup_strategy="source_value",
         source_values=["mm-sct-date"],
         extractor="_get_sct_cytogenetic_data",
         selection_rule="latest",
-        description="SCT date from FHIR extensions / Observation",
+        description="SCT date from native/SDK history with approved custom-source priority",
     ),
     "prothrombin_time_uln": FieldProvenance(
         omop_table="Observation", lookup_strategy="source_value",

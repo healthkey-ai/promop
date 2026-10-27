@@ -1,111 +1,92 @@
 # Versioned clinical source-input contract
 
 `omop_core.services.clinical_input_contract` implements the narrow source-input
-contract published in [PROMOP #1845](https://github.com/healthkey-ai/promop/pull/1845)
-on the `cb-v2` integration schema. `RECIPES` is the authoritative field/source/unit
-reference. Ratios are laboratory-ULN inputs, not INR or seconds; the SDK does not
-calculate or substitute them. The nullable projection columns do not supply a
-default swallowing answer.
+contract published in [PROMOP #1845](https://github.com/healthkey-ai/promop/pull/1845),
+forward-ported onto the `dev` schema. `RECIPES` is the authoritative field/source/unit
+reference. Ratios are laboratory-ULN inputs, not INR or seconds; the SDK neither
+calculates nor substitutes them. Nullable projections supply no default swallowing
+answer. This backend contract does not add frontend controls or new FHIR mappings.
 
 ## Availability and authority
 
-SDK version 2 and field availability are separate contracts. `capabilities()`
-requires an exact compatible approved `FieldConceptMapping`, the concept-zero
-sentinel and the Patient self-report type vocabulary. It verifies the source,
-table, scalar answer shape, type and unit. Descriptors and curator availability
-use the same resolver; the writer re-resolves and locks mappings inside its
-transaction. A client descriptor cannot authorize a recipe.
+SDK version is integer `2`; per-field availability is a separate contract.
+`capabilities()` requires an exact compatible approved `FieldConceptMapping`,
+the concept-zero sentinel and Patient self-report type vocabulary. It verifies
+source, table, scalar answer shape, type and unit. Descriptors and curator
+availability share the resolver; the writer re-resolves and locks mapping rows
+inside its transaction. A caller descriptor can narrow access, never grant it.
 
 There are no automatically approved seeds. Missing, proposed, revoked or
-incompatible mappings make SDK writes unavailable, not projection-only edits.
-An approved mapping grants neither patient access nor a new clinical role.
-Hosts must authorize the Person before calling this SDK; native API access and
-tenant checks remain in the existing view paths. Facts retain the published
-patient-self-report provenance, not an assertion of clinician authorship.
+incompatible mappings fail closed without fallback to projection-only edits.
+Legacy SCT `32817` remains available to existing native writes, not to the SDK's
+concept-zero/self-report recipe. Custom approved SCT sources retain existing
+curated priority; this contract defines no new cross-source medical policy.
 
-The legacy SCT binding uses a historical nonzero placeholder. It does **not**
-authorize the SDK's concept-zero/self-report recipe. That native path remains
-unchanged and is not advertised as SDK capability. Recognizing it as SDK
-permission requires a separate explicit compatibility decision. Version 2 alone
-therefore does not establish four-field readiness.
+Callers must supply an already-authorized Person. Native APIs retain tenant,
+role, scope and ownership checks; a mapping decision grants no patient access.
 
-## Write transaction
+## Append-only writes and readback
 
-1. Validate the entire clinical batch before creating facts.
-2. Lock the PatientRecord projection, then Person, then mapping rows in stable
-   field order. This preserves the existing projection-before-Person lock order.
-3. Append observations. Corrections and clears never update/delete imported or
-   earlier rows. False is an explicit answer; null appends a clear tombstone.
-4. Require the latest date/primary-key source row to be the row just appended.
-   A newer imported fact rejects even an equal-value edit or a clear that would
-   otherwise look like unknown.
-5. Supersede only the submitted fields' previous pending intent. Refresh and
-   verify final values and absence of unresolved pending markers. Preserve other
-   pending edits without treating this write as their attestation.
+`write_clinical_inputs(person, changes)` validates raw commands before writing.
+Explicit `False` is an answer; `None` appends a clear tombstone, never an inferred
+negative. New SCT dates beyond `timezone.localdate()` are rejected. That limit
+does not reject strictly decoded historical future dates on reads.
 
-All steps are atomic. A validation, approval, writer, refresh or readback failure
-rolls back facts and projection changes. Mixed batches in the generic applier
-also run inside one transaction. Native PATCH performs the clinical refresh
-before saving other submitted projection edits, so it cannot erase those edits
-before the ordinary pending/projection lifecycle handles them.
-New SDK SCT writes enforce the native API's existing future-date limit using
-`timezone.localdate()`. Reading historical source dates does not apply that
-write-only limit; date syntax, provenance and payload-shape checks still apply.
-Body-measurement echoes preserve their original value/unit pair across that
-refresh. Only actual value edits receive the native API's existing kg/cm policy;
-unchanged pounds/inches/metres are never silently relabeled or converted.
-Caller-narrowed descriptors may deny a clinical command even with an approved
-recipe. A missing/read-only entry rejects the whole clinical/mixed batch, unlike
-legacy scalar partial rejection; a permissive descriptor still cannot grant
-mapping approval.
+Corrections, equal-value retries and clears append distinct Observation facts.
+They do not delete imports or upsert another same-day concept-zero input. The
+writer locks the record, Person and mappings, checks that each appended fact
+actually became the selected date/ID winner, refreshes the projection, and
+verifies readback. An equal projected value alone cannot acknowledge a new fact
+that lost source precedence. Validation or readback failure rolls back the batch.
 
-Native full-form autosave may echo unchanged typed values that have no pending
-marker. These echoes are removed before availability checks and do not create
-facts or acknowledge a source write. Changed or pending inputs still require
-the dedicated writer. Explicit SDK equal-value commands always append evidence.
-Native create/bulk-create rejects dedicated clinical inputs instead of silently
-dropping them; author them after the authorized patient record exists.
+The generic field applier dispatches these commands to the dedicated writer,
+including clears, inside its transaction. The native serializer retains raw
+type validation and suppresses unchanged full-autosave echoes without pending
+intent. Those echoes neither require approval nor create self-report facts.
+Historical future SCT echoes are normalized under read rules before they are
+discarded; the future-date write restriction still applies to all remaining
+commands, including an unchanged value with pending intent.
+Body-measurement echoes retain existing units; actual edits keep the native unit
+policy. Mixed edits preserve unrelated pending values.
 
-## Read compatibility and pending values
+## Refresh, pending intent and provenance
 
-Reading historical SDK facts does not depend on the current write approval.
-The decoder selects latest date/primary key, checks recipe provenance, units and
-answer slots, and returns explicit unknown for invalid latest facts or clears.
-It never falls back to an older answer. Legacy non-SDK SCT facts retain their
-native decoder; latest SDK SCT rows use strict decoding.
+Snapshots retain raw source rows before generic clear filtering. The newest
+date/ID wins for each source; strict provenance, units and answer-slot decoding
+rejects malformed latest facts rather than resurrecting older results.
+SCT tombstones mask older legacy-source dates while preserving their history.
 
-Strict decoding runs in the curated-read phase, before pending restoration.
-The snapshot retains raw source-input rows before generic concept-keyed clear
-filtering, so a source-key SCT clear can mask a legacy nonzero-concept date.
-Generic conversion cannot override the new fields or built-in SCT source-family
-selection. SCT mappings to other source keys retain their existing curated priority; this
-contract only owns the built-in SCT source family, not cross-source precedence.
-Existing unresolved pending values are restored normally, and invalid/absent facts cannot resolve a
-pending clinical clear merely because both decode to null. Generic same-day
-upsert and approval-triggered pending backfill cannot bypass the source writer.
+Historical read compatibility is independent of current write approval. Only a
+valid selected source answer or tombstone can resolve a pending clinical clear.
+Curation does not backfill pending projection values as patient self-reports.
+A new explicit command supersedes only its own pending intent; unrelated pending
+edits remain pending. SCT projection and provenance share a pure source selector:
+native baseline, strict SDK override, then the existing approved custom-source
+priority. Provenance marks the actual table/row identity, not an equal or pending
+projection value, and retains the winner within its 20-row history limit even
+when an older custom source outranks newer canonical corrections. Exact custom
+mapping history and canonical corrections/tombstones stay patient-scoped.
 
-## Integration boundary
+The SDK invokes full PatientRecord re-derivation, not a field-only refresh. It
+does not add clinical formulas. Current `dev` IMWG/FLC pairing and therapy-history
+semantics remain in force; the separate `cb-v2` therapy-attestation is not part
+of this port. The existing refresh query budget remains 21.
 
-Descriptors retain the `target="patient_record"` envelope and a dedicated
-contract marker with source metadata. Consumers must route these edits through
-`apply_field_writes` or `write_clinical_inputs`, never generic projection.
-Compatibility with the separate shared-form candidate
-[PROMOP #1984](https://github.com/healthkey-ai/promop/pull/1984) must be tested on
-a composed revision; neither that PR nor #1845 is replaced by this implementation.
-This contract does not reconcile IMWG derivation, approve mappings, repin
-CancerBot or establish clinical/security release readiness.
+## Schema boundary
 
-## Persisted projections and rollout
+Exactly three nullable columns carry this contract:
+`able_to_swallow_tablets_capsules`, `prothrombin_time_uln` and
+`activated_partial_thromboplastin_time_uln`. Existing `sct_date` is not re-added,
+and neither migration contains mapping approvals or data backfill.
 
-Derivation version 19 makes records with earlier derivation versions eligible for the normal
-`backfill_patient_records` command. The schema migration itself only adds
-nullable columns: it does not perform that backfill or rewrite OMOP facts.
-The command performs full PatientRecord re-derivation, not only these inputs.
-Unchanged formulas do not imply unchanged computed results.
+Both branches added those columns, so since the 2026-10-28 back-merge the
+migration that owns them is
+`0306_patientrecord_able_to_swallow_tablets_capsules_and_more` (dev). It adds a
+column only where `introspection.get_table_description` does not already see it,
+which makes it safe on a database where the `cb-v2` copy
+(`0310_cb_clinical_input_sources`) ran first. `0310` keeps its identifier and
+dependency on `0309_condition_context_mappings` with no operations, so a
+database migrated through either history reaches the same schema.
 
-Before any staging backfill, review a scoped before/after projection comparison
-and pending/source evidence, including downstream computed values. The command's
-`--dry-run --organization <slug>` reports candidate counts only; it does not show
-clinical value changes. A version bump and local synthetic backfill regression
-are not clinical approval or authorization to execute a staging/production
-backfill. IMWG reconciliation remains a separate gate.
+Delivery status, verification and rollout gates live in
+[the delivery plan](cb_clinical_inputs_plan.md).

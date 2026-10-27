@@ -159,9 +159,9 @@ patient data (#2043).
 `manage.py refresh_axis_variants --queue` or migration `0303` records an
 `axis_variant_refresh` request and the Celery worker performs it, with `keys`,
 `done`, `refreshed` and a `progress_at` heartbeat on the row as it goes. A
-deploy that replaces the worker mid-walk kills the task; the next worker boot
-sees the stale heartbeat, requeues the request and resumes it at `done`
-(#2023). It never runs inside `migrate`:
+deploy that replaces the worker mid-walk kills the task; the next sweep, at
+worker boot or on a live worker's five-minute recheck (#2048), sees the stale
+heartbeat, requeues the request and resumes it after its `cursor` (#2023). It never runs inside `migrate`:
 on the HealthTree instance it outlived the Cloud Run migrate job's hour, and
 no deploy reached traffic until the walk was moved off the release step. A
 worker publishes any request still queued when it starts, so a request a

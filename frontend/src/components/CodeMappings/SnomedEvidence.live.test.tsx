@@ -40,7 +40,7 @@ describeLive("SNOMED evidence against a live backend", () => {
   });
 
   it("shows the reference and side, holds back what the source does not support, and saves a setting", async () => {
-    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={["/code-mappings?direction=forward"]}><CodeMappingPage /></MemoryRouter>);
     fireEvent.change(await screen.findByLabelText("Search mappings", {}, { timeout: 30000 }),
       { target: { value: CODE } });
     // An Athena row is approved, and the Approved section starts collapsed.
