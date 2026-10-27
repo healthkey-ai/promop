@@ -1168,14 +1168,18 @@ def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fiel
     elif 'gelf_criteria_options' in changed_fields:
         patient_info.gelf_criteria_status = None
     # Derive composite b_symptoms from the three individual B-symptom fields.
-    _vals = [patient_info.b_symptom_fever, patient_info.b_symptom_night_sweats,
-             patient_info.b_symptom_weight_loss]
-    if any(v is True for v in _vals):
-        patient_info.b_symptoms = True
-    elif all(v is False for v in _vals):
-        patient_info.b_symptoms = False
-    else:
-        patient_info.b_symptoms = None
+    # Only act when at least one individual field carries a value or was just
+    # changed; an unrelated edit must not overwrite a previously stored
+    # b_symptoms (same guard pattern as gelf_criteria_options above).
+    _b_symptom_fields = ('b_symptom_fever', 'b_symptom_night_sweats', 'b_symptom_weight_loss')
+    _vals = [getattr(patient_info, f) for f in _b_symptom_fields]
+    if any(f in changed_fields for f in _b_symptom_fields) or any(v is not None for v in _vals):
+        if any(v is True for v in _vals):
+            patient_info.b_symptoms = True
+        elif all(v is False for v in _vals):
+            patient_info.b_symptoms = False
+        else:
+            patient_info.b_symptoms = None
     _compute_derived_fields(patient_info, apply_formulas=False)
     _clear_overflowing_decimal_fields(patient_info)
     patient_info.save()
