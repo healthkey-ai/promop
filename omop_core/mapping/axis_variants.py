@@ -196,7 +196,7 @@ def rebuild_unit_evidence(mappings):
     patient, counts = patient_unit_evidence(mappings)
     changed = []
     for m in mappings:
-        kept = [e for e in (m.source_unit_evidence or []) if isinstance(e, dict) and not _is_imported(e)]
+        kept = [e for e in (m.source_unit_evidence or []) if isinstance(e, dict) and not e.get('source')]
         rebuilt = patient.get(m.pk, []) + kept
         if (m.source_unit_evidence or []) != rebuilt:
             m.source_unit_evidence = rebuilt

@@ -593,6 +593,28 @@ def test_rebuild_evidence_counts_per_hospital_code():
     assert b_by_unit == {'g/dL': 3}, f'Hospital B evidence wrong: {b_by_unit}'
 
 
+def test_rebuild_replaces_stale_patient_data_entries():
+    """A prior buggy walk stamped global Measurement counts as source: 'patient-data'.
+    The rebuild must replace them with fresh PSC evidence, not concatenate old + new (#2057)."""
+    stale_patient_data = [
+        {'display': 'g/dL', 'code': 'g/dL', 'normalized': 'g/dL', 'count': 277000, 'patients': 500, 'source': 'patient-data'},
+        {'display': 'g/L', 'code': 'g/L', 'normalized': 'g/L', 'count': 237, 'patients': 50, 'source': 'patient-data'},
+    ]
+    mapping = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id=LAB, source_code='ALB-STALE', omop_table='measurement',
+        source_unit_evidence=stale_patient_data)
+    PatientSourceCode.objects.create(
+        person=PersonFactory(), source_value='ALB-STALE', source_vocabulary_id=LAB,
+        omop_table='measurement', source_unit='g/dL', occurrence_count=10)
+    axis_variants.rebuild_unit_evidence([mapping])
+    mapping.refresh_from_db()
+    assert len(mapping.source_unit_evidence) == 1, \
+        f'Stale patient-data entries should be replaced, not kept: {mapping.source_unit_evidence}'
+    assert mapping.source_unit_evidence[0]['display'] == 'g/dL'
+    assert mapping.source_unit_evidence[0]['count'] == 10
+    assert mapping.source_unit_evidence[0]['source'] == 'patient-data'
+
+
 # --- FHIR codings extraction ---
 
 
