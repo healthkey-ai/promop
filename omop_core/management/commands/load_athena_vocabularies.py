@@ -201,8 +201,11 @@ def _resolve_gdrive_vocabulary(url, log):
         )
         if result is None:
             raise CommandError(f'Google Drive folder listing failed: {url}')
+        _loinc_re = re.compile(r'(?i)loinc.*\.zip$')
         zips = sorted(
-            (item for item in result if Path(item.path).suffix.lower() == '.zip'),
+            (item for item in result
+             if Path(item.path).suffix.lower() == '.zip'
+             and not _loinc_re.match(PurePosixPath(item.path).name)),
             key=lambda item: item.path,
         )
         if not zips:
@@ -219,6 +222,11 @@ def _resolve_gdrive_vocabulary(url, log):
             key=lambda item: item.path,
             reverse=True,
         )
+        loinc_id = loinc_zips[0].id if loinc_zips else None
+        loinc_name = PurePosixPath(loinc_zips[0].path).name if loinc_zips else None
+        # Include LOINC archive identity so a new LOINC release (even with the
+        # same Athena vocabulary) invalidates the deploy-time sync check.
+        loinc_suffix = f'+loinc:{loinc_id}:{loinc_name}' if loinc_id else ''
         return {
             'id': zips[0].id,
             'name': name,
@@ -226,9 +234,9 @@ def _resolve_gdrive_vocabulary(url, log):
             # build timestamp. Include both provider ID and name so either a
             # replacement upload or a renamed in-place revision invalidates
             # the cheap deploy-time check. SHA-256 is recorded after download.
-            'identity': f'gdrive-file:{zips[0].id}:{name}',
-            'loinc_archive_id': loinc_zips[0].id if loinc_zips else None,
-            'loinc_archive_name': PurePosixPath(loinc_zips[0].path).name if loinc_zips else None,
+            'identity': f'gdrive-file:{zips[0].id}:{name}{loinc_suffix}',
+            'loinc_archive_id': loinc_id,
+            'loinc_archive_name': loinc_name,
         }
 
     match = re.search(r'(?:/d/|[?&]id=)([-\w]+)', url)

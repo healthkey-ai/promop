@@ -95,6 +95,46 @@ def test_folder_resolution_exposes_stable_file_identity_without_download(monkeyp
     download.assert_not_called()
 
 
+def test_loinc_zip_excluded_from_vocabulary_selection(monkeypatch):
+    """A LOINC release ZIP must not be selected as the Athena vocabulary archive."""
+    listing = Mock(return_value=[
+        SimpleNamespace(id='loinc-zip', path='Loinc_2.83.zip'),
+        SimpleNamespace(id='athena-zip', path='vocabulary_download_v5_{uuid}.zip'),
+        SimpleNamespace(id='large-csv', path='CONCEPT.csv'),
+    ])
+    monkeypatch.setattr(gdown, 'download_folder', listing)
+    monkeypatch.setattr(gdown, 'download', Mock())
+
+    selected = loader._resolve_gdrive_vocabulary(
+        'https://drive.google.com/drive/folders/test', lambda msg: None,
+    )
+
+    assert selected['id'] == 'athena-zip'
+    assert selected['loinc_archive_id'] == 'loinc-zip'
+    assert selected['loinc_archive_name'] == 'Loinc_2.83.zip'
+    assert '+loinc:loinc-zip:Loinc_2.83.zip' in selected['identity']
+
+
+def test_loinc_identity_change_invalidates_sync_identity(monkeypatch):
+    """A new LOINC release produces a different identity even when the Athena vocab is unchanged."""
+    def resolve_with_loinc(loinc_id, loinc_name):
+        listing = Mock(return_value=[
+            SimpleNamespace(id='athena-zip', path='vocabulary_download_v5.zip'),
+            SimpleNamespace(id=loinc_id, path=loinc_name),
+        ])
+        monkeypatch.setattr(gdown, 'download_folder', listing)
+        monkeypatch.setattr(gdown, 'download', Mock())
+        return loader._resolve_gdrive_vocabulary(
+            'https://drive.google.com/drive/folders/test', lambda msg: None,
+        )
+
+    old = resolve_with_loinc('loinc-v283', 'Loinc_2.83.zip')
+    new = resolve_with_loinc('loinc-v290', 'Loinc_2.90.zip')
+
+    assert old['identity'] != new['identity']
+    assert old['id'] == new['id']  # same Athena vocab
+
+
 def test_direct_file_download_does_not_list_a_folder(tmp_path, monkeypatch):
     listing = Mock()
     download = Mock(return_value=str(tmp_path / 'athena-vocabulary.zip'))
