@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import api from '@/api/axios';
 import { destinationError } from './destinationSearch';
+import AxisVariantWalkPanel from './AxisVariantWalkPanel';
 import EditMappingDialog from './EditMappingDialog';
 import { AxisVariantFlag, AxisVariantList } from './LoincAxisChips';
 import type { AxisVariant, LoincAxesPayload } from './loincAxes';
@@ -178,9 +179,14 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange, initialC
 
   return <Dialog.Root open={selected !== null} onOpenChange={open => { if (!open && !writing && !editing) setSelected(null); }}>
     <section aria-label="Concept to source code" className="space-y-5">
-    <div>
-      <h2 className="text-lg font-semibold text-slate-950">Source-code coverage</h2>
-      <p className="mt-1 text-sm text-slate-600">Choose a standard concept, then review the source codes that should map to it.</p>
+    <div className="flex flex-wrap items-start justify-between gap-3">
+      <div>
+        <h2 className="text-lg font-semibold text-slate-950">Source-code coverage</h2>
+        <p className="mt-1 text-sm text-slate-600">Choose a standard concept, then review the source codes that should map to it.</p>
+      </div>
+      {/* The walk that keeps unit counts and axis variants current after new
+          patients are loaded, and what it found of the other axes (#2050, #2051). */}
+      <AxisVariantWalkPanel canApprove={canApprove} />
     </div>
     <div className="flex flex-wrap gap-3">
       <input className={`${input} min-w-64 flex-1`} aria-label="Search standard concepts" placeholder="Concept name, code, OMOP ID or patient field"

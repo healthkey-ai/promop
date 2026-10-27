@@ -7098,8 +7098,10 @@ class _ConceptFixtureBase(_SmartBase):
 
         # Search/list fixtures need a controlled catalog: deployment migrations
         # may already contain these real IDs, codes and other matching names.
+        # Unloaded vocabulary mappings legitimately have a NULL concept. SQL
+        # NOT IN (NULL) matches no rows, so exclude those from the subquery.
         Concept.objects.filter(vocabulary_id__in=('LOINC', 'SNOMED')).exclude(
-            pk__in=FieldConceptMapping.objects.values_list('concept_id', flat=True),
+            pk__in=FieldConceptMapping.objects.filter(concept_id__isnull=False).values_list('concept_id', flat=True),
         ).delete()
         Vocabulary.objects.filter(pk__in=('LOINC', 'SNOMED')).update(vocabulary_version='')
 

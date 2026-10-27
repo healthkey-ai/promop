@@ -16,6 +16,7 @@ their OMOP source facts and refreshes the projection once per batch.
 
 import logging
 from datetime import date
+from django.utils import timezone
 from decimal import Decimal, InvalidOperation
 
 from django.core.exceptions import ValidationError
@@ -344,7 +345,9 @@ def apply_field_writes(person, changes, today=None, descriptor=None):
         _apply_location(person, location_updates, person_dirty)
     if person_dirty:
         person.save(update_fields=sorted(person_dirty))
-    if result.applied:
+    # write_clinical_inputs derives for its readback, from the fully-applied
+    # state, so a batch that carries a clinical field must not derive twice.
+    if result.applied and not clinical:
         refresh_patient_record(person)
     if clinical:
         write_clinical_inputs(person, clinical, today=today)
@@ -546,6 +549,11 @@ def _write_editable_fact(person, field, d, value, today):
         }
 
     # Deterministic target when several of OUR same-day rows exist (was `.first()` with no ordering).
+    from omop_core.services.cancer_details import projection_scope
+    scope = projection_scope(person, field, model)
+    keys.update(scope)
+    if scope and any(value is not None for value in scope.values()):
+        fields[f'{model._meta.db_table}_datetime'] = timezone.now()
     existing = model.objects.filter(**keys).order_by(pk_order).first()
     if existing is not None:
         for attr, val in fields.items():

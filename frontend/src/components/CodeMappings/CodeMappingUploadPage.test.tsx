@@ -19,7 +19,7 @@ vi.mock("@/api/axios", () => ({
 
 describe("CodeMappingPage upload action", () => {
   it("opens the upload dialog with signed-in email provenance", async () => {
-    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={["/code-mappings?direction=forward"]}><CodeMappingPage /></MemoryRouter>);
     await waitFor(() => expect(mockGet.mock.calls.length).toBeGreaterThanOrEqual(5));
     fireEvent.click(await screen.findByRole("button", { name: "Upload" }));
     expect(await screen.findByRole("dialog", { name: "Upload source codes" })).toBeInTheDocument();

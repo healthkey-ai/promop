@@ -9,6 +9,7 @@ from omop_core.models import (
     ConceptRelationship,
     LoincClass,
     LoincCodeClass,
+    PatientSourceCode,
     ProvenanceRecord,
     Relationship,
     SourceCodeConceptMapping,
@@ -18,7 +19,7 @@ from omop_core.services.mapping_unit_consistency import (
     unit_consistency_for_mappings,
 )
 from patient_portal.models import Identity
-from tests.factories import ConceptFactory, MeasurementFactory, OrganizationFactory
+from tests.factories import ConceptFactory, MeasurementFactory, OrganizationFactory, PersonFactory
 
 pytestmark = pytest.mark.django_db
 
@@ -68,11 +69,18 @@ def mapping(destination, **kwargs):
     return SourceCodeConceptMapping.objects.create(**values)
 
 
-def measurement(destination, unit, **kwargs):
-    return MeasurementFactory(
-        measurement_concept=destination, measurement_source_value='ALB-1',
+def measurement(destination, unit, *, source_code='ALB-1', vocab='EPIC', **kwargs):
+    m = MeasurementFactory(
+        measurement_concept=destination, measurement_source_value=source_code,
         unit_source_value=unit, value_as_number=4.2, **kwargs,
     )
+    if not kwargs.get('is_erroneous'):
+        PatientSourceCode.objects.get_or_create(
+            person=m.person, source_value=source_code,
+            source_vocabulary_id=vocab, omop_table='measurement',
+            defaults={'source_unit': unit, 'occurrence_count': 1},
+        )
+    return m
 
 
 def test_convertible_source_units_are_consistent():
@@ -131,19 +139,22 @@ def test_non_quantitative_destination_warns_when_numeric_units_exist():
     assert report['property'] == ''
 
 
-def test_hospital_mapping_only_uses_units_attributed_to_its_organization():
+def test_hospital_mapping_only_uses_units_from_its_own_hospital_code():
+    """With PSC-based evidence, scoping is by (source_vocabulary_id, source_code),
+    not by ProvenanceRecord attribution on Measurement rows."""
     destination = loinc_destination()
-    first, second = OrganizationFactory(), OrganizationFactory()
-    row = mapping(destination, organization=first)
-    in_scope = measurement(destination, 'g/dL')
-    out_of_scope = measurement(destination, 'mmol/L')
-    content_type = ContentType.objects.get_for_model(type(in_scope))
-    for clinical_row, organization in ((in_scope, first), (out_of_scope, second)):
-        ProvenanceRecord.objects.create(
-            source='EHR_SYNC', source_user_id=f'org-{organization.pk}',
-            organization=organization, content_type=content_type,
-            object_id=clinical_row.pk,
-        )
+    first_org, second_org = OrganizationFactory(), OrganizationFactory()
+    # Hospital A's mapping with g/dL evidence.
+    row = mapping(destination, source_vocabulary_id='HOSP-A', organization=first_org)
+    person = PersonFactory()
+    PatientSourceCode.objects.create(
+        person=person, source_value='ALB-1', source_vocabulary_id='HOSP-A',
+        omop_table='measurement', source_unit='g/dL', occurrence_count=1)
+    # Hospital B has mmol/L — a different source vocabulary, so it must not
+    # leak into Hospital A's evidence.
+    PatientSourceCode.objects.create(
+        person=person, source_value='ALB-1', source_vocabulary_id='HOSP-B',
+        omop_table='measurement', source_unit='mmol/L', occurrence_count=1)
 
     report = unit_consistency_for_mapping(row, destination)
 
@@ -153,17 +164,17 @@ def test_hospital_mapping_only_uses_units_attributed_to_its_organization():
     ]
 
 
-def test_batch_check_keeps_measurement_query_count_flat(django_assert_num_queries):
+def test_batch_check_keeps_query_count_flat(django_assert_num_queries):
     destination = loinc_destination()
     rows = [mapping(destination, source_code=f'ALB-{index}') for index in range(3)]
-    for index, row in enumerate(rows):
-        MeasurementFactory(
-            measurement_concept=destination,
-            measurement_source_value=row.source_code,
-            unit_source_value='g/dL', value_as_number=index,
-        )
+    person = PersonFactory()
+    for row in rows:
+        PatientSourceCode.objects.create(
+            person=person, source_value=row.source_code,
+            source_vocabulary_id='EPIC', omop_table='measurement',
+            source_unit='g/dL', occurrence_count=1)
 
-    # axes, metadata, preference, and one aggregate Measurement query
+    # axes, metadata, preference, and one PSC query for the batch
     with django_assert_num_queries(4):
         reports = unit_consistency_for_mappings(rows, destination=destination)
 

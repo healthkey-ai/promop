@@ -197,7 +197,7 @@ function renderPage(rows: TestMappingRow[] = [proposedRow, approvedRow]) {
     return Promise.resolve({ data: {} });
   });
   return render(
-    <MemoryRouter>
+    <MemoryRouter initialEntries={["/code-mappings?direction=forward"]}>
       <CodeMappingPage />
     </MemoryRouter>,
   );
@@ -585,7 +585,7 @@ describe("CodeMappingPage", () => {
       }
       return Promise.resolve({ data: url.includes("reference") ? reference : {} });
     });
-    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={["/code-mappings?direction=forward"]}><CodeMappingPage /></MemoryRouter>);
     await screen.findByText("M-PROTEIN, SERUM", { selector: '[data-testid=source-code]' });
 
     fireEvent.change(screen.getByRole("textbox", { name: "Search mappings" }), { target: { value: "C90.00" } });
@@ -1672,7 +1672,7 @@ describe("CodeMappingPage", () => {
         ? Promise.resolve({ data: { ...reference, suggest_max_per_run: 3 } }) : originalGet(url));
       // Refresh the reference by switching away and remounting with the capped response.
       page.unmount();
-      render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+      render(<MemoryRouter initialEntries={["/code-mappings?direction=forward"]}><CodeMappingPage /></MemoryRouter>);
       await waitFor(() => expect(screen.getByLabelText("Number of suggestions")).toHaveValue(3));
       fireEvent.change(screen.getByLabelText("Number of suggestions"), { target: { value: "4" } });
       expect(screen.getByRole("button", { name: "Suggest" })).toBeDisabled();
@@ -1695,7 +1695,7 @@ describe("CodeMappingPage", () => {
         return Promise.resolve({ data: {} });
       });
       render(
-        <MemoryRouter>
+        <MemoryRouter initialEntries={["/code-mappings?direction=forward"]}>
           <CodeMappingPage />
         </MemoryRouter>,
       );
@@ -1752,7 +1752,7 @@ describe("CodeMappingPage", () => {
         return Promise.resolve({ data: {} });
       });
       render(
-        <MemoryRouter>
+        <MemoryRouter initialEntries={["/code-mappings?direction=forward"]}>
           <CodeMappingPage />
         </MemoryRouter>,
       );
@@ -1878,12 +1878,12 @@ describe("server mapping pages", () => {
       if (url === "/v1/code-mappings/") return Promise.resolve({ data: browseData(overrides) });
       return Promise.resolve({ data: url.includes("reference") ? reference : {} });
     });
-    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={["/code-mappings?direction=forward"]}><CodeMappingPage /></MemoryRouter>);
   };
 
   it("shows the page shell while all initial requests are pending", () => {
     mockGet.mockImplementation(() => new Promise(() => {}));
-    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={["/code-mappings?direction=forward"]}><CodeMappingPage /></MemoryRouter>);
     expect(screen.getByRole("heading", { name: "Code Mapping" })).toBeInTheDocument();
     expect(screen.getByLabelText("Search mappings")).toBeInTheDocument();
     expect(screen.getByText("Loading mappings…")).toBeInTheDocument();
@@ -1892,7 +1892,7 @@ describe("server mapping pages", () => {
   it("finishes an empty mapping load without waiting for reference or accuracy", async () => {
     mockGet.mockImplementation((url: string) => url === "/v1/code-mappings/"
       ? Promise.resolve({ data: [] }) : new Promise(() => {}));
-    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={["/code-mappings?direction=forward"]}><CodeMappingPage /></MemoryRouter>);
     await waitFor(() => expect(screen.queryByText("Loading mappings…")).not.toBeInTheDocument());
     expect(screen.getByRole("heading", { name: "Code Mapping" })).toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
@@ -1901,7 +1901,7 @@ describe("server mapping pages", () => {
   it("keeps mapping rows usable when ancillary requests fail", async () => {
     mockGet.mockImplementation((url: string) => url === "/v1/code-mappings/"
       ? Promise.resolve({ data: browseData() }) : Promise.reject(new Error("ancillary unavailable")));
-    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={["/code-mappings?direction=forward"]}><CodeMappingPage /></MemoryRouter>);
     expect(await screen.findByRole("button", { name: "Approve M-PROTEIN, SERUM" })).toBeEnabled();
     expect(screen.queryByText("Failed to load code mappings.")).not.toBeInTheDocument();
     expect(screen.getByText("Could not load mapping options. Refresh to retry.")).toBeInTheDocument();
@@ -1919,7 +1919,7 @@ describe("server mapping pages", () => {
       if (url === "/v1/code-mappings/999/") return Promise.resolve({ data: { ...proposedRow, mapping_id: 999, status: "rejected", notes: "Full notes" } });
       return Promise.resolve({ data: url.includes("reference") ? reference : {} });
     });
-    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={["/code-mappings?direction=forward"]}><CodeMappingPage /></MemoryRouter>);
     await screen.findByRole("button", { name: "Approve M-PROTEIN, SERUM" });
     expect(screen.queryByText("Loading mappings…")).not.toBeInTheDocument();
     expect(await screen.findByText("Checking duplicate source codes…")).toBeInTheDocument();
@@ -1940,7 +1940,7 @@ describe("server mapping pages", () => {
         pages: { ...browseData().pages, Approved: { page: 1, page_size: 100, total: 1 } },
       }) });
     });
-    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={["/code-mappings?direction=forward"]}><CodeMappingPage /></MemoryRouter>);
     await screen.findByRole("button", { name: "Approve M-PROTEIN, SERUM" });
     expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/", { params: expect.objectContaining({ sections: "Unmapped,Proposed", include_duplicates: 0 }) });
     fireEvent.click(screen.getByRole("button", { name: /^Approved/ }));
@@ -1959,7 +1959,7 @@ describe("server mapping pages", () => {
         pages: { ...browseData().pages, Unmapped: { page, page_size: 100, total: onlySeen ? 101 : 500 } },
       }) });
     });
-    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={["/code-mappings?direction=forward"]}><CodeMappingPage /></MemoryRouter>);
     await screen.findByText("SEEN PAGE 1");
     const filter = screen.getByRole("checkbox", { name: "Unmapped: only codes with Seen greater than zero" });
     expect(filter).toBeChecked();
@@ -1995,7 +1995,7 @@ describe("server mapping pages", () => {
         ],
       }) });
     });
-    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={["/code-mappings?direction=forward"]}><CodeMappingPage /></MemoryRouter>);
 
     await screen.findByText("10627");
     fireEvent.change(screen.getByRole("combobox", { name: "Filter by organization" }), {
@@ -2053,7 +2053,7 @@ describe("server mapping pages", () => {
       if (url === "/v1/code-mappings/") return Promise.resolve({ data: browseData({ rollup: true, groups: { Unmapped: [entry()] } }) });
       return Promise.resolve({ data: url.includes("reference") ? reference : {} });
     });
-    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={["/code-mappings?direction=forward"]}><CodeMappingPage /></MemoryRouter>);
     fireEvent.click(await screen.findByRole("button", { name: "Expand Albumin" }));
     await screen.findByText("SEEN MEMBER");
     fireEvent.click(screen.getByRole("checkbox", { name: "Unmapped: only codes with Seen greater than zero" }));
@@ -2107,7 +2107,7 @@ describe("server mapping pages", () => {
       if (url === "/v1/code-mappings/") return Promise.resolve({ data: payload });
       return Promise.resolve({ data: url.includes("reference") ? reference : {} });
     });
-    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={["/code-mappings?direction=forward"]}><CodeMappingPage /></MemoryRouter>);
     const filter = await screen.findByLabelText("Filter by provenance") as HTMLSelectElement;
     // Those rows are worked off, so the next refresh stops offering the value.
     payload = browseData({ provenances: [{ origin_system: "HT-One", count: 9 }] });
@@ -2157,7 +2157,7 @@ describe("server mapping pages", () => {
       if (url === "/v1/code-mappings/") return Promise.resolve({ data: payload });
       return Promise.resolve({ data: url.includes("reference") ? reference : {} });
     });
-    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={["/code-mappings?direction=forward"]}><CodeMappingPage /></MemoryRouter>);
     await screen.findByRole("table", { name: "Unmapped mappings" });
     payload = browseData({ rollup: true, groups: { Unmapped: [entry()] } });
     fireEvent.click(screen.getByLabelText("Group by label"));
@@ -2224,7 +2224,7 @@ describe("server mapping pages", () => {
       }
       return Promise.resolve({ data: url.includes("reference") ? reference : {} });
     });
-    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={["/code-mappings?direction=forward"]}><CodeMappingPage /></MemoryRouter>);
     const toggle = await screen.findByRole("button", { name: /Expand Albumin/ });
     fireEvent.click(toggle);
     expect(await screen.findByText("EPIC#aaa")).toBeInTheDocument();
@@ -2245,7 +2245,7 @@ describe("server mapping pages", () => {
       if (url === "/v1/code-mappings/group/") return Promise.resolve({ data: { results: [] } });
       return Promise.resolve({ data: url.includes("reference") ? reference : {} });
     });
-    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={["/code-mappings?direction=forward"]}><CodeMappingPage /></MemoryRouter>);
     fireEvent.click(await screen.findByRole("button", { name: /Expand unlabelled/ }));
     await waitFor(() => expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/group/",
       { params: expect.objectContaining({ label: ":77" }) }));
@@ -2272,7 +2272,7 @@ describe("server mapping pages", () => {
       }
       return Promise.resolve({ data: url.includes("reference") ? reference : {} });
     });
-    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={["/code-mappings?direction=forward"]}><CodeMappingPage /></MemoryRouter>);
     const unmapped = await screen.findByRole("table", { name: "Unmapped mappings" });
     fireEvent.click(within(unmapped).getByRole("button", { name: /Expand Albumin/ }));
     expect(await screen.findByText("UNMAPPED-CODE")).toBeInTheDocument();
@@ -2297,7 +2297,7 @@ describe("server mapping pages", () => {
       if (url === "/v1/code-mappings/group/") return Promise.resolve({ data: { results: [] } });
       return Promise.resolve({ data: url.includes("reference") ? reference : {} });
     });
-    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={["/code-mappings?direction=forward"]}><CodeMappingPage /></MemoryRouter>);
     fireEvent.click(await screen.findByRole("button", { name: /Expand Albumin/ }));
     await waitFor(() => expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/group/",
       { params: expect.objectContaining({ source: "ICD10" }) }));
@@ -2313,7 +2313,7 @@ describe("server mapping pages", () => {
       if (url === "/v1/code-mappings/group/") return Promise.resolve({ data: { results: [] } });
       return Promise.resolve({ data: url.includes("reference") ? reference : {} });
     });
-    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={["/code-mappings?direction=forward"]}><CodeMappingPage /></MemoryRouter>);
     await screen.findByRole("table", { name: "Unmapped mappings" });
     fireEvent.change(screen.getByLabelText("Filter by provenance"), { target: { value: "curator" } });
     fireEvent.click(await screen.findByRole("button", { name: /Expand Albumin/ }));
@@ -2417,7 +2417,7 @@ describe("server mapping pages", () => {
       }
       return Promise.resolve({ data: url.includes("reference") ? reference : {} });
     });
-    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={["/code-mappings?direction=forward"]}><CodeMappingPage /></MemoryRouter>);
     expect(await screen.findByText("FIRST PAGE")).toBeInTheDocument();
     expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/", { params: expect.objectContaining({
       order_0: "-occurrence_count", order_1: "-occurrence_count", order_2: "-occurrence_count",
@@ -2444,7 +2444,7 @@ describe("Overall review counters and refresh", () => {
       overall: { ...metrics, review_totals: { approved: 6, rejected: 2, overridden: 3 } },
       by_source_vocabulary: { "": { ...metrics, review_totals: { approved: 99, rejected: 99, overridden: 99 } } },
     } : url.includes("reference") ? reference : [proposedRow] }));
-    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={["/code-mappings?direction=forward"]}><CodeMappingPage /></MemoryRouter>);
     const section = await screen.findByRole("region", { name: "Suggestion accuracy" });
     expect(within(section).getByText("Approved").parentElement).toHaveTextContent("6");
     expect(within(section).getByText("Rejected").parentElement).toHaveTextContent("2");
@@ -2467,7 +2467,7 @@ describe("Overall review counters and refresh", () => {
       models: [latestReviewed, { ...metrics, model_version: "v0.2" }],
       by_source_vocabulary: { "": { ...latestReviewed, all_models: { ...latestReviewed, model_versions: 1 } } },
     } : url.includes("reference") ? reference : [proposedRow] }));
-    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={["/code-mappings?direction=forward"]}><CodeMappingPage /></MemoryRouter>);
     const section = await screen.findByRole("region", { name: "Suggestion accuracy" });
     expect(await within(section).findByText("Precision")).toBeInTheDocument();
     expect(within(section).getByText("Precision").parentElement).toHaveTextContent("50.0%");
@@ -2495,7 +2495,7 @@ describe("Overall review counters and refresh", () => {
       overall: { ...metrics, latest_reviewed: latestReviewed, review_totals: { approved: 5, rejected: 1, overridden: 0 } },
       by_source_vocabulary: {},
     } : url.includes("reference") ? reference : [proposedRow] }));
-    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={["/code-mappings?direction=forward"]}><CodeMappingPage /></MemoryRouter>);
     const section = await screen.findByRole("region", { name: "Suggestion accuracy" });
     expect(await within(section).findByText("Precision")).toBeInTheDocument();
     expect(within(section).queryByText("100.0%")).not.toBeInTheDocument();
@@ -2514,7 +2514,7 @@ describe("Overall review counters and refresh", () => {
       return Promise.resolve({ data: { overall: { ...metrics, review_totals: { approved: loads > 1 ? 1 : 0, rejected: 0, overridden: 0 } }, by_source_vocabulary: {} } });
     });
     mockPatch.mockResolvedValue({ data: { ...proposedRow, status: "approved" } });
-    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={["/code-mappings?direction=forward"]}><CodeMappingPage /></MemoryRouter>);
     fireEvent.click(await screen.findByRole("button", { name: "Approve M-PROTEIN, SERUM" }));
     await waitFor(() => expect(screen.queryByRole("button", { name: "Approve M-PROTEIN, SERUM" })).not.toBeInTheDocument());
     const section = screen.getByRole("region", { name: "Suggestion accuracy" });
@@ -2527,7 +2527,7 @@ describe("Overall review counters and refresh", () => {
       overall: { ...metrics, approved: 99, review_totals: { approved: 99, rejected: 0, overridden: 0 } },
       by_source_vocabulary: {},
     } : url.includes("reference") ? reference : [proposedRow] }));
-    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={["/code-mappings?direction=forward"]}><CodeMappingPage /></MemoryRouter>);
     const section = await screen.findByRole("region", { name: "Suggestion accuracy" });
     expect(within(section).getByText("Approved").parentElement).toHaveTextContent("99");
     // Older API responses still cannot supply cross-version scores.
@@ -2554,7 +2554,7 @@ describe("expanded ICD10 review feedback", () => {
       return Promise.resolve({ data: url.includes("reference") ? reference : {} });
     });
     mockPatch.mockResolvedValue({ data: { ...mapping, status } });
-    render(<MemoryRouter><CodeMappingPage /></MemoryRouter>);
+    render(<MemoryRouter initialEntries={["/code-mappings?direction=forward"]}><CodeMappingPage /></MemoryRouter>);
     fireEvent.click(await screen.findByText("Z12.11", { selector: '[data-testid=source-code]' }));
     // The dialog takes an edit lock before opening (#1440), so it is a tick late.
     await screen.findByRole("dialog");

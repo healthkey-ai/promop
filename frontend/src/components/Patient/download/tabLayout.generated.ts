@@ -330,8 +330,16 @@ export const TAB_LAYOUT: TabLayout = {
           "bulky_disease"
         ],
         [
-          "B Symptoms",
-          "b_symptoms"
+          "Fever",
+          "b_symptom_fever"
+        ],
+        [
+          "Night Sweats",
+          "b_symptom_night_sweats"
+        ],
+        [
+          "Weight Loss",
+          "b_symptom_weight_loss"
         ]
       ]
     },

@@ -22,7 +22,7 @@ from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.utils import timezone
 
-from omop_core.mapping import axis_variants
+from omop_core.mapping import axis_evidence, axis_variants
 from omop_core.models import AxisVariantRefresh
 
 logger = logging.getLogger(__name__)
@@ -32,7 +32,8 @@ ACTIVE_OUTCOMES = ('queued', 'running')
 TIME_LIMIT = 6 * 60 * 60
 #: A running request whose heartbeat is older than this lost its worker: a
 #: deploy replaced the pool mid-walk (#2023). A batch of 500 keys takes far
-#: less, so the next worker boot requeues it and the walk resumes from ``done``.
+#: less, so the next sweep, at worker boot or on the worker's five-minute
+#: recheck (#2048), requeues it and the walk resumes after its ``cursor``.
 STALE = 15 * 60
 #: Raised inside the task shortly before the hard limit, so an overrun is
 #: recorded as ``failed`` instead of a row stuck in ``running``.
@@ -102,7 +103,9 @@ def dispatch_queued_refreshes(republish=True):
     request waiting behind a busy worker is not sent three times. A request
     ``running`` with no heartbeat for :data:`STALE` lost its worker, most often
     to the deploy that booted this one, and is requeued with its ``done``
-    offset kept, so the walk resumes rather than restarts.
+    offset and ``cursor`` kept, so the walk resumes rather than restarts. The
+    rechecks repeat for the life of the worker (``tasks.keep_rechecking``),
+    because the kill can come after the replacement booted (#2048).
     """
     cutoff = timezone.now() - timedelta(seconds=STALE)
     stranded = AxisVariantRefresh.objects.filter(outcome='running').filter(
@@ -110,7 +113,10 @@ def dispatch_queued_refreshes(republish=True):
     waiting = AxisVariantRefresh.objects.filter(outcome='queued').order_by('pk').first()
     if waiting is not None:
         # Only one request may be queued, and the waiting one will walk the
-        # same codes, so the stranded one is closed rather than requeued.
+        # same codes, so the stranded one is closed rather than requeued. A
+        # rebuild it was asked for is carried over, not dropped (#2048).
+        if stranded.filter(rebuild_evidence=True).exists():
+            AxisVariantRefresh.objects.filter(pk=waiting.pk, outcome='queued').update(rebuild_evidence=True)
         stranded.update(outcome='failed', completed_at=timezone.now(),
                         failure_reason=f'Worker lost; request {waiting.pk} replaces it.')
     else:
@@ -123,6 +129,21 @@ def dispatch_queued_refreshes(republish=True):
         if publish(request):
             dispatched += 1
     return dispatched
+
+
+def requeue_on_shutdown():
+    """Move a running refresh back to queued ahead of the stale sweep.
+
+    Called from ``worker_shutting_down``: the worker knows it is dying, so
+    waiting for the heartbeat to go stale wastes 15-20 minutes on the
+    replacement worker.  The cursor, done offset and rebuild flag are kept,
+    so the next worker resumes rather than restarts.
+    """
+    requeued = AxisVariantRefresh.objects.filter(outcome='running').update(
+        outcome='queued', task_id='', started_at=None)
+    if requeued:
+        logger.info('Worker shutting down: requeued %d running refresh request(s).', requeued)
+    return requeued
 
 
 def run_pending_inline(reason='', rebuild_evidence=False):
@@ -163,11 +184,21 @@ def run_refresh(request_id, batch_size=axis_variants.REFRESH_BATCH):
                 'outcome': request.outcome if request is not None else 'missing'}
     request = AxisVariantRefresh.objects.get(pk=request_id)
     offset, already, cursor = request.done, request.refreshed, request.cursor
+    # Every write below is this attempt's: should the sweep decide this walk
+    # is dead and hand the request to another worker, the other attempt
+    # claims it with a new ``started_at`` and this one's writes land nowhere
+    # (#2048). The walk itself is idempotent, so running on costs only time.
+    attempt = AxisVariantRefresh.objects.filter(pk=request_id, outcome='running', started_at=now)
+
+    # A rebuild also counts the axis evidence it meets (#2051); the summary
+    # is written with every batch, so a resumed walk continues its counts.
+    summary = axis_evidence.Summary(request.axis_evidence) if request.rebuild_evidence else None
 
     def progress(done, refreshed, last_key):
-        AxisVariantRefresh.objects.filter(pk=request_id).update(
+        attempt.update(
             done=offset + done, refreshed=already + refreshed, progress_at=timezone.now(),
-            cursor=axis_variants.key_text(last_key))
+            cursor=axis_variants.key_text(last_key),
+            **({'axis_evidence': summary.as_dict()} if summary is not None else {}))
 
     try:
         # A rebuild walks every code with evidence or patient data and rewrites
@@ -176,20 +207,20 @@ def run_refresh(request_id, batch_size=axis_variants.REFRESH_BATCH):
         keys = axis_variants.evidence_keys() if request.rebuild_evidence else axis_variants.multi_unit_keys()
         keys = sorted(keys, key=axis_variants.key_text)
         remaining = [k for k in keys if axis_variants.key_text(k) > cursor] if cursor else keys
-        AxisVariantRefresh.objects.filter(pk=request_id).update(keys=offset + len(remaining))
+        # Collecting the keys is the longest stretch with no batch to report,
+        # so it is a heartbeat of its own.
+        attempt.update(keys=offset + len(remaining), progress_at=timezone.now())
         if cursor:
             logger.info('Axis variant refresh %s resumes after %s with %s codes left.',
                         request_id, cursor.replace('\x1f', ':'), len(remaining))
         refreshed = already + axis_variants.refresh_all(
             remaining, batch_size=batch_size, on_batch=progress,
-            rebuild_evidence=request.rebuild_evidence)
+            rebuild_evidence=request.rebuild_evidence, summary=summary)
         keys = offset + len(remaining)
     except Exception as exc:
-        AxisVariantRefresh.objects.filter(pk=request_id).update(
-            outcome='failed', failure_reason=str(exc)[:2000], completed_at=timezone.now())
+        attempt.update(outcome='failed', failure_reason=str(exc)[:2000], completed_at=timezone.now())
         raise
-    AxisVariantRefresh.objects.filter(pk=request_id).update(
-        outcome='done', completed_at=timezone.now())
+    attempt.update(outcome='done', completed_at=timezone.now())
     logger.info('Axis variant refresh %s walked %s codes and refreshed %s mappings%s.',
                 request_id, keys, refreshed,
                 ', rebuilding their unit evidence from patient data' if request.rebuild_evidence else '')

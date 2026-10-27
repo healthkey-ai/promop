@@ -30,6 +30,24 @@ All notable changes to PRomop are documented here.
   and OMOP paths. Full SLiM/MIPI-parity with Trial Details (MRI lesions, MIPI
   result ownership) remains a documented clinical decision (#5482).
 
+- **Versioned clinical source-input SDK on dev** — opt-in, per-field approved
+  source writes for laboratory ULN ratios, explicit swallowing answers and SCT
+  dates append corrections/clear tombstones and verify refreshed readback.
+  Three nullable projections add no medical defaults or mapping approvals.
+  Existing INR/seconds and native SCT behavior remain distinct; see
+  [the contract](docs/cb_clinical_inputs_architecture.md) and
+  [rollout gates](docs/cb_clinical_inputs_plan.md).
+- **A curator can walk the source codes again after loading patients** — the
+  Concept to Code tab's Source-code coverage heading now carries the walk
+  panel: when the last walk began, how many patients have source codes first
+  seen since, and a button (approval rights) that records a rebuild request
+  for the worker. While a walk is queued or running the panel shows its
+  progress. (#2050)
+- **The walk reports how much LOINC axis evidence the data holds** — a rebuild
+  counts, over the codes it walks, how many have each axis settled and from
+  what, how many carry only a hint, and how many have patients that disagree
+  on it. The panel shows the table, so whether anything beyond units ever
+  settles an axis is visible at a glance. (#2051)
 - **The patient can confirm that the recorded treatment history is complete** —
   the Treatment tab now carries "This is my complete treatment history". Until it
   is ticked, the number of recorded lines is a lower bound ("at least N"); the
@@ -39,6 +57,16 @@ All notable changes to PRomop are documented here.
   patient copy carries the confirmation with the record. The write goes through
   the packaged endpoint, so an embedding host applies its own write gate and
   per-person authorization (#1924).
+- **An ETL can write a patient's lines of therapy** — `POST
+  /api/v1/therapy-lines/bulk_upsert/` takes one person's lines as the source
+  states them (number, dates, ongoing, regimen label, outcome) and writes them
+  through the canonical line writer in one all-or-nothing request, deriving the
+  record once. Patients imported through the OMOP row endpoints had no lines,
+  because none of those endpoints writes an `Episode`, and the per-line editor
+  POST refuses the `system/etl.write` credential. Regimen labels resolve to a
+  concept only through the curated regimen table or an exact HemOnc name;
+  anything else keeps the label as the line's name and is queued as a regimen
+  mapping gap, so an abbreviation such as "R" is never guessed (#1969).
 
 - **An ETL can write a patient's lines of therapy** — `POST
   /api/v1/therapy-lines/bulk_upsert/` takes one person's lines as the source
@@ -133,6 +161,18 @@ All notable changes to PRomop are documented here.
   Their types are otherwise unchanged. Without concept 32865 loaded, the recipe
   type stands (#1959).
 
+- **A patient's own record edits are recorded as patient self-report** — a
+  `PatientRecord` PATCH by the patient (`/patient-info/me/`) or their verified
+  representative projects its OMOP facts with type 32865 (Patient self-report)
+  instead of the recipe's type, which for curated mappings defaults to EHR.
+  The patient's own facts also get a `PATIENT_SELF` provenance row, as PHR
+  entries do. Same-day matching keeps the two apart in both directions: a
+  patient's answer sits beside a clinical fact recorded the same day instead of
+  overwriting it and taking over its type and provenance, and a later clinician,
+  staff or service edit that day writes its own fact rather than the patient's.
+  Their types are otherwise unchanged. Without concept 32865 loaded, the recipe
+  type stands (#1959).
+
 - **Mapping saves return immediately** — approving or re-pointing a code
   mapping (Concept to Code, Code to Concept, group approve, CSV upload) writes the mapping
   and returns; the stored clinical rows move to the new concept in a background
@@ -156,6 +196,14 @@ All notable changes to PRomop are documented here.
 
 ### Fixed
 
+- **A refresh whose worker was killed is picked up without a deploy** — the
+  stale-heartbeat sweep ran at worker boot and twice in the next three minutes,
+  then never again. Cloud Run shuts the old instance down after the new worker
+  is up, so a walk killed that way went stale after the last recheck and stayed
+  `running` until the next deploy; the redelivered message found a row that was
+  not `queued` and skipped it. A live worker now sweeps every five minutes, so
+  a stranded request is requeued and resumed within about one stale interval.
+  (#2048)
 - **Unit counts come from the instance's own patients** — migration 0307 asks
   the worker to rewrite every code's stored unit evidence from the source codes
   on its loaded patients and the stored measurements, then refresh its axis

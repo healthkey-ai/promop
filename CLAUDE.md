@@ -1277,6 +1277,12 @@ an offset, because the key set shrinks as codes are rebuilt. Once an instance
 has completed a rebuild, a seed or inventory load writes no unit evidence
 over existing rows. The hospital code seed used to carry the inventory's
 label-level counts on every code with the label (#2041).
+A curator asks for the walk again after loading patients from the panel on
+the Concept to Code tab (`POST concept-to-code/axis-variant-walk/`, #2050),
+which also shows how many patients have source codes since the last walk
+began. A rebuild counts the axis evidence it meets (`axis_evidence.Summary`,
+stored on the request) so the panel can show whether any axis beyond property
+and scale is ever settled or varies across patients (#2051).
 
 ### Concept embeddings
 

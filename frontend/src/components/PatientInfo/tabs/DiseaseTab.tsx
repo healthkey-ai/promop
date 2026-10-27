@@ -122,7 +122,9 @@ function LymphomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onCha
             <FlipiAssessment value={formData?.flipi_score_options} recordedScore={formData?.flipi_score} descriptor={descriptors.flipi_score_options} onChange={onChange} />
           </div>
           <ClinicalField label="Bulky Disease" name="bulky_disease" descriptor={descriptors.bulky_disease} type="select" value={formData?.bulky_disease} options={YES_NO_OPTIONS} onChange={onChange} />
-          <ClinicalField label="B Symptoms" name="b_symptoms" descriptor={descriptors.b_symptoms} type="select" value={formData?.b_symptoms} options={YES_NO_OPTIONS} onChange={onChange} />
+          <ClinicalField label="Fever" name="b_symptom_fever" descriptor={descriptors.b_symptom_fever} type="select" value={formData?.b_symptom_fever} options={YES_NO_OPTIONS} onChange={onChange} />
+          <ClinicalField label="Night Sweats" name="b_symptom_night_sweats" descriptor={descriptors.b_symptom_night_sweats} type="select" value={formData?.b_symptom_night_sweats} options={YES_NO_OPTIONS} onChange={onChange} />
+          <ClinicalField label="Weight Loss" name="b_symptom_weight_loss" descriptor={descriptors.b_symptom_weight_loss} type="select" value={formData?.b_symptom_weight_loss} options={YES_NO_OPTIONS} onChange={onChange} />
         </div>
       </Section>
 

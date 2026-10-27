@@ -93,6 +93,25 @@ def test_three_same_day_concept_zero_fields_do_not_collide(patient):
     assert all(getattr(record, field) == value for field, value in values.items())
 
 
+def test_ratio_writes_never_replace_inr_or_clotting_seconds(patient):
+    from omop_core.models import Measurement
+    from tests.test_mm_lab_loinc_mapping import _measure
+    for code, value in [('6301-6', 1.1), ('5902-2', 13), ('3173-2', 29)]:
+        _measure(patient, code, value)
+    fields = ('inr', 'pt_seconds', 'ptt_seconds')
+    before = refresh_patient_record(patient)
+    expected = {field: getattr(before, field) for field in fields}
+    assert expected == {'inr': 1.1, 'pt_seconds': 13, 'ptt_seconds': 29}
+    facts = list(Measurement.objects.filter(person=patient).order_by('pk').values())
+    aptt = 'activated_partial_thromboplastin_time_uln'
+    approve(RATIO)
+    approve(aptt)
+    for changes in ({RATIO: '1.5', aptt: '2.5'}, {RATIO: None, aptt: None}):
+        after = write_clinical_inputs(patient, changes)
+        assert {field: getattr(after, field) for field in fields} == expected
+        assert list(Measurement.objects.filter(person=patient).order_by('pk').values()) == facts
+
+
 @pytest.mark.parametrize('value', ['0', '-1', 'NaN', 'Infinity', True, '1.234567', '100000000'])
 def test_invalid_batch_has_no_partial_facts(patient, value):
     approve(RATIO)
@@ -266,6 +285,28 @@ def test_one_denied_clinical_field_rolls_back_allowed_clinical_and_profile_edits
     patient.refresh_from_db()
     assert patient.gender_source_value == original
     assert not Observation.objects.filter(person=patient).exists()
+
+
+def test_mixed_profile_and_clinical_batch_derives_once(patient, monkeypatch):
+    from omop_core.services import field_write_service
+    from omop_core.services import patient_record_service
+    from omop_core.services.field_write_service import apply_field_writes
+    approve(RATIO)
+    calls = []
+    real_refresh = patient_record_service.refresh_patient_record
+
+    def counted(person, *args, **kwargs):
+        calls.append(person.pk)
+        return real_refresh(person, *args, **kwargs)
+
+    monkeypatch.setattr(field_write_service, 'refresh_patient_record', counted)
+    monkeypatch.setattr(patient_record_service, 'refresh_patient_record', counted)
+    result = apply_field_writes(patient, {'gender': 'Female', RATIO: '1.2'})
+    assert sorted(result.applied) == sorted(['gender', RATIO])
+    assert calls == [patient.pk]
+    patient.refresh_from_db()
+    assert patient.gender_source_value == 'Female'
+    assert getattr(PatientRecord.objects.get(person=patient), RATIO) == Decimal('1.2')
 
 
 @pytest.fixture
@@ -500,8 +541,9 @@ def test_equal_or_invalid_future_fact_cannot_ack_unselected_new_fact(patient, va
     assert Observation.objects.filter(person=patient).count() == 1
 
 
+@pytest.mark.parametrize('prefix', ['/api/patient-info/', '/api/v1/patient-records/'])
 @pytest.mark.parametrize('restriction', ['anonymous', 'foreign_patient', 'analyst', 'untrusted'])
-def test_curated_mapping_never_grants_caller_access(patient, restriction):
+def test_curated_mapping_never_grants_caller_access(patient, restriction, prefix):
     from omop_core.models import GroupAccess
     from patient_portal.models import Identity, PatientUser
     from rest_framework.test import APIClient
@@ -518,12 +560,13 @@ def test_curated_mapping_never_grants_caller_access(patient, restriction):
         GroupAccess.objects.create(identity=actor, org=patient.patient_record.organization, role='analyst')
     elif restriction == 'untrusted':
         GroupAccess.objects.create(identity=actor, org=OrganizationFactory(), role='org_admin')
-    response = client.patch(f'/api/patient-info/{patient.pk}/', {BOOL: False, 'person': patient.pk}, format='json')
+    response = client.patch(f'{prefix}{patient.pk}/', {BOOL: False, 'person': patient.pk}, format='json')
     assert response.status_code in {401, 403, 404}
     assert not Observation.objects.filter(person=patient).exists()
 
 
-def test_self_service_routes_to_same_dedicated_source(patient):
+@pytest.mark.parametrize('prefix', ['/api/patient-info/', '/api/v1/patient-records/'])
+def test_self_service_routes_to_same_dedicated_source(patient, prefix):
     from patient_portal.models import Identity, PatientUser
     from rest_framework.test import APIClient
     approve(BOOL)
@@ -532,11 +575,27 @@ def test_self_service_routes_to_same_dedicated_source(patient):
     client = APIClient()
     client.force_authenticate(actor)
     for value in (False, None, True):
-        response = client.patch('/api/patient-info/me/', {BOOL: value}, format='json')
+        response = client.patch(f'{prefix}me/', {BOOL: value}, format='json')
         assert response.status_code == 200, response.data
         assert response.data['patient_info'][BOOL] is value
         assert getattr(refresh_patient_record(patient), BOOL) is value
     assert Observation.objects.filter(person=patient).count() == 3
+
+
+@pytest.mark.parametrize('prefix', ['/api/patient-info/', '/api/v1/patient-records/'])
+def test_read_only_service_scope_cannot_author_approved_input(patient, prefix, settings):
+    from rest_framework.test import APIClient
+    approve(BOOL)
+    settings.SERVICE_AUTH_TOKEN = ''
+    settings.SERVICE_AUTH_TOKENS = {
+        'clinical-read-test': {'token': 'local-read-only-fixture', 'scopes': 'patient/*.read'},
+    }
+    client = APIClient()
+    client.credentials(HTTP_AUTHORIZATION='Bearer local-read-only-fixture')
+    response = client.patch(f'{prefix}{patient.pk}/', {BOOL: False}, format='json')
+    assert response.status_code == 403, response.data
+    assert not Observation.objects.filter(person=patient).exists()
+    assert getattr(PatientRecord.objects.get(person=patient), BOOL) is None
 
 
 def test_legacy_sct_native_path_still_writes_its_original_recipe(patient, staff_client):
@@ -723,6 +782,18 @@ def test_clinical_writes_preserve_current_therapy_history_attestation_contract(p
     withdraw_therapy_history(patient)
     assert PatientRecord.objects.get(person=patient).therapy_history_complete is None
     assert write_clinical_inputs(patient, {BOOL: True}).therapy_history_complete is None
+@pytest.mark.parametrize('reported_count,prior', [(None, None), (0, 'None'), (2, 'Two lines')])
+def test_clinical_writes_preserve_current_dev_reported_therapy_contract(patient, reported_count, prior):
+    approve(BOOL)
+    PatientRecord.objects.filter(person=patient).update(
+        therapy_lines_count=reported_count,
+        user_edited_fields=[] if reported_count is None else ['therapy_lines_count'],
+    )
+    for value in (False, True):
+        record = write_clinical_inputs(patient, {BOOL: value})
+        assert record.therapy_lines_count == reported_count
+        assert record.prior_therapy == prior
+        assert ('therapy_lines_count' in record.user_edited_fields) is (reported_count is not None)
 
 
 @pytest.mark.parametrize('paired', [True, False])
@@ -744,3 +815,28 @@ def test_clinical_write_preserves_current_flc_pairing_and_imwg_projection(patien
     after = write_clinical_inputs(patient, {BOOL: False})
     assert {field: getattr(after, field) for field in fields} == values
     assert _get_laboratory_data(patient)['_flc_pair'] == pair
+
+
+def test_clinical_write_preserves_authored_line_with_unknown_composition(patient):
+    from omop_core.services.episode_service import author_therapy_line
+    from omop_oncology.models import Episode, EpisodeEvent
+    from tests.test_episode_service import _seed_episode_writer_concepts
+    _seed_episode_writer_concepts()
+    approve(BOOL)
+    # composition_unknown is the API's explicit-input validation flag; the
+    # service receives its validated empty composition, not that serializer key.
+    line = author_therapy_line(patient, line_number=1, drugs=[],
+                               start_date=date(2025, 1, 1))
+    before = refresh_patient_record(patient)
+    fields = ('therapy_lines_count', 'prior_therapy', 'first_line_therapy', 'first_line_component_ids')
+    expected = {field: getattr(before, field) for field in fields}
+    assert expected['therapy_lines_count'] == 1
+    assert expected['first_line_therapy'] == 'Unknown'
+    assert expected['first_line_component_ids'] == []
+    episode = Episode.objects.filter(pk=line.episode.pk).values().get()
+    events = list(EpisodeEvent.objects.filter(episode_id=line.episode.pk).order_by('pk').values())
+    for value in (False, None):
+        after = write_clinical_inputs(patient, {BOOL: value})
+        assert {field: getattr(after, field) for field in fields} == expected
+        assert Episode.objects.filter(pk=line.episode.pk).values().get() == episode
+        assert list(EpisodeEvent.objects.filter(episode_id=line.episode.pk).order_by('pk').values()) == events

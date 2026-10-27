@@ -529,7 +529,9 @@ class PatientRecordSerializer(serializers.ModelSerializer):
                     for field in self._clinical_input_fields
                 })
             try:
-                cleaned = validated_values({field: data[field] for field in self._clinical_input_fields})
+                cleaned = validated_values(
+                    {field: data[field] for field in self._clinical_input_fields}, for_write=False,
+                )
             except ModelValidationError as exc:
                 raise serializers.ValidationError(
                     exc.message_dict if hasattr(exc, 'message_dict') else {'non_field_errors': exc.messages}) from None
@@ -542,6 +544,13 @@ class PatientRecordSerializer(serializers.ModelSerializer):
                     data.pop(field)
                     cleaned.pop(field)
                     self._clinical_input_fields.remove(field)
+            try:
+                # Historical reads may contain a future SCT date. Only a new
+                # command, including a pending equal value, gets write policy.
+                cleaned = validated_values(cleaned)
+            except ModelValidationError as exc:
+                raise serializers.ValidationError(
+                    exc.message_dict if hasattr(exc, 'message_dict') else {'non_field_errors': exc.messages}) from None
             available = capabilities()
             errors = {field: available[field]['reason'] for field in self._clinical_input_fields
                       if not available[field]['writable']}
@@ -1932,3 +1941,14 @@ class PrologSurveyResponseSerializer(serializers.Serializer):
         # `.all()` on purpose: it reads the viewset's prefetch cache, where a
         # filtered queryset would issue a query per row.
         return {a.question_key: a.value for a in obj.answers.all()}
+
+
+class ConditionContextSerializer(serializers.Serializer):
+    """A partial patch: omitted fields survive; blank/null explicitly clears."""
+    note = serializers.CharField(max_length=10000, required=False, allow_blank=True, allow_null=True)
+    care_team = serializers.CharField(max_length=2000, required=False, allow_blank=True, allow_null=True)
+
+    def to_internal_value(self, data):
+        if isinstance(data, dict) and set(data) - set(self.fields):
+            raise serializers.ValidationError({'non_field_errors': ['Only note and care_team may be updated here.']})
+        return super().to_internal_value(data)
