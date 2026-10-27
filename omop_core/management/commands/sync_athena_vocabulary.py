@@ -11,7 +11,7 @@ from django.utils import timezone
 
 from omop_core.management.commands.load_athena_vocabularies import (
     DEFAULT_GDRIVE_URL,
-    _download_gdrive_loinc_csv,
+    _download_gdrive_loinc_archive,
     _download_gdrive_vocabulary,
     _resolve_gdrive_vocabulary,
     _sha256_file,
@@ -93,7 +93,7 @@ class Command(BaseCommand):
         try:
             with tempfile.TemporaryDirectory(prefix='promop-athena-sync-') as directory:
                 selection = None
-                loinc_csv = None
+                loinc_archive = None
                 if gdrive:
                     selection = _resolve_gdrive_vocabulary(gdrive, self.stdout.write)
                     identity = selection['identity']
@@ -111,11 +111,13 @@ class Command(BaseCommand):
                     archive = _download_gdrive_vocabulary(
                         gdrive, Path(directory), self.stdout.write, selection=selection,
                     )
-                    loinc_csv_id = selection.get('loinc_csv_id')
-                    loinc_csv = (
-                        _download_gdrive_loinc_csv(
-                            loinc_csv_id, Path(directory), self.stdout.write,
-                        ) if loinc_csv_id else None
+                    loinc_archive_id = selection.get('loinc_archive_id')
+                    loinc_archive = (
+                        _download_gdrive_loinc_archive(
+                            loinc_archive_id,
+                            selection.get('loinc_archive_name'),
+                            Path(directory), self.stdout.write,
+                        ) if loinc_archive_id else None
                     )
 
                 if archive:
@@ -147,7 +149,7 @@ class Command(BaseCommand):
                 missing, installed, outcome = self._load_delta(
                     archive=archive, source_path=source_path, identity=identity,
                     sha256=sha256, dry_run=options['dry_run'],
-                    loinc_csv=str(loinc_csv) if loinc_csv else None,
+                    loinc_archive=str(loinc_archive) if loinc_archive else None,
                 )
                 self._receipt(
                     source_url, identity, sha256, previous, installed, missing,
@@ -171,7 +173,7 @@ class Command(BaseCommand):
             raise
 
     def _load_delta(self, archive, source_path, identity, sha256, dry_run,
-                    loinc_csv=None):
+                    loinc_archive=None):
         installed = None
         with transaction.atomic():
             self._acquire_lock()
@@ -181,8 +183,8 @@ class Command(BaseCommand):
             before = _table_counts()
             source = {'archive': archive} if archive else {'path': source_path}
             extra = {}
-            if loinc_csv:
-                extra['loinc_csv'] = loinc_csv
+            if loinc_archive:
+                extra['loinc_archive'] = loinc_archive
             call_command(
                 'load_athena_vocabularies', **source, **extra,
                 skip_umls_cache=True, skip_code_mappings=True,
