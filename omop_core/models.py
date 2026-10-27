@@ -2508,8 +2508,7 @@ class SourceCodeAxisVariant(models.Model):
         SourceCodeConceptMapping, on_delete=models.CASCADE,
         related_name='axis_variants',
     )
-    axis_key = models.CharField(
-        max_length=255,
+    axis_key = models.TextField(
         help_text="Canonical form of axis_values, e.g. 'property=SCnc', or 'unit=%' "
                   'for a unit that implies no single property.',
     )

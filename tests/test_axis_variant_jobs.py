@@ -10,7 +10,10 @@ from django.core.management import call_command
 from django.db import transaction
 from django.utils import timezone
 
-from omop_core.models import AxisVariantRefresh, PatientSourceCode, SourceCodeConceptMapping
+from omop_core.models import (
+    AxisVariantRefresh, PatientSourceCode, SourceCodeAxisVariant,
+    SourceCodeConceptMapping,
+)
 from omop_core.mapping import axis_variants
 from omop_core.services import axis_variant_jobs
 from tests.factories import PersonFactory
@@ -674,3 +677,15 @@ def test_the_boot_pass_publishes_a_request_the_shutdown_requeued(settings):
     with patch(PUBLISH) as publish:
         assert axis_variant_jobs.dispatch_queued_refreshes(republish=True) == 1
     publish.assert_called_once_with(args=[request.pk], task_id=f'axis-variant-refresh-{request.pk}')
+
+
+def test_long_axis_key_round_trips():
+    """axis_key longer than 255 chars stores and retrieves correctly (#2069)."""
+    mapping = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id=LAB, source_code='LONG-KEY', omop_table='measurement')
+    long_key = 'property=' + ','.join(f'Prop{i}' for i in range(80))
+    assert len(long_key) > 255
+    variant = SourceCodeAxisVariant.objects.create(
+        mapping=mapping, axis_key=long_key, axis_values={}, units=['%'])
+    variant.refresh_from_db()
+    assert variant.axis_key == long_key
