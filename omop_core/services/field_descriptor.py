@@ -247,6 +247,7 @@ _TAB_DISEASE = frozenset({
     # Lymphoma
     'tumor_grade', 'gelf_criteria_status', 'flipi_score', 'flipi_risk_category',
     'flipi_score_options', 'bulky_disease', 'b_symptoms',
+    'b_symptom_fever', 'b_symptom_night_sweats', 'b_symptom_weight_loss',
     'transformed_to_dlbcl', 'dlbcl_transformation_date', 'post_transformation_outcome',
     'bone_marrow_involvement', 'number_of_nodal_sites',
     'clonal_bone_marrow_b_lymphocytes',
