@@ -166,3 +166,15 @@ def test_slim_verdict_keeps_the_involved_chain_burden_guard():
 
     record.kappa_flc = None
     assert derive_meets_slim(record) is None
+
+
+def test_cb_trial_details_can_resolve_the_behavior_assertions():
+    """Trial Details names these columns in camelCase; the shared form needs a
+    binding or the row has no editor even though migration 0160 made it writable."""
+    writable = {'kind': 'direct', 'writable': True, 'target': 'patient_record'}
+    descriptors = patient_form_descriptors({
+        'no_mental_health_disorder_status': dict(writable),
+        'no_substance_use_status': dict(writable),
+    })
+    assert 'noMentalHealthDisorderStatus' in descriptors['no_mental_health_disorder_status']['bindings']
+    assert 'noSubstanceUseStatus' in descriptors['no_substance_use_status']['bindings']
