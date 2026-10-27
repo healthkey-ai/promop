@@ -18,12 +18,14 @@ from omop_core.models import (
     DrugExposure,
     ImageOccurrence,
     Measurement,
+    Observation,
     PatientDocument,
     PatientRecord,
     ProcedureOccurrence,
 )
 from patient_portal.models import PatientStatement, PatientUser
 from omop_core.services.condition_context import condition_contexts
+from omop_core.services.cancer_details import cancer_details, cancer_family, SLUG_FAMILY
 
 from .labs import blood_type, lab_history, labs
 from .records import genetics, medication_detail, medications, procedures
@@ -249,34 +251,6 @@ def _condition_name(row) -> str | None:
 # Cancer families by ICD-10 prefix: conditions in one family are one disease
 # over time (MGUS → smoldering → myeloma); different families are different
 # cancers and get their own entries.
-CANCER_FAMILIES = {
-    'myeloma': ('C90', 'D47.2'),
-    'prostate-cancer': ('C61',),
-    'breast-cancer': ('C50', 'D05'),
-    'lung-cancer': ('C34',),
-    'colon-cancer': ('C18', 'C19', 'C20'),
-    'follicular-lymphoma': ('C82',),
-    'chronic-lymphocytic-leukemia': ('C91.1',),
-}
-SLUG_FAMILY = {'multiple-myeloma': 'myeloma'}
-
-
-def _icd_codes(row) -> list[str]:
-    codes = [(row.condition_source_value or '').strip().upper()]
-    concept = row.condition_concept
-    if concept is not None and (concept.vocabulary_id or '').upper().startswith('ICD10'):
-        codes.append((concept.concept_code or '').strip().upper())
-    return [c for c in codes if c]
-
-
-def cancer_family(row) -> str:
-    codes = _icd_codes(row)
-    for family, prefixes in CANCER_FAMILIES.items():
-        if any(code.startswith(prefix) for code in codes for prefix in prefixes):
-            return family
-    if codes and _ICD10_CANCER.match(codes[0]):
-        return codes[0][:3]
-    return (_condition_name(row) or '').lower()
 
 
 def _transitions(rows) -> list[dict]:
@@ -288,6 +262,57 @@ def _transitions(rows) -> list[dict]:
             seen.add(name.lower())
             steps.append({'name': name, 'date': row.condition_start_date.isoformat()})
     return steps if len(steps) > 1 else []
+
+
+def _apply_cancer_details(entry, details, sources, family):
+    """Overlay only facts explicitly attached to this cancer, including clears."""
+    if not details:
+        return entry
+    detail_sources = {}
+    def take(field):
+        text, row = details[field]
+        origin = sources[type(row), row.pk]
+        contributors = getattr(row, '_cancer_detail_contributors', [])
+        if len(contributors) > 1:
+            origin = {**origin, 'contributors': [sources[type(r), r.pk] for r in contributors]}
+        return text, origin
+    if 'histologic_type' in details:
+        text, origin = take('histologic_type')
+        entry.pop('subtype', None)
+        if text:
+            entry['subtype'] = text
+        detail_sources['subtype'] = origin
+    stage_field, stage_label = STAGE_FIELDS.get(family, ('stage', 'Stage'))
+    if stage_field not in details and 'stage' in details:
+        stage_field = 'stage'
+    if stage_field in details:
+        text, origin = take(stage_field)
+        entry.pop('stage', None)
+        if text:
+            entry['stage'] = {'label': stage_label, 'value': text, 'source': origin}
+        detail_sources['stage'] = origin
+    if family in RISK_FIELDS and RISK_FIELDS[family][0] in details:
+        field, label = RISK_FIELDS[family]
+        text, origin = take(field)
+        entry.pop('risk', None)
+        if text:
+            entry['risk'] = {'label': label, 'value': text, 'source': origin}
+        detail_sources['risk'] = origin
+    biomarkers = list(entry.get('biomarkers', []))
+    for field, label in BIOMARKER_FIELDS:
+        if field not in details:
+            continue
+        text, origin = take(field)
+        biomarkers = [b for b in biomarkers if b['label'] != label]
+        if text:
+            biomarkers.append({'label': label, 'value': text, 'source': origin})
+        detail_sources[field] = origin
+    entry.pop('biomarkers', None)
+    if biomarkers:
+        entry['biomarkers'] = biomarkers
+    if detail_sources:
+        entry['detail_sources'] = detail_sources
+    return entry
 
 
 def diagnoses(person, record: PatientRecord | None) -> dict[str, Any]:
@@ -304,12 +329,21 @@ def diagnoses(person, record: PatientRecord | None) -> dict[str, Any]:
         else:
             other_rows.append(row)
 
+    details = cancer_details(person.pk, {row.pk: family for family, items in families.items() for row in items})
+    detail_sources = {}
+    for model in (Measurement, Observation):
+        selected = {r.pk: r for fields in details.values() for text, row in fields.values()
+                    for r in [row] + getattr(row, '_cancer_detail_contributors', []) if type(r) is model}
+        table = model._meta.db_table
+        detail_sources.update({(model, pk): origin for pk, origin in row_sources(model, list(selected.values()),
+            type_attr=f'{table}_type_concept', date_attr=f'{table}_date').items()})
     cancer = []
     slug = (record.disease_slug or '').lower() if record else ''
     primary_family = SLUG_FAMILY.get(slug, slug)
     primary_rows = families.pop(primary_family, [])
     primary = primary_cancer(record, _transitions(primary_rows)) if record else None
     if primary:
+        _apply_cancer_details(primary, details.get(primary_family, {}), detail_sources, primary_family)
         if primary_rows:
             primary['condition_id'] = primary_rows[-1].pk
             primary.update(contexts.get(primary_rows[-1].pk, {}))
@@ -334,6 +368,7 @@ def diagnoses(person, record: PatientRecord | None) -> dict[str, Any]:
             'transitions': _transitions(family_rows),
             'source': sources[latest.pk],
         }
+        _apply_cancer_details(entry, details.get(cancer_family(latest), {}), detail_sources, cancer_family(latest))
         cancer.append({k: v for k, v in entry.items() if v not in (None, [])})
     # The primary cancer (the one the record follows) first, then the others newest first.
     cancer.sort(key=lambda c: c.get('date') or '', reverse=True)

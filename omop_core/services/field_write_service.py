@@ -16,6 +16,7 @@ their OMOP source facts and refreshes the projection once per batch.
 
 import logging
 from datetime import date
+from django.utils import timezone
 from decimal import Decimal, InvalidOperation
 
 from django.core.exceptions import ValidationError
@@ -548,6 +549,11 @@ def _write_editable_fact(person, field, d, value, today):
         }
 
     # Deterministic target when several of OUR same-day rows exist (was `.first()` with no ordering).
+    from omop_core.services.cancer_details import projection_scope
+    scope = projection_scope(person, field, model)
+    keys.update(scope)
+    if scope and any(value is not None for value in scope.values()):
+        fields[f'{model._meta.db_table}_datetime'] = timezone.now()
     existing = model.objects.filter(**keys).order_by(pk_order).first()
     if existing is not None:
         for attr, val in fields.items():
