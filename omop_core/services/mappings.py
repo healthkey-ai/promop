@@ -211,7 +211,7 @@ CONDITION_FIELDS = frozenset({'disease', 'stage', 'condition_code_icd_10', 'cond
 # the birth date to Person — `patient_age` is a function of the birth date and
 # `ethnicity` is unhandled — so membership here does NOT mean a field survives
 # a re-derivation.
-DEMOGRAPHIC_FIELDS = frozenset({'gender', 'date_of_birth', 'patient_age', 'ethnicity'})
+DEMOGRAPHIC_FIELDS = frozenset({'gender', 'date_of_birth', 'date_of_birth_precision', 'patient_age', 'ethnicity'})
 
 # Maps line number (1/2/3) → PatientRecord field prefix
 THERAPY_LINE_PREFIXES = {

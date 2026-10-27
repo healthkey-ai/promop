@@ -1310,17 +1310,27 @@ def _get_demographics(person: Person, snapshot: OmopSnapshot = None) -> dict:
                 pass
 
     if person.year_of_birth not in PERSON_YEAR_PLACEHOLDERS:
+        month = person.month_of_birth
+        day = person.day_of_birth
+        if month and day:
+            precision = 'day'
+        elif month:
+            precision = 'month'
+        else:
+            precision = 'year'
         try:
             data['date_of_birth'] = date(
                 person.year_of_birth,
-                person.month_of_birth or 1,
-                person.day_of_birth or 1,
+                month or 1,
+                day or 1,
             )
         except ValueError:
             # OMOP permits partial dates and some imported rows contain an
             # invalid partial month/day. Keep the known year rather than
             # discarding the patient's age and DOB entirely.
             data['date_of_birth'] = date(person.year_of_birth, 1, 1)
+            precision = 'year'
+        data['date_of_birth_precision'] = precision
 
     gender_src = None
     if person.gender_concept:
