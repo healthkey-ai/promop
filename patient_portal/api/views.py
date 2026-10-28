@@ -1059,18 +1059,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         if queryset.filter(organization__isnull=True).exists():
             org_options.append({'value': '__unassigned__', 'label': 'Unassigned'})
 
-        diseases = (
-            queryset
-            .exclude(disease__isnull=True)
-            .exclude(disease='')
-            .values_list('disease', flat=True)
-            .distinct()
-            .order_by('disease')
-        )
+        from omop_core.models import DiseaseCategory
+        diseases = [c.label for c in DiseaseCategory]
 
         return {
             'orgs': org_options,
-            'diseases': list(diseases),
+            'diseases': diseases,
             'stages': ['I', 'II', 'III', 'IV'],
         }
     
