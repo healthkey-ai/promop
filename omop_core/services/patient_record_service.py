@@ -13,10 +13,9 @@ import statistics
 from collections import defaultdict
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from datetime import date, datetime, timedelta
-from django.db import models
+from django.db import DatabaseError, models, transaction
 from django.db.models import DateTimeField, Q
 from django.db.models.functions import Cast, Coalesce
-from django.db import transaction
 from django.utils import timezone
 from omop_core.models import (
     Person, PatientRecord, ConditionOccurrence, Concept, ConceptAncestor,
@@ -1463,8 +1462,8 @@ def _canonicalize_disease(name: str) -> str:
         row = DiseaseCategoryMapping.objects.filter(disease_name__iexact=name.strip()).first()
         if row:
             return _CATEGORY_TITLES.get(row.category, name)
-    except Exception:
-        pass
+    except DatabaseError:
+        pass  # Table may not exist during early migrations
     return name
 
 

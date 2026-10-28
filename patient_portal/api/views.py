@@ -10364,7 +10364,13 @@ def disease_category_mapping_list(request):
             {'detail': f'A mapping for "{disease_name}" already exists'},
             status=status.HTTP_409_CONFLICT,
         )
-    obj = DiseaseCategoryMapping.objects.create(disease_name=disease_name, category=category)
+    try:
+        obj = DiseaseCategoryMapping.objects.create(disease_name=disease_name, category=category)
+    except IntegrityError:
+        return Response(
+            {'detail': f'A mapping for "{disease_name}" already exists'},
+            status=status.HTTP_409_CONFLICT,
+        )
     return Response(
         {'id': obj.id, 'disease_name': obj.disease_name, 'category': obj.category},
         status=status.HTTP_201_CREATED,
@@ -10412,7 +10418,13 @@ def disease_category_mapping_detail(request, pk):
                 status=status.HTTP_409_CONFLICT,
             )
         obj.disease_name = disease_name
-    obj.save()
+    try:
+        obj.save()
+    except IntegrityError:
+        return Response(
+            {'detail': f'A mapping for "{obj.disease_name}" already exists'},
+            status=status.HTTP_409_CONFLICT,
+        )
     return Response({'id': obj.id, 'disease_name': obj.disease_name, 'category': obj.category})
 
 

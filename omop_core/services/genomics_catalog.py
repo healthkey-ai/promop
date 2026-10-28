@@ -3,6 +3,7 @@ import json
 from copy import deepcopy
 from dataclasses import dataclass
 
+from django.db import DatabaseError
 from django.utils import timezone
 from functools import lru_cache
 from pathlib import Path
@@ -60,8 +61,8 @@ def disease_code(value):
         ).values_list('category', flat=True).first()
         if row and row != 'Other':
             return row
-    except Exception:
-        pass
+    except DatabaseError:
+        pass  # Table may not exist during early migrations
     return None
 
 

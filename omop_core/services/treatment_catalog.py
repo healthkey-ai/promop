@@ -3,6 +3,7 @@
 The migration seeds TherapyOutcome; defaults also make newly provisioned/test
 installations usable before the vocabulary data has been loaded.
 """
+from django.db import DatabaseError
 from django.db.models import Q
 
 OUTCOMES = [
@@ -45,8 +46,8 @@ def disease_code(value):
             nci = _CATEGORY_TO_NCI.get(row)
             if nci:
                 return nci
-    except Exception:
-        pass
+    except DatabaseError:
+        pass  # Table may not exist during early migrations
     return value or ''
 
 

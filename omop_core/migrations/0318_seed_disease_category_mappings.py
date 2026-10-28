@@ -59,7 +59,7 @@ _SEED = [
     ("Follicular non-Hodgkin's lymphoma diffuse follicle center sub-type grade 1", 'FL'),
     ("Follicular non-Hodgkin's lymphoma of lymph nodes of multiple sites", 'FL'),
     ('Pediatric follicular lymphoma', 'FL'),
-    ('Follicular neoplasm of thyroid', 'FL'),
+    ('Follicular neoplasm of thyroid', 'Other'),
     # BC — Breast Cancer
     ('Breast Cancer', 'BC'),
     ('Breast cancer (disorder)', 'BC'),
