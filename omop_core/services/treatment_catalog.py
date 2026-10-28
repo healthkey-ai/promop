@@ -40,7 +40,7 @@ def disease_code(value):
     try:
         from omop_core.models import DiseaseCategoryMapping
         row = DiseaseCategoryMapping.objects.filter(
-            disease_name__iexact=value.strip(),
+            disease_name__iexact=(value or '').strip(),
         ).values_list('category', flat=True).first()
         if row:
             nci = _CATEGORY_TO_NCI.get(row)
