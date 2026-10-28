@@ -8,7 +8,7 @@ from rest_framework.test import APIClient
 from omop_core.models import (
     CanonicalUnitPreference, CanonicalUnitChange, Concept, ConceptRelationship,
     LoincClass, LoincCodeClass, Measurement, Relationship,
-    SourceCodeConceptMapping,
+    SourceCodeAxisVariant, SourceCodeConceptMapping,
 )
 from omop_core.services.canonical_units import (
     LoincAxes, convert, loinc_axes_for_concepts, normalize, property_for,
@@ -690,3 +690,162 @@ class TestResolvePersonNormalizesUnits:
         assert row.measurement_concept_id == target_concept.concept_id
         # umol/L -> mmol/L: divide by 1000
         assert row.value_as_number == Decimal('0.1')
+
+
+class TestVariantAwareNormalization:
+    """Tests that axis variants route unit normalization to the variant's concept."""
+
+    def _loinc_concept(self, code, name, property_name):
+        """Create a LOINC Measurement concept with a Has property relationship."""
+        concept = ConceptFactory(
+            concept_code=code, concept_name=name,
+            vocabulary_id='LOINC', domain_id='Measurement',
+            standard_concept='S',
+        )
+        Relationship.objects.get_or_create(
+            relationship_id='Has property',
+            defaults={
+                'relationship_name': 'Has property',
+                'is_hierarchical': 0,
+                'defines_ancestry': 0,
+                'reverse_relationship_id': '',
+                'relationship_concept_id': 0,
+            },
+        )
+        prop_concept = ConceptFactory(
+            concept_name=property_name,
+            concept_code=f'LP-{property_name.upper().replace(" ", "")}',
+        )
+        ConceptRelationship.objects.create(
+            concept_1=concept,
+            concept_2=prop_concept,
+            relationship_id='Has property',
+            valid_start_date=date(1970, 1, 1),
+            valid_end_date=date(2099, 12, 31),
+        )
+        # Also add quantitative scale
+        Relationship.objects.get_or_create(
+            relationship_id='Has scale type',
+            defaults={
+                'relationship_name': 'Has scale type',
+                'is_hierarchical': 0,
+                'defines_ancestry': 0,
+                'reverse_relationship_id': '',
+                'relationship_concept_id': 0,
+            },
+        )
+        scale_concept = ConceptFactory(
+            concept_name='Quantitative', concept_code='LP-QN-VARIANT',
+        )
+        ConceptRelationship.objects.create(
+            concept_1=concept,
+            concept_2=scale_concept,
+            relationship_id='Has scale type',
+            valid_start_date=date(1970, 1, 1),
+            valid_end_date=date(2099, 12, 31),
+        )
+        return concept
+
+    def test_repoint_variant_uses_variant_concept_property(self, db):
+        """Approving a variant normalizes to the variant concept's base unit."""
+        from omop_core.mapping.code_resolution import repoint_clinical_rows
+
+        person = PersonFactory()
+        old_concept = ConceptFactory(concept_code='OLD-V', concept_name='Old')
+
+        # Parent mapping targets a mass-concentration LOINC (base unit: g/L)
+        parent_concept = self._loinc_concept(
+            'PARENT-LC', 'Parent [Mass/volume]', 'Mass Concentration')
+        # Variant targets a substance-concentration LOINC (base unit: mol/L)
+        variant_concept = self._loinc_concept(
+            'VARIANT-LC', 'Variant [Moles/volume]', 'Substance Concentration')
+
+        mapping = _sccm('GLUCOSE', parent_concept)
+        # Axis variant for mmol/L units
+        SourceCodeAxisVariant.objects.create(
+            mapping=mapping,
+            axis_key='property=SCnc|scale_type=Qn',
+            axis_values={'property': 'SCnc', 'scale_type': 'Qn'},
+            units=['mmol/L'],
+            status='approved',
+            target_concept=variant_concept,
+        )
+
+        # Row reported in mmol/L — should normalize to mol/L (SCnc base unit)
+        row = MeasurementFactory(
+            person=person,
+            measurement_concept=old_concept,
+            measurement_source_value='GLUCOSE',
+            value_as_number=Decimal('5'),
+            unit_source_value='mmol/L',
+        )
+
+        result = repoint_clinical_rows(
+            mapping=mapping,
+            old_concept_id=old_concept.concept_id,
+            new_concept_id=variant_concept.concept_id,
+            units=['mmol/L'],
+        )
+
+        assert result['rows_updated'] == 1
+        assert result.get('rows_normalized', 0) == 1
+
+        row.refresh_from_db()
+        assert row.measurement_concept_id == variant_concept.concept_id
+        # mmol/L -> mol/L: multiply by 0.001
+        assert row.value_as_number == Decimal('0.005')
+        assert row.unit_source_value == 'mmol/L'  # never changed
+
+    def test_repoint_without_variant_uses_mapping_destination(self, db):
+        """Non-variant repoint uses the mapping's destination_unit_concept."""
+        from omop_core.mapping.code_resolution import repoint_clinical_rows
+
+        person = PersonFactory()
+        old_concept = ConceptFactory(concept_code='OLD-NV', concept_name='Old')
+        new_concept = ConceptFactory(concept_code='NEW-NV', concept_name='New')
+        # destination_unit_concept is g/dL (MCnc)
+        gdl_concept = _ucum_concept('g/dL')
+        mapping = _sccm('ALB', new_concept,
+                         destination_unit_concept=gdl_concept)
+
+        row = MeasurementFactory(
+            person=person,
+            measurement_concept=old_concept,
+            measurement_source_value='ALB',
+            value_as_number=Decimal('40'),
+            unit_source_value='g/L',
+        )
+
+        result = repoint_clinical_rows(
+            mapping=mapping,
+            old_concept_id=old_concept.concept_id,
+            new_concept_id=new_concept.concept_id,
+        )
+
+        assert result.get('rows_normalized', 0) == 1
+        row.refresh_from_db()
+        # g/L -> g/dL: divide by 10
+        assert row.value_as_number == Decimal('4')
+
+    def test_loinc_property_fallback_resolves_base_unit(self, db):
+        """When no destination_unit_concept or CUP exists, falls back to LOINC property base unit."""
+        person = PersonFactory()
+        # LOINC concept with MCnc property — base unit is g/L
+        concept = self._loinc_concept(
+            'FALLBACK-LC', 'Fallback [Mass/volume]', 'Mass Concentration')
+        mapping = _sccm('FALLBACK', concept)
+
+        row = MeasurementFactory(
+            person=person,
+            measurement_concept=concept,
+            measurement_source_value='FALLBACK',
+            value_as_number=Decimal('2'),
+            unit_source_value='g/dL',
+        )
+        qs = Measurement.objects.filter(pk=row.pk)
+        count = normalize_measurement_units(qs, mapping)
+
+        assert count == 1
+        row.refresh_from_db()
+        # g/dL -> g/L (MCnc base unit): multiply by 10
+        assert row.value_as_number == Decimal('20')

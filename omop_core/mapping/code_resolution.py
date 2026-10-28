@@ -753,13 +753,19 @@ def repoint_clinical_rows(*, mapping, old_concept_id, new_concept_id,
             )
 
             # Normalize units on repointed Measurement rows (#2088).
+            # When units is set this is a variant approval: the variant's
+            # target concept (new_concept_id) differs from the mapping's,
+            # and the mapping's destination_unit_concept was chosen for its
+            # own LOINC, not the variant's.
             if repointed_pks:
                 from omop_core.services.canonical_units import (
                     normalize_measurement_units,
                 )
                 norm_qs = model.objects.filter(pk__in=repointed_pks)
+                variant_concept = new_concept_id if units is not None else None
                 result['rows_normalized'] = normalize_measurement_units(
-                    norm_qs, mapping)
+                    norm_qs, mapping,
+                    target_concept_id=variant_concept)
 
     logger.info(
         'Mapping %s: re-pointed %s %s row(s) from concept %s to %s '

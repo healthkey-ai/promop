@@ -369,39 +369,64 @@ def measurement_normalized(measurement, preferences):
 # Write-time unit normalization
 # ---------------------------------------------------------------------------
 
-def _resolve_target_unit(mapping):
-    """Determine the target UCUM unit and property code for a mapping.
+def _resolve_target_unit(mapping, target_concept_id=None):
+    """Determine the target UCUM unit and property code.
 
     Returns ``(target_unit, property_code)`` or ``(None, None)`` when no
     conversion target can be determined.
 
+    *target_concept_id* overrides ``mapping.target_concept_id`` — needed when
+    an axis variant is being approved: the variant's target concept differs
+    from the parent mapping's, and the mapping's ``destination_unit_concept``
+    was chosen for the mapping's own LOINC code, not the variant's.  When an
+    override is provided, ``mapping.destination_unit_concept`` is skipped.
+
     Precedence:
     1. ``mapping.destination_unit_concept`` — curator-set UCUM concept on the
-       SCCM row.
-    2. ``CanonicalUnitPreference`` for the mapping's target concept — the
-       instance-wide preference for the destination LOINC code.
+       SCCM row (skipped when *target_concept_id* overrides).
+    2. ``CanonicalUnitPreference`` for the target concept.
+    3. LOINC property base unit — derived from the target concept's axes.
     """
+    effective_concept_id = target_concept_id or getattr(
+        mapping, 'target_concept_id', None)
+
     # 1. Explicit destination_unit_concept on the mapping row.
-    duc = getattr(mapping, 'destination_unit_concept', None)
-    if duc is not None:
-        dst = unit_code(duc.concept_code)
-        # Find the property that contains this unit.
-        for prop, units in UNIT_GROUPS.items():
-            if dst in units:
-                return dst, prop
-        return None, None
+    #    Skipped for variant overrides: the mapping's unit was picked for its
+    #    own LOINC, not the variant's (code_mapping_lookup does the same).
+    if target_concept_id is None:
+        duc = getattr(mapping, 'destination_unit_concept', None)
+        if duc is not None:
+            dst = unit_code(duc.concept_code)
+            for prop, units in UNIT_GROUPS.items():
+                if dst in units:
+                    return dst, prop
+            return None, None
 
     # 2. CanonicalUnitPreference for the target concept.
-    target_concept_id = getattr(mapping, 'target_concept_id', None)
-    if target_concept_id:
+    if effective_concept_id:
         from omop_core.models import CanonicalUnitPreference
         try:
             pref = CanonicalUnitPreference.objects.get(
-                concept_id=target_concept_id)
+                concept_id=effective_concept_id)
             if pref.unit and pref.property:
                 return pref.unit, pref.property
         except CanonicalUnitPreference.DoesNotExist:
             pass
+
+    # 3. LOINC property base unit — the same fallback resolve_mapping_conversion
+    #    uses when destination_unit_concept is None.
+    if effective_concept_id:
+        from omop_core.models import Concept
+        try:
+            concept = Concept.objects.get(pk=effective_concept_id)
+        except Concept.DoesNotExist:
+            return None, None
+        axes = loinc_axes_for_concepts([concept])
+        prop = property_for(concept, axes=axes.get(concept.pk))
+        if prop:
+            base = _base_unit(prop)
+            if base:
+                return base, prop
 
     return None, None
 
@@ -417,12 +442,16 @@ def _ucum_concept(unit_str):
     )
 
 
-def normalize_measurement_units(qs, mapping):
+def normalize_measurement_units(qs, mapping, target_concept_id=None):
     """Convert value/unit on Measurement rows to the mapping's target unit.
 
     *qs* is a queryset of ``Measurement`` rows (already filtered to the rows
     that were just repointed or resolved).  *mapping* is the
     ``SourceCodeConceptMapping`` that was applied.
+
+    *target_concept_id*, when provided, overrides the mapping's own target
+    concept for unit resolution — needed when an axis variant is approved,
+    because the variant's destination LOINC differs from the mapping's.
 
     Only rows with a non-null ``value_as_number`` and a recognisable
     ``unit_source_value`` are touched.  ``unit_source_value`` is never changed
@@ -432,7 +461,7 @@ def normalize_measurement_units(qs, mapping):
 
     Returns the number of rows whose ``value_as_number`` was rewritten.
     """
-    target_unit, prop = _resolve_target_unit(mapping)
+    target_unit, prop = _resolve_target_unit(mapping, target_concept_id)
     if not target_unit or not prop:
         return 0
 
