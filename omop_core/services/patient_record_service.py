@@ -280,6 +280,12 @@ PATIENT_RECORD_OMOP_MAPPED_FIELDS = frozenset(_OMOP_DERIVED_FIELDS) | frozenset(
     # docs/patient-record-first-writes.md.
     'no_other_active_malignancies', 'preexisting_conditions', 'myeloma_type',
     'progression', 'condition_code_icd_10', 'condition_code_snomed_ct',
+    # Current-diagnosis myeloma-related disorders (#5521). User-entered, never
+    # derived: an imported historical occurrence must not become a current Yes.
+    # They are listed here for descriptor coverage and projection, not in
+    # _OMOP_DERIVED_FIELDS, because derivation must not clear an answer.
+    'mgus', 'smoldering_multiple_myeloma', 'waldenstrom_macroglobulinemia',
+    'igm_multiple_myeloma', 'al_amyloidosis', 'poems_syndrome',
     'supportive_therapies', 'supportive_therapy_date',
     'supportive_therapy_start_date', 'supportive_therapy_end_date',
     'supportive_therapy_intent', 'absolute_neutrophile_count_units',

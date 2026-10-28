@@ -289,6 +289,11 @@ def project_single_value(person, field_name, value, projection, *, acknowledge_e
         except Exception:
             logger.warning('Cytogenetic projection failed; edit remains pending')
             return False
+    # Some descriptors project affirmative answers only: No/Unknown is not a
+    # negative occurrence, so it stays pending on PatientRecord. Distinct from
+    # an ordinary boolean observation, which records No as 0.0 (#5521).
+    if projection.get('affirmative_only') and (value is False or _is_empty(value)):
+        return False
     target = projection.get('omop_table')
     concept_id = projection.get('concept_id')
     source_value = projection.get('source_value')

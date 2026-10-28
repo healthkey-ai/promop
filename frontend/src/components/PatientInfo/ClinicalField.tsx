@@ -28,6 +28,8 @@ interface Props {
    *  one reason — repeating the same paragraph beside 25 boxes buries it. The
    *  tab states it once instead. */
   showReason?: boolean;
+  /** Render an explicit Unknown option for a nullable boolean (#5521). */
+  triState?: boolean;
 }
 
 /**
@@ -56,6 +58,7 @@ export default function ClinicalField({
   date,
   onDateChange,
   showReason = true,
+  triState = false,
 }: Props) {
   const store = usePatientFormStore();
   const formReadOnly = useContext(PatientFormReadOnlyContext);
@@ -98,6 +101,7 @@ export default function ClinicalField({
           options={choices}
           onChange={onChange}
           readOnly
+          triState={triState}
         />
         {showReason && (
           <p className="mt-1 text-xs text-muted-foreground" data-testid={`reason-${name}`}>
@@ -117,6 +121,7 @@ export default function ClinicalField({
         value={value}
         options={choices}
         vocabSource={vocabSource}
+        triState={triState}
         onChange={onChange}
       />
       {(onDateChange || descriptor?.projection?.omop_table === 'measurement') && (

@@ -1,10 +1,11 @@
 import { act, fireEvent, render, screen, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import type { AxiosInstance } from 'axios';
 import PatientFieldEditor from './PatientFieldEditor';
 import { PatientFormStore } from './patientFormStore';
 
-async function setup(extraFields = {}) {
+async function setup(extraFields = {}, extraValues = {}) {
   const fields = {
     height: { writable: true, target: 'patient_record', control: 'number', label: 'Height', unit: 'cm' },
     weight: { writable: true, target: 'patient_record', control: 'number', label: 'Weight', unit: 'kg' },
@@ -13,7 +14,7 @@ async function setup(extraFields = {}) {
   };
   const get = vi.fn(async (url: string) => ({ data: url.includes('writable-fields') ? fields : {
     patient_info: { person_id: 12, height: 170, weight: 60, bmi: 20.76,
-      ldh_upper_limit_normal: 250 }, write_enabled: true,
+      ldh_upper_limit_normal: 250, ...extraValues }, write_enabled: true,
   } }));
   const patch = vi.fn(async (_url: string, values: Record<string, unknown>) => ({ data: {
     patient_info: { person_id: 12, height: 170, weight: 60, ...values, bmi: 27.68 },
@@ -92,5 +93,27 @@ describe('computed patient field input dialogs', () => {
     view.rerender(<PatientFieldEditor store={store} name="cycle" />);
     fireEvent.click(screen.getByRole('button', { name: 'Edit Cycle inputs' }));
     expect(screen.getByRole('alert')).toHaveTextContent('Circular field dependency');
+  });
+});
+
+describe('current-diagnosis tri-state fields (#5521)', () => {
+  it('offers Unknown as a third answer and saves it as null', async () => {
+    const user = userEvent.setup();
+    const { store, patch } = await setup({
+      smoldering_multiple_myeloma: {
+        label: 'Smoldering Multiple Myeloma', writable: true, target: 'patient_record',
+        control: 'boolean', value_kind: 'boolean', tri_state: true,
+        bindings: ['smolderingMultipleMyeloma'],
+      },
+    }, { smoldering_multiple_myeloma: false });
+    render(<PatientFieldEditor store={store} name="smolderingMultipleMyeloma" />);
+
+    expect(screen.getByRole('combobox')).toHaveTextContent('No');
+
+    await user.click(screen.getByRole('combobox'));
+    await user.click(screen.getByRole('option', { name: 'Unknown' }));
+    await act(async () => { await store.flush(); });
+
+    expect(patch.mock.calls[0][1]).toEqual({ smoldering_multiple_myeloma: null });
   });
 });

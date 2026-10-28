@@ -65,6 +65,12 @@ export interface PatientInfo {
   cytogenetic_markers?: string;
   molecular_markers?: string;
   plasma_cell_leukemia?: boolean;
+  mgus?: boolean | null;
+  smoldering_multiple_myeloma?: boolean | null;
+  waldenstrom_macroglobulinemia?: boolean | null;
+  igm_multiple_myeloma?: boolean | null;
+  al_amyloidosis?: boolean | null;
+  poems_syndrome?: boolean | null;
   progression?: string;
   measurable_disease_imwg?: boolean;
   mrd_status?: string | null;

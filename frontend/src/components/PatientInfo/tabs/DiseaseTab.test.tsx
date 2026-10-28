@@ -11,7 +11,7 @@
  * returned vocabulary options.
  */
 
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, within } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import DiseaseTab from './DiseaseTab';
 import { __resetWritableFieldsCache, fetchWritableFields } from '@/hooks/useWritableFields';
@@ -42,11 +42,22 @@ const observation = (source_value: string, value_kind: string, multiple = false)
   },
 });
 
+const triStateBoolean = (source_value: string) => {
+  const entry = observation(source_value, 'boolean');
+  return { ...entry, projection: { ...entry.projection, affirmative_only: true } };
+};
+
 const DESCRIPTORS: Record<string, unknown> = {
   disease: observation('disease', 'string'),
   sct_date: observation('mm-sct-date', 'date'),
   stem_cell_transplant_history: observation('mm-sct-history', 'string', true),
   sct_eligibility: observation('mm-sct-eligibility', 'string', true),
+  mgus: triStateBoolean('35601003'),
+  smoldering_multiple_myeloma: triStateBoolean('413587002'),
+  waldenstrom_macroglobulinemia: triStateBoolean('190818004'),
+  igm_multiple_myeloma: triStateBoolean('IgM-MM'),
+  al_amyloidosis: triStateBoolean('23132008'),
+  poems_syndrome: triStateBoolean('79268002'),
   cytogenetic_markers: {
     ...observation('mm-cytogenetic-markers', 'string', true),
     options: [
@@ -678,5 +689,55 @@ describe('DiseaseTab — legacy cytogenetic summary', () => {
     expect(screen.getByText('t(4;14), 1q21 gain/amplification')).toBeInTheDocument();
     expect(screen.queryByTestId('ms-opt-t(11;14)')).not.toBeInTheDocument();
     expect(onChange).not.toHaveBeenCalled();
+  });
+});
+
+describe('MyelomaSection — current-diagnosis disorders (#5521)', () => {
+  beforeEach(async () => {
+    __resetWritableFieldsCache();
+    (globalThis as Record<string, unknown>).__DESCRIPTORS__ = DESCRIPTORS;
+    await fetchWritableFields();
+    setupVocabMock();
+  });
+
+  const LABELS = [
+    'MGUS',
+    'Smoldering Multiple Myeloma',
+    'Waldenström Macroglobulinemia',
+    'IgM Multiple Myeloma',
+    'Light-Chain (AL) Amyloidosis',
+    'POEMS Syndrome',
+  ];
+
+  /** The control beside a field label; labels are not HTML-associated. */
+  const controlFor = (label: string) => {
+    const labelEl = screen.getByText(label);
+    const control = labelEl.closest('.space-y-1\\.5') as HTMLElement;
+    return within(control).getByTestId('select-control') as HTMLSelectElement;
+  };
+
+  it('renders all six current-diagnosis fields', () => {
+    renderMyeloma();
+
+    expect(screen.getByText('Myeloma Related Disorders')).toBeInTheDocument();
+    for (const label of LABELS) {
+      expect(screen.getByText(label)).toBeInTheDocument();
+    }
+  });
+
+  it('shows No and Unknown as distinct answers', () => {
+    renderMyeloma({ mgus: false, poems_syndrome: null });
+
+    expect(controlFor('MGUS').value).toBe('false');
+    expect(controlFor('POEMS Syndrome').value).toBe('unknown');
+  });
+
+  it('reports Unknown as null rather than a negative answer', () => {
+    const onChange = vi.fn();
+    renderMyeloma({ mgus: true }, onChange);
+
+    fireEvent.change(controlFor('MGUS'), { target: { value: 'unknown' } });
+
+    expect(onChange).toHaveBeenCalledWith('mgus', null);
   });
 });

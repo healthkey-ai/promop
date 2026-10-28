@@ -153,6 +153,13 @@ LOINC/SNOMED recipes and approved curated mappings, to call
   reuses today's row and removes the marker.
 - Occurrence tables cannot express null or negative answers. Such edits remain
   pending on PatientRecord until an appropriate answer mapping is available.
+- A field whose answer is current state rather than an OMOP-readable result may
+  mark its projection `best_effort` (for example the current-diagnosis
+  myeloma-related disorders). The shared form writes PatientRecord first and
+  mirrors an affirmative answer into its occurrence as a side effect; a
+  projection failure never fails the save, and No/Unknown creates no fact.
+  Derivation does not read such a fact back, so imported history cannot turn a
+  current answer into Yes.
 - Sets `_skip_patient_record_refresh = True` on the OMOP instance to avoid
   recursive derivation.
 - Direct UI saves never call `refresh_patient_record()` or load the patient's

@@ -430,6 +430,36 @@ export const TAB_LAYOUT: TabLayout = {
       ]
     },
     {
+      "title": "Myeloma Related Disorders",
+      "component": "MyelomaSection",
+      "fields": [
+        [
+          "MGUS",
+          "mgus"
+        ],
+        [
+          "Smoldering Multiple Myeloma",
+          "smoldering_multiple_myeloma"
+        ],
+        [
+          "Waldenström Macroglobulinemia",
+          "waldenstrom_macroglobulinemia"
+        ],
+        [
+          "IgM Multiple Myeloma",
+          "igm_multiple_myeloma"
+        ],
+        [
+          "Light-Chain (AL) Amyloidosis",
+          "al_amyloidosis"
+        ],
+        [
+          "POEMS Syndrome",
+          "poems_syndrome"
+        ]
+      ]
+    },
+    {
       "title": "Myeloma Markers",
       "component": "MyelomaSection",
       "fields": [
