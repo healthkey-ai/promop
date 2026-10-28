@@ -28,9 +28,10 @@ def two_cancers():
     omop = VocabularyFactory(vocabulary_id='OMOP', vocabulary_name='OMOP')
     ConceptFactory(concept_id=0, concept_name='No matching concept', concept_code='0', vocabulary=omop)
     for cid, name in ((CONCEPT_TREATMENT_REGIMEN, 'Treatment Regimen'), (CONCEPT_EHR_TYPE, 'EHR'),
-                      (CONCEPT_DRUG_EXPOSURE_FIELD, 'drug_exposure_id'),
                       (CONCEPT_DISEASE_FIRST_OCCURRENCE, 'Disease First Occurrence')):
         ConceptFactory(concept_id=cid, concept_name=name, concept_code=str(cid), vocabulary=omop)
+    ConceptFactory(concept_id=CONCEPT_DRUG_EXPOSURE_FIELD, concept_name='drug_exposure.drug_exposure_id',
+                   concept_code='CDM150', vocabulary__vocabulary_id='CDM', domain__domain_id='Metadata')
     record = PatientRecordFactory(
         disease='Multiple myeloma', disease_slug=disease_slug('Multiple myeloma'), facility_name='MD Anderson',
     )

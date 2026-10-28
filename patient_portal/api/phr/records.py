@@ -14,6 +14,7 @@ from django.utils import timezone
 from django.utils.text import slugify
 
 from omop_core.models import DrugExposure, Measurement, PatientDocument, ProcedureOccurrence, Provider
+from omop_core.services.medication_context import drug_event_concepts, phr_medication_contexts
 
 from patient_portal.models import PatientStatement
 
@@ -63,7 +64,8 @@ def _in_lines_of_therapy(person, rows: list[DrugExposure]) -> set[int]:
 
     episodes = Episode.objects.filter(person=person).values_list('episode_id', flat=True)
     return set(
-        EpisodeEvent.objects.filter(episode_id__in=list(episodes), event_id__in=[r.pk for r in rows])
+        EpisodeEvent.objects.filter(episode_id__in=list(episodes), event_id__in=[r.pk for r in rows],
+                                   episode_event_field_concept_id__in=drug_event_concepts().values('pk'))
         .values_list('event_id', flat=True)
     )
 
@@ -79,7 +81,9 @@ def _medication_groups(person) -> tuple[OrderedDict, dict]:
     # Medicines given as part of a line of therapy are shown with that line;
     # here they are not asked about as prescriptions.
     in_line = _in_lines_of_therapy(person, rows)
+    contexts = phr_medication_contexts(person.pk, [r.pk for r in rows])
     for row in rows:
+        row.medication_context = contexts.get(row.pk, {})
         row.in_line_of_therapy = row.pk in in_line
     return groups, sources
 
@@ -109,6 +113,8 @@ def _summary(key: str, rows: list[DrugExposure], sources: dict, today: date,
             current, ended = False, statement.stopped_on
     item = {
         'id': key,
+        'drug_exposure_id': latest.pk,
+        **getattr(latest, 'medication_context', {}),
         'name': _drug_name(latest),
         'dose': _dose(latest),
         'status': 'current' if current else 'past',
@@ -162,6 +168,8 @@ def medication_detail(person, key: str) -> dict[str, Any] | None:
     history = []
     for row in rows:
         entry = {
+            'drug_exposure_id': row.pk,
+            **getattr(row, 'medication_context', {}),
             'date': row.drug_exposure_start_date.isoformat(),
             'end_date': row.drug_exposure_end_date.isoformat() if row.drug_exposure_end_date else None,
             'dose': _dose(row),

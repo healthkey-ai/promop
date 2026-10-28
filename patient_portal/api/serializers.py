@@ -634,7 +634,18 @@ class PatientRecordSerializer(serializers.ModelSerializer):
                 setattr(instance, f'{field}_units', unit)
             return self._update_nonclinical(instance, validated_data)
 
+    def validate_medication_contexts(self, value):
+        from omop_core.services.medication_context import validate_record_contexts
+        if self.instance is None:
+            raise serializers.ValidationError('Save the patient record before editing medication attributes.')
+        return validate_record_contexts(self.instance.person_id, value, MedicationContextSerializer,
+                                        previous=self.instance.medication_contexts or {})
+
     def _update_nonclinical(self, instance, validated_data):
+        if 'medication_contexts' in validated_data:
+            from omop_core.services.medication_context import merge_contexts
+            instance.medication_contexts = merge_contexts(
+                instance.medication_contexts or {}, validated_data.pop('medication_contexts'))
         overrides = dict(instance.therapy_overrides or {})
         for field in ('relapse_count', 'treatment_refractory_status'):
             if field in validated_data:
@@ -1900,4 +1911,15 @@ class ConditionContextSerializer(serializers.Serializer):
     def to_internal_value(self, data):
         if isinstance(data, dict) and set(data) - set(self.fields):
             raise serializers.ValidationError({'non_field_errors': ['Only note and care_team may be updated here.']})
+        return super().to_internal_value(data)
+
+
+class MedicationContextSerializer(serializers.Serializer):
+    """Partial exposure attributes; null/blank clears and omission preserves."""
+    role = serializers.CharField(max_length=1000, required=False, allow_blank=True, allow_null=True)
+    category = serializers.CharField(max_length=1000, required=False, allow_blank=True, allow_null=True)
+
+    def to_internal_value(self, data):
+        if isinstance(data, dict) and set(data) - set(self.fields):
+            raise serializers.ValidationError({'non_field_errors': ['Only role and category may be updated here.']})
         return super().to_internal_value(data)

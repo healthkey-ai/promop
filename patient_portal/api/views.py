@@ -1386,8 +1386,14 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             if clinical_fields:
                 from omop_core.services.patient_record_service import recompute_patient_record_fields
 
+                projection_data = dict(serializer.validated_data)
+                if 'medication_contexts' in clinical_fields:
+                    from omop_core.services.medication_context import context_delta
+                    projection_data['medication_contexts'] = context_delta(
+                        previous_values.get('medication_contexts') or {},
+                        projection_data['medication_contexts'])
                 projected = self._project_mapped_fields(
-                    person, clinical_fields, serializer.validated_data, actor=request.user,
+                    person, clinical_fields, projection_data, actor=request.user,
                 )
                 patient_info.user_edited_fields = sorted(
                     set(patient_info.user_edited_fields or []) - projected
@@ -1417,6 +1423,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         from omop_core.services.omop_projection import project_single_value, projection_for_descriptor
         from omop_core.services.write_descriptor import build_writable_field_descriptor
 
+        if 'medication_contexts' in direct_fields:
+            from omop_core.services.medication_context import project_record_contexts
+            project_record_contexts(person, patch_data['medication_contexts'],
+                                    **_patient_authorship(actor, person))
+            # Structured edits retain protection until a later full derivation
+            # confirms them. Never read OMOP back during this interactive save.
         try:
             with transaction.atomic():
                 descriptors = build_writable_field_descriptor()
@@ -1426,6 +1438,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         projected = set()
         authorship = None
         for field in direct_fields:
+            if field == 'medication_contexts':
+                continue  # Per-exposure attributes have their dedicated forward projector.
             projection = projection_for_descriptor(descriptors.get(field))
             if projection:
                 if authorship is None:
@@ -8958,6 +8972,7 @@ class V1DrugExposureViewSet(
     """Drug exposures on /api/v1/, with the batch actions."""
 
     source_organization_header = True
+
 
 
 @_PROVENANCE_ORG_SCHEMA

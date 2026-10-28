@@ -18,6 +18,7 @@ from typing import Any
 from django.utils import timezone
 
 from omop_core.models import DrugExposure, ProcedureOccurrence
+from omop_core.services.medication_context import drug_event_concepts, phr_medication_contexts
 from omop_oncology.models import EpisodeEvent
 
 from .names import drug_name, procedure_name
@@ -67,7 +68,8 @@ def _outcome(code: str | None) -> dict[str, str] | None:
 def _line_rows(person, episode_id: int | None) -> list[DrugExposure]:
     if episode_id is None:
         return []
-    ids = EpisodeEvent.objects.filter(episode_id=episode_id).values_list('event_id', flat=True)
+    ids = EpisodeEvent.objects.filter(episode_id=episode_id,
+        episode_event_field_concept_id__in=drug_event_concepts().values('pk')).values_list('event_id', flat=True)
     return list(
         DrugExposure.objects.filter(person=person, drug_exposure_id__in=list(ids), is_erroneous=False)
         .select_related('drug_concept', 'drug_source_concept', 'visit_occurrence')
@@ -85,22 +87,42 @@ def _line_source(ctx: '_Context', rows: list[DrugExposure], start: date) -> dict
     return source('record', ctx.facility, start)
 
 
+def _agreed_context(exposures):
+    result = {}
+    for key in ('role', 'category'):
+        values = {entry.get(key, '') for entry in exposures}
+        if len(values) == 1:
+            value = next(iter(values))
+            if value:
+                result[key] = value
+    return result
+
+
 def _medications(person, episode_id: int | None) -> list[dict[str, Any]]:
     if episode_id is None:
         return []
-    ids = EpisodeEvent.objects.filter(episode_id=episode_id).values_list('event_id', flat=True)
-    rows = (
+    ids = EpisodeEvent.objects.filter(episode_id=episode_id,
+        episode_event_field_concept_id__in=drug_event_concepts().values('pk')).values_list('event_id', flat=True)
+    rows = list(
         DrugExposure.objects.filter(person=person, drug_exposure_id__in=list(ids), is_erroneous=False)
-        .select_related('drug_concept', 'drug_source_concept')
+        .select_related('drug_concept', 'drug_source_concept', 'visit_occurrence')
         .order_by('drug_exposure_start_date', 'drug_exposure_id')
     )
+    contexts = phr_medication_contexts(person.pk, [row.pk for row in rows])
+    sources = row_sources(DrugExposure, rows, type_attr='drug_type_concept', date_attr='drug_exposure_start_date')
     meds: dict[str, dict[str, Any]] = {}
     memo: dict = {}
     for row in rows:
         name = drug_name(row, memo)
         if not name:
             continue
-        med = meds.setdefault(name.lower(), {'name': name, 'start': row.drug_exposure_start_date, 'end': None, 'open': False})
+        med = meds.setdefault(name.lower(), {'name': name, 'start': row.drug_exposure_start_date, 'end': None, 'open': False, 'exposures': []})
+        med['exposures'].append({
+            'drug_exposure_id': row.pk,
+            'start': row.drug_exposure_start_date.isoformat(),
+            'end': row.drug_exposure_end_date.isoformat() if row.drug_exposure_end_date else None,
+            **contexts.get(row.pk, {}), 'source': sources[row.pk],
+        })
         med['start'] = min(med['start'], row.drug_exposure_start_date)
         if row.drug_exposure_end_date is None:
             med['open'] = True
@@ -109,6 +131,8 @@ def _medications(person, episode_id: int | None) -> list[dict[str, Any]]:
     return [
         {k: v for k, v in {
             'name': m['name'],
+            'exposures': m['exposures'],
+            **_agreed_context(m['exposures']),
             'start': m['start'].isoformat(),
             'end': None if m['open'] or m['end'] is None else m['end'].isoformat(),
         }.items() if v is not None}

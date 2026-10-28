@@ -661,7 +661,9 @@ def therapy_line(record, number, start, end, drugs):
     for name, d_start, d_end in drugs:
         exposure = drug(record, ConceptFactory(concept_name=name, concept_code=f'RX-{name}'), d_start, d_end)
         EpisodeEvent.objects.create(episode_id=episode.episode_id, event_id=exposure.pk,
-                                    episode_event_field_concept=regimen)
+                                    episode_event_field_concept=ConceptFactory(
+                                        vocabulary__vocabulary_id='CDM', domain__domain_id='Metadata',
+                                        concept_name='drug_exposure.drug_exposure_id', concept_code='CDM150'))
     return episode
 
 
@@ -691,6 +693,13 @@ def test_therapy_draws_each_line_with_its_medicines_procedures_and_outcome():
 
     assert [t['diagnosis'] for t in data['tracks']] == [{'name': 'Multiple myeloma', 'slug': 'myeloma'}]
     first, second = data['tracks'][0]['lines']
+    # The additive exposure details retain the event identity and source.
+    for line in (first, second):
+        for medication in line['medications']:
+            exposures = medication.pop('exposures')
+            assert len(exposures) == 1
+            assert exposures[0]['drug_exposure_id']
+            assert exposures[0]['start'] == medication['start']
     assert first == {
         'id': '701', 'number': 1, 'regimen': 'VRd', 'start': '2024-03-12', 'end': '2024-10-14', 'current': False,
         'medications': [
