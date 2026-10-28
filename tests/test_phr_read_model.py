@@ -743,6 +743,31 @@ def test_whats_new_groups_the_last_30_days_by_date_section_and_facility():
     ]}
 
 
+def test_whats_new_leaves_out_what_the_patient_added_themselves():
+    """What's new is what arrived from the patient's care centers, not their own entries."""
+    record = PatientRecordFactory(disease='')
+    recent = (timezone.localdate() - timedelta(days=3)).isoformat()
+    self_report = ConceptFactory(concept_id=32865, concept_name='Patient self-report', concept_code='OMOP4976879')
+    kind = ConceptFactory(concept_name='Procedure type', concept_code='TYPE-PROC')
+    port = ConceptFactory(concept_name='Port-a-cath flush', concept_code='PROC-PORT')
+    ConceptFactory(concept_id=0, concept_code='No matching concept', concept_name='No matching concept')
+    ProcedureOccurrence.objects.create(
+        procedure_occurrence_id=1, person=record.person, procedure_concept=port, procedure_date=recent,
+        procedure_type_concept=kind)
+    typed_in = ProcedureOccurrence.objects.create(
+        procedure_occurrence_id=2, person=record.person, procedure_concept_id=0, procedure_source_value='Biopsy',
+        procedure_date=recent, procedure_type_concept=kind)
+    ProvenanceRecord.objects.create(
+        content_type=ContentType.objects.get_for_model(ProcedureOccurrence), object_id=typed_in.pk, source='PATIENT_SELF')
+    drug(record, ConceptFactory(concept_name='Vitamin D3', concept_code='RX-VD3'), recent,
+         drug_type_concept=self_report)
+    condition(record, icd10('M81.0', 'Osteoporosis'), recent, condition_type_concept=self_report)
+
+    data = signed_in(record).get('/api/v1/phr/whats-new/').data
+
+    assert data == {'days': 30, 'groups': [{'date': recent, 'items': [{'section': 'procedures', 'count': 1}]}]}
+
+
 def test_imaging_lists_reports_newest_first():
     record = PatientRecordFactory(disease='')
     PatientDocument.objects.create(person=record.person, doc_type='IMAGING', title='MRI spine', effective_date='2024-03-05')
