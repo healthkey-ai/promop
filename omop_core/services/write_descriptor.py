@@ -276,6 +276,13 @@ _COMPUTED_INPUTS = {
     'renal_adequacy_status': ['egfr_ml_min_173m2', 'serum_creatinine_mg_dl'],
     'no_active_infection_status': ['active_infection_status'],
     'no_other_active_malignancies': ['active_malignancies'],
+    # The HIV/hepatitis negatives are read back from the paired status fact by
+    # `_latest_result` in patient_record_service, so a direct write is replaced by
+    # the next derivation. Offering them as editable reported `applied` and then
+    # silently reverted (#2106). The positive field is the one to edit.
+    'no_hiv_status': ['hiv_status'],
+    'no_hepatitis_b_status': ['hepatitis_b_status'],
+    'no_hepatitis_c_status': ['hepatitis_c_status'],
 }
 
 # Lifecycle columns are not clinical data and are never writable regardless of
