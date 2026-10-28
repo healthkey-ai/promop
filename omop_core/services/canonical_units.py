@@ -1,11 +1,14 @@
-"""Instance-selected LOINC units; read-time normalization never changes source facts.
+"""Instance-selected LOINC units and write-time normalization.
 
 Conversions are deliberately limited to explicit, property-compatible UCUM scales.
 No inference of molecular weight, assay calibration, missing units or free text.
 """
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+import logging
 import re
+
+logger = logging.getLogger(__name__)
 
 # Factors to a base unit within each measured property. UCUM is case-sensitive.
 UNIT_GROUPS = {
@@ -360,3 +363,186 @@ def measurement_normalized(measurement, preferences):
     concept_id = measurement.measurement_concept_id or measurement.measurement_source_concept_id
     return normalize(preferences.get(concept_id),
                      measurement.value_as_number, unit, measurement.range_low, measurement.range_high)
+
+
+# ---------------------------------------------------------------------------
+# Write-time unit normalization
+# ---------------------------------------------------------------------------
+
+def _resolve_target_unit(mapping):
+    """Determine the target UCUM unit and property code for a mapping.
+
+    Returns ``(target_unit, property_code)`` or ``(None, None)`` when no
+    conversion target can be determined.
+
+    Precedence:
+    1. ``mapping.destination_unit_concept`` — curator-set UCUM concept on the
+       SCCM row.
+    2. ``CanonicalUnitPreference`` for the mapping's target concept — the
+       instance-wide preference for the destination LOINC code.
+    """
+    # 1. Explicit destination_unit_concept on the mapping row.
+    duc = getattr(mapping, 'destination_unit_concept', None)
+    if duc is not None:
+        dst = unit_code(duc.concept_code)
+        # Find the property that contains this unit.
+        for prop, units in UNIT_GROUPS.items():
+            if dst in units:
+                return dst, prop
+        return None, None
+
+    # 2. CanonicalUnitPreference for the target concept.
+    target_concept_id = getattr(mapping, 'target_concept_id', None)
+    if target_concept_id:
+        from omop_core.models import CanonicalUnitPreference
+        try:
+            pref = CanonicalUnitPreference.objects.get(
+                concept_id=target_concept_id)
+            if pref.unit and pref.property:
+                return pref.unit, pref.property
+        except CanonicalUnitPreference.DoesNotExist:
+            pass
+
+    return None, None
+
+
+def _ucum_concept(unit_str):
+    """Look up the UCUM Concept for a unit string, or None."""
+    from omop_core.models import Concept
+    return (
+        Concept.objects
+        .filter(vocabulary_id='UCUM', concept_code=unit_str,
+                standard_concept='S', invalid_reason__isnull=True)
+        .first()
+    )
+
+
+def normalize_measurement_units(qs, mapping):
+    """Convert value/unit on Measurement rows to the mapping's target unit.
+
+    *qs* is a queryset of ``Measurement`` rows (already filtered to the rows
+    that were just repointed or resolved).  *mapping* is the
+    ``SourceCodeConceptMapping`` that was applied.
+
+    Only rows with a non-null ``value_as_number`` and a recognisable
+    ``unit_source_value`` are touched.  ``unit_source_value`` is never changed
+    (it records the hospital's original unit).  Rows whose source unit is
+    already the target, or whose source unit is incompatible, are silently
+    skipped.
+
+    Returns the number of rows whose ``value_as_number`` was rewritten.
+    """
+    target_unit, prop = _resolve_target_unit(mapping)
+    if not target_unit or not prop:
+        return 0
+
+    target_ucum = _ucum_concept(target_unit)
+
+    # Group rows by their raw unit_source_value so we compute the conversion
+    # factor once per spelling, not once per row.
+    raw_units = list(
+        qs.filter(value_as_number__isnull=False)
+        .exclude(unit_source_value__isnull=True)
+        .exclude(unit_source_value='')
+        .values_list('unit_source_value', flat=True)
+        .distinct()
+    )
+    if not raw_units:
+        return 0
+
+    total_normalized = 0
+    for raw in raw_units:
+        src = unit_code(raw)
+        if src == target_unit:
+            # Already in the target unit — just update unit_concept_id if needed.
+            if target_ucum:
+                qs.filter(unit_source_value=raw).update(
+                    unit_concept_id=target_ucum.concept_id)
+            continue
+        if not _find_property(src, target_unit):
+            continue
+
+        # Fetch rows in batches, convert individually, bulk_update.
+        batch_qs = qs.filter(
+            unit_source_value=raw, value_as_number__isnull=False,
+        ).order_by('pk')
+        BATCH = 1000
+        offset = 0
+        while True:
+            rows = list(batch_qs[offset:offset + BATCH])
+            if not rows:
+                break
+            changed = []
+            for row in rows:
+                try:
+                    new_val = convert(
+                        row.value_as_number, src, target_unit, prop)
+                    row.value_as_number = new_val
+                    if row.range_low is not None:
+                        row.range_low = convert(
+                            row.range_low, src, target_unit, prop)
+                    if row.range_high is not None:
+                        row.range_high = convert(
+                            row.range_high, src, target_unit, prop)
+                    if target_ucum:
+                        row.unit_concept_id = target_ucum.concept_id
+                    changed.append(row)
+                except (ValueError, InvalidOperation):
+                    continue
+            if changed:
+                fields = ['value_as_number', 'range_low', 'range_high',
+                          'unit_concept_id']
+                from omop_core.models import Measurement
+                Measurement.objects.bulk_update(changed, fields)
+                total_normalized += len(changed)
+            offset += BATCH
+
+    logger.info(
+        'Normalized %d measurement row(s) to %s (%s).',
+        total_normalized, target_unit, prop,
+    )
+    return total_normalized
+
+
+def normalize_measurement_instances(instances, mapping=None,
+                                    target_unit=None, property_code=None):
+    """Convert value/unit on in-memory Measurement instances before bulk_create.
+
+    Either pass *mapping* (a ``SourceCodeConceptMapping``) to derive the
+    target, or pass *target_unit* and *property_code* directly.
+
+    Mutates instances in place.  Returns the count of instances converted.
+    """
+    if mapping is not None and target_unit is None:
+        target_unit, property_code = _resolve_target_unit(mapping)
+    if not target_unit or not property_code:
+        return 0
+
+    target_ucum = _ucum_concept(target_unit)
+    converted = 0
+    for inst in instances:
+        raw = getattr(inst, 'unit_source_value', None)
+        if not raw or inst.value_as_number is None:
+            continue
+        src = unit_code(raw)
+        if src == target_unit:
+            if target_ucum:
+                inst.unit_concept_id = target_ucum.concept_id
+            continue
+        if not _find_property(src, target_unit):
+            continue
+        try:
+            inst.value_as_number = convert(
+                inst.value_as_number, src, target_unit, property_code)
+            if inst.range_low is not None:
+                inst.range_low = convert(
+                    inst.range_low, src, target_unit, property_code)
+            if inst.range_high is not None:
+                inst.range_high = convert(
+                    inst.range_high, src, target_unit, property_code)
+            if target_ucum:
+                inst.unit_concept_id = target_ucum.concept_id
+            converted += 1
+        except (ValueError, InvalidOperation):
+            continue
+    return converted

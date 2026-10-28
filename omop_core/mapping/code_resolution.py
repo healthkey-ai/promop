@@ -749,11 +749,20 @@ def repoint_clinical_rows(*, mapping, old_concept_id, new_concept_id,
                 organization_id=mapping.organization_id,
             )
 
+            # Normalize units on repointed Measurement rows (#2088).
+            if model is Measurement:
+                from omop_core.services.canonical_units import (
+                    normalize_measurement_units,
+                )
+                result['rows_normalized'] = normalize_measurement_units(
+                    qs, mapping)
+
     logger.info(
         'Mapping %s: re-pointed %s %s row(s) from concept %s to %s '
-        '(%s collapsed, %s patient record(s) marked stale).',
+        '(%s collapsed, %s normalized, %s patient record(s) marked stale).',
         mapping.id, result['rows_updated'], table, old_concept_id,
-        new_concept_id, result['rows_collapsed'], result['persons_marked_stale'],
+        new_concept_id, result['rows_collapsed'],
+        result.get('rows_normalized', 0), result['persons_marked_stale'],
     )
     return result
 
@@ -1001,6 +1010,12 @@ def resolve_person_source_codes(person, *, source_values=None, omop_tables=None)
             with transaction.atomic():
                 with suppress_patient_record_refresh():
                     rows_to_update.update(**{concept_col: target_concept_id})
+                    # Normalize units on resolved Measurement rows (#2088).
+                    if model is Measurement:
+                        from omop_core.services.canonical_units import (
+                            normalize_measurement_units,
+                        )
+                        normalize_measurement_units(rows_to_update, mapping)
                 person_ids_touched.add(person.person_id)
                 resolved += count
                 already_resolved += group['row_count'] - count

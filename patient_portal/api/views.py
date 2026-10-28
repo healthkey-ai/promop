@@ -7134,6 +7134,75 @@ class _UpsertPlan:
         self.unattributed_matches = unattributed_matches
 
 
+def _normalize_bulk_measurement_instances(instances):
+    """Normalize units on in-memory Measurement instances before bulk_create.
+
+    Groups instances by ``measurement_source_value``, looks up the approved
+    SCCM mapping for each to determine the target unit, and falls back to
+    ``CanonicalUnitPreference`` for the destination concept.
+    """
+    from omop_core.services.canonical_units import normalize_measurement_instances
+
+    # Collect unique source values.
+    source_values = {
+        inst.measurement_source_value
+        for inst in instances
+        if inst.measurement_source_value
+    }
+    if not source_values:
+        return
+
+    # Batch-fetch approved mappings for these source values.
+    mappings_by_sv = {}
+    if source_values:
+        sccm_qs = (
+            SourceCodeConceptMapping.objects
+            .filter(
+                source_code__in=source_values,
+                omop_table='measurement',
+                status='approved',
+            )
+            .select_related('destination_unit_concept')
+        )
+        for m in sccm_qs:
+            mappings_by_sv.setdefault(m.source_code, m)
+
+    # Group instances by source_value and normalize each group.
+    from collections import defaultdict
+    by_sv = defaultdict(list)
+    for inst in instances:
+        sv = inst.measurement_source_value or ''
+        by_sv[sv].append(inst)
+
+    for sv, group in by_sv.items():
+        mapping = mappings_by_sv.get(sv)
+        if mapping:
+            normalize_measurement_instances(group, mapping=mapping)
+        else:
+            # Fall back to CanonicalUnitPreference per concept_id.
+            by_concept = defaultdict(list)
+            for inst in group:
+                cid = inst.measurement_concept_id
+                if cid:
+                    by_concept[cid].append(inst)
+            if by_concept:
+                from omop_core.models import CanonicalUnitPreference
+                prefs = {
+                    p.concept_id: p
+                    for p in CanonicalUnitPreference.objects.filter(
+                        concept_id__in=by_concept.keys(),
+                    ).exclude(unit='')
+                }
+                for cid, insts in by_concept.items():
+                    pref = prefs.get(cid)
+                    if pref and pref.unit and pref.property:
+                        normalize_measurement_instances(
+                            insts,
+                            target_unit=pref.unit,
+                            property_code=pref.property,
+                        )
+
+
 def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances,
                       organization=None):
     """Match a batch of unsaved rows against what `person` already has.
@@ -8113,6 +8182,11 @@ class _OmopBulkCreateMixin:
             # so here the suppression is load-bearing, not just defensive.
             with suppress_patient_record_refresh():
                 instances = [model_cls(**dict(attrs)) for attrs in validated]
+
+                # Normalize units on new Measurement instances (#2088).
+                if model_cls is Measurement:
+                    _normalize_bulk_measurement_instances(instances)
+
                 unattributed_matches = 0
                 if upsert:
                     plan = _plan_bulk_upsert(
