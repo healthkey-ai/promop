@@ -3700,6 +3700,10 @@ class PatientRecord(models.Model):
     active_infection_status = models.BooleanField(blank=True, null=True)
 
     concomitant_medications = models.TextField(blank=True, null=True)
+    medication_contexts = models.JSONField(
+        default=dict, blank=True,
+        help_text='Per-exposure medication role/category edits, saved before forward OMOP projection.',
+    )
     concomitant_medication_date = models.DateField(blank=True, null=True)
 
     # Wearable summary fields (derived from OMOP Measurement/Observation, 30-day window)

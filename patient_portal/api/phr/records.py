@@ -14,7 +14,7 @@ from django.utils import timezone
 from django.utils.text import slugify
 
 from omop_core.models import DrugExposure, Measurement, PatientDocument, ProcedureOccurrence, Provider
-from omop_core.services.medication_context import drug_event_concepts, medication_contexts
+from omop_core.services.medication_context import drug_event_concepts, phr_medication_contexts
 
 from patient_portal.models import PatientStatement
 
@@ -81,7 +81,7 @@ def _medication_groups(person) -> tuple[OrderedDict, dict]:
     # Medicines given as part of a line of therapy are shown with that line;
     # here they are not asked about as prescriptions.
     in_line = _in_lines_of_therapy(person, rows)
-    contexts = medication_contexts(person.pk, [r.pk for r in rows])
+    contexts = phr_medication_contexts(person.pk, [r.pk for r in rows])
     for row in rows:
         row.medication_context = contexts.get(row.pk, {})
         row.in_line_of_therapy = row.pk in in_line

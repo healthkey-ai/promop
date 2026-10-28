@@ -7,7 +7,7 @@ from django.apps import apps
 from django.db import connection
 from rest_framework.test import APIClient
 
-from omop_core.models import Concept, DrugExposure, FieldConceptMapping, Note, Observation
+from omop_core.models import Concept, DrugExposure, FieldConceptMapping, Note, Observation, PatientRecord
 from omop_core.services.medication_context import medication_contexts
 from omop_core.signals import suppress_patient_record_refresh
 from omop_oncology.models import EpisodeEvent
@@ -15,7 +15,7 @@ from tests.factories import ConceptFactory, PatientRecordFactory
 from tests.test_phr_read_model import drug, signed_in, therapy_line
 
 pytestmark = pytest.mark.django_db
-migration = import_module('omop_core.migrations.0316_medication_context_mappings')
+migration = import_module('omop_core.migrations.0317_medication_context_mappings')
 
 
 def migrate():
@@ -30,6 +30,7 @@ def setup(settings):
     category = ConceptFactory(concept_code='104747-1', domain__domain_id='Observation')
     event = ConceptFactory(concept_id=1147094, vocabulary__vocabulary_id='CDM', domain__domain_id='Metadata',
                            concept_code='CDM150', concept_name='drug_exposure.drug_exposure_id')
+    ConceptFactory(concept_id=32865, concept_code='32865', vocabulary__vocabulary_id='Type Concept', domain__domain_id='Type Concept')
     migrate()
     record = PatientRecordFactory(disease='Multiple myeloma', disease_slug='myeloma')
     exposure = drug(record, ConceptFactory(concept_name='Lenalidomide'), '2024-01-01')
@@ -37,7 +38,7 @@ def setup(settings):
 
 
 def url(exposure):
-    return f'/api/v1/drug-exposures/{exposure.pk}/context/'
+    return f'/api/v1/patient-records/{exposure.person_id}/'
 
 
 def test_migration_repairs_domains_repeatably_and_preserves_curator(setup):
@@ -64,78 +65,123 @@ def test_portable_mapping_without_loaded_vocab_refuses_fact_write(setup):
     mapping = FieldConceptMapping.objects.get(field_name='drug_exposure.role')
     assert mapping.concept_id is None
     assert (mapping.vocabulary_id, mapping.concept_code) == ('LOINC', '104803-2')
-    assert client.patch(url(exposure), {'category': 'Supportive', 'role': 'Induction'}, format='json').status_code == 400
+    response = patch(client, exposure, {'category': 'Supportive', 'role': 'Induction'})
+    assert response.status_code == 200, response.data
+    assert saved(response, exposure)['role'] == 'Induction'
+    assert 'medication_contexts' in response.data['user_edited_fields']
     assert not Observation.objects.filter(observation_event_id=exposure.pk).exists()
 
 
-def test_patch_is_typed_auditable_and_exposed_in_summary_and_history(setup):
-    from django.contrib.contenttypes.models import ContentType
-    from omop_core.models import ProvenanceRecord
+
+
+def patch(client, exposure, attributes):
+    return client.patch(url(exposure), {'medication_contexts': {str(exposure.pk): attributes}}, format='json')
+
+
+def saved(response, exposure):
+    return response.data['medication_contexts'][str(exposure.pk)]
+
+
+def current(client, exposure):
+    return client.get(url(exposure)).data['patient_info']['medication_contexts'].get(str(exposure.pk), {})
+
+
+def test_save_lands_on_patient_record_before_forward_projection_without_derive(setup, monkeypatch):
+    from omop_core.services import medication_context as service, patient_record_service
     record, exposure, client, role, category, event = setup
-    response = client.patch(url(exposure), {'role': 'Induction', 'category': 'Myeloma treatment'},
-                            format='json', HTTP_X_PROVENANCE_SOURCE='Patient reported')
+    original = service.save_medication_context
+    def project(row, values, **kwargs):
+        stored = PatientRecord.objects.get(pk=record.pk)
+        assert stored.medication_contexts[str(exposure.pk)] == {'role': 'Induction', 'category': 'Myeloma treatment'}
+        return original(row, values, **kwargs)
+    def forbidden(*args, **kwargs):
+        raise AssertionError('An interactive save must not derive or load an OMOP snapshot')
+    monkeypatch.setattr(service, 'save_medication_context', project)
+    monkeypatch.setattr(patient_record_service, 'refresh_patient_record', forbidden)
+    monkeypatch.setattr(patient_record_service, '_build_snapshot', forbidden)
+    before = (record.derived_at, record.derivation_version)
+    response = patch(client, exposure, {'role': 'Induction', 'category': 'Myeloma treatment'})
     assert response.status_code == 200, response.data
-    assert response.data == {'role': 'Induction', 'category': 'Myeloma treatment'}
+    assert saved(response, exposure) == {'role': 'Induction', 'category': 'Myeloma treatment'}
+    record.refresh_from_db()
+    assert (record.derived_at, record.derivation_version) == before
     facts = Observation.objects.filter(observation_event_id=exposure.pk)
     assert set(facts.values_list('observation_concept_id', flat=True)) == {role.pk, category.pk}
     assert set(facts.values_list('obs_event_field_concept_id', flat=True)) == {event.pk}
+    assert set(facts.values_list('observation_type_concept_id', flat=True)) == {32865}
+    from django.contrib.contenttypes.models import ContentType
+    from omop_core.models import ProvenanceRecord, RecordRevision
     assert ProvenanceRecord.objects.filter(content_type=ContentType.objects.get_for_model(Observation),
-                                            object_id__in=facts.values('pk')).count() == 2
-    summary = client.get('/api/v1/phr/medications/').data['medications'][0]
-    assert summary['drug_exposure_id'] == exposure.pk
-    assert summary['role'] == 'Induction' and summary['category'] == 'Myeloma treatment'
-    detail = client.get(f"/api/v1/phr/medications/{summary['id']}/").data
-    assert detail['history'][0]['role'] == 'Induction'
-    assert detail['history'][0]['drug_exposure_id'] == exposure.pk
+                                            object_id__in=facts.values('pk'), source='PATIENT_SELF').count() == 2
+    assert RecordRevision.objects.filter(patient_record=record, field='medication_contexts').exists()
+
+
+def test_projection_failure_keeps_saved_value_and_phr_display(setup, monkeypatch):
+    from omop_core.services import medication_context as service
+    _, exposure, client, *_ = setup
+    def fail(*args, **kwargs):
+        with connection.cursor() as cursor:
+            cursor.execute('SELECT 1 / 0')
+    monkeypatch.setattr(service, 'save_medication_context', fail)
+    response = patch(client, exposure, {'category': 'Supplement'})
+    assert response.status_code == 200, response.data
+    assert saved(response, exposure)['category'] == 'Supplement'
+    assert not Observation.objects.filter(observation_event_id=exposure.pk).exists()
+    item = client.get('/api/v1/phr/medications/').data['medications'][0]
+    assert item['category'] == 'Supplement'
+    assert item['drug_exposure_id'] == exposure.pk
 
 
 def test_partial_clear_retry_and_overflow_are_lossless(setup):
     _, exposure, client, *_ = setup
     text = 'Long medication purpose. ' * 25
-    assert client.patch(url(exposure), {'role': '[note:123]', 'category': text}, format='json').status_code == 200
-    assert client.get(url(exposure)).data == {'role': '[note:123]', 'category': text.strip()}
+    assert patch(client, exposure, {'role': '[note:123]', 'category': text}).status_code == 200
+    assert current(client, exposure) == {'role': '[note:123]', 'category': text.strip()}
     assert Note.objects.filter(note_source_value__startswith='medication:observation:').count() == 2
-    assert client.patch(url(exposure), {'role': None}, format='json').data == {'role': '', 'category': text.strip()}
+    response = patch(client, exposure, {'role': None})
+    assert saved(response, exposure) == {'role': '', 'category': text.strip()}
     count = Observation.objects.count()
-    client.patch(url(exposure), {'role': ''}, format='json')
+    assert patch(client, exposure, {'role': ''}).status_code == 200
     assert Observation.objects.count() == count
-    assert client.get(url(exposure)).data['role'] == ''
+    assert current(client, exposure)['role'] == ''
 
 
-def test_patient_and_event_namespace_isolation_and_erroneous_facts(setup):
-    record, exposure, client, _, category, event = setup
+def test_only_changed_attributes_project_when_editor_echoes_full_json(setup):
+    record, exposure, client, *_ = setup
+    other = drug(record, exposure.drug_concept, '2025-01-01')
+    patch(client, exposure, {'role': 'Induction'})
+    response = patch(client, other, {'role': 'Maintenance'})
+    before = Observation.objects.count()
+    values = response.data['medication_contexts']
+    values[str(other.pk)]['category'] = 'Myeloma treatment'
+    response = client.patch(url(exposure), {'medication_contexts': values}, format='json')
+    assert response.status_code == 200, response.data
+    assert Observation.objects.count() == before + 1
+    assert current(client, exposure)['role'] == 'Induction'
+
+
+def test_patient_and_exposure_ownership_are_validated_before_saving(setup):
+    record, exposure, client, *_ = setup
     other = PatientRecordFactory()
-    other_exposure = drug(other, exposure.drug_concept, '2024-01-01')
-    assert signed_in(other).patch(url(other_exposure), {'role': 'Private'}, format='json').status_code == 200
-    assert client.get(url(other_exposure)).status_code in (403, 404)
-    assert client.patch(url(other_exposure), {'role': 'Overwrite'}, format='json').status_code in (403, 404)
-    with suppress_patient_record_refresh():
-        fact = Observation.objects.create(observation_id=80001, person=record.person, observation_concept=category,
-            observation_type_concept_id=32817, observation_date='2020-01-01', observation_event_id=exposure.pk,
-            obs_event_field_concept=ConceptFactory(domain__domain_id='Metadata'),
-            observation_source_value='phr:drug-exposure-category', value_as_string='Wrong namespace')
-    assert client.get(url(exposure)).data == {}
-    Observation.objects.filter(pk=fact.pk).update(obs_event_field_concept=event)
-    assert client.get(url(exposure)).data == {'category': 'Wrong namespace'}
-    Observation.objects.filter(pk=fact.pk).update(is_erroneous=True)
-    assert client.get(url(exposure)).data == {}
+    foreign = drug(other, exposure.drug_concept, '2024-01-01')
+    assert patch(client, foreign, {'role': 'Stolen'}).status_code in (403, 404)
+    response = client.patch(url(exposure), {'medication_contexts': {str(foreign.pk): {'role': 'Stolen'}}}, format='json')
+    assert response.status_code == 400
+    assert current(client, exposure) == {}
     DrugExposure.objects.filter(pk=exposure.pk).update(is_erroneous=True)
-    assert client.patch(url(exposure), {'role': 'Invalid'}, format='json').status_code in (400, 404)
+    assert patch(client, exposure, {'role': 'Invalid'}).status_code == 400
 
 
-def test_invalid_input_missing_namespace_and_legacy_routes(setup):
-    _, exposure, client, *_, event = setup
-    for values in ({'role': 'x' * 1001}, {'role': 'ok', 'category': ['bad']}, {'intent': 'Curative'}):
-        assert client.patch(url(exposure), values, format='json').status_code == 400
+@pytest.mark.parametrize('value', [[], {'invalid': {}}, {'0': {}}, {'9223372036854775808': {}},
+                                  {'1': {'intent': 'Curative'}}, {'1': {'role': 'x' * 1001}}])
+def test_invalid_json_is_rejected_atomically(setup, value):
+    _, exposure, client, *_ = setup
+    assert client.patch(url(exposure), {'medication_contexts': value}, format='json').status_code == 400
+    assert current(client, exposure) == {}
     assert APIClient().get(url(exposure)).status_code in (401, 403)
-    from django.urls import resolve
-    assert getattr(resolve(f'/api/drug-exposures/{exposure.pk}/context/').func, 'actions', {}).get('get') != 'context'
-    Concept.objects.filter(pk=event.pk).delete()
-    assert client.patch(url(exposure), {'role': 'Induction'}, format='json').status_code == 400
-    assert not Observation.objects.filter(observation_event_id=exposure.pk).exists()
 
 
-def test_same_drug_in_different_lines_retains_distinct_attributes(setup):
+def test_same_drug_in_different_lines_retains_distinct_roles_and_line_intent(setup):
     from omop_core.services.episode_service import author_therapy_line
     from tests.test_episode_service import _seed_episode_writer_concepts
     record, original, client, *_ = setup
@@ -146,80 +192,97 @@ def test_same_drug_in_different_lines_retains_distinct_attributes(setup):
                                   drugs=[{'concept_id': original.drug_concept_id}], intent='Curative')
         exposure = DrugExposure.objects.get(pk=line.drug_exposure_ids[0])
         exposures.append(exposure)
-        assert client.patch(url(exposure), {'role': role}, format='json').status_code == 200
-    assert exposures[0].pk != exposures[1].pk
+        assert patch(client, exposure, {'role': role}).status_code == 200
     lines = client.get('/api/v1/phr/therapy/').data['tracks'][0]['lines']
     assert [line['intent'] for line in lines] == ['Curative', 'Curative']
     assert [line['medications'][0]['role'] for line in lines] == ['Induction', 'Maintenance']
     assert [line['medications'][0]['exposures'][0]['drug_exposure_id'] for line in lines] == [e.pk for e in exposures]
 
 
-def test_conflicting_roles_in_one_line_are_exposed_without_collapsing_them(setup):
-    record, _, client, *_, event = setup
+def test_conflicting_roles_within_a_line_keep_exposure_identity(setup):
+    record, _, client, *_ = setup
     line = therapy_line(record, 1, '2024-01-01', '2024-12-31', [
         ('Melphalan', '2024-01-01', '2024-02-01'), ('Melphalan', '2024-11-01', '2024-12-01')])
     ids = list(EpisodeEvent.objects.filter(episode_id=line.pk).values_list('event_id', flat=True))
     for pk, role in zip(ids, ('Induction', 'Conditioning')):
-        exposure = DrugExposure.objects.get(pk=pk)
-        assert client.patch(url(exposure), {'role': role, 'category': 'Myeloma treatment'}, format='json').status_code == 200
-    # A collision from another domain must not attach a medication to this line.
-    unrelated = drug(record, ConceptFactory(concept_name='Unrelated'), '2024-06-01')
-    EpisodeEvent.objects.create(episode_id=line.pk, event_id=unrelated.pk,
-                               episode_event_field_concept=ConceptFactory(domain__domain_id='Metadata'))
+        assert patch(client, DrugExposure.objects.get(pk=pk), {'role': role, 'category': 'Myeloma treatment'}).status_code == 200
     med, = client.get('/api/v1/phr/therapy/').data['tracks'][0]['lines'][0]['medications']
-    assert med['name'] == 'Melphalan' and 'role' not in med
-    assert med['category'] == 'Myeloma treatment'
-    assert {e['role'] for e in med['exposures']} == {'Induction', 'Conditioning'}
+    assert 'role' not in med and med['category'] == 'Myeloma treatment'
+    assert {entry['role'] for entry in med['exposures']} == {'Induction', 'Conditioning'}
 
 
-def test_legacy_source_identity_alternate_cdm_and_batch_queries(setup, django_assert_num_queries):
-    record, exposure, client, *_ = setup
+def test_legacy_sources_typed_namespace_and_foreign_notes(setup, django_assert_num_queries):
+    record, exposure, client, _, category, event = setup
     alternate = ConceptFactory(vocabulary__vocabulary_id='CDM', domain__domain_id='Metadata',
                                concept_code='drug_exposure.drug_exposure_id')
     with suppress_patient_record_refresh():
-        Observation.objects.create(observation_id=80002, person=record.person, observation_concept_id=0,
+        fact = Observation.objects.create(observation_id=80002, person=record.person, observation_concept_id=0,
             observation_type_concept_id=32817, observation_date='2020-01-01', observation_event_id=exposure.pk,
-            obs_event_field_concept=alternate, observation_source_value='phr:drug-exposure-role',
-            value_as_string='Legacy induction')
+            obs_event_field_concept=alternate, observation_source_value='phr:drug-exposure-role', value_as_string='Legacy induction')
     many = [exposure.pk] + [drug(record, exposure.drug_concept, '2023-01-01').pk for _ in range(12)]
     with django_assert_num_queries(2):
         assert medication_contexts(record.person_id, many) == {exposure.pk: {'role': 'Legacy induction'}}
+    Observation.objects.filter(pk=fact.pk).update(obs_event_field_concept=ConceptFactory(domain__domain_id='Metadata'))
+    assert medication_contexts(record.person_id, many) == {}
+    assert patch(client, exposure, {'role': 'Long role. ' * 30}).status_code == 200
+    fact = Observation.objects.filter(observation_event_id=exposure.pk).exclude(pk=fact.pk).get()
+    Note.objects.filter(note_source_value=f'medication:observation:{fact.pk}').update(person=PatientRecordFactory().person)
+    assert medication_contexts(record.person_id, [exposure.pk])[exposure.pk]['role'] == fact.value_as_string
 
 
-def test_unrelated_newer_exposure_does_not_inherit_older_role(setup):
+def test_later_refresh_and_mapping_approval_reconcile_pending_values(setup):
+    from omop_core.services.patient_record_service import refresh_patient_record
+    from omop_core.services.omop_projection import project_field_to_omop
     record, exposure, client, *_ = setup
-    client.patch(url(exposure), {'role': 'Induction', 'category': 'Myeloma treatment'}, format='json')
-    newer = drug(record, exposure.drug_concept, '2025-01-01')
-    summary = client.get('/api/v1/phr/medications/').data['medications'][0]
-    assert summary['drug_exposure_id'] == newer.pk
-    assert 'role' not in summary and 'category' not in summary
-    detail = client.get(f"/api/v1/phr/medications/{summary['id']}/").data
-    assert 'role' not in detail['history'][0]
-    assert detail['history'][1]['role'] == 'Induction'
+    FieldConceptMapping.objects.filter(field_name='drug_exposure.category').update(status='proposed')
+    response = patch(client, exposure, {'category': 'Supportive'})
+    assert response.status_code == 200 and not Observation.objects.filter(observation_event_id=exposure.pk).exists()
+    refresh_patient_record(record.person)
+    record.refresh_from_db()
+    assert record.medication_contexts[str(exposure.pk)]['category'] == 'Supportive'
+    assert 'medication_contexts' in record.user_edited_fields
+    FieldConceptMapping.objects.filter(field_name='drug_exposure.category').update(status='approved')
+    mapping = FieldConceptMapping.objects.get(field_name='drug_exposure.category')
+    assert project_field_to_omop(mapping) == 1
+    assert medication_contexts(record.person_id, [exposure.pk])[exposure.pk]['category'] == 'Supportive'
+    refresh_patient_record(record.person)
+    record.refresh_from_db()
+    assert 'medication_contexts' not in record.user_edited_fields
 
 
-def test_shared_medications_expose_only_selected_group_attributes(setup, settings):
+def test_shared_medication_selection_limits_attributes(setup, settings):
     from tests.test_phr_sharing import grant, holder
+    from patient_portal.api.phr.sharing import medication_group
     settings.PHR_SHARE_URL = 'https://one.example/r'
     record, exposure, client, *_ = setup
-    client.patch(url(exposure), {'category': 'Myeloma treatment'}, format='json')
+    patch(client, exposure, {'category': 'Myeloma treatment'})
     other = drug(record, ConceptFactory(concept_name='Vitamin D'), '2024-01-01', '2024-12-31')
-    client.patch(url(other), {'category': 'Supplement'}, format='json')
-    from patient_portal.api.phr.sharing import medication_group
-    summary = client.get('/api/v1/phr/medications/').data['medications']
-    selected = next(m for m in summary if m['drug_exposure_id'] == other.pk)
+    patch(client, other, {'category': 'Supplement'})
+    meds = client.get('/api/v1/phr/medications/').data['medications']
+    selected = next(item for item in meds if item['drug_exposure_id'] == other.pk)
     share = grant(client, selection={'medications': {'items': [medication_group(selected)]}})
-    assert share.status_code == 201, share.data
     shared = holder(share.data)
-    meds = shared.get('/api/v1/phr/shared/medications/').data['medications']
-    assert [m['category'] for m in meds] == ['Supplement']
+    assert [item['category'] for item in shared.get('/api/v1/phr/shared/medications/').data['medications']] == ['Supplement']
     assert shared.get(f'/api/v1/phr/shared/medications/{exposure.drug_concept_id}/').status_code == 404
 
 
-def test_foreign_overflow_note_is_never_resolved(setup):
+def test_missing_fact_type_keeps_the_patient_record_write(setup):
     _, exposure, client, *_ = setup
-    client.patch(url(exposure), {'role': 'Long role. ' * 30}, format='json')
-    fact = Observation.objects.get(observation_event_id=exposure.pk)
-    Note.objects.filter(note_source_value=f'medication:observation:{fact.pk}').update(
-        person=PatientRecordFactory().person)
-    assert client.get(url(exposure)).data['role'] == fact.value_as_string
+    Concept.objects.filter(pk__in=[32865, 32817]).delete()
+    response = patch(client, exposure, {'role': 'Induction'})
+    assert response.status_code == 200, response.data
+    assert saved(response, exposure)['role'] == 'Induction'
+    assert 'medication_contexts' in response.data['user_edited_fields']
+    assert not Observation.objects.filter(observation_event_id=exposure.pk).exists()
+
+
+def test_unchanged_retired_echo_does_not_block_another_edit(setup):
+    record, exposure, client, *_ = setup
+    first = patch(client, exposure, {'role': 'Induction'})
+    values = first.data['medication_contexts']
+    DrugExposure.objects.filter(pk=exposure.pk).update(is_erroneous=True)
+    other = drug(record, exposure.drug_concept, '2025-01-01')
+    values[str(other.pk)] = {'role': 'Maintenance'}
+    response = client.patch(url(exposure), {'medication_contexts': values}, format='json')
+    assert response.status_code == 200, response.data
+    assert saved(response, other)['role'] == 'Maintenance'

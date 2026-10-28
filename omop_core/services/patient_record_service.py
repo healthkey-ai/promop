@@ -110,7 +110,7 @@ _OMOP_DERIVED_FIELDS = [
     # Set only when the patient has confirmed the list is complete (#1924), so a
     # withdrawn confirmation must clear it on the next refresh.
     'therapy_history_complete',
-    'concomitant_medications',
+    'concomitant_medications', 'medication_contexts',
     # Treatment assertions and summaries. These are set from dated OMOP rows
     # below; clearing them prevents legacy PatientRecord patches surviving a
     # source deletion.
@@ -678,6 +678,8 @@ def _clear_derived_fields(patient_info: PatientRecord) -> None:
                 'later_therapy_type_ids', 'therapy_type_ids',
                 'stem_cell_transplant_history', 'sct_eligibility',
             ) or field in _genomic_patient_fields() else None
+            if field == 'medication_contexts':
+                default = {}
             setattr(patient_info, field, default)
 
 
@@ -1094,6 +1096,12 @@ def refresh_patient_record(person: Person) -> PatientRecord:
         for field, value in preserved.items():
             derived_value = getattr(patient_info, field, None)
             matches = _derived_value_matches(field, derived_value, value)
+            if field == 'medication_contexts':
+                from omop_core.services.medication_context import context_delta, merge_contexts
+                eligible = {str(row.pk) for row in snapshot.drug_exposures}
+                value = {pk: attributes for pk, attributes in (value or {}).items() if pk in eligible}
+                matches = not context_delta(derived_value or {}, value)
+                value = merge_contexts(derived_value or {}, value or {})
             if field in NEW_INPUT_FIELDS or field in clinical_values:
                 matches = matches and field in confirmed_inputs
             if (field == 'flipi_score_options' and value is None
@@ -1762,6 +1770,9 @@ def _get_treatment_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
         data['therapy_history_complete'] = True
 
     drug_exposures = snapshot.drug_exposures  # already ordered by start_date, id
+    from omop_core.services.medication_context import medication_contexts
+    data['medication_contexts'] = {str(pk): values for pk, values in
+        medication_contexts(person.pk, [row.pk for row in drug_exposures]).items()}
 
     recent_drugs = list(reversed(drug_exposures[-10:]))
 

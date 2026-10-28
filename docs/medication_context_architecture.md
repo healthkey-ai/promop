@@ -6,20 +6,33 @@ that a particular patient received a particular prescription or administration.
 
 ## Writing attributes
 
-`GET /api/v1/drug-exposures/{drug_exposure_id}/context/` returns the currently
-recorded `role` and `category`. `PATCH` accepts either or both fields as strings
-(up to 1,000 characters), with the same patient access and write authorization
-as the underlying clinical row. Unknown keys are rejected. Omitted fields stay
-unchanged; null or blank explicitly clears a value. An empty result means no
-attribute has been recorded. A returned empty string means it was cleared.
+Interactive edits follow [PatientRecord-first writes](patient-record-first-writes.md).
+Use `PATCH /api/v1/patient-records/{person_id}/` with the existing patient access
+and write authorization. The `medication_contexts` object is keyed by exposure ID:
 
 ```json
-{"role": "Induction", "category": "Myeloma treatment"}
+{"medication_contexts": {"123": {"role": "Induction", "category": "Myeloma treatment"}}}
 ```
 
-Create/import the drug exposure first, then patch its context. Provenance headers
-supported by the v1 clinical endpoints also apply here. The response is the full
-current context for that exposure. The legacy clinical API has no context action.
+Create/import the drug exposure first. Both attributes are optional strings up to
+1,000 characters. Omitted exposures/attributes stay unchanged; null or blank clears
+an attribute. Unknown attributes, foreign exposures, and changes to retired
+exposures are rejected before saving. Unchanged retired entries echoed by an editor
+are accepted. The existing GET detail envelope contains the saved map under
+`patient_info.medication_contexts`; PATCH returns the updated record directly.
+
+PatientRecord saves first. The backend then projects only changed attributes to
+OMOP, with signals suppressed. The response never requires full derivation or an
+OMOP snapshot. If vocabulary, mappings, or projection are unavailable, the saved
+edit remains pending and the PHR displays it immediately. Structured pending
+protection remains until a later import/explicit refresh confirms the values.
+Mapping approval retries pending projection without triggering immediate derive.
+Retired exposures are discarded from the current map during later derivation.
+
+The existing PatientRecord revision history records edits. Immediate patient
+projection writes Patient self-report facts and PATIENT_SELF provenance; other
+authors retain the mapping's type. Mapping backfill uses the approved recipe when
+no request author is present. No separate interactive OMOP context action is added.
 
 Each change appends an Observation snapshot. Its `observation_event_id` is the
 exposure ID and `obs_event_field_concept` is a valid CDM Metadata concept for

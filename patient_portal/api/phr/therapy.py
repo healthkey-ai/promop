@@ -18,7 +18,7 @@ from typing import Any
 from django.utils import timezone
 
 from omop_core.models import DrugExposure, ProcedureOccurrence
-from omop_core.services.medication_context import drug_event_concepts, medication_contexts
+from omop_core.services.medication_context import drug_event_concepts, phr_medication_contexts
 from omop_oncology.models import EpisodeEvent
 
 from .names import drug_name, procedure_name
@@ -108,7 +108,7 @@ def _medications(person, episode_id: int | None) -> list[dict[str, Any]]:
         .select_related('drug_concept', 'drug_source_concept', 'visit_occurrence')
         .order_by('drug_exposure_start_date', 'drug_exposure_id')
     )
-    contexts = medication_contexts(person.pk, [row.pk for row in rows])
+    contexts = phr_medication_contexts(person.pk, [row.pk for row in rows])
     sources = row_sources(DrugExposure, rows, type_attr='drug_type_concept', date_attr='drug_exposure_start_date')
     meds: dict[str, dict[str, Any]] = {}
     memo: dict = {}
