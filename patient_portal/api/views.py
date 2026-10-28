@@ -10465,6 +10465,15 @@ def disease_therapy_regimen_detail(request, pk):
 # =============================================================================
 
 
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def disease_category_list(request):
+    """Return the DiseaseCategory enum choices for use in dropdowns."""
+    return Response([
+        {'value': c.value, 'label': c.label} for c in DiseaseCategory
+    ])
+
+
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
 def disease_category_mapping_list(request):

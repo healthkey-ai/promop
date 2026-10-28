@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import api from '@/api/axios';
+import { fetchDiseaseCategories } from '@/api/mappingHub';
 import { destinationError } from './destinationSearch';
 import AxisVariantWalkPanel from './AxisVariantWalkPanel';
 import EditMappingDialog from './EditMappingDialog';
@@ -48,10 +49,6 @@ const domains = [
   ['', 'All domains'], ['measurement', 'Measurement'], ['observation', 'Observation'],
   ['condition', 'Condition'], ['drug_exposure', 'Drug'], ['procedure', 'Procedure'],
 ];
-const diseases = [
-  ['', 'All diseases'], ['BC', 'Breast Cancer'], ['MM', 'Myeloma'],
-  ['FL', 'Follicular Lymphoma'], ['MCL', 'Mantle Cell Lymphoma'], ['CLL', 'CLL'],
-];
 const button = 'rounded border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-100 disabled:opacity-40';
 const input = 'rounded border border-slate-300 bg-white px-3 py-2 text-sm';
 const sourceKey = (source: Source) => JSON.stringify([source.source_vocabulary_id, source.source_code]);
@@ -90,6 +87,7 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange, initialC
   /** Called once the linked concept is opened or reported, so it is not reopened. */
   onInitialConceptHandled?: () => void;
 }) {
+  const [diseases, setDiseases] = useState<[string, string][]>([['', 'All diseases']]);
   const [domain, setDomain] = useState('');
   const [disease, setDisease] = useState('');
   const [scope, setScope] = useState('fields');
@@ -110,6 +108,19 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange, initialC
   const [writing, setWriting] = useState(false);
   // The Edit Mapping dialog sits inside this one; Escape must not close both.
   const [editing, setEditing] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      try {
+        const cats = await fetchDiseaseCategories();
+        if (active) {
+          setDiseases([['', 'All diseases'], ...cats.map(c => [c.value, c.label] as [string, string])]);
+        }
+      } catch { /* keep the default "All diseases" entry */ }
+    })();
+    return () => { active = false; };
+  }, []);
 
   useEffect(() => {
     let active = true;

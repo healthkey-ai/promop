@@ -40,6 +40,13 @@ export interface DiseaseTherapyRegimenItem {
   regimen_title?: string;
 }
 
+// --- Disease Categories ---
+
+export async function fetchDiseaseCategories(): Promise<{value: string; label: string}[]> {
+  const resp = await api.get('/v1/disease-categories/');
+  return resp.data as {value: string; label: string}[];
+}
+
 export async function fetchMappingStats(): Promise<MappingStats> {
   const resp = await api.get('/v1/mapping-stats/');
   return resp.data as MappingStats;
