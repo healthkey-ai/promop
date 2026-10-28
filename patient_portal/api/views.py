@@ -5632,7 +5632,10 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
         if not isinstance(request.data, dict) or not request.data:
             return Response({'detail': 'Provide a non-empty object of field edits.'}, status=400)
         try:
-            record, result = apply_patient_form_patch(person, request.data)
+            record, result = apply_patient_form_patch(
+                person, request.data,
+                authorship=_patient_authorship(request.user, person),
+            )
         except ValueError as exc:
             return Response({'detail': str(exc)}, status=400)
         if not result.applied:

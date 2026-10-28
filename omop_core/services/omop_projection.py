@@ -85,7 +85,7 @@ def curated_values_from_snapshot(snapshot, *, confirmed_clinical_fields=None):
     from omop_core.services.clinical_units import blood_count_projection
     from omop_core.services.field_write_service import _invert_inverse_assertion
     from omop_core.services.write_descriptor import (
-        _LIFECYCLE_FIELDS, _WRITE_RECIPE_INCOMPLETE,
+        PINNED_PROJECTION_FIELDS, _LIFECYCLE_FIELDS, _WRITE_RECIPE_INCOMPLETE,
         get_serializer_read_only_fields, mapping_target_for,
     )
 
@@ -95,6 +95,7 @@ def curated_values_from_snapshot(snapshot, *, confirmed_clinical_fields=None):
         and field.name not in get_serializer_read_only_fields()
         and field.name not in _LIFECYCLE_FIELDS
         and field.name not in _WRITE_RECIPE_INCOMPLETE
+        and field.name not in PINNED_PROJECTION_FIELDS
         and field.get_internal_type() != 'JSONField'
     }
 

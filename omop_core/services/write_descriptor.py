@@ -314,6 +314,11 @@ _MYELOMA_RELATED_DISORDER_PROJECTIONS = {
     },
 }
 
+# Fields whose projection is fixed by a reviewed built-in recipe. A curator
+# mapping must not replace their descriptor semantics or read OMOP facts back
+# into a current answer (#5521).
+PINNED_PROJECTION_FIELDS = frozenset(_MYELOMA_RELATED_DISORDER_PROJECTIONS)
+
 # Lifecycle columns are not clinical data and are never writable regardless of
 # mapping state; they are excluded rather than reported as unwritable fields.
 _LIFECYCLE_FIELDS = frozenset({
@@ -786,10 +791,6 @@ def build_writable_field_descriptor():
             }
             continue
 
-        if field in curated:
-            descriptor[field] = curated[field]
-            continue
-
         if field in _MYELOMA_RELATED_DISORDER_PROJECTIONS:
             entry = {
                 'kind': KIND_DIRECT,
@@ -837,6 +838,10 @@ def build_writable_field_descriptor():
                     f"{spec['concept_code']} is not loaded — no OMOP projection available."
                 )
             descriptor[field] = entry
+            continue
+
+        if field in curated:
+            descriptor[field] = curated[field]
             continue
 
         if field in _WEARABLE_METRIC:

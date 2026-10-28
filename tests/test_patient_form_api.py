@@ -1,9 +1,13 @@
 """The standalone v1 API and the embedded host use the same form writer."""
 import pytest
 from rest_framework.test import APIClient
-from omop_core.models import Measurement
-from patient_portal.models import Identity
-from tests.factories import ConceptFactory, PatientRecordFactory, VocabularyFactory
+from omop_core.models import (
+    ConditionOccurrence, Measurement, Observation, ProvenanceRecord,
+)
+from patient_portal.models import Identity, PatientUser
+from tests.factories import (
+    ConceptFactory, DomainFactory, PatientRecordFactory, VocabularyFactory,
+)
 
 pytestmark = pytest.mark.django_db
 
@@ -250,3 +254,87 @@ def test_location_uses_its_own_limit_not_the_scalar_fact_limit():
     record.person.refresh_from_db()
     assert Location.objects.get(pk=record.person.location_id).country == country
     assert record.planned_therapies == 'VRd'
+
+
+MM_FIELDS = {
+    'mgus': ('mgus', 4149022, '35601003', 'Observation'),
+    'smoldering_multiple_myeloma': ('smolderingMultipleMyeloma', 4184985, '413587002', 'Condition'),
+    'waldenstrom_macroglobulinemia': ('waldenstromMacroglobulinemia', 4098597, '190818004', 'Condition'),
+    'igm_multiple_myeloma': ('igmMultipleMyeloma', None, None, None),
+    'al_amyloidosis': ('alAmyloidosis', 4047607, '23132008', 'Condition'),
+    'poems_syndrome': ('poemsSyndrome', 4193776, '79268002', 'Condition'),
+}
+
+
+def _seed_mm_vocab():
+    VocabularyFactory(vocabulary_id='SNOMED')
+    type_vocab = VocabularyFactory(vocabulary_id='Type Concept')
+    for concept_id in (32817, 32865):
+        ConceptFactory(concept_id=concept_id, concept_code=str(concept_id), vocabulary=type_vocab)
+    for _binding, concept_id, code, domain in MM_FIELDS.values():
+        if concept_id is None:
+            continue
+        ConceptFactory(
+            concept_id=concept_id, concept_code=code, concept_name=code,
+            vocabulary=VocabularyFactory(vocabulary_id='SNOMED'),
+            domain=DomainFactory(domain_id=domain),
+        )
+
+
+def test_shared_form_api_advertises_the_six_current_diagnosis_fields():
+    record = PatientRecordFactory()
+    _seed_mm_vocab()
+
+    descriptor = _client().get(
+        '/api/v1/patient-records/writable-fields/', {'person_id': record.person_id},
+        HTTP_X_PATIENT_FORM='1',
+    ).data
+
+    for field, (binding, _concept_id, _code, _domain) in MM_FIELDS.items():
+        entry = descriptor[field]
+        assert entry['writable'] is True, (field, entry.get('reason'))
+        assert entry['control'] == 'boolean'
+        assert entry['tri_state'] is True
+        assert binding in entry['bindings']
+
+
+def test_shared_form_api_saves_and_projects_a_condition_field():
+    record = PatientRecordFactory()
+    _seed_mm_vocab()
+
+    response = _client().patch(
+        f'/api/v1/patient-records/{record.person_id}/',
+        {'smoldering_multiple_myeloma': True}, format='json', HTTP_X_PATIENT_FORM='1',
+    )
+
+    assert response.status_code == 200, response.data
+    assert 'smoldering_multiple_myeloma' in response.data['write']['applied']
+    record.refresh_from_db()
+    assert record.smoldering_multiple_myeloma is True
+    assert ConditionOccurrence.objects.filter(
+        person=record.person, condition_concept_id=4184985,
+    ).count() == 1
+
+
+def test_patient_self_form_write_projects_self_report_and_provenance():
+    record = PatientRecordFactory()
+    _seed_mm_vocab()
+    identity = Identity.objects.create_user(email='mm-self@example.test')
+    PatientUser.objects.create(identity=identity, person=record.person)
+    client = APIClient()
+    client.force_authenticate(identity)
+
+    response = client.patch(
+        f'/api/v1/patient-records/{record.person_id}/',
+        {'mgus': True}, format='json', HTTP_X_PATIENT_FORM='1',
+    )
+
+    assert response.status_code == 200, response.data
+    record.refresh_from_db()
+    assert record.mgus is True
+    row = Observation.objects.get(person=record.person, observation_concept_id=4149022)
+    assert row.observation_type_concept_id == 32865
+    assert ProvenanceRecord.objects.filter(
+        object_id=row.pk, source='PATIENT_SELF',
+        source_user_id=f'{identity.issuer}|{identity.sub}',
+    ).exists()

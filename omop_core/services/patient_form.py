@@ -23,11 +23,13 @@ from omop_core.services.write_descriptor import build_writable_field_descriptor
 logger = logging.getLogger(__name__)
 
 
-def _project_side_effects(person, direct, projections):
+def _project_side_effects(person, direct, projections, authorship=None):
     """Mirror PatientRecord answers into OMOP without risking the saved answer.
 
     The record write already happened and is the source of truth; a projection
-    failure must not roll it back or fail the request (#5521).
+    failure must not roll it back or fail the request (#5521). ``authorship``
+    carries the caller's self-report typing and provenance, exactly as the
+    native PATCH does, so a patient answer never takes over a clinical fact.
     """
     if not projections:
         return
@@ -39,6 +41,7 @@ def _project_side_effects(person, direct, projections):
         try:
             project_single_value(
                 person, name, direct[name], projection, acknowledge_existing=True,
+                **(authorship or {}),
             )
         except Exception:
             logger.warning(
@@ -221,12 +224,15 @@ def patient_form_descriptors(descriptor=None, *, readable_fields=None, writable=
 
 
 @transaction.atomic
-def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor=None):
+def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor=None,
+                             authorship=None):
     """Shared form write, with explicit acknowledgements and no no-op success.
 
     The host must authorize the person first. Existing OMOP mapping/provenance
     and clear restrictions remain owned by apply_field_writes. Direct columns
     retain their existing PatientRecord-only behavior (e.g. planned_therapies).
+    ``authorship`` is the caller's project_single_value typing (self-report and
+    provenance), supplied by the view for best-effort side-effect projections.
     """
     result = FieldWriteResult()
     record, _ = PatientRecord.objects.get_or_create(person=person)
@@ -327,7 +333,7 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
         record.user_edited_fields = sorted(set(record.user_edited_fields or []) | set(direct))
         record.save(update_fields=sorted(direct) + ['user_edited_fields'])
         result.applied.extend(direct)
-        _project_side_effects(person, direct, side_effect_projections)
+        _project_side_effects(person, direct, side_effect_projections, authorship)
     if facts:
         fact_result = apply_field_writes(person, facts, descriptor=descriptor)
         result.applied.extend(fact_result.applied)

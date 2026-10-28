@@ -6,8 +6,9 @@ binding, and save to PatientRecord even when their OMOP projection is an
 occurrence that derivation never reads back.
 """
 import pytest
+from django.utils import timezone
 
-from omop_core.models import ConditionOccurrence, Observation
+from omop_core.models import ConditionOccurrence, Observation, ProvenanceRecord
 from omop_core.services.patient_form import (
     apply_patient_form_patch,
     patient_form_descriptors,
@@ -16,6 +17,7 @@ from omop_core.services.write_descriptor import build_writable_field_descriptor
 from tests.factories import (
     ConceptFactory,
     DomainFactory,
+    ObservationFactory,
     PatientRecordFactory,
     PersonFactory,
     VocabularyFactory,
@@ -55,6 +57,8 @@ def _seed_vocab():
     VocabularyFactory(vocabulary_id='Type Concept')
     ConceptFactory(concept_id=32817, concept_code='32817', vocabulary_id='Type Concept',
                    concept_name='EHR')
+    ConceptFactory(concept_id=32865, concept_code='32865', vocabulary_id='Type Concept',
+                   concept_name='Patient self-report')
     for _field, (concept_id, code, domain_id) in CONCEPTS.items():
         ConceptFactory(
             concept_id=concept_id, concept_code=code, vocabulary_id='SNOMED',
@@ -122,4 +126,53 @@ def test_a_no_is_saved_without_an_occurrence():
     assert record.al_amyloidosis is False
     assert not ConditionOccurrence.objects.filter(
         person=person, condition_concept_id=4047607,
+    ).exists()
+
+
+def test_a_patient_answer_is_self_report_beside_a_clinical_fact():
+    _seed_vocab()
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    clinical = ObservationFactory(
+        person=person, observation_concept_id=4149022,
+        observation_source_value='35601003', value_as_number=0.0,
+        observation_date=timezone.localdate(), observation_type_concept_id=32817,
+    )
+
+    record, _result = apply_patient_form_patch(
+        person, {'mgus': True},
+        authorship={'type_concept_id': 32865, 'patient_user_id': 'issuer|sub'},
+    )
+
+    assert record.mgus is True
+    rows = Observation.objects.filter(person=person, observation_concept_id=4149022)
+    assert rows.count() == 2
+    untouched = rows.get(observation_id=clinical.observation_id)
+    assert untouched.observation_type_concept_id == 32817
+    assert untouched.value_as_number == 0.0
+    self_report = rows.exclude(observation_id=clinical.observation_id).get()
+    assert self_report.observation_type_concept_id == 32865
+    assert ProvenanceRecord.objects.filter(
+        object_id=self_report.pk, source='PATIENT_SELF', source_user_id='issuer|sub',
+    ).exists()
+
+
+def test_a_projection_failure_does_not_lose_the_saved_answer(monkeypatch):
+    _seed_vocab()
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError('projection is down')
+
+    monkeypatch.setattr(
+        'omop_core.services.omop_projection.project_single_value', boom,
+    )
+
+    record, result = apply_patient_form_patch(person, {'poems_syndrome': True})
+
+    assert 'poems_syndrome' in result.applied
+    assert record.poems_syndrome is True
+    assert not ConditionOccurrence.objects.filter(
+        person=person, condition_concept_id=4193776,
     ).exists()

@@ -1,7 +1,9 @@
 """PatientRecord-first writes for the six current-diagnosis MM fields (#5521)."""
 import pytest
 
-from omop_core.models import ConditionOccurrence, Observation
+from django.utils import timezone
+
+from omop_core.models import ConditionOccurrence, FieldConceptMapping, Observation
 from omop_core.services.omop_projection import project_single_value
 from omop_core.services.patient_record_service import (
     PATIENT_RECORD_OMOP_MAPPED_FIELDS,
@@ -12,9 +14,9 @@ from omop_core.services.write_descriptor import KIND_DIRECT, build_writable_fiel
 from omop_core.signals import suppress_patient_record_refresh
 from patient_portal.api.serializers import PatientRecordSerializer
 from tests.factories import (
-    ConditionOccurrenceFactory,
     ConceptFactory,
     DomainFactory,
+    ObservationFactory,
     PatientRecordFactory,
     PersonFactory,
     VocabularyFactory,
@@ -104,25 +106,86 @@ def test_the_fields_are_writable_but_never_derived():
         assert field not in _OMOP_DERIVED_FIELDS
 
 
-def test_a_manual_false_survives_refresh_and_imported_history_is_not_current_yes():
+def test_imported_positive_history_does_not_become_current_yes():
+    """MGUS is an Observation-domain concept; history is not a current answer."""
     _seed_vocab()
     person = PersonFactory()
     record = PatientRecordFactory(person=person, mgus=False)
     record.user_edited_fields = ['mgus']
     record.save(update_fields=['mgus', 'user_edited_fields'])
 
-    # An imported historical MGUS occurrence must not turn the current answer
-    # into Yes, and the patient's explicit No must survive the refresh.
     with suppress_patient_record_refresh():
-        ConditionOccurrenceFactory(
-            person=person, condition_concept_id=4149022,
-            condition_source_value='35601003',
+        ObservationFactory(
+            person=person, observation_concept_id=4149022,
+            observation_source_value='35601003', value_as_number=1.0,
+            observation_date=timezone.localdate(),
         )
 
     refreshed = refresh_patient_record(person)
 
     assert refreshed.mgus is False
     assert refreshed.smoldering_multiple_myeloma is None
+
+
+def test_an_unknown_answer_survives_refresh_with_an_existing_positive_fact():
+    _seed_vocab()
+    person = PersonFactory()
+    descriptor = build_writable_field_descriptor()
+    projection = {**descriptor['mgus']['projection'], 'value_kind': 'boolean'}
+    assert project_single_value(person, 'mgus', True, projection) is True
+
+    record = PatientRecordFactory(person=person)
+    record.mgus = None
+    record.user_edited_fields = ['mgus']
+    record.save(update_fields=['mgus', 'user_edited_fields'])
+
+    refreshed = refresh_patient_record(person)
+
+    assert refreshed.mgus is None
+    # The earlier positive fact is history; it is neither deleted nor promoted.
+    assert Observation.objects.filter(
+        person=person, observation_concept_id=4149022,
+    ).count() == 1
+
+
+def test_a_curated_mapping_cannot_replace_the_pinned_recipe():
+    _seed_vocab()
+    concept = ConceptFactory(
+        concept_id=9_999_991, concept_code='MGUS-ALT', vocabulary_id='SNOMED',
+        concept_name='Alternative MGUS concept',
+    )
+    FieldConceptMapping.objects.create(
+        field_name='mgus', concept=concept, status='approved', omop_table='observation',
+    )
+
+    entry = build_writable_field_descriptor()['mgus']
+
+    assert entry['tri_state'] is True
+    assert entry['projection']['concept_id'] == 4149022
+    assert entry['projection']['affirmative_only'] is True
+    assert entry['projection']['best_effort'] is True
+
+
+def test_a_curated_mapping_does_not_derive_a_current_answer():
+    _seed_vocab()
+    concept = ConceptFactory(
+        concept_id=9_999_992, concept_code='MGUS-ALT-2', vocabulary_id='SNOMED',
+        concept_name='Alternative MGUS concept',
+    )
+    FieldConceptMapping.objects.create(
+        field_name='mgus', concept=concept, status='approved', omop_table='observation',
+    )
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+
+    with suppress_patient_record_refresh():
+        ObservationFactory(
+            person=person, observation_concept_id=concept.concept_id,
+            observation_source_value=concept.concept_code, value_as_number=1.0,
+            observation_date=timezone.localdate(),
+        )
+
+    assert refresh_patient_record(person).mgus is None
 
 
 def test_serializer_accepts_true_false_and_null():
