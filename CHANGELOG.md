@@ -190,6 +190,11 @@ All notable changes to PRomop are documented here.
 
 ### Fixed
 
+- **One migration leaf again** — #2073 (`0313_widen_axis_key`) and #2072
+  (`0313_add_b_symptom_fields`, `0314_b_symptom_mappings`) both branched from
+  0312, leaving `dev` with two leaves, every PR's backend check red and the
+  deploys of `140e3601` and `10cf269f` failed in Test. Merge migration
+  `0315_merge_20261028_0615` joins them. (#2080)
 - **A refresh whose worker was killed is picked up without a deploy** — the
   stale-heartbeat sweep ran at worker boot and twice in the next three minutes,
   then never again. Cloud Run shuts the old instance down after the new worker
