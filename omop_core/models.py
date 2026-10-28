@@ -3245,7 +3245,13 @@ class PatientRecord(models.Model):
     # General Information
     email = models.EmailField(max_length=255, null=True, blank=True, db_index=True)
     date_of_birth = models.DateField(null=True, blank=True)
-    
+    date_of_birth_precision = models.CharField(
+        max_length=5,
+        choices=[('day', 'Day'), ('month', 'Month'), ('year', 'Year')],
+        blank=True, null=True,
+        help_text="Precision of date_of_birth: 'day' (full date), 'month' (year+month), 'year' (year only)",
+    )
+
     # Demographics
     patient_age = models.IntegerField(help_text="What is the patient's age?", blank=True, null=True)
     gender = models.CharField(

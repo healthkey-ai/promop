@@ -253,7 +253,9 @@ from omop_core.services.genomics_catalog import patient_fields as _genomic_patie
 _OMOP_DERIVED_FIELDS.extend(_genomic_patient_fields())
 
 PATIENT_RECORD_OMOP_MAPPED_FIELDS = frozenset(_OMOP_DERIVED_FIELDS) | frozenset({
-    'date_of_birth', 'gender', 'race', 'ethnicity', 'languages_skills',
+    # DOB precision is projected from Person's partial birth-date components,
+    # alongside the date itself; neither is an unmapped clinical attribute.
+    'date_of_birth', 'date_of_birth_precision', 'gender', 'race', 'ethnicity', 'languages_skills',
     'country', 'region', 'city', 'postal_code', 'latitude', 'longitude',
     # Flattened language capabilities (#827). Derived from PersonLanguageSkill
     # by _flatten_language_capabilities, so they are read-only over the API:
@@ -1310,17 +1312,27 @@ def _get_demographics(person: Person, snapshot: OmopSnapshot = None) -> dict:
                 pass
 
     if person.year_of_birth not in PERSON_YEAR_PLACEHOLDERS:
+        month = person.month_of_birth
+        day = person.day_of_birth
+        if month and day:
+            precision = 'day'
+        elif month:
+            precision = 'month'
+        else:
+            precision = 'year'
         try:
             data['date_of_birth'] = date(
                 person.year_of_birth,
-                person.month_of_birth or 1,
-                person.day_of_birth or 1,
+                month or 1,
+                day or 1,
             )
         except ValueError:
             # OMOP permits partial dates and some imported rows contain an
             # invalid partial month/day. Keep the known year rather than
             # discarding the patient's age and DOB entirely.
             data['date_of_birth'] = date(person.year_of_birth, 1, 1)
+            precision = 'year'
+        data['date_of_birth_precision'] = precision
 
     gender_src = None
     if person.gender_concept:

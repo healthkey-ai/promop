@@ -16,6 +16,7 @@ export interface PatientInfo {
   email?: string;
   
   // General
+  date_of_birth_precision?: 'day' | 'month' | 'year' | null;
   patient_age?: number;
   gender?: string;
   weight_kg?: number;
