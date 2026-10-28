@@ -12049,13 +12049,24 @@ def _serialize_code_mapping_row(concept, mapping=None, source_retirement=None,
 
 def _axis_fields(mapping):
     """LOINC axis state every queue row carries: the curator's axis entries,
-    and how many axis variants the code's units imply (the queue's blue
-    "n axis values" flag)."""
-    return {
+    how many axis variants the code's units imply (the queue's blue
+    "n axis values" flag), and each variant's destination when present."""
+    from omop_core.mapping import axis_variants
+    result = {
         'axis_variant_count': mapping.axis_variant_count if mapping else 0,
         'loinc_axes': (mapping.loinc_axes or {}) if mapping else {},
         'snomed_attributes': (mapping.snomed_attributes or {}) if mapping else {},
     }
+    if mapping and mapping.axis_variant_count >= axis_variants.FLAG_THRESHOLD:
+        # Use .all() to honour the prefetch cache when the queryset was built
+        # with prefetch_related('axis_variants__target_concept').  A single-row
+        # call (detail endpoint) without the prefetch still works — just not
+        # batched.
+        result['axis_variants'] = [
+            axis_variants.serialize(v)
+            for v in mapping.axis_variants.all()
+        ]
+    return result
 
 
 def _clean_required(data, field_name):
@@ -12631,7 +12642,8 @@ def code_mapping_group(request):
         return Response({'detail': 'Unknown section.'}, status=status.HTTP_400_BAD_REQUEST)
 
     mappings = without_icd10_athena_duplicates(SourceCodeConceptMapping.objects.select_related(
-        'target_concept', 'created_by', 'reviewer', 'locked_by', 'organization'))
+        'target_concept', 'created_by', 'reviewer', 'locked_by', 'organization',
+    ).prefetch_related('axis_variants__target_concept'))
     # Same tab, search and provenance narrowing browse applied before it
     # counted the entry. Without this, an entry reading "3 codes" under a
     # provenance filter expands into all 2,557 -- including the rows the filter
@@ -12904,6 +12916,8 @@ def code_mapping_list(request):
         from omop_core.services.mapping_source_units import SourceUnits
         mappings = SourceCodeConceptMapping.objects.select_related(
             'target_concept', 'created_by', 'reviewer', 'locked_by', 'organization',
+        ).prefetch_related(
+            'axis_variants__target_concept',
         ).defer('source_unit_evidence').annotate(source_units=SourceUnits('source_unit_evidence'))
         from omop_core.services.athena_mapping_guard import without_icd10_athena_duplicates
         mappings = without_icd10_athena_duplicates(mappings)
