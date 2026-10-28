@@ -22,8 +22,11 @@ export default function DateControl({
         placeholder="YYYY"
         value={yearVal}
         onChange={(e) => {
-          const y = e.target.value;
-          onChange(y ? `${y}-01-01` : null);
+          const raw = e.target.value;
+          if (!raw) { onChange(null); return; }
+          const y = parseInt(raw, 10);
+          if (isNaN(y) || y < 1900 || y > new Date().getFullYear()) return;
+          onChange(`${y}-01-01`);
         }}
       />
     );

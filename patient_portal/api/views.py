@@ -590,7 +590,7 @@ _ALL_PROFILE_FIELDS = (
     _PROFILE_SIMPLE_PERSON_FIELDS
     | set(_PROFILE_DEMOGRAPHIC_FIELDS)
     | set(_PROFILE_LOCATION_FIELDS)
-    | {'date_of_birth'}
+    | {'date_of_birth', 'date_of_birth_precision'}
 )
 
 
@@ -680,19 +680,48 @@ def _project_profile_fields(person, direct_fields, patch_data):
     # A date of birth is factual source data, not a computed field. Corrections
     # therefore replace every OMOP representation together; otherwise a stale
     # birth_datetime could disagree with year/month/day after an edit.
-    if 'date_of_birth' in profile_fields:
-        dob = patch_data['date_of_birth']
+    if profile_fields & {'date_of_birth', 'date_of_birth_precision'}:
+        dob = patch_data.get('date_of_birth')
+        if dob is None and 'date_of_birth' not in patch_data:
+            # Precision-only PATCH: reconstruct DOB from Person's existing fields.
+            if person.year_of_birth:
+                from datetime import date as _date
+                try:
+                    dob = _date(
+                        person.year_of_birth,
+                        person.month_of_birth or 1,
+                        person.day_of_birth or 1,
+                    )
+                except ValueError:
+                    dob = _date(person.year_of_birth, 1, 1)
         if isinstance(dob, str):
             dob = parse_date(dob)
-        values = {
-            'year_of_birth': dob.year if dob else None,
-            'month_of_birth': dob.month if dob else None,
-            'day_of_birth': dob.day if dob else None,
-            'birth_datetime': (
-                timezone.make_aware(datetime.combine(dob, datetime.min.time()))
-                if dob else None
-            ),
-        }
+        precision = patch_data.get('date_of_birth_precision')
+        if dob:
+            if precision == 'year':
+                month_val = None
+                day_val = None
+            elif precision == 'month':
+                month_val = dob.month
+                day_val = None
+            else:
+                month_val = dob.month
+                day_val = dob.day
+            values = {
+                'year_of_birth': dob.year,
+                'month_of_birth': month_val,
+                'day_of_birth': day_val,
+                'birth_datetime': (
+                    timezone.make_aware(datetime.combine(dob, datetime.min.time()))
+                ),
+            }
+        else:
+            values = {
+                'year_of_birth': None,
+                'month_of_birth': None,
+                'day_of_birth': None,
+                'birth_datetime': None,
+            }
         for attr, value in values.items():
             if getattr(person, attr) != value:
                 setattr(person, attr, value)

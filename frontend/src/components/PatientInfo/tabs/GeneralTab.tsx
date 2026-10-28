@@ -123,8 +123,21 @@ export default function GeneralTab({
                 { value: 'year', label: 'Year only' },
               ]}
               onChange={(v) => {
-                onChange('date_of_birth_precision', v ?? 'day');
-                onChange('date_of_birth', null);
+                const newPrec = v ?? 'day';
+                onChange('date_of_birth_precision', newPrec);
+                const current = formData?.date_of_birth as string | undefined;
+                const year = current?.substring(0, 4);
+                if (year && /^\d{4}$/.test(year)) {
+                  if (newPrec === 'year') {
+                    onChange('date_of_birth', `${year}-01-01`);
+                  } else if (newPrec === 'month') {
+                    const month = current?.substring(5, 7) || '01';
+                    onChange('date_of_birth', `${year}-${month}-01`);
+                  }
+                  // 'day': keep the existing full date as-is
+                } else {
+                  onChange('date_of_birth', null);
+                }
               }}
             />
           </div>

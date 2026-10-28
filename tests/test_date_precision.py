@@ -142,6 +142,87 @@ class TestAgeComputation:
 
 
 # ---------------------------------------------------------------------------
+# Profile projection — the actual PATCH path via _project_profile_fields
+# ---------------------------------------------------------------------------
+
+class TestProfileProjection:
+    """_project_profile_fields must honor precision when writing to Person."""
+
+    def test_year_precision_nulls_month_day_on_person(self):
+        from patient_portal.api.views import _project_profile_fields
+        person = PersonFactory(year_of_birth=1970, month_of_birth=3, day_of_birth=15)
+        PatientRecordFactory(person=person)
+        _project_profile_fields(
+            person,
+            {'date_of_birth', 'date_of_birth_precision'},
+            {'date_of_birth': date(1985, 1, 1), 'date_of_birth_precision': 'year'},
+        )
+        person.refresh_from_db()
+        assert person.year_of_birth == 1985
+        assert person.month_of_birth is None
+        assert person.day_of_birth is None
+
+    def test_month_precision_nulls_day_on_person(self):
+        from patient_portal.api.views import _project_profile_fields
+        person = PersonFactory(year_of_birth=1970, month_of_birth=3, day_of_birth=15)
+        PatientRecordFactory(person=person)
+        _project_profile_fields(
+            person,
+            {'date_of_birth', 'date_of_birth_precision'},
+            {'date_of_birth': date(1985, 6, 1), 'date_of_birth_precision': 'month'},
+        )
+        person.refresh_from_db()
+        assert person.year_of_birth == 1985
+        assert person.month_of_birth == 6
+        assert person.day_of_birth is None
+
+    def test_day_precision_writes_all(self):
+        from patient_portal.api.views import _project_profile_fields
+        person = PersonFactory(year_of_birth=1970, month_of_birth=None, day_of_birth=None)
+        PatientRecordFactory(person=person)
+        _project_profile_fields(
+            person,
+            {'date_of_birth', 'date_of_birth_precision'},
+            {'date_of_birth': date(1985, 6, 15), 'date_of_birth_precision': 'day'},
+        )
+        person.refresh_from_db()
+        assert person.year_of_birth == 1985
+        assert person.month_of_birth == 6
+        assert person.day_of_birth == 15
+
+    def test_precision_only_patch_uses_existing_dob(self):
+        """Changing only precision (no date_of_birth in payload) re-writes Person."""
+        from patient_portal.api.views import _project_profile_fields
+        person = PersonFactory(year_of_birth=1985, month_of_birth=6, day_of_birth=15)
+        PatientRecordFactory(person=person)
+        _project_profile_fields(
+            person,
+            {'date_of_birth_precision'},
+            {'date_of_birth_precision': 'year'},
+        )
+        person.refresh_from_db()
+        assert person.year_of_birth == 1985
+        assert person.month_of_birth is None
+        assert person.day_of_birth is None
+
+    def test_round_trip_year_survives_refresh(self):
+        """Year-only through _project_profile_fields → refresh → precision stays 'year'."""
+        from patient_portal.api.views import _project_profile_fields
+        person = PersonFactory(year_of_birth=1970, month_of_birth=3, day_of_birth=15)
+        pr = PatientRecordFactory(person=person)
+        _project_profile_fields(
+            person,
+            {'date_of_birth', 'date_of_birth_precision'},
+            {'date_of_birth': date(1985, 1, 1), 'date_of_birth_precision': 'year'},
+        )
+        # Refresh should derive 'year' from Person's null month/day.
+        refresh_patient_record(person)
+        pr.refresh_from_db()
+        assert pr.date_of_birth_precision == 'year'
+        assert pr.date_of_birth == date(1985, 1, 1)
+
+
+# ---------------------------------------------------------------------------
 # Serializer validation
 # ---------------------------------------------------------------------------
 
@@ -149,7 +230,6 @@ class TestPrecisionValidation:
     """Serializer should validate date_of_birth_precision choices."""
 
     def test_future_date_still_rejected(self):
-        from rest_framework.test import APIRequestFactory
         from patient_portal.api.serializers import PatientRecordSerializer
         future = date(2099, 1, 1)
         serializer = PatientRecordSerializer(data={

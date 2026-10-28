@@ -271,9 +271,9 @@ def _sync_demographics(person, patient_info, changed_data: dict = None) -> None:
             except ValueError:
                 dob = None
     if dob:
-        precision = (
-            getattr(patient_info, 'date_of_birth_precision', None)
-            or changed_data.get('date_of_birth_precision')
+        pr_precision = getattr(patient_info, 'date_of_birth_precision', None)
+        precision = pr_precision if pr_precision is not None else (
+            changed_data.get('date_of_birth_precision') if changed_data else None
         )
         person.year_of_birth = dob.year
         if precision == 'year':
