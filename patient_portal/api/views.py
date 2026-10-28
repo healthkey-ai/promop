@@ -7163,6 +7163,124 @@ class _UpsertPlan:
         self.unattributed_matches = unattributed_matches
 
 
+def _normalize_bulk_measurement_rows(model_cls, new_ids):
+    """Normalize units on newly-inserted Measurement rows (post-create).
+
+    Groups rows by ``measurement_source_value``, looks up the approved SCCM
+    mapping for each to determine the target unit.  When the mapping has
+    approved axis variants, rows are sub-grouped by unit and each variant's
+    target concept drives the conversion — because the variant's LOINC may
+    have a different property (and therefore different canonical unit) from
+    the parent mapping's.
+
+    Works on already-persisted rows so the upsert identity is never altered.
+    """
+    from omop_core.models import SourceCodeAxisVariant
+    from omop_core.services.canonical_units import (
+        normalize_measurement_units, unit_code,
+    )
+
+    rows = model_cls.objects.filter(pk__in=new_ids)
+
+    # Collect unique source values from the inserted rows.
+    source_values = set(
+        rows.exclude(measurement_source_value__isnull=True)
+        .exclude(measurement_source_value='')
+        .values_list('measurement_source_value', flat=True)
+        .distinct()
+    )
+    if not source_values:
+        return
+
+    # Batch-fetch approved mappings for these source values.
+    mappings_by_sv = {}
+    sccm_qs = (
+        SourceCodeConceptMapping.objects
+        .filter(
+            source_code__in=source_values,
+            omop_table='measurement',
+            status='approved',
+        )
+        .select_related('destination_unit_concept')
+    )
+    for m in sccm_qs:
+        mappings_by_sv.setdefault(m.source_code, m)
+
+    # Batch-fetch approved variants for the mappings that have them.
+    mapping_ids = [m.id for m in mappings_by_sv.values()
+                   if m.axis_variant_count]
+    variants_by_mapping = defaultdict(list)
+    if mapping_ids:
+        for v in SourceCodeAxisVariant.objects.filter(
+            mapping_id__in=mapping_ids,
+            status='approved',
+            target_concept__isnull=False,
+        ):
+            variants_by_mapping[v.mapping_id].append(v)
+
+    # Normalize each source-value group.
+    for sv, mapping in mappings_by_sv.items():
+        sv_qs = rows.filter(measurement_source_value=sv)
+        variants = variants_by_mapping.get(mapping.id, [])
+
+        if variants:
+            # Route by unit: each variant covers a set of unit spellings.
+            # Rows matching a variant normalize to the variant's concept;
+            # remaining rows normalize to the mapping's concept.
+            # Fetch all distinct raw unit spellings once (not per variant).
+            raw_units = list(
+                sv_qs.exclude(unit_source_value__isnull=True)
+                .exclude(unit_source_value='')
+                .values_list('unit_source_value', flat=True)
+                .distinct()
+            )
+            claimed_pks = set()
+            for variant in variants:
+                wanted = set(variant.units or [])
+                if not wanted or not variant.target_concept_id:
+                    continue
+                spellings = [r for r in raw_units if unit_code(r) in wanted]
+                if spellings:
+                    var_qs = sv_qs.filter(unit_source_value__in=spellings)
+                    claimed_pks.update(
+                        var_qs.values_list('pk', flat=True))
+                    normalize_measurement_units(
+                        var_qs, mapping,
+                        target_concept_id=variant.target_concept_id)
+            # Remaining rows (not claimed by any variant) use the mapping.
+            # normalize_measurement_units returns 0 when no rows match,
+            # so no exists() guard needed.
+            unclaimed = sv_qs.exclude(pk__in=claimed_pks) if claimed_pks else sv_qs
+            normalize_measurement_units(unclaimed, mapping)
+        else:
+            normalize_measurement_units(sv_qs, mapping)
+
+    # For source values with no SCCM mapping, normalize by concept_id.
+    # _resolve_target_unit's LOINC property fallback handles this via the
+    # target_concept_id parameter.
+    unmapped_svs = source_values - mappings_by_sv.keys()
+    if unmapped_svs:
+        unmapped_rows = rows.filter(measurement_source_value__in=unmapped_svs)
+        concept_ids = set(
+            unmapped_rows
+            .exclude(measurement_concept_id__isnull=True)
+            .exclude(measurement_concept_id=0)
+            .values_list('measurement_concept_id', flat=True)
+            .distinct()
+        )
+        # Normalization fires only on newly-inserted rows by design.
+        # Rows updated by the upsert are normalized by
+        # repoint_clinical_rows when the mapping destination changes.
+        from types import SimpleNamespace
+        for cid in concept_ids:
+            mock_mapping = SimpleNamespace(
+                destination_unit_concept=None,
+                target_concept_id=cid,
+            )
+            cid_qs = unmapped_rows.filter(measurement_concept_id=cid)
+            normalize_measurement_units(cid_qs, mock_mapping)
+
+
 def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances,
                       organization=None):
     """Match a batch of unsaved rows against what `person` already has.
@@ -8157,6 +8275,13 @@ class _OmopBulkCreateMixin:
                         setattr(inst, pk_field, pk)
                     model_cls.objects.bulk_create(instances)
                     ids, updated = list(new_ids), 0
+
+                # Normalize units on newly-inserted Measurement rows (#2088).
+                # Done AFTER upsert/bulk_create because value_as_number is part
+                # of the Measurement upsert key — normalizing before the match
+                # would change the identity and create duplicates on a re-run.
+                if model_cls is Measurement and new_ids:
+                    _normalize_bulk_measurement_rows(model_cls, new_ids)
 
                 # Concept-duplicate detection (opt-in).
                 concept_dup_warn, concept_dup_reject = _parse_concept_dup_flags(
