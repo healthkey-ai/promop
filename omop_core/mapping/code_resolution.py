@@ -742,6 +742,9 @@ def repoint_clinical_rows(*, mapping, old_concept_id, new_concept_id,
 
         # post_delete receivers are live, and the collapse below deletes rows.
         with suppress_patient_record_refresh():
+            # Snapshot PKs before the concept update: the lazy queryset filters
+            # on old_concept_id, so after .update() it would find zero rows.
+            repointed_pks = set(qs.values_list('pk', flat=True)) if model is Measurement else None
             qs.update(**{concept_col: new_concept_id})
             result['rows_collapsed'] = _collapse_duplicates(
                 model, concept_col, source_col, match,
@@ -750,12 +753,13 @@ def repoint_clinical_rows(*, mapping, old_concept_id, new_concept_id,
             )
 
             # Normalize units on repointed Measurement rows (#2088).
-            if model is Measurement:
+            if repointed_pks:
                 from omop_core.services.canonical_units import (
                     normalize_measurement_units,
                 )
+                norm_qs = model.objects.filter(pk__in=repointed_pks)
                 result['rows_normalized'] = normalize_measurement_units(
-                    qs, mapping)
+                    norm_qs, mapping)
 
     logger.info(
         'Mapping %s: re-pointed %s %s row(s) from concept %s to %s '
@@ -1009,13 +1013,20 @@ def resolve_person_source_codes(person, *, source_values=None, omop_tables=None)
 
             with transaction.atomic():
                 with suppress_patient_record_refresh():
+                    # Snapshot PKs before the concept update: the lazy queryset
+                    # filters on unresolved_q, so after .update() it finds zero.
+                    resolved_pks = (
+                        set(rows_to_update.values_list('pk', flat=True))
+                        if model is Measurement else None
+                    )
                     rows_to_update.update(**{concept_col: target_concept_id})
                     # Normalize units on resolved Measurement rows (#2088).
-                    if model is Measurement:
+                    if resolved_pks:
                         from omop_core.services.canonical_units import (
                             normalize_measurement_units,
                         )
-                        normalize_measurement_units(rows_to_update, mapping)
+                        norm_qs = model.objects.filter(pk__in=resolved_pks)
+                        normalize_measurement_units(norm_qs, mapping)
                 person_ids_touched.add(person.person_id)
                 resolved += count
                 already_resolved += group['row_count'] - count

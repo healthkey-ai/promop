@@ -580,3 +580,113 @@ class TestNormalizeMeasurementInstances:
         count = normalize_measurement_instances([inst], mapping=mapping)
         assert count == 0
         assert inst.value_as_number == Decimal('10')
+
+
+class TestRepointNormalizesUnits:
+    """Integration test: repoint_clinical_rows normalizes Measurement units."""
+
+    def test_repoint_converts_values(self, db):
+        from omop_core.mapping.code_resolution import repoint_clinical_rows
+
+        person = PersonFactory()
+        old_concept = ConceptFactory(concept_code='OLD', concept_name='Old')
+        new_concept = ConceptFactory(concept_code='NEW', concept_name='New')
+        mmol_concept = _ucum_concept('mmol/L')
+        mapping = _sccm('GLUCOSE', new_concept,
+                         destination_unit_concept=mmol_concept)
+
+        row = MeasurementFactory(
+            person=person,
+            measurement_concept=old_concept,
+            measurement_source_value='GLUCOSE',
+            value_as_number=Decimal('500'),
+            unit_source_value='umol/L',
+            range_low=Decimal('300'),
+            range_high=Decimal('600'),
+        )
+
+        result = repoint_clinical_rows(
+            mapping=mapping,
+            old_concept_id=old_concept.concept_id,
+            new_concept_id=new_concept.concept_id,
+        )
+
+        assert result['rows_updated'] == 1
+        assert result.get('rows_normalized', 0) == 1
+
+        row.refresh_from_db()
+        assert row.measurement_concept_id == new_concept.concept_id
+        # umol/L -> mmol/L: divide by 1000
+        assert row.value_as_number == Decimal('0.5')
+        assert row.range_low == Decimal('0.3')
+        assert row.range_high == Decimal('0.6')
+        assert row.unit_source_value == 'umol/L'  # never changed
+
+    def test_repoint_skips_non_measurement_tables(self, db):
+        from omop_core.mapping.code_resolution import repoint_clinical_rows
+        from omop_core.models import ConditionOccurrence
+        from omop_core.services.pk import next_pk
+
+        person = PersonFactory()
+        old_concept = ConceptFactory(concept_code='COLD', concept_name='Cold')
+        new_concept = ConceptFactory(concept_code='CNEW', concept_name='CNew')
+        type_concept = ConceptFactory(concept_code='CTYPE', concept_name='CType')
+
+        pk = next_pk(ConditionOccurrence, 'condition_occurrence_id')
+        ConditionOccurrence.objects.create(
+            condition_occurrence_id=pk,
+            person=person,
+            condition_concept=old_concept,
+            condition_type_concept=type_concept,
+            condition_source_value='HEADACHE',
+            condition_start_date='2024-01-01',
+        )
+
+        mapping = SourceCodeConceptMapping.objects.create(
+            source_code='HEADACHE',
+            target_concept=new_concept,
+            omop_table='condition',
+            status='approved',
+        )
+
+        result = repoint_clinical_rows(
+            mapping=mapping,
+            old_concept_id=old_concept.concept_id,
+            new_concept_id=new_concept.concept_id,
+        )
+        assert result['rows_updated'] == 1
+        assert 'rows_normalized' not in result
+
+
+class TestResolvePersonNormalizesUnits:
+    """Integration test: resolve_person_source_codes normalizes Measurement units."""
+
+    def test_resolve_converts_values(self, db):
+        from omop_core.mapping.code_resolution import resolve_person_source_codes
+
+        person = PersonFactory()
+        target_concept = ConceptFactory(
+            concept_code='TARGET', concept_name='Target')
+        mmol_concept = _ucum_concept('mmol/L')
+
+        _sccm('LAB-X', target_concept,
+               destination_unit_concept=mmol_concept)
+
+        # Row with concept_id=0 (NO_MATCHING_CONCEPT)
+        no_match = ConceptFactory(concept_id=0, concept_code='0',
+                                  concept_name='No matching concept')
+        row = MeasurementFactory(
+            person=person,
+            measurement_concept=no_match,
+            measurement_source_value='LAB-X',
+            value_as_number=Decimal('100'),
+            unit_source_value='umol/L',
+        )
+
+        result = resolve_person_source_codes(person)
+        assert result['resolved'] >= 1
+
+        row.refresh_from_db()
+        assert row.measurement_concept_id == target_concept.concept_id
+        # umol/L -> mmol/L: divide by 1000
+        assert row.value_as_number == Decimal('0.1')

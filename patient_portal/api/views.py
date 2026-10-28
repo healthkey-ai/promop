@@ -7134,73 +7134,79 @@ class _UpsertPlan:
         self.unattributed_matches = unattributed_matches
 
 
-def _normalize_bulk_measurement_instances(instances):
-    """Normalize units on in-memory Measurement instances before bulk_create.
+def _normalize_bulk_measurement_rows(model_cls, new_ids):
+    """Normalize units on newly-inserted Measurement rows (post-create).
 
-    Groups instances by ``measurement_source_value``, looks up the approved
-    SCCM mapping for each to determine the target unit, and falls back to
-    ``CanonicalUnitPreference`` for the destination concept.
+    Groups rows by ``measurement_source_value``, looks up the approved SCCM
+    mapping for each to determine the target unit, and falls back to
+    ``CanonicalUnitPreference`` for the destination concept.  Works on
+    already-persisted rows so the upsert identity is never altered.
     """
-    from omop_core.services.canonical_units import normalize_measurement_instances
+    from omop_core.services.canonical_units import normalize_measurement_units
 
-    # Collect unique source values.
-    source_values = {
-        inst.measurement_source_value
-        for inst in instances
-        if inst.measurement_source_value
-    }
+    rows = model_cls.objects.filter(pk__in=new_ids)
+
+    # Collect unique source values from the inserted rows.
+    source_values = set(
+        rows.exclude(measurement_source_value__isnull=True)
+        .exclude(measurement_source_value='')
+        .values_list('measurement_source_value', flat=True)
+        .distinct()
+    )
     if not source_values:
         return
 
     # Batch-fetch approved mappings for these source values.
     mappings_by_sv = {}
-    if source_values:
-        sccm_qs = (
-            SourceCodeConceptMapping.objects
-            .filter(
-                source_code__in=source_values,
-                omop_table='measurement',
-                status='approved',
-            )
-            .select_related('destination_unit_concept')
+    sccm_qs = (
+        SourceCodeConceptMapping.objects
+        .filter(
+            source_code__in=source_values,
+            omop_table='measurement',
+            status='approved',
         )
-        for m in sccm_qs:
-            mappings_by_sv.setdefault(m.source_code, m)
+        .select_related('destination_unit_concept')
+    )
+    for m in sccm_qs:
+        mappings_by_sv.setdefault(m.source_code, m)
 
-    # Group instances by source_value and normalize each group.
-    from collections import defaultdict
-    by_sv = defaultdict(list)
-    for inst in instances:
-        sv = inst.measurement_source_value or ''
-        by_sv[sv].append(inst)
+    # Normalize each source-value group via its mapping.
+    for sv, mapping in mappings_by_sv.items():
+        sv_qs = rows.filter(measurement_source_value=sv)
+        normalize_measurement_units(sv_qs, mapping)
 
-    for sv, group in by_sv.items():
-        mapping = mappings_by_sv.get(sv)
-        if mapping:
-            normalize_measurement_instances(group, mapping=mapping)
-        else:
-            # Fall back to CanonicalUnitPreference per concept_id.
-            by_concept = defaultdict(list)
-            for inst in group:
-                cid = inst.measurement_concept_id
-                if cid:
-                    by_concept[cid].append(inst)
-            if by_concept:
-                from omop_core.models import CanonicalUnitPreference
-                prefs = {
-                    p.concept_id: p
-                    for p in CanonicalUnitPreference.objects.filter(
-                        concept_id__in=by_concept.keys(),
-                    ).exclude(unit='')
-                }
-                for cid, insts in by_concept.items():
-                    pref = prefs.get(cid)
-                    if pref and pref.unit and pref.property:
-                        normalize_measurement_instances(
-                            insts,
-                            target_unit=pref.unit,
-                            property_code=pref.property,
-                        )
+    # For source values with no SCCM mapping, fall back to
+    # CanonicalUnitPreference per concept_id.
+    unmapped_svs = source_values - mappings_by_sv.keys()
+    if unmapped_svs:
+        unmapped_rows = rows.filter(measurement_source_value__in=unmapped_svs)
+        concept_ids = set(
+            unmapped_rows
+            .exclude(measurement_concept_id__isnull=True)
+            .values_list('measurement_concept_id', flat=True)
+            .distinct()
+        )
+        if concept_ids:
+            from omop_core.models import CanonicalUnitPreference
+            prefs = {
+                p.concept_id: p
+                for p in CanonicalUnitPreference.objects.filter(
+                    concept_id__in=concept_ids,
+                ).exclude(unit='')
+            }
+            for cid, pref in prefs.items():
+                if pref.unit and pref.property:
+                    from types import SimpleNamespace
+                    # Build a mock mapping with a mock destination_unit_concept
+                    # so _resolve_target_unit finds the unit via the first path.
+                    mock_duc = SimpleNamespace(concept_code=pref.unit)
+                    mock_mapping = SimpleNamespace(
+                        destination_unit_concept=mock_duc,
+                        target_concept_id=cid,
+                    )
+                    cid_qs = unmapped_rows.filter(
+                        measurement_concept_id=cid)
+                    normalize_measurement_units(cid_qs, mock_mapping)
 
 
 def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances,
@@ -8182,11 +8188,6 @@ class _OmopBulkCreateMixin:
             # so here the suppression is load-bearing, not just defensive.
             with suppress_patient_record_refresh():
                 instances = [model_cls(**dict(attrs)) for attrs in validated]
-
-                # Normalize units on new Measurement instances (#2088).
-                if model_cls is Measurement:
-                    _normalize_bulk_measurement_instances(instances)
-
                 unattributed_matches = 0
                 if upsert:
                     plan = _plan_bulk_upsert(
@@ -8202,6 +8203,13 @@ class _OmopBulkCreateMixin:
                         setattr(inst, pk_field, pk)
                     model_cls.objects.bulk_create(instances)
                     ids, updated = list(new_ids), 0
+
+                # Normalize units on newly-inserted Measurement rows (#2088).
+                # Done AFTER upsert/bulk_create because value_as_number is part
+                # of the Measurement upsert key — normalizing before the match
+                # would change the identity and create duplicates on a re-run.
+                if model_cls is Measurement and new_ids:
+                    _normalize_bulk_measurement_rows(model_cls, new_ids)
 
                 # Concept-duplicate detection (opt-in).
                 concept_dup_warn, concept_dup_reject = _parse_concept_dup_flags(
