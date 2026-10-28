@@ -35,6 +35,16 @@ def _test_database_url() -> str:
     return f"postgresql://{user}{password}@{host}:{port}/{cfg['NAME']}"
 
 
+def _stop_worker(worker, *, timeout=30):
+    """Reap the fixture's subprocess even when Celery warm shutdown stalls."""
+    worker.terminate()
+    try:
+        worker.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        worker.kill()
+        worker.wait(timeout=10)
+
+
 @pytest.fixture(params=['promop', 'ctomop'])
 def celery_worker_process(request):
     broker = os.environ.get('CELERY_BROKER_URL', '')
@@ -52,8 +62,7 @@ def celery_worker_process(request):
     try:
         yield worker
     finally:
-        worker.terminate()
-        worker.wait(timeout=30)
+        _stop_worker(worker)
 
 
 def _poll(client, task_id: str) -> dict:
