@@ -152,7 +152,7 @@ from .condition_serializers import V1MeasurementSerializer, V1ObservationSeriali
 from .serializers import (
     PrologSurveySerializer, PrologSurveyResponseSerializer,
     UserSerializer, PatientRecordSerializer, PatientListSerializer, ProvenanceRecordSerializer,
-    ConditionOccurrenceSerializer, ConditionContextSerializer, DrugExposureSerializer, MeasurementSerializer,
+    ConditionOccurrenceSerializer, ConditionContextSerializer, MedicationContextSerializer, DrugExposureSerializer, MeasurementSerializer,
     ObservationSerializer, ProcedureOccurrenceSerializer,
     EpisodeSerializer, EpisodeEventSerializer,
     PatientDocumentSerializer, PatientTrialEnrollmentSerializer,
@@ -8830,9 +8830,23 @@ class V1ConditionOccurrenceViewSet(
 @_PROVENANCE_ORG_SCHEMA
 class V1DrugExposureViewSet(
         _OmopBulkUpdateMixin, _OmopBulkDeleteMixin, DrugExposureViewSet):
-    """Drug exposures on /api/v1/, with the batch actions."""
+    """Drug exposures on /api/v1/, with batch actions and medication context."""
 
     source_organization_header = True
+
+    @extend_schema(request=MedicationContextSerializer, responses=MedicationContextSerializer)
+    @action(detail=True, methods=['get', 'patch'], url_path='context')
+    def context(self, request, pk=None):
+        from omop_core.services.medication_context import medication_contexts, save_medication_context
+
+        exposure = self.get_object()
+        if request.method == 'GET':
+            return Response(medication_contexts(exposure.person_id, [exposure.pk]).get(exposure.pk, {}))
+        _authorize_person_write(request, exposure.person)
+        data = MedicationContextSerializer(data=request.data)
+        data.is_valid(raise_exception=True)
+        self._provenance(request)
+        return Response(save_medication_context(exposure, data.validated_data, record_provenance=self._prov))
 
 
 @_PROVENANCE_ORG_SCHEMA

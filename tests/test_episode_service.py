@@ -32,9 +32,10 @@ def _seed_episode_writer_concepts():
     )
     ConceptFactory(
         concept_id=CONCEPT_DRUG_EXPOSURE_FIELD,
-        concept_name='drug_exposure_id',
-        concept_code=str(CONCEPT_DRUG_EXPOSURE_FIELD),
-        vocabulary=vocab,
+        concept_name='drug_exposure.drug_exposure_id',
+        concept_code='CDM150',
+        vocabulary__vocabulary_id='CDM',
+        domain__domain_id='Metadata',
     )
     snomed = VocabularyFactory(vocabulary_id='SNOMED', vocabulary_name='SNOMED')
     ConceptFactory(
