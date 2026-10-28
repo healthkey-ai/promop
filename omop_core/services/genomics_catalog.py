@@ -49,7 +49,20 @@ def disease_code(value):
         'cll': 'CLL', 'chronic lymphocytic leukemia': 'CLL',
         'chronic lymphocytic leukaemia': 'CLL',
     }
-    return aliases.get(key)
+    code = aliases.get(key)
+    if code:
+        return code
+    # Fallback: consult the DiseaseCategoryMapping table
+    try:
+        from omop_core.models import DiseaseCategoryMapping
+        row = DiseaseCategoryMapping.objects.filter(
+            disease_name__iexact=value.strip(),
+        ).values_list('category', flat=True).first()
+        if row and row != 'Other':
+            return row
+    except Exception:
+        pass
+    return None
 
 
 def canonicalize_variant(variant):

@@ -46,7 +46,8 @@ from omop_core.models import (
     ToxicityGrade, Language, LanguageSkillLevel, BinetStage, ProteinExpression,
     RichterTransformation, TumorBurden, MorphologicVariant, DiseaseActivity,
     PreExistingConditionCategory,
-    Disease, CancerStage, KarnofskyScore, EcogStatus, PeripheralNeuropathyGrade,
+    Disease, DiseaseCategory, DiseaseCategoryMapping,
+    CancerStage, KarnofskyScore, EcogStatus, PeripheralNeuropathyGrade,
     InfectionStatus, DiseaseProgression, MeasurableDisease, GelfCriteria,
     FlipIScore, FollicularLymphomaGrade, PostTransformationOutcome,
     BreastCancerFirstLineTherapy, BreastCancerSecondLineTherapy, BreastCancerLaterLineTherapy,
@@ -10146,6 +10147,8 @@ def mapping_stats(request):
         .annotate(n=Count(Concat('disease', Value(':'), Cast('concept_id', CharField())), distinct=True))
         .values_list('status', 'n'))
 
+    disease_category_total = DiseaseCategoryMapping.objects.count()
+
     return Response({
         'relevance_signals': {s: signal_pairs.get(s, 0) for s in ('proposed', 'accepted', 'rejected')},
         'field_mappings': {'total': field_total, 'approved': field_approved, 'proposed': field_proposed, 'unmapped': field_unmapped},
@@ -10155,6 +10158,9 @@ def mapping_stats(request):
             'components': TherapyComponent.objects.count(),
             'classes': TherapyClass.objects.count(),
             'disease_links': DiseaseTherapyRegimen.objects.count(),
+        },
+        'disease_category': {
+            'total': disease_category_total,
         },
     })
 
@@ -10312,6 +10318,102 @@ def disease_therapy_regimen_detail(request, pk):
         return Response({'detail': 'Not found'}, status=status.HTTP_404_NOT_FOUND)
     obj.delete()
     return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+# =============================================================================
+# Disease Category Mapping
+# =============================================================================
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def disease_category_mapping_list(request):
+    """List or create disease-to-category mappings.
+
+    GET  /api/v1/disease-category-mappings/?search=myeloma
+    POST /api/v1/disease-category-mappings/  {"disease_name": "...", "category": "MM"}
+    """
+    if request.method == 'GET':
+        qs = DiseaseCategoryMapping.objects.all()
+        search = request.query_params.get('search', '').strip()
+        if search:
+            qs = qs.filter(disease_name__icontains=search)
+        return Response([
+            {'id': m.id, 'disease_name': m.disease_name, 'category': m.category}
+            for m in qs
+        ])
+    # POST
+    denied = _require_mapping_admin(request)
+    if denied:
+        return denied
+    disease_name = (request.data.get('disease_name') or '').strip()
+    category = (request.data.get('category') or '').strip()
+    if not disease_name or not category:
+        return Response(
+            {'detail': 'disease_name and category are required'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    valid_categories = {c.value for c in DiseaseCategory}
+    if category not in valid_categories:
+        return Response(
+            {'detail': f'category must be one of {sorted(valid_categories)}'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    if DiseaseCategoryMapping.objects.filter(disease_name__iexact=disease_name).exists():
+        return Response(
+            {'detail': f'A mapping for "{disease_name}" already exists'},
+            status=status.HTTP_409_CONFLICT,
+        )
+    obj = DiseaseCategoryMapping.objects.create(disease_name=disease_name, category=category)
+    return Response(
+        {'id': obj.id, 'disease_name': obj.disease_name, 'category': obj.category},
+        status=status.HTTP_201_CREATED,
+    )
+
+
+@api_view(['PATCH', 'DELETE'])
+@permission_classes([IsAuthenticated])
+def disease_category_mapping_detail(request, pk):
+    """Update or delete a disease-category mapping.
+
+    PATCH  /api/v1/disease-category-mappings/<pk>/  {"category": "Other"}
+    DELETE /api/v1/disease-category-mappings/<pk>/
+    """
+    denied = _require_mapping_admin(request)
+    if denied:
+        return denied
+    try:
+        obj = DiseaseCategoryMapping.objects.get(pk=pk)
+    except DiseaseCategoryMapping.DoesNotExist:
+        return Response({'detail': 'Not found'}, status=status.HTTP_404_NOT_FOUND)
+    if request.method == 'DELETE':
+        obj.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+    # PATCH
+    category = request.data.get('category')
+    disease_name = request.data.get('disease_name')
+    if category is not None:
+        category = category.strip()
+        valid_categories = {c.value for c in DiseaseCategory}
+        if category not in valid_categories:
+            return Response(
+                {'detail': f'category must be one of {sorted(valid_categories)}'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        obj.category = category
+    if disease_name is not None:
+        disease_name = disease_name.strip()
+        if not disease_name:
+            return Response({'detail': 'disease_name cannot be empty'}, status=status.HTTP_400_BAD_REQUEST)
+        dup = DiseaseCategoryMapping.objects.filter(disease_name__iexact=disease_name).exclude(pk=pk)
+        if dup.exists():
+            return Response(
+                {'detail': f'A mapping for "{disease_name}" already exists'},
+                status=status.HTTP_409_CONFLICT,
+            )
+        obj.disease_name = disease_name
+    obj.save()
+    return Response({'id': obj.id, 'disease_name': obj.disease_name, 'category': obj.category})
 
 
 # =============================================================================

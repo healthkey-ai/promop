@@ -2970,6 +2970,27 @@ class Disease(VocabularyLookup):
         db_table = 'vocabulary_disease'
 
 
+class DiseaseCategory(models.TextChoices):
+    BC = 'BC', 'Breast Cancer'
+    MM = 'MM', 'Multiple Myeloma'
+    FL = 'FL', 'Follicular Lymphoma'
+    CLL = 'CLL', 'Chronic Lymphocytic Leukemia'
+    MCL = 'MCL', 'Mantle Cell Lymphoma'
+    OTHER = 'Other', 'Other'
+
+
+class DiseaseCategoryMapping(models.Model):
+    disease_name = models.TextField(unique=True)
+    category = models.CharField(max_length=10, choices=DiseaseCategory.choices)
+
+    class Meta:
+        db_table = 'disease_category_mapping'
+        ordering = ['disease_name']
+
+    def __str__(self):
+        return f'{self.disease_name} → {self.category}'
+
+
 class CancerStage(VocabularyLookup):
     class Meta:
         db_table = 'vocabulary_cancer_stage'
