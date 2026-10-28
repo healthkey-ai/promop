@@ -116,6 +116,7 @@ _OMOP_DERIVED_FIELDS = [
     'first_line_outcome', 'first_line_intent', 'first_line_discontinuation_reason',
     'second_line_outcome', 'second_line_intent', 'second_line_discontinuation_reason',
     'later_outcome', 'later_intent', 'later_discontinuation_reason',
+    'first_line_progression_date', 'second_line_progression_date', 'later_progression_date', 'pod24',
     'therapy_intent', 'reason_for_discontinuation', 'relapse_count',
     'treatment_refractory_status', 'washout_period_duration',
     'remission_duration_min', 'remission_duration',
@@ -2314,6 +2315,14 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures, sn
             if name
         )
 
+    # ── Bulk-fetch maintenance flags for all episodes ──────────────────────
+    from omop_oncology.models import TherapyLineExposure
+    maint_exposure_ids = set(
+        TherapyLineExposure.objects
+        .filter(episode_id__in=all_episode_ids, is_maintenance=True)
+        .values_list('drug_exposure_id', flat=True)
+    )
+
     # ── Second pass: populate data dict ───────────────────────────────────
     release_id = _latest_published_release_id()
     prov: dict = {}
@@ -2384,6 +2393,11 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures, sn
 
         start_date = str(episode.episode_start_date) if episode.episode_start_date else None
         end_date = str(episode.episode_end_date) if episode.episode_end_date else None
+        maint_drugs = [
+            _usable_concept_name(de.drug_concept) or de.drug_source_value
+            for de in drugs_in_episode if de.pk in maint_exposure_ids
+        ]
+        has_maintenance = bool(maint_drugs)
 
         if lot == 1:
             data['first_line_therapy'] = drug_names
@@ -2417,9 +2431,13 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures, sn
             # for an unresolved regimen) and origin so lines_of_therapy renders
             # the correct line number, pairs each later line with its own id, and
             # reports per-line asserted/inferred.
-            later.append({'lineNumber': lot, 'therapy': drug_names,
-                          'startDate': start_date, 'endDate': end_date, 'origin': origin,
-                          'concept_id': concept_id})
+            entry = {'lineNumber': lot, 'therapy': drug_names,
+                     'startDate': start_date, 'endDate': end_date, 'origin': origin,
+                     'concept_id': concept_id}
+            if has_maintenance:
+                entry['has_maintenance'] = True
+                entry['maintenance_drugs'] = maint_drugs
+            later.append(entry)
             data['later_therapies'] = later
             if concept_id:
                 ids = data.get('later_therapy_ids') or []
@@ -2506,6 +2524,55 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures, sn
     later_lots = sorted(k for k in lot_outcomes if k >= 3)
     if later_lots:
         data['later_outcome'] = lot_outcomes[later_lots[0]]
+
+    # ── Per-line progression dates from LOT-N-progression Observations ────
+    lot_progression_dates: dict = {}
+    progression_obs = sorted(
+        (o for o in (snapshot.observations if snapshot else [])
+         if (o.observation_source_value or '').startswith('LOT-')
+         and (o.observation_source_value or '').endswith('-progression')
+         and _belongs_to_lines(o, line_ids)),
+        key=lambda o: o.observation_date or date.min,
+    )
+    if not progression_obs and not snapshot:
+        progression_obs = (
+            Observation.objects
+            .filter(
+                Q(observation_event_id__isnull=True) | Q(observation_event_id__in=line_ids),
+                person=person,
+                is_erroneous=False,
+                observation_source_value__startswith='LOT-',
+                observation_source_value__endswith='-progression',
+            )
+            .order_by('observation_date')
+        )
+    for obs in progression_obs:
+        src = obs.observation_source_value or ''
+        try:
+            lot_n = int(src.split('-')[1])
+        except (IndexError, ValueError):
+            continue
+        if obs.observation_date:
+            lot_progression_dates[lot_n] = obs.observation_date
+
+    if 1 in lot_progression_dates:
+        data['first_line_progression_date'] = lot_progression_dates[1]
+    if 2 in lot_progression_dates:
+        data['second_line_progression_date'] = lot_progression_dates[2]
+    later_prog = sorted(k for k in lot_progression_dates if k >= 3)
+    if later_prog:
+        data['later_progression_date'] = lot_progression_dates[later_prog[0]]
+
+    # ── POD24: progression within 24 months of first-line start ───────────
+    first_start = data.get('first_line_start_date')
+    first_prog = lot_progression_dates.get(1)
+    if first_start and first_prog:
+        try:
+            start_d = date.fromisoformat(first_start) if isinstance(first_start, str) else first_start
+            days = (first_prog - start_d).days
+            data['pod24'] = days <= 730  # 24 months ≈ 730 days
+        except (ValueError, TypeError):
+            pass
 
     _apply_treatment_assertions(data, person, episodes, snapshot)
 

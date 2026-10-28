@@ -133,7 +133,13 @@ export interface PatientInfo {
   later_discontinuation_reason?: string;
   later_outcome?: string;
   later_line_outcome?: string;  // UI uses this name
-  
+
+  // Per-line progression dates and POD24
+  first_line_progression_date?: string | null;
+  second_line_progression_date?: string | null;
+  later_progression_date?: string | null;
+  pod24?: boolean | null;
+
   // Supportive Therapy
   supportive_therapies?: string;
   supportive_therapy_start_date?: string;

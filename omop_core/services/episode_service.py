@@ -89,6 +89,7 @@ def upsert_therapy_line_episode(
     outcome=_UNSET,
     intent=_UNSET,
     discontinuation_reason=_UNSET,
+    progression_date=_UNSET,
     source_value=None,
     today=None,
     replace_events=False,
@@ -126,6 +127,7 @@ def upsert_therapy_line_episode(
             unchanged, and the default preserves explicit None-as-clear behavior.
         drug_exposure_ids: iterable of drug_exposure_id to link via EpisodeEvent.
         outcome: optional outcome string → LOT-{n}-outcome Observation.
+        progression_date: optional date → LOT-{n}-progression Observation.
         source_value: episode_source_value to store. Defaults to 'LOT-{n}'.
             Callers that record a human name or phase-labelled regimen
             (reverse sync, inference) pass their own value.
@@ -268,6 +270,13 @@ def upsert_therapy_line_episode(
                                  line=episode, adopt=adopts_unparented)
     elif discontinuation_reason is not _UNSET and replace_metadata:
         _delete_line_observation(person, line_number, 'discontinuation', line=episode, adopt=adopts_unparented)
+
+    if progression_date is not _UNSET and progression_date:
+        _upsert_line_observation(person, line_number, 'progression', 'Progressive Disease',
+                                 ehr_type_concept, no_match_concept, obs_date=progression_date,
+                                 line=episode, adopt=adopts_unparented)
+    elif progression_date is not _UNSET and replace_metadata:
+        _delete_line_observation(person, line_number, 'progression', line=episode, adopt=adopts_unparented)
 
     return TherapyLineEpisodeResult(episode, created, event_ids)
 
@@ -549,6 +558,7 @@ def _author_therapy_line_once(
     outcome=_UNSET,
     intent=_UNSET,
     discontinuation_reason=_UNSET,
+    progression_date=_UNSET,
     source_value=_UNSET,
     replace=False,
     disease=None,
@@ -621,6 +631,7 @@ def _author_therapy_line_once(
             outcome=outcome,
             intent=intent,
             discontinuation_reason=discontinuation_reason,
+            progression_date=progression_date,
             source_value=source_value,
             replace=replace,
             disease=disease,
@@ -643,6 +654,7 @@ def _author_therapy_line_inner(
     outcome=_UNSET,
     intent=_UNSET,
     discontinuation_reason=_UNSET,
+    progression_date=_UNSET,
     source_value=_UNSET,
     replace=False,
     disease=None,
@@ -734,7 +746,8 @@ def _author_therapy_line_inner(
         person, line_number=line_number, regimen_concept=object_regimen,
         regimen_source_concept=regimen, overwrite_source_concept=True,
         start_date=start, end_date=end, outcome=outcome, intent=intent,
-        discontinuation_reason=discontinuation_reason, source_value=source_value,
+        discontinuation_reason=discontinuation_reason,
+        progression_date=progression_date, source_value=source_value,
         disease=disease, episode=episode,
         replace_events=replace and composition_supplied,
         replace_metadata=replace,
@@ -799,11 +812,16 @@ def _author_therapy_line_inner(
         ).exclude(episode_id=line.pk).exists()
         if existing is not None and existing.person_id != person.pk:
             raise ValueError('Exposure ownership does not match the patient.')
+        is_maint = bool(values.get('maintenance', False))
         if existing is not None and (existing.drug_concept_id == concept.pk
                        and existing.drug_source_value == raw
                        and existing.drug_exposure_start_date == drug_start
                        and existing.drug_exposure_end_date == drug_end
                        and not existing.is_erroneous):
+            # Drug exposure unchanged — but maintenance flag may need updating.
+            if owned is not None and owned.is_maintenance != is_maint:
+                owned.is_maintenance = is_maint
+                owned.save(update_fields=['is_maintenance'])
             exposure_ids.append(existing.pk)
             continue
         if existing is None or shared or owned is None:
@@ -815,9 +833,13 @@ def _author_therapy_line_inner(
             if owned is not None:
                 owned.drug_exposure = existing
                 owned.source_value = raw or ''
-                owned.save(update_fields=['drug_exposure', 'source_value'])
+                owned.is_maintenance = is_maint
+                owned.save(update_fields=['drug_exposure', 'source_value', 'is_maintenance'])
             else:
-                TherapyLineExposure.objects.create(episode=line, source_value=raw or '', drug_exposure=existing)
+                TherapyLineExposure.objects.create(
+                    episode=line, source_value=raw or '', drug_exposure=existing,
+                    is_maintenance=is_maint,
+                )
             created += 1
         else:
             updates = dict(drug_concept_id=concept.pk, drug_source_value=raw,
@@ -828,6 +850,9 @@ def _author_therapy_line_inner(
                 for key, value in updates.items():
                     setattr(existing, key, value)
                 existing.save(update_fields=dirty)
+            if owned.is_maintenance != is_maint:
+                owned.is_maintenance = is_maint
+                owned.save(update_fields=['is_maintenance'])
             if owned.source_value != (raw or ''):
                 owned.source_value = raw or ''
                 owned.save(update_fields=['source_value'])

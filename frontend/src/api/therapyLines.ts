@@ -17,6 +17,7 @@ export interface TherapyLineDrug {
   source_value?: string | null;
   start_date?: string;
   end_date?: string | null;
+  maintenance?: boolean;
 }
 
 export interface TherapyLinePayload {
@@ -31,6 +32,7 @@ export interface TherapyLinePayload {
   outcome?: string | null;
   intent?: string | null;
   discontinuation_reason?: string | null;
+  progression_date?: string | null;
 }
 
 export interface TherapyLineResult {
@@ -55,6 +57,7 @@ export interface EditableTherapyLine {
   /** False when the line is recorded without its drug composition (#1924). */
   composition_known?: boolean;
   drugs?: Array<DrugConcept & TherapyLineDrug>;
+  progression_date?: string | null;
 }
 
 export interface TherapyOutcomeChoice { code: string; value: string; label: string }

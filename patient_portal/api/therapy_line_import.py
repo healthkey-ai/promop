@@ -72,11 +72,21 @@ class TherapyLineImportLineSerializer(serializers.Serializer):
     regimen_concept_id = serializers.IntegerField(required=False, min_value=1)
     outcome = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=60)
     disease = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=100)
+    progression_date = serializers.DateField(required=False, allow_null=True)
+    maintenance_drugs = serializers.ListField(
+        child=serializers.DictField(), required=False, default=list,
+        help_text="Drugs marked as maintenance: [{concept_id, source_value?, start_date?, end_date?}]",
+    )
 
     def validate_start_date(self, value: date) -> date:
         """Reject a line that has not started yet."""
         if value > date.today():
             raise serializers.ValidationError('A future therapy line is planned, not received treatment.')
+        return value
+
+    def validate_progression_date(self, value: date | None) -> date | None:
+        if value and value > date.today():
+            raise serializers.ValidationError('A future progression date is not a recorded event.')
         return value
 
     def validate(self, attrs: ImportLine) -> ImportLine:
@@ -86,6 +96,9 @@ class TherapyLineImportLineSerializer(serializers.Serializer):
             raise serializers.ValidationError({'end_date': 'An ongoing line has no end_date.'})
         if end is not None and end < attrs['start_date']:
             raise serializers.ValidationError({'end_date': 'end_date cannot precede start_date.'})
+        prog = attrs.get('progression_date')
+        if prog is not None and prog < attrs['start_date']:
+            raise serializers.ValidationError({'progression_date': 'progression_date cannot precede start_date.'})
         return attrs
 
     class Meta:
@@ -157,6 +170,15 @@ def _author_kwargs(line: ImportLine, regimens: ResolvedRegimens) -> dict[str, An
         kwargs['regimen_concept_id'] = line['regimen_concept_id']
     elif line.get('regimen'):
         kwargs['regimen_concept_id'] = regimens[line['regimen']][0].concept_id
+    if 'progression_date' in line:
+        kwargs['progression_date'] = line['progression_date']
+    # Merge maintenance_drugs into the drugs list with maintenance=True on each
+    maint = line.get('maintenance_drugs')
+    if maint:
+        drugs = list(kwargs.get('drugs', []))
+        for d in maint:
+            drugs.append({**d, 'maintenance': True})
+        kwargs['drugs'] = drugs
     return kwargs
 
 
