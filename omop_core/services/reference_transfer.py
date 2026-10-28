@@ -23,6 +23,7 @@ from omop_core.models import (
     Concept,
     ConceptClass,
     ConceptMappingPriority,
+    DiseaseCategoryMapping,
     DiseaseTherapyRegimen,
     Domain,
     MappingDestinationCandidate,
@@ -113,6 +114,7 @@ def copied_tables() -> list[ReferenceTable]:
         # Curator priority (#1914), matched on the concept's natural key. A
         # concept not loaded here is skipped with a warning.
         ReferenceTable(ConceptMappingPriority, ('concept',)),
+        ReferenceTable(DiseaseCategoryMapping, ('disease_name',)),
     ]
 
 

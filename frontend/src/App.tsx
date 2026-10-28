@@ -26,6 +26,7 @@ import SuggestRunLogPage from "@/components/CodeMappings/SuggestRunLogPage";
 import RelevanceSignalsPage from "@/components/MappingHub/RelevanceSignalsPage";
 import CodeMappingAccuracyPage from "@/components/CodeMappings/CodeMappingAccuracyPage";
 import MappingHubPage from "@/components/MappingHub/MappingHubPage";
+import DiseaseCategoryPage from "@/components/MappingHub/DiseaseCategoryPage";
 import TherapyMappingPage from "@/components/TherapyMappings/TherapyMappingPage";
 import OrgLogin from "@/components/Auth/OrgLogin";
 import OrgSignup from "@/components/Auth/OrgSignup";
@@ -174,6 +175,7 @@ function AppRoutes() {
       <Route path="/code-mappings/accuracy" element={mappingAdminRoute(<CodeMappingAccuracyPage />)} />
       <Route path="/therapy-mappings" element={mappingAdminRoute(<TherapyMappingPage />)} />
       <Route path="/relevance-signals" element={mappingAdminRoute(<RelevanceSignalsPage />)} />
+      <Route path="/disease-category-mappings" element={mappingAdminRoute(<DiseaseCategoryPage />)} />
       <Route
         path="/profile"
         element={

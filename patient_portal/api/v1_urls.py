@@ -43,6 +43,7 @@ from .views import (
     mapping_stats,
     therapy_regimen_components, therapy_component_classes,
     disease_therapy_regimen_list, disease_therapy_regimen_detail,
+    disease_category_mapping_list, disease_category_mapping_detail,
     concept_ancestors, concept_descendants, concept_detail, concept_graph_batch,
     concept_synonyms, concept_synonym_search, concept_replacement,
     vocab_release_list, vocab_release_detail, vocab_release_latest,
@@ -248,4 +249,6 @@ urlpatterns = [
     path('mapping-stats/', mapping_stats, name='v1-mapping-stats'),
     path('disease-therapy-regimens/', disease_therapy_regimen_list, name='v1-disease-therapy-regimen-list'),
     path('disease-therapy-regimens/<int:pk>/', disease_therapy_regimen_detail, name='v1-disease-therapy-regimen-detail'),
+    path('disease-category-mappings/', disease_category_mapping_list, name='v1-disease-category-mapping-list'),
+    path('disease-category-mappings/<int:pk>/', disease_category_mapping_detail, name='v1-disease-category-mapping-detail'),
 ]

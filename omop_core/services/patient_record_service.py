@@ -13,10 +13,9 @@ import statistics
 from collections import defaultdict
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from datetime import date, datetime, timedelta
-from django.db import models
+from django.db import DatabaseError, models, transaction
 from django.db.models import DateTimeField, Q
 from django.db.models.functions import Cast, Coalesce
-from django.db import transaction
 from django.utils import timezone
 from omop_core.models import (
     Person, PatientRecord, ConditionOccurrence, Concept, ConceptAncestor,
@@ -1441,16 +1440,39 @@ _DISEASE_ALIASES = {
     'er|erbb2 breast cancer (disorder)': 'Breast Cancer',
 }
 
+# DiseaseCategory code → canonical title used by _canonicalize_disease.
+_CATEGORY_TITLES = {
+    'BC': 'Breast Cancer',
+    'MM': 'Multiple Myeloma',
+    'FL': 'Follicular Lymphoma',
+    'CLL': 'Chronic Lymphocytic Leukemia',
+    'MCL': 'Mantle Cell Lymphoma',
+}
+
 
 def _canonicalize_disease(name: str) -> str:
     """Map a raw OMOP condition concept name to EXACT's canonical disease title.
 
+    Checks the in-code alias dict first (fast path), then falls back to the
+    DiseaseCategoryMapping table for curator-maintained entries.
     Unrecognised names are returned unchanged (preserve, don't drop).
     """
     if not name:
         return name
     normalized = name.strip().lower()
-    return _DISEASE_ALIASES.get(normalized, name)
+    # Fast path: hardcoded aliases (most common names)
+    alias = _DISEASE_ALIASES.get(normalized)
+    if alias:
+        return alias
+    # Fallback: consult the DiseaseCategoryMapping table
+    try:
+        from omop_core.models import DiseaseCategoryMapping
+        row = DiseaseCategoryMapping.objects.filter(disease_name__iexact=name.strip()).first()
+        if row:
+            return _CATEGORY_TITLES.get(row.category, name)
+    except DatabaseError:
+        pass  # Table may not exist during early migrations
+    return name
 
 
 SAMPLE_DISEASE_STATUS_SOURCE_VALUE = 'sample-patient-disease-status'

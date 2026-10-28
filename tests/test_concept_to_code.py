@@ -82,6 +82,47 @@ def test_all_scope_reaches_non_field_destinations_but_only_current_standard(clie
     assert client.get(f'{BASE}{nonstandard.pk}/').status_code == 404
 
 
+def test_disease_filter_restricts_concepts_to_disease_fields(client):
+    mm_concept = ConceptFactory(concept_name='M-protein')
+    bc_concept = ConceptFactory(concept_name='ER status')
+    shared_concept = ConceptFactory(concept_name='Tumor grade')
+    FieldConceptMapping.objects.create(concept=mm_concept, field_name='monoclonal_protein_serum', omop_table='measurement')
+    FieldConceptMapping.objects.create(concept=bc_concept, field_name='estrogen_receptor_status', omop_table='observation')
+    FieldConceptMapping.objects.create(concept=shared_concept, field_name='tumor_grade', omop_table='observation')
+
+    # MM filter returns only MM-field concepts (monoclonal_protein_serum is in MM, tumor_grade is in BC/FL/MCL).
+    mm_ids = {r['concept_id'] for r in client.get(BASE, {'disease': 'MM'}).data['results']}
+    assert mm_concept.pk in mm_ids
+    assert bc_concept.pk not in mm_ids
+
+    # BC filter returns only BC-field concepts.
+    bc_ids = {r['concept_id'] for r in client.get(BASE, {'disease': 'BC'}).data['results']}
+    assert bc_concept.pk in bc_ids
+    assert shared_concept.pk in bc_ids  # tumor_grade is a BC field
+    assert mm_concept.pk not in bc_ids
+
+    # No disease returns all three.
+    all_ids = {r['concept_id'] for r in client.get(BASE).data['results']}
+    assert {mm_concept.pk, bc_concept.pk, shared_concept.pk} <= all_ids
+
+    # Invalid disease code returns 400.
+    assert client.get(BASE, {'disease': 'INVALID'}).status_code == 400
+
+
+def test_disease_filter_forces_fields_scope(client):
+    """When disease is set, scope=all is overridden to fields so only field concepts appear."""
+    concept = ConceptFactory(concept_name='Unfielded concept')
+    mm_concept = ConceptFactory(concept_name='Myeloma type')
+    FieldConceptMapping.objects.create(concept=mm_concept, field_name='myeloma_type', omop_table='observation')
+    # scope=all without disease returns both.
+    all_ids = {r['concept_id'] for r in client.get(BASE, {'scope': 'all'}).data['results']}
+    assert concept.pk in all_ids and mm_concept.pk in all_ids
+    # disease=MM with scope=all still restricts to fields.
+    mm_ids = {r['concept_id'] for r in client.get(BASE, {'disease': 'MM', 'scope': 'all'}).data['results']}
+    assert mm_concept.pk in mm_ids
+    assert concept.pk not in mm_ids
+
+
 def test_list_and_detail_paginate_before_serialization(client, concept):
     for index in range(52):
         source(f'C{index:02}', target_concept=concept, occurrence_count=index)
