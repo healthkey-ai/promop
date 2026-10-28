@@ -20,6 +20,7 @@ from django.utils import timezone
 from omop_core.models import DrugExposure, ProcedureOccurrence
 from omop_oncology.models import EpisodeEvent
 
+from .names import drug_name, procedure_name
 from .sources import row_sources, source
 
 # Response categories, explained without disease-specific thresholds: the
@@ -69,7 +70,7 @@ def _line_rows(person, episode_id: int | None) -> list[DrugExposure]:
     ids = EpisodeEvent.objects.filter(episode_id=episode_id).values_list('event_id', flat=True)
     return list(
         DrugExposure.objects.filter(person=person, drug_exposure_id__in=list(ids), is_erroneous=False)
-        .select_related('drug_concept', 'visit_occurrence')
+        .select_related('drug_concept', 'drug_source_concept', 'visit_occurrence')
         .order_by('drug_exposure_start_date', 'drug_exposure_id')
     )
 
@@ -90,15 +91,13 @@ def _medications(person, episode_id: int | None) -> list[dict[str, Any]]:
     ids = EpisodeEvent.objects.filter(episode_id=episode_id).values_list('event_id', flat=True)
     rows = (
         DrugExposure.objects.filter(person=person, drug_exposure_id__in=list(ids), is_erroneous=False)
-        .select_related('drug_concept')
+        .select_related('drug_concept', 'drug_source_concept')
         .order_by('drug_exposure_start_date', 'drug_exposure_id')
     )
     meds: dict[str, dict[str, Any]] = {}
+    memo: dict = {}
     for row in rows:
-        name = (
-            row.drug_concept.concept_name if row.drug_concept_id and row.drug_concept else row.drug_source_value
-        ) or ''
-        name = name.strip()
+        name = drug_name(row, memo)
         if not name:
             continue
         med = meds.setdefault(name.lower(), {'name': name, 'start': row.drug_exposure_start_date, 'end': None, 'open': False})
@@ -127,7 +126,7 @@ class _Context:
         self.today = timezone.localdate()
         self.procedures = list(
             ProcedureOccurrence.objects.filter(person=person, is_erroneous=False)
-            .select_related('procedure_concept', 'visit_occurrence')
+            .select_related('procedure_concept', 'procedure_source_concept', 'visit_occurrence')
             .order_by('procedure_date')
         )
         self.proc_sources = row_sources(
@@ -148,10 +147,7 @@ def _shape(ctx: _Context, entry: dict) -> dict[str, Any] | None:
     window_end = end or ctx.today
     procs = []
     for row in ctx.procedures:
-        name = (
-            row.procedure_concept.concept_name if row.procedure_concept_id and row.procedure_concept
-            else row.procedure_source_value
-        ) or ''
+        name = procedure_name(row)
         if start <= row.procedure_date <= window_end and _TREATMENT_PROCEDURE.search(name):
             procs.append({'name': name.strip(), 'date': row.procedure_date.isoformat(),
                           'source': ctx.proc_sources[row.pk]})
