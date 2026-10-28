@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Input } from "@/components/shadcn/input";
 
 export default function DateControl({
@@ -11,8 +12,13 @@ export default function DateControl({
   onChange: (v: unknown) => void;
   precision?: 'day' | 'month' | 'year' | null;
 }) {
+  const source = `${precision ?? 'day'}:${value ?? ''}`;
+  const yearVal = value ? value.substring(0, 4) : '';
+  const [yearDraft, setYearDraft] = useState({ source, text: yearVal });
+  if (yearDraft.source !== source) {
+    setYearDraft({ source, text: yearVal });
+  }
   if (precision === 'year') {
-    const yearVal = value ? value.substring(0, 4) : '';
     return (
       <Input
         disabled={disabled}
@@ -20,14 +26,18 @@ export default function DateControl({
         min={1900}
         max={new Date().getFullYear()}
         placeholder="YYYY"
-        value={yearVal}
+        value={yearDraft.text}
         onChange={(e) => {
           const raw = e.target.value;
+          setYearDraft({ source, text: raw });
           if (!raw) { onChange(null); return; }
+          // Keep incomplete typing locally; only complete valid years are dates.
+          if (!/^\d{4}$/.test(raw)) return;
           const y = parseInt(raw, 10);
           if (isNaN(y) || y < 1900 || y > new Date().getFullYear()) return;
           onChange(`${y}-01-01`);
         }}
+        onBlur={() => setYearDraft({ source, text: yearVal })}
       />
     );
   }
