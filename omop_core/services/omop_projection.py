@@ -223,11 +223,19 @@ def project_field_to_omop(mapping) -> int:
     projection and refresh, using the same lock as the PATCH handler.
     """
     from omop_core.services.patient_record_service import refresh_patient_record
-    from omop_core.services.write_descriptor import build_writable_field_descriptor
+    from omop_core.services.write_descriptor import (
+        PINNED_PROJECTION_FIELDS, build_writable_field_descriptor,
+    )
     from omop_core.services.clinical_input_contract import uses_dedicated_writer
 
     if uses_dedicated_writer(mapping.field_name):
         # Curation is not evidence of who authored pending projection values.
+        return 0
+    if mapping.field_name in PINNED_PROJECTION_FIELDS:
+        # A reviewed built-in recipe owns these fields. A curator mapping must
+        # not re-project a pending current-state answer: the backfill has no
+        # author, so it would write the recipe type and could take over a
+        # clinical fact (#5521).
         return 0
     if mapping.status != 'approved':
         return 0

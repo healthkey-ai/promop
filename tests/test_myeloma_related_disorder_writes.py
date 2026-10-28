@@ -4,7 +4,7 @@ import pytest
 from django.utils import timezone
 
 from omop_core.models import ConditionOccurrence, FieldConceptMapping, Observation
-from omop_core.services.omop_projection import project_single_value
+from omop_core.services.omop_projection import project_field_to_omop, project_single_value
 from omop_core.services.patient_record_service import (
     PATIENT_RECORD_OMOP_MAPPED_FIELDS,
     _OMOP_DERIVED_FIELDS,
@@ -201,3 +201,31 @@ def test_serializer_accepts_true_false_and_null():
 
     assert saved.mgus is True
     assert saved.al_amyloidosis is None
+
+
+def test_approving_a_curated_mapping_does_not_backfill_a_pinned_answer():
+    _seed_vocab()
+    person = PersonFactory()
+    record = PatientRecordFactory(person=person, mgus=True)
+    record.user_edited_fields = ['mgus']
+    record.save(update_fields=['mgus', 'user_edited_fields'])
+    clinical = ObservationFactory(
+        person=person, observation_concept_id=4149022,
+        observation_source_value='35601003', value_as_number=0.0,
+        observation_date=timezone.localdate(), observation_type_concept_id=32817,
+    )
+    concept = ConceptFactory(
+        concept_id=9_999_993, concept_code='MGUS-ALT-3', vocabulary_id='SNOMED',
+        concept_name='Alternative MGUS concept',
+    )
+    mapping = FieldConceptMapping.objects.create(
+        field_name='mgus', concept=concept, status='approved', omop_table='observation',
+    )
+
+    assert project_field_to_omop(mapping) == 0
+
+    clinical.refresh_from_db()
+    assert clinical.value_as_number == 0.0
+    assert Observation.objects.filter(
+        person=person, observation_concept_id=4149022,
+    ).count() == 1
