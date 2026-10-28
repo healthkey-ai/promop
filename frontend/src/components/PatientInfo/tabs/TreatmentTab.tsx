@@ -238,7 +238,7 @@ export default function TreatmentTab({ formData, onChange, diseaseType, onRecord
               ))}
             </ul>
           )}
-          {formData?.pod24 != null && (
+          {diseaseType === 'lymphoma' && formData?.pod24 != null && (
             <div className={`mt-2 inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${
               formData.pod24
                 ? 'bg-red-100 text-red-800'

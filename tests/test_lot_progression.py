@@ -14,7 +14,9 @@ from omop_core.models import Observation, PatientRecord
 from omop_core.services.episode_service import author_therapy_line
 from omop_core.services.patient_record_service import refresh_patient_record
 from omop_oncology.models import TherapyLineExposure
-from tests.factories import ConceptFactory, PatientRecordFactory, VocabularyFactory
+from tests.factories import (
+    ConceptFactory, ConditionOccurrenceFactory, PatientRecordFactory, VocabularyFactory,
+)
 from tests.test_episode_service import _seed_episode_writer_concepts
 
 pytestmark = pytest.mark.django_db
@@ -32,10 +34,24 @@ def _drug_concept():
     )
 
 
+def _fl_condition_concept():
+    """A concept whose name triggers the oncologic predicate and canonical FL match."""
+    return ConceptFactory(
+        concept_name='Follicular lymphoma', concept_code='FL-COND',
+        standard_concept='S',
+    )
+
+
 @pytest.fixture
 def person():
     _seed_episode_writer_concepts()
-    return PatientRecordFactory(disease='follicular lymphoma').person
+    record = PatientRecordFactory(disease='follicular lymphoma')
+    # Create a ConditionOccurrence so _get_disease_data derives disease_slug='follicular-lymphoma'.
+    ConditionOccurrenceFactory(
+        person=record.person,
+        condition_concept=_fl_condition_concept(),
+    )
+    return record.person
 
 
 @pytest.fixture

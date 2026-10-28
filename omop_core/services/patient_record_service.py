@@ -1823,7 +1823,8 @@ def _get_treatment_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
             episodes = primary_lines(person, primary_slug).select_related(
                 'episode_source_concept', 'episode_object_concept').order_by('episode_number')
             if episodes.exists():
-                return _get_treatment_data_from_episodes(person, data, episodes, drug_exposures, snapshot)
+                return _get_treatment_data_from_episodes(person, data, episodes, drug_exposures, snapshot,
+                                                         disease_slug=primary_slug)
     except Exception:
         pass
 
@@ -2180,7 +2181,8 @@ def _apply_inferred_lots(data: dict, lots, drug_exposures=None) -> None:
         data['therapy_type_ids'] = sorted(all_classes)
 
 
-def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures, snapshot: OmopSnapshot = None):
+def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures, snapshot: OmopSnapshot = None,
+                                      *, disease_slug: str = ''):
     """Use Episode records for structured therapy line grouping."""
     try:
         from omop_oncology.models import EpisodeEvent
@@ -2564,9 +2566,11 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures, sn
         data['later_progression_date'] = lot_progression_dates[later_prog[0]]
 
     # ── POD24: progression within 24 months of first-line start ───────────
+    # POD24 is an FL-specific prognostic marker; only compute for FL patients.
     first_start = data.get('first_line_start_date')
     first_prog = lot_progression_dates.get(1)
-    if first_start and first_prog:
+    is_fl = disease_slug == 'follicular-lymphoma'
+    if is_fl and first_start and first_prog:
         try:
             start_d = date.fromisoformat(first_start) if isinstance(first_start, str) else first_start
             days = (first_prog - start_d).days

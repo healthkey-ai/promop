@@ -7,7 +7,7 @@ administrations, and whether its composition is known. Keeping one builder stops
 the two surfaces from drifting (the reason concepts and regimens were moved here).
 """
 from omop_core.models import DrugExposure
-from omop_oncology.models import EpisodeEvent
+from omop_oncology.models import EpisodeEvent, TherapyLineExposure
 
 
 def lines_of_therapy(obj, concept_cache=None):
@@ -69,6 +69,13 @@ def lines_of_therapy(obj, concept_cache=None):
         )
     } if all_event_ids else {}
 
+    # Bulk-fetch maintenance flags so the dialog can show/preserve them.
+    maint_exposure_ids = set(
+        TherapyLineExposure.objects
+        .filter(episode_id__in=episode_ids, is_maintenance=True)
+        .values_list('drug_exposure_id', flat=True)
+    ) if episode_ids else set()
+
     def _editable_drugs(line_number):
         episode = episodes_by_line.get(line_number)
         if episode is None:
@@ -90,6 +97,7 @@ def lines_of_therapy(obj, concept_cache=None):
                 'concept_class_id': concept.concept_class_id,
                 'standard_concept': concept.standard_concept,
                 'source_value': de.drug_source_value,
+                'maintenance': de.pk in maint_exposure_ids,
             })
         # An asserted line may have no recorded drug at all (#1924). Say so
         # explicitly, so a consumer does not read "no drugs listed" as "no
