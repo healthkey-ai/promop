@@ -11,7 +11,7 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import { ArrowLeft, ChevronDown, ChevronRight, Download, Pencil, Plus, Search, Sparkles, Upload } from "lucide-react";
 import api from "@/api/axios";
 import { useAuth } from "@/hooks/useAuth";
-import { AxisVariantFlag } from "./LoincAxisChips";
+import { AxisVariantFlag, AxisVariantList } from "./LoincAxisChips";
 import {
   type CodeMappingRow,
   type Reference,
@@ -1108,6 +1108,7 @@ export default function CodeMappingPage() {
                   {row.destination_vocabulary_id && <div className="text-xs text-slate-500">{row.destination_vocabulary_id}</div>}
                 </>
               ) : <span className="text-xs text-slate-500">—</span>}
+              <AxisVariantList variants={row.axis_variants} canApprove={false} />
               {(row.measurement_type || row.suggested_unit) && (
                 <ConceptInputDetails domain_id={row.destination_domain_id || ""} measurement_type={row.measurement_type} suggested_unit={row.suggested_unit} example_units={row.example_units} />
               )}
