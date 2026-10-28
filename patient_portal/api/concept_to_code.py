@@ -56,6 +56,10 @@ def concept_to_code_list(request):
         raise ValidationError({'domain': 'Unknown clinical table.'})
     if params.get('status') and params['status'] not in ('approved', 'proposed'):
         raise ValidationError({'status': 'Choose approved or proposed.'})
+    if params.get('disease'):
+        from omop_core.services.disease_relevance import DISEASES
+        if params['disease'] not in DISEASES:
+            raise ValidationError({'disease': f'Choose one of {", ".join(DISEASES)}.'})
     try:
         page_size = int(params.get('page_size', PAGE_SIZE))
     except (TypeError, ValueError):

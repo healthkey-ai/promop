@@ -48,6 +48,10 @@ const domains = [
   ['', 'All domains'], ['measurement', 'Measurement'], ['observation', 'Observation'],
   ['condition', 'Condition'], ['drug_exposure', 'Drug'], ['procedure', 'Procedure'],
 ];
+const diseases = [
+  ['', 'All diseases'], ['BC', 'Breast Cancer'], ['MM', 'Myeloma'],
+  ['FL', 'Follicular Lymphoma'], ['MCL', 'Mantle Cell Lymphoma'], ['CLL', 'CLL'],
+];
 const button = 'rounded border border-slate-300 px-3 py-1.5 text-sm hover:bg-slate-100 disabled:opacity-40';
 const input = 'rounded border border-slate-300 bg-white px-3 py-2 text-sm';
 const sourceKey = (source: Source) => JSON.stringify([source.source_vocabulary_id, source.source_code]);
@@ -87,6 +91,7 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange, initialC
   onInitialConceptHandled?: () => void;
 }) {
   const [domain, setDomain] = useState('');
+  const [disease, setDisease] = useState('');
   const [scope, setScope] = useState('fields');
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(1);
@@ -113,7 +118,7 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange, initialC
       setLoading(true); setError('');
       try {
         const response = await api.get<Page<Concept> & { prioritized?: number }>('/v1/concept-to-code/', {
-          params: { domain, scope, search, page, page_size: pageSize, ...(rankedOnly ? { prioritized: '1' } : {}) },
+          params: { domain, scope, search, page, page_size: pageSize, ...(disease ? { disease } : {}), ...(rankedOnly ? { prioritized: '1' } : {}) },
           signal: controller.signal,
         });
         if (active) setData(response.data);
@@ -122,7 +127,7 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange, initialC
       } finally { if (active) setLoading(false); }
     }, 250);
     return () => { active = false; controller.abort(); window.clearTimeout(timer); };
-  }, [domain, scope, search, page, pageSize, rankedOnly, revision]);
+  }, [domain, disease, scope, search, page, pageSize, rankedOnly, revision]);
 
   // One concept per move: the server renumbers the global list, so a move
   // from a filtered or later page needs nothing else from it (#1914).
@@ -198,6 +203,10 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange, initialC
       <select aria-label="Concept domain" className={input} disabled={writing} value={domain}
         onChange={event => { setDomain(event.target.value); setPage(1); }}>
         {domains.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+      </select>
+      <select aria-label="Disease category" className={input} disabled={writing} value={disease}
+        onChange={event => { setDisease(event.target.value); setPage(1); }}>
+        {diseases.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
       </select>
       <select aria-label="Concepts per page" className={input} disabled={writing} value={pageSize}
         onChange={event => { setPageSize(Number(event.target.value)); setPage(1); }}>
