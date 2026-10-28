@@ -479,6 +479,13 @@ def normalize_measurement_units(qs, mapping, target_concept_id=None):
     if not raw_units:
         return 0
 
+    # Skip rows already normalized to the target unit (idempotency guard).
+    # Without this, a re-approve would convert already-converted values again
+    # using unit_source_value (which is never changed), producing a double
+    # conversion.
+    if target_ucum:
+        qs = qs.exclude(unit_concept_id=target_ucum.concept_id)
+
     total_normalized = 0
     for raw in raw_units:
         src = unit_code(raw)
@@ -526,10 +533,11 @@ def normalize_measurement_units(qs, mapping, target_concept_id=None):
                 total_normalized += len(changed)
             offset += BATCH
 
-    logger.info(
-        'Normalized %d measurement row(s) to %s (%s).',
-        total_normalized, target_unit, prop,
-    )
+    if total_normalized:
+        logger.info(
+            'Normalized %d measurement row(s) to %s (%s).',
+            total_normalized, target_unit, prop,
+        )
     return total_normalized
 
 

@@ -7198,18 +7198,18 @@ def _normalize_bulk_measurement_rows(model_cls, new_ids):
             # Route by unit: each variant covers a set of unit spellings.
             # Rows matching a variant normalize to the variant's concept;
             # remaining rows normalize to the mapping's concept.
+            # Fetch all distinct raw unit spellings once (not per variant).
+            raw_units = list(
+                sv_qs.exclude(unit_source_value__isnull=True)
+                .exclude(unit_source_value='')
+                .values_list('unit_source_value', flat=True)
+                .distinct()
+            )
             claimed_pks = set()
             for variant in variants:
                 wanted = set(variant.units or [])
                 if not wanted or not variant.target_concept_id:
                     continue
-                # Find raw spellings in the rows that map to variant units.
-                raw_units = list(
-                    sv_qs.exclude(unit_source_value__isnull=True)
-                    .exclude(unit_source_value='')
-                    .values_list('unit_source_value', flat=True)
-                    .distinct()
-                )
                 spellings = [r for r in raw_units if unit_code(r) in wanted]
                 if spellings:
                     var_qs = sv_qs.filter(unit_source_value__in=spellings)
@@ -7219,9 +7219,10 @@ def _normalize_bulk_measurement_rows(model_cls, new_ids):
                         var_qs, mapping,
                         target_concept_id=variant.target_concept_id)
             # Remaining rows (not claimed by any variant) use the mapping.
+            # normalize_measurement_units returns 0 when no rows match,
+            # so no exists() guard needed.
             unclaimed = sv_qs.exclude(pk__in=claimed_pks) if claimed_pks else sv_qs
-            if unclaimed.exists():
-                normalize_measurement_units(unclaimed, mapping)
+            normalize_measurement_units(unclaimed, mapping)
         else:
             normalize_measurement_units(sv_qs, mapping)
 
@@ -7238,8 +7239,11 @@ def _normalize_bulk_measurement_rows(model_cls, new_ids):
             .values_list('measurement_concept_id', flat=True)
             .distinct()
         )
+        # Normalization fires only on newly-inserted rows by design.
+        # Rows updated by the upsert are normalized by
+        # repoint_clinical_rows when the mapping destination changes.
+        from types import SimpleNamespace
         for cid in concept_ids:
-            from types import SimpleNamespace
             mock_mapping = SimpleNamespace(
                 destination_unit_concept=None,
                 target_concept_id=cid,

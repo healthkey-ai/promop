@@ -758,14 +758,29 @@ def repoint_clinical_rows(*, mapping, old_concept_id, new_concept_id,
             # and the mapping's destination_unit_concept was chosen for its
             # own LOINC, not the variant's.
             if repointed_pks:
-                from omop_core.services.canonical_units import (
-                    normalize_measurement_units,
-                )
-                norm_qs = model.objects.filter(pk__in=repointed_pks)
-                variant_concept = new_concept_id if units is not None else None
-                result['rows_normalized'] = normalize_measurement_units(
-                    norm_qs, mapping,
-                    target_concept_id=variant_concept)
+                try:
+                    from omop_core.services.canonical_units import (
+                        normalize_measurement_units,
+                    )
+                    norm_qs = model.objects.filter(pk__in=repointed_pks)
+                    variant_concept = new_concept_id if units is not None else None
+                    result['rows_normalized'] = normalize_measurement_units(
+                        norm_qs, mapping,
+                        target_concept_id=variant_concept)
+                    # Re-collapse: normalization may have made previously-
+                    # distinct values identical (e.g. 100.4 and 100.6 umol/L
+                    # both round to 0.1 mmol/L).
+                    if result['rows_normalized']:
+                        result['rows_collapsed'] += _collapse_duplicates(
+                            model, concept_col, source_col, match,
+                            new_concept_id, person_ids,
+                            organization_id=mapping.organization_id,
+                        )
+                except Exception:
+                    logger.exception(
+                        'Unit normalization failed for mapping %s',
+                        mapping.id,
+                    )
 
     logger.info(
         'Mapping %s: re-pointed %s %s row(s) from concept %s to %s '
@@ -974,7 +989,7 @@ def resolve_person_source_codes(person, *, source_values=None, omop_tables=None)
                     omop_table=table_key,
                     status='approved',
                 )
-                .select_related('target_concept')
+                .select_related('target_concept', 'destination_unit_concept')
                 .first()
             )
             if mapping is None:
@@ -1027,12 +1042,21 @@ def resolve_person_source_codes(person, *, source_values=None, omop_tables=None)
                     )
                     rows_to_update.update(**{concept_col: target_concept_id})
                     # Normalize units on resolved Measurement rows (#2088).
+                    # Wrapped in try/except so a normalization failure (e.g.
+                    # numeric overflow in bulk_update) does not roll back the
+                    # concept update or abort resolution for remaining groups.
                     if resolved_pks:
-                        from omop_core.services.canonical_units import (
-                            normalize_measurement_units,
-                        )
-                        norm_qs = model.objects.filter(pk__in=resolved_pks)
-                        normalize_measurement_units(norm_qs, mapping)
+                        try:
+                            from omop_core.services.canonical_units import (
+                                normalize_measurement_units,
+                            )
+                            norm_qs = model.objects.filter(pk__in=resolved_pks)
+                            normalize_measurement_units(norm_qs, mapping)
+                        except Exception:
+                            logger.exception(
+                                'Unit normalization failed for %s (mapping %s)',
+                                sv, mapping.id,
+                            )
                 person_ids_touched.add(person.person_id)
                 resolved += count
                 already_resolved += group['row_count'] - count

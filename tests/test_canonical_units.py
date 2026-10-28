@@ -849,3 +849,119 @@ class TestVariantAwareNormalization:
         row.refresh_from_db()
         # g/dL -> g/L (MCnc base unit): multiply by 10
         assert row.value_as_number == Decimal('20')
+
+
+class TestNormalizationIdempotency:
+    """Calling normalize twice must not double-convert values."""
+
+    def test_second_normalize_is_noop(self, db):
+        """After one normalize, a second call should leave values unchanged."""
+        person = PersonFactory()
+        concept = ConceptFactory(concept_code='IDEM', concept_name='Idempotent')
+        mmol_concept = _ucum_concept('mmol/L')
+        mapping = _sccm('IDEM', concept,
+                         destination_unit_concept=mmol_concept)
+
+        row = MeasurementFactory(
+            person=person,
+            measurement_concept=concept,
+            measurement_source_value='IDEM',
+            value_as_number=Decimal('100'),
+            unit_source_value='umol/L',
+        )
+        qs = Measurement.objects.filter(pk=row.pk)
+
+        # First call: converts umol/L -> mmol/L
+        count1 = normalize_measurement_units(qs, mapping)
+        assert count1 == 1
+        row.refresh_from_db()
+        assert row.value_as_number == Decimal('0.1')
+        assert row.unit_concept_id == mmol_concept.concept_id
+
+        # Second call: should be a no-op (idempotency guard skips rows
+        # whose unit_concept_id already matches target).
+        count2 = normalize_measurement_units(qs, mapping)
+        assert count2 == 0
+        row.refresh_from_db()
+        # Value must NOT have been converted again (0.1 -> 0.0001 would be wrong)
+        assert row.value_as_number == Decimal('0.1')
+
+
+class TestUnmappedConceptNormalization:
+    """Test the fallback path for rows with no SCCM mapping."""
+
+    def test_loinc_property_fallback_normalizes_unmapped_rows(self, db):
+        """Rows with a LOINC concept but no SCCM use LOINC property base unit."""
+        from types import SimpleNamespace
+
+        person = PersonFactory()
+        # LOINC concept with MCnc property — base unit is g/L
+        concept = ConceptFactory(
+            concept_code='UNMAP-LC', concept_name='Unmapped [Mass/volume]',
+            vocabulary_id='LOINC', domain_id='Measurement',
+            standard_concept='S',
+        )
+        Relationship.objects.get_or_create(
+            relationship_id='Has property',
+            defaults={
+                'relationship_name': 'Has property',
+                'is_hierarchical': 0,
+                'defines_ancestry': 0,
+                'reverse_relationship_id': '',
+                'relationship_concept_id': 0,
+            },
+        )
+        prop_concept = ConceptFactory(
+            concept_name='Mass Concentration',
+            concept_code='LP-MASSCONCENTRATION-UNMAP',
+        )
+        ConceptRelationship.objects.create(
+            concept_1=concept,
+            concept_2=prop_concept,
+            relationship_id='Has property',
+            valid_start_date=date(1970, 1, 1),
+            valid_end_date=date(2099, 12, 31),
+        )
+        Relationship.objects.get_or_create(
+            relationship_id='Has scale type',
+            defaults={
+                'relationship_name': 'Has scale type',
+                'is_hierarchical': 0,
+                'defines_ancestry': 0,
+                'reverse_relationship_id': '',
+                'relationship_concept_id': 0,
+            },
+        )
+        scale_concept = ConceptFactory(
+            concept_name='Quantitative', concept_code='LP-QN-UNMAP',
+        )
+        ConceptRelationship.objects.create(
+            concept_1=concept,
+            concept_2=scale_concept,
+            relationship_id='Has scale type',
+            valid_start_date=date(1970, 1, 1),
+            valid_end_date=date(2099, 12, 31),
+        )
+
+        row = MeasurementFactory(
+            person=person,
+            measurement_concept=concept,
+            measurement_source_value='UNMAPPED-LAB',
+            value_as_number=Decimal('2'),
+            unit_source_value='g/dL',
+        )
+
+        # Simulate the unmapped path: SimpleNamespace mock with no
+        # destination_unit_concept, only the concept_id.
+        mock_mapping = SimpleNamespace(
+            destination_unit_concept=None,
+            target_concept_id=concept.concept_id,
+        )
+        qs = Measurement.objects.filter(pk=row.pk)
+        count = normalize_measurement_units(qs, mock_mapping)
+
+        assert count == 1
+        row.refresh_from_db()
+        # g/dL -> g/L (MCnc base unit): multiply by 10
+        assert row.value_as_number == Decimal('20')
+        assert row.unit_source_value == 'g/dL'  # never changed
