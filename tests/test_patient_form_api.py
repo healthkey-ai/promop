@@ -1,12 +1,15 @@
 """The standalone v1 API and the embedded host use the same form writer."""
 import pytest
+from django.utils import timezone
 from rest_framework.test import APIClient
 from omop_core.models import (
-    ConditionOccurrence, Measurement, Observation, ProvenanceRecord,
+    ConditionOccurrence, Measurement, Observation, PersonalRepresentative,
+    ProvenanceRecord,
 )
 from patient_portal.models import Identity, PatientUser
 from tests.factories import (
-    ConceptFactory, DomainFactory, PatientRecordFactory, VocabularyFactory,
+    ConceptFactory, DomainFactory, ObservationFactory, PatientRecordFactory,
+    VocabularyFactory,
 )
 
 pytestmark = pytest.mark.django_db
@@ -266,11 +269,13 @@ MM_FIELDS = {
 }
 
 
-def _seed_mm_vocab():
+def _seed_mm_vocab(*, ehr_type=True, self_report_type=True):
     VocabularyFactory(vocabulary_id='SNOMED')
     type_vocab = VocabularyFactory(vocabulary_id='Type Concept')
-    for concept_id in (32817, 32865):
-        ConceptFactory(concept_id=concept_id, concept_code=str(concept_id), vocabulary=type_vocab)
+    if ehr_type:
+        ConceptFactory(concept_id=32817, concept_code='32817', vocabulary=type_vocab)
+    if self_report_type:
+        ConceptFactory(concept_id=32865, concept_code='32865', vocabulary=type_vocab)
     for _binding, concept_id, code, domain in MM_FIELDS.values():
         if concept_id is None:
             continue
@@ -337,4 +342,85 @@ def test_patient_self_form_write_projects_self_report_and_provenance():
     assert ProvenanceRecord.objects.filter(
         object_id=row.pk, source='PATIENT_SELF',
         source_user_id=f'{identity.issuer}|{identity.sub}',
+    ).exists()
+
+
+def test_a_missing_ehr_type_concept_does_not_roll_back_the_answer():
+    from omop_core.services.write_descriptor import build_writable_field_descriptor
+
+    from omop_core.models import Concept
+
+    record = PatientRecordFactory()
+    _seed_mm_vocab(ehr_type=False)
+    # conftest seeds the standard EHR type concept; this case is a deployment
+    # where it is genuinely absent.
+    Concept.objects.filter(concept_id=32817).delete()
+
+    entry = build_writable_field_descriptor()['smoldering_multiple_myeloma']
+    assert entry['writable'] is True
+    assert 'projection' not in entry
+    assert 'type concept' in entry['reason']
+
+    response = _client().patch(
+        f'/api/v1/patient-records/{record.person_id}/',
+        {'smoldering_multiple_myeloma': True}, format='json', HTTP_X_PATIENT_FORM='1',
+    )
+
+    assert response.status_code == 200, response.data
+    record.refresh_from_db()
+    assert record.smoldering_multiple_myeloma is True
+    assert not ConditionOccurrence.objects.filter(
+        person=record.person, condition_concept_id=4184985,
+    ).exists()
+
+
+def test_a_patient_answer_skips_projection_without_the_self_report_type():
+    record = PatientRecordFactory()
+    _seed_mm_vocab(self_report_type=False)
+    clinical = ObservationFactory(
+        person=record.person, observation_concept_id=4149022,
+        observation_source_value='35601003', value_as_number=0.0,
+        observation_date=timezone.localdate(), observation_type_concept_id=32817,
+    )
+    identity = Identity.objects.create_user(email='mm-self-no-type@example.test')
+    PatientUser.objects.create(identity=identity, person=record.person)
+    client = APIClient()
+    client.force_authenticate(identity)
+
+    response = client.patch(
+        f'/api/v1/patient-records/{record.person_id}/',
+        {'mgus': True}, format='json', HTTP_X_PATIENT_FORM='1',
+    )
+
+    assert response.status_code == 200, response.data
+    record.refresh_from_db()
+    assert record.mgus is True
+    clinical.refresh_from_db()
+    assert clinical.value_as_number == 0.0
+    assert Observation.objects.filter(
+        person=record.person, observation_concept_id=4149022,
+    ).count() == 1
+
+
+def test_a_representative_answer_skips_projection_without_the_self_report_type():
+    record = PatientRecordFactory()
+    _seed_mm_vocab(self_report_type=False)
+    carer = Identity.objects.create_user(email='mm-carer-no-type@example.test')
+    PersonalRepresentative.objects.create(
+        representative=carer, person_id=record.person_id,
+        relationship='caregiver', verification_status='VERIFIED',
+    )
+    client = APIClient()
+    client.force_authenticate(carer)
+
+    response = client.patch(
+        f'/api/v1/patient-records/{record.person_id}/',
+        {'mgus': True}, format='json', HTTP_X_PATIENT_FORM='1',
+    )
+
+    assert response.status_code == 200, response.data
+    record.refresh_from_db()
+    assert record.mgus is True
+    assert not Observation.objects.filter(
+        person=record.person, observation_concept_id=4149022,
     ).exists()

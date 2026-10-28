@@ -33,10 +33,24 @@ def _project_side_effects(person, direct, projections, authorship=None):
     """
     if not projections:
         return
+    from omop_core.models import Concept
     from omop_core.services.omop_projection import project_single_value
 
     for name, projection in projections.items():
         if name not in direct or not projection:
+            continue
+        # A type or target concept that is not loaded would fail the foreign key
+        # at transaction commit, after the projector's savepoint — which would
+        # roll back the answer this function exists to preserve. Skip instead.
+        required = {
+            projection.get('concept_id'),
+            (authorship or {}).get('type_concept_id') or projection.get('type_concept_id') or 32817,
+        } - {None}
+        if Concept.objects.filter(concept_id__in=required).count() != len(required):
+            logger.warning(
+                'OMOP concepts %s are not loaded; skipping the projection for %s',
+                sorted(required), name,
+            )
             continue
         try:
             project_single_value(
@@ -225,7 +239,7 @@ def patient_form_descriptors(descriptor=None, *, readable_fields=None, writable=
 
 @transaction.atomic
 def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor=None,
-                             authorship=None):
+                             authorship=None, project_side_effects=True):
     """Shared form write, with explicit acknowledgements and no no-op success.
 
     The host must authorize the person first. Existing OMOP mapping/provenance
@@ -233,6 +247,8 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
     retain their existing PatientRecord-only behavior (e.g. planned_therapies).
     ``authorship`` is the caller's project_single_value typing (self-report and
     provenance), supplied by the view for best-effort side-effect projections.
+    ``project_side_effects`` lets a caller keep the PatientRecord answer while
+    skipping OMOP when the fact could not be typed safely.
     """
     result = FieldWriteResult()
     record, _ = PatientRecord.objects.get_or_create(person=person)
@@ -333,7 +349,8 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
         record.user_edited_fields = sorted(set(record.user_edited_fields or []) | set(direct))
         record.save(update_fields=sorted(direct) + ['user_edited_fields'])
         result.applied.extend(direct)
-        _project_side_effects(person, direct, side_effect_projections, authorship)
+        if project_side_effects:
+            _project_side_effects(person, direct, side_effect_projections, authorship)
     if facts:
         fact_result = apply_field_writes(person, facts, descriptor=descriptor)
         result.applied.extend(fact_result.applied)

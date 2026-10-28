@@ -175,6 +175,15 @@ def _genomics_type_concept(user, person):
     return 32865 if get_actor_role(user, person.person_id) in ('self', 'representative') else 32817
 
 
+def _patient_author_role(actor, person):
+    """The caller's role for this person, or None for an anonymous caller."""
+    from omop_core.authorization import get_actor_role
+
+    if not getattr(actor, 'is_authenticated', False):
+        return None
+    return get_actor_role(actor, person.person_id)
+
+
 def _patient_authorship(actor, person):
     """project_single_value keywords for the author of a PatientRecord save.
 
@@ -182,12 +191,9 @@ def _patient_authorship(actor, person):
     patient's own facts also carry PATIENT_SELF provenance. Anyone else, or a
     service credential with no Identity, writes with the recipe's type.
     """
-    from omop_core.authorization import get_actor_role
     from omop_core.services.omop_projection import patient_self_report_type
 
-    if not getattr(actor, 'is_authenticated', False):
-        return {}
-    role = get_actor_role(actor, person.person_id)
+    role = _patient_author_role(actor, person)
     if role not in ('self', 'representative') or not (self_report := patient_self_report_type()):
         return {}
     authorship = {'type_concept_id': self_report}
@@ -5632,9 +5638,15 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
         if not isinstance(request.data, dict) or not request.data:
             return Response({'detail': 'Provide a non-empty object of field edits.'}, status=400)
         try:
+            authorship = _patient_authorship(request.user, person)
+            # Without the Patient self-report type concept the patient's fact
+            # cannot be told apart from a clinical one, and projecting could
+            # overwrite today's clinical answer. Keep the PatientRecord answer
+            # and skip the best-effort side effect instead.
+            patient_author = _patient_author_role(request.user, person) in ('self', 'representative')
             record, result = apply_patient_form_patch(
-                person, request.data,
-                authorship=_patient_authorship(request.user, person),
+                person, request.data, authorship=authorship,
+                project_side_effects=not (patient_author and not authorship),
             )
         except ValueError as exc:
             return Response({'detail': str(exc)}, status=400)

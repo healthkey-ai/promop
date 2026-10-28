@@ -656,10 +656,12 @@ def build_writable_field_descriptor():
     concept_by_id = {
         concept.concept_id: concept
         for concept in Concept.objects.filter(
-            concept_id__in=myeloma_concept_ids | {CONCEPT_LARGEST_LYMPH_NODE_DIMENSION},
+            concept_id__in=myeloma_concept_ids
+            | {CONCEPT_LARGEST_LYMPH_NODE_DIMENSION, CONCEPT_EHR_TYPE},
         ).only('concept_id', 'concept_code', 'concept_name', 'vocabulary_id')
     }
     largest_lymph_node_concept = concept_by_id.get(CONCEPT_LARGEST_LYMPH_NODE_DIMENSION)
+    ehr_type_loaded = CONCEPT_EHR_TYPE in concept_by_id
     myeloma_concepts = {
         field: concept_by_id.get(spec['concept_id'])
         for field, spec in _MYELOMA_RELATED_DISORDER_PROJECTIONS.items()
@@ -805,7 +807,7 @@ def build_writable_field_descriptor():
             }
             spec = _MYELOMA_RELATED_DISORDER_PROJECTIONS[field]
             concept = myeloma_concepts.get(field)
-            if concept is not None:
+            if concept is not None and ehr_type_loaded:
                 entry['projection'] = {
                     'omop_table': spec['omop_table'],
                     'concept_id': concept.concept_id,
@@ -831,6 +833,11 @@ def build_writable_field_descriptor():
                 entry['reason'] = (
                     'Written directly to PatientRecord. No standard OMOP concept '
                     'is available for IgM myeloma; no projection is attempted.'
+                )
+            elif not ehr_type_loaded:
+                entry['reason'] = (
+                    'Written directly to PatientRecord. The EHR type concept '
+                    f'{CONCEPT_EHR_TYPE} is not loaded — no OMOP projection available.'
                 )
             else:
                 entry['reason'] = (
