@@ -1422,7 +1422,9 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         PATIENT_SELF provenance row. Anyone else's keeps the recipe's type.
         """
         from omop_core.services.omop_projection import project_single_value, projection_for_descriptor
-        from omop_core.services.write_descriptor import build_writable_field_descriptor
+        from omop_core.services.write_descriptor import (
+            PINNED_PROJECTION_FIELDS, build_writable_field_descriptor,
+        )
 
         try:
             with transaction.atomic():
@@ -1432,11 +1434,21 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             return set()
         projected = set()
         authorship = None
+        patient_author_without_type = False
         for field in direct_fields:
             projection = projection_for_descriptor(descriptors.get(field))
             if projection:
                 if authorship is None:
                     authorship = _patient_authorship(actor, person)
+                    patient_author_without_type = (
+                        not authorship
+                        and _patient_author_role(actor, person) in ('self', 'representative')
+                    )
+                if field in PINNED_PROJECTION_FIELDS and patient_author_without_type:
+                    # Without 32865 the patient's fact cannot be told apart
+                    # from a clinical one; a current-state answer must not
+                    # overwrite today's clinical fact. Keep the record value.
+                    continue
                 if project_single_value(person, field, patch_data[field], projection,
                                         acknowledge_existing=True, **authorship):
                     # Occurrences and structured answers need their dedicated

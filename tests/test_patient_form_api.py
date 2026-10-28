@@ -424,3 +424,53 @@ def test_a_representative_answer_skips_projection_without_the_self_report_type()
     assert not Observation.objects.filter(
         person=record.person, observation_concept_id=4149022,
     ).exists()
+
+
+def test_native_patient_patch_skips_pinned_projection_without_self_report_type():
+    record = PatientRecordFactory()
+    _seed_mm_vocab(self_report_type=False)
+    clinical = ObservationFactory(
+        person=record.person, observation_concept_id=4149022,
+        observation_source_value='35601003', value_as_number=0.0,
+        observation_date=timezone.localdate(), observation_type_concept_id=32817,
+    )
+    identity = Identity.objects.create_user(email='mm-native-self@example.test')
+    PatientUser.objects.create(identity=identity, person=record.person)
+    client = APIClient()
+    client.force_authenticate(identity)
+
+    response = client.patch(
+        f'/api/v1/patient-records/{record.person_id}/', {'mgus': True}, format='json',
+    )
+
+    assert response.status_code == 200, response.data
+    record.refresh_from_db()
+    assert record.mgus is True
+    clinical.refresh_from_db()
+    assert clinical.value_as_number == 0.0
+    assert Observation.objects.filter(
+        person=record.person, observation_concept_id=4149022,
+    ).count() == 1
+
+
+def test_native_representative_patch_skips_pinned_projection_without_self_report_type():
+    record = PatientRecordFactory()
+    _seed_mm_vocab(self_report_type=False)
+    carer = Identity.objects.create_user(email='mm-native-carer@example.test')
+    PersonalRepresentative.objects.create(
+        representative=carer, person_id=record.person_id,
+        relationship='caregiver', verification_status='VERIFIED',
+    )
+    client = APIClient()
+    client.force_authenticate(carer)
+
+    response = client.patch(
+        f'/api/v1/patient-records/{record.person_id}/', {'mgus': True}, format='json',
+    )
+
+    assert response.status_code == 200, response.data
+    record.refresh_from_db()
+    assert record.mgus is True
+    assert not Observation.objects.filter(
+        person=record.person, observation_concept_id=4149022,
+    ).exists()
