@@ -1576,6 +1576,16 @@ error line, not 500. The whole batch rolled back, so the caller can retry, and a
 
 A row with no `source_value` or no date has no identity and is always inserted.
 
+**Measurement values are stored as sent, and stay that way** (#2104). The ETL
+converts units itself, and `value_as_number` is in the upsert key, so a value
+promop rewrites stops matching the ETL's re-run. Bulk-inserted Measurement rows
+get `units_as_sent=True`, and unit normalization (`normalize_measurement_units`,
+run by repoint and resolve) converts only `units_as_sent=False` rows — the
+model default, i.e. promop's own ingest such as lab-results sync. Rows written
+before the column hold `None` (unknown: `EHR_SYNC` provenance is shared with
+FHIR sync and optional) and are left as stored; `manage.py
+classify_measurement_units` reclassifies them deliberately.
+
 ### Source hospital (`X-Provenance-Organization-ID`, #1690)
 
 One ETL credential reads several hospitals, and a hospital-scoped mapping only

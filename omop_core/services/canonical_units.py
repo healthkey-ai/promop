@@ -8,8 +8,6 @@ from decimal import Decimal, InvalidOperation
 import logging
 import re
 
-from django.db.models import Q
-
 logger = logging.getLogger(__name__)
 
 # Factors to a base unit within each measured property. UCUM is case-sensitive.
@@ -444,8 +442,7 @@ def _ucum_concept(unit_str):
     )
 
 
-def normalize_measurement_units(qs, mapping, target_concept_id=None,
-                                keep_sent_units=False):
+def normalize_measurement_units(qs, mapping, target_concept_id=None):
     """Convert value/unit on Measurement rows to the mapping's target unit.
 
     *qs* is a queryset of ``Measurement`` rows (already filtered to the rows
@@ -462,10 +459,11 @@ def normalize_measurement_units(qs, mapping, target_concept_id=None,
     already the target, or whose source unit is incompatible, are silently
     skipped.
 
-    *keep_sent_units*, when true, also skips every row that already carries a
-    ``unit_concept`` (0, "No matching concept", counts as none).  The bulk OMOP
-    write sets it (#2104): its caller, the ETL, converts units itself, so the
-    value is meant in the unit concept it sent, not in ``unit_source_value``.
+    Only rows with ``units_as_sent=False`` are converted (#2104).  ``True``
+    rows came through the bulk OMOP write, whose caller (the ETL) chose the
+    value and unit itself; ``None`` rows predate the column, so who chose them
+    is unknown, and they are left as stored too.  Converting either would
+    rewrite a value its writer still matches on.
 
     Returns the number of rows whose ``value_as_number`` was rewritten.
     """
@@ -475,8 +473,12 @@ def normalize_measurement_units(qs, mapping, target_concept_id=None,
 
     target_ucum = _ucum_concept(target_unit)
 
-    if keep_sent_units:
-        qs = qs.filter(Q(unit_concept_id__isnull=True) | Q(unit_concept_id=0))
+    unknown = qs.filter(units_as_sent__isnull=True).count()
+    if unknown:
+        logger.info(
+            'Left %d measurement row(s) as stored: written before units_as_sent '
+            'was recorded (see classify_measurement_units).', unknown)
+    qs = qs.filter(units_as_sent=False)
 
     # Group rows by their raw unit_source_value so we compute the conversion
     # factor once per spelling, not once per row.
@@ -572,6 +574,8 @@ def normalize_measurement_instances(instances, mapping=None,
         raw = getattr(inst, 'unit_source_value', None)
         if not raw or inst.value_as_number is None:
             continue
+        if getattr(inst, 'units_as_sent', False) is not False:
+            continue  # the writer's unit, or unknown (#2104)
         src = unit_code(raw)
         if src == target_unit:
             if target_ucum:
