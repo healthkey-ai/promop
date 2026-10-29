@@ -67,7 +67,9 @@ FIELD_BINDINGS = {
 # CB rule or allowing an input change to appear to establish that verdict.
 FORM_INPUTS = {
     'bmi': ['weight', 'height'],
-    'meets_slim': ['clonal_plasma_cells', 'kappa_flc', 'lambda_flc', 'bone_lesions'],
+    # Superseded by the descriptor's list: `derive_meets_slim` reads the FLC ratio
+    # and deliberately does not infer the MRI criterion from `bone_lesions`.
+    'meets_slim': ['clonal_plasma_cells', 'kappa_flc', 'lambda_flc', 'kappa_lambda_ratio'],
     'meets_crab': ['serum_calcium_mg_dl', 'creatinine_clearance_ml_min',
                    'serum_creatinine_mg_dl', 'hemoglobin_g_dl', 'bone_lesions'],
     'tnbc_status': ['estrogen_receptor_status', 'progesterone_receptor_status', 'her2_status'],

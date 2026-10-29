@@ -775,12 +775,14 @@ def build_writable_field_descriptor():
             continue
 
         if field in _COMPUTED_INPUTS:
+            inputs = _COMPUTED_INPUTS[field]
             descriptor[field] = {
                 'kind': KIND_COMPUTED,
                 'writable': False,
-                'inputs': _COMPUTED_INPUTS[field],
+                'inputs': inputs,
                 'reason': (
-                    'Computed from ' + ', '.join(_COMPUTED_INPUTS[field]) + '.'
+                    'Computed from ' + ', '.join(inputs) + '.' if inputs else
+                    'Computed from OMOP facts; there is no record field to edit.'
                 ),
             }
             continue

@@ -1197,6 +1197,11 @@ def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fiel
         patient_info.meets_crab = derive_meets_crab(patient_info)
     if MEETS_SLIM_INPUT_FIELDS.intersection(changed_fields):
         patient_info.meets_slim = derive_meets_slim(patient_info)
+    # `disease_slug` is what the descriptor names as computed from `disease`, so a
+    # direct edit to the name has to move the slug here; the full refresh only
+    # derives it from the OMOP condition, which a record-level edit does not touch.
+    if 'disease' in changed_fields and patient_info.disease:
+        patient_info.disease_slug = _disease_name_to_slug(patient_info.disease)
     # Derive composite b_symptoms from the three individual B-symptom fields.
     # Only act when at least one individual field carries a value or was just
     # changed; an unrelated edit must not overwrite a previously stored

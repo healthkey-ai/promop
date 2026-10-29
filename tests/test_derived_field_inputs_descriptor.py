@@ -49,3 +49,38 @@ def test_the_components_stay_writable(component):
         f'{component} is the field a caller edits to move the verdict; refusing it '
         'would leave the computed field with no edit path at all'
     )
+
+
+def test_disease_slug_follows_a_direct_disease_edit():
+    """The descriptor names `disease` as the input, so a direct edit has to move it.
+
+    The full refresh derives the slug from the OMOP condition; a record-level edit
+    does not touch that, so `recompute_patient_record_fields` owns it for the edit
+    path. Without this the descriptor would promise an input that does nothing.
+    """
+    from omop_core.services.patient_record_service import recompute_patient_record_fields
+    from tests.factories import PatientRecordFactory
+
+    record = PatientRecordFactory(disease='Multiple Myeloma', disease_slug='multiple-myeloma')
+
+    record.disease = 'Chronic Lymphocytic Leukemia'
+    recompute_patient_record_fields(record, changed_fields={'disease'})
+    record.refresh_from_db()
+
+    assert record.disease_slug == 'chronic-lymphocytic-leukemia'
+
+
+def test_the_shared_form_takes_its_navigation_from_the_descriptor():
+    """`patient_form.FORM_INPUTS` used to carry its own copy for `meets_slim`.
+
+    It listed `bone_lesions` and omitted `kappa_lambda_ratio`, while
+    `derive_meets_slim` reads the FLC ratio and deliberately does not infer the MRI
+    criterion from `bone_lesions`. The form now prefers the descriptor, so the two
+    cannot disagree for a field the descriptor classifies.
+    """
+    from omop_core.services.patient_form import patient_form_descriptors
+
+    entries = patient_form_descriptors()
+    assert entries['meets_slim']['inputs'] == INPUTS['meets_slim']
+    assert entries['b_symptoms']['inputs'] == INPUTS['b_symptoms']
+    assert entries['disease_slug']['inputs'] == INPUTS['disease_slug']
