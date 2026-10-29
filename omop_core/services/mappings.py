@@ -561,9 +561,6 @@ SUGGESTED_FIELD_CODES: dict[str, tuple[str, str]] = {
     'marital_status':                ('125680007', 'SNOMED'),
     # Negation fields (map to the base clinical concept being negated)
     'no_active_infection_status':    ('56051006',  'SNOMED'),
-    'no_hiv_status':                 ('86406008',  'SNOMED'),
-    'no_hepatitis_b_status':         ('66071002',  'SNOMED'),
-    'no_hepatitis_c_status':         ('50711007',  'SNOMED'),
     # Conditions
     'hiv_status':                    ('86406008',  'SNOMED'),
     'hepatitis_b_status':            ('66071002',  'SNOMED'),

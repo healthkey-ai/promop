@@ -179,9 +179,6 @@ export interface PatientInfo {
   hiv_status?: boolean;
   hepatitis_b_status?: boolean;
   hepatitis_c_status?: boolean;
-  no_hiv_status?: boolean;
-  no_hepatitis_b_status?: boolean;
-  no_hepatitis_c_status?: boolean;
   
   bilirubin_total_mg_dl?: number;
   alt_u_l?: number;
