@@ -1299,15 +1299,6 @@ class Measurement(models.Model):
     # PHR-S FM PH.1.1#06 — entered-in-error (retain, exclude from normal reads).
     is_erroneous = models.BooleanField(default=False, help_text="Marked entered-in-error; retained but excluded from normal reads")
     erroneous_reason = models.TextField(null=True, blank=True, help_text="Why this record was marked erroneous")
-    # Who owns the value's unit (#2104). Unit normalization converts only False.
-    # True: the bulk OMOP write stored the writer's value and unit as sent.
-    # False: written by promop's own ingest; it may convert to a canonical unit.
-    # None: written before this was recorded; treated like True. Reclassify with
-    # `manage.py classify_measurement_units`.
-    units_as_sent = models.BooleanField(
-        null=True, default=False,
-        help_text="Value and unit are the writer's; unit normalization never rewrites them. "
-                  "Null: unknown (written before #2104), also left as stored.")
 
     class Meta:
         db_table = 'measurement'

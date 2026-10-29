@@ -8151,14 +8151,6 @@ class _OmopBulkCreateMixin:
             # so here the suppression is load-bearing, not just defensive.
             with suppress_patient_record_refresh():
                 instances = [model_cls(**dict(attrs)) for attrs in validated]
-                if model_cls is Measurement:
-                    # Stored as sent, and never unit-converted later (#2104).
-                    # The ETL converts units itself, and value_as_number is in
-                    # the Measurement upsert key: a converted row would stop
-                    # matching its own re-run. Only inserted rows take this;
-                    # a matched row keeps the marker it has.
-                    for inst in instances:
-                        inst.units_as_sent = True
                 unattributed_matches = 0
                 if upsert:
                     plan = _plan_bulk_upsert(

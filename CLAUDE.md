@@ -1576,15 +1576,14 @@ error line, not 500. The whole batch rolled back, so the caller can retry, and a
 
 A row with no `source_value` or no date has no identity and is always inserted.
 
-**Measurement values are stored as sent, and stay that way** (#2104). The ETL
-converts units itself, and `value_as_number` is in the upsert key, so a value
-promop rewrites stops matching the ETL's re-run. Bulk-inserted Measurement rows
-get `units_as_sent=True`, and unit normalization (`normalize_measurement_units`,
-run by repoint and resolve) converts only `units_as_sent=False` rows — the
-model default, i.e. promop's own ingest such as lab-results sync. Rows written
-before the column hold `None` (unknown: `EHR_SYNC` provenance is shared with
-FHIR sync and optional) and are left as stored; `manage.py
-classify_measurement_units` reclassifies them deliberately.
+**Measurement values are stored as sent, and stay that way** (#2104). promop
+converts units only when it reads (`canonical_units.normalize`,
+`measurement_normalized`), never by rewriting `value_as_number`. Every writer
+matches its next run on the value it sent: this upsert key, the ETL's diff,
+FHIR sync's discrete-result identities and lab-results sync's dedup query. A
+rewritten value made each insert a duplicate, and a conversion too large for
+`Decimal(15,5)` aborted the transaction, undoing the repoint it ran in. Do not
+add write-time unit conversion to repoint, resolve or any ingest path.
 
 ### Source hospital (`X-Provenance-Organization-ID`, #1690)
 
