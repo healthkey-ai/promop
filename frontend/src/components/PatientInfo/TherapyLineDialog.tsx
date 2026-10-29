@@ -62,6 +62,7 @@ export default function TherapyLineDialog({
   const [outcomeError, setOutcomeError] = useState('');
   const [intent, setIntent] = useState(line?.intent ?? '');
   const [discReason, setDiscReason] = useState(line?.discontinuation_reason ?? '');
+  const [progressionDate, setProgressionDate] = useState(line?.progression_date ?? '');
   const [drugs, setDrugs] = useState<SelectedDrug[]>(line?.drugs ?? []);
   // Recording a line whose drugs are not known is a real clinical statement
   // (#1924), and it is a different action from clearing an existing line's
@@ -286,6 +287,7 @@ export default function TherapyLineDialog({
         outcome: outcome || null,
         intent: intent || null,
         discontinuation_reason: discReason || null,
+        progression_date: progressionDate || null,
         // Preserve the original concept_id when the clinician hasn't changed the
         // regimen — a no-op save must not silently erase a stored concept.
         regimen_concept_id: selectedRegimen?.concept_id ?? line?.regimen_concept_id ?? null,
@@ -297,6 +299,7 @@ export default function TherapyLineDialog({
               ? d.source_value : (d.source_value || d.concept_name).slice(0, 50),
             ...(d.start_date !== undefined ? { start_date: d.start_date } : {}),
             ...(d.end_date !== undefined ? { end_date: d.end_date } : {}),
+            ...(d.maintenance ? { maintenance: true } : {}),
           }))
           : [],
         ...(knownComposition ? {} : { composition_unknown: true }),
@@ -417,6 +420,15 @@ export default function TherapyLineDialog({
                 <option key={o.value} value={o.value}>{o.label}</option>
               ))}
             </select>
+          </label>
+          <label className="text-sm">
+            <span className="mb-1 block font-medium">Progression date</span>
+            <input
+              type="date" value={progressionDate}
+              onChange={(e) => setProgressionDate(e.target.value)}
+              max={new Date().toISOString().split('T')[0]}
+              className="w-full rounded-md border border-input px-2 py-1.5 text-sm"
+            />
           </label>
         </div>
 
@@ -599,6 +611,18 @@ export default function TherapyLineDialog({
                           }} />
                       </label>
                     </div>
+                    <label className="mt-1 flex items-center gap-1.5 text-xs">
+                      <input
+                        type="checkbox"
+                        checked={d.maintenance ?? false}
+                        onChange={(e) => {
+                          const checked = e.target.checked;
+                          setDrugs((prev) => prev.map((item, i) => i === index
+                            ? { ...item, maintenance: checked } : item));
+                        }}
+                      />
+                      Maintenance
+                    </label>
                   </div>
                   <button
                     onClick={() => setDrugs((prev) => prev.filter((_, i) => i !== index))}

@@ -3458,6 +3458,15 @@ class PatientRecord(models.Model):
     later_outcome = models.TextField(blank=True, null=True)
     later_intent = models.CharField(max_length=50, blank=True, null=True, help_text="Later Line Therapy Intent (Adjuvant/Neoadjuvant/Metastatic)")
     later_discontinuation_reason = models.CharField(max_length=50, blank=True, null=True, help_text="Later Line Reason for Discontinuation (Progression/Toxicity/Completion)")
+    # Per-line progression dates and POD24 derivation
+    first_line_progression_date = models.DateField(blank=True, null=True,
+        help_text="Date of progression on first-line therapy")
+    second_line_progression_date = models.DateField(blank=True, null=True,
+        help_text="Date of progression on second-line therapy")
+    later_progression_date = models.DateField(blank=True, null=True,
+        help_text="Earliest progression date across later-line (3L+) therapies")
+    pod24 = models.BooleanField(null=True, blank=True,
+        help_text="Progression of disease within 24 months of first-line start (FL prognostic marker)")
     supportive_therapies = models.TextField(blank=True, null=True)
     supportive_therapy_date = models.DateField(blank=True, null=True)
     supportive_therapy_start_date = models.DateField(blank=True, null=True, help_text="Supportive Therapy Start Date")

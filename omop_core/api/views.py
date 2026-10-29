@@ -93,7 +93,8 @@ class TherapyLineViewSet(viewsets.ViewSet):
 
         submitted = {key: data[key] for key in (
             'drugs', 'start_date', 'end_date', 'regimen_concept_id',
-            'outcome', 'intent', 'discontinuation_reason', 'source_value',
+            'outcome', 'intent', 'discontinuation_reason', 'progression_date',
+            'source_value',
         ) if key in data}
         try:
             with transaction.atomic():

@@ -28,6 +28,7 @@ from omop_core.mapping.therapy import is_assertable_regimen, resolve_regimen_lab
 from omop_core.models import Concept, PatientRecord, Person, ProvenanceRecord
 from omop_core.services.disease_episodes import disease_key, disease_slug, primary_disease_slug
 from omop_core.services.episode_service import TherapyLineEpisodeResult, author_therapy_lines
+from omop_oncology.models import TherapyLineExposure
 from omop_core.services.patient_record_service import refresh_patient_record
 from omop_core.services.therapy_errors import (
     CONFLICT_MESSAGE, TherapyLineValidationError, refusal_payload,
@@ -72,11 +73,22 @@ class TherapyLineImportLineSerializer(serializers.Serializer):
     regimen_concept_id = serializers.IntegerField(required=False, min_value=1)
     outcome = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=60)
     disease = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=100)
+    progression_date = serializers.DateField(required=False, allow_null=True)
+    maintenance_drugs = serializers.ListField(
+        child=serializers.DictField(), required=False, default=list,
+        help_text="Drugs to mark as maintenance on the line: [{concept_id}]. "
+                  "Each entry must have a concept_id matching a drug already on the line.",
+    )
 
     def validate_start_date(self, value: date) -> date:
         """Reject a line that has not started yet."""
         if value > date.today():
             raise serializers.ValidationError('A future therapy line is planned, not received treatment.')
+        return value
+
+    def validate_progression_date(self, value: date | None) -> date | None:
+        if value and value > date.today():
+            raise serializers.ValidationError('A future progression date is not a recorded event.')
         return value
 
     def validate(self, attrs: ImportLine) -> ImportLine:
@@ -86,6 +98,21 @@ class TherapyLineImportLineSerializer(serializers.Serializer):
             raise serializers.ValidationError({'end_date': 'An ongoing line has no end_date.'})
         if end is not None and end < attrs['start_date']:
             raise serializers.ValidationError({'end_date': 'end_date cannot precede start_date.'})
+        prog = attrs.get('progression_date')
+        if prog is not None and prog < attrs['start_date']:
+            raise serializers.ValidationError({'progression_date': 'progression_date cannot precede start_date.'})
+        for i, d in enumerate(attrs.get('maintenance_drugs', [])):
+            if not d.get('concept_id'):
+                raise serializers.ValidationError({
+                    'maintenance_drugs': f'Entry {i} must have a concept_id.',
+                })
+            if not isinstance(d['concept_id'], int):
+                try:
+                    d['concept_id'] = int(d['concept_id'])
+                except (TypeError, ValueError):
+                    raise serializers.ValidationError({
+                        'maintenance_drugs': f'Entry {i}: concept_id must be an integer.',
+                    })
         return attrs
 
     class Meta:
@@ -141,7 +168,9 @@ class TherapyLineImportSerializer(serializers.Serializer):
 
 def _author_kwargs(line: ImportLine, regimens: ResolvedRegimens) -> dict[str, Any]:
     """Translate a source line into author_therapy_lines kwargs."""
-    # replace=True lets outcome: null clear. Drugs are never passed so their links survive
+    # replace=True lets outcome: null clear. Drugs are never passed so their
+    # links survive; maintenance_drugs are applied post-authoring via
+    # _apply_maintenance_flags to avoid triggering the replace-events path.
     kwargs: dict[str, Any] = {'line_number': line['line_number'], 'start_date': line['start_date'], 'replace': True}
     if line.get('ongoing'):
         kwargs['end_date'] = None
@@ -157,7 +186,31 @@ def _author_kwargs(line: ImportLine, regimens: ResolvedRegimens) -> dict[str, An
         kwargs['regimen_concept_id'] = line['regimen_concept_id']
     elif line.get('regimen'):
         kwargs['regimen_concept_id'] = regimens[line['regimen']][0].concept_id
+    if 'progression_date' in line:
+        kwargs['progression_date'] = line['progression_date']
     return kwargs
+
+
+def _apply_maintenance_flags(lines: list[ImportLine], results: list[TherapyLineEpisodeResult]) -> None:
+    """Mark drugs as maintenance on authored lines, without altering the line's composition.
+
+    Matches maintenance_drugs entries to existing TherapyLineExposure rows by
+    concept_id on the authored episode. Unmatched concept_ids are silently
+    skipped (the drug may not be on the line yet).
+    """
+    for line, result in zip(lines, results):
+        maint = line.get('maintenance_drugs')
+        if not maint:
+            continue
+        maint_concept_ids = {
+            d.get('concept_id') for d in maint if d.get('concept_id')
+        }
+        if not maint_concept_ids:
+            continue
+        TherapyLineExposure.objects.filter(
+            episode=result.episode,
+            drug_exposure__drug_concept_id__in=maint_concept_ids,
+        ).update(is_maintenance=True)
 
 
 def _regimen_match(line: ImportLine, regimens: ResolvedRegimens) -> str | None:
@@ -213,6 +266,8 @@ def import_therapy_lines(person: Person, lines: list[ImportLine], provenance: Pr
                 results = author_therapy_lines(
                     person, [_author_kwargs(line, regimens) for line in lines], asserted_by='import',
                 )
+                if results is not None:
+                    _apply_maintenance_flags(lines, results)
                 if results is None:
                     # Also drops the regimens quarantined above
                     transaction.set_rollback(True)
