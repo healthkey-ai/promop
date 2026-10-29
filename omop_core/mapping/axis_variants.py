@@ -195,6 +195,7 @@ def rebuild_unit_evidence(mappings):
     mappings = [m for m in mappings if m is not None]
     patient, counts = patient_unit_evidence(mappings)
     changed = []
+    count_changed = []
     for m in mappings:
         kept = [e for e in (m.source_unit_evidence or []) if isinstance(e, dict) and not e.get('source')]
         rebuilt = patient.get(m.pk, []) + kept
@@ -203,8 +204,17 @@ def rebuild_unit_evidence(mappings):
             changed.append(m)
         if kept:
             counts[m.pk] = counts.get(m.pk, Counter()) | _imported_unit_counts([m]).get(m.pk, Counter())
+        # Update occurrence_count from the PSC totals (#2110). The seeded
+        # inventory wrote label-level counts on every code with the label;
+        # the per-patient source codes give the correct per-code count.
+        psc_total = sum(counts.get(m.pk, Counter()).values())
+        if psc_total and m.occurrence_count != psc_total:
+            m.occurrence_count = psc_total
+            count_changed.append(m)
     if changed:
         SourceCodeConceptMapping.objects.bulk_update(changed, ['source_unit_evidence'], batch_size=500)
+    if count_changed:
+        SourceCodeConceptMapping.objects.bulk_update(count_changed, ['occurrence_count'], batch_size=500)
     _store_fhir_codings(mappings)
     return len(changed), counts
 
@@ -416,6 +426,16 @@ def refresh(mapping, unit_counts=None):
             row.occurrence_count = variant['occurrence_count']
             row.save()
             existing[variant['axis_key']] = row
+    # Update occurrence_count on surviving variant rows that match detected
+    # variants, even when below FLAG_THRESHOLD (#2111). A rebuild can correct
+    # inflated counts from pre-rebuild Measurement aggregation.
+    if len(variants) < FLAG_THRESHOLD:
+        detected_by_key = {v['axis_key']: v for v in variants}
+        for key, row in existing.items():
+            variant = detected_by_key.get(key)
+            if variant and row.pk and row.occurrence_count != variant['occurrence_count']:
+                row.occurrence_count = variant['occurrence_count']
+                row.save(update_fields=['occurrence_count'])
     # A variant the evidence no longer shows keeps a destination or an
     # approval, which is a curator's work; one with nothing decided was only
     # ever evidence, and evidence that has gone is deleted (#2043).

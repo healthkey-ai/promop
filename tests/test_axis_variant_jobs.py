@@ -711,3 +711,83 @@ def test_long_axis_key_round_trips():
         mapping=mapping, axis_key=long_key, axis_values={}, units=['%'])
     variant.refresh_from_db()
     assert variant.axis_key == long_key
+
+
+# --- occurrence_count rebuild (#2110) and variant count correction (#2111) ---
+
+
+def test_rebuild_updates_occurrence_count_from_psc_totals():
+    """rebuild_unit_evidence should update occurrence_count from PSC data (#2110).
+
+    Hospital code seeds carried inflated label-level counts; the rebuild
+    must correct them to the per-code PSC totals.
+    """
+    mapping = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id=LAB, source_code='ALB-COUNT', omop_table='measurement',
+        occurrence_count=1600,  # inflated seed count
+        source_unit_evidence=SEEDED)
+    person = PersonFactory()
+    PatientSourceCode.objects.create(
+        person=person, source_value='ALB-COUNT', source_vocabulary_id=LAB,
+        omop_table='measurement', source_unit='g/dL', occurrence_count=414)
+    axis_variants.rebuild_unit_evidence([mapping])
+    mapping.refresh_from_db()
+    assert mapping.occurrence_count == 414, \
+        f'occurrence_count should be updated from PSC total, got {mapping.occurrence_count}'
+
+
+def test_rebuild_does_not_zero_occurrence_count_when_no_psc_data():
+    """A code with no PSC data should keep its existing occurrence_count (#2110)."""
+    mapping = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id=LAB, source_code='NO-PSC', omop_table='measurement',
+        occurrence_count=50,
+        source_unit_evidence=SEEDED)
+    axis_variants.rebuild_unit_evidence([mapping])
+    mapping.refresh_from_db()
+    assert mapping.occurrence_count == 50, \
+        'occurrence_count should not be zeroed when there is no PSC data'
+
+
+def test_rebuild_sums_multiple_units_for_occurrence_count():
+    """occurrence_count should be the sum across all units (#2110)."""
+    mapping = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id=LAB, source_code='GLU-SUM', omop_table='measurement',
+        occurrence_count=1600,
+        source_unit_evidence=SEEDED)
+    person_a = PersonFactory()
+    person_b = PersonFactory()
+    PatientSourceCode.objects.create(
+        person=person_a, source_value='GLU-SUM', source_vocabulary_id=LAB,
+        omop_table='measurement', source_unit='mg/dL', occurrence_count=300)
+    PatientSourceCode.objects.create(
+        person=person_b, source_value='GLU-SUM', source_vocabulary_id=LAB,
+        omop_table='measurement', source_unit='mmol/L', occurrence_count=114)
+    axis_variants.rebuild_unit_evidence([mapping])
+    mapping.refresh_from_db()
+    assert mapping.occurrence_count == 414, \
+        f'occurrence_count should be sum of all units, got {mapping.occurrence_count}'
+
+
+def test_surviving_variant_rows_get_updated_counts_below_threshold():
+    """Old variant rows with approval/destination should get corrected counts
+    even when below FLAG_THRESHOLD (#2111)."""
+    mapping = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id=LAB, source_code='ALB-VAR', omop_table='measurement',
+        axis_variant_count=0)
+    # Create an old variant row with inflated count and an approval
+    old_variant = SourceCodeAxisVariant.objects.create(
+        mapping=mapping, axis_key='property=MCnc|scale_type=Qn',
+        axis_values={'property': 'MCnc', 'scale_type': 'Qn'},
+        units=['g/dL'], occurrence_count=279045,
+        status='approved', target_concept_id=12345)
+    # Only one unit in PSC → 1 variant detected, below FLAG_THRESHOLD(2)
+    person = PersonFactory()
+    PatientSourceCode.objects.create(
+        person=person, source_value='ALB-VAR', source_vocabulary_id=LAB,
+        omop_table='measurement', source_unit='g/dL', occurrence_count=414)
+    from collections import Counter
+    counts = Counter({'g/dL': 414})
+    axis_variants.refresh(mapping, counts)
+    old_variant.refresh_from_db()
+    assert old_variant.occurrence_count == 414, \
+        f'Surviving variant should have corrected count, got {old_variant.occurrence_count}'
