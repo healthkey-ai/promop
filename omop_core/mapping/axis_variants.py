@@ -194,29 +194,33 @@ def rebuild_unit_evidence(mappings):
 
     mappings = [m for m in mappings if m is not None]
     patient, counts = patient_unit_evidence(mappings)
-    changed = []
-    count_changed = []
+    dirty = set()          # pks whose in-memory instance needs flushing
+    update_fields = set()  # columns touched across all dirty instances
     for m in mappings:
         kept = [e for e in (m.source_unit_evidence or []) if isinstance(e, dict) and not e.get('source')]
         rebuilt = patient.get(m.pk, []) + kept
+        # Capture the PSC-only total *before* merging imported counts (#2110).
+        # The kept merge adds inventory/text-term counts that are exactly the
+        # inflated values this fix corrects, so they must not feed back into
+        # occurrence_count.  A total of 0 means no recognised units in the PSC
+        # data; the existing count is left as-is because we have no better
+        # number.
+        psc_total = sum(counts.get(m.pk, Counter()).values())
         if (m.source_unit_evidence or []) != rebuilt:
             m.source_unit_evidence = rebuilt
-            changed.append(m)
+            dirty.add(m.pk)
+            update_fields.add('source_unit_evidence')
         if kept:
             counts[m.pk] = counts.get(m.pk, Counter()) | _imported_unit_counts([m]).get(m.pk, Counter())
-        # Update occurrence_count from the PSC totals (#2110). The seeded
-        # inventory wrote label-level counts on every code with the label;
-        # the per-patient source codes give the correct per-code count.
-        psc_total = sum(counts.get(m.pk, Counter()).values())
         if psc_total and m.occurrence_count != psc_total:
             m.occurrence_count = psc_total
-            count_changed.append(m)
-    if changed:
-        SourceCodeConceptMapping.objects.bulk_update(changed, ['source_unit_evidence'], batch_size=500)
-    if count_changed:
-        SourceCodeConceptMapping.objects.bulk_update(count_changed, ['occurrence_count'], batch_size=500)
+            dirty.add(m.pk)
+            update_fields.add('occurrence_count')
+    if dirty:
+        to_flush = [m for m in mappings if m.pk in dirty]
+        SourceCodeConceptMapping.objects.bulk_update(to_flush, list(update_fields), batch_size=500)
     _store_fhir_codings(mappings)
-    return len(changed), counts
+    return len(dirty), counts
 
 
 def _patient_fhir_codings(mapping):
@@ -431,11 +435,14 @@ def refresh(mapping, unit_counts=None):
     # inflated counts from pre-rebuild Measurement aggregation.
     if len(variants) < FLAG_THRESHOLD:
         detected_by_key = {v['axis_key']: v for v in variants}
+        count_updates = []
         for key, row in existing.items():
             variant = detected_by_key.get(key)
             if variant and row.pk and row.occurrence_count != variant['occurrence_count']:
                 row.occurrence_count = variant['occurrence_count']
-                row.save(update_fields=['occurrence_count'])
+                count_updates.append(row)
+        if count_updates:
+            SourceCodeAxisVariant.objects.bulk_update(count_updates, ['occurrence_count'])
     # A variant the evidence no longer shows keeps a destination or an
     # approval, which is a curator's work; one with nothing decided was only
     # ever evidence, and evidence that has gone is deleted (#2043).
