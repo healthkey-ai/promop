@@ -7182,7 +7182,8 @@ def _normalize_bulk_measurement_rows(model_cls, new_ids):
     have a different property (and therefore different canonical unit) from
     the parent mapping's.
 
-    Works on already-persisted rows so the upsert identity is never altered.
+    Rows that already carry a ``unit_concept`` are left as sent (#2104); see
+    ``normalize_measurement_units``.
     """
     from omop_core.models import SourceCodeAxisVariant
     from omop_core.services.canonical_units import (
@@ -8286,9 +8287,11 @@ class _OmopBulkCreateMixin:
                     ids, updated = list(new_ids), 0
 
                 # Normalize units on newly-inserted Measurement rows (#2088).
-                # Done AFTER upsert/bulk_create because value_as_number is part
-                # of the Measurement upsert key — normalizing before the match
-                # would change the identity and create duplicates on a re-run.
+                # Rows that carry a unit_concept are stored as sent (#2104):
+                # the ETL converts units itself, and value_as_number is part of
+                # the Measurement upsert key, so converting a row it sent would
+                # stop its re-run from matching and insert a duplicate. Only
+                # rows sent without a unit concept are converted.
                 if model_cls is Measurement and new_ids:
                     _normalize_bulk_measurement_rows(model_cls, new_ids)
 

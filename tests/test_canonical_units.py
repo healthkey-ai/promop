@@ -965,3 +965,200 @@ class TestUnmappedConceptNormalization:
         # g/dL -> g/L (MCnc base unit): multiply by 10
         assert row.value_as_number == Decimal('20')
         assert row.unit_source_value == 'g/dL'  # never changed
+
+
+class TestUnitConceptIsStoredAsSent:
+    """A row that carries a unit_concept keeps the value and unit it was sent with (#2104).
+
+    The ETL converts units itself (etl#44) and sends the resulting unit concept.
+    Converting its rows again from unit_source_value stored sodium 140 mmol/L as
+    0.14 mol/L, and the ETL's re-run then found no row matching what it sent.
+    """
+
+    def _sodium(self):
+        concept = ConceptFactory(concept_code='SOD-2104', concept_name='Sodium')
+        mmol = _ucum_concept('mmol/L')
+        mol = _ucum_concept('mol/L')
+        mapping = _sccm('Sodium Level', concept, destination_unit_concept=mol)
+        return concept, mmol, mol, mapping
+
+    def test_queryset_helper_skips_rows_with_unit_concept(self, db):
+        concept, mmol, mol, mapping = self._sodium()
+        row = MeasurementFactory(
+            measurement_concept=concept, measurement_source_value='Sodium Level',
+            value_as_number=Decimal('140'), unit_source_value='mmol/L',
+            unit_concept=mmol, range_low=Decimal('135'), range_high=Decimal('145'),
+        )
+
+        count = normalize_measurement_units(
+            Measurement.objects.filter(pk=row.pk), mapping)
+
+        assert count == 0
+        row.refresh_from_db()
+        assert row.value_as_number == Decimal('140')
+        assert row.range_low == Decimal('135')
+        assert row.range_high == Decimal('145')
+        assert row.unit_concept_id == mmol.concept_id
+
+    def test_value_already_converted_by_the_sender_is_not_converted_again(self, db):
+        # unit_source_value names the hospital's unit; the value and
+        # unit_concept are the ETL's converted ones.
+        concept, mmol, mol, mapping = self._sodium()
+        row = MeasurementFactory(
+            measurement_concept=concept, measurement_source_value='Sodium Level',
+            value_as_number=Decimal('0.14'), unit_source_value='mmol/L',
+            unit_concept=mol,
+        )
+
+        assert normalize_measurement_units(
+            Measurement.objects.filter(pk=row.pk), mapping) == 0
+        row.refresh_from_db()
+        assert row.value_as_number == Decimal('0.14')
+
+    def test_no_matching_concept_counts_as_no_unit(self, db):
+        concept, mmol, mol, mapping = self._sodium()
+        no_match = ConceptFactory(concept_id=0, concept_code='0',
+                                  concept_name='No matching concept')
+        row = MeasurementFactory(
+            measurement_concept=concept, measurement_source_value='Sodium Level',
+            value_as_number=Decimal('140'), unit_source_value='mmol/L',
+            unit_concept=no_match,
+        )
+
+        assert normalize_measurement_units(
+            Measurement.objects.filter(pk=row.pk), mapping) == 1
+        row.refresh_from_db()
+        assert row.value_as_number == Decimal('0.14')
+        assert row.unit_concept_id == mol.concept_id
+
+    def test_mixed_rows_convert_only_those_without_unit_concept(self, db):
+        concept, mmol, mol, mapping = self._sodium()
+        sent = MeasurementFactory(
+            measurement_concept=concept, measurement_source_value='Sodium Level',
+            value_as_number=Decimal('140'), unit_source_value='mmol/L',
+            unit_concept=mmol,
+        )
+        bare = MeasurementFactory(
+            measurement_concept=concept, measurement_source_value='Sodium Level',
+            value_as_number=Decimal('138'), unit_source_value='mmol/L',
+        )
+
+        count = normalize_measurement_units(
+            Measurement.objects.filter(pk__in=[sent.pk, bare.pk]), mapping)
+
+        assert count == 1
+        sent.refresh_from_db()
+        bare.refresh_from_db()
+        assert sent.value_as_number == Decimal('140')
+        assert bare.value_as_number == Decimal('0.138')
+
+    def test_instance_helper_skips_rows_with_unit_concept(self, db):
+        concept, mmol, mol, mapping = self._sodium()
+        inst = MeasurementFactory.build(
+            measurement_concept=concept, value_as_number=Decimal('140'),
+            unit_source_value='mmol/L', unit_concept=mmol,
+        )
+
+        assert normalize_measurement_instances([inst], mapping=mapping) == 0
+        assert inst.value_as_number == Decimal('140')
+        assert inst.unit_concept_id == mmol.concept_id
+
+    def test_repoint_leaves_rows_with_unit_concept_as_sent(self, db):
+        from omop_core.mapping.code_resolution import repoint_clinical_rows
+
+        concept, mmol, mol, mapping = self._sodium()
+        old_concept = ConceptFactory(concept_code='SOD-OLD', concept_name='Old')
+        row = MeasurementFactory(
+            measurement_concept=old_concept, measurement_source_value='Sodium Level',
+            value_as_number=Decimal('140'), unit_source_value='mmol/L',
+            unit_concept=mmol,
+        )
+
+        result = repoint_clinical_rows(
+            mapping=mapping, old_concept_id=old_concept.concept_id,
+            new_concept_id=concept.concept_id)
+
+        assert result['rows_updated'] == 1
+        assert result.get('rows_normalized', 0) == 0
+        row.refresh_from_db()
+        assert row.measurement_concept_id == concept.concept_id
+        assert row.value_as_number == Decimal('140')
+        assert row.unit_concept_id == mmol.concept_id
+
+
+@pytest.fixture
+def etl_client(db):
+    client = APIClient()
+    admin = Identity.objects.create_user(
+        email='etl-2104@example.org', password='test', is_staff=True)
+    client.force_authenticate(admin)
+    return client
+
+
+class TestBulkCreateStoresUnitsAsSent:
+    """POST /api/v1/measurements/ with a list, as the ETL sends it (#2104)."""
+
+    def _setup(self):
+        person = PersonFactory()
+        PatientRecordFactory(person=person)
+        concept = ConceptFactory(concept_code='SOD-BULK', concept_name='Sodium')
+        type_concept = ConceptFactory(concept_code='EHR-BULK', concept_name='EHR')
+        mmol = _ucum_concept('mmol/L')
+        mol = _ucum_concept('mol/L')
+        _sccm('Sodium Level', concept, destination_unit_concept=mol)
+        return person, concept, type_concept, mmol, mol
+
+    def _row(self, person, concept, type_concept, unit_concept=None):
+        row = {
+            'person': person.person_id,
+            'measurement_concept': concept.concept_id,
+            'measurement_date': '2026-10-01',
+            'measurement_type_concept': type_concept.concept_id,
+            'value_as_number': '140.00000',
+            'unit_source_value': 'mmol/L',
+            'measurement_source_value': 'Sodium Level',
+            'value_source_value': '140',
+        }
+        if unit_concept is not None:
+            row['unit_concept'] = unit_concept.concept_id
+        return row
+
+    def test_row_with_unit_concept_is_stored_as_sent(self, etl_client):
+        person, concept, type_concept, mmol, mol = self._setup()
+
+        resp = etl_client.post(
+            '/api/v1/measurements/?skip_refresh=true&upsert=false',
+            [self._row(person, concept, type_concept, mmol)], format='json')
+
+        assert resp.status_code == 201, resp.content
+        row = Measurement.objects.get(pk=resp.json()['ids'][0])
+        assert row.value_as_number == Decimal('140')
+        assert row.unit_concept_id == mmol.concept_id
+        assert row.unit_source_value == 'mmol/L'
+
+    def test_rerun_with_upsert_matches_instead_of_duplicating(self, etl_client):
+        person, concept, type_concept, mmol, mol = self._setup()
+        body = [self._row(person, concept, type_concept, mmol)]
+
+        first = etl_client.post('/api/v1/measurements/?skip_refresh=true',
+                                body, format='json')
+        second = etl_client.post('/api/v1/measurements/?skip_refresh=true',
+                                 body, format='json')
+
+        assert first.status_code == 201, first.content
+        assert second.status_code == 201, second.content
+        assert second.json()['created'] == 0
+        assert second.json()['ids'] == first.json()['ids']
+        assert Measurement.objects.filter(person=person).count() == 1
+
+    def test_row_without_unit_concept_is_still_converted(self, etl_client):
+        person, concept, type_concept, mmol, mol = self._setup()
+
+        resp = etl_client.post(
+            '/api/v1/measurements/?skip_refresh=true&upsert=false',
+            [self._row(person, concept, type_concept)], format='json')
+
+        assert resp.status_code == 201, resp.content
+        row = Measurement.objects.get(pk=resp.json()['ids'][0])
+        assert row.value_as_number == Decimal('0.14')
+        assert row.unit_concept_id == mol.concept_id
