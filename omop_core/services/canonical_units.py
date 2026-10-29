@@ -444,7 +444,8 @@ def _ucum_concept(unit_str):
     )
 
 
-def normalize_measurement_units(qs, mapping, target_concept_id=None):
+def normalize_measurement_units(qs, mapping, target_concept_id=None,
+                                keep_sent_units=False):
     """Convert value/unit on Measurement rows to the mapping's target unit.
 
     *qs* is a queryset of ``Measurement`` rows (already filtered to the rows
@@ -455,15 +456,16 @@ def normalize_measurement_units(qs, mapping, target_concept_id=None):
     concept for unit resolution — needed when an axis variant is approved,
     because the variant's destination LOINC differs from the mapping's.
 
-    Only rows with a non-null ``value_as_number``, a recognisable
-    ``unit_source_value`` and **no** ``unit_concept`` are touched.  A row that
-    already carries a unit concept is stored as its writer sent it (#2104):
-    the ETL converts units itself, and its value is meant in that unit, not
-    in ``unit_source_value``.  This is also the idempotency guard: a row this
-    function converts gets the target unit concept, so a later call skips it.
-    ``unit_source_value`` is never changed (it records the hospital's original
-    unit).  Rows whose source unit is already the target, or whose source unit
-    is incompatible, are silently skipped.
+    Only rows with a non-null ``value_as_number`` and a recognisable
+    ``unit_source_value`` are touched.  ``unit_source_value`` is never changed
+    (it records the hospital's original unit).  Rows whose source unit is
+    already the target, or whose source unit is incompatible, are silently
+    skipped.
+
+    *keep_sent_units*, when true, also skips every row that already carries a
+    ``unit_concept`` (0, "No matching concept", counts as none).  The bulk OMOP
+    write sets it (#2104): its caller, the ETL, converts units itself, so the
+    value is meant in the unit concept it sent, not in ``unit_source_value``.
 
     Returns the number of rows whose ``value_as_number`` was rewritten.
     """
@@ -473,9 +475,8 @@ def normalize_measurement_units(qs, mapping, target_concept_id=None):
 
     target_ucum = _ucum_concept(target_unit)
 
-    # Rows whose unit the writer already chose are left as sent (#2104).
-    # 0 is OMOP's "No matching concept", i.e. no unit chosen.
-    qs = qs.filter(Q(unit_concept_id__isnull=True) | Q(unit_concept_id=0))
+    if keep_sent_units:
+        qs = qs.filter(Q(unit_concept_id__isnull=True) | Q(unit_concept_id=0))
 
     # Group rows by their raw unit_source_value so we compute the conversion
     # factor once per spelling, not once per row.
@@ -488,6 +489,13 @@ def normalize_measurement_units(qs, mapping, target_concept_id=None):
     )
     if not raw_units:
         return 0
+
+    # Skip rows already normalized to the target unit (idempotency guard).
+    # Without this, a re-approve would convert already-converted values again
+    # using unit_source_value (which is never changed), producing a double
+    # conversion.
+    if target_ucum:
+        qs = qs.exclude(unit_concept_id=target_ucum.concept_id)
 
     total_normalized = 0
     for raw in raw_units:
@@ -563,9 +571,6 @@ def normalize_measurement_instances(instances, mapping=None,
     for inst in instances:
         raw = getattr(inst, 'unit_source_value', None)
         if not raw or inst.value_as_number is None:
-            continue
-        if inst.unit_concept_id:
-            # The writer chose the unit; store as sent (#2104).
             continue
         src = unit_code(raw)
         if src == target_unit:

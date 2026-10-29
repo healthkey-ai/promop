@@ -967,12 +967,13 @@ class TestUnmappedConceptNormalization:
         assert row.unit_source_value == 'g/dL'  # never changed
 
 
-class TestUnitConceptIsStoredAsSent:
-    """A row that carries a unit_concept keeps the value and unit it was sent with (#2104).
+class TestKeepSentUnits:
+    """keep_sent_units leaves a row that carries a unit_concept as sent (#2104).
 
     The ETL converts units itself (etl#44) and sends the resulting unit concept.
     Converting its rows again from unit_source_value stored sodium 140 mmol/L as
     0.14 mol/L, and the ETL's re-run then found no row matching what it sent.
+    Only the bulk write opts in; repoint and resolve still convert.
     """
 
     def _sodium(self):
@@ -991,7 +992,8 @@ class TestUnitConceptIsStoredAsSent:
         )
 
         count = normalize_measurement_units(
-            Measurement.objects.filter(pk=row.pk), mapping)
+            Measurement.objects.filter(pk=row.pk), mapping,
+            keep_sent_units=True)
 
         assert count == 0
         row.refresh_from_db()
@@ -1011,7 +1013,8 @@ class TestUnitConceptIsStoredAsSent:
         )
 
         assert normalize_measurement_units(
-            Measurement.objects.filter(pk=row.pk), mapping) == 0
+            Measurement.objects.filter(pk=row.pk), mapping,
+            keep_sent_units=True) == 0
         row.refresh_from_db()
         assert row.value_as_number == Decimal('0.14')
 
@@ -1026,7 +1029,8 @@ class TestUnitConceptIsStoredAsSent:
         )
 
         assert normalize_measurement_units(
-            Measurement.objects.filter(pk=row.pk), mapping) == 1
+            Measurement.objects.filter(pk=row.pk), mapping,
+            keep_sent_units=True) == 1
         row.refresh_from_db()
         assert row.value_as_number == Decimal('0.14')
         assert row.unit_concept_id == mol.concept_id
@@ -1044,7 +1048,8 @@ class TestUnitConceptIsStoredAsSent:
         )
 
         count = normalize_measurement_units(
-            Measurement.objects.filter(pk__in=[sent.pk, bare.pk]), mapping)
+            Measurement.objects.filter(pk__in=[sent.pk, bare.pk]), mapping,
+            keep_sent_units=True)
 
         assert count == 1
         sent.refresh_from_db()
@@ -1052,18 +1057,23 @@ class TestUnitConceptIsStoredAsSent:
         assert sent.value_as_number == Decimal('140')
         assert bare.value_as_number == Decimal('0.138')
 
-    def test_instance_helper_skips_rows_with_unit_concept(self, db):
+    def test_without_the_flag_rows_with_unit_concept_are_converted(self, db):
+        # Lab-results sync sets unit_concept from the unit string, so its
+        # value is in unit_source_value and still needs converting.
         concept, mmol, mol, mapping = self._sodium()
-        inst = MeasurementFactory.build(
-            measurement_concept=concept, value_as_number=Decimal('140'),
-            unit_source_value='mmol/L', unit_concept=mmol,
+        row = MeasurementFactory(
+            measurement_concept=concept, measurement_source_value='Sodium Level',
+            value_as_number=Decimal('140'), unit_source_value='mmol/L',
+            unit_concept=mmol,
         )
 
-        assert normalize_measurement_instances([inst], mapping=mapping) == 0
-        assert inst.value_as_number == Decimal('140')
-        assert inst.unit_concept_id == mmol.concept_id
+        assert normalize_measurement_units(
+            Measurement.objects.filter(pk=row.pk), mapping) == 1
+        row.refresh_from_db()
+        assert row.value_as_number == Decimal('0.14')
+        assert row.unit_concept_id == mol.concept_id
 
-    def test_repoint_leaves_rows_with_unit_concept_as_sent(self, db):
+    def test_repoint_still_converts_rows_with_unit_concept(self, db):
         from omop_core.mapping.code_resolution import repoint_clinical_rows
 
         concept, mmol, mol, mapping = self._sodium()
@@ -1079,11 +1089,11 @@ class TestUnitConceptIsStoredAsSent:
             new_concept_id=concept.concept_id)
 
         assert result['rows_updated'] == 1
-        assert result.get('rows_normalized', 0) == 0
+        assert result.get('rows_normalized', 0) == 1
         row.refresh_from_db()
         assert row.measurement_concept_id == concept.concept_id
-        assert row.value_as_number == Decimal('140')
-        assert row.unit_concept_id == mmol.concept_id
+        assert row.value_as_number == Decimal('0.14')
+        assert row.unit_concept_id == mol.concept_id
 
 
 @pytest.fixture

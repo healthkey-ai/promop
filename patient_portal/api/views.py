@@ -7182,8 +7182,9 @@ def _normalize_bulk_measurement_rows(model_cls, new_ids):
     have a different property (and therefore different canonical unit) from
     the parent mapping's.
 
-    Rows that already carry a ``unit_concept`` are left as sent (#2104); see
-    ``normalize_measurement_units``.
+    Rows that already carry a ``unit_concept`` are left as sent (#2104): the
+    ETL converts units itself.  Later repoints and resolutions still convert
+    them; see ``normalize_measurement_units(keep_sent_units=...)``.
     """
     from omop_core.models import SourceCodeAxisVariant
     from omop_core.services.canonical_units import (
@@ -7256,14 +7257,15 @@ def _normalize_bulk_measurement_rows(model_cls, new_ids):
                         var_qs.values_list('pk', flat=True))
                     normalize_measurement_units(
                         var_qs, mapping,
-                        target_concept_id=variant.target_concept_id)
+                        target_concept_id=variant.target_concept_id,
+                        keep_sent_units=True)
             # Remaining rows (not claimed by any variant) use the mapping.
             # normalize_measurement_units returns 0 when no rows match,
             # so no exists() guard needed.
             unclaimed = sv_qs.exclude(pk__in=claimed_pks) if claimed_pks else sv_qs
-            normalize_measurement_units(unclaimed, mapping)
+            normalize_measurement_units(unclaimed, mapping, keep_sent_units=True)
         else:
-            normalize_measurement_units(sv_qs, mapping)
+            normalize_measurement_units(sv_qs, mapping, keep_sent_units=True)
 
     # For source values with no SCCM mapping, normalize by concept_id.
     # _resolve_target_unit's LOINC property fallback handles this via the
@@ -7288,7 +7290,7 @@ def _normalize_bulk_measurement_rows(model_cls, new_ids):
                 target_concept_id=cid,
             )
             cid_qs = unmapped_rows.filter(measurement_concept_id=cid)
-            normalize_measurement_units(cid_qs, mock_mapping)
+            normalize_measurement_units(cid_qs, mock_mapping, keep_sent_units=True)
 
 
 def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances,
