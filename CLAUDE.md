@@ -1572,7 +1572,10 @@ raw text behind that resolution, so it separates two coded answers safely.
 
 A batch that trips a database constraint returns **409** with the driver's first
 error line, not 500. The whole batch rolled back, so the caller can retry, and a
-500 reads as "the service is down".
+500 reads as "the service is down". A value the database refuses after
+validation (`DataError`, e.g. `numeric field overflow`) returns **400** with
+that first line, on the single-row, bulk create and bulk update writes: the
+same request fails the same way, so it is not a retry (#2101).
 
 A row with no `source_value` or no date has no identity and is always inserted.
 

@@ -17,7 +17,7 @@ from rest_framework.throttling import ScopedRateThrottle
 from oauth2_provider.contrib.rest_framework import OAuth2Authentication
 from patient_portal.models import Identity
 from django.contrib.auth import logout, login, authenticate
-from django.db import IntegrityError, models, transaction
+from django.db import DataError, IntegrityError, models, transaction
 from django.db.models import Case, CharField, Count, F, IntegerField, Prefetch, Q, Value, When
 from django.db.models.functions import Cast, Concat, Length
 from django.views.decorators.csrf import csrf_exempt
@@ -7987,6 +7987,26 @@ class _OmopDeferRefreshMixin:
         return response
 
 
+def _data_error_response(exc, what, logger_args):
+    """400 for a value the database refused (#2101), e.g. ``numeric field overflow``.
+
+    Validation passed, so this is a value something server-side derived that
+    does not fit its column. It is the request's data, not a fault of the
+    service, and the same request will fail the same way, so a retry is not
+    the answer. The driver's first line names the problem; the log keeps the
+    traceback.
+    """
+    logger.exception(*logger_args)
+    return Response(
+        {'detail': (
+            f'The database refused a value in the {what} and rolled it back '
+            'whole; nothing was written. Retrying the same request will fail '
+            'the same way.'
+        ), 'error': str(exc).strip().partition('\n')[0]},
+        status=status.HTTP_400_BAD_REQUEST,
+    )
+
+
 def _bulk_row_errors(errors, row_count):
     """Keep the bulk endpoint's positional error list under DRF 3.18.
 
@@ -8129,6 +8149,10 @@ class _OmopBulkCreateMixin:
                 ), 'error': str(exc).strip().partition('\n')[0]},
                 status=status.HTTP_409_CONFLICT,
             )
+        except DataError as exc:
+            return _data_error_response(
+                exc, 'row',
+                ('single %s upsert for person %s failed on a database value', model_name, person.person_id))
 
         obj = model_cls.objects.get(**{pk_field: row_id})
         response_serializer = self.get_serializer(obj)
@@ -8244,6 +8268,10 @@ class _OmopBulkCreateMixin:
                 ), 'error': str(exc).strip().partition('\n')[0]},
                 status=status.HTTP_409_CONFLICT,
             )
+        except DataError as exc:
+            return _data_error_response(
+                exc, 'batch',
+                ('bulk %s write for person %s failed on a database value', model_name, person.person_id))
 
     def _bulk_write(
         self,
@@ -8413,6 +8441,10 @@ class _OmopBulkUpdateMixin:
                 ), 'error': str(exc).strip().partition('\n')[0]},
                 status=status.HTTP_409_CONFLICT,
             )
+        except DataError as exc:
+            return _data_error_response(
+                exc, 'batch',
+                ('bulk %s update for %s rows failed on a database value', model_name, len(ids)))
 
     def _write_bulk_update(
         self,
