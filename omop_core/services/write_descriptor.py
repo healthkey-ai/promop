@@ -283,6 +283,21 @@ _COMPUTED_INPUTS = {
     'no_hiv_status': ['hiv_status'],
     'no_hepatitis_b_status': ['hepatitis_b_status'],
     'no_hepatitis_c_status': ['hepatitis_c_status'],
+    # Same class, found by writing each field and re-deriving (#2113). These four
+    # are derived from record fields, so the inputs are the edit surface:
+    # `recompute_patient_record_fields` owns the verdict, the components do not.
+    'b_symptoms': [
+        'b_symptom_fever', 'b_symptom_night_sweats', 'b_symptom_weight_loss',
+    ],
+    'meets_slim': [
+        'clonal_plasma_cells', 'kappa_flc', 'lambda_flc', 'kappa_lambda_ratio',
+    ],
+    'disease_slug': ['disease'],
+    # These two have no record component at all: they are read off OMOP condition
+    # facts (SNOMED 40733004 / 363346000). Computed with no inputs, so a client
+    # shows the value read-only instead of offering a field that cannot exist.
+    'active_infection_status': [],
+    'active_malignancies': [],
 }
 
 # Lifecycle columns are not clinical data and are never writable regardless of
@@ -760,12 +775,14 @@ def build_writable_field_descriptor():
             continue
 
         if field in _COMPUTED_INPUTS:
+            inputs = _COMPUTED_INPUTS[field]
             descriptor[field] = {
                 'kind': KIND_COMPUTED,
                 'writable': False,
-                'inputs': _COMPUTED_INPUTS[field],
+                'inputs': inputs,
                 'reason': (
-                    'Computed from ' + ', '.join(_COMPUTED_INPUTS[field]) + '.'
+                    'Computed from ' + ', '.join(inputs) + '.' if inputs else
+                    'Computed from OMOP facts; there is no record field to edit.'
                 ),
             }
             continue
