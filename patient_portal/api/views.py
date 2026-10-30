@@ -6074,10 +6074,15 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
                 )
 
         # A code that now arrives in two units may imply two LOINC tests; the
-        # queue flags it. Evidence only, so a failure here never fails the upload.
+        # queue flags it. The codes' Seen counts become what their per-patient
+        # rows now say, replacing the provisional count a lookup kept while
+        # no rows existed (#2123). Evidence only, so a failure here never
+        # fails the upload.
         try:
-            from omop_core.mapping.axis_variants import refresh_multi_unit_codes
-            refresh_multi_unit_codes({(svid, sv) for sv, svid, _ot in request_keys})
+            from omop_core.mapping.axis_variants import rebuild_seen_counts, refresh_multi_unit_codes
+            keys = {(svid, sv) for sv, svid, _ot in request_keys}
+            refresh_multi_unit_codes(keys)
+            rebuild_seen_counts(keys)
         except Exception:  # noqa: BLE001
             logger.warning('Axis variant refresh after source-code upload failed.', exc_info=True)
 

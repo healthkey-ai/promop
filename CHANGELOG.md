@@ -190,6 +190,12 @@ All notable changes to PRomop are documented here.
 
 ### Fixed
 
+- **A lookup's Seen bump is provisional** — `code-mappings/lookup/` now
+  increments a code's Seen count only while the instance holds no per-patient
+  source-code rows for it; a lookup is one ask per code per batch, not one
+  per record. Each per-patient upload sets the Seen count of the codes it
+  wrote from their rows, so the provisional count gives way as soon as the
+  patients land. (#2123)
 - **Seen counts come from this instance's patients** — a rebuild walk now
   starts by setting every mapped code's Seen count, in one statement, from the
   per-patient source-code rows, per vocabulary and code, instead of leaving

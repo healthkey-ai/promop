@@ -228,15 +228,31 @@ def _description_for(source_vocabulary_id, source_code, source_text):
     return describe_source_code(source_vocabulary_id or '', source_code) or text
 
 
+def _has_patient_rows(mapping, organization=None):
+    """Whether this instance holds per-patient rows for the mapping's code:
+    then its Seen count is theirs, not the lookups' (#2123). A hospital-scoped
+    mapping asks about its hospital's patients."""
+    rows = PatientSourceCode.objects.filter(
+        source_vocabulary_id=mapping.source_vocabulary_id or '', source_value__iexact=mapping.source_code)
+    if mapping.organization_id is not None:
+        rows = rows.filter(person__patient_record__organization_id=mapping.organization_id)
+    return rows.exists()
+
+
 def _record_proposal(*, source_vocabulary_id, source_code, source_text,
                      concept, omop_table, source_system, organization=None,
                      notes='', is_suggestion=False):
     """Create or bump the proposed mapping for a code an import had to invent.
 
     Idempotent: the first sighting creates the row, later sightings bump
-    ``occurrence_count`` and ``last_seen`` so the review queue can be ordered by
-    how much a code actually matters.  Never touches an approved row — that
-    would let an import quietly undo a curator.
+    ``last_seen``, and ``occurrence_count`` while the code has no per-patient
+    rows on this instance, so the review queue can be ordered by how much a
+    code actually matters before its patients' source codes are uploaded.
+    That count is provisional: a lookup is one ask per code per batch, not
+    one per record, and once the per-patient rows exist they are the count
+    (``axis_variants.rebuild_seen_counts`` after each upload and in the
+    rebuild walk, #2123), so a sighting no longer adds to it. Never touches
+    an approved row — that would let an import quietly undo a curator.
     """
     now = timezone.now()
     # Truncated before the lookup as well as the create. Looking up the full
@@ -289,10 +305,9 @@ def _record_proposal(*, source_vocabulary_id, source_code, source_text,
 
     # This is called by concurrent import workers.  Reading, adding one in
     # Python, and saving loses sightings under load; keep Seen a real counter.
-    updates = {
-        'occurrence_count': F('occurrence_count') + 1,
-        'last_seen': now,
-    }
+    updates = {'last_seen': now}
+    if not _has_patient_rows(mapping, organization):
+        updates['occurrence_count'] = F('occurrence_count') + 1
     if mapping.first_seen is None:
         updates['first_seen'] = now
     SourceCodeConceptMapping.objects.filter(pk=mapping.pk).update(**updates)

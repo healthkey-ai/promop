@@ -335,7 +335,7 @@ def _patient_rows_for(scoped=False):
     return rows
 
 
-def rebuild_seen_counts():
+def rebuild_seen_counts(keys=None):
     """Set every mapped code's Seen count from this instance's per-patient rows (#2121).
 
     On a seeded instance ``occurrence_count`` was the hospital-code extract's
@@ -347,9 +347,13 @@ def rebuild_seen_counts():
     patients only. Set-based, four statements, so it costs the same whatever
     the walk's key set; a code with no rows here keeps its count. The
     extract's label-group figure is cleared on the rows rebuilt, since it no
-    longer describes the members' counts. Returns the rows updated.
+    longer describes the members' counts. ``keys`` limits the pass to those
+    ``(source_vocabulary_id, source_code)`` keys: what a per-patient upload
+    runs for the codes it just wrote, so the count a lookup bumped while no
+    patient rows existed (#2123) gives way to the rows as soon as they land.
+    Returns the rows updated.
     """
-    from django.db.models import Exists, OuterRef, Subquery, Sum
+    from django.db.models import Exists, OuterRef, Q, Subquery, Sum
 
     from omop_core.models import SourceCodeConceptMapping
 
@@ -357,11 +361,21 @@ def rebuild_seen_counts():
         return Subquery(queryset.order_by().values('source_vocabulary_id')
                         .annotate(n=Sum('occurrence_count')).values('n')[:1])
 
+    match = None
+    if keys is not None:
+        keys = {(vocab or '', code) for vocab, code in keys if code}
+        if not keys:
+            return 0
+        match = Q()
+        for vocab, code in keys:
+            match |= Q(source_vocabulary_id=vocab, source_code__iexact=code)
     updated = 0
     for scoped in (False, True):
         rows = _patient_rows_for(scoped)
         on_table = rows.filter(omop_table=OuterRef('omop_table'))
         mappings = SourceCodeConceptMapping.objects.filter(organization__isnull=not scoped)
+        if match is not None:
+            mappings = mappings.filter(match)
         updated += mappings.filter(omop_table='').filter(Exists(rows)).update(
             occurrence_count=total(rows), source_group_occurrence_count=None)
         updated += mappings.exclude(omop_table='').filter(Exists(on_table)).update(
