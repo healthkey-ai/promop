@@ -146,14 +146,15 @@ transition therefore links both the `data-owner` and `privacy` approvals.
 | `target_version` | text | `updated_at:fingerprint` |
 | `manifest_hash` | char(64) | reviewed allowlist |
 | `expires_at` | timestamptz | required |
+| `revision` | int | per-staging, per-approver round |
 | `created_at` | timestamptz | audit |
 
-Unique `(staging, approver, decision, target_version, manifest_hash)`; a new round
-after the target changes creates a new row, while a duplicate approval for the same
-decision/version is rejected. A deletion needs **two distinct approver identities**,
-one with role `data-owner` and one with `privacy`, for the same transition; history
-keeps earlier approvals. The transition links all applied approvals through the M2M
-table.
+Unique `(staging, approver, revision)`. Every approval round gets a new `revision`,
+including a re-approval after expiry when the target/manifest did not change; a
+duplicate revision is rejected, and history keeps earlier rounds. A deletion needs
+**two distinct approver identities**, one with role `data-owner` and one with
+`privacy`, for the same transition; the transition links all applied approvals
+through the M2M table.
 
 ## 5. Identity
 
@@ -247,13 +248,13 @@ Rules:
    | 3 | absent/ambiguous | value/absent | any | `keep_target`/no-op; no invented clear |
    | 4 | value | absent | any | `copy` |
    | 5 | value | equal value | any | no-op |
-   | 6 | divergence (value vs different value, clear vs value, confirmed edit vs import) | any | any | evaluate provenance in rows 7–10; never a default guess |
-   | 7 | no authoritative user event | divergence | any | `conflict` |
-   | 8 | equal/incomparable provenance | divergence | any | `conflict` |
-   | 9 | target later, confirmed | divergence | any | `keep_target` |
-   | 10 | source later | divergence | default | `conflict` (target wins, unresolved) |
-   | 11 | source later | divergence | approved cohort/field + `overwrite` | `copy`/`clear`; displaced target retained |
-   | 12 | any | divergence | recorded `chronology_override` | the recorded decision's result, only for the version/hash it names |
+   | 6 | divergence (value vs different value, clear vs value, confirmed edit vs import) | any | any | evaluate rows 7–12 in order; the first match terminates; never a default guess |
+   | 7 | any | divergence | recorded `chronology_override` for this target version/hash | the recorded decision's result; a stale override is `conflict` |
+   | 8 | no authoritative user event | divergence | any | `conflict` |
+   | 9 | equal/incomparable provenance | divergence | any | `conflict` |
+   | 10 | target later, confirmed | divergence | any | `keep_target` |
+   | 11 | source later | divergence | default | `conflict` (target wins, unresolved) |
+   | 12 | source later | divergence | approved cohort/field + `overwrite` | `copy`/`clear`; displaced target retained |
 
    `significant` means the manifest marks the field as clinical/significant (the
    default for migrated fields); a non-significant difference is still recorded but
