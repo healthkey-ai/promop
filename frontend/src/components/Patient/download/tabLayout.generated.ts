@@ -138,24 +138,12 @@ export const TAB_LAYOUT: TabLayout = {
           "hiv_status"
         ],
         [
-          "No HIV",
-          "no_hiv_status"
-        ],
-        [
           "Hepatitis B Positive",
           "hepatitis_b_status"
         ],
         [
-          "No Hepatitis B",
-          "no_hepatitis_b_status"
-        ],
-        [
           "Hepatitis C Positive",
           "hepatitis_c_status"
-        ],
-        [
-          "No Hepatitis C",
-          "no_hepatitis_c_status"
         ]
       ]
     },
