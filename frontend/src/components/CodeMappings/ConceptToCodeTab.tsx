@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import api from '@/api/axios';
 import { fetchDiseaseCategories } from '@/api/mappingHub';
@@ -28,6 +28,8 @@ type Source = {
   axis_variant_count?: number;
   /** The variants themselves, each with its own (suggested) destination (#2012). */
   axis_variants?: AxisVariant[];
+  /** Normalised description for grouping codes with the same label. */
+  source_label_norm?: string | null;
   /** The ranker's confidence (0-1) in this source → concept pairing. */
   confidence?: number | null;
   /** Saved in the full editor since the preview: no longer a bulk-review row. */
@@ -430,6 +432,8 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
   // Retry the sources a ranker declined in earlier runs, instead of skipping them (#2034).
   const [retryDeclined, setRetryDeclined] = useState(false);
   const [strategies, setStrategies] = useState({ umls: true, lexical: true });
+  // Which candidate groups (by normalised label) are expanded to show individual codes.
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [writing, setWriting] = useState(false);
   const [progress, setProgress] = useState('');
   const [order, setOrder] = useState<ConfidenceOrder>('');
@@ -504,7 +508,7 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
     setSelected(new Set());
   };
   const start = async () => {
-    setStarting(true); setError(''); setProgress(''); setSelected(new Set()); setRun(null); setPatched({}); setMode('candidates');
+    setStarting(true); setError(''); setProgress(''); setSelected(new Set()); setRun(null); setPatched({}); setExpanded(new Set()); setMode('candidates');
     try {
       const { data: next } = await api.post<Run>('/v1/concept-to-code/suggest/', {
         concept_ids: [concept.concept_id], strategies: Object.keys(strategies).filter(key => strategies[key as keyof typeof strategies]),
@@ -528,8 +532,50 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
   const declinedHidden = unscored.filter(row => row.declined).length;
   const unrankedHidden = unscored.length - declinedHidden;
   const candidateRows = scored.filter(row => !seenOnly || row.occurrence_count > 0);
+  const sortedCandidates = order ? [...candidateRows].sort(byConfidence(order)) : candidateRows;
+
+  // Group candidates by normalised description so identical-label codes can be
+  // approved in one click. Rows with null norm are each their own group.
+  type CandidateGroup = {
+    key: string; description: string; members: Source[];
+    maxConfidence: number | null; minConfidence: number | null;
+    totalSeen: number; hasVariants: boolean;
+  };
+  const candidateGroups = useMemo<CandidateGroup[]>(() => {
+    const map = new Map<string, Source[]>();
+    const ungrouped: Source[] = [];
+    for (const row of sortedCandidates) {
+      const norm = row.source_label_norm;
+      if (!norm) { ungrouped.push(row); continue; }
+      const existing = map.get(norm);
+      if (existing) existing.push(row);
+      else map.set(norm, [row]);
+    }
+    const groups: CandidateGroup[] = [];
+    for (const [norm, members] of map) {
+      const confidences = members.map(m => m.confidence).filter((c): c is number => c != null);
+      groups.push({
+        key: norm, description: members[0].source_code_description,
+        members, totalSeen: members[0].occurrence_count,
+        maxConfidence: confidences.length ? Math.max(...confidences) : null,
+        minConfidence: confidences.length ? Math.min(...confidences) : null,
+        hasVariants: members.some(m => (m.axis_variant_count ?? 0) >= 2),
+      });
+    }
+    for (const row of ungrouped) {
+      const c = row.confidence ?? null;
+      groups.push({
+        key: sourceKey(row), description: row.source_code_description,
+        members: [row], totalSeen: row.occurrence_count,
+        maxConfidence: c, minConfidence: c,
+        hasVariants: (row.axis_variant_count ?? 0) >= 2,
+      });
+    }
+    return groups;
+  }, [sortedCandidates]);
+
   const linkedRows = STATUSES.flatMap(status => open[status] ? groups[status].data?.results ?? [] : []);
-  const rows = mode === 'candidates' ? (order ? [...candidateRows].sort(byConfidence(order)) : candidateRows) : linkedRows;
+  const rows = mode === 'candidates' ? sortedCandidates : linkedRows;
   const editable = rows.filter(row => !row.edited && (row.status === 'proposed' || (row.status === 'unmapped' && row.mapping_id === null)) && row.origin_system !== 'athena');
   const pending = editable.filter(row => selected.has(sourceKey(row)));
   // Every open group answers with the counts of all three, under the same filters.
@@ -761,7 +807,7 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
           {open[status] && group.data && <tr><td colSpan={6} className="p-0">
             <Pagination data={group.data} disabled={writing || group.loading} change={next => { group.setPage(next); group.setData(null); setSelected(new Set()); }} /></td></tr>}
         </tbody>;
-      }) : <tbody>{rows.map(renderRow)}</tbody>}
+      }) : <tbody>{candidateGroups.map(renderGroup)}</tbody>}
     </table></div>
     {mode === 'candidates' && !loading && !rows.length && <p className="text-sm text-slate-500">No source codes shown. {seenOnly ? 'Uncheck > 0 only to include zero-Seen codes. ' : ''}
       Run Suggest source codes to search.</p>}
@@ -772,6 +818,68 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
       onSaved={editorSaved} onDeleted={editorDeleted}
       defaultDestination={destination} sourceExamples />
   </section>;
+
+  // Render a group of candidates sharing the same normalised description.
+  // Single-member groups render exactly as a plain row. Multi-member groups
+  // show a collapsible header with a group-level checkbox.
+  function renderGroup(group: CandidateGroup) {
+    if (group.members.length === 1) return renderRow(group.members[0]);
+    const isExpanded = expanded.has(group.key);
+    const editableMembers = group.members.filter(row => editable.includes(row));
+    const selectedCount = editableMembers.filter(row => selected.has(sourceKey(row))).length;
+    const allSelected = editableMembers.length > 0 && selectedCount === editableMembers.length;
+    const someSelected = selectedCount > 0 && !allSelected;
+    const toggleGroupSelection = (checked: boolean) => {
+      setSelected(previous => {
+        const next = new Set(previous);
+        for (const row of editableMembers) { if (checked) next.add(sourceKey(row)); else next.delete(sourceKey(row)); }
+        return next;
+      });
+    };
+    const confidenceLabel = group.maxConfidence != null
+      ? (group.minConfidence !== null && Math.round(group.minConfidence * 100) !== Math.round(group.maxConfidence * 100)
+        ? `${percent(group.minConfidence)}–${percent(group.maxConfidence)}` : percent(group.maxConfidence))
+      : null;
+    return <React.Fragment key={group.key}>
+      <tr className="border-b border-slate-100 bg-slate-50/50 align-top">
+        <td className="p-2"><input type="checkbox" aria-label={`Select all ${group.members.length} codes for ${group.description}`}
+          disabled={busy || !editableMembers.length} checked={allSelected}
+          ref={el => { if (el) el.indeterminate = someSelected; }}
+          onChange={event => toggleGroupSelection(event.target.checked)} /></td>
+        <td className="p-2" colSpan={2}>
+          <button type="button" className="flex items-center gap-2 text-sm text-slate-800"
+            onClick={() => setExpanded(prev => { const next = new Set(prev); if (isExpanded) next.delete(group.key); else next.add(group.key); return next; })}>
+            <span aria-hidden="true" className="text-xs">{isExpanded ? '▾' : '▸'}</span>
+            <span>{group.description || '—'}</span>
+            <span className="rounded-full bg-slate-200 px-2 py-0.5 text-xs font-medium text-slate-700">{group.members.length} codes</span>
+            {group.hasVariants && <span className="text-xs text-sky-700">axis variants</span>}
+          </button>
+        </td>
+        <td className="p-2 text-right tabular-nums">{group.totalSeen}</td>
+        <td className="p-2 text-xs text-slate-500">{group.members[0].destination_concept_name || 'None'}</td>
+        <td className="p-2 text-xs">{confidenceLabel != null
+          ? <span className="font-medium tabular-nums">{confidenceLabel}</span>
+          : <span className="text-slate-500">not scored</span>}</td>
+      </tr>
+      {isExpanded && group.members.map(row => <tr key={sourceKey(row)} className="cursor-pointer border-b border-slate-100 bg-white align-top hover:bg-slate-50"
+        onClick={event => { if ((event.target as HTMLElement).closest('input, button, a, select, label')) return; void openEditor(row); }}>
+        <td className="p-2 pl-6"><input type="checkbox" aria-label={`Select ${row.source_vocabulary_id || 'Uncoded'} ${row.source_code}`}
+          disabled={busy || !editable.includes(row)} checked={selected.has(sourceKey(row))}
+          onChange={event => setSelected(previous => { const next = new Set(previous); if (event.target.checked) next.add(sourceKey(row)); else next.delete(sourceKey(row)); return next; })} /></td>
+        <td className="p-2 pl-6 font-mono text-xs"><button type="button" className="text-left underline underline-offset-2 hover:text-slate-950 disabled:opacity-40"
+          disabled={locked} aria-haspopup="dialog" title={`Open ${row.source_code} in Edit Mapping`}
+          onClick={() => void openEditor(row)}>{row.source_vocabulary_id || 'Uncoded'}:{row.source_code}</button><AxisVariantFlag count={row.axis_variant_count} />
+          <AxisVariantList variants={row.axis_variants} canApprove={canApprove} busy={locked} onApprove={variant => void approveVariant(row, variant)} /></td>
+        <td className="p-2 text-slate-500">{row.source_code_description || '—'}</td><td className="p-2 text-right tabular-nums">{row.occurrence_count}</td>
+        <td className="p-2 text-xs">{row.destination_concept_name || 'None'}{row.destination_concept_id && <div className="mt-1 text-slate-500">
+          OMOP {row.destination_concept_id} · {row.destination_standard_concept === 'S' ? 'Standard' : 'Nonstandard'}</div>}</td>
+        <td className="p-2 text-xs"><span className={row.status === 'approved' ? 'font-medium text-green-800' : 'text-slate-700'}>{row.status === 'unmapped' ? 'Not yet mapped' : row.status}</span>
+          {(row.status === 'proposed' || mode === 'candidates') && <div className="mt-1 text-slate-700">
+            Confidence: {row.confidence != null ? <span className="font-medium tabular-nums">{percent(row.confidence)}</span> : <span className="text-slate-500">not scored</span>}</div>}
+          {row.edited && <div className="mt-1 text-slate-700">Saved in the editor</div>}</td>
+      </tr>)}
+    </React.Fragment>;
+  }
 
   // A plain render function, not a nested component: a component declared here
   // would be a new type every render and remount each row.

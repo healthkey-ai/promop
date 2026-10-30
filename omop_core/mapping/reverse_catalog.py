@@ -11,6 +11,7 @@ from django.utils import timezone
 
 from omop_core.models import Concept, SourceCodeConceptMapping, SourceVocabularyTerm, UmlsSourceCode
 from omop_core.services.concept_to_code import source_payload
+from omop_core.services.source_labels import normalise
 from omop_core.services.source_vocabularies import (
     DOMAIN_TO_TABLE, VOCAB_TO_UMLS_ROOT, VOCABULARY_OID_ALIASES,
     canonical_source_vocabulary,
@@ -48,6 +49,7 @@ def _candidate(kind, row, domain_id):
         'destination_concept_id': None, 'destination_concept_name': '',
         'destination_standard_concept': None, 'domain_id': domain_id,
         'omop_table': DOMAIN_TO_TABLE[domain_id],
+        'source_label_norm': normalise(name),
         'source_kind': kind, 'source_record_id': row.pk,
     }
     source['source_revision'] = hashlib.sha256(json.dumps(

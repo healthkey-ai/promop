@@ -38,6 +38,7 @@ def source_payload(row):
         'destination_standard_concept': row.target_concept.standard_concept if row.target_concept else None,
         'domain_id': row.domain_id, 'omop_table': row.omop_table,
         'confidence': row.suggestion_confidence,
+        'source_label_norm': row.source_label_norm,
         # Its units imply this many LOINC axis sets (the blue "n axis values").
         'axis_variant_count': row.axis_variant_count,
         # ... and these are the variants, each with its own destination (#2012).
