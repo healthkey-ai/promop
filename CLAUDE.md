@@ -29,6 +29,28 @@ dump, so fix and verify on staging; schema changes reach production only through
 
 ---
 
+## Write Architecture: PatientRecord First
+
+**Read [`docs/patient-record-first-writes.md`](docs/patient-record-first-writes.md)
+before changing anything that writes patient data.** It is the architecture
+document for interactive edits, and the rules below assume it.
+
+- **A UI edit is written to `PatientRecord` first.** The value lands on the
+  record immediately and is tracked in `user_edited_fields`.
+- **It then feeds forward into the OMOP tables** as a side effect, through the
+  field's descriptor projection (`project_single_value`), when the field has a
+  built-in recipe or an approved `FieldConceptMapping`.
+- **There is no immediate re-derive back into `PatientRecord`.** Direct UI saves
+  do not call `refresh_patient_record()`; the record already holds the value.
+  A later sync or derivation pass may round-trip OMOP facts back into the
+  record, and `user_edited_fields` is what keeps a pending edit from being
+  overwritten when it does.
+- **Ingest goes the other way.** The ETL, FHIR sync and bulk OMOP endpoints
+  write OMOP facts and derive the record from them. See
+  [FHIR Upload Architecture](#fhir-upload-architecture) below.
+
+---
+
 ## Project Overview
 
 ### Staging deployment
@@ -49,7 +71,9 @@ redeploy does not. See `docs/render-staging-celery.md`.
 **promop** is a Django + React application that:
 - Stores clinical oncology patient data in an OMOP CDM–aligned PostgreSQL schema
 - Exposes a DRF REST API consumed by a React TypeScript frontend
-- Accepts FHIR R4 Bundle uploads to ingest patient records
+- Loads patient data as OMOP rows through the bulk OMOP endpoints, written by a
+  separate ETL project that reads FHIR itself; promop's own FHIR R4 Bundle
+  upload is **optional** and is not on that path
 - Generates synthetic FHIR patient data for testing via a Django management command
 - Deploys to Render (backend) with PostgreSQL
 
@@ -101,7 +125,17 @@ Both paths route to `PatientRecordViewSet` and return identical data. The only d
 
 ## Rule: Adding a New Patient Attribute
 
-When adding any new field to `PatientRecord`, you **must** touch ALL of the following layers. Do not skip any layer.
+When adding any new field to `PatientRecord`, you **must** touch layers 1, 2, 3,
+5, 7 and 8 below. Do not skip any of them.
+
+Layers 4 and 9 are the built-in FHIR uploader and its synthetic-bundle
+generator. **They are optional.** Production data is loaded as OMOP rows by a
+separate ETL project that reads FHIR itself, through the bulk OMOP endpoints,
+and never through `upload_fhir_bundle`. Touch 4 and 9 only when the field should
+also be populated by that uploader (for example, for the synthetic test data).
+A field a patient enters in the UI is written to `PatientRecord` first and fed
+forward into OMOP, so it needs no FHIR mapping at all; see
+[Write Architecture: PatientRecord First](#write-architecture-patientrecord-first).
 
 ### 1. Django Model (`omop_core/models.py`)
 
@@ -150,9 +184,13 @@ nothing — that is the form the test commands above use.
 - If the field needs **custom serialization** (e.g., computed values, nested data), add an explicit `SerializerMethodField`.
 - If the field needs **write validation**, add it to `extra_kwargs`.
 
-### 4. FHIR Upload Loader (`patient_portal/api/views.py` → `upload_fhir_bundle`)
+### 4. FHIR Upload Loader (`patient_portal/api/views.py` → `upload_fhir_bundle`) — optional
 
-This is the function that parses incoming FHIR Bundles and writes data into `PatientRecord`. You **must** add a mapping here for the new field or it will never be populated from FHIR uploads.
+This is the function that parses FHIR Bundles posted to promop's own upload
+endpoint. That endpoint is optional: the ETL that loads production data does not
+use it. Add a mapping here only when the new field should also be populated by
+this uploader; without one, the field is simply not populated from bundles
+posted to it.
 
 **Step A — Declare an initializer** at the top of the patient-processing block (so the variable always exists even if no matching FHIR resource is found):
 
@@ -249,9 +287,9 @@ Use the existing `FormField` and `Input`/`Select` UI primitives:
 
 Register the new tab in `frontend/src/components/Layout/TabBar.tsx` if a new tab is created. Wire the tab into `frontend/src/components/Patient/PatientDetail.tsx`.
 
-### 9. FHIR Bundle Generator (`omop_core/management/commands/generate_fhir_bundle.py`)
+### 9. FHIR Bundle Generator (`omop_core/management/commands/generate_fhir_bundle.py`) — optional
 
-Add synthetic data generation for the new field. The generator creates FHIR Observation, Condition, or extension resources. Pick the right FHIR resource type:
+Only when layer 4 was done: add synthetic data generation for the new field. The generator creates FHIR Observation, Condition, or extension resources. Pick the right FHIR resource type:
 
 - **Lab value / measurement** → FHIR `Observation` with a LOINC code
 - **Clinical status / boolean** → FHIR `Observation` with a SNOMED code or extension
@@ -286,7 +324,9 @@ Call the new generator method from the main patient generation loop and add it t
 
 ## Rule: Tests for Every New Attribute
 
-For each new attribute, create tests that cover **all four layers**. Add tests to the relevant test files.
+For each new attribute, create tests that cover the model, the API and the
+React UI. Add the FHIR upload test only when layer 4 was done. Add tests to the
+relevant test files.
 
 ### Backend Tests (`omop_core/tests.py` and `patient_portal/tests.py`)
 
@@ -1442,6 +1482,14 @@ test data into `promop_dev` — use `promop_test` for automated tests.
 ---
 
 ## FHIR Upload Architecture
+
+promop's own FHIR upload endpoint is **optional**. Production data is loaded by a
+separate ETL project that reads FHIR itself and writes OMOP rows through the
+bulk OMOP endpoints below; it never calls this endpoint. The endpoint remains
+for the synthetic bundles `generate_fhir_bundle` produces and for ad hoc loads.
+Either way the direction is the same, OMOP first and then derive, which is the
+opposite of an interactive edit; see
+[Write Architecture: PatientRecord First](#write-architecture-patientrecord-first).
 
 The FHIR upload endpoint in `patient_portal/api/views.py` (`upload_fhir_bundle`):
 
