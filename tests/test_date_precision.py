@@ -222,9 +222,12 @@ class TestProfileProjection:
         assert pr.date_of_birth == date(1985, 1, 1)
 
 
-@pytest.mark.parametrize('shared', [False, True])
+@pytest.mark.parametrize(('prefix', 'shared'), [
+    ('/api/v1/patient-records/', False), ('/api/patient-info/', False),
+    ('/api/v1/patient-records/', True),
+])
 @pytest.mark.parametrize(('precision', 'month', 'day'), [('year', None, None), ('month', 6, None)])
-def test_date_only_patch_keeps_existing_precision(shared, precision, month, day):
+def test_date_only_patch_keeps_existing_precision(prefix, shared, precision, month, day):
     from rest_framework.test import APIClient
     from patient_portal.models import Identity
     person = PersonFactory(year_of_birth=1985, month_of_birth=month, day_of_birth=day)
@@ -233,13 +236,40 @@ def test_date_only_patch_keeps_existing_precision(shared, precision, month, day)
     client = APIClient()
     client.force_authenticate(Identity.objects.create_user(email='dob-precision@example.test', is_staff=True))
     headers = {'HTTP_X_PATIENT_FORM': '1'} if shared else {}
-    response = client.patch(f'/api/v1/patient-records/{person.pk}/',
+    response = client.patch(f'{prefix}{person.pk}/',
         {'date_of_birth': f'1986-{month or 1:02d}-01'}, format='json', **headers)
     assert response.status_code == 200, response.data
     person.refresh_from_db()
     assert (person.year_of_birth, person.month_of_birth, person.day_of_birth) == (1986, month, day)
     record = refresh_patient_record(person)
     assert record.date_of_birth_precision == precision
+
+
+@pytest.mark.parametrize('prefix', ['/api/v1/patient-records/', '/api/patient-info/'])
+@pytest.mark.parametrize('changes', [
+    {'date_of_birth': '1986-03-15'},
+    {'date_of_birth_precision': 'month'},
+    {'date_of_birth': '1986-03-15', 'date_of_birth_precision': 'day'},
+])
+def test_native_dob_patch_keeps_record_person_and_response_consistent(prefix, changes):
+    from rest_framework.test import APIClient
+    from patient_portal.models import Identity
+    person = PersonFactory(year_of_birth=1985, month_of_birth=None, day_of_birth=None)
+    record = PatientRecordFactory(person=person, date_of_birth=date(1985, 1, 1), date_of_birth_precision='year')
+    client = APIClient()
+    client.force_authenticate(Identity.objects.create_user(email='native-dob-pair@example.test', is_staff=True))
+    response = client.patch(f'{prefix}{person.pk}/', changes, format='json')
+    assert response.status_code == 200, response.data
+    precision = changes.get('date_of_birth_precision', 'year')
+    expected = {'year': date(1986, 1, 1), 'month': date(1985, 1, 1), 'day': date(1986, 3, 15)}[precision]
+    record.refresh_from_db(); person.refresh_from_db()
+    assert record.date_of_birth == expected
+    assert record.date_of_birth_precision == precision
+    assert response.data['date_of_birth'] == expected.isoformat()
+    assert response.data['date_of_birth_precision'] == precision
+    assert (person.year_of_birth, person.month_of_birth, person.day_of_birth) == (
+        expected.year, expected.month if precision != 'year' else None,
+        expected.day if precision == 'day' else None)
 
 
 @pytest.mark.parametrize('changes', [
