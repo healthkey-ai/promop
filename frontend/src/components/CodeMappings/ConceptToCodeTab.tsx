@@ -536,12 +536,15 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
 
   // Group candidates by normalised description so identical-label codes can be
   // approved in one click. Rows with null norm are each their own group.
+  // No useMemo: the candidate list is bounded (max 100) and the grouping is a
+  // single linear scan, so recomputing on every render is cheaper than
+  // maintaining stable dependency references through the derivation chain.
   type CandidateGroup = {
     key: string; description: string; members: Source[];
     maxConfidence: number | null; minConfidence: number | null;
     totalSeen: number; hasVariants: boolean;
   };
-  const candidateGroups = useMemo<CandidateGroup[]>(() => {
+  const candidateGroups: CandidateGroup[] = (() => {
     const map = new Map<string, Source[]>();
     const ungrouped: Source[] = [];
     for (const row of sortedCandidates) {
@@ -551,12 +554,12 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
       if (existing) existing.push(row);
       else map.set(norm, [row]);
     }
-    const groups: CandidateGroup[] = [];
+    const result: CandidateGroup[] = [];
     for (const [norm, members] of map) {
       const confidences = members.map(m => m.confidence).filter((c): c is number => c != null);
-      groups.push({
+      result.push({
         key: norm, description: members[0].source_code_description,
-        members, totalSeen: members[0].occurrence_count,
+        members, totalSeen: members.reduce((sum, m) => sum + m.occurrence_count, 0),
         maxConfidence: confidences.length ? Math.max(...confidences) : null,
         minConfidence: confidences.length ? Math.min(...confidences) : null,
         hasVariants: members.some(m => (m.axis_variant_count ?? 0) >= 2),
@@ -564,15 +567,15 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
     }
     for (const row of ungrouped) {
       const c = row.confidence ?? null;
-      groups.push({
+      result.push({
         key: sourceKey(row), description: row.source_code_description,
         members: [row], totalSeen: row.occurrence_count,
         maxConfidence: c, minConfidence: c,
         hasVariants: (row.axis_variant_count ?? 0) >= 2,
       });
     }
-    return groups;
-  }, [sortedCandidates]);
+    return result;
+  })();
 
   const linkedRows = STATUSES.flatMap(status => open[status] ? groups[status].data?.results ?? [] : []);
   const rows = mode === 'candidates' ? sortedCandidates : linkedRows;

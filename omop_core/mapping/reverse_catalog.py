@@ -49,12 +49,14 @@ def _candidate(kind, row, domain_id):
         'destination_concept_id': None, 'destination_concept_name': '',
         'destination_standard_concept': None, 'domain_id': domain_id,
         'omop_table': DOMAIN_TO_TABLE[domain_id],
-        'source_label_norm': normalise(name),
         'source_kind': kind, 'source_record_id': row.pk,
     }
     source['source_revision'] = hashlib.sha256(json.dumps(
         [source, version], sort_keys=True, default=str,
     ).encode()).hexdigest()
+    # Added after the hash: a pure function of name, so it cannot drift
+    # independently and must not invalidate in-flight previews.
+    source['source_label_norm'] = normalise(name)
     return source
 
 
