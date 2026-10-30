@@ -7,8 +7,7 @@ import Section from '../Section';
 import { Input } from '@/components/shadcn/input';
 import SelectControl from '../controls/SelectControl';
 import { today } from '@/api/clinicalFacts';
-import PreexistingConditionsAnswer, { type ConditionsAnswer } from '../PreexistingConditionsAnswer';
-import {
+import PreexistingConditionsAnswer, { type ConditionsAnswer } from '../PreexistingConditionsAnswer';import {
   COUNTRY_OPTIONS, US_STATES,
   ECOG_OPTIONS, KARNOFSKY_OPTIONS,
   DISEASE_OPTIONS,
@@ -234,7 +233,11 @@ export default function GeneralTab({
               personId={personId}
               flag={formData.no_pre_existing_conditions}
               categories={formData.preexisting_conditions}
-              readOnly={conditionsReadOnly || loading || descriptors.preexisting_conditions?.writable !== true}
+              // The explicit answer has its own snapshot/write endpoint; the
+              // generic field descriptor deliberately does not advertise it
+              // (a PATCH to these columns is not how they are authored). The
+              // host's write gate and that endpoint's own 409 are the authority.
+              readOnly={conditionsReadOnly || loading}
               onSaved={onConditionsSaved}
             /> : <p className="text-sm">Pre-existing conditions require the explicit answer editor.</p>}
           </div>
