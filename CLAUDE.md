@@ -1279,9 +1279,11 @@ its table, per vocabulary and code, so the order-system and result-system
 codings of one test no longer share the extract's number (#2121); a code
 with no patient rows here keeps its count, and the extract's label-group
 figure is cleared on the rows rebuilt. Each per-patient source-code upload
-runs the same pass for the codes it wrote, and a lookup bumps a code's Seen
-only while it has no per-patient rows here (#2123): a lookup is one ask per
-code per batch, so that count is provisional until the rows replace it. The walk resumes after its stored `cursor`, not
+runs the same pass for the codes it wrote and removed, and the lookup
+endpoint's sighting (`resolve_source_code_variant(provisional=True)`) adds one
+only while the code has no per-patient rows here, reading the rows once they
+exist (#2123): a lookup is one ask per code per batch, so that count is
+provisional; a per-record caller such as FHIR sync always adds one. The walk resumes after its stored `cursor`, not
 an offset, because the key set shrinks as codes are rebuilt. Once an instance
 has completed a rebuild, a seed or inventory load writes no unit evidence
 over existing rows and does not raise the Seen count of a code that has

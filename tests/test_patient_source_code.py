@@ -118,6 +118,18 @@ class TestPostSourceCodes:
         assert resp.status_code == 201
         mapping.refresh_from_db(); other.refresh_from_db()
         assert (mapping.occurrence_count, other.occurrence_count) == (3, 7)
+        # A replace that drops GLU and brings HGB rebuilds both: HGB from its rows,
+        # GLU keeps its number since no rows are left to say better.
+        resp = smart_env['client'].post(_url(smart_env['person'].person_id), {
+            'replace': True,
+            'source_codes': [
+                {'source_value': 'HGB', 'source_vocabulary_id': 'LOINC',
+                 'omop_table': 'measurement', 'occurrence_count': 11},
+            ],
+        }, format='json')
+        assert resp.status_code in (200, 201)
+        mapping.refresh_from_db(); other.refresh_from_db()
+        assert (mapping.occurrence_count, other.occurrence_count) == (3, 11)
 
     def test_upserts_on_second_post(self, smart_env):
         url = _url(smart_env['person'].person_id)

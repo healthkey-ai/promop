@@ -321,15 +321,16 @@ def evidence_keys():
 
 
 def _patient_rows_for(scoped=False):
-    """Per-patient rows of the outer mapping's code: same vocabulary, code
-    compared case-insensitively, as ingest resolves a code to its mapping;
-    with ``scoped``, only the mapping's hospital's patients."""
+    """Per-patient rows of the outer mapping's code: same vocabulary and
+    code, exactly, which is what the rows' index answers (a case-insensitive
+    match would scan the table once per mapping); with ``scoped``, only the
+    mapping's hospital's patients."""
     from django.db.models import OuterRef
 
     from omop_core.models import PatientSourceCode
 
     rows = PatientSourceCode.objects.filter(
-        source_vocabulary_id=OuterRef('source_vocabulary_id'), source_value__iexact=OuterRef('source_code'))
+        source_vocabulary_id=OuterRef('source_vocabulary_id'), source_value=OuterRef('source_code'))
     if scoped:
         rows = rows.filter(person__patient_record__organization_id=OuterRef('organization_id'))
     return rows
@@ -344,7 +345,7 @@ def rebuild_seen_counts(keys=None):
     per-patient rows are keyed per vocabulary, code and table, so each coding
     system gets its own sum: the rows on the mapping's table, or on any table
     for a mapping with none; a hospital-scoped mapping counts its hospital's
-    patients only. Set-based, four statements, so it costs the same whatever
+    patients only. Codes match exactly, as the rows' index allows. Set-based, four statements, so it costs the same whatever
     the walk's key set; a code with no rows here keeps its count. The
     extract's label-group figure is cleared on the rows rebuilt, since it no
     longer describes the members' counts. ``keys`` limits the pass to those
@@ -368,7 +369,7 @@ def rebuild_seen_counts(keys=None):
             return 0
         match = Q()
         for vocab, code in keys:
-            match |= Q(source_vocabulary_id=vocab, source_code__iexact=code)
+            match |= Q(source_vocabulary_id=vocab, source_code=code)
     updated = 0
     for scoped in (False, True):
         rows = _patient_rows_for(scoped)
