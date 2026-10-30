@@ -114,14 +114,6 @@ const DIAGNOSTIC: Array<[string, string]> = [
   ['Bone Imaging Normal', 'bone_imaging_result'],
 ];
 
-// Computed organ-function verdicts. The result is read-only; the dialog reaches
-// the labs and demographics it is derived from.
-const ORGAN_FUNCTION: Array<[string, string]> = [
-  ['Renal Adequacy', 'renal_adequacy_status'],
-  ['Hepatic Adequacy', 'hepatic_adequacy_status'],
-  ['Haematological Adequacy', 'haematological_adequacy_status'],
-];
-
 const MIN_CHART_POINTS = 3;
 
 function ChartIconButton({
@@ -225,7 +217,13 @@ export default function LabsTab({ formData, onChange }: Props) {
       {section('Cardiac', CARDIAC)}
       {section('Tumor Markers', TUMOR_MARKERS)}
       {section('Diagnostic Tests', DIAGNOSTIC, 'boolean')}
-      {section('Organ Function', ORGAN_FUNCTION, 'boolean')}
+
+      {/*
+        Organ-function verdicts (renal, hepatic and haematological adequacy) are
+        deliberately not rendered here: Labs shows source lab inputs, while those
+        fields are derived summaries. Hiding the section changes no loading,
+        writing, derivation or stored value (#5609).
+      */}
 
       <Dialog open={!!chartDialog} onOpenChange={(open) => { if (!open) setChartDialog(null); }}>
         <DialogContent className="max-w-[40rem]">
