@@ -6005,6 +6005,9 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
             (o.source_value, o.source_vocabulary_id, o.omop_table) for o in objs
         }
 
+        # Codes whose rows a replace or a final chunk removes: their Seen
+        # counts are rebuilt too (#2123).
+        removed_keys = set()
         with transaction.atomic():
             deleted = 0
             if replace or upload_id:
@@ -6029,11 +6032,9 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
                 for sv, svid, ot in request_keys:
                     keep |= Q(source_value=sv, source_vocabulary_id=svid,
                               omop_table=ot)
-                deleted, _ = (
-                    PatientSourceCode.objects.filter(person=person)
-                    .exclude(keep)
-                    .delete()
-                )
+                gone = PatientSourceCode.objects.filter(person=person).exclude(keep)
+                removed_keys |= set(gone.values_list('source_vocabulary_id', 'source_value'))
+                deleted, _ = gone.delete()
 
             # Count existing rows inside the transaction (after delete if
             # replace) so created/updated counts reflect actual DB state.
@@ -6061,11 +6062,9 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
                 # After the upsert, so this chunk's own rows carry the token.
                 # Every other row belongs to a run that has finished or been
                 # abandoned, because an overlapping run was refused above.
-                deleted, _ = (
-                    PatientSourceCode.objects.filter(person=person)
-                    .exclude(upload_id=upload_id)
-                    .delete()
-                )
+                gone = PatientSourceCode.objects.filter(person=person).exclude(upload_id=upload_id)
+                removed_keys |= set(gone.values_list('source_vocabulary_id', 'source_value'))
+                deleted, _ = gone.delete()
                 run.finalized_at = timezone.now()
                 run.save(update_fields=['finalized_at', 'last_chunk_at'])
                 logger.info(
@@ -6075,11 +6074,24 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
 
         # A code that now arrives in two units may imply two LOINC tests; the
         # queue flags it. Evidence only, so a failure here never fails the upload.
+        keys = {(svid, sv) for sv, svid, _ot in request_keys}
         try:
             from omop_core.mapping.axis_variants import refresh_multi_unit_codes
-            refresh_multi_unit_codes({(svid, sv) for sv, svid, _ot in request_keys})
+            refresh_multi_unit_codes(keys)
         except Exception:  # noqa: BLE001
             logger.warning('Axis variant refresh after source-code upload failed.', exc_info=True)
+        # The codes' Seen counts become what their per-patient rows now say,
+        # replacing the provisional count a lookup kept while no rows existed
+        # (#2123); a mapping stored under a vocabulary's canonical id is
+        # reached through it as well.
+        try:
+            from omop_core.mapping.axis_variants import rebuild_seen_counts
+            from omop_core.services.source_vocabularies import canonical_source_vocabulary
+            touched = keys | removed_keys
+            touched |= {(canonical_source_vocabulary(svid), sv) for svid, sv in touched}
+            rebuild_seen_counts(touched)
+        except Exception:  # noqa: BLE001
+            logger.warning('Seen count rebuild after source-code upload failed.', exc_info=True)
 
         result: dict = {'created': created, 'updated': updated}
         if replace or final:
@@ -14395,6 +14407,8 @@ def code_mapping_lookup(request):
             organization=request_organization,
             source_unit=unit_inputs[idx][0] or None,
             metadata=metadata,
+            # One ask per code per batch: a provisional sighting (#2123).
+            provisional=True,
             mint=not is_term,
         )
         # A code with LOINC axis variants means a different concept per unit,

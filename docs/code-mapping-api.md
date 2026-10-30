@@ -251,8 +251,12 @@ The lookup lifecycle is:
 2. Return an existing effective SCCM mapping. A curator-approved mapping wins
    over every automatic result.
 3. If an existing row is `proposed`, return it as unresolved and atomically
-   increment its `occurrence_count` and `last_seen`. Its target remains a
-   suggestion, never an effective mapping.
+   update its `last_seen` and `occurrence_count`. This endpoint asks once per
+   code per batch, not once per record, so its count is provisional (#2123):
+   it adds one only while the code has no per-patient rows on this instance,
+   and once they exist the count is set from them (per-record callers such as
+   FHIR sync always add one). Its target remains a suggestion, never an
+   effective mapping.
 4. On an SCCM miss, look up the code in loaded Athena vocabulary data. This is
    valid for every source vocabulary, including standard CPT4, LOINC, and
    SNOMED concepts. A successful direct match is materialized in SCCM as an

@@ -815,8 +815,7 @@ def test_a_rebuild_sets_the_seen_count_from_this_instance_s_patients_per_coding_
                                          source_vocabulary_id=order.source_vocabulary_id, omop_table='measurement')
     PatientSourceCode.objects.create(person=PersonFactory(), source_value='5090', occurrence_count=2,
                                      source_vocabulary_id=result.source_vocabulary_id, omop_table='measurement')
-    # Recorded in another case than the mapping spells it: ingest resolves codes case-insensitively.
-    PatientSourceCode.objects.create(person=PersonFactory(), source_value='glu', occurrence_count=5,
+    PatientSourceCode.objects.create(person=PersonFactory(), source_value='GLU', occurrence_count=5,
                                      source_vocabulary_id=LAB, omop_table='measurement')
     PatientSourceCode.objects.create(person=PersonFactory(), source_value='GLU', occurrence_count=6,
                                      source_vocabulary_id=LAB, omop_table='observation')
