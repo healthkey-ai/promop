@@ -1271,11 +1271,19 @@ the instance's own: `--rebuild-evidence` (or migration `0307`) sets
 units from the source codes on its loaded patients and the stored Measurement
 rows (`axis_variants.rebuild_unit_evidence`, entries with `source:
 "patient-data"`; a text term's own recorded units, which name no source, are
-kept), then refreshes the variants, deleting one the evidence no longer shows
-unless a curator decided it. The walk resumes after its stored `cursor`, not
+kept), then refreshes the variants, deleting one the evidence no longer
+shows unless a curator decided it. Before the walk, a rebuild also sets every
+mapped code's Seen count (`occurrence_count`) in one statement
+(`axis_variants.rebuild_seen_counts`) to the sum of its per-patient rows for
+its table, per vocabulary and code, so the order-system and result-system
+codings of one test no longer share the extract's number (#2121); a code
+with no patient rows here keeps its count, and the extract's label-group
+figure is cleared on the rows rebuilt. The walk resumes after its stored `cursor`, not
 an offset, because the key set shrinks as codes are rebuilt. Once an instance
 has completed a rebuild, a seed or inventory load writes no unit evidence
-over existing rows. The hospital code seed used to carry the inventory's
+over existing rows and does not raise the Seen count of a code that has
+per-patient rows here (`axis_variants.rebuilt_seen_keys`; the
+`import_healthtree_seen_counts` snapshot skips them too). The hospital code seed used to carry the inventory's
 label-level counts on every code with the label (#2041).
 A curator asks for the walk again after loading patients from the panel on
 the Concept to Code tab (`POST concept-to-code/axis-variant-walk/`, #2050),
