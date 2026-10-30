@@ -1,6 +1,7 @@
 import { useVocabulary } from '@/hooks/useVocabulary';
 import { useWritableFields } from '@/hooks/useWritableFields';
 import ClinicalField from '../ClinicalField';
+import SelectControl from '../controls/SelectControl';
 import Section from '../Section';
 import FlipiAssessment from '../FlipiAssessment';
 import GelfAssessment from '../GelfAssessment';
@@ -20,6 +21,49 @@ interface Props {
   formData: Record<string, unknown>;
   onChange: (field: string, value: unknown) => void;
   diseaseType: 'breast' | 'lymphoma' | 'myeloma' | 'cll' | 'mcl' | 'other';
+}
+
+const PRECISION_OPTIONS = [
+  { value: 'day', label: 'Full date' },
+  { value: 'month', label: 'Month & year' },
+  { value: 'year', label: 'Year only' },
+];
+
+/** Inline date precision picker reused by sct_date and dlbcl_transformation_date. */
+function DatePrecisionPicker({
+  dateField, precisionField, formData, onChange,
+}: {
+  dateField: string;
+  precisionField: string;
+  formData: Record<string, unknown>;
+  onChange: (field: string, value: unknown) => void;
+}) {
+  const precision = (formData?.[precisionField] as string) ?? 'day';
+  return (
+    <div className="space-y-1.5">
+      <label className="text-sm font-medium text-portal-text-primary">Date Precision</label>
+      <SelectControl
+        value={precision}
+        options={PRECISION_OPTIONS}
+        onChange={(v) => {
+          const newPrec = v ?? 'day';
+          onChange(precisionField, newPrec);
+          const current = formData?.[dateField] as string | undefined;
+          const year = current?.substring(0, 4);
+          if (year && /^\d{4}$/.test(year)) {
+            if (newPrec === 'year') {
+              onChange(dateField, `${year}-01-01`);
+            } else if (newPrec === 'month') {
+              const month = current?.substring(5, 7) || '01';
+              onChange(dateField, `${year}-${month}-01`);
+            }
+          } else {
+            onChange(dateField, null);
+          }
+        }}
+      />
+    </div>
+  );
 }
 
 function BreastCancerSection({ formData, onChange }: Omit<Props, 'diseaseType'>) {
@@ -131,7 +175,8 @@ function LymphomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onCha
       <Section title="Transformation to DLBCL">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
           <ClinicalField label="Transformed to DLBCL" name="transformed_to_dlbcl" descriptor={descriptors.transformed_to_dlbcl} type="boolean" value={formData?.transformed_to_dlbcl} onChange={onChange} />
-          <ClinicalField label="Transformation Date" name="dlbcl_transformation_date" descriptor={descriptors.dlbcl_transformation_date} type="date" value={formData?.dlbcl_transformation_date} onChange={onChange} />
+          <ClinicalField label="Transformation Date" name="dlbcl_transformation_date" descriptor={descriptors.dlbcl_transformation_date} type="date" value={formData?.dlbcl_transformation_date} onChange={onChange} precision={(formData?.dlbcl_transformation_date_precision as 'day' | 'month' | 'year') ?? 'day'} />
+          <DatePrecisionPicker dateField="dlbcl_transformation_date" precisionField="dlbcl_transformation_date_precision" formData={formData} onChange={onChange} />
           <ClinicalField label="Post-Transformation Outcome" name="post_transformation_outcome" descriptor={descriptors.post_transformation_outcome} type="select" value={formData?.post_transformation_outcome} options={txOutcomeOptions.length ? txOutcomeOptions.map((o: { value: string }) => o.value) : []} onChange={onChange} vocabSource={txOutcomeSource} />
         </div>
       </Section>
@@ -173,7 +218,8 @@ function MyelomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onChan
           <div className="sm:col-span-2">
             <ClinicalField label="Prior SCT Type" name="stem_cell_transplant_history" descriptor={descriptors.stem_cell_transplant_history} type="multiselect" value={formData?.stem_cell_transplant_history} options={sctTypeOptions.length ? sctTypeOptions.map((o: { value: string }) => o.value) : STEM_CELL_TRANSPLANT_OPTIONS} onChange={onChange} vocabSource={sctTypeSource} />
           </div>
-          <ClinicalField label="SCT Date" name="sct_date" descriptor={descriptors.sct_date} type="date" value={formData?.sct_date} onChange={onChange} />
+          <ClinicalField label="SCT Date" name="sct_date" descriptor={descriptors.sct_date} type="date" value={formData?.sct_date} onChange={onChange} precision={(formData?.sct_date_precision as 'day' | 'month' | 'year') ?? 'day'} />
+          <DatePrecisionPicker dateField="sct_date" precisionField="sct_date_precision" formData={formData} onChange={onChange} />
           <div className="sm:col-span-2">
             <ClinicalField label="SCT Eligibility" name="sct_eligibility" descriptor={descriptors.sct_eligibility} type="multiselect" value={formData?.sct_eligibility} options={sctEligibilityOptions.length ? sctEligibilityOptions.map((o: { value: string }) => o.value) : SCT_ELIGIBILITY_OPTIONS} onChange={onChange} vocabSource={sctEligibilitySource} />
           </div>

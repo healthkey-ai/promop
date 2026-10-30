@@ -90,7 +90,8 @@ _OMOP_DERIVED_FIELDS = [
     'email', 'phone_number', 'facility_name', 'validated', 'validated_by',
     'validation_date', 'suppress_demographics_for_others',
     # Disease / condition
-    'disease', 'diagnosis_date', 'death_date', 'condition_clinical_status', 'disease_slug',
+    'disease', 'diagnosis_date', 'diagnosis_date_precision',
+    'death_date', 'condition_clinical_status', 'disease_slug',
     'active_infection_status', 'no_active_infection_status',
     'active_malignancies', 'no_other_active_malignancies',
     # Therapy lines
@@ -169,7 +170,8 @@ _OMOP_DERIVED_FIELDS = [
     # MM boolean/coded fields (derived by _get_mm_specific_data)
     'plasma_cell_leukemia', 'bone_lesions', 'meets_crab', 'meets_slim',
     # MM cytogenetics + SCT (derived by _get_sct_cytogenetic_data)
-    'cytogenetic_markers', 'sct_date', 'stem_cell_transplant_history', 'sct_eligibility',
+    'cytogenetic_markers', 'sct_date', 'sct_date_precision',
+    'stem_cell_transplant_history', 'sct_eligibility',
     # Vitals
     'systolic_blood_pressure', 'diastolic_blood_pressure', 'heartrate',
     'weight', 'weight_units', 'height', 'height_units', 'temperature',
@@ -224,7 +226,8 @@ _OMOP_DERIVED_FIELDS = [
     'flipi_risk_category', 'number_of_nodal_sites', 'bulky_disease', 'b_symptoms',
     'b_symptom_fever', 'b_symptom_night_sweats', 'b_symptom_weight_loss',
     'gelf_criteria_options', 'ldh_upper_limit_normal',
-    'transformed_to_dlbcl', 'dlbcl_transformation_date', 'post_transformation_outcome',
+    'transformed_to_dlbcl', 'dlbcl_transformation_date', 'dlbcl_transformation_date_precision',
+    'post_transformation_outcome',
     # Assessment
     'measurable_disease_by_recist_status',
     # Clinical (breast cancer)
@@ -1637,6 +1640,7 @@ def _get_disease_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
             data['disease'] = _canonicalize_disease(raw_name)
         if cancer_condition.condition_start_date:
             data['diagnosis_date'] = cancer_condition.condition_start_date
+            data['diagnosis_date_precision'] = 'day'
 
     # Any condition for diagnosis_date fallback (earliest)
     if 'diagnosis_date' not in data:
@@ -1644,6 +1648,7 @@ def _get_disease_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
         if dated:
             earliest = min(dated, key=lambda c: c.condition_start_date)
             data['diagnosis_date'] = earliest.condition_start_date
+            data['diagnosis_date_precision'] = 'day'
 
     # condition_clinical_status — from condition_status_concept
     # snapshot.conditions is -start_date ordered, so first is most recent
@@ -3875,6 +3880,7 @@ def _get_sct_cytogenetic_data(person: Person, snapshot: OmopSnapshot = None) -> 
     sct = native_sct_source(snapshot)
     if sct.has_value:
         data['sct_date'] = sct.value
+        data['sct_date_precision'] = 'day'
     _SOURCE_KEYS = ('mm-cytogenetic-markers',
         'mm-sct-history', 'mm-sct-eligibility')
     # Use index lookups instead of scanning all observations
@@ -4613,6 +4619,7 @@ def _get_dlbcl_transformation(person: Person, observations, snapshot: OmopSnapsh
 
     data['transformed_to_dlbcl'] = True
     data['dlbcl_transformation_date'] = transformation_date
+    data['dlbcl_transformation_date_precision'] = 'day'
 
     death = snapshot.death
     if death and death.death_date and death.death_date >= transformation_date:
