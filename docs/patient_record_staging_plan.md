@@ -32,43 +32,83 @@ Recommended: `patient_portal` (application/cutover state), **not** `omop_core`
 `UserProfile.person_id`; it is not an OMOP entity and must not appear in the CDM
 schema.
 
-Open for review: `patient_portal` vs a new small app. The recommendation is
-`patient_portal` because it already owns patient-facing application state and
-migrations; no new app for one table.
+`patient_portal` already owns patient-facing application state and migrations; no new
+app for one table. This is a decision to approve, not an open question.
 
 ## 4. Model
 
-`PatientRecordStaging` (one row per field, not one JSON blob per patient):
+`PatientRecordStaging` (one row per field or line component, not one JSON blob per
+patient):
 
 | Column | Type | Notes |
 | --- | --- | --- |
 | `id` | UUID | primary key |
-| `transfer_key` | text, unique | client idempotency key for a create batch |
+| `batch_key` | text | client idempotency key for a create batch |
+| `item_key` | text | stable within the batch: `<field>` or `<field>:<index>` |
+| `group_key` | text, null | atomic group (e.g. one therapy line) |
+| `payload_hash` | char(64) | canonical hash of the item payload |
 | `subject_key` | text | stable CB identity: `user:<id>` or `patient_info:<id>` |
 | `person_id` | bigint, null | PROMOP Person; null until CB links |
 | `field` | text | manifest field name |
 | `value` | jsonb | scalar/list/dict, with the manifest type |
 | `kind` | text | `source_value` or `displaced_target` |
-| `provenance` | jsonb | source, edit/revision time, audit reference |
+| `provenance` | jsonb | required, see §5 |
 | `manifest_hash` | char(64) | reviewed allowlist that produced the value |
-| `state` | text | see §5 |
-| `destination` | text, null | staging row id / target field for a displaced value |
-| `owner` | text, null | accountable role or person |
+| `state` | text | see §6 |
+| `destination_kind` | text, null | `patient_record_field` or `staging_item` |
+| `destination_ref` | text, null | field name or staging item id |
+| `winning_item_id` | UUID, null | for a displaced target: the item that won |
+| `owner` | text | accountable role or service identity; required |
+| `created_by` | text | authenticated creator; required |
 | `target_version` | text, null | `PatientRecord.updated_at` + fingerprint the decision is bound to |
-| `approval` | jsonb, null | see §6 |
-| `attempts` | int | bounded retry count |
-| `claimed_at` | timestamptz, null | atomic claim for transfer |
+| `approval` | jsonb, null | see §7 |
 | `transferred_at` | timestamptz, null | terminal success |
 | `created_at` / `updated_at` | timestamptz | audit |
 
-Indexes: `(subject_key, state)`, `(person_id, state)`, `(state, updated_at)`,
-unique `transfer_key` per create batch (or `(transfer_key, field)` if the batch key
-is reused across rows).
+Constraints and indexes:
 
-Constraints: `state` in the enum; `transferred` requires `transferred_at`;
-`approved_deletion` requires an approval with a deletion decision.
+- unique `(batch_key, item_key)`;
+- unique `content_hash` = `sha256(batch_key | item_key | payload_hash)` so a reused
+  `batch_key` with a different payload is rejected, not merged;
+- indexes: `(subject_key, state)`, `(person_id, state)`, `(state, updated_at)`,
+  `(group_key)` where not null;
+- `state` in the enum; `kind=displaced_target` requires
+  `state=retained_not_for_transfer` and `winning_item_id`;
+- `state=transferred` requires `transferred_at`;
+- `state=approved_deletion` requires an approval with `decision=delete`;
+- `awaiting_transfer` cannot be a `displaced_target`;
+- `destination_kind` and `destination_ref` are set together or both null.
 
-## 5. States and transitions
+Provenance is a required JSON schema, not free text:
+
+```json
+{
+  "source": "cb_patient_info | migration | staging",
+  "source_record": "patient_info:<id>",
+  "edited_at": "ISO-8601 or null",
+  "revision": "audit/revision reference or null",
+  "manifest_hash": "sha256",
+  "captured_at": "ISO-8601"
+}
+```
+
+Every state change also appends `PatientRecordStagingTransition`:
+`(staging_id, from_state, to_state, actor, reason, approval_id, created_at)`.
+The transition history is append-only and is the audit source; the current `state`
+is a cache of the last transition.
+
+## 5. Identity
+
+- `subject_key` is the stable CB identity. `patient_info:<id>` is an opaque
+  identifier; it is never dereferenced and never read as clinical data.
+- `person_id` is nullable until CB links the identity. A transfer may create the
+  Person only through the same service call that carries the disease and the rest of
+  the payload; it must not create a bare Person/record first.
+- A batch must contain exactly one `subject_key`; mixed-subject batches are rejected.
+- `destination_ref` for a displaced target points at the winning item, so the audit
+  shows both sides.
+
+## 6. States and transitions
 
 | State | Meaning | Allowed next |
 | --- | --- | --- |
@@ -85,14 +125,17 @@ manifest hash it was decided against. If the target changes, the row returns to
 A losing value never moves to `awaiting_transfer` automatically. Only an explicit
 approved resolution can do that.
 
-## 6. Approval object
+Every transition out of `conflict` writes a `PatientRecordStagingTransition` and the
+approval object in the same transaction.
+
+## 7. Approval object
 
 Common fields for **every** outcome:
 
 ```json
 {
-  "approver": "actor id",
-  "role": "clinical-data-owner | data-owner | privacy | security",
+  "approver": "actor id (server-derived, not body-supplied)",
+  "role": "clinical-data-owner | data-owner | privacy",
   "scope": "patient/field/cohort",
   "decision": "transfer | retain | delete",
   "reason": "why",
@@ -105,113 +148,138 @@ Common fields for **every** outcome:
 
 Additional requirements: retention location for `retain`; retention policy
 reference and deletion action for `delete`. The migration author cannot approve
-their own conflict; a role not named here cannot approve.
+their own conflict; the creator (`created_by`) cannot be the approver. A role not
+named in §8 cannot approve.
 
-## 7. Transfer algorithm
-
-`transfer(subject_key | staging_ids, *, expected_target_version, actor)`:
-
-1. Lock the staging rows (`select_for_update`) in id order; skip rows not in
-   `awaiting_transfer`.
-2. Lock the `PatientRecord` row (or the `Person` when the record does not exist
-   yet) **after** the staging rows. No path may take the record lock before the
-   staging lock.
-3. Recompute the target version. If it differs from `expected_target_version`, move
-   the row to `conflict` and stop; do not write.
-4. If `state == conflict`, require a valid, unexpired approval whose
-   `target_version`/`manifest_hash` match; otherwise stop.
-5. Create the `PatientRecord` in the same transaction **only when the batch carries
-   a disease value**; otherwise leave the patient staged. Apply the staged fields
-   to `PatientRecord` and add them to `user_edited_fields`. No full
-   `refresh_patient_record`.
-6. Project mapped fields best-effort per field, using the reviewed
-   `project_single_value` contract. A projection failure leaves the record edit and
-   a pending projection; it does not fail the transfer.
-7. Mark `transferred` in the same transaction as the record write; a crash leaves
-   either both or neither.
-8. A repeated call is a no-op that returns the current state.
-
-Disease-less patient: CB creates the Person/link, then calls transfer with the
-person id and the staged payload. The record is created only in the transfer
-transaction that also writes the disease; it is never a bare record.
-
-Losing/displaced values: `kind=displaced_target` rows are written at the same time
-as the winning value, but stay `retained_not_for_transfer`. They are never
-auto-transferred.
-
-## 8. API surface for CancerBot
+## 8. Authorization
 
 Internal service endpoints; not patient-facing.
 
-| Method | Path | Auth | Purpose |
-| --- | --- | --- | --- |
-| `POST` | `/api/v1/patient-record-staging/` | service token, `patient_record_staging:write` | create a batch (idempotent by `transfer_key`) |
-| `GET` | `/api/v1/patient-record-staging/?subject_key=…` | service token, `:read` | list state for a patient |
-| `POST` | `/api/v1/patient-record-staging/transfer/` | service token, `:write` | transfer a batch with expected target version |
-| `POST` | `/api/v1/patient-record-staging/<id>/resolve/` | staff/clinical role | record an approval/resolution |
-| `POST` | `/api/v1/patient-record-staging/<id>/delete/` | privacy/data owner | approved deletion |
+| Action | Allowed actor | Scope |
+| --- | --- | --- |
+| create batch | service token | `patient_record_staging:write` |
+| list state | service token | `patient_record_staging:read` |
+| transfer | service token | `patient_record_staging:write` |
+| resolve transfer/retain | clinical-data-owner or data-owner | object-level, per §7 |
+| resolve delete | data-owner **and** privacy | object-level, per §7 |
+| purge | data-owner + privacy | retention job |
 
-The API never accepts `PatientInfo` and never returns it. Responses expose state,
-field, and the repair action, not clinical values, to non-owner roles.
+Rules:
 
-Open for review: service-token endpoints vs an in-process Python service (CB embeds
-PROMOP per ADR 0001). Recommendation: implement the service first, expose the
-minimal token endpoints for the migration job and repair, and keep the matcher
-outside.
+- The approver identity is derived from the authenticated request, never from the
+  body. The creator cannot approve.
+- The service token may act only for the `subject_key` it names; `person_id` must
+  match that subject's link. A token cannot read another subject's values.
+- Non-owner responses are redacted: state, field, repair action only; no `value`,
+  `provenance` or `approval` payload.
+- In-process calls (CB embeds PROMOP per ADR 0001) use the same service and audit;
+  they do not bypass authorization or the transition history.
+- `service_tokens.ALLOWED_SCOPES` must be extended explicitly; generic staff
+  permission is not clinical/data authority.
 
-## 9. Concurrency and idempotency
+## 9. Transfer algorithm
 
-- `transfer_key` makes create idempotent; a duplicate create returns the existing
-  rows.
-- Transfer claims rows with `select_for_update`; a concurrent transfer sees
+`transfer(batch_key, *, expected_target_version, actor)`:
+
+1. Authorize the actor and load the batch. Reject mixed `subject_key`; resolve the
+   Person/record once.
+2. Lock all staging items in `id` order, then lock the `PatientRecord`/`Person`
+   (sorted when a batch spans more than one target). No path may take the record
+   lock before the staging lock.
+3. Re-run the **full decision evaluator** under the lock for every item: target
+   presence, pending/clear, provenance comparison, explicit-clear evidence,
+   chronology, group atomicity. A version match alone is not authority to
+   overwrite.
+4. If the stored decision's `target_version`/`manifest_hash` does not match the
+   current target, return to `conflict`. If an approval exists, verify decision,
+   scope, expiry, target version and manifest hash even when the row is
+   `awaiting_transfer`; an expired approval is a `conflict`.
+5. For a disease-less batch: create the Person/record only in this transaction and
+   only when a valid disease item is part of the transferred group. A disease value
+   that is skipped, conflicting or losing does not authorize record creation.
+6. Apply the group atomically through the shared PatientRecord writer (validation,
+   `user_edited_fields`, source authorship, per-field savepoints). Do not use a raw
+   `setattr` loop and do not call `refresh_patient_record`.
+7. Write displaced targets as `retained_not_for_transfer` rows with
+   `winning_item_id`, in the same transaction.
+8. Mark `transferred` and append transitions in the same transaction as the record
+   write. A crash leaves either both or neither.
+9. Project mapped fields best-effort per field with `project_single_value`; a
+   failure keeps the record edit and a pending projection. A durable worker owns
+   retries after `transferred`; the transfer itself is not retried for projection.
+10. A repeated call is a no-op that returns the current state.
+
+## 10. Concurrency
+
+- `batch_key`/`content_hash` make create idempotent; a duplicate key with a changed
+  payload is rejected.
+- Transfer claims items with `select_for_update`; a concurrent transfer sees
   `transferred` and no-ops.
-- Lock order: staging rows → `PatientRecord`/`Person`. CB's repair holds
+- Creation race: the existing `/me/` path uses `get_or_create`; the transfer service
+  must re-check the record after taking the Person/record lock and must not assume
+  it is the only creator. The unique `content_hash` and `(batch_key, item_key)` are
+  the database arbitration.
+- Lock order: staging items → `PatientRecord`/`Person`. CB's repair holds
   `UserProfile` before calling PROMOP; PROMOP never takes `UserProfile`.
-- A stale approval returns the row to `conflict`; it never writes.
-- Retry is bounded; exhausted rows stay `conflict` and alert.
+- Mixed-subject or multi-target batches lock all targets in sorted order; a batch
+  that cannot be ordered is rejected.
+- No `claimed_at` lease: the transfer is one transaction with row locks. A failed
+  transaction leaves no claim; retries are explicit.
 
-## 10. Retention and security
+## 11. Retention and security
 
-- Staging contains PHI. Access is restricted to the service and authorized
-  clinical/data roles; every read/write is audited.
+- Staging contains PHI. Access is restricted by §8; every read/write is audited.
 - `retained_not_for_transfer` and `approved_deletion` follow the retention policy;
-  deletion is a recorded action, not a silent purge.
+  deletion is a recorded action with a tombstone, not a silent purge.
+- `transferred` rows are retained for audit for the configured period; a purge
+  command removes payloads but keeps the transition tombstones.
+- Legal hold overrides purge.
 - No values in logs or error messages; log ids and field names only.
 - The archive `PatientInfo` is never read.
 
-## 11. Tests
+## 12. Migration
 
-- create idempotency by `transfer_key`;
-- state transitions, including stale approval → `conflict`;
+- Additive migration on the current `cb-v2` leaf; run `makemigrations --check
+  --dry-run` and the migration-graph check before push.
+- If `cb-v2` moves while the PR is open, rebase and regenerate the unmerged
+  migration; never renumber an applied migration.
+- The staging table is not an OMOP CDM table and does not depend on OMOP vocab.
+
+## 13. Tests
+
+- create idempotency by `batch_key`; changed payload under the same key is rejected;
+- state transitions, including stale/expired approval → `conflict`;
 - target changed between read and transfer → `conflict`, no write;
 - newer target edit/clear blocks transfer; old target value preserved as
-  `displaced_target`;
+  `displaced_target` with `winning_item_id`;
 - disease-less batch transfers atomically with the disease and creates no bare
-  record;
+  record; a disease that is skipped/conflicting does not authorize creation;
 - losing value never auto-transfers;
 - concurrent transfer: one wins, one no-ops;
-- projection failure keeps the record edit and marks pending;
-- API auth: service token scopes, staff resolution, no self-approval, non-owner
-  cannot read values;
-- retention/deletion audit.
+- creation race with the existing `/me/` `get_or_create` path;
+- group atomicity (therapy line) and no partial group;
+- projection failure keeps the record edit and marks pending; durable retry after
+  `transferred`;
+- API auth: scopes, object ownership, staff/clinical roles, no self-approval,
+  redacted non-owner responses, in-process audit;
+- retention/purge/legal hold.
 
-## 12. Open questions for review
+## 14. Decisions to approve
 
-1. `patient_portal` vs a new app for the model.
-2. Does transfer create the `PatientRecord` when the batch carries disease, or does
-   CB create it first? Recommendation: transfer creates it in the same transaction.
-3. Service-token API vs in-process service first.
-4. Retention period for `retained_not_for_transfer` / `approved_deletion`.
-5. Projection failure representation: reuse the existing pending marker on
-   `PatientRecord`, or add a staging `projection_state`.
-6. Therapy-line atomic groups: one staging row per line or per field? Recommendation:
-   one row per field plus a `group_key`, transferred atomically.
-7. Who may approve `retain`/`delete` (clinical/data/privacy split).
+1. `patient_portal` for the model.
+2. Transfer creates the record when the batch carries disease (recommended).
+3. Service-first with token endpoints; in-process calls use the same service.
+4. Group identity `group_key`; one row per field/line component.
+5. Role split and scopes in §8.
+6. Projection retry owner: durable worker after `transferred`.
+7. Retention period and legal-hold policy (numeric value can be approved later if
+   purge is disabled until then).
 
-## 13. Delivery slices
+## 15. Delivery slices
 
-1. Model + migration + state machine tests (no API).
-2. Transfer service for a single scalar field, with revalidation/idempotency.
+1. Model + migration + state machine + transition history (no API).
+2. Transfer service for a single scalar field, with the full decision evaluator and
+   revalidation.
 3. Batch/disease-less transfer and displaced-target retention.
 4. Service-token API for create/list/transfer.
 5. Resolution API + retention/deletion.
