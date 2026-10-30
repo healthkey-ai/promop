@@ -14,6 +14,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from omop_core.models import (
+    ConceptAncestor,
     ConditionOccurrence,
     DrugExposure,
     ImageOccurrence,
@@ -135,9 +136,10 @@ class AboutView(PhrView):
 
 # ---------------------------------------------------------------- Diagnoses
 
-# ICD-10 neoplasms: C00–C96 malignant, D37–D48 uncertain behaviour (which holds
-# the blood-cancer precursors and MPN/MDS, e.g. D47.2 MGUS, D46 MDS).
-_ICD10_CANCER = re.compile(r'^(C\d|D3[7-9]|D4[0-8])', re.IGNORECASE)
+# ICD-10 neoplasms: C00–C96 malignant, and of the uncertain-behaviour block only
+# D45–D47, the blood-cancer precursors and MPN/MDS (D47.2 MGUS, D46 MDS). The
+# rest of it, e.g. D48.5 of skin, is not a cancer diagnosis (#119).
+_ICD10_CANCER = re.compile(r'^(C\d|D4[5-7])', re.IGNORECASE)
 _CANCER_WORDS = re.compile(
     r'neoplas|carcinoma|lymphoma|leuka?emia|myeloma|sarcoma|melanoma|malignan|cancer|'
     r'gammopathy|myelodysplas|myeloproliferative|tumou?r',
@@ -145,8 +147,19 @@ _CANCER_WORDS = re.compile(
 )
 
 
+# Names a cancer without being one (#119): a past cancer, a complication of
+# one, a benign or uncertain growth, a test or a worry.
+_NOT_CANCER = re.compile(
+    r'\bhistory of\b|\bh/o\b|\bdue to\b|\bsecondary to\b|\bbenign\b|uncertain behaviou?r|'
+    r'\bscreening\b|\bsuspected\b|\brisk of\b|\bfear of\b',
+    re.IGNORECASE,
+)
+
+
 def is_cancer_condition(row: ConditionOccurrence) -> bool:
     concept = row.condition_concept
+    if any(_NOT_CANCER.search(text or '') for text in (_condition_name(row), row.condition_source_value)):
+        return False
     codes = [row.condition_source_value or '']
     if concept is not None and (concept.vocabulary_id or '').upper().startswith('ICD10'):
         codes.append(concept.concept_code or '')
@@ -253,15 +266,52 @@ def _condition_name(row) -> str | None:
 # cancers and get their own entries.
 
 
-def _transitions(rows) -> list[dict]:
+def _transitions(rows, name_of=None) -> list[dict]:
     """Dated steps when a family holds more than one diagnosis name."""
+    name_of = name_of or _condition_name
     steps, seen = [], set()
     for row in rows:
-        name = _condition_name(row)
+        name = name_of(row)
         if name and name.lower() not in seen:
             seen.add(name.lower())
             steps.append({'name': name, 'date': row.condition_start_date.isoformat()})
     return steps if len(steps) > 1 else []
+
+
+def _same_disease(families: dict[str, list]) -> tuple[dict[str, list], dict[int, str]]:
+    """One entry per disease, however specifically it was coded (#119).
+
+    A cancer whose concept descends from another of the patient's cancers
+    (squamous cell carcinoma of foot under squamous cell carcinoma) joins that
+    family, and is named for the more general diagnosis. Returns the merged
+    families and the general names by condition id.
+    """
+    concepts = {r.condition_concept_id: r.condition_concept for rows in families.values() for r in rows
+                if r.condition_concept_id}
+    pairs = ConceptAncestor.objects.filter(
+        ancestor_concept_id__in=list(concepts), descendant_concept_id__in=list(concepts),
+    ).values_list('ancestor_concept_id', 'descendant_concept_id') if len(concepts) > 1 else []
+    above = {}
+    for ancestor, descendant in pairs:
+        if ancestor != descendant:
+            above.setdefault(descendant, set()).add(ancestor)
+    # The most general of the patient's own concepts above each one.
+    general = {d: min(a for a in ancestors if a not in above) for d, ancestors in above.items()
+               if any(a not in above for a in ancestors)}
+    if not general:
+        return families, {}
+    home = {r.condition_concept_id: key for key, rows in families.items() for r in rows}
+    merged: dict[str, list] = {}
+    names = {}
+    for key, rows in families.items():
+        for row in rows:
+            top = general.get(row.condition_concept_id)
+            merged.setdefault(home[top] if top else key, []).append(row)
+            if top:
+                names[row.pk] = _text(concepts[top].concept_name)
+    for rows in merged.values():
+        rows.sort(key=lambda r: (r.condition_start_date, r.condition_occurrence_id))
+    return merged, names
 
 
 def _apply_cancer_details(entry, details, sources, family):
@@ -328,6 +378,10 @@ def diagnoses(person, record: PatientRecord | None) -> dict[str, Any]:
             families.setdefault(cancer_family(row), []).append(row)
         else:
             other_rows.append(row)
+    families, general_names = _same_disease(families)
+
+    def name_of(row):
+        return general_names.get(row.pk) or _condition_name(row)
 
     details = cancer_details(person.pk, {row.pk: family for family, items in families.items() for row in items})
     detail_sources = {}
@@ -341,7 +395,7 @@ def diagnoses(person, record: PatientRecord | None) -> dict[str, Any]:
     slug = (record.disease_slug or '').lower() if record else ''
     primary_family = SLUG_FAMILY.get(slug, slug)
     primary_rows = families.pop(primary_family, [])
-    primary = primary_cancer(record, _transitions(primary_rows)) if record else None
+    primary = primary_cancer(record, _transitions(primary_rows, name_of)) if record else None
     if primary:
         _apply_cancer_details(primary, details.get(primary_family, {}), detail_sources, primary_family)
         if primary_rows:
@@ -350,25 +404,25 @@ def diagnoses(person, record: PatientRecord | None) -> dict[str, Any]:
         if 'status' not in primary and primary_rows and all(r.condition_end_date for r in primary_rows):
             primary['status'] = 'Resolved'
         cancer.append(primary)
-    for family_rows in families.values():
+    for family, family_rows in families.items():
         latest = family_rows[-1]
-        name = _condition_name(latest)
+        name = name_of(latest)
         if not name:
             continue
         resolved = all(r.condition_end_date for r in family_rows)
         # Diagnosed when the current diagnosis began (myeloma, not the MGUS
         # before it); the earlier steps are in the transitions.
-        current_start = next(r for r in family_rows if _condition_name(r) == name).condition_start_date
+        current_start = next(r for r in family_rows if name_of(r) == name).condition_start_date
         entry = {
             'id': f'condition-{latest.pk}',
             **contexts.get(latest.pk, {}),
             'name': name,
             'date': current_start.isoformat(),
             'status': 'Resolved' if resolved else _text(latest.condition_status_source_value),
-            'transitions': _transitions(family_rows),
+            'transitions': _transitions(family_rows, name_of),
             'source': sources[latest.pk],
         }
-        _apply_cancer_details(entry, details.get(cancer_family(latest), {}), detail_sources, cancer_family(latest))
+        _apply_cancer_details(entry, details.get(family, {}), detail_sources, family)
         cancer.append({k: v for k, v in entry.items() if v not in (None, [])})
     # The primary cancer (the one the record follows) first, then the others newest first.
     cancer.sort(key=lambda c: c.get('date') or '', reverse=True)

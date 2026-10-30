@@ -319,6 +319,65 @@ def test_a_second_cancer_gets_its_own_entry_after_the_primary():
     assert 'transitions' not in cancer[1]
 
 
+def snomed(code, name):
+    return ConceptFactory(
+        concept_code=code, concept_name=name,
+        vocabulary=VocabularyFactory(vocabulary_id='SNOMED', vocabulary_name='SNOMED'),
+    )
+
+
+def test_only_cancer_diagnoses_are_listed_as_cancer_one_entry_per_disease():
+    """#119, after the reporter's record: a history of a cancer, pain due to it,
+    benign and uncertain growths aren't cancers; SCC of foot is the SCC already listed."""
+    from omop_core.models import ConceptAncestor
+
+    record = PatientRecordFactory(disease='')
+    scc, scc_foot = snomed('402815007', 'Squamous cell carcinoma'), snomed('403895004', 'Squamous cell carcinoma of foot')
+    ConceptAncestor.objects.create(ancestor_concept=scc, descendant_concept=scc_foot,
+                                   min_levels_of_separation=2, max_levels_of_separation=2)
+    condition(record, scc, '2024-11-05')
+    condition(record, scc_foot, '2025-10-27')
+    condition(record, scc_foot, '2026-02-20')
+    condition(record, snomed('254656002', 'Squamous cell carcinoma in situ of skin'), '2024-10-25')
+    condition(record, snomed('429024007', 'History of squamous cell carcinoma of skin'), '2026-02-19')
+    condition(record, snomed('98921000119102', 'Pain due to neoplastic disease'), '2018-05-29',
+              condition_source_value='Cancer associated pain')
+    condition(record, snomed('95087004', 'Neoplasm of uncertain behavior of skin'), '2024-10-25')
+    condition(record, icd10('D48.5', 'Neoplasm of uncertain behavior of skin'), '2025-06-24')
+    condition(record, snomed('92069005', 'Benign neoplasm of soft tissue'), '2026-08-14')
+    condition(record, icd10('D47.2', 'Monoclonal gammopathy'), '2019-06-04')
+
+    data = signed_in(record).get('/api/v1/phr/diagnoses/').data
+
+    # The SCC is listed once, as first diagnosed; the in situ one is a different diagnosis.
+    assert sorted((c['name'], c['date']) for c in data['cancer']) == [
+        ('Monoclonal gammopathy', '2019-06-04'),
+        ('Squamous cell carcinoma', '2024-11-05'),
+        ('Squamous cell carcinoma in situ of skin', '2024-10-25'),
+    ]
+    scc_entry = next(c for c in data['cancer'] if c['name'] == 'Squamous cell carcinoma')
+    assert 'transitions' not in scc_entry
+    assert {c['name'] for c in data['other']} == {
+        'History of squamous cell carcinoma of skin', 'Pain due to neoplastic disease',
+        'Neoplasm of uncertain behavior of skin', 'Benign neoplasm of soft tissue',
+    }
+
+
+def test_a_history_of_the_primary_cancer_is_not_a_step_in_its_transitions():
+    record = PatientRecordFactory(disease='Multiple myeloma', disease_slug='myeloma', diagnosis_date='2010-07-01')
+    condition(record, icd10('C90.00', 'Multiple myeloma'), '2010-07-01')
+    condition(record, snomed('120481000119109', 'History of multiple myeloma'), '2016-08-29')
+    condition(record, snomed('16318001000119107', 'Hypogammaglobulinemia due to multiple myeloma'), '2022-01-10')
+
+    data = signed_in(record).get('/api/v1/phr/diagnoses/').data
+
+    assert [c['name'] for c in data['cancer']] == ['Multiple myeloma']
+    assert not data['cancer'][0].get('transitions')
+    assert {c['name'] for c in data['other']} == {
+        'History of multiple myeloma', 'Hypogammaglobulinemia due to multiple myeloma',
+    }
+
+
 def test_without_a_derived_primary_each_cancer_condition_is_listed():
     record = PatientRecordFactory(disease='')
     condition(record, icd10('C50.911', 'Malignant neoplasm of breast'), '2020-02-02')
