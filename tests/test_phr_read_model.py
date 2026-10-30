@@ -500,6 +500,22 @@ def drug(record, concept, start, end=None, **kwargs):
         )
 
 
+def test_medications_are_ordered_by_their_latest_prescription():
+    """#125: each card shows its latest prescription's date, so that is the order (newest first)."""
+    record = PatientRecordFactory(disease='')
+    early_then_recent = ConceptFactory(concept_name='Immunoglobulin G', concept_code='RX-IGG')
+    drug(record, early_then_recent, '2020-01-01', '2020-01-02')
+    drug(record, early_then_recent, '2026-01-29', '2026-01-30')
+    drug(record, ConceptFactory(concept_name='Cilgavimab', concept_code='RX-CIL'), '2022-09-26', '2022-09-27')
+    drug(record, ConceptFactory(concept_name='Hydrocortisone', concept_code='RX-HYD'), '2024-09-12', '2024-09-13')
+
+    meds = signed_in(record).get('/api/v1/phr/medications/').data['medications']
+
+    assert [(m['name'], m['source']['date']) for m in meds] == [
+        ('Immunoglobulin G', '2026-01-29'), ('Hydrocortisone', '2024-09-12'), ('Cilgavimab', '2022-09-26'),
+    ]
+
+
 def test_medications_group_exposures_per_drug_current_first_with_dose_history():
     record = PatientRecordFactory(disease='')
     future = (timezone.localdate() + timedelta(days=30)).isoformat()
@@ -811,9 +827,13 @@ from patient_portal.models import PatientStatement  # noqa: E402
 @pytest.fixture
 def meds_patient():
     record = PatientRecordFactory(disease='')
-    future = (timezone.localdate() + timedelta(days=30)).isoformat()
-    current = drug(record, ConceptFactory(concept_name='Acyclovir', concept_code='RX-ACY'), '2025-01-01', future)
-    past = drug(record, ConceptFactory(concept_name='Zoledronic acid', concept_code='RX-ZOL'), '2024-01-01', '2024-06-01')
+    today = timezone.localdate()
+    future = (today + timedelta(days=30)).isoformat()
+    # Both given in the last year, so both are asked about (#123).
+    current = drug(record, ConceptFactory(concept_name='Acyclovir', concept_code='RX-ACY'),
+                   (today - timedelta(days=60)).isoformat(), future)
+    past = drug(record, ConceptFactory(concept_name='Zoledronic acid', concept_code='RX-ZOL'),
+                (today - timedelta(days=200)).isoformat(), (today - timedelta(days=100)).isoformat())
     self_report = ConceptFactory(concept_id=32865, concept_name='Patient self-report', concept_code='OMOP4976879')
     own = drug(record, ConceptFactory(concept_name='Vitamin D3', concept_code='RX-VD3'), '2024-04-03', None,
                drug_type_concept=self_report)
@@ -843,6 +863,33 @@ def test_record_prescriptions_wait_for_confirmation_and_answers_can_be_undone(me
     assert client.delete(f"/api/v1/phr/medications/{ids['past']}/statement/").status_code == 204
     assert med(client, ids['past'])['pending'] is True
     assert not PatientStatement.objects.filter(person=record.person).exists()
+
+
+def test_prescriptions_older_than_a_year_count_as_taken_and_can_be_changed(meds_patient):
+    """#123: only the last year's prescriptions are asked about."""
+    record, client, ids = meds_patient
+    today = timezone.localdate()
+    old_past = drug(record, ConceptFactory(concept_name='Cephalexin', concept_code='RX-CEP'),
+                    (today - timedelta(days=500)).isoformat(), (today - timedelta(days=490)).isoformat())
+    old_open = drug(record, ConceptFactory(concept_name='Levothyroxine', concept_code='RX-LEV'),
+                    (today - timedelta(days=800)).isoformat(), None)
+    past, current = str(old_past.drug_concept_id), str(old_open.drug_concept_id)
+
+    assert 'pending' not in med(client, past)
+    assert med(client, past)['confirmation'] == {'status': 'took', 'assumed': True}
+    assert med(client, current)['confirmation'] == {'status': 'taking', 'assumed': True}
+    assert not PatientStatement.objects.filter(person=record.person).exists()  # nothing is written
+
+    assert say(client, past, status='not_taken').status_code == 200
+    assert med(client, past)['confirmation'] == {'status': 'not_taken'}
+    stopped_on = (today - timedelta(days=10)).isoformat()
+    assert say(client, current, status='stopped', stopped_on=stopped_on).status_code == 200
+    assert med(client, current)['confirmation'] == {'status': 'stopped', 'stopped_on': stopped_on}
+
+    # Prescribed again this year: asked about again.
+    assert client.delete(f'/api/v1/phr/medications/{past}/statement/').status_code == 204
+    drug(record, old_past.drug_concept, (today - timedelta(days=5)).isoformat(), (today - timedelta(days=1)).isoformat())
+    assert med(client, past)['pending'] is True and 'confirmation' not in med(client, past)
 
 
 def test_answers_must_fit_whether_the_prescription_is_current(meds_patient):
@@ -1107,7 +1154,8 @@ def test_a_line_of_therapys_medicines_are_not_prescriptions_to_confirm():
                                   first_line_therapy='VRd', first_line_start_date='2024-03-12',
                                   first_line_end_date='2024-10-14')
     therapy_line(record, 1, '2024-03-12', '2024-10-14', [('Bortezomib', '2024-03-12', '2024-08-26')])
-    prescription = drug(record, ConceptFactory(concept_name='Acyclovir', concept_code='RX-ACY'), '2024-03-18', None)
+    prescription = drug(record, ConceptFactory(concept_name='Acyclovir', concept_code='RX-ACY'),
+                        (timezone.localdate() - timedelta(days=30)).isoformat(), None)
 
     meds = {m['name']: m for m in signed_in(record).get('/api/v1/phr/medications/').data['medications']}
 
