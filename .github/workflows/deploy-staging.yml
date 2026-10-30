@@ -21,15 +21,17 @@ permissions:
   id-token: write
 
 jobs:
+  # Runs on every dev push but does not gate the staging deploy, matching
+  # Render, which deploys dev on push. dev does not require PRs to be up to
+  # date, so this is what catches two PRs that pass alone and break together:
+  # a failure shows red on the dev commit, it does not hold staging back.
   test:
     name: Test
     if: github.ref_name == 'dev'
     uses: ./.github/workflows/ci.yml
 
-  # Builds alongside the tests rather than after them: only the deploy job
-  # waits on the tests, so a failing suite still stops the release but the
-  # build no longer adds its minutes to theirs. The image is pushed under the
-  # commit SHA only; :latest moves in the deploy job, once tests have passed.
+  # The image is pushed under the commit SHA only; :latest moves in the
+  # deploy job, once the revision is actually being deployed.
   build:
     name: Build image
     if: >-
@@ -76,14 +78,10 @@ jobs:
   # behind a running deploy and could displace a pending one.
   deploy:
     name: Deploy
-    needs: [test, build]
+    needs: build
     concurrency:
       group: deploy-staging
       cancel-in-progress: false
-    if: >-
-      always() &&
-      needs.build.result == 'success' &&
-      (needs.test.result == 'success' || needs.test.result == 'skipped')
     runs-on: ubuntu-latest
 
     steps:
