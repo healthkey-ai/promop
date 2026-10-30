@@ -235,11 +235,8 @@ export default function GeneralTab({
       <Section title="Infection Status" description="Viral infection history.">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
           {field('HIV Positive', 'hiv_status', 'boolean')}
-          {field('No HIV', 'no_hiv_status', 'boolean')}
           {field('Hepatitis B Positive', 'hepatitis_b_status', 'boolean')}
-          {field('No Hepatitis B', 'no_hepatitis_b_status', 'boolean')}
           {field('Hepatitis C Positive', 'hepatitis_c_status', 'boolean')}
-          {field('No Hepatitis C', 'no_hepatitis_c_status', 'boolean')}
         </div>
       </Section>
 

@@ -271,8 +271,8 @@ PATIENT_RECORD_OMOP_MAPPED_FIELDS = frozenset(_OMOP_DERIVED_FIELDS) | frozenset(
     'concomitant_medication_details',
     'first_line_outcome', 'second_line_outcome', 'later_outcome',
     'flipi_score_options', 'hepatitis_b_status', 'hepatitis_c_status',
-    'hiv_status', 'no_hepatitis_b_status', 'no_hepatitis_c_status',
-    'no_hiv_status', 'no_pre_existing_conditions', 'no_tobacco_use_status',
+    'hiv_status',
+    'no_pre_existing_conditions', 'no_tobacco_use_status',
     'measurable_disease_imwg', 'measurable_disease_iwcll',
     'protein_expressions', 'richter_transformation', 'tobacco_use_details',
     'tp53_disruption',
@@ -3544,7 +3544,7 @@ def _get_infection_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
                 return 'positive'
         return None
 
-    def _latest_result(codes, positive_field, negative_field):
+    def _latest_result(codes, positive_field):
         """Apply the newest recognized result across the code/source union.
 
         The union lists code-matched rows ahead of source-only rows, so it must
@@ -3556,17 +3556,15 @@ def _get_infection_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
         for m in rows:
             result = _infection_value(m)
             if result == 'negative':
-                data[negative_field] = True
                 data[positive_field] = False
                 return
             if result == 'positive':
-                data[negative_field] = False
                 data[positive_field] = True
                 return
 
-    _latest_result(('5221-7', '7917-8'), 'hiv_status', 'no_hiv_status')
-    _latest_result(('5195-3',), 'hepatitis_b_status', 'no_hepatitis_b_status')
-    _latest_result(('5196-1',), 'hepatitis_c_status', 'no_hepatitis_c_status')
+    _latest_result(('5221-7', '7917-8'), 'hiv_status')
+    _latest_result(('5195-3',), 'hepatitis_b_status')
+    _latest_result(('5196-1',), 'hepatitis_c_status')
 
     return data
 
