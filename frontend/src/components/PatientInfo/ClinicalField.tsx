@@ -60,6 +60,10 @@ export default function ClinicalField({
   const store = usePatientFormStore();
   const formReadOnly = useContext(PatientFormReadOnlyContext);
   const writable = !!descriptor?.writable;
+  // The server says which booleans are three-valued (Yes / No / Unknown, with
+  // Unknown an answer of its own, #5521); the federated editor reads the same
+  // flag, so a tab never has to repeat the list.
+  const triState = descriptor?.tri_state === true;
   // A tab that shares one date across its fields passes it in — a blood panel is
   // drawn once. A tab whose results come from different specimens, as a pathology
   // report's do, can leave it out and get a date per field rather than one date
@@ -98,6 +102,7 @@ export default function ClinicalField({
           options={choices}
           onChange={onChange}
           readOnly
+          triState={triState}
         />
         {showReason && (
           <p className="mt-1 text-xs text-muted-foreground" data-testid={`reason-${name}`}>
@@ -117,6 +122,7 @@ export default function ClinicalField({
         value={value}
         options={choices}
         vocabSource={vocabSource}
+        triState={triState}
         onChange={onChange}
       />
       {(onDateChange || descriptor?.projection?.omop_table === 'measurement') && (

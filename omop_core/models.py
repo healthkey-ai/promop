@@ -3351,6 +3351,28 @@ class PatientRecord(models.Model):
     plasma_cell_leukemia = models.BooleanField(blank=True, null=True, default=None)
     myeloma_type = models.CharField(max_length=100, blank=True, null=True, help_text="Myeloma subtype from MyelomaType vocabulary")
     progression = models.TextField(blank=True, null=True)
+    # Current-diagnosis myeloma-related disorders (#5521). Nullable on purpose:
+    # None = Unknown, False = No, True = Yes. These are user-entered current
+    # state, not an OMOP-derived history; an imported old diagnosis must not
+    # become a current Yes without confirmation.
+    mgus = models.BooleanField(
+        blank=True, null=True, default=None,
+        help_text="Does the patient currently have MGUS?")
+    smoldering_multiple_myeloma = models.BooleanField(
+        blank=True, null=True, default=None,
+        help_text="Does the patient currently have smoldering multiple myeloma?")
+    waldenstrom_macroglobulinemia = models.BooleanField(
+        blank=True, null=True, default=None,
+        help_text="Does the patient currently have Waldenström macroglobulinemia?")
+    igm_multiple_myeloma = models.BooleanField(
+        blank=True, null=True, default=None,
+        help_text="Does the patient currently have IgM multiple myeloma?")
+    al_amyloidosis = models.BooleanField(
+        blank=True, null=True, default=None,
+        help_text="Does the patient currently have light-chain (AL) amyloidosis?")
+    poems_syndrome = models.BooleanField(
+        blank=True, null=True, default=None,
+        help_text="Does the patient currently have POEMS syndrome?")
 
     # Vital signs
     heartrate = models.IntegerField(help_text="Patient's heart rate", blank=True, null=True)

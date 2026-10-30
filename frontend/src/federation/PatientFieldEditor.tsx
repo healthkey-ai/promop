@@ -76,7 +76,8 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
         </Dialog.Root>
       </div>
     </> : writable ? <Field label={compact ? '' : label} name={canonical} type={control}
-      value={value} options={field.options?.map((option) => option.value)} onChange={store.enqueue} />
+      value={value} options={field.options?.map((option) => option.value)}
+      triState={field.tri_state === true} onChange={store.enqueue} />
       : <><div>{!compact && <span className="text-sm font-medium">{label}: </span>}{formatted}</div>
         <p className="text-xs text-muted-foreground">{reason} {infoHref && <a href={infoHref}>Open Your Info</a>}</p></>}
     {(field.unit ?? field.projection?.unit) && <span className="text-xs text-muted-foreground">{field.unit ?? field.projection?.unit}</span>}

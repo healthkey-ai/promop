@@ -4,6 +4,8 @@ Bindings name existing fields, never translate answer codes or clinical units.
 Unknown bindings are intentionally not inferred from casing/display labels.
 Computed dependencies are navigation metadata, not permission to write a verdict.
 """
+import logging
+
 from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.utils import timezone
@@ -17,6 +19,39 @@ from omop_core.services.patient_record_service import (
     recompute_patient_record_fields,
 )
 from omop_core.services.write_descriptor import build_writable_field_descriptor
+
+logger = logging.getLogger(__name__)
+
+
+def _project_side_effects(person, direct, projections, authorship=None):
+    """Mirror PatientRecord answers into OMOP without risking the saved answer.
+
+    The record write already happened and is the source of truth; a projection
+    failure must not roll it back or fail the request (#5521). ``authorship``
+    carries the caller's self-report typing and provenance, exactly as the
+    native PATCH does, so a patient answer never takes over a clinical fact.
+    """
+    if not projections:
+        return
+    from omop_core.services.omop_projection import project_single_value
+
+    # The descriptor only advertises a projection whose concepts resolved, and
+    # the view only supplies a self-report type it found, so nothing here can
+    # fail a foreign key at commit. The guard below is for anything else:
+    # project_single_value keeps its own savepoint, but a failure before it
+    # gets there must not take the saved answer with it.
+    for name, projection in projections.items():
+        if name not in direct or not projection:
+            continue
+        try:
+            project_single_value(
+                person, name, direct[name], projection, acknowledge_existing=True,
+                **(authorship or {}),
+            )
+        except Exception:
+            logger.warning(
+                'OMOP projection failed for %s; the PatientRecord answer is saved', name,
+            )
 
 
 FIELD_BINDINGS = {
@@ -50,6 +85,14 @@ FIELD_BINDINGS = {
     # though migration 0160 makes the field writable.
     'no_mental_health_disorder_status': ['noMentalHealthDisorderStatus'],
     'no_substance_use_status': ['noSubstanceUseStatus'],
+    # Trial Details names the six current-diagnosis questions in camelCase
+    # (#5521); without a binding the shared form cannot resolve the row.
+    'mgus': ['mgus'],
+    'smoldering_multiple_myeloma': ['smolderingMultipleMyeloma'],
+    'waldenstrom_macroglobulinemia': ['waldenstromMacroglobulinemia'],
+    'igm_multiple_myeloma': ['igmMultipleMyeloma'],
+    'al_amyloidosis': ['alAmyloidosis'],
+    'poems_syndrome': ['poemsSyndrome'],
     'flipi_score': ['flipiScore'], 'gelf_criteria_status': ['gelfCriteriaStatus'],
     'tumor_grade': ['tumorGrade'], 'stage': ['stage'],
     'peripheral_neuropathy_grade': ['peripheralNeuropathyGrade'],
@@ -142,7 +185,9 @@ def patient_form_descriptors(descriptor=None, *, readable_fields=None, writable=
             'kind': 'computed', 'writable': False, 'reason': 'Computed result; edit its source inputs.',
         })
         field = model_fields.get(name)
-        entry['label'] = str(field.verbose_name).replace('_', ' ').capitalize() if field else name.replace('_', ' ').capitalize()
+        entry['label'] = entry.get('label') or (
+            str(field.verbose_name).replace('_', ' ').capitalize() if field
+            else name.replace('_', ' ').capitalize())
         entry['bindings'] = FIELD_BINDINGS.get(name, [])
         kind = field.get_internal_type() if field else ''
         entry['control'] = ('boolean' if kind == 'BooleanField' else 'number'
@@ -162,8 +207,13 @@ def patient_form_descriptors(descriptor=None, *, readable_fields=None, writable=
             entry['compatibility_scope'] = 'result'
         projection = entry.get('projection') or {}
         unsupported = DEDICATED_WRITES.get(name)
-        if projection and (projection.get('omop_table') not in ('measurement', 'observation')
-                           or entry.get('value_kind') == 'json'):
+        # A best-effort projection is written to PatientRecord first; the fact is
+        # a side effect that need not be readable back. This is the only way an
+        # occurrence target can be authored here, because an occurrence cannot
+        # be derived back into the current answer.
+        if (projection and not projection.get('best_effort')
+                and (projection.get('omop_table') not in ('measurement', 'observation')
+                     or entry.get('value_kind') == 'json')):
             unsupported = 'This field requires its dedicated OMOP resource editor.'
         if entry.get('kind') == 'editable' and not projection and 'concept_id' not in entry:
             unsupported = 'This field requires its dedicated structured-data editor.'
@@ -183,19 +233,29 @@ def patient_form_descriptors(descriptor=None, *, readable_fields=None, writable=
 
 
 @transaction.atomic
-def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor=None):
+def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor=None,
+                             authorship=None, patient_author=False):
     """Shared form write, with explicit acknowledgements and no no-op success.
 
     The host must authorize the person first. Existing OMOP mapping/provenance
     and clear restrictions remain owned by apply_field_writes. Direct columns
     retain their existing PatientRecord-only behavior (e.g. planned_therapies).
+    ``authorship`` is the caller's project_single_value typing (self-report and
+    provenance) for best-effort side-effect projections; ``patient_author``
+    says the caller is the patient or their representative. A patient author
+    with no authorship means the self-report type concept is not loaded, and
+    then the side effect is skipped here, by the write itself: a patient's
+    answer typed as the recipe's EHR fact would match and overwrite today's
+    clinical fact in place, whichever caller forgot to say who was writing.
     """
     result = FieldWriteResult()
     record, _ = PatientRecord.objects.get_or_create(person=person)
     record = PatientRecord.objects.select_for_update().get(pk=record.pk)
     descriptor = patient_form_descriptors(descriptor, readable_fields=allowed_fields, record=record)
-    facts, direct, person_changes = {}, {}, set()
-    dob_changed = False
+    facts, direct, person_changes, profile_applied = {}, {}, set(), set()
+    side_effect_projections = {}
+    record_profile_fields = set()
+    project_side_effects = not (patient_author and not authorship)
     for name, value in changes.items():
         entry = descriptor.get(name, {})
         if not entry.get('writable') or entry.get('target') != 'patient_record':
@@ -217,6 +277,7 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
                 setattr(person, key, text)
                 person_changes.add(key)
             result.applied.append(name)
+            profile_applied.add(name)
             continue
         if name in ('phone_number', 'email', 'date_of_birth'):
             try:
@@ -233,15 +294,32 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
                 record.person = person
                 record.date_of_birth = value
                 record.patient_age = None
-                dob_changed = True
+                record_profile_fields |= {'date_of_birth', 'patient_age'}
             else:
-                updates = {name: value.strip() if isinstance(value, str) else value}
+                value = value.strip() if isinstance(value, str) else value
+                updates = {name: value}
+                # The record mirrors these from Person only when it is derived,
+                # and a direct save does not derive; mirror them here so the
+                # response reads back what was just written.
+                setattr(record, name, value)
+                record_profile_fields.add(name)
             for key, item in updates.items():
                 setattr(person, key, item)
                 person_changes.add(key)
             result.applied.append(name)
+            profile_applied.add(name)
             continue
-        if (not entry.get('projection')
+        projection = entry.get('projection') or {}
+        # PatientRecord-first: a best-effort projection is stored on the record
+        # here and only mirrored into OMOP afterwards. Facts that are derived
+        # back into the record keep the legacy facts path below.
+        best_effort = (entry.get('kind') == 'direct'
+                       and entry.get('target') == 'patient_record'
+                       and projection.get('best_effort') is True)
+        if best_effort:
+            from omop_core.services.omop_projection import projection_for_descriptor
+            side_effect_projections[name] = projection_for_descriptor(entry)
+        if ((not entry.get('projection') or best_effort)
                 and entry.get('projection_target') not in ('person', 'location')
                 and entry.get('kind') == 'direct'):
             field = record._meta.get_field(name)
@@ -270,14 +348,16 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
             facts[name] = value
     if person_changes:
         person.save(update_fields=sorted(person_changes))
-    if dob_changed:
-        record.save(update_fields=['date_of_birth', 'patient_age'])
+    if record_profile_fields:
+        record.save(update_fields=sorted(record_profile_fields))
     if direct:
         for name, value in direct.items():
             setattr(record, name, value)
         record.user_edited_fields = sorted(set(record.user_edited_fields or []) | set(direct))
         record.save(update_fields=sorted(direct) + ['user_edited_fields'])
         result.applied.extend(direct)
+        if project_side_effects:
+            _project_side_effects(person, direct, side_effect_projections, authorship)
     if facts:
         fact_result = apply_field_writes(person, facts, descriptor=descriptor)
         result.applied.extend(fact_result.applied)
@@ -291,16 +371,17 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
             record.user_edited_fields = sorted(set(record.user_edited_fields or []) - pending)
             record.save(update_fields=['user_edited_fields'])
             refresh_patient_record(person)
-    if (direct or person_changes) and not (facts and fact_result.applied):
-        refresh_patient_record(person)
-    if direct:
-        # A direct edit has no OMOP fact to re-derive from yet. Recompute the
-        # dependent defining events from the record's own canonical inputs so
-        # the saved verdict is the one the form will read back, not a stale
-        # value from the last refresh.
+    if direct or profile_applied:
+        # PatientRecord first: the record already holds the answer, and the
+        # OMOP side effect is not read back (docs/patient-record-first-writes.md).
+        # There is deliberately no refresh_patient_record() here, as there is
+        # none on the native PATCH: a derivation now would rank the side
+        # effect against the record's own history. Recompute the dependent
+        # defining events from the record's own canonical inputs instead, so
+        # the saved verdict is the one the form will read back.
         record = recompute_patient_record_fields(
             PatientRecord.objects.select_for_update().get(pk=record.pk),
-            changed_fields=set(direct),
+            changed_fields=set(direct) | profile_applied,
         )
     record.refresh_from_db()
     return record, result

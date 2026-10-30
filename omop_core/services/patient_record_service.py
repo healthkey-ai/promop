@@ -280,6 +280,12 @@ PATIENT_RECORD_OMOP_MAPPED_FIELDS = frozenset(_OMOP_DERIVED_FIELDS) | frozenset(
     # docs/patient-record-first-writes.md.
     'no_other_active_malignancies', 'preexisting_conditions', 'myeloma_type',
     'progression', 'condition_code_icd_10', 'condition_code_snomed_ct',
+    # Current-diagnosis myeloma-related disorders (#5521). User-entered, never
+    # derived: an imported historical occurrence must not become a current Yes.
+    # They are listed here for descriptor coverage and projection, not in
+    # _OMOP_DERIVED_FIELDS, because derivation must not clear an answer.
+    'mgus', 'smoldering_multiple_myeloma', 'waldenstrom_macroglobulinemia',
+    'igm_multiple_myeloma', 'al_amyloidosis', 'poems_syndrome',
     'supportive_therapies', 'supportive_therapy_date',
     'supportive_therapy_start_date', 'supportive_therapy_end_date',
     'supportive_therapy_intent', 'absolute_neutrophile_count_units',
@@ -1585,9 +1591,20 @@ def _primary_cancer_condition(person, snapshot: OmopSnapshot, cancers: list):
     return max(cancers, key=rank)
 
 
+def _is_current_state_answer(cond):
+    """A row a pinned current-state recipe wrote from a PatientRecord answer (#5521).
+
+    It records that the patient answered Yes, dated the day they answered. It
+    is not a diagnosis the record is about, so it must not become the primary
+    cancer or the diagnosis date, which an EHR row for the same concept may.
+    """
+    from omop_core.services.write_descriptor import PINNED_PROJECTION_SOURCE_VALUES
+    return cond.condition_source_value in PINNED_PROJECTION_SOURCE_VALUES
+
+
 def _is_oncologic(cond):
     """Shared cancer predicate for the primary selector and scoped projections."""
-    if cond.is_erroneous:
+    if cond.is_erroneous or _is_current_state_answer(cond):
         return False
     cname = (cond.condition_concept.concept_name or '').lower() if cond.condition_concept else ''
     src = (cond.condition_source_value or '').lower()
@@ -1628,7 +1645,8 @@ def _get_disease_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
 
     # Any condition for diagnosis_date fallback (earliest)
     if 'diagnosis_date' not in data:
-        dated = [c for c in snapshot.conditions if c.condition_start_date]
+        dated = [c for c in snapshot.conditions
+                 if c.condition_start_date and not _is_current_state_answer(c)]
         if dated:
             earliest = min(dated, key=lambda c: c.condition_start_date)
             data['diagnosis_date'] = earliest.condition_start_date
@@ -1730,9 +1748,12 @@ def _get_active_condition_data(person: Person, snapshot: OmopSnapshot = None) ->
     """
     snapshot = snapshot or _build_snapshot(person)
     today = timezone.localdate()
+    # A current-state answer row is the patient's Yes to one of the pinned
+    # questions, not a diagnosis; it must not count as another active
+    # malignancy or infection on top of the record's own history.
     current_conditions = [
         condition for condition in snapshot.conditions
-        if _condition_is_current(condition, today)
+        if _condition_is_current(condition, today) and not _is_current_state_answer(condition)
     ]
     data = {}
 

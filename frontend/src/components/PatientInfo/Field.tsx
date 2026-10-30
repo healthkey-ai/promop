@@ -18,6 +18,7 @@ interface FieldProps {
   onChange: (name: string, value: unknown) => void;
   disabled?: boolean;
   readOnly?: boolean;
+  triState?: boolean;
   vocabSource?: VocabSource | null;
   fullWidth?: boolean;
 }
@@ -31,6 +32,7 @@ export default function Field({
   onChange,
   disabled,
   readOnly,
+  triState,
   vocabSource,
 }: FieldProps) {
   const isDisabled = disabled || readOnly;
@@ -105,6 +107,7 @@ export default function Field({
           <BooleanControl
             value={value as boolean | null | undefined}
             disabled={isDisabled}
+            triState={triState}
             onChange={(v) => onChange(name, v)}
           />
         );
@@ -129,7 +132,7 @@ export default function Field({
         );
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [type, value, optionObjects, isDisabled, name, selectedValues, msDisplay]);
+  }, [type, value, optionObjects, isDisabled, name, selectedValues, msDisplay, triState]);
 
   return (
     <div className="space-y-1.5">

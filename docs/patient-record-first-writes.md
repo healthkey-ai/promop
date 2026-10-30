@@ -143,7 +143,9 @@ LOINC/SNOMED recipes and approved curated mappings, to call
   Other editors keep the recipe's type (curated recipes default to EHR,
   32817) and never update a patient's self-report fact, unless the recipe is
   itself typed self-report. Without concept 32865 loaded, the recipe's type
-  stands (#1959).
+  stands (#1959), except for pinned current-state fields (#5521): their
+  best-effort projection is skipped so a patient answer cannot take over a
+  clinical fact.
 - Serializes same-day writes with database locks. Projection uses a savepoint,
   so a failed projection leaves the PatientRecord edit pending.
 - A cleared Measurement or Observation stores null answer columns with
@@ -153,6 +155,24 @@ LOINC/SNOMED recipes and approved curated mappings, to call
   reuses today's row and removes the marker.
 - Occurrence tables cannot express null or negative answers. Such edits remain
   pending on PatientRecord until an appropriate answer mapping is available.
+- A field whose answer is current state rather than an OMOP-readable result may
+  mark its projection `best_effort` (for example the current-diagnosis
+  myeloma-related disorders). The shared form writes PatientRecord first and
+  mirrors an affirmative answer into its occurrence as a side effect; a
+  projection failure never fails the save. No/Unknown creates no fact and
+  retracts the rows an earlier Yes wrote (flagged `is_erroneous`, never
+  deleted), scoped to the recipe's own rows and the same kind of author, so a
+  later derivation cannot keep reading a fact the record has withdrawn.
+  The rows such a recipe writes carry a `patient-record:<field>` source value:
+  derivation never reads them back into the answer, and the primary-cancer
+  selector, the diagnosis-date fallback and the active-condition flags all skip
+  them, so a current-state answer can neither become a Yes from imported
+  history, nor displace the diagnosis the record is about, nor count as another
+  active malignancy.
+- The shared form (`apply_patient_form_patch`) follows the same rule as the
+  native PATCH: a direct edit never calls `refresh_patient_record()`. It
+  recomputes the record's own dependent fields and returns; derivation, when it
+  next runs, sees the OMOP side effect alongside the record's history.
 - Sets `_skip_patient_record_refresh = True` on the OMOP instance to avoid
   recursive derivation.
 - Direct UI saves never call `refresh_patient_record()` or load the patient's

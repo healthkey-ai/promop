@@ -85,7 +85,7 @@ def curated_values_from_snapshot(snapshot, *, confirmed_clinical_fields=None):
     from omop_core.services.clinical_units import blood_count_projection
     from omop_core.services.field_write_service import _invert_inverse_assertion
     from omop_core.services.write_descriptor import (
-        _LIFECYCLE_FIELDS, _WRITE_RECIPE_INCOMPLETE,
+        PINNED_PROJECTION_FIELDS, _LIFECYCLE_FIELDS, _WRITE_RECIPE_INCOMPLETE,
         get_serializer_read_only_fields, mapping_target_for,
     )
 
@@ -95,6 +95,7 @@ def curated_values_from_snapshot(snapshot, *, confirmed_clinical_fields=None):
         and field.name not in get_serializer_read_only_fields()
         and field.name not in _LIFECYCLE_FIELDS
         and field.name not in _WRITE_RECIPE_INCOMPLETE
+        and field.name not in PINNED_PROJECTION_FIELDS
         and field.get_internal_type() != 'JSONField'
     }
 
@@ -222,11 +223,19 @@ def project_field_to_omop(mapping) -> int:
     projection and refresh, using the same lock as the PATCH handler.
     """
     from omop_core.services.patient_record_service import refresh_patient_record
-    from omop_core.services.write_descriptor import build_writable_field_descriptor
+    from omop_core.services.write_descriptor import (
+        PINNED_PROJECTION_FIELDS, build_writable_field_descriptor,
+    )
     from omop_core.services.clinical_input_contract import uses_dedicated_writer
 
     if uses_dedicated_writer(mapping.field_name):
         # Curation is not evidence of who authored pending projection values.
+        return 0
+    if mapping.field_name in PINNED_PROJECTION_FIELDS:
+        # A reviewed built-in recipe owns these fields. A curator mapping must
+        # not re-project a pending current-state answer: the backfill has no
+        # author, so it would write the recipe type and could take over a
+        # clinical fact (#5521).
         return 0
     if mapping.status != 'approved':
         return 0
@@ -289,6 +298,14 @@ def project_single_value(person, field_name, value, projection, *, acknowledge_e
         except Exception:
             logger.warning('Cytogenetic projection failed; edit remains pending')
             return False
+    # Some descriptors project affirmative answers only: No/Unknown is not a
+    # negative occurrence, so it stays pending on PatientRecord. Distinct from
+    # an ordinary boolean observation, which records No as 0.0 (#5521). The
+    # rows an earlier Yes wrote are withdrawn, or derivation would keep
+    # reading a fact the record no longer asserts.
+    if projection.get('affirmative_only') and (value is False or _is_empty(value)):
+        _retract_affirmative_facts(person, projection, type_concept_id)
+        return False
     target = projection.get('omop_table')
     concept_id = projection.get('concept_id')
     source_value = projection.get('source_value')
@@ -380,6 +397,46 @@ def project_single_value(person, field_name, value, projection, *, acknowledge_e
     except Exception:
         logger.warning('OMOP value projection failed; edit remains pending')
         return False
+
+
+def _retract_affirmative_facts(person, projection, type_concept_id=None):
+    """Mark the facts an affirmative-only recipe wrote as entered in error.
+
+    Only this recipe's own rows are touched, found by the source value it
+    writes, so an imported diagnosis with the same concept is never flagged.
+    The author rule is project_single_value's: a patient's No retracts only
+    self-report rows, and anyone else's No retracts only the rest. Flagging
+    rather than deleting keeps the history and takes effect the same day; an
+    end date of today would still count as current.
+    """
+    target = projection.get('omop_table')
+    concept_id = projection.get('concept_id')
+    source_value = projection.get('source_value')
+    if target not in _TARGET_CONFIG or concept_id is None or not source_value:
+        return
+    model, _pk, concept_field, _date, type_field, src_field, _num, _str = _TARGET_CONFIG[target]
+    fact_type = type_concept_id or projection.get('type_concept_id') or 32817
+    rows = model.objects.filter(
+        person=person, is_erroneous=False,
+        **{concept_field: concept_id, src_field: source_value},
+    )
+    if type_concept_id is not None:
+        rows = rows.filter(**{type_field: type_concept_id})
+    elif fact_type != PATIENT_SELF_REPORT_TYPE:
+        rows = rows.exclude(**{type_field: PATIENT_SELF_REPORT_TYPE})
+    try:
+        with transaction.atomic():
+            # The same lock the Yes path takes, so a No cannot evaluate its
+            # rows before a concurrent Yes has committed its own.
+            Person.objects.select_for_update().get(pk=person.pk)
+            for row in rows:
+                row.is_erroneous = True
+                row.erroneous_reason = 'retracted by a later PatientRecord answer'
+                row._skip_patient_record_refresh = True
+                row.save(update_fields=['is_erroneous', 'erroneous_reason'])
+                del row._skip_patient_record_refresh
+    except Exception:
+        logger.warning('Could not retract the earlier affirmative fact; edit remains pending')
 
 
 def patient_self_report_type():

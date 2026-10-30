@@ -300,6 +300,64 @@ _COMPUTED_INPUTS = {
     'active_malignancies': [],
 }
 
+# Current-diagnosis myeloma-related disorders (#5521). These are direct
+# PatientRecord fields; an affirmative answer projects to the reviewed OMOP
+# fact, while No/Unknown remains pending on PatientRecord because occurrence
+# tables cannot express a negative. Concepts come from the clinical owner's
+# list in CB #5521; IgM myeloma has no standard concept and stays direct-only.
+_MYELOMA_RELATED_DISORDER_PROJECTIONS = {
+    'mgus': {
+        'concept_id': 4149022, 'omop_table': 'observation',
+        'concept_code': '35601003', 'vocabulary': 'SNOMED',
+        'label': 'MGUS',
+    },
+    'smoldering_multiple_myeloma': {
+        'concept_id': 4184985, 'omop_table': 'condition',
+        'concept_code': '413587002', 'vocabulary': 'SNOMED',
+        'label': 'Smoldering multiple myeloma',
+    },
+    'waldenstrom_macroglobulinemia': {
+        'concept_id': 4098597, 'omop_table': 'condition',
+        'concept_code': '190818004', 'vocabulary': 'SNOMED',
+        'label': 'Waldenström macroglobulinemia',
+    },
+    'igm_multiple_myeloma': {
+        'label': 'IgM multiple myeloma',
+    },
+    'al_amyloidosis': {
+        'concept_id': 4047607, 'omop_table': 'condition',
+        'concept_code': '23132008', 'vocabulary': 'SNOMED',
+        'label': 'Light-chain (AL) amyloidosis',
+    },
+    'poems_syndrome': {
+        'concept_id': 4193776, 'omop_table': 'condition',
+        'concept_code': '79268002', 'vocabulary': 'SNOMED',
+        'label': 'POEMS syndrome',
+    },
+}
+
+# Fields whose projection is fixed by a reviewed built-in recipe. A curator
+# mapping must not replace their descriptor semantics or read OMOP facts back
+# into a current answer (#5521).
+PINNED_PROJECTION_FIELDS = frozenset(_MYELOMA_RELATED_DISORDER_PROJECTIONS)
+
+
+def pinned_projection_source_value(field):
+    """The source value that marks an OMOP row as this field's own answer.
+
+    The rows a pinned recipe writes are told apart from imported history by
+    this, never by the concept: an EHR row for the same SNOMED code is a
+    diagnosis, this is a patient's current-state answer dated the day they
+    gave it. Derivation uses it to keep such a row from becoming the record's
+    primary cancer, and a later No/Unknown uses it to find the rows it retracts.
+    """
+    return 'patient-record:' + field
+
+
+PINNED_PROJECTION_SOURCE_VALUES = frozenset(
+    pinned_projection_source_value(field) for field in PINNED_PROJECTION_FIELDS
+)
+
 # Lifecycle columns are not clinical data and are never writable regardless of
 # mapping state; they are excluded rather than reported as unwritable fields.
 _LIFECYCLE_FIELDS = frozenset({
@@ -627,9 +685,27 @@ def build_writable_field_descriptor():
     derived_concepts = _resolve_concepts(
         {(vocab, code) for code, vocab, _fn in DERIVED_FIELD_TO_CODE.values()}
     )
-    largest_lymph_node_concept = Concept.objects.filter(
-        concept_id=CONCEPT_LARGEST_LYMPH_NODE_DIMENSION
-    ).only('concept_id', 'concept_code', 'concept_name', 'vocabulary_id').first()
+    # The reviewed myeloma concepts come from the same vocabulary tables and are
+    # resolved in this one query with the largest-lymph-node concept, so adding
+    # them does not add a query per field or a new query overall (#5521).
+    myeloma_concept_ids = {
+        spec['concept_id'] for spec in _MYELOMA_RELATED_DISORDER_PROJECTIONS.values()
+        if spec.get('concept_id')
+    }
+    concept_by_id = {
+        concept.concept_id: concept
+        for concept in Concept.objects.filter(
+            concept_id__in=myeloma_concept_ids
+            | {CONCEPT_LARGEST_LYMPH_NODE_DIMENSION, CONCEPT_EHR_TYPE},
+        ).only('concept_id', 'concept_code', 'concept_name', 'vocabulary_id')
+    }
+    largest_lymph_node_concept = concept_by_id.get(CONCEPT_LARGEST_LYMPH_NODE_DIMENSION)
+    ehr_type_loaded = CONCEPT_EHR_TYPE in concept_by_id
+    myeloma_concepts = {
+        field: concept_by_id.get(spec['concept_id'])
+        for field, spec in _MYELOMA_RELATED_DISORDER_PROJECTIONS.items()
+        if spec.get('concept_id')
+    }
 
     choice_options = {
         field_name: [
@@ -754,6 +830,61 @@ def build_writable_field_descriptor():
                     'reading, counting each day once across all device metrics.'
                 ),
             }
+            continue
+
+        if field in _MYELOMA_RELATED_DISORDER_PROJECTIONS:
+            entry = {
+                'kind': KIND_DIRECT,
+                'writable': True,
+                'target': 'patient_record',
+                'value_kind': 'boolean',
+                'label': _MYELOMA_RELATED_DISORDER_PROJECTIONS[field]['label'],
+                # Yes / No / Unknown are three distinct answers here; the
+                # shared form must offer Unknown explicitly instead of relying
+                # on a generic clear (#5521).
+                'tri_state': True,
+            }
+            spec = _MYELOMA_RELATED_DISORDER_PROJECTIONS[field]
+            concept = myeloma_concepts.get(field)
+            if concept is not None and ehr_type_loaded:
+                entry['projection'] = {
+                    'omop_table': spec['omop_table'],
+                    'concept_id': concept.concept_id,
+                    'code': concept.concept_code,
+                    'vocabulary': concept.vocabulary_id,
+                    'display': concept.concept_name,
+                    'type_concept_id': CONCEPT_EHR_TYPE,
+                    'source_value': pinned_projection_source_value(field),
+                    # No/Unknown must not become a negative occurrence; the
+                    # answer stays pending on PatientRecord, and the rows an
+                    # earlier Yes wrote are retracted.
+                    'affirmative_only': True,
+                    # The shared form writes PatientRecord first and treats this
+                    # fact as a side effect: an occurrence cannot be derived back
+                    # into a current answer, so it must not be the only write.
+                    'best_effort': True,
+                }
+                entry['reason'] = (
+                    'Written directly to PatientRecord; an affirmative answer '
+                    'projects to the reviewed OMOP fact. No/Unknown stays pending '
+                    'because occurrence tables cannot express a negative.'
+                )
+            elif not spec.get('concept_id'):
+                entry['reason'] = (
+                    'Written directly to PatientRecord. No standard OMOP concept '
+                    'is available for IgM myeloma; no projection is attempted.'
+                )
+            elif not ehr_type_loaded:
+                entry['reason'] = (
+                    'Written directly to PatientRecord. The EHR type concept '
+                    f'{CONCEPT_EHR_TYPE} is not loaded — no OMOP projection available.'
+                )
+            else:
+                entry['reason'] = (
+                    f"Written directly to PatientRecord. {spec['vocabulary']} "
+                    f"{spec['concept_code']} is not loaded — no OMOP projection available."
+                )
+            descriptor[field] = entry
             continue
 
         if field in curated:

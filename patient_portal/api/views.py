@@ -175,25 +175,34 @@ def _genomics_type_concept(user, person):
     return 32865 if get_actor_role(user, person.person_id) in ('self', 'representative') else 32817
 
 
-def _patient_authorship(actor, person):
-    """project_single_value keywords for the author of a PatientRecord save.
-
-    The patient or a verified representative writes patient self-report; the
-    patient's own facts also carry PATIENT_SELF provenance. Anyone else, or a
-    service credential with no Identity, writes with the recipe's type.
-    """
+def _patient_author_role(actor, person):
+    """The caller's role for this person, or None for an anonymous caller."""
     from omop_core.authorization import get_actor_role
-    from omop_core.services.omop_projection import patient_self_report_type
 
     if not getattr(actor, 'is_authenticated', False):
-        return {}
-    role = get_actor_role(actor, person.person_id)
-    if role not in ('self', 'representative') or not (self_report := patient_self_report_type()):
-        return {}
+        return None
+    return get_actor_role(actor, person.person_id)
+
+
+def _patient_author(actor, person):
+    """(is the caller the patient or their representative, project_single_value keywords).
+
+    One role lookup answers both. The patient or a verified representative
+    writes patient self-report; the patient's own facts also carry
+    PATIENT_SELF provenance. Anyone else, or a service credential with no
+    Identity, writes with the recipe's type. A patient author with empty
+    keywords means the self-report type concept is not loaded.
+    """
+    from omop_core.services.omop_projection import patient_self_report_type
+
+    role = _patient_author_role(actor, person)
+    patient_author = role in ('self', 'representative')
+    if not patient_author or not (self_report := patient_self_report_type()):
+        return patient_author, {}
     authorship = {'type_concept_id': self_report}
     if role == 'self':
         authorship['patient_user_id'] = f'{actor.issuer}|{actor.sub}'
-    return authorship
+    return patient_author, authorship
 
 
 def _write_genetic_mutations(person, mutations, type_concept_id):
@@ -1416,7 +1425,9 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         PATIENT_SELF provenance row. Anyone else's keeps the recipe's type.
         """
         from omop_core.services.omop_projection import project_single_value, projection_for_descriptor
-        from omop_core.services.write_descriptor import build_writable_field_descriptor
+        from omop_core.services.write_descriptor import (
+            PINNED_PROJECTION_FIELDS, build_writable_field_descriptor,
+        )
 
         try:
             with transaction.atomic():
@@ -1426,17 +1437,28 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             return set()
         projected = set()
         authorship = None
+        patient_author_without_type = False
         for field in direct_fields:
             projection = projection_for_descriptor(descriptors.get(field))
             if projection:
                 if authorship is None:
-                    authorship = _patient_authorship(actor, person)
+                    patient_author, authorship = _patient_author(actor, person)
+                    patient_author_without_type = patient_author and not authorship
+                if field in PINNED_PROJECTION_FIELDS and patient_author_without_type:
+                    # Without 32865 the patient's fact cannot be told apart
+                    # from a clinical one; a current-state answer must not
+                    # overwrite today's clinical fact. Keep the record value.
+                    continue
                 if project_single_value(person, field, patch_data[field], projection,
                                         acknowledge_existing=True, **authorship):
                     # Occurrences and structured answers need their dedicated
                     # extractors before their saved values can be acknowledged.
+                    # A pinned current-state answer is never read back from
+                    # OMOP, so it stays pending here as it does on the shared
+                    # form; the two write paths must agree on what pending means.
                     if (projection['omop_table'] in ('measurement', 'observation')
-                            and projection.get('value_kind') != 'json'):
+                            and projection.get('value_kind') != 'json'
+                            and field not in PINNED_PROJECTION_FIELDS):
                         projected.add(field)
         return projected
 
@@ -5632,7 +5654,14 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
         if not isinstance(request.data, dict) or not request.data:
             return Response({'detail': 'Provide a non-empty object of field edits.'}, status=400)
         try:
-            record, result = apply_patient_form_patch(person, request.data)
+            patient_author, authorship = _patient_author(request.user, person)
+            # Without the Patient self-report type concept the patient's fact
+            # cannot be told apart from a clinical one, and projecting could
+            # overwrite today's clinical answer. Keep the PatientRecord answer
+            # and skip the best-effort side effect instead.
+            record, result = apply_patient_form_patch(
+                person, request.data, authorship=authorship, patient_author=patient_author,
+            )
         except ValueError as exc:
             return Response({'detail': str(exc)}, status=400)
         if not result.applied:
