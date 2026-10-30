@@ -30,6 +30,10 @@ type Source = {
   axis_variants?: AxisVariant[];
   /** Normalised description for grouping codes with the same label. */
   source_label_norm?: string | null;
+  /** Distinct units this code has been observed in (from source_unit_evidence). */
+  units?: string[];
+  /** LOINC system axis (specimen type), e.g. "Ser", "Plas", "Bld". */
+  specimen?: string;
   /** The ranker's confidence (0-1) in this source → concept pairing. */
   confidence?: number | null;
   /** Saved in the full editor since the preview: no longer a bulk-review row. */
@@ -873,7 +877,12 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
           disabled={locked} aria-haspopup="dialog" title={`Open ${row.source_code} in Edit Mapping`}
           onClick={() => void openEditor(row)}>{row.source_vocabulary_id || 'Uncoded'}:{row.source_code}</button><AxisVariantFlag count={row.axis_variant_count} />
           <AxisVariantList variants={row.axis_variants} canApprove={canApprove} busy={locked} onApprove={variant => void approveVariant(row, variant)} /></td>
-        <td className="p-2 text-slate-500">{row.source_code_description || '—'}</td><td className="p-2 text-right tabular-nums">{row.occurrence_count}</td>
+        <td className="p-2 text-slate-500">{row.source_code_description || '—'}
+          {(row.units?.length || row.specimen) ? <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-xs">
+            {row.units?.length ? <span title="Units observed"><span className="font-medium text-slate-600">Units:</span> {row.units.join(', ')}</span> : null}
+            {row.specimen ? <span title="Specimen type (LOINC system)"><span className="font-medium text-slate-600">Specimen:</span> {row.specimen}</span> : null}
+          </div> : null}
+        </td><td className="p-2 text-right tabular-nums">{row.occurrence_count}</td>
         <td className="p-2 text-xs">{row.destination_concept_name || 'None'}{row.destination_concept_id && <div className="mt-1 text-slate-500">
           OMOP {row.destination_concept_id} · {row.destination_standard_concept === 'S' ? 'Standard' : 'Nonstandard'}</div>}</td>
         <td className="p-2 text-xs"><span className={row.status === 'approved' ? 'font-medium text-green-800' : 'text-slate-700'}>{row.status === 'unmapped' ? 'Not yet mapped' : row.status}</span>
