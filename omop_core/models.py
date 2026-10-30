@@ -2979,9 +2979,22 @@ class DiseaseCategory(models.TextChoices):
     OTHER = 'Other', 'Other'
 
 
+class DiseaseCategoryChoice(models.Model):
+    """User-manageable disease category choices (replaces the hardcoded enum for validation)."""
+    code = models.CharField(max_length=30, unique=True)
+    label = models.CharField(max_length=120)
+
+    class Meta:
+        db_table = 'disease_category_choice'
+        ordering = ['label']
+
+    def __str__(self):
+        return f'{self.code} — {self.label}'
+
+
 class DiseaseCategoryMapping(models.Model):
     disease_name = models.TextField(unique=True)
-    category = models.CharField(max_length=10, choices=DiseaseCategory.choices)
+    category = models.CharField(max_length=30)
 
     class Meta:
         db_table = 'disease_category_mapping'

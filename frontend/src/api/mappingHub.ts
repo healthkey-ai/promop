@@ -47,6 +47,15 @@ export async function fetchDiseaseCategories(): Promise<{value: string; label: s
   return resp.data as {value: string; label: string}[];
 }
 
+export async function createDiseaseCategory(data: { code: string; label: string }): Promise<{value: string; label: string}> {
+  const resp = await api.post('/v1/disease-categories/', data);
+  return resp.data as {value: string; label: string};
+}
+
+export async function deleteDiseaseCategory(code: string): Promise<void> {
+  await api.delete(`/v1/disease-categories/${encodeURIComponent(code)}/`);
+}
+
 export async function fetchMappingStats(): Promise<MappingStats> {
   const resp = await api.get('/v1/mapping-stats/');
   return resp.data as MappingStats;
