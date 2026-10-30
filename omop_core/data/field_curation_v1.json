@@ -8162,21 +8162,6 @@
       "is_active": true
     },
     {
-      "field_name": "no_hepatitis_b_status",
-      "formula": "@not(hepatitis_b_status)",
-      "is_active": true
-    },
-    {
-      "field_name": "no_hepatitis_c_status",
-      "formula": "@not(hepatitis_c_status)",
-      "is_active": true
-    },
-    {
-      "field_name": "no_hiv_status",
-      "formula": "@not(hiv_status)",
-      "is_active": true
-    },
-    {
       "field_name": "no_other_active_malignancies",
       "formula": "@count(active_malignancies) <= 1",
       "is_active": true

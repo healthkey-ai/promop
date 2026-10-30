@@ -196,6 +196,45 @@ All notable changes to PRomop are documented here.
 
 ### Fixed
 
+- **Author-sensitive medication context and partial DOB (#2129)** — mapping
+  approval no longer projects pending medication attributes without reliable
+  per-attribute authorship or duplicates patient self-report as EHR. Pending
+  answers remain visible in PatientRecord/PHR. Read-only shared DOB displays
+  only the known year/month instead of placeholder date components.
+- **Native DOB pair validation (#2129)** — normalize date and precision inside
+  the existing cross-field validator, keeping PatientRecord, Person and the
+  PATCH response consistent on both legacy and v1 routes. Promoting a partial
+  DOB to a full date requires explicit day precision.
+- **cb-v2 backmerge data contracts (#2129)** — retain raw OMOP measurement
+  numbers, units and reference ranges during import and mapping repoints;
+  canonical units remain an additive read model, preserving retry identity and
+  avoiding lossy/overflowing write-time conversion. Preserve maintenance through
+  editor serialization (including omission by older clients), keep late-line
+  progression dates per line, and honor partial DOB precision in both native
+  and shared profile writers. Patient filters retain literal diagnoses and
+  support categories; family-history/risk categories do not assert patient
+  cancer. PHR names require source-vocabulary evidence rather than guessing from
+  a bare code. Seen-count existence, totals and rebuilds agree on OID aliases
+  and truncated source-code keys. No existing clinical data is rewritten.
+- **A lookup's Seen bump is provisional** — `code-mappings/lookup/` asks once
+  per code per batch, not once per record, so its sighting now adds one only
+  while the instance holds no per-patient source-code rows for the code, and
+  sets the count from the rows once they exist; per-record callers such as
+  FHIR sync still add one. Each per-patient upload sets the Seen count of the
+  codes it wrote or removed from their rows. (#2123)
+- **Seen counts come from this instance's patients** — a rebuild walk now
+  starts by setting every mapped code's Seen count, in one statement, from the
+  per-patient source-code rows, per vocabulary and code, instead of leaving
+  the hospital-code extract's number, which counted every coding of an
+  observation and so showed one figure for the order-system and result-system
+  codes of a test. A code with no patient rows here keeps its count; a later
+  seed, inventory or snapshot load does not raise the count of a code that
+  has patient rows here. (#2121)
+- **One migration leaf again** — #2073 (`0313_widen_axis_key`) and #2072
+  (`0313_add_b_symptom_fields`, `0314_b_symptom_mappings`) both branched from
+  0312, leaving `dev` with two leaves, every PR's backend check red and the
+  deploys of `140e3601` and `10cf269f` failed in Test. Merge migration
+  `0315_merge_20261028_0615` joins them. (#2080)
 - **A refresh whose worker was killed is picked up without a deploy** — the
   stale-heartbeat sweep ran at worker boot and twice in the next three minutes,
   then never again. Cloud Run shuts the old instance down after the new worker

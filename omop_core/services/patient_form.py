@@ -9,7 +9,6 @@ import logging
 from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.utils import timezone
-from datetime import datetime
 from decimal import Decimal
 
 from omop_core.models import PatientRecord
@@ -255,6 +254,7 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
     facts, direct, person_changes, profile_applied = {}, {}, set(), set()
     side_effect_projections = {}
     record_profile_fields = set()
+    birth_changes = {}
     project_side_effects = not (patient_author and not authorship)
     for name, value in changes.items():
         entry = descriptor.get(name, {})
@@ -279,30 +279,25 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
             result.applied.append(name)
             profile_applied.add(name)
             continue
-        if name in ('phone_number', 'email', 'date_of_birth'):
+        if name in ('date_of_birth', 'date_of_birth_precision'):
+            try:
+                birth_changes[name] = record._meta.get_field(name).clean(None if value == '' else value, record)
+            except ValidationError as exc:
+                raise ValueError(f'{name}: {"; ".join(exc.messages)}') from exc
+            if name == 'date_of_birth' and birth_changes[name] and birth_changes[name] > timezone.localdate():
+                raise ValueError('date_of_birth: Date of birth cannot be in the future.')
+            result.applied.append(name)
+            profile_applied.add(name)
+            continue
+        if name in ('phone_number', 'email'):
             try:
                 value = record._meta.get_field(name).clean(None if value == '' else value, record)
             except ValidationError as exc:
                 raise ValueError(f'{name}: {"; ".join(exc.messages)}') from exc
-            if name == 'date_of_birth':
-                updates = {'year_of_birth': value.year if value else None,
-                           'month_of_birth': value.month if value else None,
-                           'day_of_birth': value.day if value else None,
-                           'birth_datetime': timezone.make_aware(datetime.combine(value, datetime.min.time())) if value else None}
-                # Full external derivation deliberately preserves DOB. Clear
-                # the read model too, as the native profile writer does.
-                record.person = person
-                record.date_of_birth = value
-                record.patient_age = None
-                record_profile_fields |= {'date_of_birth', 'patient_age'}
-            else:
-                value = value.strip() if isinstance(value, str) else value
-                updates = {name: value}
-                # The record mirrors these from Person only when it is derived,
-                # and a direct save does not derive; mirror them here so the
-                # response reads back what was just written.
-                setattr(record, name, value)
-                record_profile_fields.add(name)
+            value = value.strip() if isinstance(value, str) else value
+            updates = {name: value}
+            setattr(record, name, value)
+            record_profile_fields.add(name)
             for key, item in updates.items():
                 setattr(person, key, item)
                 person_changes.add(key)
@@ -346,6 +341,17 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
                     and value is not None and len(str(value)) > 60):
                 raise ValueError(f'{name}: this scalar write supports at most 60 characters; no value was saved.')
             facts[name] = value
+    if birth_changes:
+        from omop_core.services.birth_dates import normalize_birth_date, person_birth_values
+        dob, precision = normalize_birth_date(person, birth_changes)
+        for name, value in person_birth_values(dob, precision).items():
+            setattr(person, name, value)
+            person_changes.add(name)
+        record.person = person
+        record.date_of_birth = dob
+        record.date_of_birth_precision = precision
+        record.patient_age = None
+        record_profile_fields |= {'date_of_birth', 'date_of_birth_precision', 'patient_age'}
     if person_changes:
         person.save(update_fields=sorted(person_changes))
     if record_profile_fields:

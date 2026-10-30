@@ -21,6 +21,7 @@ interface FieldProps {
   triState?: boolean;
   vocabSource?: VocabSource | null;
   fullWidth?: boolean;
+  precision?: 'day' | 'month' | 'year' | null;
 }
 
 export default function Field({
@@ -34,6 +35,7 @@ export default function Field({
   readOnly,
   triState,
   vocabSource,
+  precision,
 }: FieldProps) {
   const isDisabled = disabled || readOnly;
   const optionObjects = useMemo(() => stringsToOptions(options), [options]);
@@ -118,6 +120,7 @@ export default function Field({
             value={formatDateForInput(value as string)}
             disabled={isDisabled}
             onChange={(v) => onChange(name, v)}
+            precision={precision}
           />
         );
 
@@ -132,7 +135,7 @@ export default function Field({
         );
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [type, value, optionObjects, isDisabled, name, selectedValues, msDisplay, triState]);
+  }, [type, value, optionObjects, isDisabled, name, selectedValues, msDisplay, triState, precision]);
 
   return (
     <div className="space-y-1.5">

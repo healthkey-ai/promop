@@ -66,8 +66,12 @@ def browse_concepts(params):
         fields = fields.filter(status=params['status'])
     if params.get('domain'):
         fields = fields.filter(omop_table=params['domain'])
+    disease = (params.get('disease') or '').strip()
+    if disease:
+        from omop_core.services.disease_relevance import _disease_fields
+        fields = fields.filter(field_name__in=_disease_fields(disease))
     concepts = standard_destinations()
-    scope = params.get('scope', 'fields')
+    scope = 'fields' if disease else params.get('scope', 'fields')
     if scope == 'fields':
         concepts = concepts.filter(Exists(fields.filter(concept_id=OuterRef('pk'))))
     elif params.get('domain'):

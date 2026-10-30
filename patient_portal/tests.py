@@ -24797,8 +24797,8 @@ class FieldFormulaAPITest(TestCase):
 
     def test_delete_formula(self):
         resp = self.client.post('/api/v1/field-formulas/', {
-            'field_name': 'no_hiv_status',
-            'formula': '@not(hiv_status)',
+            'field_name': 'no_active_infection_status',
+            'formula': '@not(active_infection_status)',
             'is_active': False,
         }, format='json')
         self.assertEqual(resp.status_code, 201, resp.data)

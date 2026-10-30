@@ -30,6 +30,10 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
   </div>;
   if (ancestors.includes(canonical)) return <p role="alert">Circular field dependency; editing is unavailable.</p>;
   const value = canonical in state.pending ? state.pending[canonical] : state.values[canonical];
+  const dobPrecision = state.pending.date_of_birth_precision ?? state.values.date_of_birth_precision;
+  const precision = canonical === 'date_of_birth'
+    && (dobPrecision === 'day' || dobPrecision === 'month' || dobPrecision === 'year')
+    ? dobPrecision : undefined;
   const label = field.label ?? canonical;
   const inputs = field.inputs ?? (field.canonical ? [field.canonical] : []);
   const writable = !readOnly && state.writable && field.writable && field.target === 'patient_record';
@@ -39,6 +43,8 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
   // read-only and is recalculated by PROMOP.
   const gated = Boolean(field.compatibility_reason);
   const formatted = value == null || value === '' ? 'Unknown'
+    : precision === 'year' ? String(value).slice(0, 4)
+    : precision === 'month' ? String(value).slice(0, 7)
     : typeof value === 'boolean' ? (value ? 'Yes' : 'No')
     : typeof value === 'object' ? JSON.stringify(value) : String(value);
   const control = field.multiple ? 'multiselect' : field.options?.length
@@ -77,7 +83,7 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
       </div>
     </> : writable ? <Field label={compact ? '' : label} name={canonical} type={control}
       value={value} options={field.options?.map((option) => option.value)}
-      triState={field.tri_state === true} onChange={store.enqueue} />
+      triState={field.tri_state === true} precision={precision} onChange={store.enqueue} />
       : <><div>{!compact && <span className="text-sm font-medium">{label}: </span>}{formatted}</div>
         <p className="text-xs text-muted-foreground">{reason} {infoHref && <a href={infoHref}>Open Your Info</a>}</p></>}
     {(field.unit ?? field.projection?.unit) && <span className="text-xs text-muted-foreground">{field.unit ?? field.projection?.unit}</span>}

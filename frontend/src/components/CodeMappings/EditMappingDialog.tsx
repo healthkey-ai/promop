@@ -202,7 +202,7 @@ export default function EditMappingDialog({
 
   /** Offer the caller's destination when the row arrives without one. */
   const withDefaultDestination = useCallback((built: MappingForm): MappingForm => {
-    if (!defaultDestination || built.destination_concept_id) return built;
+    if (!defaultDestination) return built;
     const domainId = built.domain_id || defaultDestination.domain_id || "";
     return {
       ...built,
@@ -1024,6 +1024,7 @@ export default function EditMappingDialog({
                     </label>
                     <HelpTip tip={TIP.search} />
                   </div>
+                  {!defaultDestination && (
                   <div className="flex flex-wrap items-center gap-3">
                     {(["umls", "lexical", "vectors"] as const).map((key) => (
                       <div key={key} className="inline-flex items-center gap-1 text-xs text-slate-600">
@@ -1060,6 +1061,7 @@ export default function EditMappingDialog({
                       Suggest
                     </button>
                   </div>
+                  )}
                 </div>
                 {variantMessage && <p role="status" data-testid="variant-suggestion" className="text-xs text-slate-700">{variantMessage}</p>}
                 {mode === "edit" && selectedRow?.mapping_id && <LoincAxesPanel

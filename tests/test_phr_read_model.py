@@ -661,7 +661,9 @@ def therapy_line(record, number, start, end, drugs):
     for name, d_start, d_end in drugs:
         exposure = drug(record, ConceptFactory(concept_name=name, concept_code=f'RX-{name}'), d_start, d_end)
         EpisodeEvent.objects.create(episode_id=episode.episode_id, event_id=exposure.pk,
-                                    episode_event_field_concept=regimen)
+                                    episode_event_field_concept=ConceptFactory(
+                                        vocabulary__vocabulary_id='CDM', domain__domain_id='Metadata',
+                                        concept_name='drug_exposure.drug_exposure_id', concept_code='CDM150'))
     return episode
 
 
@@ -691,6 +693,13 @@ def test_therapy_draws_each_line_with_its_medicines_procedures_and_outcome():
 
     assert [t['diagnosis'] for t in data['tracks']] == [{'name': 'Multiple myeloma', 'slug': 'myeloma'}]
     first, second = data['tracks'][0]['lines']
+    # The additive exposure details retain the event identity and source.
+    for line in (first, second):
+        for medication in line['medications']:
+            exposures = medication.pop('exposures')
+            assert len(exposures) == 1
+            assert exposures[0]['drug_exposure_id']
+            assert exposures[0]['start'] == medication['start']
     assert first == {
         'id': '701', 'number': 1, 'regimen': 'VRd', 'start': '2024-03-12', 'end': '2024-10-14', 'current': False,
         'medications': [
@@ -741,6 +750,31 @@ def test_whats_new_groups_the_last_30_days_by_date_section_and_facility():
             {'section': 'medications', 'count': 1},
         ]},
     ]}
+
+
+def test_whats_new_leaves_out_what_the_patient_added_themselves():
+    """What's new is what arrived from the patient's care centers, not their own entries."""
+    record = PatientRecordFactory(disease='')
+    recent = (timezone.localdate() - timedelta(days=3)).isoformat()
+    self_report = ConceptFactory(concept_id=32865, concept_name='Patient self-report', concept_code='OMOP4976879')
+    kind = ConceptFactory(concept_name='Procedure type', concept_code='TYPE-PROC')
+    port = ConceptFactory(concept_name='Port-a-cath flush', concept_code='PROC-PORT')
+    ConceptFactory(concept_id=0, concept_code='No matching concept', concept_name='No matching concept')
+    ProcedureOccurrence.objects.create(
+        procedure_occurrence_id=1, person=record.person, procedure_concept=port, procedure_date=recent,
+        procedure_type_concept=kind)
+    typed_in = ProcedureOccurrence.objects.create(
+        procedure_occurrence_id=2, person=record.person, procedure_concept_id=0, procedure_source_value='Biopsy',
+        procedure_date=recent, procedure_type_concept=kind)
+    ProvenanceRecord.objects.create(
+        content_type=ContentType.objects.get_for_model(ProcedureOccurrence), object_id=typed_in.pk, source='PATIENT_SELF')
+    drug(record, ConceptFactory(concept_name='Vitamin D3', concept_code='RX-VD3'), recent,
+         drug_type_concept=self_report)
+    condition(record, icd10('M81.0', 'Osteoporosis'), recent, condition_type_concept=self_report)
+
+    data = signed_in(record).get('/api/v1/phr/whats-new/').data
+
+    assert data == {'days': 30, 'groups': [{'date': recent, 'items': [{'section': 'procedures', 'count': 1}]}]}
 
 
 def test_imaging_lists_reports_newest_first():

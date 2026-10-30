@@ -359,4 +359,4 @@ def measurement_normalized(measurement, preferences):
         unit = concept.concept_code if concept and concept.vocabulary_id == 'UCUM' else None
     concept_id = measurement.measurement_concept_id or measurement.measurement_source_concept_id
     return normalize(preferences.get(concept_id),
-                     measurement.value_as_number, unit, measurement.range_low, measurement.range_high)
+                      measurement.value_as_number, unit, measurement.range_low, measurement.range_high)

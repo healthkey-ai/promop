@@ -99,10 +99,14 @@ def test_backfill_uses_historical_models_is_idempotent_and_preserves_existing_va
         typing(record.person, '882-1', 'O positive')
     PatientRecord.objects.filter(pk=records[1].pk).update(blood_type='AB negative')
     PatientRecord.objects.filter(pk=records[2].pk).update(user_edited_fields=['blood_type'])
+    # The suite runs with --no-migrations, so the tables reflect the current
+    # models. A historical state frozen at 0290 selects columns that later
+    # migrations removed (0321 dropped the inverse infection fields), so build
+    # the state at the graph's leaf: still a migration-state model, but one
+    # whose columns match the tables.
     with override_settings(MIGRATION_MODULES={}):
-        historical_apps = MigrationLoader(connection).project_state([
-            ('omop_core', '0290_patientrecord_blood_type'),
-        ]).apps
+        loader = MigrationLoader(connection)
+        historical_apps = loader.project_state(loader.graph.leaf_nodes('omop_core')).apps
     for _ in range(2):
         migration.backfill_blood_type(historical_apps, SimpleNamespace(connection=connection))
     for record in records:

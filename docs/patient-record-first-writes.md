@@ -70,6 +70,14 @@ Patient name uses the same PATCH and updates Person's name columns; its response
 field is not a stored PatientRecord column. Clinician validation fields retain
 their staff access checks.
 
+Birth-date precision is part of that profile contract on both native PATCH and
+the shared form. A date-only edit preserves Person's known precision; changing
+from year/month to a full date requires an explicit precision edit. Year-only
+and month-only values use day/month 1 as PatientRecord placeholders, while the
+unknown Person components and `birth_datetime` remain null. Precision and date
+may be sent together in either order; a precision-only edit updates both the
+read-model pair and Person without a full history refresh.
+
 ## Write Descriptor Changes
 
 The `build_writable_field_descriptor()` function now returns `KIND_DIRECT` with
@@ -196,6 +204,10 @@ When a curator approves a `FieldConceptMapping`, the `post_save` signal triggers
 pending user-edited value for that field. It filters by `user_edited_fields`,
 not by comparing typed columns to an empty string, and uses the same dated
 writer and unit recipe as PATCH. Records with no pending edits are untouched.
+Dedicated writers and pinned current-state fields that require author-aware
+projection are exceptions: approval does not invent authorship from a recipe.
+Medication contexts likewise stay pending when no per-attribute author is
+available; existing self-report facts are not duplicated as EHR facts.
 
 ## Derivation Preservation
 
@@ -253,8 +265,9 @@ import/ingestion path, not an interactive save.
 3. **Derivation cannot overwrite user edits** — `user_edited_fields` tracking
    ensures user values persist until derivation represents the saved value.
 
-4. **Mapping approval triggers backfill** — existing user edits are projected
-   when a mapping is approved, without any manual step.
+4. **Mapping approval triggers eligible backfill** — existing user edits are
+   projected when a mapping is approved, except author-sensitive fields whose
+   pending data cannot establish fact authorship.
 
 5. **The frontend has one write path** — no more split between OMOP and
    PatientRecord. The descriptor still carries projection metadata for the date

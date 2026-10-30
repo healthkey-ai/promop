@@ -711,3 +711,165 @@ def test_long_axis_key_round_trips():
         mapping=mapping, axis_key=long_key, axis_values={}, units=['%'])
     variant.refresh_from_db()
     assert variant.axis_key == long_key
+
+
+# --- occurrence_count rebuild (#2110) and variant count correction (#2111) ---
+
+
+def test_rebuild_updates_occurrence_count_from_psc_totals():
+    """rebuild_unit_evidence should update occurrence_count from PSC data (#2110).
+
+    Hospital code seeds carried inflated label-level counts; the rebuild
+    must correct them to the per-code PSC totals.
+    """
+    mapping = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id=LAB, source_code='ALB-COUNT', omop_table='measurement',
+        occurrence_count=1600,  # inflated seed count
+        source_unit_evidence=SEEDED)
+    person = PersonFactory()
+    PatientSourceCode.objects.create(
+        person=person, source_value='ALB-COUNT', source_vocabulary_id=LAB,
+        omop_table='measurement', source_unit='g/dL', occurrence_count=414)
+    axis_variants.rebuild_unit_evidence([mapping])
+    mapping.refresh_from_db()
+    assert mapping.occurrence_count == 414, \
+        f'occurrence_count should be updated from PSC total, got {mapping.occurrence_count}'
+
+
+def test_rebuild_does_not_zero_occurrence_count_when_no_psc_data():
+    """A code with no PSC data should keep its existing occurrence_count (#2110)."""
+    mapping = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id=LAB, source_code='NO-PSC', omop_table='measurement',
+        occurrence_count=50,
+        source_unit_evidence=SEEDED)
+    axis_variants.rebuild_unit_evidence([mapping])
+    mapping.refresh_from_db()
+    assert mapping.occurrence_count == 50, \
+        'occurrence_count should not be zeroed when there is no PSC data'
+
+
+def test_rebuild_sums_multiple_units_for_occurrence_count():
+    """occurrence_count should be the sum across all units (#2110)."""
+    mapping = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id=LAB, source_code='GLU-SUM', omop_table='measurement',
+        occurrence_count=1600,
+        source_unit_evidence=SEEDED)
+    person_a = PersonFactory()
+    person_b = PersonFactory()
+    PatientSourceCode.objects.create(
+        person=person_a, source_value='GLU-SUM', source_vocabulary_id=LAB,
+        omop_table='measurement', source_unit='mg/dL', occurrence_count=300)
+    PatientSourceCode.objects.create(
+        person=person_b, source_value='GLU-SUM', source_vocabulary_id=LAB,
+        omop_table='measurement', source_unit='mmol/L', occurrence_count=114)
+    axis_variants.rebuild_unit_evidence([mapping])
+    mapping.refresh_from_db()
+    assert mapping.occurrence_count == 414, \
+        f'occurrence_count should be sum of all units, got {mapping.occurrence_count}'
+
+
+def test_surviving_variant_rows_get_updated_counts_below_threshold():
+    """Old variant rows with approval/destination should get corrected counts
+    even when below FLAG_THRESHOLD (#2111)."""
+    mapping = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id=LAB, source_code='ALB-VAR', omop_table='measurement',
+        axis_variant_count=0)
+    # Create an old variant row with inflated count and an approval
+    old_variant = SourceCodeAxisVariant.objects.create(
+        mapping=mapping, axis_key='property=MCnc|scale_type=Qn',
+        axis_values={'property': 'MCnc', 'scale_type': 'Qn'},
+        units=['g/dL'], occurrence_count=279045,
+        status='approved', target_concept_id=12345)
+    # Only one unit in PSC → 1 variant detected, below FLAG_THRESHOLD(2)
+    person = PersonFactory()
+    PatientSourceCode.objects.create(
+        person=person, source_value='ALB-VAR', source_vocabulary_id=LAB,
+        omop_table='measurement', source_unit='g/dL', occurrence_count=414)
+    from collections import Counter
+    counts = Counter({'g/dL': 414})
+    axis_variants.refresh(mapping, counts)
+    old_variant.refresh_from_db()
+    assert old_variant.occurrence_count == 414, \
+        f'Surviving variant should have corrected count, got {old_variant.occurrence_count}'
+
+
+# --- Seen counts from this instance's patients, for every code (#2121) ---
+
+
+def test_a_rebuild_sets_the_seen_count_from_this_instance_s_patients_per_coding_system():
+    """The extract counted each coding of an observation, so two coding systems' codes showed one
+    number (#2121); the per-patient rows give each its own, in one pass, walk or no walk."""
+    order = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id='urn:oid:1.2.3.2.7.2.768282', source_code='5090', omop_table='measurement',
+        occurrence_count=1714, source_group_occurrence_count=1714)
+    result = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id='urn:oid:1.2.3.2.7.5.737384.134', source_code='5090', omop_table='measurement',
+        occurrence_count=1714, source_group_occurrence_count=1714)
+    never_loaded = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id='urn:oid:1.2.3.2.7.2.768282', source_code='5091', omop_table='measurement',
+        occurrence_count=99, source_group_occurrence_count=120)
+    any_table = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id=LAB, source_code='GLU', omop_table='', occurrence_count=1)
+    for n in (3, 4):
+        PatientSourceCode.objects.create(person=PersonFactory(), source_value='5090', occurrence_count=n,
+                                         source_vocabulary_id=order.source_vocabulary_id, omop_table='measurement')
+    PatientSourceCode.objects.create(person=PersonFactory(), source_value='5090', occurrence_count=2,
+                                     source_vocabulary_id=result.source_vocabulary_id, omop_table='measurement')
+    PatientSourceCode.objects.create(person=PersonFactory(), source_value='GLU', occurrence_count=5,
+                                     source_vocabulary_id=LAB, omop_table='measurement')
+    PatientSourceCode.objects.create(person=PersonFactory(), source_value='GLU', occurrence_count=6,
+                                     source_vocabulary_id=LAB, omop_table='observation')
+    # A row on another table does not count for a measurement mapping.
+    PatientSourceCode.objects.create(person=PersonFactory(), source_value='5090', occurrence_count=50,
+                                     source_vocabulary_id=result.source_vocabulary_id, omop_table='observation')
+    assert (order.source_vocabulary_id, '5090') not in axis_variants.evidence_keys(), \
+        'a code with no unit is not walked; its count is set without a walk'
+    assert axis_variants.rebuild_seen_counts() == 3
+    for m in (order, result, never_loaded, any_table):
+        m.refresh_from_db()
+    assert (order.occurrence_count, result.occurrence_count) == (7, 2)
+    assert (order.source_group_occurrence_count, result.source_group_occurrence_count) == (None, None), \
+        "the extract's group figure no longer describes the members"
+    assert (never_loaded.occurrence_count, never_loaded.source_group_occurrence_count) == (99, 120), \
+        'a code with no patient rows here keeps its count'
+    assert any_table.occurrence_count == 11, 'a mapping with no table counts every table'
+
+
+def test_a_hospital_scoped_mapping_counts_its_own_patients_only():
+    from tests.factories import OrganizationFactory, PatientRecordFactory
+
+    ours, theirs = OrganizationFactory(), OrganizationFactory()
+    shared = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id=LAB, source_code='HGB', omop_table='measurement', occurrence_count=1)
+    scoped = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id=LAB, source_code='HGB', omop_table='measurement', occurrence_count=1, organization=ours)
+    for org, n in ((ours, 3), (theirs, 700)):
+        record = PatientRecordFactory(organization=org)
+        PatientSourceCode.objects.create(person=record.person, source_value='HGB', source_vocabulary_id=LAB,
+                                         omop_table='measurement', source_unit='g/dL', occurrence_count=n)
+    axis_variants.refresh_all(rebuild_evidence=True)
+    shared.refresh_from_db(); scoped.refresh_from_db()
+    assert (shared.occurrence_count, scoped.occurrence_count) == (703, 3)
+
+
+def test_a_rebuild_request_sets_seen_counts_once_and_a_resumed_one_does_not_repeat_it(two_unit_code):
+    SourceCodeConceptMapping.objects.filter(pk=two_unit_code.pk).update(occurrence_count=1714)
+    request = AxisVariantRefresh.objects.create(reason='rebuild', rebuild_evidence=True)
+    assert axis_variant_jobs.run_refresh(request.pk)['outcome'] == 'done'
+    two_unit_code.refresh_from_db()
+    assert two_unit_code.occurrence_count == 6, 'two patients, three records each'
+    with patch.object(axis_variants, 'rebuild_seen_counts') as counts:
+        resumed = AxisVariantRefresh.objects.create(reason='resumed', rebuild_evidence=True, done=1, cursor='A\x1fA')
+        assert axis_variant_jobs.run_refresh(resumed.pk)['outcome'] == 'done'
+        plain = AxisVariantRefresh.objects.create(reason='plain')
+        assert axis_variant_jobs.run_refresh(plain.pk)['outcome'] == 'done'
+    counts.assert_not_called()
+
+
+def test_rebuilt_seen_keys_are_the_codes_on_patients_once_a_rebuild_completed(two_unit_code):
+    bare = SourceCodeConceptMapping.objects.create(source_vocabulary_id=LAB, source_code='NOPAT', omop_table='measurement')
+    assert axis_variants.rebuilt_seen_keys() == set(), 'nothing is protected before a rebuild'
+    AxisVariantRefresh.objects.create(reason='done', rebuild_evidence=True, outcome='done')
+    assert axis_variants.rebuilt_seen_keys() == {(LAB, 'GLU')}
+    assert axis_variants.rebuilt_seen_keys([(LAB, 'GLU'), (LAB, 'NOPAT')]) == {(LAB, 'GLU')}
+    assert axis_variants.rebuilt_seen_keys([(LAB, bare.source_code)]) == set()

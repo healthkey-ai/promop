@@ -3,6 +3,7 @@ import json
 from copy import deepcopy
 from dataclasses import dataclass
 
+from django.db import DatabaseError
 from django.utils import timezone
 from functools import lru_cache
 from pathlib import Path
@@ -49,7 +50,20 @@ def disease_code(value):
         'cll': 'CLL', 'chronic lymphocytic leukemia': 'CLL',
         'chronic lymphocytic leukaemia': 'CLL',
     }
-    return aliases.get(key)
+    code = aliases.get(key)
+    if code:
+        return code
+    # Fallback: consult the DiseaseCategoryMapping table
+    try:
+        from omop_core.models import DiseaseCategoryMapping
+        row = DiseaseCategoryMapping.objects.filter(
+            disease_name__iexact=(value or '').strip(),
+        ).values_list('category', flat=True).first()
+        if row and row != 'Other':
+            return row
+    except DatabaseError:
+        pass  # Table may not exist during early migrations
+    return None
 
 
 def canonicalize_variant(variant):

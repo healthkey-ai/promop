@@ -66,6 +66,8 @@ export interface CodeMappingRow {
   destination_unit_concept_id?: number | null;
   /** 0, or how many LOINC axis sets this code's units imply (>= 2). */
   axis_variant_count?: number;
+  /** Per-variant destinations, present when axis_variant_count >= 2. */
+  axis_variants?: import("./loincAxes").AxisVariant[];
   /** Curator LOINC axis overrides: a value settles an axis, null lifts it. */
   loinc_axes?: Partial<Record<"component" | "property" | "time_aspect" | "system" | "scale_type" | "method_type", string | null>>;
   /** Curator SNOMED settings: key absent = inferred, null = do not constrain / no side. */

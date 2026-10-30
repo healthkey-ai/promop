@@ -2970,6 +2970,27 @@ class Disease(VocabularyLookup):
         db_table = 'vocabulary_disease'
 
 
+class DiseaseCategory(models.TextChoices):
+    BC = 'BC', 'Breast Cancer'
+    MM = 'MM', 'Multiple Myeloma'
+    FL = 'FL', 'Follicular Lymphoma'
+    CLL = 'CLL', 'Chronic Lymphocytic Leukemia'
+    MCL = 'MCL', 'Mantle Cell Lymphoma'
+    OTHER = 'Other', 'Other'
+
+
+class DiseaseCategoryMapping(models.Model):
+    disease_name = models.TextField(unique=True)
+    category = models.CharField(max_length=10, choices=DiseaseCategory.choices)
+
+    class Meta:
+        db_table = 'disease_category_mapping'
+        ordering = ['disease_name']
+
+    def __str__(self):
+        return f'{self.disease_name} → {self.category}'
+
+
 class CancerStage(VocabularyLookup):
     class Meta:
         db_table = 'vocabulary_cancer_stage'
@@ -3270,7 +3291,13 @@ class PatientRecord(models.Model):
     # General Information
     email = models.EmailField(max_length=255, null=True, blank=True, db_index=True)
     date_of_birth = models.DateField(null=True, blank=True)
-    
+    date_of_birth_precision = models.CharField(
+        max_length=5,
+        choices=[('day', 'Day'), ('month', 'Month'), ('year', 'Year')],
+        blank=True, null=True,
+        help_text="Precision of date_of_birth: 'day' (full date), 'month' (year+month), 'year' (year only)",
+    )
+
     # Demographics
     patient_age = models.IntegerField(help_text="What is the patient's age?", blank=True, null=True)
     gender = models.CharField(
@@ -3478,6 +3505,15 @@ class PatientRecord(models.Model):
     later_outcome = models.TextField(blank=True, null=True)
     later_intent = models.CharField(max_length=50, blank=True, null=True, help_text="Later Line Therapy Intent (Adjuvant/Neoadjuvant/Metastatic)")
     later_discontinuation_reason = models.CharField(max_length=50, blank=True, null=True, help_text="Later Line Reason for Discontinuation (Progression/Toxicity/Completion)")
+    # Per-line progression dates and POD24 derivation
+    first_line_progression_date = models.DateField(blank=True, null=True,
+        help_text="Date of progression on first-line therapy")
+    second_line_progression_date = models.DateField(blank=True, null=True,
+        help_text="Date of progression on second-line therapy")
+    later_progression_date = models.DateField(blank=True, null=True,
+        help_text="Earliest progression date across later-line (3L+) therapies")
+    pod24 = models.BooleanField(null=True, blank=True,
+        help_text="Progression of disease within 24 months of first-line start (FL prognostic marker)")
     supportive_therapies = models.TextField(blank=True, null=True)
     supportive_therapy_date = models.DateField(blank=True, null=True)
     supportive_therapy_start_date = models.DateField(blank=True, null=True, help_text="Supportive Therapy Start Date")
@@ -3731,9 +3767,6 @@ class PatientRecord(models.Model):
 
     # These are inverse projections of the corresponding infection results.
     # A patient without a recorded result is unknown, not known-negative.
-    no_hiv_status = models.BooleanField(help_text="Does the patient has had HIV?", blank=True, null=True, default=None)
-    no_hepatitis_b_status = models.BooleanField(help_text="Does the patient has had Hepatitis B (HBV)?", blank=True, null=True, default=None)
-    no_hepatitis_c_status = models.BooleanField(help_text="Does the patient has had Hepatitis C (HCV)?", blank=True, null=True, default=None)
     no_active_infection_status = models.BooleanField(
         help_text="Does the patient have any active infection?",
         blank=True, null=True, default=None,
@@ -3741,6 +3774,10 @@ class PatientRecord(models.Model):
     active_infection_status = models.BooleanField(blank=True, null=True)
 
     concomitant_medications = models.TextField(blank=True, null=True)
+    medication_contexts = models.JSONField(
+        default=dict, blank=True,
+        help_text='Per-exposure medication role/category edits, saved before forward OMOP projection.',
+    )
     concomitant_medication_date = models.DateField(blank=True, null=True)
 
     # Wearable summary fields (derived from OMOP Measurement/Observation, 30-day window)

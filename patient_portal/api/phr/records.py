@@ -14,19 +14,18 @@ from django.utils import timezone
 from django.utils.text import slugify
 
 from omop_core.models import DrugExposure, Measurement, PatientDocument, ProcedureOccurrence, Provider
+from omop_core.services.medication_context import drug_event_concepts, phr_medication_contexts
 
 from patient_portal.models import PatientStatement
 
+from .names import drug_name, procedure_name
 from .sources import row_sources, source
 
 # ---------------------------------------------------------------- medications
 
 
 def _drug_name(row: DrugExposure) -> str | None:
-    concept = row.drug_concept
-    if concept is not None and row.drug_concept_id != 0 and (concept.concept_name or '').strip():
-        return concept.concept_name.strip()
-    return (row.drug_source_value or '').strip() or None
+    return drug_name(row) or None
 
 
 def _group_key(row: DrugExposure) -> str:
@@ -54,7 +53,7 @@ def _is_current(row: DrugExposure, today: date) -> bool:
 def _exposures(person):
     return list(
         DrugExposure.objects.filter(person=person, is_erroneous=False)
-        .select_related('drug_concept', 'visit_occurrence')
+        .select_related('drug_concept', 'drug_source_concept', 'visit_occurrence')
         .order_by('-drug_exposure_start_date', '-drug_exposure_id')
     )
 
@@ -65,7 +64,8 @@ def _in_lines_of_therapy(person, rows: list[DrugExposure]) -> set[int]:
 
     episodes = Episode.objects.filter(person=person).values_list('episode_id', flat=True)
     return set(
-        EpisodeEvent.objects.filter(episode_id__in=list(episodes), event_id__in=[r.pk for r in rows])
+        EpisodeEvent.objects.filter(episode_id__in=list(episodes), event_id__in=[r.pk for r in rows],
+                                   episode_event_field_concept_id__in=drug_event_concepts().values('pk'))
         .values_list('event_id', flat=True)
     )
 
@@ -74,13 +74,16 @@ def _medication_groups(person) -> tuple[OrderedDict, dict]:
     rows = _exposures(person)
     sources = row_sources(DrugExposure, rows, type_attr='drug_type_concept', date_attr='drug_exposure_start_date')
     groups: OrderedDict[str, list[DrugExposure]] = OrderedDict()
+    memo: dict = {}
     for row in rows:
-        if _drug_name(row):
+        if drug_name(row, memo):
             groups.setdefault(_group_key(row), []).append(row)
     # Medicines given as part of a line of therapy are shown with that line;
     # here they are not asked about as prescriptions.
     in_line = _in_lines_of_therapy(person, rows)
+    contexts = phr_medication_contexts(person.pk, [r.pk for r in rows])
     for row in rows:
+        row.medication_context = contexts.get(row.pk, {})
         row.in_line_of_therapy = row.pk in in_line
     return groups, sources
 
@@ -110,6 +113,8 @@ def _summary(key: str, rows: list[DrugExposure], sources: dict, today: date,
             current, ended = False, statement.stopped_on
     item = {
         'id': key,
+        'drug_exposure_id': latest.pk,
+        **getattr(latest, 'medication_context', {}),
         'name': _drug_name(latest),
         'dose': _dose(latest),
         'status': 'current' if current else 'past',
@@ -163,6 +168,8 @@ def medication_detail(person, key: str) -> dict[str, Any] | None:
     history = []
     for row in rows:
         entry = {
+            'drug_exposure_id': row.pk,
+            **getattr(row, 'medication_context', {}),
             'date': row.drug_exposure_start_date.isoformat(),
             'end_date': row.drug_exposure_end_date.isoformat() if row.drug_exposure_end_date else None,
             'dose': _dose(row),
@@ -179,7 +186,7 @@ def procedures(person, record) -> dict[str, Any]:
     rows = list(
         # Imaging studies are listed under Imaging (promop#1731).
         ProcedureOccurrence.objects.filter(person=person, is_erroneous=False, image_occurrences__isnull=True)
-        .select_related('procedure_concept', 'visit_occurrence')
+        .select_related('procedure_concept', 'procedure_source_concept', 'visit_occurrence')
         .order_by('-procedure_date', '-procedure_occurrence_id')
     )
     sources = row_sources(ProcedureOccurrence, rows, type_attr='procedure_type_concept', date_attr='procedure_date')
@@ -191,13 +198,9 @@ def procedures(person, record) -> dict[str, Any]:
     ) if provider_ids else {}
     entries = _statements(person, PatientStatement.SUBJECT_PROCEDURE)
     items = []
+    memo: dict = {}
     for row in rows:
-        concept = row.procedure_concept
-        name = (
-            concept.concept_name.strip()
-            if concept is not None and row.procedure_concept_id != 0 and (concept.concept_name or '').strip()
-            else (row.procedure_source_value or '').strip()
-        )
+        name = procedure_name(row, memo)
         if not name:
             continue
         entry = entries.get(str(row.pk))

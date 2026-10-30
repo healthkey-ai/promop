@@ -17,9 +17,9 @@ from rest_framework.throttling import ScopedRateThrottle
 from oauth2_provider.contrib.rest_framework import OAuth2Authentication
 from patient_portal.models import Identity
 from django.contrib.auth import logout, login, authenticate
-from django.db import IntegrityError, models, transaction
+from django.db import DataError, IntegrityError, models, transaction
 from django.db.models import Case, CharField, Count, F, IntegerField, Prefetch, Q, Value, When
-from django.db.models.functions import Cast, Concat, Length
+from django.db.models.functions import Cast, Concat, Length, Lower, Trim
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from django.utils import timezone
@@ -46,7 +46,8 @@ from omop_core.models import (
     ToxicityGrade, Language, LanguageSkillLevel, BinetStage, ProteinExpression,
     RichterTransformation, TumorBurden, MorphologicVariant, DiseaseActivity,
     PreExistingConditionCategory,
-    Disease, CancerStage, KarnofskyScore, EcogStatus, PeripheralNeuropathyGrade,
+    Disease, DiseaseCategory, DiseaseCategoryMapping,
+    CancerStage, KarnofskyScore, EcogStatus, PeripheralNeuropathyGrade,
     InfectionStatus, DiseaseProgression, MeasurableDisease, GelfCriteria,
     FlipIScore, FollicularLymphomaGrade, PostTransformationOutcome,
     BreastCancerFirstLineTherapy, BreastCancerSecondLineTherapy, BreastCancerLaterLineTherapy,
@@ -203,6 +204,15 @@ def _patient_author(actor, person):
     if role == 'self':
         authorship['patient_user_id'] = f'{actor.issuer}|{actor.sub}'
     return patient_author, authorship
+
+
+def _patient_authorship(actor, person):
+    """project_single_value keywords for the author of a PatientRecord save.
+
+    The medication-context writer wants only the keywords; the record
+    editors use _patient_author for the role as well.
+    """
+    return _patient_author(actor, person)[1]
 
 
 def _write_genetic_mutations(person, mutations, type_concept_id):
@@ -601,7 +611,7 @@ _ALL_PROFILE_FIELDS = (
     _PROFILE_SIMPLE_PERSON_FIELDS
     | set(_PROFILE_DEMOGRAPHIC_FIELDS)
     | set(_PROFILE_LOCATION_FIELDS)
-    | {'date_of_birth'}
+    | {'date_of_birth', 'date_of_birth_precision'}
 )
 
 
@@ -691,19 +701,10 @@ def _project_profile_fields(person, direct_fields, patch_data):
     # A date of birth is factual source data, not a computed field. Corrections
     # therefore replace every OMOP representation together; otherwise a stale
     # birth_datetime could disagree with year/month/day after an edit.
-    if 'date_of_birth' in profile_fields:
-        dob = patch_data['date_of_birth']
-        if isinstance(dob, str):
-            dob = parse_date(dob)
-        values = {
-            'year_of_birth': dob.year if dob else None,
-            'month_of_birth': dob.month if dob else None,
-            'day_of_birth': dob.day if dob else None,
-            'birth_datetime': (
-                timezone.make_aware(datetime.combine(dob, datetime.min.time()))
-                if dob else None
-            ),
-        }
+    if profile_fields & {'date_of_birth', 'date_of_birth_precision'}:
+        from omop_core.services.birth_dates import normalize_birth_date, person_birth_values
+        dob, precision = normalize_birth_date(person, patch_data)
+        values = person_birth_values(dob, precision)
         for attr, value in values.items():
             if getattr(person, attr) != value:
                 setattr(person, attr, value)
@@ -994,7 +995,25 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
         disease = self._normalize_all_param(params.get('disease'))
         if disease:
-            queryset = queryset.filter(disease__iexact=disease)
+            category = next((c for c in DiseaseCategory
+                if disease.casefold() in {c.value.casefold(), c.label.casefold()}), None)
+            if category is None:
+                queryset = queryset.filter(disease__iexact=disease)
+            else:
+                queryset = queryset.alias(_disease_key=Lower(Trim('disease')))
+                names = DiseaseCategoryMapping.objects.annotate(
+                    _name=Lower(Trim('disease_name')))
+                if category == DiseaseCategory.OTHER:
+                    # Other also includes a recorded disease not classified yet;
+                    # unknown/absent disease is not a diagnosis category.
+                    known = names.exclude(category=DiseaseCategory.OTHER).values('_name')
+                    queryset = queryset.exclude(disease__isnull=True).exclude(_disease_key='').exclude(
+                        Q(_disease_key__in=known) | Q(_disease_key__in=[
+                            c.label.casefold() for c in DiseaseCategory if c != DiseaseCategory.OTHER]))
+                else:
+                    queryset = queryset.filter(
+                        Q(_disease_key=category.label.casefold())
+                        | Q(_disease_key__in=names.filter(category=category).values('_name')))
 
         stage = self._normalize_all_param(params.get('stage'))
         if stage:
@@ -1056,18 +1075,14 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         if queryset.filter(organization__isnull=True).exists():
             org_options.append({'value': '__unassigned__', 'label': 'Unassigned'})
 
-        diseases = (
-            queryset
-            .exclude(disease__isnull=True)
-            .exclude(disease='')
-            .values_list('disease', flat=True)
-            .distinct()
-            .order_by('disease')
-        )
+        from omop_core.models import DiseaseCategory
+        diseases = sorted({c.label for c in DiseaseCategory} | set(
+            queryset.exclude(disease__isnull=True).exclude(disease='')
+            .values_list('disease', flat=True).distinct()))
 
         return {
             'orgs': org_options,
-            'diseases': list(diseases),
+            'diseases': diseases,
             'stages': ['I', 'II', 'III', 'IV'],
         }
     
@@ -1384,8 +1399,14 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             if clinical_fields:
                 from omop_core.services.patient_record_service import recompute_patient_record_fields
 
+                projection_data = dict(serializer.validated_data)
+                if 'medication_contexts' in clinical_fields:
+                    from omop_core.services.medication_context import context_delta
+                    projection_data['medication_contexts'] = context_delta(
+                        previous_values.get('medication_contexts') or {},
+                        projection_data['medication_contexts'])
                 projected = self._project_mapped_fields(
-                    person, clinical_fields, serializer.validated_data, actor=request.user,
+                    person, clinical_fields, projection_data, actor=request.user,
                 )
                 patient_info.user_edited_fields = sorted(
                     set(patient_info.user_edited_fields or []) - projected
@@ -1429,6 +1450,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             PINNED_PROJECTION_FIELDS, build_writable_field_descriptor,
         )
 
+        if 'medication_contexts' in direct_fields:
+            from omop_core.services.medication_context import project_record_contexts
+            project_record_contexts(person, patch_data['medication_contexts'],
+                                    **_patient_authorship(actor, person))
+            # Structured edits retain protection until a later full derivation
+            # confirms them. Never read OMOP back during this interactive save.
         try:
             with transaction.atomic():
                 descriptors = build_writable_field_descriptor()
@@ -1439,6 +1466,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         authorship = None
         patient_author_without_type = False
         for field in direct_fields:
+            if field == 'medication_contexts':
+                continue  # Per-exposure attributes have their dedicated forward projector.
             projection = projection_for_descriptor(descriptors.get(field))
             if projection:
                 if authorship is None:
@@ -6078,6 +6107,9 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
             (o.source_value, o.source_vocabulary_id, o.omop_table) for o in objs
         }
 
+        # Codes whose rows a replace or a final chunk removes: their Seen
+        # counts are rebuilt too (#2123).
+        removed_keys = set()
         with transaction.atomic():
             deleted = 0
             if replace or upload_id:
@@ -6102,11 +6134,9 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
                 for sv, svid, ot in request_keys:
                     keep |= Q(source_value=sv, source_vocabulary_id=svid,
                               omop_table=ot)
-                deleted, _ = (
-                    PatientSourceCode.objects.filter(person=person)
-                    .exclude(keep)
-                    .delete()
-                )
+                gone = PatientSourceCode.objects.filter(person=person).exclude(keep)
+                removed_keys |= set(gone.values_list('source_vocabulary_id', 'source_value'))
+                deleted, _ = gone.delete()
 
             # Count existing rows inside the transaction (after delete if
             # replace) so created/updated counts reflect actual DB state.
@@ -6134,11 +6164,9 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
                 # After the upsert, so this chunk's own rows carry the token.
                 # Every other row belongs to a run that has finished or been
                 # abandoned, because an overlapping run was refused above.
-                deleted, _ = (
-                    PatientSourceCode.objects.filter(person=person)
-                    .exclude(upload_id=upload_id)
-                    .delete()
-                )
+                gone = PatientSourceCode.objects.filter(person=person).exclude(upload_id=upload_id)
+                removed_keys |= set(gone.values_list('source_vocabulary_id', 'source_value'))
+                deleted, _ = gone.delete()
                 run.finalized_at = timezone.now()
                 run.save(update_fields=['finalized_at', 'last_chunk_at'])
                 logger.info(
@@ -6148,11 +6176,24 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
 
         # A code that now arrives in two units may imply two LOINC tests; the
         # queue flags it. Evidence only, so a failure here never fails the upload.
+        keys = {(svid, sv) for sv, svid, _ot in request_keys}
         try:
             from omop_core.mapping.axis_variants import refresh_multi_unit_codes
-            refresh_multi_unit_codes({(svid, sv) for sv, svid, _ot in request_keys})
+            refresh_multi_unit_codes(keys)
         except Exception:  # noqa: BLE001
             logger.warning('Axis variant refresh after source-code upload failed.', exc_info=True)
+        # The codes' Seen counts become what their per-patient rows now say,
+        # replacing the provisional count a lookup kept while no rows existed
+        # (#2123); a mapping stored under a vocabulary's canonical id is
+        # reached through it as well.
+        try:
+            from omop_core.mapping.axis_variants import rebuild_seen_counts
+            from omop_core.services.source_vocabularies import canonical_source_vocabulary
+            touched = keys | removed_keys
+            touched |= {(canonical_source_vocabulary(svid), sv) for svid, sv in touched}
+            rebuild_seen_counts(touched)
+        except Exception:  # noqa: BLE001
+            logger.warning('Seen count rebuild after source-code upload failed.', exc_info=True)
 
         result: dict = {'created': created, 'updated': updated}
         if replace or final:
@@ -7942,6 +7983,26 @@ class _OmopDeferRefreshMixin:
         return response
 
 
+def _data_error_response(exc, what, logger_args):
+    """400 for a value the database refused (#2101), e.g. ``numeric field overflow``.
+
+    Validation passed, so this is a value something server-side derived that
+    does not fit its column. It is the request's data, not a fault of the
+    service, and the same request will fail the same way, so a retry is not
+    the answer. The driver's first line names the problem; the log keeps the
+    traceback.
+    """
+    logger.exception(*logger_args)
+    return Response(
+        {'detail': (
+            f'The database refused a value in the {what} and rolled it back '
+            'whole; nothing was written. Retrying the same request will fail '
+            'the same way.'
+        ), 'error': str(exc).strip().partition('\n')[0]},
+        status=status.HTTP_400_BAD_REQUEST,
+    )
+
+
 def _bulk_row_errors(errors, row_count):
     """Keep the bulk endpoint's positional error list under DRF 3.18.
 
@@ -8084,6 +8145,10 @@ class _OmopBulkCreateMixin:
                 ), 'error': str(exc).strip().partition('\n')[0]},
                 status=status.HTTP_409_CONFLICT,
             )
+        except DataError as exc:
+            return _data_error_response(
+                exc, 'row',
+                ('single %s upsert for person %s failed on a database value', model_name, person.person_id))
 
         obj = model_cls.objects.get(**{pk_field: row_id})
         response_serializer = self.get_serializer(obj)
@@ -8201,6 +8266,10 @@ class _OmopBulkCreateMixin:
                 ), 'error': str(exc).strip().partition('\n')[0]},
                 status=status.HTTP_409_CONFLICT,
             )
+        except DataError as exc:
+            return _data_error_response(
+                exc, 'batch',
+                ('bulk %s write for person %s failed on a database value', model_name, person.person_id))
 
     def _bulk_write(
         self,
@@ -8363,6 +8432,10 @@ class _OmopBulkUpdateMixin:
                 ), 'error': str(exc).strip().partition('\n')[0]},
                 status=status.HTTP_409_CONFLICT,
             )
+        except DataError as exc:
+            return _data_error_response(
+                exc, 'batch',
+                ('bulk %s update for %s rows failed on a database value', model_name, len(ids)))
 
     def _write_bulk_update(
         self,
@@ -8917,6 +8990,7 @@ class V1DrugExposureViewSet(
     """Drug exposures on /api/v1/, with the batch actions."""
 
     source_organization_header = True
+
 
 
 @_PROVENANCE_ORG_SCHEMA
@@ -10230,6 +10304,8 @@ def mapping_stats(request):
         .annotate(n=Count(Concat('disease', Value(':'), Cast('concept_id', CharField())), distinct=True))
         .values_list('status', 'n'))
 
+    disease_category_total = DiseaseCategoryMapping.objects.count()
+
     return Response({
         'relevance_signals': {s: signal_pairs.get(s, 0) for s in ('proposed', 'accepted', 'rejected')},
         'field_mappings': {'total': field_total, 'approved': field_approved, 'proposed': field_proposed, 'unmapped': field_unmapped},
@@ -10239,6 +10315,9 @@ def mapping_stats(request):
             'components': TherapyComponent.objects.count(),
             'classes': TherapyClass.objects.count(),
             'disease_links': DiseaseTherapyRegimen.objects.count(),
+        },
+        'disease_category': {
+            'total': disease_category_total,
         },
     })
 
@@ -10396,6 +10475,123 @@ def disease_therapy_regimen_detail(request, pk):
         return Response({'detail': 'Not found'}, status=status.HTTP_404_NOT_FOUND)
     obj.delete()
     return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+# =============================================================================
+# Disease Category Mapping
+# =============================================================================
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def disease_category_list(request):
+    """Return the DiseaseCategory enum choices for use in dropdowns."""
+    return Response([
+        {'value': c.value, 'label': c.label} for c in DiseaseCategory
+    ])
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def disease_category_mapping_list(request):
+    """List or create disease-to-category mappings.
+
+    GET  /api/v1/disease-category-mappings/?search=myeloma
+    POST /api/v1/disease-category-mappings/  {"disease_name": "...", "category": "MM"}
+    """
+    if request.method == 'GET':
+        qs = DiseaseCategoryMapping.objects.all()
+        search = request.query_params.get('search', '').strip()
+        if search:
+            qs = qs.filter(disease_name__icontains=search)
+        return Response([
+            {'id': m.id, 'disease_name': m.disease_name, 'category': m.category}
+            for m in qs
+        ])
+    # POST
+    denied = _require_mapping_admin(request)
+    if denied:
+        return denied
+    disease_name = (request.data.get('disease_name') or '').strip()
+    category = (request.data.get('category') or '').strip()
+    if not disease_name or not category:
+        return Response(
+            {'detail': 'disease_name and category are required'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    valid_categories = {c.value for c in DiseaseCategory}
+    if category not in valid_categories:
+        return Response(
+            {'detail': f'category must be one of {sorted(valid_categories)}'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    if DiseaseCategoryMapping.objects.filter(disease_name__iexact=disease_name).exists():
+        return Response(
+            {'detail': f'A mapping for "{disease_name}" already exists'},
+            status=status.HTTP_409_CONFLICT,
+        )
+    try:
+        obj = DiseaseCategoryMapping.objects.create(disease_name=disease_name, category=category)
+    except IntegrityError:
+        return Response(
+            {'detail': f'A mapping for "{disease_name}" already exists'},
+            status=status.HTTP_409_CONFLICT,
+        )
+    return Response(
+        {'id': obj.id, 'disease_name': obj.disease_name, 'category': obj.category},
+        status=status.HTTP_201_CREATED,
+    )
+
+
+@api_view(['PATCH', 'DELETE'])
+@permission_classes([IsAuthenticated])
+def disease_category_mapping_detail(request, pk):
+    """Update or delete a disease-category mapping.
+
+    PATCH  /api/v1/disease-category-mappings/<pk>/  {"category": "Other"}
+    DELETE /api/v1/disease-category-mappings/<pk>/
+    """
+    denied = _require_mapping_admin(request)
+    if denied:
+        return denied
+    try:
+        obj = DiseaseCategoryMapping.objects.get(pk=pk)
+    except DiseaseCategoryMapping.DoesNotExist:
+        return Response({'detail': 'Not found'}, status=status.HTTP_404_NOT_FOUND)
+    if request.method == 'DELETE':
+        obj.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+    # PATCH
+    category = request.data.get('category')
+    disease_name = request.data.get('disease_name')
+    if category is not None:
+        category = category.strip()
+        valid_categories = {c.value for c in DiseaseCategory}
+        if category not in valid_categories:
+            return Response(
+                {'detail': f'category must be one of {sorted(valid_categories)}'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        obj.category = category
+    if disease_name is not None:
+        disease_name = disease_name.strip()
+        if not disease_name:
+            return Response({'detail': 'disease_name cannot be empty'}, status=status.HTTP_400_BAD_REQUEST)
+        dup = DiseaseCategoryMapping.objects.filter(disease_name__iexact=disease_name).exclude(pk=pk)
+        if dup.exists():
+            return Response(
+                {'detail': f'A mapping for "{disease_name}" already exists'},
+                status=status.HTTP_409_CONFLICT,
+            )
+        obj.disease_name = disease_name
+    try:
+        obj.save()
+    except IntegrityError:
+        return Response(
+            {'detail': f'A mapping for "{obj.disease_name}" already exists'},
+            status=status.HTTP_409_CONFLICT,
+        )
+    return Response({'id': obj.id, 'disease_name': obj.disease_name, 'category': obj.category})
 
 
 # =============================================================================
@@ -12162,13 +12358,24 @@ def _serialize_code_mapping_row(concept, mapping=None, source_retirement=None,
 
 def _axis_fields(mapping):
     """LOINC axis state every queue row carries: the curator's axis entries,
-    and how many axis variants the code's units imply (the queue's blue
-    "n axis values" flag)."""
-    return {
+    how many axis variants the code's units imply (the queue's blue
+    "n axis values" flag), and each variant's destination when present."""
+    from omop_core.mapping import axis_variants
+    result = {
         'axis_variant_count': mapping.axis_variant_count if mapping else 0,
         'loinc_axes': (mapping.loinc_axes or {}) if mapping else {},
         'snomed_attributes': (mapping.snomed_attributes or {}) if mapping else {},
     }
+    if mapping and mapping.axis_variant_count >= axis_variants.FLAG_THRESHOLD:
+        # Use .all() to honour the prefetch cache when the queryset was built
+        # with prefetch_related('axis_variants__target_concept').  A single-row
+        # call (detail endpoint) without the prefetch still works — just not
+        # batched.
+        result['axis_variants'] = [
+            axis_variants.serialize(v)
+            for v in mapping.axis_variants.all()
+        ]
+    return result
 
 
 def _clean_required(data, field_name):
@@ -12744,7 +12951,8 @@ def code_mapping_group(request):
         return Response({'detail': 'Unknown section.'}, status=status.HTTP_400_BAD_REQUEST)
 
     mappings = without_icd10_athena_duplicates(SourceCodeConceptMapping.objects.select_related(
-        'target_concept', 'created_by', 'reviewer', 'locked_by', 'organization'))
+        'target_concept', 'created_by', 'reviewer', 'locked_by', 'organization',
+    ).prefetch_related('axis_variants__target_concept'))
     # Same tab, search and provenance narrowing browse applied before it
     # counted the entry. Without this, an entry reading "3 codes" under a
     # provenance filter expands into all 2,557 -- including the rows the filter
@@ -13017,6 +13225,8 @@ def code_mapping_list(request):
         from omop_core.services.mapping_source_units import SourceUnits
         mappings = SourceCodeConceptMapping.objects.select_related(
             'target_concept', 'created_by', 'reviewer', 'locked_by', 'organization',
+        ).prefetch_related(
+            'axis_variants__target_concept',
         ).defer('source_unit_evidence').annotate(source_units=SourceUnits('source_unit_evidence'))
         from omop_core.services.athena_mapping_guard import without_icd10_athena_duplicates
         mappings = without_icd10_athena_duplicates(mappings)
@@ -14176,6 +14386,8 @@ def code_mapping_lookup(request):
             organization=request_organization,
             source_unit=unit_inputs[idx][0] or None,
             metadata=metadata,
+            # One ask per code per batch: a provisional sighting (#2123).
+            provisional=True,
             mint=not is_term,
         )
         # A code with LOINC axis variants means a different concept per unit,

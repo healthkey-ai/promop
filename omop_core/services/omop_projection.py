@@ -228,6 +228,10 @@ def project_field_to_omop(mapping) -> int:
     )
     from omop_core.services.clinical_input_contract import uses_dedicated_writer
 
+    if mapping.field_name in ('drug_exposure.role', 'drug_exposure.category'):
+        # The pending JSON/revision log does not preserve per-attribute fact
+        # authorship. Curation cannot turn a patient answer into an EHR fact.
+        return 0
     if uses_dedicated_writer(mapping.field_name):
         # Curation is not evidence of who authored pending projection values.
         return 0

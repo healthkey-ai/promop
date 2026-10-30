@@ -3,7 +3,8 @@
 What's new lists the last 30 days of the record, grouped by date, then section,
 then facility. OMOP rows carry no import timestamp, so clinical rows are placed
 by the date they refer to; documents use their upload time, which is when they
-actually arrived.
+actually arrived. It is what arrived from the patient's care centers: what the
+patient entered themselves (self-reported, or written by them) is left out.
 """
 from __future__ import annotations
 
@@ -18,7 +19,7 @@ from omop_core.models import ConditionOccurrence, DrugExposure, Measurement, Pat
 from .labs import NOT_LABS, effective_concept
 from omop_core.services.condition_context import measurement_context_filter
 from .records import GENETIC_DOC_LABELS
-from .sources import care_site_names, row_sources, source
+from .sources import PATIENT_SELF_REPORT_TYPE_CONCEPT_ID, care_site_names, patient_authored_ids, row_sources, source
 
 WINDOW_DAYS = 30
 SECTION_ORDER = ['labs', 'medications', 'diagnoses', 'procedures', 'genetics', 'imaging']
@@ -32,11 +33,16 @@ def whats_new(person, record) -> dict[str, Any]:
     since = timezone.localdate() - timedelta(days=WINDOW_DAYS)
     counts: Counter = Counter()
 
-    def tally(model, date_field, section, extra=None, **filters):
-        query = model.objects.filter(person=person, is_erroneous=False, **{f'{date_field}__gte': since}, **filters)
+    def tally(model, date_field, type_field, section, extra=None, **filters):
+        query = (
+            model.objects.filter(person=person, is_erroneous=False, **{f'{date_field}__gte': since}, **filters)
+            .exclude(**{type_field: PATIENT_SELF_REPORT_TYPE_CONCEPT_ID})
+        )
         if model is Measurement:
             query = query.exclude(measurement_context_filter())
         rows = list(query.select_related('visit_occurrence', *(extra or [])))
+        own = patient_authored_ids(model, (row.pk for row in rows))
+        rows = [row for row in rows if row.pk not in own]
         sites = care_site_names(rows)
         for row in rows:
             if section == 'labs':
@@ -46,12 +52,15 @@ def whats_new(person, record) -> dict[str, Any]:
                     continue
             counts[(getattr(row, date_field), section, _site(row, sites))] += 1
 
-    tally(Measurement, 'measurement_date', 'labs', ['measurement_concept', 'measurement_source_concept'])
-    tally(DrugExposure, 'drug_exposure_start_date', 'medications')
-    tally(ConditionOccurrence, 'condition_start_date', 'diagnoses')
+    tally(Measurement, 'measurement_date', 'measurement_type_concept_id', 'labs',
+          ['measurement_concept', 'measurement_source_concept'])
+    tally(DrugExposure, 'drug_exposure_start_date', 'drug_type_concept_id', 'medications')
+    tally(ConditionOccurrence, 'condition_start_date', 'condition_type_concept_id', 'diagnoses')
     # An imaging study is a procedure row with an image_occurrence (#1731).
-    tally(ProcedureOccurrence, 'procedure_date', 'procedures', image_occurrences__isnull=True)
-    tally(ProcedureOccurrence, 'procedure_date', 'imaging', image_occurrences__isnull=False)
+    tally(ProcedureOccurrence, 'procedure_date', 'procedure_type_concept_id', 'procedures',
+          image_occurrences__isnull=True)
+    tally(ProcedureOccurrence, 'procedure_date', 'procedure_type_concept_id', 'imaging',
+          image_occurrences__isnull=False)
     # A study's own report file is counted with the study.
     for doc in PatientDocument.objects.filter(person=person, uploaded_at__date__gte=since,
                                               procedure_occurrence_id__isnull=True):
