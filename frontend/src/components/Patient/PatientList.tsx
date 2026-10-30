@@ -18,11 +18,10 @@ interface Patient {
   organization_slug?: string | null;
   disease: string;
   stage: string;
-  genomics_summary?: string;
+  unmapped_source_code_count?: number;
   therapy_lines_count?: number | null;
   updated_at: string;
   treatment_summary?: { name: string; line: number; start_date: string | null; end_date: string | null } | null;
-  disease_status?: string | null;
   subtype_biomarkers?: string;
   ecog_performance_status?: number | null;
   ecog_assessment_date?: string | null;
@@ -429,6 +428,8 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
             <option value="name">Name</option><option value="age">Age: youngest first</option><option value="-age">Age: oldest first</option>
             <option value="disease">Disease</option><option value="stage">Stage</option><option value="status">Disease status</option>
             <option value="organization">Organization</option>
+            <option value="unmapped_source_codes">Unmapped Source Codes: low to high</option>
+            <option value="-unmapped_source_codes">Unmapped Source Codes: high to low</option>
           </select>
         </label>
         <span className="text-xs text-muted-foreground">View and clinical filters are saved in this browser.</span>
@@ -585,13 +586,17 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
               <th className="px-4 py-3 font-medium text-muted-foreground">Age</th>
               <th className="px-4 py-3 font-medium text-muted-foreground">Disease</th>
               <th className="px-4 py-3 font-medium text-muted-foreground">Stage</th>
-              <th className="px-4 py-3 font-medium text-muted-foreground">Genomics</th>
               <th className="whitespace-nowrap px-4 py-3 text-center font-medium text-muted-foreground">Num Lines</th>
               {extraColumns.map((column) => <th key={column} className="whitespace-nowrap px-4 py-3 font-medium text-muted-foreground">{{
-                treatment: 'Latest Recorded Line', status: 'Disease Status', ecog: 'ECOG', gaps: 'Key Data Gaps',
+                treatment: 'Latest Recorded Line', ecog: 'ECOG', gaps: 'Key Data Gaps',
                 freshness: 'Latest Clinical Result', location: 'Location', contact: 'Contact Info', organization: 'Organization',
               }[column]}</th>)}
               <th className="px-4 py-3 font-medium text-muted-foreground">Last Updated</th>
+              <th aria-sort={ordering === 'unmapped_source_codes' ? 'ascending' : ordering === '-unmapped_source_codes' ? 'descending' : 'none'} className="whitespace-nowrap px-4 py-3 text-right font-medium text-muted-foreground">
+                <button type="button" onClick={() => changeOrdering(ordering === 'unmapped_source_codes' ? '-unmapped_source_codes' : 'unmapped_source_codes')}>
+                  Unmapped Source Codes{ordering === 'unmapped_source_codes' ? ' ↑' : ordering === '-unmapped_source_codes' ? ' ↓' : ''}
+                </button>
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -641,11 +646,6 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
                   <td className="px-4 py-3" onClick={() => navigate(`/patient/${patient.person_id}`)}>
                     {patient.stage || "N/A"}
                   </td>
-                  <td className="px-4 py-3" onClick={() => navigate(`/patient/${patient.person_id}`)}>
-                    <span className="block max-w-72 truncate" title={patient.genomics_summary || undefined}>
-                      {patient.genomics_summary || "No genomic data"}
-                    </span>
-                  </td>
                   <td className="px-4 py-3 text-center tabular-nums" onClick={() => navigate(`/patient/${patient.person_id}`)}>
                     {patient.therapy_lines_count ?? "N/A"}
                   </td>
@@ -654,7 +654,6 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
                       <span className="block text-xs text-muted-foreground">Line {patient.treatment_summary.line} · Start: {formatDate(patient.treatment_summary.start_date)}</span>
                       <span className="block text-xs text-muted-foreground">End: {formatDate(patient.treatment_summary.end_date)}</span></> : 'Not recorded'}
                   </td>}
-                  {show('status') && <td className="px-4 py-3" onClick={() => navigate(`/patient/${patient.person_id}`)}>{patient.disease_status || 'Not recorded'}</td>}
                   {show('ecog') && <td className="px-4 py-3 tabular-nums" onClick={() => navigate(`/patient/${patient.person_id}`)}>{patient.ecog_performance_status ?? 'Not recorded'}
                     {patient.ecog_performance_status != null && <span className="block whitespace-nowrap text-xs text-muted-foreground">Assessed: {formatDate(patient.ecog_assessment_date)}</span>}
                   </td>}
@@ -665,6 +664,9 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
                   {show('freshness') && <td className="whitespace-nowrap px-4 py-3" onClick={() => navigate(`/patient/${patient.person_id}`)}>{formatDate(patient.latest_result_date)}</td>}
                   <td className="px-4 py-3" onClick={() => navigate(`/patient/${patient.person_id}`)}>
                     {formatDate(patient.updated_at)}
+                  </td>
+                  <td className={`px-4 py-3 text-right tabular-nums${patient.unmapped_source_code_count === 0 ? ' text-red-600 dark:text-red-400' : ''}`} onClick={() => navigate(`/patient/${patient.person_id}`)}>
+                    {patient.unmapped_source_code_count ?? 'Not available'}
                   </td>
                 </tr>
               ))

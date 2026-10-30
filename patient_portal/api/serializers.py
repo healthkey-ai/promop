@@ -284,6 +284,7 @@ class PatientListSerializer(serializers.ModelSerializer):
     person_id = serializers.IntegerField(source='person.person_id', read_only=True)
     patient_name = serializers.SerializerMethodField()
     age = serializers.SerializerMethodField()
+    unmapped_source_code_count = serializers.IntegerField(read_only=True, default=0)
     genomics_summary = serializers.SerializerMethodField()
     treatment_summary = serializers.SerializerMethodField()
     disease_status = serializers.SerializerMethodField()
@@ -307,7 +308,7 @@ class PatientListSerializer(serializers.ModelSerializer):
             'organization_slug',
             'disease',
             'stage',
-            'genomics_summary',
+            'unmapped_source_code_count', 'genomics_summary',
             'therapy_lines_count',
             'treatment_summary', 'disease_status', 'subtype_biomarkers',
             'ecog_performance_status', 'ecog_assessment_date', 'data_gaps',
