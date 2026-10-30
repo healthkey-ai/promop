@@ -48,6 +48,16 @@ async function selectConcept(canApprove = true) {
 }
 
 describe('concept-first curation', () => {
+  it('does not offer a disease category unsupported by the concept filter', async () => {
+    get.mockImplementation((url: string) => Promise.resolve({ data:
+      url === '/v1/disease-categories/' ? [{ value: 'MM', label: 'Multiple Myeloma' }, { value: 'Other', label: 'Other' }]
+        : url === '/v1/concept-to-code/' ? page([concept]) : page([source]),
+    }));
+    render(<ConceptToCodeTab canApprove />);
+    await screen.findByRole('option', { name: 'Multiple Myeloma' });
+    expect(screen.queryByRole('option', { name: 'Other' })).not.toBeInTheDocument();
+  });
+
   it('opens a dialog immediately from a long concept list and shows source loading errors inside it', async () => {
     const concepts = Array.from({ length: 50 }, (_, index) => ({
       ...concept, concept_id: 123 + index, concept_name: index ? `Concept ${index}` : concept.concept_name,

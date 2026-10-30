@@ -1488,6 +1488,14 @@ _CATEGORY_TITLES = {
 }
 
 
+def _is_context_only_disease(name):
+    """Relevance to a cancer is not evidence the patient has that cancer."""
+    return (name or '').strip().casefold().startswith((
+        'family history', 'fh of ', 'fh:', 'at high risk', 'at increased risk',
+        'at risk for ', 'at risk of ', 'risk of ', 'screening for ',
+    ))
+
+
 def _canonicalize_disease(name: str) -> str:
     """Map a raw OMOP condition concept name to EXACT's canonical disease title.
 
@@ -1495,7 +1503,7 @@ def _canonicalize_disease(name: str) -> str:
     DiseaseCategoryMapping table for curator-maintained entries.
     Unrecognised names are returned unchanged (preserve, don't drop).
     """
-    if not name:
+    if not name or _is_context_only_disease(name):
         return name
     normalized = name.strip().lower()
     # Fast path: hardcoded aliases (most common names)
@@ -1651,6 +1659,8 @@ def _is_oncologic(cond):
         return False
     cname = (cond.condition_concept.concept_name or '').lower() if cond.condition_concept else ''
     src = (cond.condition_source_value or '').lower()
+    if _is_context_only_disease(cname) or _is_context_only_disease(src):
+        return False
     if 'screening' in cname or (not cond.condition_concept_id and 'screening' in src):
         return False
     return any(word in cname or word in src for word in (
@@ -2616,6 +2626,9 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures, sn
     later_prog = sorted(k for k in lot_progression_dates if k >= 3)
     if later_prog:
         data['later_progression_date'] = lot_progression_dates[later_prog[0]]
+    for line in data.get('later_therapies', []):
+        progression = lot_progression_dates.get(line.get('lineNumber'))
+        line['progression_date'] = progression.isoformat() if progression else None
 
     # ── POD24: progression within 24 months of first-line start ───────────
     # POD24 is an FL-specific prognostic marker; only compute for FL patients.

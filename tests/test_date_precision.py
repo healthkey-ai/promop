@@ -222,6 +222,48 @@ class TestProfileProjection:
         assert pr.date_of_birth == date(1985, 1, 1)
 
 
+@pytest.mark.parametrize('shared', [False, True])
+@pytest.mark.parametrize(('precision', 'month', 'day'), [('year', None, None), ('month', 6, None)])
+def test_date_only_patch_keeps_existing_precision(shared, precision, month, day):
+    from rest_framework.test import APIClient
+    from patient_portal.models import Identity
+    person = PersonFactory(year_of_birth=1985, month_of_birth=month, day_of_birth=day)
+    record = PatientRecordFactory(person=person, date_of_birth=date(1985, month or 1, 1),
+                                  date_of_birth_precision=precision)
+    client = APIClient()
+    client.force_authenticate(Identity.objects.create_user(email='dob-precision@example.test', is_staff=True))
+    headers = {'HTTP_X_PATIENT_FORM': '1'} if shared else {}
+    response = client.patch(f'/api/v1/patient-records/{person.pk}/',
+        {'date_of_birth': f'1986-{month or 1:02d}-01'}, format='json', **headers)
+    assert response.status_code == 200, response.data
+    person.refresh_from_db()
+    assert (person.year_of_birth, person.month_of_birth, person.day_of_birth) == (1986, month, day)
+    record = refresh_patient_record(person)
+    assert record.date_of_birth_precision == precision
+
+
+@pytest.mark.parametrize('changes', [
+    {'date_of_birth_precision': 'year', 'date_of_birth': '1985-01-01'},
+    {'date_of_birth': '1985-01-01', 'date_of_birth_precision': 'year'},
+    {'date_of_birth_precision': 'year'},
+])
+def test_shared_precision_patch_is_order_independent_and_projects_to_person(changes):
+    from rest_framework.test import APIClient
+    from patient_portal.models import Identity
+    person = PersonFactory(year_of_birth=1985, month_of_birth=6, day_of_birth=15)
+    record = PatientRecordFactory(person=person, date_of_birth=date(1985, 6, 15),
+                                  date_of_birth_precision='day')
+    client = APIClient()
+    client.force_authenticate(Identity.objects.create_user(email='dob-shared@example.test', is_staff=True))
+    response = client.patch(f'/api/v1/patient-records/{person.pk}/', changes,
+                            format='json', HTTP_X_PATIENT_FORM='1')
+    assert response.status_code == 200, response.data
+    person.refresh_from_db(); record.refresh_from_db()
+    assert (person.year_of_birth, person.month_of_birth, person.day_of_birth) == (1985, None, None)
+    assert record.date_of_birth_precision == 'year'
+    assert record.date_of_birth == date(1985, 1, 1)
+
+
 # ---------------------------------------------------------------------------
 # Serializer validation
 # ---------------------------------------------------------------------------

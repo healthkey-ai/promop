@@ -196,6 +196,17 @@ All notable changes to PRomop are documented here.
 
 ### Fixed
 
+- **cb-v2 backmerge data contracts (#2129)** — retain raw OMOP measurement
+  numbers, units and reference ranges during import and mapping repoints;
+  canonical units remain an additive read model, preserving retry identity and
+  avoiding lossy/overflowing write-time conversion. Preserve maintenance through
+  editor serialization (including omission by older clients), keep late-line
+  progression dates per line, and honor partial DOB precision in both native
+  and shared profile writers. Patient filters retain literal diagnoses and
+  support categories; family-history/risk categories do not assert patient
+  cancer. PHR names require source-vocabulary evidence rather than guessing from
+  a bare code. Seen-count existence, totals and rebuilds agree on OID aliases
+  and truncated source-code keys. No existing clinical data is rewritten.
 - **A lookup's Seen bump is provisional** — `code-mappings/lookup/` asks once
   per code per batch, not once per record, so its sighting now adds one only
   while the instance holds no per-patient source-code rows for the code, and

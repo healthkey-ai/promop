@@ -206,7 +206,7 @@ def lines_of_therapy(obj, concept_cache=None):
                 obj.later_component_ids, lt.get('startDate'), lt.get('endDate'),
                 obj.later_outcome, obj.later_intent,
                 obj.later_discontinuation_reason,
-                progression_date=obj.later_progression_date,
+                progression_date=lt.get('progression_date'),
                 later_aggregate=True,
                 origin_override=lt.get('origin'),
                 comp_class=obj.later_therapy_type_ids))
@@ -225,7 +225,6 @@ def lines_of_therapy(obj, concept_cache=None):
                     obj.later_component_ids, obj.later_start_date or obj.later_date, obj.later_end_date,
                     obj.later_outcome, obj.later_intent,
                     obj.later_discontinuation_reason,
-                    progression_date=obj.later_progression_date,
                     later_aggregate=True,
                     comp_class=obj.later_therapy_type_ids))
         elif obj.later_therapy:
@@ -234,7 +233,6 @@ def lines_of_therapy(obj, concept_cache=None):
                 obj.later_component_ids, obj.later_start_date, obj.later_end_date,
                 obj.later_outcome, obj.later_intent,
                 obj.later_discontinuation_reason,
-                progression_date=obj.later_progression_date,
                 later_aggregate=True,
                 comp_class=obj.later_therapy_type_ids))
     return lines

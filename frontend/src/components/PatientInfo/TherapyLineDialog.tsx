@@ -300,7 +300,7 @@ export default function TherapyLineDialog({
               ? d.source_value : (d.source_value || d.concept_name).slice(0, 50),
             ...(d.start_date !== undefined ? { start_date: d.start_date } : {}),
             ...(d.end_date !== undefined ? { end_date: d.end_date } : {}),
-            ...(d.maintenance ? { maintenance: true } : {}),
+            ...(d.maintenance !== undefined ? { maintenance: d.maintenance } : {}),
           }))
           : [],
         ...(knownComposition ? {} : { composition_unknown: true }),

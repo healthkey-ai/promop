@@ -615,6 +615,13 @@ class PatientRecordSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError('Date of birth cannot be in the future.')
         return value
 
+    def validate(self, attrs):
+        if self.instance is not None and {'date_of_birth', 'date_of_birth_precision'} & attrs.keys():
+            from omop_core.services.birth_dates import normalize_birth_date
+            dob, precision = normalize_birth_date(self.instance.person, attrs)
+            attrs.update(date_of_birth=dob, date_of_birth_precision=precision)
+        return attrs
+
     def validate_treatment_refractory_status(self, value):
         from omop_core.services.treatment_catalog import REFRACTORY_STATUSES
         if value not in (None, '') and value not in REFRACTORY_STATUSES:

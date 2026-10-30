@@ -117,3 +117,15 @@ describe('current-diagnosis tri-state fields (#5521)', () => {
     expect(patch.mock.calls[0][1]).toEqual({ smoldering_multiple_myeloma: null });
   });
 });
+
+it('uses stored and pending DOB precision in the shared date editor', async () => {
+  const { store, patch } = await setup({
+    date_of_birth: { label: 'Date of birth', writable: true, target: 'patient_record', control: 'date' },
+    date_of_birth_precision: { writable: true, target: 'patient_record', control: 'text' },
+  }, { date_of_birth: '1985-01-01', date_of_birth_precision: 'year' });
+  render(<PatientFieldEditor store={store} name="date_of_birth" />);
+  expect(screen.getByRole('spinbutton')).toHaveValue(1985);
+  fireEvent.change(screen.getByRole('spinbutton'), { target: { value: '1986' } });
+  await act(async () => { await store.flush(); });
+  expect(patch.mock.calls[0][1]).toEqual({ date_of_birth: '1986-01-01' });
+});

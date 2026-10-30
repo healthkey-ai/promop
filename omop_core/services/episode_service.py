@@ -857,7 +857,9 @@ def _author_therapy_line_inner(
         ).exclude(episode_id=line.pk).exists()
         if existing is not None and existing.person_id != person.pk:
             raise TherapyLineRejected('Exposure ownership does not match the patient.')
-        is_maint = bool(values.get('maintenance', False))
+        # Older clients omit this attribute even when echoing the drugs list.
+        # Absence preserves an authored flag; explicit False clears it.
+        is_maint = values.get('maintenance', owned.is_maintenance if owned else False)
         if existing is not None and (existing.drug_concept_id == concept.pk
                        and existing.drug_source_value == raw
                        and existing.drug_exposure_start_date == drug_start

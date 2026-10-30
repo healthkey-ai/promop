@@ -81,3 +81,27 @@ def test_a_limited_rebuild_touches_only_the_keys_given():
     a.refresh_from_db(); b.refresh_from_db()
     assert (a.occurrence_count, b.occurrence_count) == (5, 100)
     assert axis_variants.rebuild_seen_counts([]) == 0
+
+
+@pytest.mark.parametrize('mapping_vocab', ['SNOMED', 'urn:oid:2.16.840.1.113883.6.96'])
+def test_seen_sums_canonical_and_oid_rows_in_both_directions(mapping_vocab):
+    for vocabulary, count in [('SNOMED', 5), ('urn:oid:2.16.840.1.113883.6.96', 12)]:
+        rows(code='271737000', n=count, vocabulary=vocabulary)
+    result = sighting(code='271737000', vocabulary=mapping_vocab)
+    assert result.occurrence_count == 17
+    assert sighting(code='271737000', vocabulary=mapping_vocab).occurrence_count == 17
+    result.occurrence_count = 100
+    result.save(update_fields=['occurrence_count'])
+    axis_variants.rebuild_seen_counts([('SNOMED', '271737000')])
+    result.refresh_from_db()
+    assert result.occurrence_count == 17
+    axis_variants.rebuild_unit_evidence([result])
+    result.refresh_from_db()
+    assert result.occurrence_count == 17, 'a subsequent unit-evidence rebuild must not undo alias totals'
+
+
+def test_truncated_mapping_reads_the_same_patient_rows_for_existence_and_total():
+    code = 'x' * code_resolution.SOURCE_CODE_MAX + '-long-source-name'
+    rows(code=code, n=12)
+    assert sighting(code=code).occurrence_count == 12
+    assert sighting(code=code).occurrence_count == 12

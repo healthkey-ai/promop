@@ -243,18 +243,12 @@ def _has_patient_rows(mapping):
     hospital-scoped mapping asking about its own hospital's patients. A
     vocabulary stored under its canonical id also answers for the OID the
     rows may carry; a code the mapping holds truncated answers by prefix."""
-    vocabulary = mapping.source_vocabulary_id or ''
-    rows = PatientSourceCode.objects.filter(source_vocabulary_id__in={
-        vocabulary, *[oid for oid, canonical in VOCABULARY_OID_ALIASES.items() if canonical == vocabulary]})
-    if len(mapping.source_code) >= SOURCE_CODE_MAX:
-        rows = rows.filter(source_value__startswith=mapping.source_code)
-    else:
-        rows = rows.filter(source_value=mapping.source_code)
+    from django.db.models import Exists
+    from omop_core.mapping.axis_variants import _patient_rows_for
+    rows = _patient_rows_for(scoped=mapping.organization_id is not None)
     if mapping.omop_table:
         rows = rows.filter(omop_table=mapping.omop_table)
-    if mapping.organization_id is not None:
-        rows = rows.filter(person__patient_record__organization_id=mapping.organization_id)
-    return rows.exists()
+    return SourceCodeConceptMapping.objects.filter(pk=mapping.pk).filter(Exists(rows)).exists()
 
 
 def _seen_from_rows(mapping):
@@ -798,9 +792,6 @@ def repoint_clinical_rows(*, mapping, old_concept_id, new_concept_id,
 
         # post_delete receivers are live, and the collapse below deletes rows.
         with suppress_patient_record_refresh():
-            # Snapshot PKs before the concept update: the lazy queryset filters
-            # on old_concept_id, so after .update() it would find zero rows.
-            repointed_pks = set(qs.values_list('pk', flat=True)) if model is Measurement else None
             qs.update(**{concept_col: new_concept_id})
             result['rows_collapsed'] = _collapse_duplicates(
                 model, concept_col, source_col, match,
@@ -808,42 +799,12 @@ def repoint_clinical_rows(*, mapping, old_concept_id, new_concept_id,
                 organization_id=mapping.organization_id,
             )
 
-            # Normalize units on repointed Measurement rows (#2088).
-            # When units is set this is a variant approval: the variant's
-            # target concept (new_concept_id) differs from the mapping's,
-            # and the mapping's destination_unit_concept was chosen for its
-            # own LOINC, not the variant's.
-            if repointed_pks:
-                try:
-                    from omop_core.services.canonical_units import (
-                        normalize_measurement_units,
-                    )
-                    norm_qs = model.objects.filter(pk__in=repointed_pks)
-                    variant_concept = new_concept_id if units is not None else None
-                    result['rows_normalized'] = normalize_measurement_units(
-                        norm_qs, mapping,
-                        target_concept_id=variant_concept)
-                    # Re-collapse: normalization may have made previously-
-                    # distinct values identical (e.g. 100.4 and 100.6 umol/L
-                    # both round to 0.1 mmol/L).
-                    if result['rows_normalized']:
-                        result['rows_collapsed'] += _collapse_duplicates(
-                            model, concept_col, source_col, match,
-                            new_concept_id, person_ids,
-                            organization_id=mapping.organization_id,
-                        )
-                except Exception:
-                    logger.exception(
-                        'Unit normalization failed for mapping %s',
-                        mapping.id,
-                    )
-
     logger.info(
         'Mapping %s: re-pointed %s %s row(s) from concept %s to %s '
-        '(%s collapsed, %s normalized, %s patient record(s) marked stale).',
+        '(%s collapsed, %s patient record(s) marked stale).',
         mapping.id, result['rows_updated'], table, old_concept_id,
         new_concept_id, result['rows_collapsed'],
-        result.get('rows_normalized', 0), result['persons_marked_stale'],
+        result['persons_marked_stale'],
     )
     return result
 
@@ -1090,29 +1051,7 @@ def resolve_person_source_codes(person, *, source_values=None, omop_tables=None)
 
             with transaction.atomic():
                 with suppress_patient_record_refresh():
-                    # Snapshot PKs before the concept update: the lazy queryset
-                    # filters on unresolved_q, so after .update() it finds zero.
-                    resolved_pks = (
-                        set(rows_to_update.values_list('pk', flat=True))
-                        if model is Measurement else None
-                    )
                     rows_to_update.update(**{concept_col: target_concept_id})
-                    # Normalize units on resolved Measurement rows (#2088).
-                    # Wrapped in try/except so a normalization failure (e.g.
-                    # numeric overflow in bulk_update) does not roll back the
-                    # concept update or abort resolution for remaining groups.
-                    if resolved_pks:
-                        try:
-                            from omop_core.services.canonical_units import (
-                                normalize_measurement_units,
-                            )
-                            norm_qs = model.objects.filter(pk__in=resolved_pks)
-                            normalize_measurement_units(norm_qs, mapping)
-                        except Exception:
-                            logger.exception(
-                                'Unit normalization failed for %s (mapping %s)',
-                                sv, mapping.id,
-                            )
                 person_ids_touched.add(person.person_id)
                 resolved += count
                 already_resolved += group['row_count'] - count

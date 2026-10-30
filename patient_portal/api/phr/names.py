@@ -1,12 +1,10 @@
 """Display names for medicines and procedures, including unmapped ones.
 
-A mapped row shows its concept's name. An import can leave a row unmapped
-(concept 0) with only its code as the source value, RxNorm "2762" or CPT
-"85025", and a patient can't read a code. Then the row's source concept names
-it, or the vocabularies we hold do, the way the code-mapping queue names its
-codes (``describe_source_code``: Athena, then the source catalogue, then
-UMLS). Read-only: nothing is mapped or recorded here, so the queue and its
-curators stay the only way a row gets its concept.
+A mapped row shows its concept's name. Otherwise its source concept may name
+it, or establish the vocabulary for a code lookup. A bare source value does
+not establish a namespace: hospital-local codes can collide with RxNorm/CPT.
+Without that evidence show what was recorded, never guess a different medicine.
+Read-only: nothing is mapped or recorded here.
 """
 from __future__ import annotations
 
@@ -50,8 +48,10 @@ def display_name(concept_id, concept, source_concept_id, source_concept, source_
     value = (source_value or '').strip()
     if source_concept_id and _concept_name(source_concept) and _concept_name(source_concept) != value:
         return _concept_name(source_concept)
-    if CODE.match(value):
-        return _named(vocabularies, value, memo) or value
+    vocabulary = getattr(source_concept, 'vocabulary_id', None)
+    code = getattr(source_concept, 'concept_code', None)
+    if source_concept_id and vocabulary in vocabularies and code == value and CODE.match(value):
+        return _named((vocabulary,), value, memo) or value
     return value
 
 

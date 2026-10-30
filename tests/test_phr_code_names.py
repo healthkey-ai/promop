@@ -59,8 +59,8 @@ def unmapped_procedure(record, pk, source_value, day='2025-10-24'):
 
 
 def test_an_unmapped_medicine_coded_in_rxnorm_shows_the_rxnorm_name(record):
-    concept('RxNorm', '2762', 'clonazepam')
-    unmapped_drug(record, '2762')
+    source = concept('RxNorm', '2762', 'clonazepam')
+    unmapped_drug(record, '2762', drug_source_concept=source)
 
     meds = signed_in(record).get('/api/v1/phr/medications/').data['medications']
 
@@ -88,10 +88,14 @@ def test_text_and_unknown_codes_are_shown_as_recorded(record):
 
 
 def test_an_unmapped_procedure_coded_in_cpt_or_hcpcs_shows_its_name(record):
-    concept('CPT4', '85025', 'Blood count; complete (CBC), automated and automated differential WBC count')
-    concept('HCPCS', 'J9041', 'Injection, bortezomib, 0.1 mg')
-    unmapped_procedure(record, 1, '85025', day='2025-10-24')
-    unmapped_procedure(record, 2, 'J9041', day='2025-10-20')
+    cpt = concept('CPT4', '85025', 'Blood count; complete (CBC), automated and automated differential WBC count')
+    hcpcs = concept('HCPCS', 'J9041', 'Injection, bortezomib, 0.1 mg')
+    first = unmapped_procedure(record, 1, '85025', day='2025-10-24')
+    second = unmapped_procedure(record, 2, 'J9041', day='2025-10-20')
+    first.procedure_source_concept = cpt
+    second.procedure_source_concept = hcpcs
+    first.save(update_fields=['procedure_source_concept'])
+    second.save(update_fields=['procedure_source_concept'])
     unmapped_procedure(record, 3, 'Port flush', day='2025-10-10')
 
     items = signed_in(record).get('/api/v1/phr/procedures/').data['procedures']
@@ -101,3 +105,13 @@ def test_an_unmapped_procedure_coded_in_cpt_or_hcpcs_shows_its_name(record):
         'Injection, bortezomib, 0.1 mg',
         'Port flush',
     ]
+
+
+def test_bare_local_codes_do_not_borrow_standard_vocabulary_names(record):
+    concept('RxNorm', '2762', 'clonazepam')
+    concept('CPT4', '85025', 'Blood count')
+    unmapped_drug(record, '2762')
+    unmapped_procedure(record, 1, '85025')
+    client = signed_in(record)
+    assert client.get('/api/v1/phr/medications/').data['medications'][0]['name'] == '2762'
+    assert client.get('/api/v1/phr/procedures/').data['procedures'][0]['name'] == '85025'

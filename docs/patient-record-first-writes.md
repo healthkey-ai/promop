@@ -70,6 +70,14 @@ Patient name uses the same PATCH and updates Person's name columns; its response
 field is not a stored PatientRecord column. Clinician validation fields retain
 their staff access checks.
 
+Birth-date precision is part of that profile contract on both native PATCH and
+the shared form. A date-only edit preserves Person's known precision; changing
+from year/month to a full date requires an explicit precision edit. Year-only
+and month-only values use day/month 1 as PatientRecord placeholders, while the
+unknown Person components and `birth_datetime` remain null. Precision and date
+may be sent together in either order; a precision-only edit updates both the
+read-model pair and Person without a full history refresh.
+
 ## Write Descriptor Changes
 
 The `build_writable_field_descriptor()` function now returns `KIND_DIRECT` with
