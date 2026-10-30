@@ -93,11 +93,17 @@ jobs:
 
       - uses: google-github-actions/setup-gcloud@v2
 
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${GCP_REGION}-docker.pkg.dev --quiet
+
+      # A manifest push, not `gcloud artifacts docker tags add`: moving a tag
+      # that way needs artifactregistry.tags.delete, which the deploy account
+      # does not have.
       - name: Tag image as latest
         run: |
-          gcloud artifacts docker tags add \
-            ${ARTIFACT_REPO}/ctomop:${IMAGE_TAG} \
-            ${ARTIFACT_REPO}/ctomop:latest --quiet
+          docker buildx imagetools create \
+            -t ${ARTIFACT_REPO}/ctomop:latest \
+            ${ARTIFACT_REPO}/ctomop:${IMAGE_TAG}
 
       - name: Deploy new revision (no traffic)
         run: |
