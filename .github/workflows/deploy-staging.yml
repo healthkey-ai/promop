@@ -30,14 +30,15 @@ jobs:
     if: github.ref_name == 'dev'
     uses: ./.github/workflows/ci.yml
 
-  build-and-deploy:
-    name: Build & Deploy
-    needs: test
+  # Builds alongside the tests rather than after them: only the deploy job
+  # waits on the tests, so a failing suite still stops the release but the
+  # build no longer adds its minutes to theirs. The image is pushed under the
+  # commit SHA only; :latest moves in the deploy job, once tests have passed.
+  build:
+    name: Build image
     if: >-
-      always() &&
-      (needs.test.result == 'success' || needs.test.result == 'skipped') &&
-      (github.event_name == 'push' ||
-       contains(github.event.pull_request.labels.*.name, 'deploy-staging'))
+      github.event_name == 'push' ||
+      contains(github.event.pull_request.labels.*.name, 'deploy-staging')
     runs-on: ubuntu-latest
 
     steps:
@@ -57,15 +58,46 @@ jobs:
       - name: Configure Docker for Artifact Registry
         run: gcloud auth configure-docker ${GCP_REGION}-docker.pkg.dev --quiet
 
+      - uses: docker/setup-buildx-action@v3
+
+      # Layer cache lives in Artifact Registry beside the image, so pip install,
+      # the model download and npm ci are reused until their inputs change.
       - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.gcp
+          platforms: linux/amd64
+          provenance: false
+          push: true
+          build-args: GIT_COMMIT=${{ env.IMAGE_TAG }}
+          tags: ${{ env.ARTIFACT_REPO }}/ctomop:${{ env.IMAGE_TAG }}
+          cache-from: type=registry,ref=${{ env.ARTIFACT_REPO }}/ctomop:buildcache
+          cache-to: type=registry,ref=${{ env.ARTIFACT_REPO }}/ctomop:buildcache,mode=max,image-manifest=true,oci-mediatypes=true
+
+  deploy:
+    name: Deploy
+    needs: [test, build]
+    if: >-
+      always() &&
+      needs.build.result == 'success' &&
+      (needs.test.result == 'success' || needs.test.result == 'skipped')
+    runs-on: ubuntu-latest
+
+    steps:
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Tag image as latest
         run: |
-          docker build --platform linux/amd64 --provenance=false \
-            -f Dockerfile.gcp \
-            --build-arg GIT_COMMIT=${IMAGE_TAG} \
-            -t ${ARTIFACT_REPO}/ctomop:${IMAGE_TAG} \
-            -t ${ARTIFACT_REPO}/ctomop:latest .
-          docker push ${ARTIFACT_REPO}/ctomop:${IMAGE_TAG}
-          docker push ${ARTIFACT_REPO}/ctomop:latest
+          gcloud artifacts docker tags add \
+            ${ARTIFACT_REPO}/ctomop:${IMAGE_TAG} \
+            ${ARTIFACT_REPO}/ctomop:latest --quiet
 
       - name: Deploy new revision (no traffic)
         run: |
