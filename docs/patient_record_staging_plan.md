@@ -48,6 +48,7 @@ request:
 | `batch_key` | text, unique | client idempotency key |
 | `subject_key` | text | exactly one subject per batch |
 | `payload_hash` | char(64) | canonical hash of the committed item set |
+| `group_manifest` | jsonb | `{group_key: [required_item_key, ...]}` |
 | `state` | text | `open`, `committed`, `abandoned` |
 | `created_by` | text | authenticated service identity |
 | `created_at` / `committed_at` | timestamptz | audit |
@@ -58,7 +59,10 @@ Rules:
   computes `payload_hash`;
 - a repeated `batch_key` with a different `subject_key` or `payload_hash` is
   rejected (`409 batch_key_conflict`);
-- committed items are immutable; a changed value requires a new batch;
+- commit validates every `group_manifest` group has exactly its required item keys;
+  a partial therapy line or any missing group member blocks the commit;
+- committed items are immutable; a changed value or a displaced-target row requires
+  a new batch;
 - a batch never spans subjects.
 
 ### 4.2 Item
@@ -87,7 +91,6 @@ patient):
 | `owner` | text | accountable role or service identity; required |
 | `created_by` | text | authenticated creator; required |
 | `target_version` | text, null | `PatientRecord.updated_at` + fingerprint the decision is bound to |
-| `approval` | jsonb, null | see §7 |
 | `transferred_at` | timestamptz, null | terminal success |
 | `created_at` / `updated_at` | timestamptz | audit |
 
@@ -120,9 +123,11 @@ Provenance is a required JSON schema, not free text:
 ```
 
 Every state change also appends `PatientRecordStagingTransition`:
-`(staging_id, from_state, to_state, actor, reason, approval FK, created_at)`.
+`(staging_id, from_state, to_state, actor, reason, created_at)`.
 The transition history is append-only and is the audit source; the current `state`
-is a cache of the last transition.
+is a cache of the last transition. A transition that applied a resolution links to
+its approvals through `PatientRecordStagingTransitionApproval` (M2M); a delete
+transition therefore links both the `data-owner` and `privacy` approvals.
 
 ### 4.3 Approval
 
@@ -143,8 +148,9 @@ is a cache of the last transition.
 | `expires_at` | timestamptz | required |
 | `created_at` | timestamptz | audit |
 
-Unique `(staging, approver, role)`; a deletion needs **two distinct role rows**
-(`data-owner` and `privacy`). The transition row points at the approval(s).
+Unique `(staging, approver)`; a deletion needs **two distinct approver identities**,
+one with role `data-owner` and one with `privacy`. Two rows by the same person are
+rejected. The transition links both approvals through the M2M table.
 
 ## 5. Identity
 
@@ -224,20 +230,31 @@ Rules:
 
 `transfer(batch_key, *, expected_target_version, actor)`:
 
-1. Authorize the actor and load the batch. Reject mixed `subject_key`; resolve the
-   Person/record once.
-2. Lock all staging items in `id` order, then lock the `PatientRecord`/`Person`
-   (sorted when a batch spans more than one target). No path may take the record
-   lock before the staging lock.
-3. Re-run the **normative decision evaluator** from
-   `docs/patientrecord-cutover-plan.md` §0.6.0–§0.6.2 under the lock, in that order:
-   pending target, explicit-clear evidence, absent/ambiguous empty, value equality,
-   provenance/chronology, approved overwrite, conflict. Each item resolves to
-   exactly one of `copy`, `keep_target`, `clear`, `conflict`.
-   - A version match is **not** overwrite authority.
-   - `overwrite` applies only with an approved cohort/field scope and a later
-     authoritative source; `chronology_override` needs its own recorded decision.
-   - Incomparable provenance is `conflict`, never a guess.
+1. Authorize the actor and load the batch. Reject a batch that is not
+   `committed`, is not single-subject, or has a missing group member.
+2. Lock all staging items in `id` order, then lock the `PatientRecord`/`Person` for
+   the batch's single subject. No path may take the record lock before the staging
+   lock. A batch that names more than one subject/target is rejected.
+3. Re-run the **normative decision table** under the lock, in this order:
+
+   | Source | Target | Mode | Result |
+   | --- | --- | --- | --- |
+   | pending target | any | any | `keep_target`; stage loser |
+   | absent/ambiguous | value/absent | any | `keep_target`/no-op; no invented clear |
+   | value | absent | any | `copy` |
+   | value | equal value | any | no-op |
+   | value | different value | default | `keep_target`; conflict if significant |
+   | value | different value | approved cohort/field + `overwrite`, source later | `copy`; displaced target retained |
+   | explicit clear | value | default | `conflict` |
+   | explicit clear | value | approved cohort/field + `overwrite`, source later | `clear`; displaced target retained |
+   | equal/incomparable provenance | divergence | any | `conflict` |
+   | no authoritative user event | divergence | any | `conflict` |
+
+   A version match is **not** overwrite authority. `overwrite` requires the approved
+   cohort/field scope and a later authoritative source; `chronology_override` needs
+   its own recorded approval. This table is self-contained and must stay in lockstep
+   with CB's `patientrecord-cutover-plan.md` §0.6.0–§0.6.2; a divergence is a
+   blocker, not an interpretation.
 4. Compare the stored decision's `target_version`/`manifest_hash` with the current
    target. If they differ, return to `conflict`. If an approval exists, verify
    decision, scope, expiry, target version and manifest hash even when the row is
@@ -251,8 +268,9 @@ Rules:
    group, not only its savepoint. Per-field savepoints are only for the OMOP
    projection, never for the record writes. Do not call `refresh_patient_record`.
    Write a target revision/audit row tied to the staging batch and actor.
-7. Write displaced targets as `retained_not_for_transfer` rows with
-   `winning_item_id`, in the same transaction.
+7. Write displaced targets as `retained_not_for_transfer` rows in a **new committed
+   batch** keyed `"<source_batch>:displaced:<winning_item_id>"`; the original batch
+   is immutable. Set `winning_item_id` and write them in the same transaction.
 8. Mark `transferred` and append transitions in the same transaction as the record
    write. A crash leaves either both or neither.
 9. Project mapped fields best-effort per field with `project_single_value`; a
@@ -267,9 +285,9 @@ Rules:
 - Transfer claims items with `select_for_update`; a concurrent transfer sees
   `transferred` and no-ops.
 - Creation race: the existing `/me/` path uses `get_or_create`. Both it and the
-  transfer service take the same **subject anchor** first:
-  `pg_advisory_xact_lock(hashtext(subject_key))` when no Person/record exists, or
-  the `PatientUser`/`Identity` row when it does. The transfer then re-reads the
+  transfer service take the **same stable anchor first**:
+  `pg_advisory_xact_lock(hashtext(subject_key))`, whether or not a Person/record
+  exists. The anchor never switches to a row lock. The transfer then re-reads the
   record under the anchor and must not assume it is the only creator. The unique
   `content_hash`, `(batch, item_key)` and the anchor are the arbitration.
 - Lock order: subject anchor → staging items → `PatientRecord`/`Person`. CB's repair
