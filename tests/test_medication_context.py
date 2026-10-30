@@ -230,7 +230,7 @@ def test_legacy_sources_typed_namespace_and_foreign_notes(setup, django_assert_n
     assert medication_contexts(record.person_id, [exposure.pk])[exposure.pk]['role'] == fact.value_as_string
 
 
-def test_later_refresh_and_mapping_approval_reconcile_pending_values(setup):
+def test_mapping_approval_without_authorship_keeps_patient_answer_pending(setup):
     from omop_core.services.patient_record_service import refresh_patient_record
     from omop_core.services.omop_projection import project_field_to_omop
     record, exposure, client, *_ = setup
@@ -243,11 +243,48 @@ def test_later_refresh_and_mapping_approval_reconcile_pending_values(setup):
     assert 'medication_contexts' in record.user_edited_fields
     FieldConceptMapping.objects.filter(field_name='drug_exposure.category').update(status='approved')
     mapping = FieldConceptMapping.objects.get(field_name='drug_exposure.category')
-    assert project_field_to_omop(mapping) == 1
-    assert medication_contexts(record.person_id, [exposure.pk])[exposure.pk]['category'] == 'Supportive'
+    assert project_field_to_omop(mapping) == 0
+    assert not Observation.objects.filter(observation_event_id=exposure.pk).exists()
+    assert client.get('/api/v1/phr/medications/').data['medications'][0]['category'] == 'Supportive'
+    refresh_patient_record(record.person)
+    record.refresh_from_db()
+    assert 'medication_contexts' in record.user_edited_fields
+    assert record.medication_contexts[str(exposure.pk)]['category'] == 'Supportive'
+
+
+def test_repeated_mapping_approval_never_duplicates_self_report_as_ehr(setup):
+    from django.contrib.contenttypes.models import ContentType
+    from omop_core.models import ProvenanceRecord
+    from omop_core.services.omop_projection import project_field_to_omop
+    from omop_core.services.patient_record_service import refresh_patient_record
+    record, exposure, client, *_ = setup
+    assert patch(client, exposure, {'role': 'Induction'}).status_code == 200
+    record.refresh_from_db()
+    assert 'medication_contexts' in record.user_edited_fields
+    mapping = FieldConceptMapping.objects.get(field_name='drug_exposure.role')
+    for _ in range(2):
+        assert project_field_to_omop(mapping) == 0
+    fact, = Observation.objects.filter(observation_event_id=exposure.pk)
+    assert fact.observation_type_concept_id == 32865
+    assert ProvenanceRecord.objects.filter(content_type=ContentType.objects.get_for_model(Observation),
+                                            object_id=fact.pk, source='PATIENT_SELF').exists()
     refresh_patient_record(record.person)
     record.refresh_from_db()
     assert 'medication_contexts' not in record.user_edited_fields
+
+
+def test_mapping_approval_does_not_invent_authorship_for_legacy_pending_json(setup):
+    from omop_core.services.omop_projection import project_field_to_omop
+    record, exposure, *_ = setup
+    values = {str(exposure.pk): {'role': 'Induction'}}
+    PatientRecord.objects.filter(pk=record.pk).update(
+        medication_contexts=values, user_edited_fields=['medication_contexts'])
+    mapping = FieldConceptMapping.objects.get(field_name='drug_exposure.role')
+    assert project_field_to_omop(mapping) == 0
+    assert not Observation.objects.filter(observation_event_id=exposure.pk).exists()
+    record.refresh_from_db()
+    assert record.medication_contexts == values
+    assert 'medication_contexts' in record.user_edited_fields
 
 
 def test_shared_medication_selection_limits_attributes(setup, settings):

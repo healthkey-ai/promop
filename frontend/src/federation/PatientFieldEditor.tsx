@@ -43,6 +43,8 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
   // read-only and is recalculated by PROMOP.
   const gated = Boolean(field.compatibility_reason);
   const formatted = value == null || value === '' ? 'Unknown'
+    : precision === 'year' ? String(value).slice(0, 4)
+    : precision === 'month' ? String(value).slice(0, 7)
     : typeof value === 'boolean' ? (value ? 'Yes' : 'No')
     : typeof value === 'object' ? JSON.stringify(value) : String(value);
   const control = field.multiple ? 'multiselect' : field.options?.length

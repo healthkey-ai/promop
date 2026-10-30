@@ -5,7 +5,7 @@ import type { AxiosInstance } from 'axios';
 import PatientFieldEditor from './PatientFieldEditor';
 import { PatientFormStore } from './patientFormStore';
 
-async function setup(extraFields = {}, extraValues = {}) {
+async function setup(extraFields = {}, extraValues = {}, writeEnabled = true) {
   const fields = {
     height: { writable: true, target: 'patient_record', control: 'number', label: 'Height', unit: 'cm' },
     weight: { writable: true, target: 'patient_record', control: 'number', label: 'Weight', unit: 'kg' },
@@ -14,7 +14,7 @@ async function setup(extraFields = {}, extraValues = {}) {
   };
   const get = vi.fn(async (url: string) => ({ data: url.includes('writable-fields') ? fields : {
     patient_info: { person_id: 12, height: 170, weight: 60, bmi: 20.76,
-      ldh_upper_limit_normal: 250, ...extraValues }, write_enabled: true,
+      ldh_upper_limit_normal: 250, ...extraValues }, write_enabled: writeEnabled,
   } }));
   const patch = vi.fn(async (_url: string, values: Record<string, unknown>) => ({ data: {
     patient_info: { person_id: 12, height: 170, weight: 60, ...values, bmi: 27.68 },
@@ -128,4 +128,21 @@ it('uses stored and pending DOB precision in the shared date editor', async () =
   fireEvent.change(screen.getByRole('spinbutton'), { target: { value: '1986' } });
   await act(async () => { await store.flush(); });
   expect(patch.mock.calls[0][1]).toEqual({ date_of_birth: '1986-01-01' });
+});
+
+describe.each(['readOnly', 'unwritableStore', 'unwritableField'] as const)('DOB precision in %s views', (mode) => {
+  it.each([
+    ['year', '1985-01-01', '1985'],
+    ['month', '1985-06-01', '1985-06'],
+    ['day', '1985-06-15', '1985-06-15'],
+    ['year', null, 'Unknown'],
+  ])('shows only known components for %s precision', async (precision, value, expected) => {
+    const { store } = await setup({
+      date_of_birth: { label: 'Date of birth', writable: mode !== 'unwritableField', target: 'patient_record', control: 'date' },
+    }, { date_of_birth: value, date_of_birth_precision: precision }, mode !== 'unwritableStore');
+    const { container } = render(<PatientFieldEditor store={store} name="date_of_birth" readOnly={mode === 'readOnly'} />);
+    expect(container.querySelector('[data-field="date_of_birth"] > div')?.textContent).toBe(`Date of birth: ${expected}`);
+    if (precision !== 'day' && value) expect(container).not.toHaveTextContent(value);
+    expect(screen.queryByRole('spinbutton')).not.toBeInTheDocument();
+  });
 });

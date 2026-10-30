@@ -196,6 +196,11 @@ All notable changes to PRomop are documented here.
 
 ### Fixed
 
+- **Author-sensitive medication context and partial DOB (#2129)** — mapping
+  approval no longer projects pending medication attributes without reliable
+  per-attribute authorship or duplicates patient self-report as EHR. Pending
+  answers remain visible in PatientRecord/PHR. Read-only shared DOB displays
+  only the known year/month instead of placeholder date components.
 - **cb-v2 backmerge data contracts (#2129)** — retain raw OMOP measurement
   numbers, units and reference ranges during import and mapping repoints;
   canonical units remain an additive read model, preserving retry identity and

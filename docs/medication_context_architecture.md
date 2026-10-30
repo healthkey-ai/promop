@@ -26,13 +26,17 @@ OMOP, with signals suppressed. The response never requires full derivation or an
 OMOP snapshot. If vocabulary, mappings, or projection are unavailable, the saved
 edit remains pending and the PHR displays it immediately. Structured pending
 protection remains until a later import/explicit refresh confirms the values.
-Mapping approval retries pending projection without triggering immediate derive.
+Mapping approval does not retry projection: the pending JSON and revision log
+do not preserve reliable per-attribute fact authorship. Values remain protected
+and visible in the PHR until derivation confirms them from matching facts.
 Retired exposures are discarded from the current map during later derivation.
 
 The existing PatientRecord revision history records edits. Immediate patient
 projection writes Patient self-report facts and PATIENT_SELF provenance; other
-authors retain the mapping's type. Mapping backfill uses the approved recipe when
-no request author is present. No separate interactive OMOP context action is added.
+authors retain the mapping's type. A new interactive attribute change can project
+with its request author; approval alone cannot supply that author or relabel an
+existing self-report as EHR. Automatic backfill requires a future durable
+per-attribute authorship contract. No separate interactive OMOP context action is added.
 
 Each change appends an Observation snapshot. Its `observation_event_id` is the
 exposure ID and `obs_event_field_concept` is a valid CDM Metadata concept for

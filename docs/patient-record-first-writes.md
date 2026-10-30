@@ -204,6 +204,10 @@ When a curator approves a `FieldConceptMapping`, the `post_save` signal triggers
 pending user-edited value for that field. It filters by `user_edited_fields`,
 not by comparing typed columns to an empty string, and uses the same dated
 writer and unit recipe as PATCH. Records with no pending edits are untouched.
+Dedicated writers and pinned current-state fields that require author-aware
+projection are exceptions: approval does not invent authorship from a recipe.
+Medication contexts likewise stay pending when no per-attribute author is
+available; existing self-report facts are not duplicated as EHR facts.
 
 ## Derivation Preservation
 
@@ -261,8 +265,9 @@ import/ingestion path, not an interactive save.
 3. **Derivation cannot overwrite user edits** — `user_edited_fields` tracking
    ensures user values persist until derivation represents the saved value.
 
-4. **Mapping approval triggers backfill** — existing user edits are projected
-   when a mapping is approved, without any manual step.
+4. **Mapping approval triggers eligible backfill** — existing user edits are
+   projected when a mapping is approved, except author-sensitive fields whose
+   pending data cannot establish fact authorship.
 
 5. **The frontend has one write path** — no more split between OMOP and
    PatientRecord. The descriptor still carries projection metadata for the date
