@@ -190,6 +190,14 @@ All notable changes to PRomop are documented here.
 
 ### Fixed
 
+- **Seen counts come from this instance's patients** — a rebuild walk now
+  starts by setting every mapped code's Seen count, in one statement, from the
+  per-patient source-code rows, per vocabulary and code, instead of leaving
+  the hospital-code extract's number, which counted every coding of an
+  observation and so showed one figure for the order-system and result-system
+  codes of a test. A code with no patient rows here keeps its count; a later
+  seed, inventory or snapshot load does not raise the count of a code that
+  has patient rows here. (#2121)
 - **One migration leaf again** — #2073 (`0313_widen_axis_key`) and #2072
   (`0313_add_b_symptom_fields`, `0314_b_symptom_mappings`) both branched from
   0312, leaving `dev` with two leaves, every PR's backend check red and the

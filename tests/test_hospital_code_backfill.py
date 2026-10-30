@@ -187,6 +187,16 @@ def test_an_inventory_load_leaves_patient_derived_evidence_alone():
     ]), provenance='healthtree-unmapped-v2')
     cleared.refresh_from_db()
     assert cleared.source_unit_evidence == []
+    # A code with no patients here still takes the load's count (#2121)...
+    assert cleared.occurrence_count == 5
+    # ...and one whose count the rebuild set from its patients keeps it.
+    from omop_core.models import PatientSourceCode
+    from tests.factories import PersonFactory
+    PatientSourceCode.objects.create(person=PersonFactory(), source_value='GLU', source_vocabulary_id=EPIC,
+                                     omop_table='measurement', occurrence_count=2)
+    upsert_inventory(build_inventory([primary(EPIC, 'GLU', 'Glucose', 5000)]), provenance='healthtree-unmapped-v2')
+    mapping.refresh_from_db()
+    assert mapping.occurrence_count == 5
 
 
 def test_dry_run_does_not_write():
