@@ -108,6 +108,11 @@ class Command(BaseCommand):
                      alias_matches=0, changed_mappings=0, unchanged_mappings=0,
                      unmatched_mappings=0, ambiguous_mappings=0)
         matched = set()
+        # Counts this instance rebuilt from its own patients are not replaced
+        # by a snapshot's (#2121).
+        from omop_core.mapping import axis_variants
+        rebuilt = axis_variants.rebuilt_seen_keys()
+        stats['rebuilt_mappings'] = 0
         with transaction.atomic():
             pending = []
             rows = SourceCodeConceptMapping.objects.only(
@@ -121,6 +126,9 @@ class Command(BaseCommand):
                 matched.add(key)
                 stats['matched_mappings'] += 1
                 stats[f'{kind}_matches'] += 1
+                if (mapping.source_vocabulary_id, mapping.source_code) in rebuilt:
+                    stats['rebuilt_mappings'] += 1
+                    continue
                 if mapping.occurrence_count == counts[key]:
                     stats['unchanged_mappings'] += 1
                     continue

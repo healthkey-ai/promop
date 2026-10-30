@@ -437,11 +437,18 @@ def upsert_inventory(build, *, provenance, actor=None, dry_run=False,
         # row's, cleared ones included; new rows still take the inventory's.
         from omop_core.models import AxisVariantRefresh
         rebuilt_here = AxisVariantRefresh.objects.filter(rebuild_evidence=True, outcome='done').exists()
+        # A count this instance rebuilt from its own patients (#2121) is the
+        # code's real Seen; the extract's, which counts every coding of an
+        # observation, is not raised over it. A code with no patients here
+        # still takes the load's count.
+        rebuilt_counts = axis_variants.rebuilt_seen_keys(
+            (m.source_vocabulary_id, m.source_code) for m in existing)
         updates = []
         for mapping in existing:
             imported = rows[(mapping.source_vocabulary_id, mapping.source_code)]
             changed = False
-            if imported.occurrence_count > mapping.occurrence_count:
+            if imported.occurrence_count > mapping.occurrence_count \
+                    and (mapping.source_vocabulary_id, mapping.source_code) not in rebuilt_counts:
                 mapping.occurrence_count = imported.occurrence_count
                 changed = True
             # Evidence this instance derived from its own patients (#2043) is
