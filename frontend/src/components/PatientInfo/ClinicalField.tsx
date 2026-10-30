@@ -28,8 +28,6 @@ interface Props {
    *  one reason — repeating the same paragraph beside 25 boxes buries it. The
    *  tab states it once instead. */
   showReason?: boolean;
-  /** Render an explicit Unknown option for a nullable boolean (#5521). */
-  triState?: boolean;
 }
 
 /**
@@ -58,11 +56,14 @@ export default function ClinicalField({
   date,
   onDateChange,
   showReason = true,
-  triState = false,
 }: Props) {
   const store = usePatientFormStore();
   const formReadOnly = useContext(PatientFormReadOnlyContext);
   const writable = !!descriptor?.writable;
+  // The server says which booleans are three-valued (Yes / No / Unknown, with
+  // Unknown an answer of its own, #5521); the federated editor reads the same
+  // flag, so a tab never has to repeat the list.
+  const triState = descriptor?.tri_state === true;
   // A tab that shares one date across its fields passes it in — a blood panel is
   // drawn once. A tab whose results come from different specimens, as a pathology
   // report's do, can leave it out and get a date per field rather than one date

@@ -33,24 +33,15 @@ def _project_side_effects(person, direct, projections, authorship=None):
     """
     if not projections:
         return
-    from omop_core.models import Concept
     from omop_core.services.omop_projection import project_single_value
 
+    # The descriptor only advertises a projection whose concepts resolved, and
+    # the view only supplies a self-report type it found, so nothing here can
+    # fail a foreign key at commit. The guard below is for anything else:
+    # project_single_value keeps its own savepoint, but a failure before it
+    # gets there must not take the saved answer with it.
     for name, projection in projections.items():
         if name not in direct or not projection:
-            continue
-        # A type or target concept that is not loaded would fail the foreign key
-        # at transaction commit, after the projector's savepoint — which would
-        # roll back the answer this function exists to preserve. Skip instead.
-        required = {
-            projection.get('concept_id'),
-            (authorship or {}).get('type_concept_id') or projection.get('type_concept_id') or 32817,
-        } - {None}
-        if Concept.objects.filter(concept_id__in=required).count() != len(required):
-            logger.warning(
-                'OMOP concepts %s are not loaded; skipping the projection for %s',
-                sorted(required), name,
-            )
             continue
         try:
             project_single_value(
@@ -254,7 +245,7 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
     record, _ = PatientRecord.objects.get_or_create(person=person)
     record = PatientRecord.objects.select_for_update().get(pk=record.pk)
     descriptor = patient_form_descriptors(descriptor, readable_fields=allowed_fields, record=record)
-    facts, direct, person_changes = {}, {}, set()
+    facts, direct, person_changes, profile_applied = {}, {}, set(), set()
     side_effect_projections = {}
     dob_changed = False
     for name, value in changes.items():
@@ -278,6 +269,7 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
                 setattr(person, key, text)
                 person_changes.add(key)
             result.applied.append(name)
+            profile_applied.add(name)
             continue
         if name in ('phone_number', 'email', 'date_of_birth'):
             try:
@@ -301,6 +293,7 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
                 setattr(person, key, item)
                 person_changes.add(key)
             result.applied.append(name)
+            profile_applied.add(name)
             continue
         projection = entry.get('projection') or {}
         # PatientRecord-first: a best-effort projection is stored on the record
@@ -364,16 +357,17 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
             record.user_edited_fields = sorted(set(record.user_edited_fields or []) - pending)
             record.save(update_fields=['user_edited_fields'])
             refresh_patient_record(person)
-    if (direct or person_changes) and not (facts and fact_result.applied):
-        refresh_patient_record(person)
-    if direct:
-        # A direct edit has no OMOP fact to re-derive from yet. Recompute the
-        # dependent defining events from the record's own canonical inputs so
-        # the saved verdict is the one the form will read back, not a stale
-        # value from the last refresh.
+    if direct or profile_applied:
+        # PatientRecord first: the record already holds the answer, and the
+        # OMOP side effect is not read back (docs/patient-record-first-writes.md).
+        # There is deliberately no refresh_patient_record() here, as there is
+        # none on the native PATCH: a derivation now would rank the side
+        # effect against the record's own history. Recompute the dependent
+        # defining events from the record's own canonical inputs instead, so
+        # the saved verdict is the one the form will read back.
         record = recompute_patient_record_fields(
             PatientRecord.objects.select_for_update().get(pk=record.pk),
-            changed_fields=set(direct),
+            changed_fields=set(direct) | profile_applied,
         )
     record.refresh_from_db()
     return record, result

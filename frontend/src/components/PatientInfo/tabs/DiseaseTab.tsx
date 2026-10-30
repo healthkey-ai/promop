@@ -185,12 +185,12 @@ function MyelomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onChan
           Current diagnosis. A previous diagnosis that has progressed to active myeloma is not a current Yes.
         </p>
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <ClinicalField label="MGUS" name="mgus" descriptor={descriptors.mgus} type="boolean" triState value={formData?.mgus} onChange={onChange} />
-          <ClinicalField label="Smoldering Multiple Myeloma" name="smoldering_multiple_myeloma" descriptor={descriptors.smoldering_multiple_myeloma} type="boolean" triState value={formData?.smoldering_multiple_myeloma} onChange={onChange} />
-          <ClinicalField label="Waldenström Macroglobulinemia" name="waldenstrom_macroglobulinemia" descriptor={descriptors.waldenstrom_macroglobulinemia} type="boolean" triState value={formData?.waldenstrom_macroglobulinemia} onChange={onChange} />
-          <ClinicalField label="IgM Multiple Myeloma" name="igm_multiple_myeloma" descriptor={descriptors.igm_multiple_myeloma} type="boolean" triState value={formData?.igm_multiple_myeloma} onChange={onChange} />
-          <ClinicalField label="Light-Chain (AL) Amyloidosis" name="al_amyloidosis" descriptor={descriptors.al_amyloidosis} type="boolean" triState value={formData?.al_amyloidosis} onChange={onChange} />
-          <ClinicalField label="POEMS Syndrome" name="poems_syndrome" descriptor={descriptors.poems_syndrome} type="boolean" triState value={formData?.poems_syndrome} onChange={onChange} />
+          <ClinicalField label="MGUS" name="mgus" descriptor={descriptors.mgus} type="boolean" value={formData?.mgus} onChange={onChange} />
+          <ClinicalField label="Smoldering Multiple Myeloma" name="smoldering_multiple_myeloma" descriptor={descriptors.smoldering_multiple_myeloma} type="boolean" value={formData?.smoldering_multiple_myeloma} onChange={onChange} />
+          <ClinicalField label="Waldenström Macroglobulinemia" name="waldenstrom_macroglobulinemia" descriptor={descriptors.waldenstrom_macroglobulinemia} type="boolean" value={formData?.waldenstrom_macroglobulinemia} onChange={onChange} />
+          <ClinicalField label="IgM Multiple Myeloma" name="igm_multiple_myeloma" descriptor={descriptors.igm_multiple_myeloma} type="boolean" value={formData?.igm_multiple_myeloma} onChange={onChange} />
+          <ClinicalField label="Light-Chain (AL) Amyloidosis" name="al_amyloidosis" descriptor={descriptors.al_amyloidosis} type="boolean" value={formData?.al_amyloidosis} onChange={onChange} />
+          <ClinicalField label="POEMS Syndrome" name="poems_syndrome" descriptor={descriptors.poems_syndrome} type="boolean" value={formData?.poems_syndrome} onChange={onChange} />
         </div>
       </Section>
 

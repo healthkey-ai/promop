@@ -176,3 +176,22 @@ def test_a_projection_failure_does_not_lose_the_saved_answer(monkeypatch):
     assert not ConditionOccurrence.objects.filter(
         person=person, condition_concept_id=4193776,
     ).exists()
+
+
+def test_a_direct_answer_does_not_rederive_the_record(monkeypatch):
+    """PatientRecord first: the record already holds the answer and the OMOP
+    side effect is not read back, so the shared form must not derive now, any
+    more than the native PATCH does (docs/patient-record-first-writes.md)."""
+    _seed_vocab()
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    derived = []
+    monkeypatch.setattr(
+        'omop_core.services.patient_form.refresh_patient_record', derived.append,
+    )
+
+    record, result = apply_patient_form_patch(person, {'poems_syndrome': True})
+
+    assert 'poems_syndrome' in result.applied
+    assert record.poems_syndrome is True
+    assert derived == []

@@ -44,7 +44,7 @@ const observation = (source_value: string, value_kind: string, multiple = false)
 
 const triStateBoolean = (source_value: string) => {
   const entry = observation(source_value, 'boolean');
-  return { ...entry, projection: { ...entry.projection, affirmative_only: true } };
+  return { ...entry, tri_state: true, projection: { ...entry.projection, affirmative_only: true } };
 };
 
 const DESCRIPTORS: Record<string, unknown> = {

@@ -159,9 +159,18 @@ LOINC/SNOMED recipes and approved curated mappings, to call
   mark its projection `best_effort` (for example the current-diagnosis
   myeloma-related disorders). The shared form writes PatientRecord first and
   mirrors an affirmative answer into its occurrence as a side effect; a
-  projection failure never fails the save, and No/Unknown creates no fact.
-  Derivation does not read such a fact back, so imported history cannot turn a
-  current answer into Yes.
+  projection failure never fails the save. No/Unknown creates no fact and
+  retracts the rows an earlier Yes wrote (flagged `is_erroneous`, never
+  deleted), scoped to the recipe's own rows and the same kind of author, so a
+  later derivation cannot keep reading a fact the record has withdrawn.
+  The rows such a recipe writes carry a `patient-record:<field>` source value:
+  derivation never reads them back into the answer, and the primary-cancer
+  selector skips them, so a current-state answer can neither become a Yes from
+  imported history nor displace the diagnosis the record is about.
+- The shared form (`apply_patient_form_patch`) follows the same rule as the
+  native PATCH: a direct edit never calls `refresh_patient_record()`. It
+  recomputes the record's own dependent fields and returns; derivation, when it
+  next runs, sees the OMOP side effect alongside the record's history.
 - Sets `_skip_patient_record_refresh = True` on the OMOP instance to avoid
   recursive derivation.
 - Direct UI saves never call `refresh_patient_record()` or load the patient's

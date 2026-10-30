@@ -319,6 +319,23 @@ _MYELOMA_RELATED_DISORDER_PROJECTIONS = {
 # into a current answer (#5521).
 PINNED_PROJECTION_FIELDS = frozenset(_MYELOMA_RELATED_DISORDER_PROJECTIONS)
 
+
+def pinned_projection_source_value(field):
+    """The source value that marks an OMOP row as this field's own answer.
+
+    The rows a pinned recipe writes are told apart from imported history by
+    this, never by the concept: an EHR row for the same SNOMED code is a
+    diagnosis, this is a patient's current-state answer dated the day they
+    gave it. Derivation uses it to keep such a row from becoming the record's
+    primary cancer, and a later No/Unknown uses it to find the rows it retracts.
+    """
+    return 'patient-record:' + field
+
+
+PINNED_PROJECTION_SOURCE_VALUES = frozenset(
+    pinned_projection_source_value(field) for field in PINNED_PROJECTION_FIELDS
+)
+
 # Lifecycle columns are not clinical data and are never writable regardless of
 # mapping state; they are excluded rather than reported as unwritable fields.
 _LIFECYCLE_FIELDS = frozenset({
@@ -815,9 +832,10 @@ def build_writable_field_descriptor():
                     'vocabulary': concept.vocabulary_id,
                     'display': concept.concept_name,
                     'type_concept_id': CONCEPT_EHR_TYPE,
-                    'source_value': concept.concept_code,
+                    'source_value': pinned_projection_source_value(field),
                     # No/Unknown must not become a negative occurrence; the
-                    # answer stays pending on PatientRecord instead.
+                    # answer stays pending on PatientRecord, and the rows an
+                    # earlier Yes wrote are retracted.
                     'affirmative_only': True,
                     # The shared form writes PatientRecord first and treats this
                     # fact as a side effect: an occurrence cannot be derived back

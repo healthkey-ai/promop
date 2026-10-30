@@ -1,9 +1,11 @@
 """PatientRecord-first writes for the six current-diagnosis MM fields (#5521)."""
+from datetime import date
+
 import pytest
 
 from django.utils import timezone
 
-from omop_core.models import ConditionOccurrence, FieldConceptMapping, Observation
+from omop_core.models import Concept, ConditionOccurrence, FieldConceptMapping, Observation
 from omop_core.services.omop_projection import project_field_to_omop, project_single_value
 from omop_core.services.patient_record_service import (
     PATIENT_RECORD_OMOP_MAPPED_FIELDS,
@@ -15,6 +17,7 @@ from omop_core.signals import suppress_patient_record_refresh
 from patient_portal.api.serializers import PatientRecordSerializer
 from tests.factories import (
     ConceptFactory,
+    ConditionOccurrenceFactory,
     DomainFactory,
     ObservationFactory,
     PatientRecordFactory,
@@ -229,3 +232,88 @@ def test_approving_a_curated_mapping_does_not_backfill_a_pinned_answer():
     assert Observation.objects.filter(
         person=person, observation_concept_id=4149022,
     ).count() == 1
+
+
+def test_a_yes_does_not_displace_the_primary_cancer():
+    """The answer row is dated today and 'Smoldering Multiple Myeloma' reads as a
+    cancer, so without the source-value marker the primary-cancer ranking would
+    pick it over an untreated myeloma diagnosed years ago (review of #2098)."""
+    _seed_vocab()
+    person = PersonFactory()
+    myeloma = ConceptFactory(
+        concept_id=437233, concept_code='109989006', vocabulary_id='SNOMED',
+        concept_name='Multiple myeloma', domain=DomainFactory(domain_id='Condition'),
+    )
+    with suppress_patient_record_refresh():
+        ConditionOccurrenceFactory(
+            person=person, condition_concept=myeloma, condition_start_date='2020-03-01',
+        )
+    assert refresh_patient_record(person).disease == 'Multiple Myeloma'
+
+    descriptor = build_writable_field_descriptor()
+    projection = {**descriptor['smoldering_multiple_myeloma']['projection'], 'value_kind': 'boolean'}
+    assert project_single_value(person, 'smoldering_multiple_myeloma', True, projection) is True
+
+    refreshed = refresh_patient_record(person)
+
+    assert refreshed.disease == 'Multiple Myeloma'
+    assert refreshed.diagnosis_date == date(2020, 3, 1)
+    answer = ConditionOccurrence.objects.get(person=person, condition_concept_id=4184985)
+    assert answer.condition_source_value == 'patient-record:smoldering_multiple_myeloma'
+
+
+def test_a_later_no_or_unknown_retracts_the_projected_yes():
+    _seed_vocab()
+    descriptor = build_writable_field_descriptor()
+    person = PersonFactory()
+
+    smm = {**descriptor['smoldering_multiple_myeloma']['projection'], 'value_kind': 'boolean'}
+    assert project_single_value(person, 'smoldering_multiple_myeloma', True, smm) is True
+    rows = ConditionOccurrence.objects.filter(person=person, condition_concept_id=4184985)
+    assert rows.filter(is_erroneous=False).count() == 1
+
+    assert project_single_value(person, 'smoldering_multiple_myeloma', False, smm) is False
+    assert rows.filter(is_erroneous=False).count() == 0
+    assert rows.get().erroneous_reason  # kept as history, flagged in error
+
+    mgus = {**descriptor['mgus']['projection'], 'value_kind': 'boolean'}
+    assert project_single_value(person, 'mgus', True, mgus) is True
+    assert project_single_value(person, 'mgus', None, mgus) is False
+    assert not Observation.objects.filter(
+        person=person, observation_concept_id=4149022, is_erroneous=False,
+    ).exists()
+
+
+def test_a_no_retracts_only_the_answers_own_rows():
+    """An imported diagnosis with the same concept, and another author's answer, stay."""
+    _seed_vocab()
+    ConceptFactory(concept_id=32865, concept_code='32865', vocabulary_id='Type Concept',
+                   concept_name='Patient self-report')
+    descriptor = build_writable_field_descriptor()
+    person = PersonFactory()
+    smm = {**descriptor['smoldering_multiple_myeloma']['projection'], 'value_kind': 'boolean'}
+    with suppress_patient_record_refresh():
+        imported = ConditionOccurrenceFactory(
+            person=person, condition_concept=Concept.objects.get(concept_id=4184985),
+            condition_source_value='413587002', condition_start_date='2021-01-01',
+        )
+    assert project_single_value(person, 'smoldering_multiple_myeloma', True, smm) is True
+    assert project_single_value(
+        person, 'smoldering_multiple_myeloma', True, smm, type_concept_id=32865,
+    ) is True
+    live = ConditionOccurrence.objects.filter(
+        person=person, condition_concept_id=4184985, is_erroneous=False,
+    )
+    assert live.count() == 3
+
+    # The patient's No withdraws only the patient's own answer.
+    assert project_single_value(
+        person, 'smoldering_multiple_myeloma', False, smm, type_concept_id=32865,
+    ) is False
+    assert set(live.values_list('condition_type_concept_id', flat=True)) == {
+        32817, imported.condition_type_concept_id,
+    }
+
+    # A clinician's No withdraws the clinical answer, and still not the import.
+    assert project_single_value(person, 'smoldering_multiple_myeloma', False, smm) is False
+    assert list(live.values_list('condition_occurrence_id', flat=True)) == [imported.pk]

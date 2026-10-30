@@ -474,3 +474,22 @@ def test_native_representative_patch_skips_pinned_projection_without_self_report
     assert not Observation.objects.filter(
         person=record.person, observation_concept_id=4149022,
     ).exists()
+
+
+def test_native_patch_keeps_a_pinned_answer_pending_like_the_shared_form():
+    """A pinned current-state answer is never read back from OMOP, so neither
+    write path may strip it from user_edited_fields as 'backed by OMOP'."""
+    record = PatientRecordFactory()
+    _seed_mm_vocab()
+
+    response = _client().patch(
+        f'/api/v1/patient-records/{record.person_id}/', {'mgus': True}, format='json',
+    )
+
+    assert response.status_code == 200, response.data
+    record.refresh_from_db()
+    assert record.mgus is True
+    assert 'mgus' in record.user_edited_fields
+    assert Observation.objects.filter(
+        person=record.person, observation_concept_id=4149022, is_erroneous=False,
+    ).count() == 1

@@ -184,22 +184,30 @@ def _patient_author_role(actor, person):
     return get_actor_role(actor, person.person_id)
 
 
-def _patient_authorship(actor, person):
-    """project_single_value keywords for the author of a PatientRecord save.
+def _patient_author(actor, person):
+    """(is the caller the patient or their representative, project_single_value keywords).
 
-    The patient or a verified representative writes patient self-report; the
-    patient's own facts also carry PATIENT_SELF provenance. Anyone else, or a
-    service credential with no Identity, writes with the recipe's type.
+    One role lookup answers both. The patient or a verified representative
+    writes patient self-report; the patient's own facts also carry
+    PATIENT_SELF provenance. Anyone else, or a service credential with no
+    Identity, writes with the recipe's type. A patient author with empty
+    keywords means the self-report type concept is not loaded.
     """
     from omop_core.services.omop_projection import patient_self_report_type
 
     role = _patient_author_role(actor, person)
-    if role not in ('self', 'representative') or not (self_report := patient_self_report_type()):
-        return {}
+    patient_author = role in ('self', 'representative')
+    if not patient_author or not (self_report := patient_self_report_type()):
+        return patient_author, {}
     authorship = {'type_concept_id': self_report}
     if role == 'self':
         authorship['patient_user_id'] = f'{actor.issuer}|{actor.sub}'
-    return authorship
+    return patient_author, authorship
+
+
+def _patient_authorship(actor, person):
+    """project_single_value keywords for the author of a PatientRecord save."""
+    return _patient_author(actor, person)[1]
 
 
 def _write_genetic_mutations(person, mutations, type_concept_id):
@@ -1439,11 +1447,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             projection = projection_for_descriptor(descriptors.get(field))
             if projection:
                 if authorship is None:
-                    authorship = _patient_authorship(actor, person)
-                    patient_author_without_type = (
-                        not authorship
-                        and _patient_author_role(actor, person) in ('self', 'representative')
-                    )
+                    patient_author, authorship = _patient_author(actor, person)
+                    patient_author_without_type = patient_author and not authorship
                 if field in PINNED_PROJECTION_FIELDS and patient_author_without_type:
                     # Without 32865 the patient's fact cannot be told apart
                     # from a clinical one; a current-state answer must not
@@ -1453,8 +1458,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                         acknowledge_existing=True, **authorship):
                     # Occurrences and structured answers need their dedicated
                     # extractors before their saved values can be acknowledged.
+                    # A pinned current-state answer is never read back from
+                    # OMOP, so it stays pending here as it does on the shared
+                    # form; the two write paths must agree on what pending means.
                     if (projection['omop_table'] in ('measurement', 'observation')
-                            and projection.get('value_kind') != 'json'):
+                            and projection.get('value_kind') != 'json'
+                            and field not in PINNED_PROJECTION_FIELDS):
                         projected.add(field)
         return projected
 
@@ -5650,12 +5659,11 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
         if not isinstance(request.data, dict) or not request.data:
             return Response({'detail': 'Provide a non-empty object of field edits.'}, status=400)
         try:
-            authorship = _patient_authorship(request.user, person)
+            patient_author, authorship = _patient_author(request.user, person)
             # Without the Patient self-report type concept the patient's fact
             # cannot be told apart from a clinical one, and projecting could
             # overwrite today's clinical answer. Keep the PatientRecord answer
             # and skip the best-effort side effect instead.
-            patient_author = _patient_author_role(request.user, person) in ('self', 'representative')
             record, result = apply_patient_form_patch(
                 person, request.data, authorship=authorship,
                 project_side_effects=not (patient_author and not authorship),
