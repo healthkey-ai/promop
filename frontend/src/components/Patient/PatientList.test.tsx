@@ -16,23 +16,47 @@ beforeEach(() => {
   localStorage.clear();
 });
 
-it('shows genomics, zero and nonzero therapy counts, and the full name on hover', async () => {
+it('shows unmapped counts last with zero in red and removes Genomics and Disease Status', async () => {
   vi.mocked(api.get).mockResolvedValue({ data: { count: 2, results: [
     { person_id: 1, patient_name: 'Alexandra Catherine Example', disease: 'Breast Cancer',
-      genomics_summary: 'BRCA1 c.68_69delAG (present); TP53 (absent)', therapy_lines_count: 3 },
+      therapy_lines_count: 3, unmapped_source_code_count: 12 },
     { person_id: 2, patient_name: 'Sam Example', disease: 'Follicular Lymphoma',
-      genomics_summary: '', therapy_lines_count: 0 },
+      therapy_lines_count: 0, unmapped_source_code_count: 0 },
   ] } });
   render(<MemoryRouter><PatientList /></MemoryRouter>);
-  expect(await screen.findByRole('columnheader', { name: 'Genomics' })).toBeInTheDocument();
-  expect(screen.getByRole('columnheader', { name: 'Num Lines' })).toBeInTheDocument();
+  const first = (await screen.findByTitle('Alexandra Catherine Example')).closest('tr')!;
+  const second = screen.getByTitle('Sam Example').closest('tr')!;
+  expect(screen.getAllByRole('columnheader').at(-1)).toHaveTextContent('Unmapped Source Codes');
+  expect(screen.queryByRole('columnheader', { name: 'Genomics' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('columnheader', { name: 'Disease Status' })).not.toBeInTheDocument();
+  expect(first.lastElementChild).toHaveTextContent('12');
+  expect(first.lastElementChild).not.toHaveClass('text-red-600');
+  expect(second.lastElementChild).toHaveTextContent('0');
+  expect(second.lastElementChild).toHaveClass('text-red-600');
   expect(screen.getByTitle('Alexandra Catherine Example')).toHaveClass('truncate', 'w-28');
-  expect(screen.getByTitle('BRCA1 c.68_69delAG (present); TP53 (absent)')).toBeInTheDocument();
-  expect(screen.getByText('No genomic data')).toBeInTheDocument();
-  expect(screen.getByRole('cell', { name: '3' })).toBeInTheDocument();
-  expect(screen.getByRole('cell', { name: '0' })).toBeInTheDocument();
-  fireEvent.click(screen.getByTitle('BRCA1 c.68_69delAG (present); TP53 (absent)'));
+  fireEvent.click(first.lastElementChild!);
   expect(navigate).toHaveBeenCalledWith('/patient/1');
+  for (const view of ['foundation', 'analyst']) {
+    fireEvent.change(screen.getByLabelText('Audience view'), { target: { value: view } });
+    expect(screen.queryByRole('columnheader', { name: 'Disease Status' })).not.toBeInTheDocument();
+    expect(screen.getAllByRole('columnheader').at(-1)).toHaveTextContent('Unmapped Source Codes');
+  }
+});
+
+it('sorts unmapped counts on the server and preserves the ordering preference', async () => {
+  vi.mocked(api.get).mockResolvedValue({ data: { count: 30, results: [] } });
+  const { unmount } = render(<MemoryRouter><PatientList /></MemoryRouter>);
+  await screen.findByRole('button', { name: 'Unmapped Source Codes' });
+  fireEvent.click(screen.getByRole('button', { name: /next/i }));
+  await waitFor(() => expect(api.get).toHaveBeenLastCalledWith('/patient-info/', expect.objectContaining({ params: expect.objectContaining({ page: 2 }) })));
+  fireEvent.click(await screen.findByRole('button', { name: 'Unmapped Source Codes' }));
+  await waitFor(() => expect(api.get).toHaveBeenLastCalledWith('/patient-info/', expect.objectContaining({ params: expect.objectContaining({ page: 1, ordering: 'unmapped_source_codes' }) })));
+  fireEvent.click(screen.getByRole('button', { name: /Unmapped Source Codes/ }));
+  await waitFor(() => expect(api.get).toHaveBeenLastCalledWith('/patient-info/', expect.objectContaining({ params: expect.objectContaining({ ordering: '-unmapped_source_codes' }) })));
+  expect(screen.getByRole('columnheader', { name: /Unmapped Source Codes/ })).toHaveAttribute('aria-sort', 'descending');
+  unmount();
+  render(<MemoryRouter><PatientList /></MemoryRouter>);
+  expect(await screen.findByLabelText('Sort by')).toHaveValue('-unmapped_source_codes');
 });
 
 
@@ -52,7 +76,7 @@ it('shows clinical context without inferring active treatment or losing ECOG zer
   expect(screen.getByText('End: Not recorded')).toBeInTheDocument();
   const row = screen.getByTitle('Review Example').closest('tr')!;
   expect(within(row).queryByText(/active treatment/i)).not.toBeInTheDocument();
-  expect(within(row).getByText('Remission')).toBeInTheDocument();
+  expect(within(row).queryByText('Remission')).not.toBeInTheDocument();
   expect(within(row).getAllByText('0')).toHaveLength(2);
 });
 
