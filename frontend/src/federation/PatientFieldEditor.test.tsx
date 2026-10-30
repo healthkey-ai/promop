@@ -94,6 +94,30 @@ describe('computed patient field input dialogs', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Edit Cycle inputs' }));
     expect(screen.getByRole('alert')).toHaveTextContent('Circular field dependency');
   });
+
+  it('renders a computed value read-only when the host withholds its only source', async () => {
+    // No Active Infection / No Other Active Malignancies depend on condition
+    // facts this host does not expose; an empty "inputs below" dialog was the
+    // reported bug (#5600).
+    const { store } = await setup({ no_active_infection_status: {
+      label: 'No active infection', writable: false, kind: 'computed',
+      inputs: ['active_infection_status'],
+      reason: 'Computed from active_infection_status.',
+    } });
+    render(<PatientFieldEditor store={store} name="no_active_infection_status" />);
+    expect(screen.queryByRole('button', { name: /Edit .* inputs/ })).not.toBeInTheDocument();
+    expect(screen.getByText(/not editable in this view/)).toBeInTheDocument();
+    expect(screen.queryByText('No reviewed PROMOP field binding')).not.toBeInTheDocument();
+  });
+
+  it('does not offer a partial dialog when any dependency is withheld', async () => {
+    const { store } = await setup({ composite_partial: {
+      label: 'Composite partial', writable: false, inputs: ['weight', 'active_malignancies'],
+    } });
+    render(<PatientFieldEditor store={store} name="composite_partial" />);
+    expect(screen.queryByRole('button', { name: 'Edit Composite partial inputs' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+  });
 });
 
 describe('current-diagnosis tri-state fields (#5521)', () => {

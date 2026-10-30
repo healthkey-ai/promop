@@ -36,8 +36,19 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
     ? dobPrecision : undefined;
   const label = field.label ?? canonical;
   const inputs = field.inputs ?? (field.canonical ? [field.canonical] : []);
+  // A dependency the host withholds has no descriptor of its own. Opening the
+  // dialog anyway would promise an edit surface made only of "No reviewed
+  // PROMOP field binding" rows (#5600); a partial dialog would misrepresent the
+  // missing sources as optional. Treat the whole computed value as read-only.
+  const unavailableInputs = inputs.filter((input) => {
+    const child = store.resolve(input);
+    return !child || !state.fields[child];
+  });
+  const inputsUnavailable = unavailableInputs.length > 0;
   const writable = !readOnly && state.writable && field.writable && field.target === 'patient_record';
-  const reason = field.compatibility_reason ?? field.reason ?? 'Derived value; edit the source inputs.';
+  const reason = inputsUnavailable
+    ? 'This value is derived from data that is not editable in this view.'
+    : field.compatibility_reason ?? field.reason ?? 'Derived value; edit the source inputs.';
   // A compatibility gate withholds the RESULT, not the clinical facts it is
   // computed from. Editing an input never writes the verdict; the result remains
   // read-only and is recalculated by PROMOP.
@@ -52,7 +63,7 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
     : field.control ?? (field.value_kind === 'number' ? 'number'
       : field.value_kind === 'boolean' ? 'boolean' : field.value_kind === 'date' ? 'date' : 'text');
   return <div className="space-y-1" data-field={canonical}>
-    {inputs.length ? <>
+    {inputs.length && !inputsUnavailable ? <>
       {!compact && <div className="text-sm font-medium">{label}</div>}
       <div className="flex items-center gap-2"><span>{formatted}</span>
         <Dialog.Root open={open} onOpenChange={setOpen}>
