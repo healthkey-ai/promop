@@ -46,7 +46,7 @@ from omop_core.models import (
     ToxicityGrade, Language, LanguageSkillLevel, BinetStage, ProteinExpression,
     RichterTransformation, TumorBurden, MorphologicVariant, DiseaseActivity,
     PreExistingConditionCategory,
-    Disease, DiseaseCategory, DiseaseCategoryMapping,
+    Disease, DiseaseCategory, DiseaseCategoryChoice, DiseaseCategoryMapping,
     CancerStage, KarnofskyScore, EcogStatus, PeripheralNeuropathyGrade,
     InfectionStatus, DiseaseProgression, MeasurableDisease, GelfCriteria,
     FlipIScore, FollicularLymphomaGrade, PostTransformationOutcome,
@@ -1059,8 +1059,9 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         if queryset.filter(organization__isnull=True).exists():
             org_options.append({'value': '__unassigned__', 'label': 'Unassigned'})
 
-        from omop_core.models import DiseaseCategory
-        diseases = [c.label for c in DiseaseCategory]
+        from omop_core.models import DiseaseCategory, DiseaseCategoryChoice
+        rows = list(DiseaseCategoryChoice.objects.values_list('label', flat=True))
+        diseases = rows if rows else [c.label for c in DiseaseCategory]
 
         return {
             'orgs': org_options,
@@ -10503,13 +10504,87 @@ def disease_therapy_regimen_detail(request, pk):
 # =============================================================================
 
 
-@api_view(['GET'])
+def _valid_category_codes() -> set[str]:
+    """Return valid category codes from the DB table, falling back to the enum."""
+    try:
+        codes = set(DiseaseCategoryChoice.objects.values_list('code', flat=True))
+        if codes:
+            return codes
+    except Exception:
+        pass
+    return {c.value for c in DiseaseCategory}
+
+
+@api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
 def disease_category_list(request):
-    """Return the DiseaseCategory enum choices for use in dropdowns."""
-    return Response([
-        {'value': c.value, 'label': c.label} for c in DiseaseCategory
-    ])
+    """List or create disease category choices.
+
+    GET  /api/v1/disease-categories/
+    POST /api/v1/disease-categories/  {"code": "DLBCL", "label": "Diffuse Large B-Cell Lymphoma"}
+    """
+    if request.method == 'GET':
+        rows = DiseaseCategoryChoice.objects.all()
+        if not rows.exists():
+            # Fallback: return enum choices when the table is empty (pre-migration)
+            return Response([
+                {'value': c.value, 'label': c.label} for c in DiseaseCategory
+            ])
+        return Response([
+            {'value': r.code, 'label': r.label} for r in rows
+        ])
+    # POST
+    denied = _require_mapping_admin(request)
+    if denied:
+        return denied
+    code = (request.data.get('code') or '').strip()
+    label = (request.data.get('label') or '').strip()
+    if not code or not label:
+        return Response(
+            {'detail': 'code and label are required'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+    if DiseaseCategoryChoice.objects.filter(code__iexact=code).exists():
+        return Response(
+            {'detail': f'A category with code "{code}" already exists'},
+            status=status.HTTP_409_CONFLICT,
+        )
+    try:
+        obj = DiseaseCategoryChoice.objects.create(code=code, label=label)
+    except IntegrityError:
+        return Response(
+            {'detail': f'A category with code "{code}" already exists'},
+            status=status.HTTP_409_CONFLICT,
+        )
+    return Response(
+        {'value': obj.code, 'label': obj.label},
+        status=status.HTTP_201_CREATED,
+    )
+
+
+@api_view(['DELETE'])
+@permission_classes([IsAuthenticated])
+def disease_category_detail(request, code):
+    """Delete a disease category choice.
+
+    DELETE /api/v1/disease-categories/<code>/
+    """
+    denied = _require_mapping_admin(request)
+    if denied:
+        return denied
+    try:
+        obj = DiseaseCategoryChoice.objects.get(code=code)
+    except DiseaseCategoryChoice.DoesNotExist:
+        return Response({'detail': 'Not found'}, status=status.HTTP_404_NOT_FOUND)
+    # Don't allow deleting a category that has mappings pointing to it.
+    in_use = DiseaseCategoryMapping.objects.filter(category=code).count()
+    if in_use:
+        return Response(
+            {'detail': f'Cannot delete: {in_use} mapping(s) use this category'},
+            status=status.HTTP_409_CONFLICT,
+        )
+    obj.delete()
+    return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 @api_view(['GET', 'POST'])
@@ -10540,7 +10615,7 @@ def disease_category_mapping_list(request):
             {'detail': 'disease_name and category are required'},
             status=status.HTTP_400_BAD_REQUEST,
         )
-    valid_categories = {c.value for c in DiseaseCategory}
+    valid_categories = _valid_category_codes()
     if category not in valid_categories:
         return Response(
             {'detail': f'category must be one of {sorted(valid_categories)}'},
@@ -10587,7 +10662,7 @@ def disease_category_mapping_detail(request, pk):
     disease_name = request.data.get('disease_name')
     if category is not None:
         category = category.strip()
-        valid_categories = {c.value for c in DiseaseCategory}
+        valid_categories = _valid_category_codes()
         if category not in valid_categories:
             return Response(
                 {'detail': f'category must be one of {sorted(valid_categories)}'},

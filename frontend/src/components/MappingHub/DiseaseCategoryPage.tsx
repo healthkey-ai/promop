@@ -3,6 +3,9 @@ import { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ArrowLeft, Plus, Search, Trash2 } from 'lucide-react';
 import {
+  fetchDiseaseCategories,
+  createDiseaseCategory,
+  deleteDiseaseCategory,
   fetchDiseaseCategoryMappings,
   createDiseaseCategoryMapping,
   updateDiseaseCategoryMapping,
@@ -10,27 +13,36 @@ import {
   type DiseaseCategoryMappingItem,
 } from '@/api/mappingHub';
 
-const CATEGORIES = ['BC', 'MM', 'FL', 'CLL', 'MCL', 'Other'] as const;
-const CATEGORY_LABELS: Record<string, string> = {
-  BC: 'Breast Cancer',
-  MM: 'Multiple Myeloma',
-  FL: 'Follicular Lymphoma',
-  CLL: 'Chronic Lymphocytic Leukemia',
-  MCL: 'Mantle Cell Lymphoma',
-  Other: 'Other',
-};
+interface CategoryOption { value: string; label: string }
 
 export default function DiseaseCategoryPage() {
   const navigate = useNavigate();
+  const [categories, setCategories] = useState<CategoryOption[]>([]);
   const [items, setItems] = useState<DiseaseCategoryMappingItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [newName, setNewName] = useState('');
-  const [newCategory, setNewCategory] = useState<string>('MM');
+  const [newCategory, setNewCategory] = useState<string>('');
   const [adding, setAdding] = useState(false);
 
-  const load = useCallback(async (q?: string) => {
+  // New category form
+  const [showNewCat, setShowNewCat] = useState(false);
+  const [newCatCode, setNewCatCode] = useState('');
+  const [newCatLabel, setNewCatLabel] = useState('');
+  const [addingCat, setAddingCat] = useState(false);
+
+  const loadCategories = useCallback(async () => {
+    try {
+      const cats = await fetchDiseaseCategories();
+      setCategories(cats);
+      setNewCategory(prev => prev || (cats.length > 0 ? cats[0].value : ''));
+    } catch {
+      // Fallback handled by backend
+    }
+  }, []);
+
+  const loadMappings = useCallback(async (q?: string) => {
     setLoading(true);
     setError(null);
     try {
@@ -43,19 +55,23 @@ export default function DiseaseCategoryPage() {
   }, []);
 
   useEffect(() => {
-    queueMicrotask(() => { void load(); });
-  }, [load]);
+    queueMicrotask(() => { void loadCategories(); });
+  }, [loadCategories]);
 
-  const handleSearch = () => { void load(search || undefined); };
+  useEffect(() => {
+    queueMicrotask(() => { void loadMappings(); });
+  }, [loadMappings]);
+
+  const handleSearch = () => { void loadMappings(search || undefined); };
 
   const handleAdd = async () => {
-    if (!newName.trim()) return;
+    if (!newName.trim() || !newCategory) return;
     setAdding(true);
     setError(null);
     try {
       await createDiseaseCategoryMapping({ disease_name: newName.trim(), category: newCategory });
       setNewName('');
-      await load(search || undefined);
+      await loadMappings(search || undefined);
     } catch (e: unknown) {
       const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
       setError(msg || 'Failed to create mapping.');
@@ -82,6 +98,35 @@ export default function DiseaseCategoryPage() {
     }
   };
 
+  const handleAddCategory = async () => {
+    if (!newCatCode.trim() || !newCatLabel.trim()) return;
+    setAddingCat(true);
+    setError(null);
+    try {
+      await createDiseaseCategory({ code: newCatCode.trim(), label: newCatLabel.trim() });
+      setNewCatCode('');
+      setNewCatLabel('');
+      setShowNewCat(false);
+      await loadCategories();
+    } catch (e: unknown) {
+      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      setError(msg || 'Failed to create category.');
+    } finally {
+      setAddingCat(false);
+    }
+  };
+
+  const handleDeleteCategory = async (code: string) => {
+    setError(null);
+    try {
+      await deleteDiseaseCategory(code);
+      await loadCategories();
+    } catch (e: unknown) {
+      const msg = (e as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      setError(msg || 'Failed to delete category.');
+    }
+  };
+
   return (
     <div className="mx-auto max-w-5xl p-6">
       <div className="mb-6 flex items-center gap-3">
@@ -96,7 +141,69 @@ export default function DiseaseCategoryPage() {
 
       {error && <div className="mb-4 rounded-md bg-destructive/10 p-3 text-sm text-destructive">{error}</div>}
 
-      {/* Add form */}
+      {/* Categories management */}
+      <div className="mb-4 rounded-lg border border-border bg-background p-4">
+        <div className="mb-2 flex items-center justify-between">
+          <h3 className="text-sm font-medium text-foreground">Categories</h3>
+          <button
+            className="inline-flex items-center gap-1 rounded-md border border-input px-2 py-1 text-xs hover:bg-accent"
+            onClick={() => setShowNewCat(!showNewCat)}
+          >
+            <Plus size={14} /> New Category
+          </button>
+        </div>
+        {showNewCat && (
+          <div className="mb-3 flex flex-wrap items-end gap-2 rounded border border-dashed border-border p-3">
+            <div>
+              <label htmlFor="new-cat-code" className="mb-1 block text-xs font-medium text-muted-foreground">Code</label>
+              <input
+                id="new-cat-code"
+                className="w-28 rounded-md border border-input bg-background px-2 py-1.5 text-sm"
+                placeholder="e.g. DLBCL"
+                value={newCatCode}
+                onChange={e => setNewCatCode(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') void handleAddCategory(); }}
+              />
+            </div>
+            <div className="flex-1 min-w-[160px]">
+              <label htmlFor="new-cat-label" className="mb-1 block text-xs font-medium text-muted-foreground">Label</label>
+              <input
+                id="new-cat-label"
+                className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm"
+                placeholder="e.g. Diffuse Large B-Cell Lymphoma"
+                value={newCatLabel}
+                onChange={e => setNewCatLabel(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') void handleAddCategory(); }}
+              />
+            </div>
+            <button
+              className="inline-flex items-center gap-1 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+              onClick={() => void handleAddCategory()}
+              disabled={addingCat || !newCatCode.trim() || !newCatLabel.trim()}
+            >
+              Add
+            </button>
+          </div>
+        )}
+        <div className="flex flex-wrap gap-2">
+          {categories.map(cat => (
+            <span key={cat.value} className="inline-flex items-center gap-1.5 rounded-full border border-border bg-muted/50 px-2.5 py-1 text-xs">
+              <span className="font-medium">{cat.value}</span>
+              <span className="text-muted-foreground">{cat.label}</span>
+              <button
+                className="ml-0.5 rounded-full p-0.5 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                onClick={() => void handleDeleteCategory(cat.value)}
+                aria-label={`Delete category ${cat.value}`}
+                title="Delete category"
+              >
+                <Trash2 size={12} />
+              </button>
+            </span>
+          ))}
+        </div>
+      </div>
+
+      {/* Add mapping form */}
       <div className="mb-4 flex flex-wrap items-end gap-2 rounded-lg border border-border bg-background p-4">
         <div className="flex-1 min-w-[200px]">
           <label htmlFor="new-disease-name" className="mb-1 block text-xs font-medium text-muted-foreground">Disease Name</label>
@@ -117,7 +224,7 @@ export default function DiseaseCategoryPage() {
             value={newCategory}
             onChange={e => setNewCategory(e.target.value)}
           >
-            {CATEGORIES.map(c => <option key={c} value={c}>{c} — {CATEGORY_LABELS[c]}</option>)}
+            {categories.map(c => <option key={c.value} value={c.value}>{c.value} — {c.label}</option>)}
           </select>
         </div>
         <button
@@ -170,7 +277,11 @@ export default function DiseaseCategoryPage() {
                       value={item.category}
                       onChange={e => void handleCategoryChange(item, e.target.value)}
                     >
-                      {CATEGORIES.map(c => <option key={c} value={c}>{c} — {CATEGORY_LABELS[c]}</option>)}
+                      {categories.map(c => <option key={c.value} value={c.value}>{c.value} — {c.label}</option>)}
+                      {/* Show current value even if its category was removed */}
+                      {!categories.some(c => c.value === item.category) && (
+                        <option value={item.category}>{item.category}</option>
+                      )}
                     </select>
                   </td>
                   <td className="px-4 py-2 text-center">

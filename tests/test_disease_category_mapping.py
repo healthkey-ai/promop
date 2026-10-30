@@ -1,9 +1,9 @@
-"""Tests for DiseaseCategoryMapping model and API."""
+"""Tests for DiseaseCategoryMapping model and API, including DiseaseCategoryChoice CRUD."""
 
 import pytest
 from rest_framework.test import APIClient
 
-from omop_core.models import DiseaseCategoryMapping, DiseaseCategory, Organization
+from omop_core.models import DiseaseCategoryChoice, DiseaseCategoryMapping, DiseaseCategory, Organization
 from patient_portal.models import Identity
 
 
@@ -108,6 +108,15 @@ class TestDiseaseCategoryMappingListAPI:
         }, format='json')
         assert resp.status_code == 409
 
+    def test_post_custom_category_accepted(self, staff_client):
+        """A custom category added via DiseaseCategoryChoice is accepted."""
+        DiseaseCategoryChoice.objects.create(code='DLBCL', label='Diffuse Large B-Cell Lymphoma')
+        resp = staff_client.post(URL_LIST, {
+            'disease_name': 'DLBCL NOS', 'category': 'DLBCL',
+        }, format='json')
+        assert resp.status_code == 201
+        assert resp.json()['category'] == 'DLBCL'
+
     def test_post_invalid_category(self, staff_client):
         resp = staff_client.post(URL_LIST, {
             'disease_name': 'Some disease', 'category': 'INVALID',
@@ -177,6 +186,106 @@ class TestDiseaseCategoryMappingPermissions:
     def test_patient_delete_403(self, patient_client):
         obj = DiseaseCategoryMapping.objects.create(disease_name='No delete', category='MM')
         resp = patient_client.delete(_detail_url(obj.pk))
+        assert resp.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# DiseaseCategoryChoice CRUD
+# ---------------------------------------------------------------------------
+
+CAT_URL = '/api/v1/disease-categories/'
+
+
+def _cat_detail_url(code):
+    return f'/api/v1/disease-categories/{code}/'
+
+
+@pytest.mark.django_db
+class TestDiseaseCategoryChoiceModel:
+    def test_create_and_retrieve(self):
+        obj = DiseaseCategoryChoice.objects.create(code='DLBCL', label='Diffuse Large B-Cell Lymphoma')
+        assert obj.pk is not None
+        assert DiseaseCategoryChoice.objects.get(code='DLBCL').label == 'Diffuse Large B-Cell Lymphoma'
+
+    def test_unique_code(self):
+        DiseaseCategoryChoice.objects.create(code='XX', label='X')
+        from django.db import IntegrityError
+        with pytest.raises(IntegrityError):
+            DiseaseCategoryChoice.objects.create(code='XX', label='Y')
+
+
+@pytest.mark.django_db
+class TestDiseaseCategoryChoiceAPI:
+    def test_get_list_from_db(self, staff_client):
+        """When DiseaseCategoryChoice rows exist, GET returns them."""
+        DiseaseCategoryChoice.objects.create(code='BC', label='Breast Cancer')
+        DiseaseCategoryChoice.objects.create(code='MM', label='Multiple Myeloma')
+        resp = staff_client.get(CAT_URL)
+        assert resp.status_code == 200
+        codes = [item['value'] for item in resp.json()]
+        assert 'BC' in codes
+        assert 'MM' in codes
+
+    def test_get_list_fallback_to_enum(self, staff_client):
+        """When no DB rows exist, GET falls back to the enum."""
+        DiseaseCategoryChoice.objects.all().delete()
+        resp = staff_client.get(CAT_URL)
+        assert resp.status_code == 200
+        codes = [item['value'] for item in resp.json()]
+        assert 'BC' in codes
+        assert 'Other' in codes
+
+    def test_post_create(self, staff_client):
+        resp = staff_client.post(CAT_URL, {
+            'code': 'DLBCL', 'label': 'Diffuse Large B-Cell Lymphoma',
+        }, format='json')
+        assert resp.status_code == 201
+        assert resp.json()['value'] == 'DLBCL'
+        assert DiseaseCategoryChoice.objects.filter(code='DLBCL').exists()
+
+    def test_post_duplicate_409(self, staff_client):
+        DiseaseCategoryChoice.objects.create(code='XX', label='X')
+        resp = staff_client.post(CAT_URL, {'code': 'xx', 'label': 'Y'}, format='json')
+        assert resp.status_code == 409
+
+    def test_post_missing_fields(self, staff_client):
+        resp = staff_client.post(CAT_URL, {'code': 'ZZ'}, format='json')
+        assert resp.status_code == 400
+
+    def test_delete(self, staff_client):
+        DiseaseCategoryChoice.objects.create(code='DEL', label='Delete Me')
+        resp = staff_client.delete(_cat_detail_url('DEL'))
+        assert resp.status_code == 204
+        assert not DiseaseCategoryChoice.objects.filter(code='DEL').exists()
+
+    def test_delete_in_use_409(self, staff_client):
+        DiseaseCategoryChoice.objects.create(code='USED', label='In Use')
+        DiseaseCategoryMapping.objects.create(disease_name='Some disease', category='USED')
+        resp = staff_client.delete(_cat_detail_url('USED'))
+        assert resp.status_code == 409
+
+    def test_delete_not_found(self, staff_client):
+        resp = staff_client.delete(_cat_detail_url('NOPE'))
+        assert resp.status_code == 404
+
+
+@pytest.mark.django_db
+class TestDiseaseCategoryChoicePermissions:
+    def test_anon_get_401(self, anon_client):
+        resp = anon_client.get(CAT_URL)
+        assert resp.status_code == 401
+
+    def test_patient_get_allowed(self, patient_client):
+        resp = patient_client.get(CAT_URL)
+        assert resp.status_code == 200
+
+    def test_patient_post_403(self, patient_client):
+        resp = patient_client.post(CAT_URL, {'code': 'X', 'label': 'Y'}, format='json')
+        assert resp.status_code == 403
+
+    def test_patient_delete_403(self, patient_client):
+        DiseaseCategoryChoice.objects.create(code='ND', label='No Delete')
+        resp = patient_client.delete(_cat_detail_url('ND'))
         assert resp.status_code == 403
 
 
@@ -253,3 +362,13 @@ class TestSeedData:
         assert DiseaseCategoryMapping.objects.filter(
             disease_name='Breast Cancer', category='BC',
         ).exists()
+
+    def test_category_choice_seed(self):
+        """The 0321 migration seeds DiseaseCategoryChoice from the enum."""
+        import importlib
+        mod = importlib.import_module('omop_core.migrations.0321_diseasecategorychoice')
+        from django.apps import apps
+        mod.seed_forward(apps, None)
+        assert DiseaseCategoryChoice.objects.count() >= 6
+        assert DiseaseCategoryChoice.objects.filter(code='BC', label='Breast Cancer').exists()
+        assert DiseaseCategoryChoice.objects.filter(code='Other', label='Other').exists()
