@@ -1017,6 +1017,7 @@ export default function EditMappingDialog({
 
               {/* Search sits at the top: picking a concept fills everything below it. */}
               <div className="mb-4">
+                {!defaultDestination && (
                 <div className="mb-2 flex items-end justify-between gap-3">
                   <div className="flex items-center gap-1">
                     <label className="text-sm font-medium text-slate-700" htmlFor="code-mapping-concept-search">
@@ -1063,6 +1064,7 @@ export default function EditMappingDialog({
                   </div>
                   )}
                 </div>
+                )}
                 {variantMessage && <p role="status" data-testid="variant-suggestion" className="text-xs text-slate-700">{variantMessage}</p>}
                 {mode === "edit" && selectedRow?.mapping_id && <LoincAxesPanel
                   key={selectedRow.mapping_id} ref={axesPanel} mappingId={selectedRow.mapping_id} canEdit canApprove={canApprove}
@@ -1091,7 +1093,7 @@ export default function EditMappingDialog({
                     applyConcept(candidate as ConceptResult);
                     setSuggestionMessage("Candidate selected. Save the mapping to keep your choice.");
                   }} />}
-                <div className="flex gap-2">
+                {!defaultDestination && (<><div className="flex gap-2">
                   <div className="relative flex-1">
                     <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={15} />
                     <input
@@ -1184,6 +1186,7 @@ export default function EditMappingDialog({
                     </button>
                   ))}
                 </div>
+                </>)}
               </div>
 
               {/* Destination fields */}
