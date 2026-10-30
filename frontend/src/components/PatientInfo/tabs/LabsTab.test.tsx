@@ -71,6 +71,27 @@ describe('LabsTab', () => {
     expect(screen.getByTestId('section-Liver Function')).toBeInTheDocument();
   });
 
+  it('does not render the derived organ-function verdicts (#5609)', () => {
+    render(<LabsTab formData={{
+      renal_adequacy_status: true,
+      hepatic_adequacy_status: false,
+      haematological_adequacy_status: true,
+    }} onChange={onChange} />);
+    expect(screen.queryByTestId('section-Organ Function')).not.toBeInTheDocument();
+    for (const name of [
+      'renal_adequacy_status',
+      'hepatic_adequacy_status',
+      'haematological_adequacy_status',
+    ]) {
+      expect(screen.queryByTestId(`field-${name}`)).not.toBeInTheDocument();
+    }
+    // The source lab sections stay, and loading the stored verdicts must not
+    // look like an edit.
+    expect(screen.getByTestId('section-Blood Counts')).toBeInTheDocument();
+    expect(screen.getByTestId('section-Diagnostic Tests')).toBeInTheDocument();
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
   it('does not show chart icon when field has fewer than 3 data points', () => {
     const group: LabMeasurementGroup = {
       sourceValue: '2160-0',
