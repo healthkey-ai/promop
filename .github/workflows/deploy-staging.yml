@@ -9,10 +9,6 @@ on:
   pull_request:
     types: [labeled, synchronize]
 
-concurrency:
-  group: deploy-staging
-  cancel-in-progress: false
-
 env:
   GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
   GCP_REGION: ${{ vars.GCP_REGION || 'us-central1' }}
@@ -75,9 +71,15 @@ jobs:
           cache-from: type=registry,ref=${{ env.ARTIFACT_REPO }}/ctomop:buildcache
           cache-to: type=registry,ref=${{ env.ARTIFACT_REPO }}/ctomop:buildcache,mode=max,image-manifest=true,oci-mediatypes=true
 
+  # Serialised here, not on the workflow: at workflow level every pull_request
+  # event joined the queue, so an unlabelled PR that never deploys waited
+  # behind a running deploy and could displace a pending one.
   deploy:
     name: Deploy
     needs: [test, build]
+    concurrency:
+      group: deploy-staging
+      cancel-in-progress: false
     if: >-
       always() &&
       needs.build.result == 'success' &&
