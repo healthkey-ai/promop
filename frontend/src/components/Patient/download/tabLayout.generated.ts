@@ -902,24 +902,6 @@ export const TAB_LAYOUT: TabLayout = {
           "bone_imaging_result"
         ]
       ]
-    },
-    {
-      "title": "Organ Function",
-      "component": "LabsTab",
-      "fields": [
-        [
-          "Renal Adequacy",
-          "renal_adequacy_status"
-        ],
-        [
-          "Hepatic Adequacy",
-          "hepatic_adequacy_status"
-        ],
-        [
-          "Haematological Adequacy",
-          "haematological_adequacy_status"
-        ]
-      ]
     }
   ],
   "BehaviorTab": [
