@@ -21,6 +21,9 @@ export default function TreatingInstitutionField({ value, descriptor, onChange }
   const [active, setActive] = useState(-1);
   const writable = !!descriptor?.writable;
   useEffect(() => {
+    // Nothing to search when the field is read-only: the directory fetch is only
+    // useful to a writer (#5576).
+    if (!writable) return;
     let canceled = false;
     clinicalClient().get(clinicalUrl('/treating-institutions/')).then(({ data }) => {
       if (!Array.isArray(data?.institutions) || !data.institutions.every((c: Institution) =>
@@ -30,7 +33,7 @@ export default function TreatingInstitutionField({ value, descriptor, onChange }
       if (!canceled) setCenters(data.institutions);
     }).catch(() => { if (!canceled) setUnavailable(true); });
     return () => { canceled = true; };
-  }, []);
+  }, [writable]);
 
   const normalized = query.trim().toLocaleLowerCase();
   const matches = centers.filter(c => `${c.label} ${c.state_code}`.toLocaleLowerCase().includes(normalized));
@@ -52,27 +55,34 @@ export default function TreatingInstitutionField({ value, descriptor, onChange }
         <FieldMappingLink name="facility_name" label="Treating Institution" />
       </div>
       <div className="flex gap-2">
-        <Input id={id} role="combobox" aria-autocomplete="list" aria-expanded={open && writable}
-          aria-controls={`${id}-list`} aria-activedescendant={open && active >= 0 ? `${id}-option-${active}` : undefined}
-          aria-describedby={`${id}-help`} autoComplete="off" value={query} readOnly={!writable} maxLength={255}
-          placeholder="Search center name, city, or state"
-          onFocus={() => { if (writable) setOpen(true); }}
-          onBlur={() => { setOpen(false); setActive(-1); setDraft(null); }}
-          onChange={e => { setDraft(e.target.value); setActive(-1); setOpen(true); }}
-          onKeyDown={e => {
-            if (!writable) return;
-            if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
-              e.preventDefault(); setOpen(true);
-              setActive(i => Math.max(0, Math.min(options.length - 1, i + (e.key === 'ArrowDown' ? 1 : -1))));
-            } else if (e.key === 'Enter' && open) {
-              e.preventDefault(); choose(active >= 0 && options[active] ? options[active].value : query.trim());
-            } else if (e.key === 'Escape') {
-              e.preventDefault(); setOpen(false); setActive(-1); setDraft(null);
-            }
-          }} />
+        {writable ? (
+          <Input id={id} role="combobox" aria-autocomplete="list" aria-expanded={open}
+            aria-controls={`${id}-list`} aria-activedescendant={open && active >= 0 ? `${id}-option-${active}` : undefined}
+            aria-describedby={`${id}-help`} autoComplete="off" value={query} maxLength={255}
+            placeholder="Search center name, city, or state"
+            onFocus={() => setOpen(true)}
+            onBlur={() => { setOpen(false); setActive(-1); setDraft(null); }}
+            onChange={e => { setDraft(e.target.value); setActive(-1); setOpen(true); }}
+            onKeyDown={e => {
+              if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                e.preventDefault(); setOpen(true);
+                setActive(i => Math.max(0, Math.min(options.length - 1, i + (e.key === 'ArrowDown' ? 1 : -1))));
+              } else if (e.key === 'Enter' && open) {
+                e.preventDefault(); choose(active >= 0 && options[active] ? options[active].value : query.trim());
+              } else if (e.key === 'Escape') {
+                e.preventDefault(); setOpen(false); setActive(-1); setDraft(null);
+              }
+            }} />
+        ) : (
+          // A field the caller may not write must not look like a search box. It used
+          // to stay a focusable combobox with a search placeholder that never opened a
+          // list and never fetched anything, which reads as broken search rather than
+          // as "not yours to edit" (#5576).
+          <p className="flex h-9 items-center text-sm text-portal-text-primary">{value || '—'}</p>
+        )}
         {writable && value && <button type="button" className="text-sm text-muted-foreground" onClick={() => choose('')} aria-label="Clear treating institution">Clear</button>}
       </div>
-      {open && writable && options.length > 0 && (
+      {open && options.length > 0 && (
         <ul id={`${id}-list`} role="listbox" aria-label="Treating institutions" className="absolute z-30 max-h-60 w-full overflow-auto rounded-md border bg-white py-1 shadow-md">
           {options.map((option, index) => (
             <li id={`${id}-option-${index}`} key={option.key} role="option" aria-selected={active === index}

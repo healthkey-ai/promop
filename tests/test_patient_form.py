@@ -27,7 +27,12 @@ def test_host_read_surface_and_caller_write_gate_are_independent():
 
 def test_slim_compatibility_gate_is_explicit_without_a_new_formula():
     descriptors = patient_form_descriptors({})
-    assert descriptors['meets_slim']['inputs'] == ['clonal_plasma_cells', 'kappa_flc', 'lambda_flc', 'bone_lesions']
+    # #2113: `derive_meets_slim` reads the FLC ratio and deliberately does not infer
+    # the MRI criterion from `bone_lesions`, so the navigation names the ratio and
+    # drops the bone-lesion flag. The compatibility gate below is unchanged.
+    assert descriptors['meets_slim']['inputs'] == [
+        'clonal_plasma_cells', 'kappa_flc', 'lambda_flc', 'kappa_lambda_ratio',
+    ]
     assert 'clinical review' in descriptors['meets_slim']['compatibility_reason']
     assert descriptors['meets_slim']['writable'] is False
     assert descriptors['meets_slim']['compatibility_scope'] == 'result'
