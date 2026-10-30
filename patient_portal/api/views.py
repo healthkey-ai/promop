@@ -205,11 +205,6 @@ def _patient_author(actor, person):
     return patient_author, authorship
 
 
-def _patient_authorship(actor, person):
-    """project_single_value keywords for the author of a PatientRecord save."""
-    return _patient_author(actor, person)[1]
-
-
 def _write_genetic_mutations(person, mutations, type_concept_id):
     from omop_core.services.genomics import replace_variants
     replace_variants(person, mutations, type_concept_id=type_concept_id)
@@ -5665,8 +5660,7 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
             # overwrite today's clinical answer. Keep the PatientRecord answer
             # and skip the best-effort side effect instead.
             record, result = apply_patient_form_patch(
-                person, request.data, authorship=authorship,
-                project_side_effects=not (patient_author and not authorship),
+                person, request.data, authorship=authorship, patient_author=patient_author,
             )
         except ValueError as exc:
             return Response({'detail': str(exc)}, status=400)

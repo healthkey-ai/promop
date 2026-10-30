@@ -234,16 +234,19 @@ def patient_form_descriptors(descriptor=None, *, readable_fields=None, writable=
 
 @transaction.atomic
 def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor=None,
-                             authorship=None, project_side_effects=True):
+                             authorship=None, patient_author=False):
     """Shared form write, with explicit acknowledgements and no no-op success.
 
     The host must authorize the person first. Existing OMOP mapping/provenance
     and clear restrictions remain owned by apply_field_writes. Direct columns
     retain their existing PatientRecord-only behavior (e.g. planned_therapies).
     ``authorship`` is the caller's project_single_value typing (self-report and
-    provenance), supplied by the view for best-effort side-effect projections.
-    ``project_side_effects`` lets a caller keep the PatientRecord answer while
-    skipping OMOP when the fact could not be typed safely.
+    provenance) for best-effort side-effect projections; ``patient_author``
+    says the caller is the patient or their representative. A patient author
+    with no authorship means the self-report type concept is not loaded, and
+    then the side effect is skipped here, by the write itself: a patient's
+    answer typed as the recipe's EHR fact would match and overwrite today's
+    clinical fact in place, whichever caller forgot to say who was writing.
     """
     result = FieldWriteResult()
     record, _ = PatientRecord.objects.get_or_create(person=person)
@@ -251,7 +254,8 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
     descriptor = patient_form_descriptors(descriptor, readable_fields=allowed_fields, record=record)
     facts, direct, person_changes, profile_applied = {}, {}, set(), set()
     side_effect_projections = {}
-    dob_changed = False
+    record_profile_fields = set()
+    project_side_effects = not (patient_author and not authorship)
     for name, value in changes.items():
         entry = descriptor.get(name, {})
         if not entry.get('writable') or entry.get('target') != 'patient_record':
@@ -290,9 +294,15 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
                 record.person = person
                 record.date_of_birth = value
                 record.patient_age = None
-                dob_changed = True
+                record_profile_fields |= {'date_of_birth', 'patient_age'}
             else:
-                updates = {name: value.strip() if isinstance(value, str) else value}
+                value = value.strip() if isinstance(value, str) else value
+                updates = {name: value}
+                # The record mirrors these from Person only when it is derived,
+                # and a direct save does not derive; mirror them here so the
+                # response reads back what was just written.
+                setattr(record, name, value)
+                record_profile_fields.add(name)
             for key, item in updates.items():
                 setattr(person, key, item)
                 person_changes.add(key)
@@ -338,8 +348,8 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
             facts[name] = value
     if person_changes:
         person.save(update_fields=sorted(person_changes))
-    if dob_changed:
-        record.save(update_fields=['date_of_birth', 'patient_age'])
+    if record_profile_fields:
+        record.save(update_fields=sorted(record_profile_fields))
     if direct:
         for name, value in direct.items():
             setattr(record, name, value)

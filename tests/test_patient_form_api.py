@@ -130,6 +130,10 @@ def test_shared_form_preserves_profile_phone_and_name_workflows():
     assert response.status_code == 200, response.data
     record.person.refresh_from_db()
     assert record.person.phone_number == '+15551234567'
+    # The record mirrors Person only when derived, and a direct save does not
+    # derive, so the write mirrors it itself.
+    record.refresh_from_db()
+    assert record.phone_number == '+15551234567'
     assert record.person.given_name == 'Synthetic'
     assert record.person.family_name == 'Patient'
     assert response.data['patient_name'] == 'Synthetic Patient'

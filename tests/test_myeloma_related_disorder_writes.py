@@ -317,3 +317,26 @@ def test_a_no_retracts_only_the_answers_own_rows():
     # A clinician's No withdraws the clinical answer, and still not the import.
     assert project_single_value(person, 'smoldering_multiple_myeloma', False, smm) is False
     assert list(live.values_list('condition_occurrence_id', flat=True)) == [imported.pk]
+
+
+def test_a_yes_is_not_read_back_as_another_active_malignancy(monkeypatch):
+    """Smoldering myeloma is a SNOMED descendant of malignant neoplastic
+    disease, so without the source-value marker the answer row would count as
+    a second active malignancy and flip no_other_active_malignancies."""
+    from omop_core.services import patient_record_service
+
+    _seed_vocab()
+    monkeypatch.setattr(
+        patient_record_service, '_active_condition_descendant_ids',
+        lambda _root: {4184985, 4098597},
+    )
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    descriptor = build_writable_field_descriptor()
+    projection = {**descriptor['smoldering_multiple_myeloma']['projection'], 'value_kind': 'boolean'}
+    assert project_single_value(person, 'smoldering_multiple_myeloma', True, projection) is True
+
+    refreshed = refresh_patient_record(person)
+
+    assert refreshed.active_malignancies == []
+    assert refreshed.no_other_active_malignancies is True

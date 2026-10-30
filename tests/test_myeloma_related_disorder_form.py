@@ -8,7 +8,7 @@ occurrence that derivation never reads back.
 import pytest
 from django.utils import timezone
 
-from omop_core.models import ConditionOccurrence, Observation, ProvenanceRecord
+from omop_core.models import Concept, ConditionOccurrence, Observation, ProvenanceRecord
 from omop_core.services.patient_form import (
     apply_patient_form_patch,
     patient_form_descriptors,
@@ -195,3 +195,33 @@ def test_a_direct_answer_does_not_rederive_the_record(monkeypatch):
     assert 'poems_syndrome' in result.applied
     assert record.poems_syndrome is True
     assert derived == []
+
+
+def test_the_write_itself_skips_a_patient_answer_without_the_self_report_type():
+    """The rule lives in the write, not in a view: a patient's answer that
+    cannot be typed self-report is kept on the record and not projected,
+    whichever caller forgot to say so."""
+    _seed_vocab()
+    Concept.objects.filter(concept_id=32865).delete()
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    clinical = ObservationFactory(
+        person=person, observation_concept_id=4149022,
+        observation_source_value='patient-record:mgus', value_as_number=0.0,
+        observation_date=timezone.localdate(), observation_type_concept_id=32817,
+    )
+
+    record, result = apply_patient_form_patch(
+        person, {'mgus': True}, authorship={}, patient_author=True,
+    )
+
+    assert 'mgus' in result.applied
+    assert record.mgus is True
+    clinical.refresh_from_db()
+    assert clinical.value_as_number == 0.0
+    assert Observation.objects.filter(person=person, observation_concept_id=4149022).count() == 1
+
+    # Anyone else writes the recipe's own fact.
+    apply_patient_form_patch(person, {'mgus': True}, authorship={}, patient_author=False)
+    clinical.refresh_from_db()
+    assert clinical.value_as_number == 1.0

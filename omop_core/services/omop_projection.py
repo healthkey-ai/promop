@@ -426,6 +426,9 @@ def _retract_affirmative_facts(person, projection, type_concept_id=None):
         rows = rows.exclude(**{type_field: PATIENT_SELF_REPORT_TYPE})
     try:
         with transaction.atomic():
+            # The same lock the Yes path takes, so a No cannot evaluate its
+            # rows before a concurrent Yes has committed its own.
+            Person.objects.select_for_update().get(pk=person.pk)
             for row in rows:
                 row.is_erroneous = True
                 row.erroneous_reason = 'retracted by a later PatientRecord answer'

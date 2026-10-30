@@ -1748,9 +1748,12 @@ def _get_active_condition_data(person: Person, snapshot: OmopSnapshot = None) ->
     """
     snapshot = snapshot or _build_snapshot(person)
     today = timezone.localdate()
+    # A current-state answer row is the patient's Yes to one of the pinned
+    # questions, not a diagnosis; it must not count as another active
+    # malignancy or infection on top of the record's own history.
     current_conditions = [
         condition for condition in snapshot.conditions
-        if _condition_is_current(condition, today)
+        if _condition_is_current(condition, today) and not _is_current_state_answer(condition)
     ]
     data = {}
 
