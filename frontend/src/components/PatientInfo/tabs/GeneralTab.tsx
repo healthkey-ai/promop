@@ -5,6 +5,7 @@ import ClinicalField from '../ClinicalField';
 import TreatingInstitutionField from '../TreatingInstitutionField';
 import Section from '../Section';
 import { Input } from '@/components/shadcn/input';
+import SelectControl from '../controls/SelectControl';
 import { today } from '@/api/clinicalFacts';
 import PreexistingConditionsAnswer, { type ConditionsAnswer } from '../PreexistingConditionsAnswer';
 import {
@@ -80,6 +81,9 @@ export default function GeneralTab({
   ) => {
     const descriptor = descriptors[name];
     const dated = descriptor?.writable && descriptor.projection?.omop_table === 'measurement';
+    const prec = name === 'date_of_birth'
+      ? ((formData?.date_of_birth_precision as string) ?? 'day')
+      : undefined;
     return (
       <ClinicalField
         label={label}
@@ -90,6 +94,7 @@ export default function GeneralTab({
         options={extra.options}
         vocabSource={extra.vocabSource}
         onChange={onChange}
+        precision={prec as 'day' | 'month' | 'year' | undefined}
         date={dated ? date : undefined}
         onDateChange={dated ? setDate : undefined}
       />
@@ -111,6 +116,35 @@ export default function GeneralTab({
           <div className="space-y-1.5">
             <label className="text-sm font-medium text-portal-text-primary">Patient Name</label>
             <Input value={editedName} onChange={(e) => onNameChange(e.target.value)} />
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium text-portal-text-primary">Date Precision</label>
+            <SelectControl
+              value={(formData?.date_of_birth_precision as string) ?? 'day'}
+              options={[
+                { value: 'day', label: 'Full date' },
+                { value: 'month', label: 'Month & year' },
+                { value: 'year', label: 'Year only' },
+              ]}
+              onChange={(v) => {
+                const newPrec = v ?? 'day';
+                onChange('date_of_birth_precision', newPrec);
+                const current = formData?.date_of_birth as string | undefined;
+                const year = current?.substring(0, 4);
+                if (year && /^\d{4}$/.test(year)) {
+                  if (newPrec === 'year') {
+                    onChange('date_of_birth', `${year}-01-01`);
+                  } else if (newPrec === 'month') {
+                    const month = current?.substring(5, 7) || '01';
+                    onChange('date_of_birth', `${year}-${month}-01`);
+                  }
+                  // 'day': keep the existing full date as-is
+                } else {
+                  onChange('date_of_birth', null);
+                }
+              }}
+            />
           </div>
 
           {field('Date of Birth', 'date_of_birth', 'date')}
@@ -213,11 +247,8 @@ export default function GeneralTab({
       <Section title="Infection Status" description="Viral infection history.">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
           {field('HIV Positive', 'hiv_status', 'boolean')}
-          {field('No HIV', 'no_hiv_status', 'boolean')}
           {field('Hepatitis B Positive', 'hepatitis_b_status', 'boolean')}
-          {field('No Hepatitis B', 'no_hepatitis_b_status', 'boolean')}
           {field('Hepatitis C Positive', 'hepatitis_c_status', 'boolean')}
-          {field('No Hepatitis C', 'no_hepatitis_c_status', 'boolean')}
         </div>
       </Section>
 

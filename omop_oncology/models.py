@@ -59,6 +59,7 @@ class TherapyLineExposure(models.Model):
     episode = models.ForeignKey(Episode, on_delete=models.CASCADE, related_name='authored_exposures')
     drug_exposure = models.OneToOneField('omop_core.DrugExposure', on_delete=models.CASCADE)
     source_value = models.CharField(max_length=50)
+    is_maintenance = models.BooleanField(default=False)
 
     class Meta:
         db_table = 'therapy_line_exposure'

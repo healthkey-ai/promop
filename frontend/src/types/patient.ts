@@ -16,6 +16,7 @@ export interface PatientInfo {
   email?: string;
   
   // General
+  date_of_birth_precision?: 'day' | 'month' | 'year' | null;
   patient_age?: number;
   gender?: string;
   weight_kg?: number;
@@ -138,7 +139,13 @@ export interface PatientInfo {
   later_discontinuation_reason?: string;
   later_outcome?: string;
   later_line_outcome?: string;  // UI uses this name
-  
+
+  // Per-line progression dates and POD24
+  first_line_progression_date?: string | null;
+  second_line_progression_date?: string | null;
+  later_progression_date?: string | null;
+  pod24?: boolean | null;
+
   // Supportive Therapy
   supportive_therapies?: string;
   supportive_therapy_start_date?: string;
@@ -178,9 +185,6 @@ export interface PatientInfo {
   hiv_status?: boolean;
   hepatitis_b_status?: boolean;
   hepatitis_c_status?: boolean;
-  no_hiv_status?: boolean;
-  no_hepatitis_b_status?: boolean;
-  no_hepatitis_c_status?: boolean;
   
   bilirubin_total_mg_dl?: number;
   alt_u_l?: number;

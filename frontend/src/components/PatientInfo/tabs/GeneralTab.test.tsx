@@ -169,6 +169,17 @@ describe('GeneralTab', () => {
     expect(screen.getByTestId('reason-hiv_status')).toBeInTheDocument();
   });
 
+  it('shows viral status with positive labels only', async () => {
+    await renderTab({ hiv_status: false, hepatitis_b_status: true, hepatitis_c_status: null });
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+    for (const label of ['HIV Positive', 'Hepatitis B Positive', 'Hepatitis C Positive']) {
+      expect(screen.getByText(label)).toBeInTheDocument();
+    }
+    for (const label of ['No HIV', 'No Hepatitis B', 'No Hepatitis C']) {
+      expect(screen.queryByText(label)).not.toBeInTheDocument();
+    }
+  });
+
   it('leaves the age display alone', async () => {
     // Not a PatientRecord column at all — worked out in the browser from the
     // date of birth.

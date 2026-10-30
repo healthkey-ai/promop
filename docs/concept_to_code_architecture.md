@@ -45,7 +45,12 @@ Suggest reaches the same rows with the ranker's evidence attached.
 
 Source rows default to Seen > 0 and sort by Seen descending. The checkbox above
 the Seen header includes zero-Seen rows when unchecked. Seen represents the
-stored occurrence counter, not a count of distinct patients. Search, pagination
+stored occurrence counter, not a count of distinct patients. On a seeded
+instance it starts as the hospital-code extract's record count, which counts
+each coding of an observation; the rebuild walk (#2043, #2121) replaces it
+with the sum of this instance's own per-patient rows for the code, per
+vocabulary, so a code never loaded here keeps the extract's number and one
+that was shows what this instance has seen. Search, pagination
 and changes to the filter clear the current selection. A changed Seen filter
 requires a new suggestion search to retrieve additional candidates.
 

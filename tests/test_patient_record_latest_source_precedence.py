@@ -37,30 +37,30 @@ def _refresh(person):
 
 
 @pytest.mark.parametrize(
-    ('code', 'field', 'no_field'),
+    ('code', 'field'),
     [
-        ('5221-7', 'hiv_status', 'no_hiv_status'),
-        ('7917-8', 'hiv_status', 'no_hiv_status'),
-        ('5195-3', 'hepatitis_b_status', 'no_hepatitis_b_status'),
-        ('5196-1', 'hepatitis_c_status', 'no_hepatitis_c_status'),
+        ('5221-7', 'hiv_status'),
+        ('7917-8', 'hiv_status'),
+        ('5195-3', 'hepatitis_b_status'),
+        ('5196-1', 'hepatitis_c_status'),
     ],
 )
 @pytest.mark.parametrize(
-    ('old_value', 'new_value', 'expected', 'expected_no'),
+    ('old_value', 'new_value', 'expected'),
     [
-        ('positive', 'negative', False, True),
-        ('negative', 'positive', True, False),
+        ('positive', 'negative', False),
+        ('negative', 'positive', True),
     ],
 )
 def test_infection_latest_result_wins(
-    code, field, no_field, old_value, new_value, expected, expected_no,
+    code, field, old_value, new_value, expected,
 ):
     person = PersonFactory()
     concept = ConceptFactory(concept_code=code, concept_name=f'Infection {code}')
     with suppress_patient_record_refresh():
         PatientRecordFactory(
             person=person,
-            **{field: not expected, no_field: expected},
+            **{field: not expected},
         )
         MeasurementFactory(
             person=person, measurement_concept=concept,
@@ -76,7 +76,6 @@ def test_infection_latest_result_wins(
     record = _refresh(person)
 
     assert getattr(record, field) is expected
-    assert getattr(record, no_field) is expected_no
 
 
 def test_infection_union_does_not_let_stale_source_only_row_win():
@@ -85,7 +84,7 @@ def test_infection_union_does_not_let_stale_source_only_row_win():
     coded = ConceptFactory(concept_code='5221-7', concept_name='HIV coded')
     source_only = ConceptFactory(concept_code='LOCAL-HIV', concept_name='HIV local')
     with suppress_patient_record_refresh():
-        PatientRecordFactory(person=person, hiv_status=False, no_hiv_status=True)
+        PatientRecordFactory(person=person, hiv_status=False)
         MeasurementFactory(
             person=person, measurement_concept=source_only,
             measurement_source_value='7917-8', measurement_date=OLD,
@@ -100,14 +99,13 @@ def test_infection_union_does_not_let_stale_source_only_row_win():
     record = _refresh(person)
 
     assert record.hiv_status is True
-    assert record.no_hiv_status is False
 
 
 def test_infection_newest_unusable_keeps_latest_recognized():
     person = PersonFactory()
     concept = ConceptFactory(concept_code='5221-7', concept_name='HIV')
     with suppress_patient_record_refresh():
-        PatientRecordFactory(person=person, hiv_status=False, no_hiv_status=True)
+        PatientRecordFactory(person=person, hiv_status=False)
         MeasurementFactory(
             person=person, measurement_concept=concept,
             measurement_source_value='5221-7', measurement_date=date(2026, 1, 1),
@@ -127,7 +125,6 @@ def test_infection_newest_unusable_keeps_latest_recognized():
     record = _refresh(person)
 
     assert record.hiv_status is True
-    assert record.no_hiv_status is False
 
 
 def test_infection_all_unusable_leaves_fields_unknown():
@@ -145,7 +142,6 @@ def test_infection_all_unusable_leaves_fields_unknown():
     record = _refresh(person)
 
     assert record.hiv_status is None
-    assert record.no_hiv_status is None
 
 
 # ---------------------------------------------------------------------------
@@ -699,7 +695,7 @@ def test_selection_uses_date_then_id(
     person = PersonFactory()
     concept = ConceptFactory(concept_code='5221-7', concept_name='HIV')
     with suppress_patient_record_refresh():
-        PatientRecordFactory(person=person, hiv_status=True, no_hiv_status=False)
+        PatientRecordFactory(person=person, hiv_status=True)
         MeasurementFactory(
             person=person, measurement_id=older_id, measurement_concept=concept,
             measurement_source_value='5221-7', measurement_date=older_day,
@@ -722,7 +718,7 @@ def test_refresh_persists_latest_values_and_current_version():
     hiv = ConceptFactory(concept_code='5221-7', concept_name='HIV')
     binet = ConceptFactory(concept_name='Binet stage')
     with suppress_patient_record_refresh():
-        PatientRecordFactory(person=person, hiv_status=True, no_hiv_status=False)
+        PatientRecordFactory(person=person, hiv_status=True)
         MeasurementFactory(
             person=person, measurement_concept=hiv,
             measurement_source_value='5221-7', measurement_date=OLD,
@@ -746,6 +742,5 @@ def test_refresh_persists_latest_values_and_current_version():
 
     record.refresh_from_db()
     assert record.hiv_status is False
-    assert record.no_hiv_status is True
     assert record.binet_stage == 'C'
     assert record.derivation_version == DERIVATION_VERSION

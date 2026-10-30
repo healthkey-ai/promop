@@ -13,10 +13,9 @@ import statistics
 from collections import defaultdict
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from datetime import date, datetime, timedelta
-from django.db import models
+from django.db import DatabaseError, models, transaction
 from django.db.models import DateTimeField, Q
 from django.db.models.functions import Cast, Coalesce
-from django.db import transaction
 from django.utils import timezone
 from omop_core.models import (
     Person, PatientRecord, ConditionOccurrence, Concept, ConceptAncestor,
@@ -110,13 +109,14 @@ _OMOP_DERIVED_FIELDS = [
     # Set only when the patient has confirmed the list is complete (#1924), so a
     # withdrawn confirmation must clear it on the next refresh.
     'therapy_history_complete',
-    'concomitant_medications',
+    'concomitant_medications', 'medication_contexts',
     # Treatment assertions and summaries. These are set from dated OMOP rows
     # below; clearing them prevents legacy PatientRecord patches surviving a
     # source deletion.
     'first_line_outcome', 'first_line_intent', 'first_line_discontinuation_reason',
     'second_line_outcome', 'second_line_intent', 'second_line_discontinuation_reason',
     'later_outcome', 'later_intent', 'later_discontinuation_reason',
+    'first_line_progression_date', 'second_line_progression_date', 'later_progression_date', 'pod24',
     'therapy_intent', 'reason_for_discontinuation', 'relapse_count',
     'treatment_refractory_status', 'washout_period_duration',
     'remission_duration_min', 'remission_duration',
@@ -253,7 +253,9 @@ from omop_core.services.genomics_catalog import patient_fields as _genomic_patie
 _OMOP_DERIVED_FIELDS.extend(_genomic_patient_fields())
 
 PATIENT_RECORD_OMOP_MAPPED_FIELDS = frozenset(_OMOP_DERIVED_FIELDS) | frozenset({
-    'date_of_birth', 'gender', 'race', 'ethnicity', 'languages_skills',
+    # DOB precision is projected from Person's partial birth-date components,
+    # alongside the date itself; neither is an unmapped clinical attribute.
+    'date_of_birth', 'date_of_birth_precision', 'gender', 'race', 'ethnicity', 'languages_skills',
     'country', 'region', 'city', 'postal_code', 'latitude', 'longitude',
     # Flattened language capabilities (#827). Derived from PersonLanguageSkill
     # by _flatten_language_capabilities, so they are read-only over the API:
@@ -269,8 +271,8 @@ PATIENT_RECORD_OMOP_MAPPED_FIELDS = frozenset(_OMOP_DERIVED_FIELDS) | frozenset(
     'concomitant_medication_details',
     'first_line_outcome', 'second_line_outcome', 'later_outcome',
     'flipi_score_options', 'hepatitis_b_status', 'hepatitis_c_status',
-    'hiv_status', 'no_hepatitis_b_status', 'no_hepatitis_c_status',
-    'no_hiv_status', 'no_pre_existing_conditions', 'no_tobacco_use_status',
+    'hiv_status',
+    'no_pre_existing_conditions', 'no_tobacco_use_status',
     'measurable_disease_imwg', 'measurable_disease_iwcll',
     'protein_expressions', 'richter_transformation', 'tobacco_use_details',
     'tp53_disruption',
@@ -682,6 +684,8 @@ def _clear_derived_fields(patient_info: PatientRecord) -> None:
                 'later_therapy_type_ids', 'therapy_type_ids',
                 'stem_cell_transplant_history', 'sct_eligibility',
             ) or field in _genomic_patient_fields() else None
+            if field == 'medication_contexts':
+                default = {}
             setattr(patient_info, field, default)
 
 
@@ -1098,6 +1102,12 @@ def refresh_patient_record(person: Person) -> PatientRecord:
         for field, value in preserved.items():
             derived_value = getattr(patient_info, field, None)
             matches = _derived_value_matches(field, derived_value, value)
+            if field == 'medication_contexts':
+                from omop_core.services.medication_context import context_delta, merge_contexts
+                eligible = {str(row.pk) for row in snapshot.drug_exposures}
+                value = {pk: attributes for pk, attributes in (value or {}).items() if pk in eligible}
+                matches = not context_delta(derived_value or {}, value)
+                value = merge_contexts(derived_value or {}, value or {})
             if field in NEW_INPUT_FIELDS or field in clinical_values:
                 matches = matches and field in confirmed_inputs
             if (field == 'flipi_score_options' and value is None
@@ -1347,17 +1357,27 @@ def _get_demographics(person: Person, snapshot: OmopSnapshot = None) -> dict:
                 pass
 
     if person.year_of_birth not in PERSON_YEAR_PLACEHOLDERS:
+        month = person.month_of_birth
+        day = person.day_of_birth
+        if month and day:
+            precision = 'day'
+        elif month:
+            precision = 'month'
+        else:
+            precision = 'year'
         try:
             data['date_of_birth'] = date(
                 person.year_of_birth,
-                person.month_of_birth or 1,
-                person.day_of_birth or 1,
+                month or 1,
+                day or 1,
             )
         except ValueError:
             # OMOP permits partial dates and some imported rows contain an
             # invalid partial month/day. Keep the known year rather than
             # discarding the patient's age and DOB entirely.
             data['date_of_birth'] = date(person.year_of_birth, 1, 1)
+            precision = 'year'
+        data['date_of_birth_precision'] = precision
 
     gender_src = None
     if person.gender_concept:
@@ -1458,16 +1478,39 @@ _DISEASE_ALIASES = {
     'er|erbb2 breast cancer (disorder)': 'Breast Cancer',
 }
 
+# DiseaseCategory code → canonical title used by _canonicalize_disease.
+_CATEGORY_TITLES = {
+    'BC': 'Breast Cancer',
+    'MM': 'Multiple Myeloma',
+    'FL': 'Follicular Lymphoma',
+    'CLL': 'Chronic Lymphocytic Leukemia',
+    'MCL': 'Mantle Cell Lymphoma',
+}
+
 
 def _canonicalize_disease(name: str) -> str:
     """Map a raw OMOP condition concept name to EXACT's canonical disease title.
 
+    Checks the in-code alias dict first (fast path), then falls back to the
+    DiseaseCategoryMapping table for curator-maintained entries.
     Unrecognised names are returned unchanged (preserve, don't drop).
     """
     if not name:
         return name
     normalized = name.strip().lower()
-    return _DISEASE_ALIASES.get(normalized, name)
+    # Fast path: hardcoded aliases (most common names)
+    alias = _DISEASE_ALIASES.get(normalized)
+    if alias:
+        return alias
+    # Fallback: consult the DiseaseCategoryMapping table
+    try:
+        from omop_core.models import DiseaseCategoryMapping
+        row = DiseaseCategoryMapping.objects.filter(disease_name__iexact=name.strip()).first()
+        if row:
+            return _CATEGORY_TITLES.get(row.category, name)
+    except DatabaseError:
+        pass  # Table may not exist during early migrations
+    return name
 
 
 SAMPLE_DISEASE_STATUS_SOURCE_VALUE = 'sample-patient-disease-status'
@@ -1802,6 +1845,9 @@ def _get_treatment_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
         data['therapy_history_complete'] = True
 
     drug_exposures = snapshot.drug_exposures  # already ordered by start_date, id
+    from omop_core.services.medication_context import medication_contexts
+    data['medication_contexts'] = {str(pk): values for pk, values in
+        medication_contexts(person.pk, [row.pk for row in drug_exposures]).items()}
 
     recent_drugs = list(reversed(drug_exposures[-10:]))
 
@@ -1829,7 +1875,8 @@ def _get_treatment_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
             episodes = primary_lines(person, primary_slug).select_related(
                 'episode_source_concept', 'episode_object_concept').order_by('episode_number')
             if episodes.exists():
-                return _get_treatment_data_from_episodes(person, data, episodes, drug_exposures, snapshot)
+                return _get_treatment_data_from_episodes(person, data, episodes, drug_exposures, snapshot,
+                                                         disease_slug=primary_slug)
     except Exception:
         pass
 
@@ -2186,7 +2233,8 @@ def _apply_inferred_lots(data: dict, lots, drug_exposures=None) -> None:
         data['therapy_type_ids'] = sorted(all_classes)
 
 
-def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures, snapshot: OmopSnapshot = None):
+def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures, snapshot: OmopSnapshot = None,
+                                      *, disease_slug: str = ''):
     """Use Episode records for structured therapy line grouping."""
     try:
         from omop_oncology.models import EpisodeEvent
@@ -2321,6 +2369,14 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures, sn
             if name
         )
 
+    # ── Bulk-fetch maintenance flags for all episodes ──────────────────────
+    from omop_oncology.models import TherapyLineExposure
+    maint_exposure_ids = set(
+        TherapyLineExposure.objects
+        .filter(episode_id__in=all_episode_ids, is_maintenance=True)
+        .values_list('drug_exposure_id', flat=True)
+    )
+
     # ── Second pass: populate data dict ───────────────────────────────────
     release_id = _latest_published_release_id()
     prov: dict = {}
@@ -2391,6 +2447,11 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures, sn
 
         start_date = str(episode.episode_start_date) if episode.episode_start_date else None
         end_date = str(episode.episode_end_date) if episode.episode_end_date else None
+        maint_drugs = [
+            _usable_concept_name(de.drug_concept) or de.drug_source_value
+            for de in drugs_in_episode if de.pk in maint_exposure_ids
+        ]
+        has_maintenance = bool(maint_drugs)
 
         if lot == 1:
             data['first_line_therapy'] = drug_names
@@ -2424,9 +2485,13 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures, sn
             # for an unresolved regimen) and origin so lines_of_therapy renders
             # the correct line number, pairs each later line with its own id, and
             # reports per-line asserted/inferred.
-            later.append({'lineNumber': lot, 'therapy': drug_names,
-                          'startDate': start_date, 'endDate': end_date, 'origin': origin,
-                          'concept_id': concept_id})
+            entry = {'lineNumber': lot, 'therapy': drug_names,
+                     'startDate': start_date, 'endDate': end_date, 'origin': origin,
+                     'concept_id': concept_id}
+            if has_maintenance:
+                entry['has_maintenance'] = True
+                entry['maintenance_drugs'] = maint_drugs
+            later.append(entry)
             data['later_therapies'] = later
             if concept_id:
                 ids = data.get('later_therapy_ids') or []
@@ -2513,6 +2578,57 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures, sn
     later_lots = sorted(k for k in lot_outcomes if k >= 3)
     if later_lots:
         data['later_outcome'] = lot_outcomes[later_lots[0]]
+
+    # ── Per-line progression dates from LOT-N-progression Observations ────
+    lot_progression_dates: dict = {}
+    progression_obs = sorted(
+        (o for o in (snapshot.observations if snapshot else [])
+         if (o.observation_source_value or '').startswith('LOT-')
+         and (o.observation_source_value or '').endswith('-progression')
+         and _belongs_to_lines(o, line_ids)),
+        key=lambda o: o.observation_date or date.min,
+    )
+    if not progression_obs and not snapshot:
+        progression_obs = (
+            Observation.objects
+            .filter(
+                Q(observation_event_id__isnull=True) | Q(observation_event_id__in=line_ids),
+                person=person,
+                is_erroneous=False,
+                observation_source_value__startswith='LOT-',
+                observation_source_value__endswith='-progression',
+            )
+            .order_by('observation_date')
+        )
+    for obs in progression_obs:
+        src = obs.observation_source_value or ''
+        try:
+            lot_n = int(src.split('-')[1])
+        except (IndexError, ValueError):
+            continue
+        if obs.observation_date:
+            lot_progression_dates[lot_n] = obs.observation_date
+
+    if 1 in lot_progression_dates:
+        data['first_line_progression_date'] = lot_progression_dates[1]
+    if 2 in lot_progression_dates:
+        data['second_line_progression_date'] = lot_progression_dates[2]
+    later_prog = sorted(k for k in lot_progression_dates if k >= 3)
+    if later_prog:
+        data['later_progression_date'] = lot_progression_dates[later_prog[0]]
+
+    # ── POD24: progression within 24 months of first-line start ───────────
+    # POD24 is an FL-specific prognostic marker; only compute for FL patients.
+    first_start = data.get('first_line_start_date')
+    first_prog = lot_progression_dates.get(1)
+    is_fl = disease_slug == 'follicular-lymphoma'
+    if is_fl and first_start and first_prog:
+        try:
+            start_d = date.fromisoformat(first_start) if isinstance(first_start, str) else first_start
+            days = (first_prog - start_d).days
+            data['pod24'] = days <= 730  # 24 months ≈ 730 days
+        except (ValueError, TypeError):
+            pass
 
     _apply_treatment_assertions(data, person, episodes, snapshot)
 
@@ -3480,7 +3596,7 @@ def _get_infection_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
                 return 'positive'
         return None
 
-    def _latest_result(codes, positive_field, negative_field):
+    def _latest_result(codes, positive_field):
         """Apply the newest recognized result across the code/source union.
 
         The union lists code-matched rows ahead of source-only rows, so it must
@@ -3492,17 +3608,15 @@ def _get_infection_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
         for m in rows:
             result = _infection_value(m)
             if result == 'negative':
-                data[negative_field] = True
                 data[positive_field] = False
                 return
             if result == 'positive':
-                data[negative_field] = False
                 data[positive_field] = True
                 return
 
-    _latest_result(('5221-7', '7917-8'), 'hiv_status', 'no_hiv_status')
-    _latest_result(('5195-3',), 'hepatitis_b_status', 'no_hepatitis_b_status')
-    _latest_result(('5196-1',), 'hepatitis_c_status', 'no_hepatitis_c_status')
+    _latest_result(('5221-7', '7917-8'), 'hiv_status')
+    _latest_result(('5195-3',), 'hepatitis_b_status')
+    _latest_result(('5196-1',), 'hepatitis_c_status')
 
     return data
 

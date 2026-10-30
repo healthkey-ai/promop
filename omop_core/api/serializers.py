@@ -70,10 +70,16 @@ class TherapyLineWriteSerializer(serializers.Serializer):
     # The cancer this line treats, as a disease name or slug. Omitted, the line
     # is the patient's primary cancer's (every client before #1739).
     disease = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=100)
+    progression_date = serializers.DateField(required=False, allow_null=True)
 
     def validate_start_date(self, value):
         if value and value > date.today():
             raise serializers.ValidationError('start_date cannot be in the future.')
+        return value
+
+    def validate_progression_date(self, value):
+        if value and value > date.today():
+            raise serializers.ValidationError('progression_date cannot be in the future.')
         return value
 
     def validate(self, attrs):
@@ -81,6 +87,10 @@ class TherapyLineWriteSerializer(serializers.Serializer):
         if start and end and end < start:
             raise serializers.ValidationError(
                 {'end_date': 'end_date cannot precede start_date.'})
+        prog = attrs.get('progression_date')
+        if prog and start and prog < start:
+            raise serializers.ValidationError(
+                {'progression_date': 'progression_date cannot precede start_date.'})
         # A line with neither drugs nor a named regimen asserts only that a line
         # happened. That is a real clinical statement (#1924) but it must be
         # deliberate: without the flag, an accidental empty payload is still

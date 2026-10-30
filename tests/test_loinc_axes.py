@@ -1266,3 +1266,37 @@ def test_record_units_settle_the_axes_whatever_the_metadata_sample_says():
                                observed_units=['%'])
     assert axes['property']['value'] == list(loinc_axes.AMBIGUOUS_UNIT_PROPERTIES['%'])
     assert axes['scale_type']['value'] == 'Qn'
+
+
+# --- _axis_fields includes variant destinations (#2083) -------------------------
+
+def test_axis_fields_includes_variant_destinations(two_unit_code, glucose):
+    """The mapping list serialisation must include each variant's destination
+    so the Code Mapping page can display them (#2083)."""
+    from patient_portal.api.views import _axis_fields
+
+    axis_variants.refresh(two_unit_code)
+    mcnc_variant = SourceCodeAxisVariant.objects.get(
+        mapping=two_unit_code, axis_key='property=MCnc|scale_type=Qn')
+    scnc_variant = SourceCodeAxisVariant.objects.get(
+        mapping=two_unit_code, axis_key='property=SCnc|scale_type=Qn')
+    axis_variants.set_destination(mcnc_variant, glucose['2345-7'], approve=True, user=None)
+    axis_variants.set_destination(scnc_variant, glucose['14749-6'], approve=True, user=None)
+
+    fields = _axis_fields(two_unit_code)
+    assert 'axis_variants' in fields
+    variants_by_key = {v['axis_key']: v for v in fields['axis_variants']}
+    assert variants_by_key['property=MCnc|scale_type=Qn']['target_concept']['concept_id'] == glucose['2345-7'].concept_id
+    assert variants_by_key['property=SCnc|scale_type=Qn']['target_concept']['concept_id'] == glucose['14749-6'].concept_id
+
+
+def test_axis_fields_omits_variants_when_count_below_threshold():
+    """No axis_variants key when the mapping has no variants (#2083)."""
+    from patient_portal.api.views import _axis_fields
+
+    mapping = SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id='LOINC', source_code='TEST', omop_table='measurement',
+        domain_id='Measurement', status='proposed', axis_variant_count=0,
+    )
+    fields = _axis_fields(mapping)
+    assert 'axis_variants' not in fields

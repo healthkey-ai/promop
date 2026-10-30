@@ -204,6 +204,10 @@ def run_refresh(request_id, batch_size=axis_variants.REFRESH_BATCH):
         # A rebuild walks every code with evidence or patient data and rewrites
         # its stored units from that data first (#2043); a plain refresh walks
         # only the codes seen in several units.
+        if request.rebuild_evidence and not cursor:
+            # The Seen counts are set for every code in one pass before the
+            # walk (#2121); a resumed walk did it already.
+            axis_variants.rebuild_seen_counts()
         keys = axis_variants.evidence_keys() if request.rebuild_evidence else axis_variants.multi_unit_keys()
         keys = sorted(keys, key=axis_variants.key_text)
         remaining = [k for k in keys if axis_variants.key_text(k) > cursor] if cursor else keys

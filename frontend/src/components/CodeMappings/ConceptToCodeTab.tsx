@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import api from '@/api/axios';
+import { fetchDiseaseCategories } from '@/api/mappingHub';
 import { destinationError } from './destinationSearch';
 import AxisVariantWalkPanel from './AxisVariantWalkPanel';
 import EditMappingDialog from './EditMappingDialog';
@@ -86,7 +87,9 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange, initialC
   /** Called once the linked concept is opened or reported, so it is not reopened. */
   onInitialConceptHandled?: () => void;
 }) {
+  const [diseases, setDiseases] = useState<[string, string][]>([['', 'All diseases']]);
   const [domain, setDomain] = useState('');
+  const [disease, setDisease] = useState('');
   const [scope, setScope] = useState('fields');
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(1);
@@ -108,12 +111,25 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange, initialC
 
   useEffect(() => {
     let active = true;
+    (async () => {
+      try {
+        const cats = await fetchDiseaseCategories();
+        if (active) {
+          setDiseases([['', 'All diseases'], ...cats.map(c => [c.value, c.label] as [string, string])]);
+        }
+      } catch { /* keep the default "All diseases" entry */ }
+    })();
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
     const controller = new AbortController();
     const timer = window.setTimeout(async () => {
       setLoading(true); setError('');
       try {
         const response = await api.get<Page<Concept> & { prioritized?: number }>('/v1/concept-to-code/', {
-          params: { domain, scope, search, page, page_size: pageSize, ...(rankedOnly ? { prioritized: '1' } : {}) },
+          params: { domain, scope, search, page, page_size: pageSize, ...(disease ? { disease } : {}), ...(rankedOnly ? { prioritized: '1' } : {}) },
           signal: controller.signal,
         });
         if (active) setData(response.data);
@@ -122,7 +138,7 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange, initialC
       } finally { if (active) setLoading(false); }
     }, 250);
     return () => { active = false; controller.abort(); window.clearTimeout(timer); };
-  }, [domain, scope, search, page, pageSize, rankedOnly, revision]);
+  }, [domain, disease, scope, search, page, pageSize, rankedOnly, revision]);
 
   // One concept per move: the server renumbers the global list, so a move
   // from a filtered or later page needs nothing else from it (#1914).
@@ -198,6 +214,10 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange, initialC
       <select aria-label="Concept domain" className={input} disabled={writing} value={domain}
         onChange={event => { setDomain(event.target.value); setPage(1); }}>
         {domains.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+      </select>
+      <select aria-label="Disease category" className={input} disabled={writing} value={disease}
+        onChange={event => { setDisease(event.target.value); setPage(1); }}>
+        {diseases.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
       </select>
       <select aria-label="Concepts per page" className={input} disabled={writing} value={pageSize}
         onChange={event => { setPageSize(Number(event.target.value)); setPage(1); }}>

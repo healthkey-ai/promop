@@ -211,7 +211,7 @@ CONDITION_FIELDS = frozenset({'disease', 'stage', 'condition_code_icd_10', 'cond
 # the birth date to Person — `patient_age` is a function of the birth date and
 # `ethnicity` is unhandled — so membership here does NOT mean a field survives
 # a re-derivation.
-DEMOGRAPHIC_FIELDS = frozenset({'gender', 'date_of_birth', 'patient_age', 'ethnicity'})
+DEMOGRAPHIC_FIELDS = frozenset({'gender', 'date_of_birth', 'date_of_birth_precision', 'patient_age', 'ethnicity'})
 
 # Maps line number (1/2/3) → PatientRecord field prefix
 THERAPY_LINE_PREFIXES = {
@@ -561,9 +561,6 @@ SUGGESTED_FIELD_CODES: dict[str, tuple[str, str]] = {
     'marital_status':                ('125680007', 'SNOMED'),
     # Negation fields (map to the base clinical concept being negated)
     'no_active_infection_status':    ('56051006',  'SNOMED'),
-    'no_hiv_status':                 ('86406008',  'SNOMED'),
-    'no_hepatitis_b_status':         ('66071002',  'SNOMED'),
-    'no_hepatitis_c_status':         ('50711007',  'SNOMED'),
     # Conditions
     'hiv_status':                    ('86406008',  'SNOMED'),
     'hepatitis_b_status':            ('66071002',  'SNOMED'),

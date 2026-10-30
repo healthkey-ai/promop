@@ -27,6 +27,7 @@ the rows already stored, or the decision only ever reaches data that happens to
 arrive again.
 """
 import logging
+from contextvars import ContextVar
 from datetime import date
 
 from django.contrib.contenttypes.models import ContentType
@@ -228,6 +229,41 @@ def _description_for(source_vocabulary_id, source_code, source_text):
     return describe_source_code(source_vocabulary_id or '', source_code) or text
 
 
+#: True while a caller's sightings are one ask per code per batch, not one
+#: per record: the code-mappings lookup (#2123). Such a sighting is a
+#: provisional count, kept only until the code's per-patient rows exist.
+_PROVISIONAL = ContextVar('provisional_sightings', default=False)
+
+
+def _has_patient_rows(mapping):
+    """Whether this instance holds per-patient rows for the mapping's code:
+    then its Seen count is theirs, not the lookups' (#2123). The rows are
+    matched as the walk matches them (``axis_variants.rebuild_seen_counts``):
+    exact code and vocabulary, on the mapping's table when it names one, a
+    hospital-scoped mapping asking about its own hospital's patients. A
+    vocabulary stored under its canonical id also answers for the OID the
+    rows may carry; a code the mapping holds truncated answers by prefix."""
+    vocabulary = mapping.source_vocabulary_id or ''
+    rows = PatientSourceCode.objects.filter(source_vocabulary_id__in={
+        vocabulary, *[oid for oid, canonical in VOCABULARY_OID_ALIASES.items() if canonical == vocabulary]})
+    if len(mapping.source_code) >= SOURCE_CODE_MAX:
+        rows = rows.filter(source_value__startswith=mapping.source_code)
+    else:
+        rows = rows.filter(source_value=mapping.source_code)
+    if mapping.omop_table:
+        rows = rows.filter(omop_table=mapping.omop_table)
+    if mapping.organization_id is not None:
+        rows = rows.filter(person__patient_record__organization_id=mapping.organization_id)
+    return rows.exists()
+
+
+def _seen_from_rows(mapping):
+    """Set the mapping's Seen count from its per-patient rows (#2123)."""
+    from omop_core.mapping.axis_variants import rebuild_seen_counts
+
+    rebuild_seen_counts([(mapping.source_vocabulary_id, mapping.source_code)])
+
+
 def _record_proposal(*, source_vocabulary_id, source_code, source_text,
                      concept, omop_table, source_system, organization=None,
                      notes='', is_suggestion=False):
@@ -235,7 +271,12 @@ def _record_proposal(*, source_vocabulary_id, source_code, source_text,
 
     Idempotent: the first sighting creates the row, later sightings bump
     ``occurrence_count`` and ``last_seen`` so the review queue can be ordered by
-    how much a code actually matters.  Never touches an approved row — that
+    how much a code actually matters.  A sighting under
+    :func:`provisional_sightings` (the code-mappings lookup, which asks once
+    per code per batch, not once per record) adds one only while the code
+    has no per-patient rows on this instance; once they exist they are the
+    count, and the sighting sets it from them (#2123). A per-record caller,
+    such as FHIR sync, always adds one. Never touches an approved row — that
     would let an import quietly undo a curator.
     """
     now = timezone.now()
@@ -254,7 +295,7 @@ def _record_proposal(*, source_vocabulary_id, source_code, source_text,
             # IntegrityError escapes and fails the entire bundle with a 500 --
             # a normal condition for a parallel import, not an error.
             with transaction.atomic():
-                return SourceCodeConceptMapping.objects.create(
+                created = SourceCodeConceptMapping.objects.create(
                     organization=organization,
                     source_vocabulary_id=source_vocabulary_id or '',
                     source_code=source_code,
@@ -277,6 +318,10 @@ def _record_proposal(*, source_vocabulary_id, source_code, source_text,
                     last_seen=now,
                     notes=notes,
                 )
+            if _PROVISIONAL.get() and _has_patient_rows(created):
+                _seen_from_rows(created)
+                created.refresh_from_db(fields=['occurrence_count'])
+            return created
         except IntegrityError:
             mapping = _mapping_scope(
                 source_vocabulary_id, source_code, organization,
@@ -289,10 +334,14 @@ def _record_proposal(*, source_vocabulary_id, source_code, source_text,
 
     # This is called by concurrent import workers.  Reading, adding one in
     # Python, and saving loses sightings under load; keep Seen a real counter.
-    updates = {
-        'occurrence_count': F('occurrence_count') + 1,
-        'last_seen': now,
-    }
+    updates = {'last_seen': now}
+    if _PROVISIONAL.get() and _has_patient_rows(mapping):
+        # The rows are the count: set from them rather than add to them, so
+        # a row created after its patients were uploaded, or bumped while an
+        # upload landed, reads what the rows say (#2123).
+        _seen_from_rows(mapping)
+    else:
+        updates['occurrence_count'] = F('occurrence_count') + 1
     if mapping.first_seen is None:
         updates['first_seen'] = now
     SourceCodeConceptMapping.objects.filter(pk=mapping.pk).update(**updates)
@@ -436,7 +485,7 @@ def resolve_source_code(*, source_code, omop_table, source_vocabulary_id='',
 def resolve_source_code_variant(*, source_code, omop_table, source_vocabulary_id='',
                                 source_text='', source_system='fhir-upload',
                                 organization=None, source_unit=None, metadata=None,
-                                mint=True):
+                                mint=True, provisional=False):
     """:func:`resolve_source_code`, also returning the axis variant that
     routed the record (``None`` when the mapping's own concept applies).
 
@@ -445,13 +494,20 @@ def resolve_source_code_variant(*, source_code, omop_table, source_vocabulary_id
     made for a new code. *mint* False queues a code nothing matched with no
     destination instead of a placeholder concept: right for a document term
     (:mod:`text_terms`), where a placeholder per phrasing would be noise.
+    *provisional* says the caller asks once per code per batch, not once
+    per record, so its sighting counts only until the code's per-patient
+    rows exist (#2123).
     """
-    concept, mapping = _resolve_source_code(
-        source_code=source_code, omop_table=omop_table,
-        source_vocabulary_id=source_vocabulary_id, source_text=source_text,
-        source_system=source_system, organization=organization,
-        metadata=metadata, mint=mint,
-    )
+    token = _PROVISIONAL.set(provisional)
+    try:
+        concept, mapping = _resolve_source_code(
+            source_code=source_code, omop_table=omop_table,
+            source_vocabulary_id=source_vocabulary_id, source_text=source_text,
+            source_system=source_system, organization=organization,
+            metadata=metadata, mint=mint,
+        )
+    finally:
+        _PROVISIONAL.reset(token)
     if mapping is not None and source_unit:
         from omop_core.mapping.axis_variants import variant_for
         variant = variant_for(mapping, source_unit)
@@ -742,6 +798,9 @@ def repoint_clinical_rows(*, mapping, old_concept_id, new_concept_id,
 
         # post_delete receivers are live, and the collapse below deletes rows.
         with suppress_patient_record_refresh():
+            # Snapshot PKs before the concept update: the lazy queryset filters
+            # on old_concept_id, so after .update() it would find zero rows.
+            repointed_pks = set(qs.values_list('pk', flat=True)) if model is Measurement else None
             qs.update(**{concept_col: new_concept_id})
             result['rows_collapsed'] = _collapse_duplicates(
                 model, concept_col, source_col, match,
@@ -749,11 +808,42 @@ def repoint_clinical_rows(*, mapping, old_concept_id, new_concept_id,
                 organization_id=mapping.organization_id,
             )
 
+            # Normalize units on repointed Measurement rows (#2088).
+            # When units is set this is a variant approval: the variant's
+            # target concept (new_concept_id) differs from the mapping's,
+            # and the mapping's destination_unit_concept was chosen for its
+            # own LOINC, not the variant's.
+            if repointed_pks:
+                try:
+                    from omop_core.services.canonical_units import (
+                        normalize_measurement_units,
+                    )
+                    norm_qs = model.objects.filter(pk__in=repointed_pks)
+                    variant_concept = new_concept_id if units is not None else None
+                    result['rows_normalized'] = normalize_measurement_units(
+                        norm_qs, mapping,
+                        target_concept_id=variant_concept)
+                    # Re-collapse: normalization may have made previously-
+                    # distinct values identical (e.g. 100.4 and 100.6 umol/L
+                    # both round to 0.1 mmol/L).
+                    if result['rows_normalized']:
+                        result['rows_collapsed'] += _collapse_duplicates(
+                            model, concept_col, source_col, match,
+                            new_concept_id, person_ids,
+                            organization_id=mapping.organization_id,
+                        )
+                except Exception:
+                    logger.exception(
+                        'Unit normalization failed for mapping %s',
+                        mapping.id,
+                    )
+
     logger.info(
         'Mapping %s: re-pointed %s %s row(s) from concept %s to %s '
-        '(%s collapsed, %s patient record(s) marked stale).',
+        '(%s collapsed, %s normalized, %s patient record(s) marked stale).',
         mapping.id, result['rows_updated'], table, old_concept_id,
-        new_concept_id, result['rows_collapsed'], result['persons_marked_stale'],
+        new_concept_id, result['rows_collapsed'],
+        result.get('rows_normalized', 0), result['persons_marked_stale'],
     )
     return result
 
@@ -955,7 +1045,7 @@ def resolve_person_source_codes(person, *, source_values=None, omop_tables=None)
                     omop_table=table_key,
                     status='approved',
                 )
-                .select_related('target_concept')
+                .select_related('target_concept', 'destination_unit_concept')
                 .first()
             )
             if mapping is None:
@@ -1000,7 +1090,29 @@ def resolve_person_source_codes(person, *, source_values=None, omop_tables=None)
 
             with transaction.atomic():
                 with suppress_patient_record_refresh():
+                    # Snapshot PKs before the concept update: the lazy queryset
+                    # filters on unresolved_q, so after .update() it finds zero.
+                    resolved_pks = (
+                        set(rows_to_update.values_list('pk', flat=True))
+                        if model is Measurement else None
+                    )
                     rows_to_update.update(**{concept_col: target_concept_id})
+                    # Normalize units on resolved Measurement rows (#2088).
+                    # Wrapped in try/except so a normalization failure (e.g.
+                    # numeric overflow in bulk_update) does not roll back the
+                    # concept update or abort resolution for remaining groups.
+                    if resolved_pks:
+                        try:
+                            from omop_core.services.canonical_units import (
+                                normalize_measurement_units,
+                            )
+                            norm_qs = model.objects.filter(pk__in=resolved_pks)
+                            normalize_measurement_units(norm_qs, mapping)
+                        except Exception:
+                            logger.exception(
+                                'Unit normalization failed for %s (mapping %s)',
+                                sv, mapping.id,
+                            )
                 person_ids_touched.add(person.person_id)
                 resolved += count
                 already_resolved += group['row_count'] - count

@@ -68,7 +68,7 @@ _NOISE = {
 def _search_text(field_name: str) -> str:
     """Turn a column name into something worth searching a vocabulary for.
 
-    ``no_hepatitis_b_status`` searches for "hepatitis b": the ``no_`` prefix is a
+    ``no_tobacco_use_status`` searches for "tobacco use": the ``no_`` prefix is a
     negation the projection applies, not part of the concept, and ``status`` is
     shape rather than meaning.
     """

@@ -7,7 +7,7 @@ administrations, and whether its composition is known. Keeping one builder stops
 the two surfaces from drifting (the reason concepts and regimens were moved here).
 """
 from omop_core.models import DrugExposure
-from omop_oncology.models import EpisodeEvent
+from omop_oncology.models import EpisodeEvent, TherapyLineExposure
 
 
 def lines_of_therapy(obj, concept_cache=None):
@@ -69,6 +69,13 @@ def lines_of_therapy(obj, concept_cache=None):
         )
     } if all_event_ids else {}
 
+    # Bulk-fetch maintenance flags so the dialog can show/preserve them.
+    maint_exposure_ids = set(
+        TherapyLineExposure.objects
+        .filter(episode_id__in=episode_ids, is_maintenance=True)
+        .values_list('drug_exposure_id', flat=True)
+    ) if episode_ids else set()
+
     def _editable_drugs(line_number):
         episode = episodes_by_line.get(line_number)
         if episode is None:
@@ -90,6 +97,7 @@ def lines_of_therapy(obj, concept_cache=None):
                 'concept_class_id': concept.concept_class_id,
                 'standard_concept': concept.standard_concept,
                 'source_value': de.drug_source_value,
+                'maintenance': de.pk in maint_exposure_ids,
             })
         # An asserted line may have no recorded drug at all (#1924). Say so
         # explicitly, so a consumer does not read "no drugs listed" as "no
@@ -97,8 +105,8 @@ def lines_of_therapy(obj, concept_cache=None):
         return episode.episode_id, drugs, bool(event_ids_by_episode.get(episode.episode_id))
 
     def _line(n, regimen, cid, prov_field, comp, start, end,
-              outcome, intent, disc, later_aggregate=False,
-              origin_override=None, comp_class=None):
+              outcome, intent, disc, progression_date=None,
+              later_aggregate=False, origin_override=None, comp_class=None):
         # Prefer a per-line origin (later_therapies carries one per 3L+ line);
         # else the field-level `therapy_ids_provenance` origin.
         origin = origin_override or _prov(prov_field, 'origin')
@@ -140,6 +148,7 @@ def lines_of_therapy(obj, concept_cache=None):
             'outcome': outcome,
             'intent': intent,
             'discontinuation_reason': disc,
+            'progression_date': _iso(progression_date),
         }
         if later_aggregate:
             entry['later_aggregate'] = True
@@ -153,6 +162,7 @@ def lines_of_therapy(obj, concept_cache=None):
             obj.first_line_start_date or obj.first_line_date, obj.first_line_end_date,
             obj.first_line_outcome, obj.first_line_intent,
             obj.first_line_discontinuation_reason,
+            progression_date=obj.first_line_progression_date,
             comp_class=obj.first_line_therapy_type_ids))
     if obj.second_line_therapy or obj.second_line_therapy_id:
         lines.append(_line(
@@ -161,6 +171,7 @@ def lines_of_therapy(obj, concept_cache=None):
             obj.second_line_start_date or obj.second_line_date, obj.second_line_end_date,
             obj.second_line_outcome, obj.second_line_intent,
             obj.second_line_discontinuation_reason,
+            progression_date=obj.second_line_progression_date,
             comp_class=obj.second_line_therapy_type_ids))
 
     # 3L+ lines: iterate the authoritative per-line `later_therapies` list,
@@ -194,7 +205,9 @@ def lines_of_therapy(obj, concept_cache=None):
                 aligned_ids[i], 'later_therapy_ids',
                 obj.later_component_ids, lt.get('startDate'), lt.get('endDate'),
                 obj.later_outcome, obj.later_intent,
-                obj.later_discontinuation_reason, later_aggregate=True,
+                obj.later_discontinuation_reason,
+                progression_date=obj.later_progression_date,
+                later_aggregate=True,
                 origin_override=lt.get('origin'),
                 comp_class=obj.later_therapy_type_ids))
     else:
@@ -211,13 +224,17 @@ def lines_of_therapy(obj, concept_cache=None):
                     3 + i, regimen_name, cid, 'later_therapy_ids',
                     obj.later_component_ids, obj.later_start_date or obj.later_date, obj.later_end_date,
                     obj.later_outcome, obj.later_intent,
-                    obj.later_discontinuation_reason, later_aggregate=True,
+                    obj.later_discontinuation_reason,
+                    progression_date=obj.later_progression_date,
+                    later_aggregate=True,
                     comp_class=obj.later_therapy_type_ids))
         elif obj.later_therapy:
             lines.append(_line(
                 3, obj.later_therapy, None, 'later_therapy_ids',
                 obj.later_component_ids, obj.later_start_date, obj.later_end_date,
                 obj.later_outcome, obj.later_intent,
-                obj.later_discontinuation_reason, later_aggregate=True,
+                obj.later_discontinuation_reason,
+                progression_date=obj.later_progression_date,
+                later_aggregate=True,
                 comp_class=obj.later_therapy_type_ids))
     return lines

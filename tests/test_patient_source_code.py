@@ -102,6 +102,35 @@ class TestPostSourceCodes:
         assert glu.omop_table == 'measurement'
         assert glu.occurrence_count == 3
 
+    def test_the_upload_sets_the_codes_seen_count_from_its_rows(self, smart_env):
+        """A lookup's bump was provisional; the patient rows are the count (#2123)."""
+        from omop_core.models import SourceCodeConceptMapping
+        mapping = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='LOINC', source_code='GLU', omop_table='measurement', occurrence_count=7)
+        other = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='LOINC', source_code='HGB', omop_table='measurement', occurrence_count=7)
+        resp = smart_env['client'].post(_url(smart_env['person'].person_id), {
+            'source_codes': [
+                {'source_value': 'GLU', 'source_vocabulary_id': 'LOINC',
+                 'omop_table': 'measurement', 'occurrence_count': 3},
+            ],
+        }, format='json')
+        assert resp.status_code == 201
+        mapping.refresh_from_db(); other.refresh_from_db()
+        assert (mapping.occurrence_count, other.occurrence_count) == (3, 7)
+        # A replace that drops GLU and brings HGB rebuilds both: HGB from its rows,
+        # GLU keeps its number since no rows are left to say better.
+        resp = smart_env['client'].post(_url(smart_env['person'].person_id), {
+            'replace': True,
+            'source_codes': [
+                {'source_value': 'HGB', 'source_vocabulary_id': 'LOINC',
+                 'omop_table': 'measurement', 'occurrence_count': 11},
+            ],
+        }, format='json')
+        assert resp.status_code in (200, 201)
+        mapping.refresh_from_db(); other.refresh_from_db()
+        assert (mapping.occurrence_count, other.occurrence_count) == (3, 11)
+
     def test_upserts_on_second_post(self, smart_env):
         url = _url(smart_env['person'].person_id)
         payload = {
