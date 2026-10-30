@@ -9,6 +9,7 @@ Usage:
 import dataclasses
 import logging
 import math
+import re
 import statistics
 from collections import defaultdict
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
@@ -1597,6 +1598,16 @@ def _primary_cancer_condition(person, snapshot: OmopSnapshot, cancers: list):
     return max(cancers, key=rank)
 
 
+# Names a cancer without being one: a past cancer, a complication of one, a
+# benign or uncertain growth, a test or a worry. Shared with the PHR's
+# diagnoses (HealthTree/ht-phr-one#119).
+NOT_CANCER_NAME = re.compile(
+    r'\bhistory of\b|\bh/o\b|\bdue to\b|\bsecondary to\b|\bbenign\b|uncertain behaviou?r|'
+    r'\bscreening\b|\bsuspected\b|\brisk of\b|\bfear of\b',
+    re.IGNORECASE,
+)
+
+
 def _is_oncologic(cond):
     """Shared cancer predicate for the primary selector and scoped projections."""
     if cond.is_erroneous:
@@ -1604,6 +1615,8 @@ def _is_oncologic(cond):
     cname = (cond.condition_concept.concept_name or '').lower() if cond.condition_concept else ''
     src = (cond.condition_source_value or '').lower()
     if 'screening' in cname or (not cond.condition_concept_id and 'screening' in src):
+        return False
+    if NOT_CANCER_NAME.search(cname) or NOT_CANCER_NAME.search(src):
         return False
     return any(word in cname or word in src for word in (
         'cancer', 'neoplasm', 'malignant', 'lymphoma', 'leukemia',

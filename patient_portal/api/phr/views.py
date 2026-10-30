@@ -27,6 +27,7 @@ from omop_core.models import (
 from patient_portal.models import PatientStatement, PatientUser
 from omop_core.services.condition_context import condition_contexts
 from omop_core.services.cancer_details import cancer_details, cancer_family, SLUG_FAMILY
+from omop_core.services.patient_record_service import NOT_CANCER_NAME
 
 from .labs import blood_type, lab_history, labs
 from .records import genetics, medication_detail, medications, procedures
@@ -147,18 +148,9 @@ _CANCER_WORDS = re.compile(
 )
 
 
-# Names a cancer without being one (#119): a past cancer, a complication of
-# one, a benign or uncertain growth, a test or a worry.
-_NOT_CANCER = re.compile(
-    r'\bhistory of\b|\bh/o\b|\bdue to\b|\bsecondary to\b|\bbenign\b|uncertain behaviou?r|'
-    r'\bscreening\b|\bsuspected\b|\brisk of\b|\bfear of\b',
-    re.IGNORECASE,
-)
-
-
 def is_cancer_condition(row: ConditionOccurrence) -> bool:
     concept = row.condition_concept
-    if any(_NOT_CANCER.search(text or '') for text in (_condition_name(row), row.condition_source_value)):
+    if any(NOT_CANCER_NAME.search(text or '') for text in (_condition_name(row), row.condition_source_value)):
         return False
     codes = [row.condition_source_value or '']
     if concept is not None and (concept.vocabulary_id or '').upper().startswith('ICD10'):
