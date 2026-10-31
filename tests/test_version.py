@@ -36,4 +36,4 @@ def test_the_cloud_run_image_is_stamped_with_the_commit_it_was_built_from():
     dockerfile = (root / 'Dockerfile.gcp').read_text()
     workflow = (root / '.github/workflows/deploy-staging.yml').read_text()
     assert 'ARG GIT_COMMIT' in dockerfile and 'ENV GIT_COMMIT=${GIT_COMMIT}' in dockerfile
-    assert '--build-arg GIT_COMMIT=${IMAGE_TAG}' in workflow
+    assert 'build-args: GIT_COMMIT=${{ env.IMAGE_TAG }}' in workflow
