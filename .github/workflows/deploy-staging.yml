@@ -9,10 +9,6 @@ on:
   pull_request:
     types: [labeled, synchronize]
 
-concurrency:
-  group: deploy-staging
-  cancel-in-progress: false
-
 env:
   GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
   GCP_REGION: ${{ vars.GCP_REGION || 'us-central1' }}
@@ -25,19 +21,22 @@ permissions:
   id-token: write
 
 jobs:
+  # Runs on every dev push but does not gate the staging deploy, matching
+  # Render, which deploys dev on push. dev does not require PRs to be up to
+  # date, so this is what catches two PRs that pass alone and break together:
+  # a failure shows red on the dev commit, it does not hold staging back.
   test:
     name: Test
     if: github.ref_name == 'dev'
     uses: ./.github/workflows/ci.yml
 
-  build-and-deploy:
-    name: Build & Deploy
-    needs: test
+  # The image is pushed under the commit SHA only; :latest moves in the
+  # deploy job, once the revision is actually being deployed.
+  build:
+    name: Build image
     if: >-
-      always() &&
-      (needs.test.result == 'success' || needs.test.result == 'skipped') &&
-      (github.event_name == 'push' ||
-       contains(github.event.pull_request.labels.*.name, 'deploy-staging'))
+      github.event_name == 'push' ||
+      contains(github.event.pull_request.labels.*.name, 'deploy-staging')
     runs-on: ubuntu-latest
 
     steps:
@@ -57,15 +56,54 @@ jobs:
       - name: Configure Docker for Artifact Registry
         run: gcloud auth configure-docker ${GCP_REGION}-docker.pkg.dev --quiet
 
+      - uses: docker/setup-buildx-action@v3
+
+      # Layer cache lives in Artifact Registry beside the image, so pip install,
+      # the model download and npm ci are reused until their inputs change.
       - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.gcp
+          platforms: linux/amd64
+          provenance: false
+          push: true
+          build-args: GIT_COMMIT=${{ env.IMAGE_TAG }}
+          tags: ${{ env.ARTIFACT_REPO }}/ctomop:${{ env.IMAGE_TAG }}
+          cache-from: type=registry,ref=${{ env.ARTIFACT_REPO }}/ctomop:buildcache
+          cache-to: type=registry,ref=${{ env.ARTIFACT_REPO }}/ctomop:buildcache,mode=max,image-manifest=true,oci-mediatypes=true
+
+  # Serialised here, not on the workflow: at workflow level every pull_request
+  # event joined the queue, so an unlabelled PR that never deploys waited
+  # behind a running deploy and could displace a pending one.
+  deploy:
+    name: Deploy
+    needs: build
+    concurrency:
+      group: deploy-staging
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+
+    steps:
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${GCP_REGION}-docker.pkg.dev --quiet
+
+      # A manifest push, not `gcloud artifacts docker tags add`: moving a tag
+      # that way needs artifactregistry.tags.delete, which the deploy account
+      # does not have.
+      - name: Tag image as latest
         run: |
-          docker build --platform linux/amd64 --provenance=false \
-            -f Dockerfile.gcp \
-            --build-arg GIT_COMMIT=${IMAGE_TAG} \
-            -t ${ARTIFACT_REPO}/ctomop:${IMAGE_TAG} \
-            -t ${ARTIFACT_REPO}/ctomop:latest .
-          docker push ${ARTIFACT_REPO}/ctomop:${IMAGE_TAG}
-          docker push ${ARTIFACT_REPO}/ctomop:latest
+          docker buildx imagetools create \
+            -t ${ARTIFACT_REPO}/ctomop:latest \
+            ${ARTIFACT_REPO}/ctomop:${IMAGE_TAG}
 
       - name: Deploy new revision (no traffic)
         run: |

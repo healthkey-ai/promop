@@ -11,7 +11,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
+# CPU-only torch first, so sentence-transformers finds it satisfied. The default
+# wheel brings several GB of NVIDIA CUDA libraries that Cloud Run, having no
+# GPU, never loads; they made up most of the image's build, push and pull time.
 RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu && \
     pip install --no-cache-dir -r requirements.txt
 
 # Bake the embedding model into the image. Cloud Run gives every container a
@@ -49,12 +53,6 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# The deployed commit, for /api/v1/version/ and the stamp under the logo
-# (#2016). Render injects RENDER_GIT_COMMIT; Cloud Run has no git checkout,
-# so the workflow passes the SHA it builds (#2024).
-ARG GIT_COMMIT=""
-ENV GIT_COMMIT=${GIT_COMMIT}
-
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq-dev curl && \
     rm -rf /var/lib/apt/lists/*
@@ -70,6 +68,13 @@ ENV WHITENOISE_ROOT=/app/frontend/dist/remote
 # into an immediate error instead of a silent download and a rate-limit stall.
 ENV HF_HOME=/opt/huggingface \
     HF_HUB_OFFLINE=1
+
+# The deployed commit, for /api/v1/version/ and the stamp under the logo
+# (#2016). Render injects RENDER_GIT_COMMIT; Cloud Run has no git checkout,
+# so the workflow passes the SHA it builds (#2024). Declared last: it changes
+# on every build, and every layer after it would be rebuilt rather than cached.
+ARG GIT_COMMIT=""
+ENV GIT_COMMIT=${GIT_COMMIT}
 
 EXPOSE 8080
 
