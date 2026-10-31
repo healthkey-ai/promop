@@ -1,10 +1,12 @@
-"""Tests for date_of_birth_precision on PatientRecord.
+"""Tests for date precision on PatientRecord.
 
 Covers:
-- Derivation: precision inferred from Person's month/day nullity
+- DOB: precision inferred from Person's month/day nullity
 - Sync: precision honoured when writing dob back to Person
 - Validation: future dates still rejected
 - Age: computed correctly from year-only dob
+- Clinical dates: diagnosis_date, sct_date, dlbcl_transformation_date precision
+- FHIR: partial birthDate parsing (YYYY, YYYY-MM)
 """
 import pytest
 from datetime import date
@@ -12,7 +14,9 @@ from datetime import date
 from omop_core.models import PatientRecord, Person
 from omop_core.services.patient_record_service import refresh_patient_record
 from omop_core.services.omop_write_service import _sync_demographics
-from tests.factories import PatientRecordFactory, PersonFactory
+from tests.factories import (
+    ConditionOccurrenceFactory, ConceptFactory, PatientRecordFactory, PersonFactory,
+)
 
 pytestmark = pytest.mark.django_db
 
@@ -254,3 +258,181 @@ class TestPrecisionValidation:
                 'date_of_birth_precision': prec,
             }, partial=True)
             assert serializer.is_valid(), f"Precision {prec!r} should be valid: {serializer.errors}"
+
+
+# ---------------------------------------------------------------------------
+# Clinical date precision — diagnosis, sct, transformation
+# ---------------------------------------------------------------------------
+
+class TestDiagnosisDatePrecision:
+    """diagnosis_date_precision derived from ConditionOccurrence (always 'day')."""
+
+    def test_precision_day_from_condition(self):
+        """When diagnosis_date is derived from a ConditionOccurrence, precision is 'day'."""
+        person = PersonFactory()
+        PatientRecordFactory(person=person, disease='follicular lymphoma')
+        concept = ConceptFactory(concept_name='Follicular lymphoma', standard_concept='S')
+        ConditionOccurrenceFactory(
+            person=person,
+            condition_concept=concept,
+            condition_start_date=date(2020, 3, 15),
+        )
+        refresh_patient_record(person)
+        pr = PatientRecord.objects.get(person=person)
+        assert pr.diagnosis_date == date(2020, 3, 15)
+        assert pr.diagnosis_date_precision == 'day'
+
+    def test_precision_null_when_no_condition(self):
+        """Without a ConditionOccurrence, no diagnosis_date or precision."""
+        person = PersonFactory()
+        PatientRecordFactory(person=person)
+        refresh_patient_record(person)
+        pr = PatientRecord.objects.get(person=person)
+        assert pr.diagnosis_date is None
+        assert pr.diagnosis_date_precision is None
+
+    def test_user_edit_year_precision_survives_refresh(self):
+        """A user-edited year-only diagnosis_date survives refresh when no OMOP condition exists."""
+        person = PersonFactory()
+        pr = PatientRecordFactory(person=person)
+        pr.diagnosis_date = date(2019, 1, 1)
+        pr.diagnosis_date_precision = 'year'
+        pr.user_edited_fields = ['diagnosis_date', 'diagnosis_date_precision']
+        pr.save()
+        refresh_patient_record(person)
+        pr.refresh_from_db()
+        assert pr.diagnosis_date == date(2019, 1, 1)
+        assert pr.diagnosis_date_precision == 'year'
+
+
+class TestSctDatePrecision:
+    """sct_date_precision stored on PatientRecord."""
+
+    def test_precision_stored_on_model(self):
+        person = PersonFactory()
+        pr = PatientRecordFactory(person=person)
+        pr.sct_date = date(2022, 5, 1)
+        pr.sct_date_precision = 'month'
+        pr.save()
+        pr.refresh_from_db()
+        assert pr.sct_date == date(2022, 5, 1)
+        assert pr.sct_date_precision == 'month'
+
+    def test_invalid_precision_rejected(self):
+        from patient_portal.api.serializers import PatientRecordSerializer
+        serializer = PatientRecordSerializer(data={
+            'sct_date_precision': 'century',
+        }, partial=True)
+        assert not serializer.is_valid()
+        assert 'sct_date_precision' in serializer.errors
+
+    def test_valid_precisions_accepted(self):
+        from patient_portal.api.serializers import PatientRecordSerializer
+        for prec in ('day', 'month', 'year'):
+            serializer = PatientRecordSerializer(data={
+                'sct_date_precision': prec,
+            }, partial=True)
+            assert serializer.is_valid(), f"sct_date_precision {prec!r}: {serializer.errors}"
+
+
+class TestDlbclTransformationDatePrecision:
+    """dlbcl_transformation_date_precision stored on PatientRecord."""
+
+    def test_precision_stored_on_model(self):
+        person = PersonFactory()
+        pr = PatientRecordFactory(person=person)
+        pr.dlbcl_transformation_date = date(2021, 1, 1)
+        pr.dlbcl_transformation_date_precision = 'year'
+        pr.save()
+        pr.refresh_from_db()
+        assert pr.dlbcl_transformation_date == date(2021, 1, 1)
+        assert pr.dlbcl_transformation_date_precision == 'year'
+
+
+# ---------------------------------------------------------------------------
+# FHIR partial birthDate parsing
+# ---------------------------------------------------------------------------
+
+class TestFhirPartialBirthDate:
+    """upload_fhir_bundle should handle YYYY and YYYY-MM birthDate."""
+
+    @staticmethod
+    def _import_bundle(client, birth_date_str, family='PartialDob'):
+        """Upload a minimal FHIR bundle with the given birthDate string."""
+        import io
+        import json
+
+        bundle = {
+            'resourceType': 'Bundle',
+            'type': 'collection',
+            'entry': [{
+                'resource': {
+                    'resourceType': 'Patient',
+                    'id': 'test-partial-dob',
+                    'name': [{'family': family, 'given': ['Test']}],
+                    'gender': 'female',
+                    'birthDate': birth_date_str,
+                },
+            }],
+        }
+        fhir_file = io.BytesIO(json.dumps(bundle).encode('utf-8'))
+        fhir_file.name = 'test_bundle.json'
+        return client.post(
+            '/api/patient-info/upload_fhir/',
+            {'file': fhir_file},
+            format='multipart',
+        )
+
+    def test_year_only_birthdate(self):
+        """FHIR birthDate '1985' → Person has year only, precision='year' after refresh."""
+        from patient_portal.models import Identity
+        from rest_framework.test import APIClient
+
+        user = Identity.objects.create_superuser(email='fhir_y@test.com', password='test')
+        client = APIClient()
+        client.force_authenticate(user=user)
+
+        resp = self._import_bundle(client, '1985', family='PartialDobY')
+        assert resp.status_code in (200, 201), resp.content
+        person = Person.objects.get(family_name='PartialDobY')
+        assert person.year_of_birth == 1985
+        assert person.month_of_birth is None
+        assert person.day_of_birth is None
+        pr = PatientRecord.objects.get(person=person)
+        assert pr.date_of_birth_precision == 'year'
+
+    def test_year_month_birthdate(self):
+        """FHIR birthDate '1985-06' → Person has year+month, precision='month'."""
+        from patient_portal.models import Identity
+        from rest_framework.test import APIClient
+
+        user = Identity.objects.create_superuser(email='fhir_ym@test.com', password='test')
+        client = APIClient()
+        client.force_authenticate(user=user)
+
+        resp = self._import_bundle(client, '1985-06', family='PartialDobYM')
+        assert resp.status_code in (200, 201), resp.content
+        person = Person.objects.get(family_name='PartialDobYM')
+        assert person.year_of_birth == 1985
+        assert person.month_of_birth == 6
+        assert person.day_of_birth is None
+        pr = PatientRecord.objects.get(person=person)
+        assert pr.date_of_birth_precision == 'month'
+
+    def test_full_birthdate_unchanged(self):
+        """FHIR birthDate '1985-06-15' still works as before."""
+        from patient_portal.models import Identity
+        from rest_framework.test import APIClient
+
+        user = Identity.objects.create_superuser(email='fhir_full@test.com', password='test')
+        client = APIClient()
+        client.force_authenticate(user=user)
+
+        resp = self._import_bundle(client, '1985-06-15', family='PartialDobF')
+        assert resp.status_code in (200, 201), resp.content
+        person = Person.objects.get(family_name='PartialDobF')
+        assert person.year_of_birth == 1985
+        assert person.month_of_birth == 6
+        assert person.day_of_birth == 15
+        pr = PatientRecord.objects.get(person=person)
+        assert pr.date_of_birth_precision == 'day'

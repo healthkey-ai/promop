@@ -168,13 +168,16 @@ def test_csv_cannot_claim_an_existing_unassigned_patient(setup):
 def test_invalid_patient_does_not_prevent_later_patient_import(setup):
     client, _, _ = setup
     bundle = _make_fhir_bundle()
+    # A malformed birthDate now degrades gracefully (patient created without DOB),
+    # so both patients are created.  The test verifies that a partial-date patient
+    # does not prevent a later, fully-valid patient from being imported.
     bad = {'resource': {'resourceType': 'Patient', 'id': 'bad-date', 'birthDate': 'invalid'}}
     bundle['entry'].insert(0, bad)
     response = upload(client, bundle)
     assert response.status_code == 200, response.data
-    assert response.data['created_count'] == 1
-    assert len(response.data['errors']) == 1
-    assert Person.objects.count() == 1
+    assert response.data['created_count'] == 2
+    assert len(response.data['errors']) == 0
+    assert Person.objects.count() == 2
 
 
 @pytest.mark.parametrize('scope,expected', [('patient/*.read', 403), ('patient/*.write', 200)])

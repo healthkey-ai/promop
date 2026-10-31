@@ -3268,6 +3268,9 @@ class TherapyHistoryAttestation(models.Model):
         return f'Person {self.person_id} therapy history confirmed {self.confirmed_at:%Y-%m-%d}'
 
 
+DATE_PRECISION_CHOICES = [('day', 'Day'), ('month', 'Month'), ('year', 'Year')]
+
+
 class PatientRecord(models.Model):
     """
     Comprehensive patient information model — OMOP CDM–aligned PatientRecord projection.
@@ -3281,7 +3284,7 @@ class PatientRecord(models.Model):
     date_of_birth = models.DateField(null=True, blank=True)
     date_of_birth_precision = models.CharField(
         max_length=5,
-        choices=[('day', 'Day'), ('month', 'Month'), ('year', 'Year')],
+        choices=DATE_PRECISION_CHOICES,
         blank=True, null=True,
         help_text="Precision of date_of_birth: 'day' (full date), 'month' (year+month), 'year' (year only)",
     )
@@ -3350,6 +3353,10 @@ class PatientRecord(models.Model):
     molecular_markers = models.TextField(blank=True, null=True)
     stem_cell_transplant_history = models.JSONField(blank=True, null=True, default=list)
     sct_date = models.DateField(blank=True, null=True)
+    sct_date_precision = models.CharField(
+        max_length=5, choices=DATE_PRECISION_CHOICES, blank=True, null=True,
+        help_text="Precision of sct_date: 'day', 'month', or 'year'",
+    )
     prothrombin_time_uln = models.DecimalField(
         max_digits=10, decimal_places=5, blank=True, null=True,
         validators=[MinValueValidator(Decimal('0.00001'))],
@@ -3935,6 +3942,10 @@ class PatientRecord(models.Model):
     # ConditionOccurrence, or a transformation Observation as fallback).
     transformed_to_dlbcl = models.BooleanField(blank=True, null=True)
     dlbcl_transformation_date = models.DateField(blank=True, null=True)
+    dlbcl_transformation_date_precision = models.CharField(
+        max_length=5, choices=DATE_PRECISION_CHOICES, blank=True, null=True,
+        help_text="Precision of dlbcl_transformation_date: 'day', 'month', or 'year'",
+    )
     post_transformation_outcome = models.TextField(
         blank=True, null=True,
         help_text="Vocabulary: PostTransformationOutcome",
@@ -3973,6 +3984,10 @@ class PatientRecord(models.Model):
 
     # Core clinical fields derived from OMOP ConditionOccurrence
     diagnosis_date = models.DateField(blank=True, null=True, help_text="Date of initial diagnosis (from ConditionOccurrence)")
+    diagnosis_date_precision = models.CharField(
+        max_length=5, choices=DATE_PRECISION_CHOICES, blank=True, null=True,
+        help_text="Precision of diagnosis_date: 'day', 'month', or 'year'",
+    )
     death_date = models.DateField(blank=True, null=True, help_text="Date of death (from OMOP Death)")
     condition_clinical_status = models.CharField(max_length=50, blank=True, null=True, help_text="Clinical status: active/remission/relapse")
     disease_slug = models.CharField(max_length=100, blank=True, null=True, help_text="Machine-readable disease ID e.g. 'multiple-myeloma'")
