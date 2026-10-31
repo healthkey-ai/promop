@@ -11,6 +11,7 @@ import LabsTab from '@/components/PatientInfo/tabs/LabsTab';
 import BehaviorTab from '@/components/PatientInfo/tabs/BehaviorTab';
 import WearableTab from '@/components/PatientInfo/tabs/WearableTab';
 import ClinicalSummaryTab from '@/components/PatientInfo/tabs/ClinicalSummaryTab';
+import { federatedTabKeys, tabIndexFor } from './tabOrder';
 
 function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading = true }: Pick<PatientInfoProps,
   'readOnly' | 'federated' | 'onPatientUpdated' | 'showHeading'>) {
@@ -28,8 +29,7 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
   const showDiseaseTab = diseaseType !== 'other';
   const diseaseLabel = { breast: 'Breast Cancer', lymphoma: 'Follicular Lymphoma',
     myeloma: 'Multiple Myeloma', cll: 'CLL', mcl: 'Mantle Cell Lymphoma', other: 'Disease Specific' }[diseaseType];
-  const tabKeys = ['general', ...(showDiseaseTab ? ['disease'] : []), 'treatment', 'labs', 'behavior',
-    ...(federated ? [] : ['wearable']), 'genomics', 'history'];
+  const tabKeys = federatedTabKeys(showDiseaseTab, federated);
   const labels: Record<string, string> = { general: 'General', disease: diseaseLabel, treatment: 'Treatment',
     labs: 'Labs', behavior: 'Behavior', wearable: 'Wearable', genomics: 'Genomics', history: 'History' };
   const tabKey = tabKeys[activeTab] ?? 'general';
@@ -37,11 +37,7 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
     if (deepLinkAppliedRef.current || state.loading) return;
     deepLinkAppliedRef.current = true;
     const requested = new URLSearchParams(window.location.search).get('tab');
-    const aliases: Record<string, string> = { blood: 'labs', breast_cancer: 'disease', multiple_myeloma: 'disease',
-      follicular_lymphoma: 'disease', chronic_lymphocytic_leukemia: 'disease', mantle_cell_lymphoma: 'disease' };
-    const keys = ['general', ...(showDiseaseTab ? ['disease'] : []), 'treatment', 'labs', 'behavior',
-      ...(federated ? [] : ['wearable']), 'genomics', 'history'];
-    const index = requested ? keys.indexOf(aliases[requested] ?? requested) : -1;
+    const index = tabIndexFor(requested, showDiseaseTab, federated);
     if (index >= 0) setActiveTab(index);
   }, [state.loading, showDiseaseTab, federated]);
   const handleFieldChange = useCallback((name: string, value: unknown) => {
