@@ -100,6 +100,19 @@ function panelHeading(label: string) {
   return screen.getByRole('heading', { level: 2, name: label });
 }
 
+/** A string only that tab's own component renders, so a right heading over the
+ *  wrong panel cannot pass. */
+const PANEL_CONTENT: Record<string, RegExp> = {
+  Genomics: /No genomic findings recorded/,
+  Labs: /^Blood Counts$/,
+  Behavior: /^Smoking Status$/,
+};
+
+function expectPanel(label: string) {
+  expect(panelHeading(label)).toBeInTheDocument();
+  expect(screen.getByText(PANEL_CONTENT[label])).toBeInTheDocument();
+}
+
 describe('federatedTabKeys', () => {
   it.each([
     ['with the disease tab', true, true],
@@ -159,29 +172,38 @@ describe('federated patient form tab strip', () => {
     await renderForm();
     const nav = screen.getByRole('navigation', { name: 'Patient info tabs' });
     within(nav).getByRole('button', { name: label, exact: true }).click();
-    await waitFor(() => expect(panelHeading(label)).toBeInTheDocument());
+    await waitFor(() => expectPanel(label));
     expect(activeLabel()).toBe(label);
   });
 });
 
+const DEEP_LINKS = [
+  ['genomics', 'Genomics'],
+  ['labs', 'Labs'],
+  ['behavior', 'Behavior'],
+  // Historical alias: `?tab=blood` still means Labs.
+  ['blood', 'Labs'],
+] as const;
+
 describe('federated patient form tab deep links', () => {
-  it.each([
-    ['genomics', 'Genomics'],
-    ['labs', 'Labs'],
-    ['behavior', 'Behavior'],
-    // Historical alias: `?tab=blood` still means Labs.
-    ['blood', 'Labs'],
-  ])('?tab=%s opens the %s panel', async (requested, expected) => {
+  it.each(DEEP_LINKS)('?tab=%s opens the %s panel with a disease tab', async (requested, expected) => {
     window.history.replaceState({}, '', `/?tab=${requested}`);
-    await renderForm();
-    await waitFor(() => expect(panelHeading(expected)).toBeInTheDocument());
+    await renderForm({ disease: 'Multiple Myeloma' });
+    await waitFor(() => expectPanel(expected));
+    expect(activeLabel()).toBe(expected);
+  });
+
+  it.each(DEEP_LINKS)('?tab=%s opens the %s panel without a disease tab', async (requested, expected) => {
+    window.history.replaceState({}, '', `/?tab=${requested}`);
+    await renderForm({ disease: 'Something Else' });
+    await waitFor(() => expectPanel(expected));
     expect(activeLabel()).toBe(expected);
   });
 
   it('?tab=genomics still lands on Genomics when the disease tab shifts every index', async () => {
     window.history.replaceState({}, '', '/?tab=genomics');
     await renderForm({ disease: 'Follicular Lymphoma' });
-    await waitFor(() => expect(panelHeading('Genomics')).toBeInTheDocument());
+    await waitFor(() => expectPanel('Genomics'));
     expect(activeLabel()).toBe('Genomics');
     expect(tabLabels().indexOf('Genomics')).toBe(tabLabels().indexOf('Labs') + 1);
   });
