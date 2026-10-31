@@ -2324,16 +2324,22 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     day_of_birth = None
                     
                     raw_birth = patient_resource.get('birthDate') or ''
-                    if len(raw_birth) >= 10:  # YYYY-MM-DD (full date)
-                        birth_date = datetime.strptime(raw_birth[:10], '%Y-%m-%d').date()
-                        year_of_birth = birth_date.year
-                        month_of_birth = birth_date.month
-                        day_of_birth = birth_date.day
-                    elif len(raw_birth) == 7:  # YYYY-MM (month precision)
-                        year_of_birth = int(raw_birth[:4])
-                        month_of_birth = int(raw_birth[5:7])
-                    elif len(raw_birth) == 4:  # YYYY (year precision)
-                        year_of_birth = int(raw_birth)
+                    try:
+                        if len(raw_birth) >= 10:  # YYYY-MM-DD (full date)
+                            birth_date = datetime.strptime(raw_birth[:10], '%Y-%m-%d').date()
+                            year_of_birth = birth_date.year
+                            month_of_birth = birth_date.month
+                            day_of_birth = birth_date.day
+                        elif len(raw_birth) == 7 and raw_birth[4] == '-':  # YYYY-MM (month precision)
+                            y, m = int(raw_birth[:4]), int(raw_birth[5:7])
+                            if 1 <= m <= 12:
+                                year_of_birth, month_of_birth = y, m
+                            else:
+                                year_of_birth = y  # degrade to year-only
+                        elif len(raw_birth) == 4:  # YYYY (year precision)
+                            year_of_birth = int(raw_birth)
+                    except (ValueError, TypeError):
+                        logger.warning('Could not parse FHIR birthDate; importing patient without DOB')
                     
                     # Extract address information from FHIR
                     country = None
