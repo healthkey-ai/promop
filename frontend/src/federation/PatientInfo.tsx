@@ -78,7 +78,9 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
       ].join(' ')}>{labels[key]}</button>)}
     </nav></div>
     <div><div className="pb-4 pt-2"><h2 className="text-base font-medium text-foreground/70">{labels[tabKey]}</h2></div>
-      <fieldset disabled={readOnly || !state.writable}>
+      {/* Let tab-local scroll containers bound wide tables instead of allowing
+          the fieldset's default min-content width to stretch the host page. */}
+      <fieldset className="min-w-0" disabled={readOnly || !state.writable}>
         {tabKey === 'general' && <GeneralTab showCoordinates={!federated} patientMode={federated}
           conditionsReadOnly={readOnly}
           onConditionsSaved={(answer) => store.applyServerValues({ ...answer })}

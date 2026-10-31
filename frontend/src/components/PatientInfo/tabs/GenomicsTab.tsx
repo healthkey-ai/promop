@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import LegacyCytogeneticHistory from './LegacyCytogeneticHistory';
 import FieldMappingLink from '../FieldMappingLink';
 import { clinicalClient, clinicalUrl } from '@/api/clinicalTransport';
@@ -111,6 +111,8 @@ export default function GenomicsTab({ formData, readOnly = false }: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [status, setStatus] = useState('');
+  // This controlled dialog has several openers rather than one DialogTrigger.
+  const returnFocus = useRef<HTMLElement | null>(null);
   const url = clinicalUrl(`/v1/patient-records/${personId}/genomics/`);
   const disease = String(formData.disease ?? formData.disease_slug ?? '');
   const markerFor = (v: Variant | null) => v ? markers.find(m => v.marker_key ? m.key === v.marker_key : m.kind === 'gene' && (!v.feature_type || v.feature_type === 'Gene') && m.gene.toUpperCase() === String(v.genomic_feature || v.gene || '').toUpperCase()) : undefined;
@@ -186,7 +188,8 @@ export default function GenomicsTab({ formData, readOnly = false }: {
     </div>}
     <div className="flex items-center justify-between gap-3">
       <p className="text-sm text-muted-foreground">{variants.length} genomic finding record{variants.length === 1 ? '' : 's'}</p>
-      {editable && <Button disabled={busy || !!draft} onClick={() => {
+      {editable && <Button disabled={busy || !!draft} onClick={e => {
+        returnFocus.current = e.currentTarget;
         setDraft({ genomic_feature: '', feature_type: '', variant: '', status: 'present', allelic_frequency_unit: '%', clone_fraction_unit: '%' });
         setViewing(null); setDeleting(null); setError(''); setStatus('');
       }}>Add genomic finding</Button>}
@@ -199,8 +202,8 @@ export default function GenomicsTab({ formData, readOnly = false }: {
         <thead><tr className="border-b">{['Genomic feature', 'Finding / variant', 'Finding status', 'Origin', 'Interpretation', 'Actions'].map(label => <th key={label} className="p-2 font-medium">{label}</th>)}</tr></thead>
         <tbody>{rows.map(v => <tr key={v.id ?? String(v.marker_key)} tabIndex={0}
           aria-label={`${featureLabel(v)} ${v.variant_name || v.variant || markerFor(v)?.label || ''}`}
-          onClick={() => { if (!busy && !draft) { setViewing(v); setDeleting(null); } }}
-          onKeyDown={e => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); setViewing(v); } }}
+          onClick={e => { if (!busy && !draft) { returnFocus.current = e.currentTarget; setViewing(v); setDeleting(null); } }}
+          onKeyDown={e => { if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); returnFocus.current = e.currentTarget; setViewing(v); } }}
           className="border-b align-top cursor-pointer hover:bg-muted/50">
           <td className="p-2 font-medium"><span className="inline-flex items-center gap-1.5">{featureLabel(v)}
             {markerFor(v) && <span onClick={e => e.stopPropagation()}>
@@ -212,9 +215,9 @@ export default function GenomicsTab({ formData, readOnly = false }: {
           <td className="p-2">{v.origin || v.genomic_source_class || '—'}</td>
           <td className="p-2">{v.interpretation || '—'}</td>
           <td className="p-2" onClick={e => e.stopPropagation()}><div className="flex gap-1">
-            <Button size="sm" variant="ghost" disabled={busy || !!draft} onClick={() => { setViewing(v); setDeleting(null); }}>View</Button>
+            <Button size="sm" variant="ghost" disabled={busy || !!draft} onClick={e => { returnFocus.current = e.currentTarget; setViewing(v); setDeleting(null); }}>View</Button>
             {editable && markerFor(v)?.writable !== false && <>
-              <Button size="sm" variant="ghost" disabled={busy || !!draft} onClick={() => { setDraft(editFinding(v)); setViewing(null); setDeleting(null); setError(''); }}>Edit</Button>
+              <Button size="sm" variant="ghost" disabled={busy || !!draft} onClick={e => { returnFocus.current = e.currentTarget; setDraft(editFinding(v)); setViewing(null); setDeleting(null); setError(''); }}>Edit</Button>
               {v.id && <Button size="sm" variant="ghost" disabled={busy || !!draft} onClick={() => { setDeleting(v); setError(''); }}>Delete</Button>}
             </>}
           </div></td>
@@ -227,7 +230,9 @@ export default function GenomicsTab({ formData, readOnly = false }: {
       <div className="flex gap-2"><Button disabled={busy} onClick={remove}>Confirm delete</Button><Button variant="outline" disabled={busy} onClick={() => setDeleting(null)}>Cancel</Button></div>
     </div>}
     <Dialog open={!!viewing || !!draft} onOpenChange={open => { if (!open && !busy) { setViewing(null); setDraft(null); setError(''); } }}>
-    <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto" onEscapeKeyDown={e => { if (busy) e.preventDefault(); }} onInteractOutside={e => { if (busy) e.preventDefault(); }}>
+    <DialogContent className="max-w-4xl"
+      onCloseAutoFocus={e => { e.preventDefault(); if (returnFocus.current?.isConnected) returnFocus.current.focus(); }}
+      onEscapeKeyDown={e => { if (busy) e.preventDefault(); }} onInteractOutside={e => { if (busy) e.preventDefault(); }}>
       <DialogTitle>{draft ? (draft.id ? 'Edit genomic finding' : 'New genomic finding') : 'Genomic finding details'}</DialogTitle>
       <DialogDescription>Record the laboratory findings and their interpretation. An empty value is unknown, not a negative test.</DialogDescription>
       {markerFor((draft || viewing)!)?.expert_review && <p className="text-sm text-amber-700">{markerFor((draft || viewing)!)?.expert_review}</p>}
