@@ -130,7 +130,9 @@ jobs:
               --region ${GCP_REGION} >/dev/null 2>&1; then
             gcloud run worker-pools update ${SERVICE_NAME}-worker \
               --image ${ARTIFACT_REPO}/ctomop:${IMAGE_TAG} \
-              --region ${GCP_REGION} --quiet
+              --region ${GCP_REGION} \
+              --args="-A,ctomop,worker,--loglevel=info,--queues=celery,athena,suggest" \
+              --quiet
           else
             echo "No ${SERVICE_NAME}-worker pool yet — skipping."
           fi

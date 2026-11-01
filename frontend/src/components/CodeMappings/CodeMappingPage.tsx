@@ -3,7 +3,7 @@ import CodeMappingUploadDialog, { type CodeMappingUploadResult } from "./CodeMap
 import SourceQuantityCell from "./SourceQuantityCell";
 import PageTitle from '@/components/Branding/PageTitle';
 import InlineDestinationPicker from "./InlineDestinationPicker";
-import SuggestCandidates from "./SuggestCandidates";
+import SuggestCandidates, { type CandidateActivity } from "./SuggestCandidates";
 import EditMappingDialog from "./EditMappingDialog";
 import ConceptInputDetails from "@/components/UI/ConceptInputDetails";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -393,6 +393,9 @@ export default function CodeMappingPage() {
   // itself before settling into the banner.
   const [suggestRun, setSuggestRun] = useState<SuggestRunProgress | null>(null);
   const [suggestFlash, setSuggestFlash] = useState(false);
+  // Activity from previous runs on this tab, merged with the current run's live
+  // activity so the candidates panel accumulates across Suggest clicks.
+  const [accumulatedActivity, setAccumulatedActivity] = useState<CandidateActivity[]>([]);
   // Which run the page is still interested in. A poll compares against this so
   // a superseded run — or an unmounted page — stops rather than setting state
   // nobody is showing.
@@ -885,6 +888,12 @@ export default function CodeMappingPage() {
       const finished = await pollSuggestRun(started);
       if (suggestRunRef.current !== started.run_id) return;
       setSuggestRun(finished);
+
+      // Accumulate this run's activity so the candidates panel persists across
+      // successive Suggest clicks instead of resetting each time.
+      if (finished.activity?.length) {
+        setAccumulatedActivity(prev => [...prev, ...finished.activity!]);
+      }
 
       if (finished.state === "failure") {
         setError(finished.error || "The suggest run failed.");
@@ -1437,6 +1446,7 @@ export default function CodeMappingPage() {
                   setProvenanceFilter("");
                   setOrganizationFilter("");
                   setExpandedGroups({});
+                  setAccumulatedActivity([]);
                   setActiveVocabulary(tab.vocabulary_id);
                   if (tab.vocabulary_id === OVERALL_TAB) {
                     setUnmappedCollapsed(true);
@@ -1551,9 +1561,10 @@ export default function CodeMappingPage() {
           </section>
         </div>
 
-        {suggestRun && <SuggestCandidates key={suggestRun.run_id}
-          activity={suggestRun.activity ?? []}
-          finished={suggestRun.state === "success" || suggestRun.state === "failure"}
+        {(suggestRun || accumulatedActivity.length > 0) && <SuggestCandidates
+          key="suggest-candidates"
+          activity={[...accumulatedActivity, ...(suggestRun?.activity ?? [])]}
+          finished={!suggestRun || suggestRun.state === "success" || suggestRun.state === "failure"}
           canApprove={canApprove} vocabularies={reference.destination_vocabularies}
           domains={reference.domains}
           onSaved={() => { void refreshCurrent.current(); }} />}

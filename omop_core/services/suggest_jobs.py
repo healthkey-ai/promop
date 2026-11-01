@@ -99,7 +99,9 @@ class CeleryDispatcher:
         # transaction cannot see the SuggestRun row the caller just created and
         # fails looking it up.
         transaction.on_commit(
-            lambda: suggest_mappings_task.apply_async(args=[run_id, params])
+            lambda: suggest_mappings_task.apply_async(
+                args=[run_id, params], queue='suggest',
+            )
         )
 
 
