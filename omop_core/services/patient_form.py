@@ -22,6 +22,25 @@ from omop_core.services.write_descriptor import build_writable_field_descriptor
 logger = logging.getLogger(__name__)
 
 
+def parse_fact_date(raw, field):
+    """The clinical date carried by a dated edit, or a 400-worthy error.
+
+    A date is never inferred: an unknown date must not become "today" and a
+    future date is not a measurement that happened (clinical-event-time-policy).
+    """
+    from datetime import date
+
+    if not isinstance(raw, str) or not raw:
+        raise ValueError(f'{field}: a dated result requires a date.')
+    try:
+        parsed = date.fromisoformat(raw)
+    except ValueError as exc:
+        raise ValueError(f'{field}: a result date must be YYYY-MM-DD.') from exc
+    if parsed > timezone.localdate():
+        raise ValueError(f'{field}: a result date cannot be in the future.')
+    return parsed
+
+
 def _project_side_effects(person, direct, projections, authorship=None):
     """Mirror PatientRecord answers into OMOP without risking the saved answer.
 
@@ -167,6 +186,62 @@ DEDICATED_WRITES = {
 }
 
 
+def _is_dated_projection(entry):
+    """A scalar fact whose clinical date the editor may supply.
+
+    Occurrence-shaped and JSON fields keep their dedicated authoring contract,
+    and a best-effort projection is not read back, so neither takes a date here.
+    """
+    projection = entry.get('projection') or {}
+    return (
+        bool(entry.get('writable'))
+        and not projection.get('best_effort')
+        and projection.get('omop_table') in ('measurement', 'observation')
+        and entry.get('value_kind') != 'json'
+    )
+
+
+def _attach_latest_fact_dates(record, entries):
+    """Name the latest recorded date per dated field for this patient, in place.
+
+    Two aggregate queries, not one per field. The date is metadata about the
+    fact that currently wins derivation, so a correction can target it instead
+    of defaulting to today.
+    """
+    from django.db.models import Max
+    from omop_core.models import Measurement, Observation
+
+    wanted = {'measurement': {}, 'observation': {}}
+    for name, entry in entries.items():
+        if not entry.get('dated'):
+            continue
+        projection = entry['projection']
+        concept_id = projection.get('concept_id')
+        if concept_id is not None:
+            wanted[projection['omop_table']][concept_id] = name
+    latest = {}
+    if wanted['measurement']:
+        rows = (
+            Measurement.objects.filter(
+                person=record.person, is_erroneous=False,
+                measurement_concept_id__in=wanted['measurement'])
+            .values('measurement_concept_id').annotate(latest=Max('measurement_date'))
+        )
+        for row in rows:
+            latest[wanted['measurement'][row['measurement_concept_id']]] = row['latest']
+    if wanted['observation']:
+        rows = (
+            Observation.objects.filter(
+                person=record.person, is_erroneous=False,
+                observation_concept_id__in=wanted['observation'])
+            .values('observation_concept_id').annotate(latest=Max('observation_date'))
+        )
+        for row in rows:
+            latest[wanted['observation'][row['observation_concept_id']]] = row['latest']
+    for name, value in latest.items():
+        entries[name]['latest_date'] = value.isoformat()
+
+
 def patient_form_descriptors(descriptor=None, *, readable_fields=None, writable=True, record=None):
     """Enrich the existing descriptor, without granting any additional writes."""
     descriptor = build_writable_field_descriptor() if descriptor is None else descriptor
@@ -227,7 +302,11 @@ def patient_form_descriptors(descriptor=None, *, readable_fields=None, writable=
         if not writable and entry.get('writable'):
             entry.update(writable=False, read_only_for_caller=True,
                          reason='Editing is not available for this patient in the current session.')
+        if _is_dated_projection(entry):
+            entry['dated'] = True
         result[name] = entry
+    if record is not None:
+        _attach_latest_fact_dates(record, result)
     return result
 
 
@@ -252,6 +331,13 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
     record = PatientRecord.objects.select_for_update().get(pk=record.pk)
     descriptor = patient_form_descriptors(descriptor, readable_fields=allowed_fields, record=record)
     facts, direct, person_changes, profile_applied = {}, {}, set(), set()
+    # A dated fact carries its clinical date with the value: an edit of an
+    # existing result updates that date, and a new result records the day it was
+    # actually measured rather than the day it was typed
+    # (docs/clinical-event-time-policy.md). Shared with the direct applier so
+    # both federation PATCH paths behave the same.
+    from omop_core.services.field_write_service import split_dated_edits
+    changes, fact_dates = split_dated_edits(changes, descriptor)
     side_effect_projections = {}
     record_profile_fields = set()
     birth_changes = {}
@@ -365,7 +451,7 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
         if project_side_effects:
             _project_side_effects(person, direct, side_effect_projections, authorship)
     if facts:
-        fact_result = apply_field_writes(person, facts, descriptor=descriptor)
+        fact_result = apply_field_writes(person, facts, descriptor=descriptor, dates=fact_dates)
         result.applied.extend(fact_result.applied)
         result.rejected.update(fact_result.rejected)
         result.profile.update(fact_result.profile)

@@ -172,6 +172,22 @@ export class PatientFormStore {
       }
       this.publish({ values: { ...serverValues,
         patient_name: data.patient_name ?? this.snapshot.values.patient_name } });
+      // A saved result becomes the correction target next time. Only advance the
+      // date: an older historical result must not move the latest marker back.
+      const fields = { ...this.snapshot.fields };
+      let datesChanged = false;
+      for (const name of data.write.applied) {
+        const sent = batch[name];
+        const date = sent && typeof sent === 'object' && !Array.isArray(sent)
+          ? (sent as { date?: unknown }).date : undefined;
+        const current = fields[name];
+        if (typeof date === 'string' && current && current.dated
+            && (!current.latest_date || date > current.latest_date)) {
+          fields[name] = { ...current, latest_date: date };
+          datesChanged = true;
+        }
+      }
+      if (datesChanged) this.publish({ fields });
       for (const name of Object.keys(batch)) {
         if (!data.write.applied.includes(name)) batchErrors[name] = data.write.rejected?.[name]
           ?? 'This field was not saved. It may require a different editing workflow.';

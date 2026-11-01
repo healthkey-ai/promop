@@ -15,11 +15,19 @@ interface Props {
   label?: string;
 }
 
+/** Today in the browser's zone, not UTC: a result date is a local calendar day. */
+function todayIso() {
+  const now = new Date();
+  const local = new Date(now.getTime() - now.getTimezoneOffset() * 60000);
+  return local.toISOString().slice(0, 10);
+}
+
 /** CB's computed → source-input dialog, with recursive drill-in. Medical
  * metadata and values come only from PROMOP, never the host's trial uoptions. */
 export default function PatientFieldEditor({ store, name, readOnly, infoHref, ancestors = [], compact, label: callerLabel }: Props) {
   const state = usePatientFormSnapshot(store);
   const [open, setOpen] = useState(false);
+  const [resultDateOverride, setResultDateOverride] = useState<string | null>(null);
   if (state.loading) return <span role="status">Loading patient value…</span>;
   if (state.error) return <div role="alert">{state.error} <button onClick={() => void store.load()}>Retry</button></div>;
   const canonical = store.resolve(name);
@@ -29,7 +37,11 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
     No reviewed PROMOP field binding. {infoHref && <a href={infoHref}>Open Your Info</a>}
   </div>;
   if (ancestors.includes(canonical)) return <p role="alert">Circular field dependency; editing is unavailable.</p>;
-  const value = canonical in state.pending ? state.pending[canonical] : state.values[canonical];
+  const pending = canonical in state.pending ? state.pending[canonical] : undefined;
+  // A dated edit is queued as {value, date}; the row still edits the value.
+  const pendingValue = pending && typeof pending === 'object' && !Array.isArray(pending) && 'value' in pending
+    ? (pending as { value: unknown }).value : pending;
+  const value = canonical in state.pending ? pendingValue : state.values[canonical];
   const dobPrecision = state.pending.date_of_birth_precision ?? state.values.date_of_birth_precision;
   const precision = canonical === 'date_of_birth'
     && (dobPrecision === 'day' || dobPrecision === 'month' || dobPrecision === 'year')
@@ -56,6 +68,12 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
   // computed from. Editing an input never writes the verdict; the result remains
   // read-only and is recalculated by PROMOP.
   const gated = Boolean(field.compatibility_reason);
+  // A dated fact is edited with its clinical date. The latest recorded date is
+  // the correction target; a new entry defaults to today, and an older choice
+  // says plainly that it becomes history rather than the current value.
+  const dated = writable && field.dated === true;
+  const resultDate = resultDateOverride ?? field.latest_date ?? todayIso();
+  const setResultDate = setResultDateOverride;
   const formatted = value == null || value === '' ? 'Unknown'
     : precision === 'year' ? String(value).slice(0, 4)
     : precision === 'month' ? String(value).slice(0, 7)
@@ -95,15 +113,36 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
             </Dialog.Content></Dialog.Portal>
         </Dialog.Root>
       </div>
-    </> : writable ? <Field label={compact ? '' : label} name={canonical} type={control}
-      value={value} options={field.options ?? []}
-      triState={field.tri_state === true} precision={precision} onChange={store.enqueue} />
+    </> : writable ? <>
+      <Field label={compact ? '' : label} name={canonical} type={control}
+        value={value} options={field.options ?? []}
+        triState={field.tri_state === true} precision={precision}
+        onChange={(name, next) => store.enqueue(name, dated ? { value: next, date: resultDate } : next)} />
+      {dated && <div className="mt-1 flex items-center gap-2">
+        <label htmlFor={`${canonical}-result-date`} className="text-xs text-muted-foreground whitespace-nowrap">
+          Result date
+        </label>
+        <input id={`${canonical}-result-date`} type="date" value={resultDate} max={todayIso()}
+          onChange={(event) => {
+            const next = event.target.value || todayIso();
+            setResultDate(next);
+            // Correcting the date of a result that has not flushed yet must move
+            // that same queued result, not queue a second one with a stale date.
+            if (canonical in state.pending) store.enqueue(canonical, { value: pendingValue, date: next });
+          }}
+          className="rounded-md border border-input px-2 py-1 text-xs" />
+      </div>}
+      {dated && field.latest_date && resultDate < field.latest_date
+        && <p role="status" className="text-xs text-muted-foreground">
+          Older than the latest recorded result; it will be stored as history, not as the current value.
+        </p>}
+    </>
       : <><div>{!compact && <span className="text-sm font-medium">{label}: </span>}{formatted}</div>
         <p className="text-xs text-muted-foreground">{reason} {infoHref && <a href={infoHref}>Open Your Info</a>} {field.retryable &&
           <button type="button" className="underline" onClick={() => void store.load()}>Retry</button>}</p></>}
     {field.options_note && <p role="status" className="text-xs text-muted-foreground">{field.options_note}</p>}
     {(field.unit ?? field.projection?.unit) && <span className="text-xs text-muted-foreground">{field.unit ?? field.projection?.unit}</span>}
-    {writable && field.projection?.omop_table === 'measurement'
+    {writable && field.projection?.omop_table === 'measurement' && !dated
       && <p className="text-xs text-muted-foreground">This edit is recorded with today’s date.</p>}
     {canonical in state.pending && <span role="status" className="text-xs">Saving…</span>}
     {state.errors[canonical] && <p role="alert" className="text-xs text-red-600">{state.errors[canonical]}</p>}

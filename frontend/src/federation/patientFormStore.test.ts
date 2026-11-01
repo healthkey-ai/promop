@@ -185,3 +185,46 @@ describe('shared patient-form queue', () => {
     expect(updated).toHaveBeenCalledOnce();
   });
 });
+
+describe('dated result edits', () => {
+  function setupDated() {
+    const get = vi.fn(async (url: string) => ({ data: url.includes('writable-fields') ? {
+      hemoglobin_g_dl: { writable: true, target: 'patient_record', dated: true,
+        latest_date: '2026-08-01', projection: { omop_table: 'measurement' } },
+    } : { patient_info: { person_id: 12, hemoglobin_g_dl: 12.5 }, write_enabled: true } }));
+    const patch = vi.fn(async (_url: string, edits: Record<string, unknown>) => ({ data: {
+      patient_info: { person_id: 12, hemoglobin_g_dl: 13 },
+      write: { applied: Object.keys(edits), rejected: {} },
+    } }));
+    return { store: new PatientFormStore({ get, patch } as unknown as AxiosInstance, '/api'), patch };
+  }
+
+  it('sends the value and its clinical date together', async () => {
+    const { store, patch } = setupDated();
+    await store.load();
+
+    store.enqueue('hemoglobin_g_dl', { value: 13, date: '2026-08-02' });
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(patch).toHaveBeenCalledWith('/api/v1/patient-records/12/',
+      { hemoglobin_g_dl: { value: 13, date: '2026-08-02' } },
+      { headers: { 'X-Patient-Form': '1' } });
+  });
+
+  it('advances the correction target only for a newer result', async () => {
+    const { store, patch } = setupDated();
+    await store.load();
+
+    store.enqueue('hemoglobin_g_dl', { value: 13, date: '2026-08-02' });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(store.getSnapshot().fields.hemoglobin_g_dl.latest_date).toBe('2026-08-02');
+
+    patch.mockImplementationOnce(async (_url: string, edits: Record<string, unknown>) => ({ data: {
+      patient_info: { person_id: 12, hemoglobin_g_dl: 13 },
+      write: { applied: Object.keys(edits), rejected: {} } } }));
+    store.enqueue('hemoglobin_g_dl', { value: 11, date: '2026-07-01' });
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(store.getSnapshot().fields.hemoglobin_g_dl.latest_date).toBe('2026-08-02');
+  });
+});
