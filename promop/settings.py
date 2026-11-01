@@ -765,7 +765,9 @@ def _init_firebase_admin():
         return
 
     project_id = FIREBASE_PROJECT_ID
-    options = {"projectId": project_id} if project_id else {}
+    options = {"httpTimeout": 10}
+    if project_id:
+        options["projectId"] = project_id
 
     if os.environ.get("FIREBASE_AUTH_EMULATOR_HOST"):
         class _EmulatorCredential(fb_credentials.Base):
