@@ -141,6 +141,20 @@ export class PatientFormStore {
     clearTimeout(this.timer);
     this.timer = setTimeout(() => { void this.flush(); }, 500);
   };
+  private reloadFields = async () => {
+    const personId = this.snapshot.personId;
+    if (!personId) return;
+    const revision = this.readRevision;
+    try {
+      const { data } = await this.client.get<Record<string, FormFieldDescriptor>>(
+        `${this.base}/v1/patient-records/writable-fields/`,
+        { params: { person_id: personId }, headers: { 'X-Patient-Form': '1' } });
+      if (revision === this.readRevision) this.publish({ fields: data });
+    } catch {
+      // A failed metadata refresh must not undo the value the PATCH acknowledged.
+    }
+  };
+
   flush = async (): Promise<void> => {
     clearTimeout(this.timer);
     if (this.flight || !Object.keys(this.queue).length || !this.snapshot.personId) return;
@@ -172,22 +186,16 @@ export class PatientFormStore {
       }
       this.publish({ values: { ...serverValues,
         patient_name: data.patient_name ?? this.snapshot.values.patient_name } });
-      // A saved result becomes the correction target next time. Only advance the
-      // date: an older historical result must not move the latest marker back.
-      const fields = { ...this.snapshot.fields };
-      let datesChanged = false;
-      for (const name of data.write.applied) {
+      // A saved result becomes the correction target next time. The server owns
+      // which fact wins: another session or an import may have added a newer
+      // result, so ask for the fresh descriptor instead of inferring the date
+      // from the batch we submitted.
+      const datedApplied = data.write.applied.some((name) => {
         const sent = batch[name];
-        const date = sent && typeof sent === 'object' && !Array.isArray(sent)
-          ? (sent as { date?: unknown }).date : undefined;
-        const current = fields[name];
-        if (typeof date === 'string' && current && current.dated
-            && (!current.latest_date || date > current.latest_date)) {
-          fields[name] = { ...current, latest_date: date };
-          datesChanged = true;
-        }
-      }
-      if (datesChanged) this.publish({ fields });
+        return sent && typeof sent === 'object' && !Array.isArray(sent)
+          && typeof (sent as { date?: unknown }).date === 'string';
+      });
+      if (datedApplied) await this.reloadFields();
       for (const name of Object.keys(batch)) {
         if (!data.write.applied.includes(name)) batchErrors[name] = data.write.rejected?.[name]
           ?? 'This field was not saved. It may require a different editing workflow.';
