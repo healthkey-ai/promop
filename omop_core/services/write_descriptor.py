@@ -1090,6 +1090,16 @@ def build_writable_field_descriptor():
                 'source_value': code,
             },
         }
+    # A curator-managed answer set applies to every field that stores one, not
+    # only to the unmapped KIND_NEEDS_CONCEPT branch above. `bone_lesions` is
+    # mapped to SNOMED 363817008 and still needs its Yes/No/Unknown choices: a
+    # shared editor that renders from the descriptor (and ignores a tab's local
+    # options) otherwise shows an empty picker (#5603). An existing entry's
+    # options win, so curated concept-valued sets are never replaced here.
+    for field, options in choice_options.items():
+        entry = descriptor.get(field)
+        if entry is not None and options and 'options' not in entry:
+            entry['options'] = options
     # Fields the serializer adds that no PatientRecord column backs.
     #
     # The loop above walks PATIENT_RECORD_OMOP_MAPPED_FIELDS, so it can only
