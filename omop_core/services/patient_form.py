@@ -215,6 +215,7 @@ def _attach_latest_fact_dates(record, entries):
     from omop_core.models import Observation
 
     measurement_names = set()
+    measurement_concepts = {}
     observation_concepts = {}
     for name, entry in entries.items():
         if not entry.get('dated'):
@@ -224,6 +225,7 @@ def _attach_latest_fact_dates(record, entries):
             continue
         if projection['omop_table'] == 'measurement':
             measurement_names.add(name)
+            measurement_concepts[name] = projection['concept_id']
         else:
             observation_concepts.setdefault(
                 projection['concept_id'], []).append(name)
@@ -235,6 +237,23 @@ def _attach_latest_fact_dates(record, entries):
         for name in measurement_names:
             if lab_dates.get(name) is not None:
                 latest[name] = lab_dates[name]
+        # A measurement derived outside the lab projection (for example the
+        # lymph-node size) still uses the write concept and its qualifier rule.
+        from omop_core.services.field_write_service import _FIELD_QUALIFIER
+        from omop_core.models import Measurement
+        for name in measurement_names - set(latest):
+            rows = Measurement.objects.filter(
+                person=record.person, is_erroneous=False,
+                measurement_concept_id=measurement_concepts[name],
+                value_as_number__isnull=False)
+            qualifier = _FIELD_QUALIFIER.get(name)
+            if name == 'tumor_size':
+                rows = rows.exclude(qualifier_source_value__iexact='lymph-node')
+            elif qualifier:
+                rows = rows.filter(qualifier_source_value__iexact=qualifier)
+            value = rows.aggregate(latest=Max('measurement_date'))['latest']
+            if value is not None:
+                latest[name] = value
     if observation_concepts:
         rows = (
             Observation.objects.filter(
