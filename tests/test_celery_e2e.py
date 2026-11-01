@@ -56,7 +56,7 @@ def celery_worker_process(request):
     # instead of in a forked child nobody is reading.
     worker = subprocess.Popen(
         [sys.executable, '-m', 'celery', '-A', request.param, 'worker', '--loglevel=info', '--pool=solo',
-         '--without-gossip', '--without-mingle', '--without-heartbeat'],
+         '--queues=celery,athena,suggest', '--without-gossip', '--without-mingle', '--without-heartbeat'],
         env=env,
     )
     try:
