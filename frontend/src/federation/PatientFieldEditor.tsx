@@ -17,7 +17,7 @@ interface Props {
 
 /** CB's computed → source-input dialog, with recursive drill-in. Medical
  * metadata and values come only from PROMOP, never the host's trial uoptions. */
-export default function PatientFieldEditor({ store, name, readOnly, infoHref, ancestors = [], compact, label: fallbackLabel }: Props) {
+export default function PatientFieldEditor({ store, name, readOnly, infoHref, ancestors = [], compact, label: callerLabel }: Props) {
   const state = usePatientFormSnapshot(store);
   const [open, setOpen] = useState(false);
   if (state.loading) return <span role="status">Loading patient value…</span>;
@@ -25,12 +25,15 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
   const canonical = store.resolve(name);
   const field = canonical ? state.fields[canonical] : undefined;
   if (!canonical || !field) return <div className="text-xs text-muted-foreground">
-    {fallbackLabel && <div className="text-sm font-medium">{fallbackLabel}</div>}
+    {callerLabel && <div className="text-sm font-medium">{callerLabel}</div>}
     No reviewed PROMOP field binding. {infoHref && <a href={infoHref}>Open Your Info</a>}
   </div>;
   if (ancestors.includes(canonical)) return <p role="alert">Circular field dependency; editing is unavailable.</p>;
   const value = canonical in state.pending ? state.pending[canonical] : state.values[canonical];
-  const label = field.label ?? canonical;
+  // A field's caller owns its patient-facing wording. PROMOP descriptors provide
+  // a generated label as a fallback; when a tab supplies a reviewed label, don't
+  // let that generated value replace it (for example "Hiv status" vs "HIV Positive").
+  const label = callerLabel ?? field.label ?? canonical;
   const inputs = field.inputs ?? (field.canonical ? [field.canonical] : []);
   // A dependency the host withholds has no descriptor of its own. Opening the
   // dialog anyway would promise an edit surface made only of "No reviewed

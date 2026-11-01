@@ -25,6 +25,29 @@ async function setup(extraFields = {}) {
 }
 
 describe('computed patient field input dialogs', () => {
+  it.each([
+    ['hiv_status', 'Hiv status', 'HIV Positive'],
+    ['hepatitis_b_status', 'Hepatitis b status', 'Hepatitis B Positive'],
+    ['hepatitis_c_status', 'Hepatitis c status', 'Hepatitis C Positive'],
+  ])('uses the caller label for %s instead of the generated descriptor label', async (name, generatedLabel, callerLabel) => {
+    const { store } = await setup({ [name]: {
+      writable: false, label: generatedLabel, value_kind: 'boolean', reason: 'Computed status.',
+    } });
+    render(<PatientFieldEditor store={store} name={name} label={callerLabel} />);
+
+    expect(screen.getByText(`${callerLabel}:`)).toBeVisible();
+    expect(screen.queryByText(`${generatedLabel}:`)).not.toBeInTheDocument();
+  });
+
+  it('keeps the descriptor label when the caller has no display label', async () => {
+    const { store } = await setup({ field_without_caller_label: {
+      writable: false, label: 'Descriptor label', value_kind: 'string', reason: 'Read-only.',
+    } });
+    render(<PatientFieldEditor store={store} name="field_without_caller_label" />);
+
+    expect(screen.getByText('Descriptor label:')).toBeVisible();
+  });
+
   it('opens editable inputs and changes the server-computed result in both displays', async () => {
     const { store, patch } = await setup();
     render(<><PatientFieldEditor store={store} name="bmiMin" /><PatientFieldEditor store={store} name="bmi" /></>);

@@ -10,6 +10,9 @@ import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import GeneralTab from './GeneralTab';
 import { __resetWritableFieldsCache } from '@/hooks/useWritableFields';
+import { PatientFormContext } from '@/federation/PatientFormContext';
+import { PatientFormStore } from '@/federation/patientFormStore';
+import type { AxiosInstance } from 'axios';
 
 const mockGet = vi.fn();
 vi.mock('@/api/axios', () => ({
@@ -96,6 +99,43 @@ function renderTab(
 }
 
 describe('GeneralTab', () => {
+  it('keeps all three current Infection Status labels in the shared editor', async () => {
+    const fields = {
+      hiv_status: { label: 'Hiv status', writable: true, target: 'patient_record', control: 'boolean', value_kind: 'boolean' },
+      hepatitis_b_status: { label: 'Hepatitis b status', writable: true, target: 'patient_record', control: 'boolean', value_kind: 'boolean' },
+      hepatitis_c_status: { label: 'Hepatitis c status', writable: true, target: 'patient_record', control: 'boolean', value_kind: 'boolean' },
+    };
+    const client = {
+      get: vi.fn(async (url: string) => url.endsWith('/patient-info/me/')
+        ? { data: { patient_info: { person_id: 12 }, write_enabled: true } }
+        : { data: fields }),
+      patch: vi.fn(),
+    } as unknown as AxiosInstance;
+    const store = new PatientFormStore(client, '/api');
+    await store.load();
+
+    await act(async () => {
+      render(
+        <PatientFormContext.Provider value={store}>
+          <GeneralTab
+            formData={{ person_id: 12 }} onChange={vi.fn()} editedName="Patient"
+            onNameChange={vi.fn()} onZipcodeChange={vi.fn()}
+          />
+        </PatientFormContext.Provider>,
+      );
+    });
+    for (const label of [
+      'HIV Positive', 'Hepatitis B Positive', 'Hepatitis C Positive',
+    ]) {
+      expect(screen.getByText(new RegExp(`^${label}:?$`))).toBeVisible();
+    }
+    for (const label of [
+      'Hiv status', 'Hepatitis b status', 'Hepatitis c status',
+    ]) {
+      expect(screen.queryByText(label)).not.toBeInTheDocument();
+    }
+  });
+
   it('fetches the descriptor', async () => {
     await renderTab();
     await waitFor(() =>
