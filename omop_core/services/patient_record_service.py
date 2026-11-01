@@ -4316,7 +4316,14 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None,
                 if field == 'wbc_count_thousand_per_ul':
                     if wbc_blocked_date is not None and m.measurement_date <= wbc_blocked_date:
                         break
-                    canonical_value = wbc_to_canonical(m.value_as_number, m.unit_source_value)
+                    # Keep the established source-display contract for unitless
+                    # imports (their numeric value is already stored in the
+                    # PatientRecord display scale); explicit units must be
+                    # convertible before competing with another representation.
+                    canonical_value = (
+                        float(m.value_as_number) if not (m.unit_source_value or '').strip()
+                        else wbc_to_canonical(m.value_as_number, m.unit_source_value)
+                    )
                     if canonical_value is None:
                         current_date = selected_dates.get(field)
                         if current_date is None or m.measurement_date > current_date:
