@@ -74,7 +74,11 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
   // the correction target; a new entry defaults to today, and an older choice
   // says plainly that it becomes history rather than the current value.
   const dated = writable && field.dated === true;
-  const resultDate = resultDateOverride ?? field.latest_date ?? todayIso();
+  const pendingDate = pending && typeof pending === 'object' && !Array.isArray(pending)
+      && 'date' in pending ? (pending as { date?: unknown }).date : undefined;
+  const resultDate = resultDateOverride
+    ?? (typeof pendingDate === 'string' ? pendingDate : undefined)
+    ?? field.latest_date ?? todayIso();
   // A dated value and its date are one edit. Autosaving the value alone would
   // attach it to the previous result's date before the user has chosen one, so
   // the pair waits for an explicit commit.
@@ -138,10 +142,7 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
         </label>
         <input id={`${canonical}-result-date`} type="date" value={resultDate} max={todayIso()}
           onChange={(event) => {
-            const next = event.target.value || todayIso();
-            setResultDateOverride(next);
-            // A result already queued but not flushed follows its own date edit.
-            if (canonical in state.pending) store.enqueue(canonical, { value: pendingValue, date: next });
+            setResultDateOverride(event.target.value || todayIso());
           }}
           className="rounded-md border border-input px-2 py-1 text-xs" />
         <button type="button" disabled={!datedDirty} onClick={commitDated}

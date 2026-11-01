@@ -231,6 +231,37 @@ def _attach_latest_fact_dates(record, entries):
         )
         for row in rows:
             latest[wanted['measurement'][row['measurement_concept_id']]] = row['latest']
+        # A fact may be stored without the canonical concept but with the LOINC
+        # source value; derivation still reads it, so its date counts too.
+        source_codes = {
+            entries[name]['projection'].get('source_value'): name
+            for name in wanted['measurement'].values()
+            if entries[name]['projection'].get('source_value')
+        }
+        if source_codes:
+            rows = (
+                Measurement.objects.filter(
+                    person=record.person, is_erroneous=False,
+                    measurement_source_value__in=list(source_codes))
+                .values('measurement_source_value').annotate(latest=Max('measurement_date'))
+            )
+            for row in rows:
+                name = source_codes[row['measurement_source_value']]
+                current = latest.get(name)
+                if current is None or row['latest'] > current:
+                    latest[name] = row['latest']
+        # ANC and platelets are selected across coded, source-only and legacy
+        # name spellings by derivation itself; reuse that selector instead of
+        # guessing from the write concept.
+        from omop_core.services.patient_record_service import (
+            _build_snapshot, _latest_blood_count_measurements,
+        )
+        special = {'anc_thousand_per_ul', 'platelet_count_thousand_per_ul'}
+        if special & {name for name in wanted['measurement'].values()}:
+            for field, measurement in _latest_blood_count_measurements(
+                    _build_snapshot(record.person)).items():
+                if field in special:
+                    latest[field] = measurement.measurement_date
     if wanted['observation']:
         rows = (
             Observation.objects.filter(

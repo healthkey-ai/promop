@@ -269,6 +269,33 @@ describe('dated lab results', () => {
     expect(screen.getByRole('button', { name: 'Save result' })).toBeEnabled();
   });
 
+  it('keeps showing the pending result date until the save is acknowledged', async () => {
+    const { store } = await setup({
+      hemoglobin_g_dl: { label: 'Hemoglobin', writable: true, target: 'patient_record',
+        control: 'number', dated: true, latest_date: '2026-08-01',
+        projection: { omop_table: 'measurement' } },
+    }, { hemoglobin_g_dl: 12.5 });
+    render(<PatientFieldEditor store={store} name="hemoglobin_g_dl" />);
+
+    act(() => store.enqueue('hemoglobin_g_dl', { value: 13, date: '2026-08-03' }));
+
+    expect(screen.getByLabelText('Result date')).toHaveValue('2026-08-03');
+  });
+
+  it('does not write a date change before Save result', async () => {
+    const { store, patch } = await setup({
+      hemoglobin_g_dl: { label: 'Hemoglobin', writable: true, target: 'patient_record',
+        control: 'number', dated: true, latest_date: '2026-08-01',
+        projection: { omop_table: 'measurement' } },
+    }, { hemoglobin_g_dl: 12.5 });
+    render(<PatientFieldEditor store={store} name="hemoglobin_g_dl" />);
+
+    fireEvent.change(screen.getByLabelText('Result date'), { target: { value: '2026-07-01' } });
+    await act(async () => { await store.flush(); });
+
+    expect(patch).not.toHaveBeenCalled();
+  });
+
   it('warns that an older result becomes history', async () => {
     const { store } = await setup({
       hemoglobin_g_dl: { label: 'Hemoglobin', writable: true, target: 'patient_record',
