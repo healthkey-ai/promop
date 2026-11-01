@@ -45,6 +45,18 @@ def test_the_base_descriptor_marks_a_scalar_fact_as_dated():
     assert build_writable_field_descriptor()[FIELD]['dated'] is True
 
 
+def test_a_dedicated_clinical_input_is_not_dated():
+    from omop_core.services.clinical_input_contract import CLINICAL_INPUT_FIELDS
+    from omop_core.services.write_descriptor import build_writable_field_descriptor
+
+    _person_with_lab()
+    descriptor = build_writable_field_descriptor()
+
+    marked = {name for name in CLINICAL_INPUT_FIELDS
+              if descriptor.get(name, {}).get('dated')}
+    assert not marked, f'dedicated writers must not take a caller-supplied date: {marked}'
+
+
 def test_the_descriptor_names_the_latest_recorded_date_for_a_dated_lab():
     person = _person_with_lab()
     concept = Concept.objects.get(concept_code=LOINC)

@@ -28,6 +28,8 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
   const state = usePatientFormSnapshot(store);
   const [open, setOpen] = useState(false);
   const [resultDateOverride, setResultDateOverride] = useState<string | null>(null);
+  const [valueDraft, setValueDraft] = useState<{ set: boolean; value: unknown }>(
+    { set: false, value: undefined });
   if (state.loading) return <span role="status">Loading patient value…</span>;
   if (state.error) return <div role="alert">{state.error} <button onClick={() => void store.load()}>Retry</button></div>;
   const canonical = store.resolve(name);
@@ -73,7 +75,16 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
   // says plainly that it becomes history rather than the current value.
   const dated = writable && field.dated === true;
   const resultDate = resultDateOverride ?? field.latest_date ?? todayIso();
-  const setResultDate = setResultDateOverride;
+  // A dated value and its date are one edit. Autosaving the value alone would
+  // attach it to the previous result's date before the user has chosen one, so
+  // the pair waits for an explicit commit.
+  const datedValue = dated && valueDraft.set ? valueDraft.value : value;
+  const datedDirty = dated && (valueDraft.set || resultDateOverride !== null);
+  const commitDated = () => {
+    store.enqueue(canonical, { value: datedValue, date: resultDate });
+    setValueDraft({ set: false, value: undefined });
+    setResultDateOverride(null);
+  };
   const formatted = value == null || value === '' ? 'Unknown'
     : precision === 'year' ? String(value).slice(0, 4)
     : precision === 'month' ? String(value).slice(0, 7)
@@ -115,22 +126,28 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
       </div>
     </> : writable ? <>
       <Field label={compact ? '' : label} name={canonical} type={control}
-        value={value} options={field.options ?? []}
+        value={dated ? datedValue : value} options={field.options ?? []}
         triState={field.tri_state === true} precision={precision}
-        onChange={(name, next) => store.enqueue(name, dated ? { value: next, date: resultDate } : next)} />
-      {dated && <div className="mt-1 flex items-center gap-2">
+        onChange={(name, next) => {
+          if (dated) setValueDraft({ set: true, value: next });
+          else store.enqueue(name, next);
+        }} />
+      {dated && <div className="mt-1 flex flex-wrap items-center gap-2">
         <label htmlFor={`${canonical}-result-date`} className="text-xs text-muted-foreground whitespace-nowrap">
           Result date
         </label>
         <input id={`${canonical}-result-date`} type="date" value={resultDate} max={todayIso()}
           onChange={(event) => {
             const next = event.target.value || todayIso();
-            setResultDate(next);
-            // Correcting the date of a result that has not flushed yet must move
-            // that same queued result, not queue a second one with a stale date.
+            setResultDateOverride(next);
+            // A result already queued but not flushed follows its own date edit.
             if (canonical in state.pending) store.enqueue(canonical, { value: pendingValue, date: next });
           }}
           className="rounded-md border border-input px-2 py-1 text-xs" />
+        <button type="button" disabled={!datedDirty} onClick={commitDated}
+          className="rounded-md border border-input px-2 py-1 text-xs disabled:opacity-50">
+          Save result
+        </button>
       </div>}
       {dated && field.latest_date && resultDate < field.latest_date
         && <p role="status" className="text-xs text-muted-foreground">

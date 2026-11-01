@@ -186,16 +186,18 @@ DEDICATED_WRITES = {
 }
 
 
-def _is_dated_projection(entry):
+def _is_dated_projection(name, entry):
     """A scalar fact whose clinical date the editor may supply.
 
     Occurrence-shaped and JSON fields keep their dedicated authoring contract,
     and a best-effort projection is not read back, so neither takes a date here.
     """
+    from omop_core.services.clinical_input_contract import uses_dedicated_writer
     projection = entry.get('projection') or {}
     return (
         bool(entry.get('writable'))
         and not projection.get('best_effort')
+        and not uses_dedicated_writer(name)
         and projection.get('omop_table') in ('measurement', 'observation')
         and entry.get('value_kind') != 'json'
     )
@@ -302,7 +304,7 @@ def patient_form_descriptors(descriptor=None, *, readable_fields=None, writable=
         if not writable and entry.get('writable'):
             entry.update(writable=False, read_only_for_caller=True,
                          reason='Editing is not available for this patient in the current session.')
-        if _is_dated_projection(entry):
+        if _is_dated_projection(name, entry):
             entry['dated'] = True
         result[name] = entry
     if record is not None:

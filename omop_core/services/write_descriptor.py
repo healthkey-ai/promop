@@ -1104,9 +1104,11 @@ def build_writable_field_descriptor():
     # observed (docs/clinical-event-time-policy.md). The editor offers the date
     # control only when this marker is present; a best-effort side effect is not
     # read back from the fact, and JSON values keep their dedicated contract.
-    for entry in descriptor.values():
+    from omop_core.services.clinical_input_contract import uses_dedicated_writer
+    for field, entry in descriptor.items():
         projection = entry.get('projection') or {}
         if (entry.get('writable') and not projection.get('best_effort')
+                and not uses_dedicated_writer(field)
                 and projection.get('omop_table') in ('measurement', 'observation')
                 and entry.get('value_kind') != 'json'):
             entry['dated'] = True

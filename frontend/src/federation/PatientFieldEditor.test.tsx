@@ -247,10 +247,26 @@ describe('dated lab results', () => {
     expect(screen.getByLabelText('Result date')).toHaveValue('2026-08-01');
     fireEvent.change(screen.getByRole('spinbutton'), { target: { value: '13' } });
     fireEvent.change(screen.getByLabelText('Result date'), { target: { value: '2026-08-02' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save result' }));
     await act(async () => { await store.flush(); });
 
     expect(patch.mock.calls[0][1])
       .toEqual({ hemoglobin_g_dl: { value: 13, date: '2026-08-02' } });
+  });
+
+  it('does not save a dated value before the pair is committed', async () => {
+    const { store, patch } = await setup({
+      hemoglobin_g_dl: { label: 'Hemoglobin', writable: true, target: 'patient_record',
+        control: 'number', dated: true, latest_date: '2026-08-01',
+        projection: { omop_table: 'measurement' } },
+    }, { hemoglobin_g_dl: 12.5 });
+    render(<PatientFieldEditor store={store} name="hemoglobin_g_dl" />);
+
+    fireEvent.change(screen.getByRole('spinbutton'), { target: { value: '13' } });
+    await act(async () => { await store.flush(); });
+
+    expect(patch).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Save result' })).toBeEnabled();
   });
 
   it('warns that an older result becomes history', async () => {
