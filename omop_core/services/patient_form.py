@@ -206,101 +206,44 @@ def _is_dated_projection(name, entry):
 def _attach_latest_fact_dates(record, entries):
     """Name the latest recorded date per dated field for this patient, in place.
 
-    Two aggregate queries, not one per field. The date is metadata about the
-    fact that currently wins derivation, so a correction can target it instead
-    of defaulting to today.
+    The date is metadata about the fact that currently wins derivation, so a
+    correction can target it instead of defaulting to today. Lab result dates
+    come from derivation's own selection rather than a second implementation
+    of its rules.
     """
     from django.db.models import Max
-    from omop_core.models import Measurement, Observation
+    from omop_core.models import Observation
 
-    wanted = {'measurement': {}, 'observation': {}}
+    measurement_names = set()
+    observation_concepts = {}
     for name, entry in entries.items():
         if not entry.get('dated'):
             continue
         projection = entry['projection']
-        concept_id = projection.get('concept_id')
-        if concept_id is not None:
-            wanted[projection['omop_table']].setdefault(concept_id, []).append(name)
+        if projection.get('concept_id') is None:
+            continue
+        if projection['omop_table'] == 'measurement':
+            measurement_names.add(name)
+        else:
+            observation_concepts.setdefault(
+                projection['concept_id'], []).append(name)
     latest = {}
-    if wanted['measurement']:
-        from omop_core.services.field_write_service import _FIELD_QUALIFIER
-        # 21889-1 means "Size Tumor" but legacy feeds used it for lymph nodes,
-        # with qualifier_source_value='lymph-node'. Derivation routes those rows
-        # to the node projection only, so a date lookup must apply the same
-        # qualifier rule for the two fields that share the code.
-        names = {name for group in wanted['measurement'].values() for name in group}
-        special = {name: _FIELD_QUALIFIER.get(name) for name in names
-                   if name == 'tumor_size' or _FIELD_QUALIFIER.get(name)}
-        by_name = {name: cid for cid, group in wanted['measurement'].items()
-                   for name in group}
-        plain = {cid: [n for n in group if n not in special]
-                 for cid, group in wanted['measurement'].items()}
-        plain = {cid: group for cid, group in plain.items() if group}
-        # Only a fact that supplies a value can be the one derivation reads:
-        # a newer row with no numeric value must not move the correction target.
-        if plain:
-            rows = (
-                Measurement.objects.filter(
-                    person=record.person, is_erroneous=False,
-                    measurement_concept_id__in=plain, value_as_number__isnull=False)
-                .values('measurement_concept_id').annotate(latest=Max('measurement_date'))
-            )
-            for row in rows:
-                for name in plain[row['measurement_concept_id']]:
-                    latest[name] = row['latest']
-        for name, qualifier in special.items():
-            rows = Measurement.objects.filter(
-                person=record.person, is_erroneous=False,
-                measurement_concept_id=by_name[name], value_as_number__isnull=False)
-            if name == 'tumor_size':
-                rows = rows.exclude(qualifier_source_value__iexact='lymph-node')
-            else:
-                rows = rows.filter(qualifier_source_value__iexact=qualifier)
-            latest_date = rows.aggregate(latest=Max('measurement_date'))['latest']
-            if latest_date is not None:
-                latest[name] = latest_date
-        # A fact may be stored without the canonical concept but with the LOINC
-        # source value; derivation still reads it, so its date counts too.
-        source_codes = {
-            entries[name]['projection'].get('source_value'): name
-            for group in plain.values() for name in group
-            if entries[name]['projection'].get('source_value')
-        }
-        if source_codes:
-            rows = (
-                Measurement.objects.filter(
-                    person=record.person, is_erroneous=False,
-                    measurement_source_value__in=list(source_codes),
-                    value_as_number__isnull=False)
-                .values('measurement_source_value').annotate(latest=Max('measurement_date'))
-            )
-            for row in rows:
-                name = source_codes[row['measurement_source_value']]
-                current = latest.get(name)
-                if current is None or row['latest'] > current:
-                    latest[name] = row['latest']
-        # ANC and platelets are selected across coded, source-only and legacy
-        # name spellings by derivation itself; reuse that selector instead of
-        # guessing from the write concept.
-        from omop_core.services.patient_record_service import (
-            _build_snapshot, _latest_blood_count_measurements,
-        )
-        count_fields = {'anc_thousand_per_ul', 'platelet_count_thousand_per_ul'}
-        if count_fields & names:
-            for field, measurement in _latest_blood_count_measurements(
-                    _build_snapshot(record.person)).items():
-                if field in count_fields and field in entries and entries[field].get('dated'):
-                    latest[field] = measurement.measurement_date
-    if wanted['observation']:
-        observation_names = {name for group in wanted['observation'].values() for name in group}
+    if measurement_names:
+        from omop_core.services.patient_record_service import _get_laboratory_data
+        lab_dates = {}
+        _get_laboratory_data(record.person, dates_out=lab_dates)
+        for name in measurement_names:
+            if lab_dates.get(name) is not None:
+                latest[name] = lab_dates[name]
+    if observation_concepts:
         rows = (
             Observation.objects.filter(
                 person=record.person, is_erroneous=False,
-                observation_concept_id__in=wanted['observation'])
+                observation_concept_id__in=observation_concepts)
             .values('observation_concept_id').annotate(latest=Max('observation_date'))
         )
         for row in rows:
-            for name in wanted['observation'][row['observation_concept_id']]:
+            for name in observation_concepts[row['observation_concept_id']]:
                 latest[name] = row['latest']
     for name, value in latest.items():
         entries[name]['latest_date'] = value.isoformat()

@@ -90,33 +90,21 @@ def test_a_newer_fact_without_a_value_does_not_move_the_correction_date():
     assert entry['latest_date'] == numeric.measurement_date.isoformat()
 
 
-def test_the_correction_date_uses_derivations_qualifier_rule():
+def test_the_date_follows_a_legacy_named_fact_that_supplies_the_value():
     from tests.factories import ConceptFactory
-    from omop_core.services.patient_form import _attach_latest_fact_dates
 
     person = _person_with_lab()
-    ConceptFactory(concept_code='21889-1', concept_name='Size Tumor')
-    code = Concept.objects.get(concept_code='21889-1')
+    legacy = ConceptFactory(concept_code='HGB', concept_name='Hemoglobin').concept_id
     Measurement.objects.create(
         measurement_id=next_pk(Measurement, 'measurement_id'), person=person,
-        measurement_concept=code, measurement_date=date(2026, 7, 1),
-        measurement_type_concept_id=32865, value_as_number=3)
-    Measurement.objects.create(
-        measurement_id=next_pk(Measurement, 'measurement_id'), person=person,
-        measurement_concept=code, measurement_date=date(2026, 8, 1),
-        measurement_type_concept_id=32865, value_as_number=1.5,
-        qualifier_source_value='lymph-node')
+        measurement_concept_id=legacy, measurement_date=date(2026, 7, 5),
+        measurement_type_concept_id=32865, value_as_number=12.0,
+        unit_source_value='g/dL')
     record = PatientRecord.objects.get(person=person)
-    entries = {
-        name: {'dated': True,
-               'projection': {'omop_table': 'measurement', 'concept_id': code.concept_id}}
-        for name in ('tumor_size', 'largest_lymph_node_size')
-    }
 
-    _attach_latest_fact_dates(record, entries)
+    entry = patient_form_descriptors(readable_fields={FIELD}, record=record)[FIELD]
 
-    assert entries['tumor_size']['latest_date'] == '2026-07-01'
-    assert entries['largest_lymph_node_size']['latest_date'] == '2026-08-01'
+    assert entry['latest_date'] == '2026-07-05'
 
 
 def test_a_restricted_readable_set_does_not_name_an_excluded_count():

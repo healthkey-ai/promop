@@ -4126,7 +4126,14 @@ def _latest_blood_count_measurements(snapshot):
     return selected_counts
 
 
-def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
+def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None,
+                         dates_out: dict = None) -> dict:
+    """Derive lab values; optionally record the winning fact's date per field.
+
+    ``dates_out`` lets the editor name the day the value it shows was measured
+    without re-implementing every selection rule here (legacy names, source
+    codes, FLC pairing, ANC/platelet selection).
+    """
     data = {}
     snapshot = snapshot or _build_snapshot(person)
     measurements = snapshot.measurements
@@ -4169,6 +4176,8 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
                 code_fields[code] = (field, field_casts[field])
     for field, measurement in _latest_blood_count_measurements(snapshot).items():
         data.update(blood_count_projection(field, measurement))
+        if dates_out is not None:
+            dates_out[field] = measurement.measurement_date
 
     # --- Legacy fields via exact historic concept-name matching ---
     for measurement in measurements:
@@ -4185,6 +4194,8 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
         if field_name in data:
             continue
         data[field_name] = measurement.value_as_number
+        if dates_out is not None:
+            dates_out[field_name] = measurement.measurement_date
         if measurement.unit_source_value:
             data[f'{field_name}_units'] = measurement.unit_source_value
 
@@ -4215,8 +4226,12 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
                 person.person_id, m.unit_source_value,
             )
             data[field] = Decimal(str(m.value_as_number))
+            if dates_out is not None:
+                dates_out[field] = m.measurement_date
             continue
         data[field] = canonical_flc
+        if dates_out is not None:
+            dates_out[field] = m.measurement_date
 
     # The ratio-bearing values must come from one lab event, not the newest
     # kappa and the newest lambda independently. The individual fields above
@@ -4262,9 +4277,13 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
         if field not in data:
             if code != '6690-2' or canonical_value is not None:
                 data[field] = cast(canonical_value if code == '6690-2' else m.value_as_number)
+                if dates_out is not None:
+                    dates_out[field] = m.measurement_date
         if code == '6690-2' and canonical_value is not None and 'white_blood_cell_count' not in data:
             data['white_blood_cell_count'] = canonical_value
             data['white_blood_cell_count_units'] = canonical_wbc_unit(_get_unit_system())
+            if dates_out is not None:
+                dates_out['white_blood_cell_count'] = m.measurement_date
 
     # --- New UI fields via display-name source_value (legacy/generator path) ---
     unfound = {f for (f, _) in code_fields.values() if f not in data}
@@ -4279,6 +4298,8 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
             for m in snapshot.meas_by_source.get(source_value, ()):
                 if m.value_as_number is not None:
                     data[field] = float(m.value_as_number)
+                    if dates_out is not None:
+                        dates_out[field] = m.measurement_date
                     break
 
     # --- Copy canonical values to legacy aliases (issue #471) ---
@@ -4287,6 +4308,8 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
         if value is not None:
             for alias in aliases:
                 data[alias] = _lab_alias_value(canonical, value)
+                if dates_out is not None and canonical in dates_out:
+                    dates_out[alias] = dates_out[canonical]
             data.update(_lab_alias_units(canonical, value))
 
     return data
