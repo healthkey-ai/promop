@@ -72,6 +72,44 @@ def test_the_descriptor_names_the_latest_recorded_date_for_a_dated_lab():
     assert entry['latest_date'] == '2026-08-01'
 
 
+def test_a_newer_fact_without_a_value_does_not_move_the_correction_date():
+    person = _person_with_lab()
+    concept = Concept.objects.get(concept_code=LOINC)
+    numeric = Measurement.objects.create(
+        measurement_id=next_pk(Measurement, 'measurement_id'), person=person,
+        measurement_concept=concept, measurement_date=date(2026, 7, 1),
+        measurement_type_concept_id=32865, value_as_number=12.5)
+    Measurement.objects.create(
+        measurement_id=next_pk(Measurement, 'measurement_id'), person=person,
+        measurement_concept=concept, measurement_date=date(2026, 8, 1),
+        measurement_type_concept_id=32865, value_as_number=None)
+    record = PatientRecord.objects.get(person=person)
+
+    entry = patient_form_descriptors(readable_fields={FIELD}, record=record)[FIELD]
+
+    assert entry['latest_date'] == numeric.measurement_date.isoformat()
+
+
+def test_a_restricted_readable_set_does_not_name_an_excluded_count():
+    from tests.factories import ConceptFactory
+
+    person = _person_with_lab()
+    ConceptFactory(concept_code='751-8', concept_name='Absolute neutrophil count')
+    ConceptFactory(concept_code='777-3', concept_name='Platelet count')
+    for code, value in (('751-8', 4.2), ('777-3', 150)):
+        Measurement.objects.create(
+            measurement_id=next_pk(Measurement, 'measurement_id'), person=person,
+            measurement_concept=Concept.objects.get(concept_code=code),
+            measurement_date=date(2026, 8, 1), measurement_type_concept_id=32865,
+            value_as_number=value)
+    record = PatientRecord.objects.get(person=person)
+
+    entry = patient_form_descriptors(
+        readable_fields={'anc_thousand_per_ul'}, record=record)['anc_thousand_per_ul']
+
+    assert entry['latest_date'] == '2026-08-01'
+
+
 def test_a_dated_edit_records_the_supplied_clinical_date():
     person = _person_with_lab()
 

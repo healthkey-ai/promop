@@ -223,10 +223,13 @@ def _attach_latest_fact_dates(record, entries):
             wanted[projection['omop_table']][concept_id] = name
     latest = {}
     if wanted['measurement']:
+        # Only a fact that supplies a value can be the one derivation reads:
+        # a newer undated-valued row must not move the correction target.
         rows = (
             Measurement.objects.filter(
                 person=record.person, is_erroneous=False,
-                measurement_concept_id__in=wanted['measurement'])
+                measurement_concept_id__in=wanted['measurement'],
+                value_as_number__isnull=False)
             .values('measurement_concept_id').annotate(latest=Max('measurement_date'))
         )
         for row in rows:
@@ -242,7 +245,8 @@ def _attach_latest_fact_dates(record, entries):
             rows = (
                 Measurement.objects.filter(
                     person=record.person, is_erroneous=False,
-                    measurement_source_value__in=list(source_codes))
+                    measurement_source_value__in=list(source_codes),
+                    value_as_number__isnull=False)
                 .values('measurement_source_value').annotate(latest=Max('measurement_date'))
             )
             for row in rows:
@@ -260,7 +264,7 @@ def _attach_latest_fact_dates(record, entries):
         if special & {name for name in wanted['measurement'].values()}:
             for field, measurement in _latest_blood_count_measurements(
                     _build_snapshot(record.person)).items():
-                if field in special:
+                if field in special and field in entries and entries[field].get('dated'):
                     latest[field] = measurement.measurement_date
     if wanted['observation']:
         rows = (
