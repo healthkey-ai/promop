@@ -4272,6 +4272,7 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None,
 
     loinc_ms = [m for m in measurements if m.value_as_number is not None]
     wbc_projection_blocked = False
+    wbc_blocked_date = None
     for m in loinc_ms:
         code = _measurement_code(m)
         if code not in code_fields:
@@ -4288,6 +4289,7 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None,
                 # This is the latest WBC row due to the query ordering. Do not
                 # silently substitute an older result with a known unit.
                 wbc_projection_blocked = True
+                wbc_blocked_date = m.measurement_date
                 logger.warning(
                     'WBC projections skipped for person_id=%s: unsupported or absent '
                     'unit_source_value=%r', person.person_id, m.unit_source_value,
@@ -4307,13 +4309,35 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None,
     for source_value, field in _SOURCE_VALUE_LAB_FIELDS.items():
         if field in blood_count_fields:
             continue
-        if field == 'wbc_count_thousand_per_ul' and wbc_projection_blocked:
-            continue
         if field in _FLC_FIELDS:
             continue
         for m in snapshot.meas_by_source.get(source_value, ()):
             if m.value_as_number is not None:
-                select_lab_value(field, float(m.value_as_number), m)
+                if field == 'wbc_count_thousand_per_ul':
+                    if wbc_blocked_date is not None and m.measurement_date <= wbc_blocked_date:
+                        break
+                    canonical_value = wbc_to_canonical(m.value_as_number, m.unit_source_value)
+                    if canonical_value is None:
+                        current_date = selected_dates.get(field)
+                        if current_date is None or m.measurement_date > current_date:
+                            data.pop(field, None)
+                            selected_dates.pop(field, None)
+                            data.pop('white_blood_cell_count', None)
+                            selected_dates.pop('white_blood_cell_count', None)
+                            wbc_blocked_date = m.measurement_date
+                            if dates_out is not None:
+                                dates_out.pop(field, None)
+                                dates_out.pop('white_blood_cell_count', None)
+                        break
+                    selected = select_lab_value(field, canonical_value, m)
+                    if selected:
+                        data['white_blood_cell_count'] = canonical_value
+                        data['white_blood_cell_count_units'] = canonical_wbc_unit(_get_unit_system())
+                        selected_dates['white_blood_cell_count'] = m.measurement_date
+                        if dates_out is not None:
+                            dates_out['white_blood_cell_count'] = m.measurement_date
+                else:
+                    select_lab_value(field, float(m.value_as_number), m)
                 break
 
     # --- Copy canonical values to legacy aliases (issue #471) ---

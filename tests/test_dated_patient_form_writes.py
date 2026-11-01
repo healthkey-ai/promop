@@ -147,6 +147,54 @@ def test_an_older_dated_write_is_history_across_coded_and_display_sources():
     assert float(refresh_patient_record(person).hemoglobin_g_dl) == pytest.approx(13.0)
 
 
+def test_newer_display_name_wbc_replaces_coded_value_with_normalized_pair_and_date():
+    person = _person_with_lab()
+    coded = ConceptFactory(concept_code='6690-2', concept_name='Leukocytes')
+    display_only = ConceptFactory(concept_code='LOCAL-WBC', concept_name='Imported leukocytes')
+    Measurement.objects.create(
+        measurement_id=next_pk(Measurement, 'measurement_id'), person=person,
+        measurement_concept=coded, measurement_source_value='6690-2',
+        measurement_date=date(2026, 8, 1), measurement_type_concept_id=32865,
+        value_as_number=5, unit_source_value='10*3/uL')
+    Measurement.objects.create(
+        measurement_id=next_pk(Measurement, 'measurement_id'), person=person,
+        measurement_concept=display_only, measurement_source_value=
+        'Leukocytes [#/volume] in Blood', measurement_date=date(2026, 9, 1),
+        measurement_type_concept_id=32865, value_as_number=6000,
+        unit_source_value='cells/uL')
+
+    record = refresh_patient_record(person)
+    entry = patient_form_descriptors(
+        readable_fields={'wbc_count_thousand_per_ul'}, record=record)[
+            'wbc_count_thousand_per_ul']
+
+    assert float(record.wbc_count_thousand_per_ul) == pytest.approx(6.0)
+    assert float(record.white_blood_cell_count) == pytest.approx(6.0)
+    assert entry['latest_date'] == '2026-09-01'
+
+
+def test_unsupported_newer_wbc_blocks_older_display_alias():
+    person = _person_with_lab()
+    old_concept = ConceptFactory(concept_code='LOCAL-WBC-OLD', concept_name='Old WBC')
+    new_concept = ConceptFactory(concept_code='LOCAL-WBC-NEW', concept_name='New WBC')
+    Measurement.objects.create(
+        measurement_id=next_pk(Measurement, 'measurement_id'), person=person,
+        measurement_concept=old_concept, measurement_source_value='White blood cell count',
+        measurement_date=date(2026, 8, 1), measurement_type_concept_id=32865,
+        value_as_number=5, unit_source_value='10*3/uL')
+    Measurement.objects.create(
+        measurement_id=next_pk(Measurement, 'measurement_id'), person=person,
+        measurement_concept=new_concept,
+        measurement_source_value='Leukocytes [#/volume] in Blood',
+        measurement_date=date(2026, 9, 1), measurement_type_concept_id=32865,
+        value_as_number=6000, unit_source_value='unknown')
+
+    record = refresh_patient_record(person)
+
+    assert record.wbc_count_thousand_per_ul is None
+    assert record.white_blood_cell_count is None
+
+
 def test_a_restricted_readable_set_does_not_name_an_excluded_count():
     from tests.factories import ConceptFactory
 
