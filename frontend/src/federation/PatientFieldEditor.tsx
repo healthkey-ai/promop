@@ -96,10 +96,12 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
         </Dialog.Root>
       </div>
     </> : writable ? <Field label={compact ? '' : label} name={canonical} type={control}
-      value={value} options={field.options?.map((option) => option.value)}
+      value={value} options={field.options ?? []}
       triState={field.tri_state === true} precision={precision} onChange={store.enqueue} />
       : <><div>{!compact && <span className="text-sm font-medium">{label}: </span>}{formatted}</div>
-        <p className="text-xs text-muted-foreground">{reason} {infoHref && <a href={infoHref}>Open Your Info</a>}</p></>}
+        <p className="text-xs text-muted-foreground">{reason} {infoHref && <a href={infoHref}>Open Your Info</a>} {field.retryable &&
+          <button type="button" className="underline" onClick={() => void store.load()}>Retry</button>}</p></>}
+    {field.options_note && <p role="status" className="text-xs text-muted-foreground">{field.options_note}</p>}
     {(field.unit ?? field.projection?.unit) && <span className="text-xs text-muted-foreground">{field.unit ?? field.projection?.unit}</span>}
     {writable && field.projection?.omop_table === 'measurement'
       && <p className="text-xs text-muted-foreground">This edit is recorded with today’s date.</p>}
