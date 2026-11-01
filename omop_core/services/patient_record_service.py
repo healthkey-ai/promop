@@ -4192,8 +4192,12 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None,
             ).values_list('source_code', 'target_concept_id'):
                 field = field_by_target[target_id]
                 code_fields[code] = (field, field_casts[field])
-    for field, measurement in _latest_blood_count_measurements(snapshot).items():
-        data.update(blood_count_projection(field, measurement))
+    selected_blood_counts = _latest_blood_count_measurements(snapshot)
+    blood_count_fields = set(selected_blood_counts)
+    for field, measurement in selected_blood_counts.items():
+        projected_count = blood_count_projection(field, measurement)
+        data.update(projected_count)
+        blood_count_fields.update(projected_count)
         selected_dates[field] = measurement.measurement_date
         if dates_out is not None:
             dates_out[field] = measurement.measurement_date
@@ -4204,7 +4208,7 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None,
             continue
         concept_name = measurement.measurement_concept.concept_name.casefold().strip()
         field_name = _LEGACY_LAB_CONCEPT_FIELDS.get(concept_name)
-        if not field_name:
+        if not field_name or field_name in blood_count_fields:
             continue
         if (field_name == 'hemoglobin_g_dl' and measurement.unit_source_value
                 and measurement.unit_source_value.strip().casefold() != 'g/dl'):
@@ -4273,7 +4277,7 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None,
         if code not in code_fields:
             continue
         field, cast = code_fields[code]
-        if field in _FLC_FIELDS:
+        if field in _FLC_FIELDS or field in blood_count_fields:
             continue
         canonical_value = None
         if code == '6690-2':
@@ -4301,6 +4305,8 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None,
 
     # --- New UI fields via display-name source_value (legacy/generator path) ---
     for source_value, field in _SOURCE_VALUE_LAB_FIELDS.items():
+        if field in blood_count_fields:
+            continue
         if field == 'wbc_count_thousand_per_ul' and wbc_projection_blocked:
             continue
         if field in _FLC_FIELDS:
