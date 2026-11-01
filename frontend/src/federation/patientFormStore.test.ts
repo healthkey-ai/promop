@@ -23,6 +23,53 @@ function setup() {
 beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
 
+describe('planned-therapy options from a host catalog', () => {
+  function setupCatalog(regimens: unknown) {
+    const get = vi.fn(async (url: string) => {
+      if (url.includes('writable-fields')) return { data: {
+        planned_therapies: { writable: true, target: 'patient_record', multiple: true,
+          options_source: 'therapy_regimens' } } };
+      if (url.includes('therapy-regimens')) return { data: regimens };
+      return { data: { patient_info: { person_id: 12, disease: 'Multiple Myeloma',
+        therapy_lines_count: '1' }, write_enabled: true } };
+    });
+    return new PatientFormStore({ get, patch: vi.fn() } as unknown as AxiosInstance, '/api');
+  }
+
+  it('stores the host value while showing the host label', async () => {
+    const store = setupCatalog([{ code: 'r_chop', title: 'R-CHOP', value: 'r_chop' }]);
+    await store.load();
+
+    expect(store.getSnapshot().fields.planned_therapies.options)
+      .toEqual([{ value: 'r_chop', label: 'R-CHOP' }]);
+  });
+
+  it('explains an empty catalog instead of leaving a blank picker', async () => {
+    const store = setupCatalog([]);
+    await store.load();
+
+    expect(store.getSnapshot().fields.planned_therapies.options).toEqual([]);
+    expect(store.getSnapshot().fields.planned_therapies.options_note)
+      .toMatch(/No planned therapies are available/);
+  });
+
+  it('offers a retry when the catalog request fails', async () => {
+    const get = vi.fn(async (url: string) => {
+      if (url.includes('writable-fields')) return { data: {
+        planned_therapies: { writable: true, target: 'patient_record',
+          options_source: 'therapy_regimens' } } };
+      if (url.includes('therapy-regimens')) throw new Error('catalog down');
+      return { data: { patient_info: { person_id: 12, disease: 'Multiple Myeloma' },
+        write_enabled: true } };
+    });
+    const store = new PatientFormStore({ get, patch: vi.fn() } as unknown as AxiosInstance, '/api');
+    await store.load();
+
+    expect(store.getSnapshot().fields.planned_therapies.retryable).toBe(true);
+    expect(store.getSnapshot().fields.planned_therapies.reason).toMatch(/Could not load/);
+  });
+});
+
 describe('shared patient-form queue', () => {
   it('loads caller/patient-specific descriptors and fails closed for unsupported writes', async () => {
     const { store, get, patch } = setup();

@@ -8,6 +8,10 @@ export interface FormFieldDescriptor extends FieldDescriptor {
   bindings?: string[];
   compatibility_reason?: string;
   options_source?: 'therapy_regimens';
+  /** Why a writable picker has no choices; never leave a blank panel unexplained. */
+  options_note?: string;
+  /** The choices could not be fetched; the editor offers `store.load()` again. */
+  retryable?: boolean;
 }
 export interface PatientFormSnapshot {
   values: Record<string, unknown>;
@@ -104,12 +108,16 @@ export class PatientFormStore {
             const count = values.therapy_lines_count === '3+' ? 3 : parseInt(String(values.therapy_lines_count)) || 0;
             const next = Math.max(count, ...lines.map((line: { line: number }) => line.line)) + 1;
             const round = next === 1 ? 'first_line_therapy' : next === 2 ? 'second_line_therapy' : 'later_line_therapy';
-            const regimens = await this.client.get<Array<{ title: string }>>(`${this.base}/v1/therapy-regimens/`, { params: { disease, round } });
+            const regimens = await this.client.get<Array<{ title: string; value?: string }>>(`${this.base}/v1/therapy-regimens/`, { params: { disease, round } });
             fields.planned_therapies = { ...fields.planned_therapies,
-              options: regimens.data.map((regimen) => ({ value: regimen.title })) };
+              options: regimens.data.map((regimen) => ({
+                value: regimen.value ?? regimen.title, label: regimen.title,
+              })),
+              options_note: regimens.data.length ? undefined
+                : 'No planned therapies are available for this disease and treatment line.' };
           } catch {
-            fields.planned_therapies = { ...fields.planned_therapies, writable: false,
-              reason: disease ? 'Could not load planned therapies. Retry loading the profile.' : 'Select a disease to see available therapies.' };
+            fields.planned_therapies = { ...fields.planned_therapies, writable: false, retryable: true,
+              reason: disease ? 'Could not load planned therapies.' : 'Select a disease to see available therapies.' };
           }
         }
         if (revision !== this.readRevision) return;

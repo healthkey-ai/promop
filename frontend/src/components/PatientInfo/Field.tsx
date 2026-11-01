@@ -7,14 +7,14 @@ import BooleanControl from './controls/BooleanControl';
 import MultiSelectControl from './controls/MultiSelectControl';
 import DateControl from './controls/DateControl';
 import TextNumberControl from './controls/TextNumberControl';
-import { stringsToOptions } from './utils';
+import { optionsToObjects, type OptionInput } from './utils';
 
 interface FieldProps {
   label: string;
   name: string;
   type: 'text' | 'number' | 'date' | 'select' | 'multiselect' | 'boolean' | 'email';
   value: unknown;
-  options?: string[];
+  options?: OptionInput[];
   onChange: (name: string, value: unknown) => void;
   disabled?: boolean;
   readOnly?: boolean;
@@ -38,7 +38,7 @@ export default function Field({
   precision,
 }: FieldProps) {
   const isDisabled = disabled || readOnly;
-  const optionObjects = useMemo(() => stringsToOptions(options), [options]);
+  const optionObjects = useMemo(() => optionsToObjects(options), [options]);
 
   const selectedValues = useMemo<string[]>(() => {
     const v = value;

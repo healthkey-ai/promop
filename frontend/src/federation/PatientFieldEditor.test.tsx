@@ -22,7 +22,7 @@ async function setup(extraFields = {}, extraValues = {}, writeEnabled = true) {
   } }));
   const store = new PatientFormStore({ get, patch } as unknown as AxiosInstance, '/api');
   await store.load();
-  return { store, patch };
+  return { store, patch, get };
 }
 
 describe('computed patient field input dialogs', () => {
@@ -191,5 +191,46 @@ describe.each(['readOnly', 'unwritableStore', 'unwritableField'] as const)('DOB 
     expect(container.querySelector('[data-field="date_of_birth"] > div')?.textContent).toBe(`Date of birth: ${expected}`);
     if (precision !== 'day' && value) expect(container).not.toHaveTextContent(value);
     expect(screen.queryByRole('spinbutton')).not.toBeInTheDocument();
+  });
+});
+
+describe('host-labelled options', () => {
+  it('shows the host label and writes the host value', async () => {
+    const { store, patch } = await setup({
+      planned_therapies: { label: 'Planned Therapies', writable: true, target: 'patient_record',
+        multiple: true, options: [{ value: 'r_chop', label: 'R-CHOP' }] },
+    }, { planned_therapies: '' });
+    render(<PatientFieldEditor store={store} name="planned_therapies" />);
+
+    await userEvent.click(screen.getByRole('button', { name: /Select/ }));
+    await userEvent.click(await screen.findByText('R-CHOP'));
+    await act(async () => { await store.flush(); });
+
+    expect(patch.mock.calls[0][1]).toEqual({ planned_therapies: 'r_chop' });
+  });
+
+  it('explains an empty catalog instead of rendering a bare picker', async () => {
+    const { store } = await setup({
+      planned_therapies: { label: 'Planned Therapies', writable: true, target: 'patient_record',
+        multiple: true, options: [],
+        options_note: 'No planned therapies are available for this disease and treatment line.' },
+    });
+    render(<PatientFieldEditor store={store} name="planned_therapies" />);
+
+    expect(screen.getByRole('status'))
+      .toHaveTextContent('No planned therapies are available');
+  });
+
+  it('retries a failed catalog load', async () => {
+    const { store, get } = await setup({
+      planned_therapies: { label: 'Planned Therapies', writable: false, retryable: true,
+        reason: 'Could not load planned therapies.' },
+    });
+    render(<PatientFieldEditor store={store} name="planned_therapies" />);
+    const calls = get.mock.calls.length;
+
+    await userEvent.click(screen.getByRole('button', { name: 'Retry' }));
+
+    expect(get.mock.calls.length).toBeGreaterThan(calls);
   });
 });
