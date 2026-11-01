@@ -396,6 +396,9 @@ export default function CodeMappingPage() {
   // Activity from previous runs on this tab, merged with the current run's live
   // activity so the candidates panel accumulates across Suggest clicks.
   const [accumulatedActivity, setAccumulatedActivity] = useState<CandidateActivity[]>([]);
+  // Incremented each run so SuggestCandidates can clear stale approval choices
+  // when a new run re-suggests the same mapping_id with a different concept.
+  const [suggestGeneration, setSuggestGeneration] = useState(0);
   // Which run the page is still interested in. A poll compares against this so
   // a superseded run — or an unmounted page — stops rather than setting state
   // nobody is showing.
@@ -866,6 +869,7 @@ export default function CodeMappingPage() {
     setBanner(null);
     setSuggestFlash(false);
     setSuggestRun(null);
+    setSuggestGeneration(g => g + 1);
     try {
       const activeStrategies = Object.entries(strategies)
         .filter(([, v]) => v)
@@ -887,17 +891,19 @@ export default function CodeMappingPage() {
       setSuggestRun(started);
       const finished = await pollSuggestRun(started);
       if (suggestRunRef.current !== started.run_id) return;
-      setSuggestRun(finished);
-
-      // Accumulate this run's activity so the candidates panel persists across
-      // successive Suggest clicks instead of resetting each time.
-      if (finished.activity?.length) {
-        setAccumulatedActivity(prev => [...prev, ...finished.activity!]);
-      }
+      // Clear the finished run's activity from suggestRun so events are not
+      // duplicated when merged with accumulatedActivity in the render prop.
+      setSuggestRun({ ...finished, activity: [] });
 
       if (finished.state === "failure") {
         setError(finished.error || "The suggest run failed.");
         return;
+      }
+
+      // Accumulate only successful runs so curators don't see candidates from
+      // an incomplete run mixed with good results.
+      if (finished.activity?.length) {
+        setAccumulatedActivity(prev => [...prev, ...finished.activity!]);
       }
       await refreshCurrent.current();
       announceSuggestRun(finished);
@@ -1565,6 +1571,7 @@ export default function CodeMappingPage() {
           key="suggest-candidates"
           activity={[...accumulatedActivity, ...(suggestRun?.activity ?? [])]}
           finished={!suggestRun || suggestRun.state === "success" || suggestRun.state === "failure"}
+          generation={suggestGeneration}
           canApprove={canApprove} vocabularies={reference.destination_vocabularies}
           domains={reference.domains}
           onSaved={() => { void refreshCurrent.current(); }} />}
