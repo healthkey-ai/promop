@@ -1107,11 +1107,9 @@ def build_writable_field_descriptor():
     # Only the numeric laboratory fields whose value a shared derivation selects
     # get a date control: categorical, occurrence-scoped and non-lab measurements
     # need their own winning-fact rules before an editor can correct them here.
-    from omop_core.services.clinical_input_contract import uses_dedicated_writer
     for field, entry in descriptor.items():
         projection = entry.get('projection') or {}
         if (entry.get('writable') and not projection.get('best_effort')
-                and not uses_dedicated_writer(field)
                 and field in LAB_FIELD_TO_LOINC
                 and projection.get('omop_table') == 'measurement'
                 and entry.get('value_kind') == 'number'):

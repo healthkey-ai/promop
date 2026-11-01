@@ -107,6 +107,46 @@ def test_the_date_follows_a_legacy_named_fact_that_supplies_the_value():
     assert entry['latest_date'] == '2026-07-05'
 
 
+def test_an_older_coded_result_does_not_replace_a_newer_display_name_result():
+    person = _person_with_lab()
+    coded = Concept.objects.get(concept_code=LOINC)
+    display_only = ConceptFactory(concept_code='LOCAL-HGB', concept_name='Imported hemoglobin')
+    Measurement.objects.create(
+        measurement_id=next_pk(Measurement, 'measurement_id'), person=person,
+        measurement_concept=coded, measurement_date=date(2026, 8, 1),
+        measurement_type_concept_id=32865, value_as_number=12.0,
+        unit_source_value='g/dL')
+    Measurement.objects.create(
+        measurement_id=next_pk(Measurement, 'measurement_id'), person=person,
+        measurement_concept=display_only, measurement_source_value=
+        'Hemoglobin [Mass/volume] in Blood', measurement_date=date(2026, 9, 1),
+        measurement_type_concept_id=32865, value_as_number=13.0,
+        unit_source_value='g/dL')
+
+    record = refresh_patient_record(person)
+    entry = patient_form_descriptors(
+        readable_fields={FIELD}, record=record)[FIELD]
+
+    assert float(record.hemoglobin_g_dl) == pytest.approx(13.0)
+    assert entry['latest_date'] == '2026-09-01'
+
+
+def test_an_older_dated_write_is_history_across_coded_and_display_sources():
+    person = _person_with_lab()
+    display_only = ConceptFactory(concept_code='LOCAL-HGB', concept_name='Imported hemoglobin')
+    Measurement.objects.create(
+        measurement_id=next_pk(Measurement, 'measurement_id'), person=person,
+        measurement_concept=display_only, measurement_source_value=
+        'Hemoglobin [Mass/volume] in Blood', measurement_date=date(2026, 9, 1),
+        measurement_type_concept_id=32865, value_as_number=13.0,
+        unit_source_value='g/dL')
+
+    apply_patient_form_patch(
+        person, {FIELD: {'value': 12.0, 'date': '2026-08-01'}}, allowed_fields={FIELD})
+
+    assert float(refresh_patient_record(person).hemoglobin_g_dl) == pytest.approx(13.0)
+
+
 def test_a_restricted_readable_set_does_not_name_an_excluded_count():
     from tests.factories import ConceptFactory
 
