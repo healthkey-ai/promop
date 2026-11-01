@@ -186,23 +186,6 @@ DEDICATED_WRITES = {
 }
 
 
-def _is_dated_projection(name, entry):
-    """A scalar fact whose clinical date the editor may supply.
-
-    Occurrence-shaped and JSON fields keep their dedicated authoring contract,
-    and a best-effort projection is not read back, so neither takes a date here.
-    """
-    from omop_core.services.clinical_input_contract import uses_dedicated_writer
-    projection = entry.get('projection') or {}
-    return (
-        bool(entry.get('writable'))
-        and not projection.get('best_effort')
-        and not uses_dedicated_writer(name)
-        and projection.get('omop_table') in ('measurement', 'observation')
-        and entry.get('value_kind') != 'json'
-    )
-
-
 def _attach_latest_fact_dates(record, entries):
     """Name the latest recorded date per dated field for this patient, in place.
 
@@ -237,23 +220,6 @@ def _attach_latest_fact_dates(record, entries):
         for name in measurement_names:
             if lab_dates.get(name) is not None:
                 latest[name] = lab_dates[name]
-        # A measurement derived outside the lab projection (for example the
-        # lymph-node size) still uses the write concept and its qualifier rule.
-        from omop_core.services.field_write_service import _FIELD_QUALIFIER
-        from omop_core.models import Measurement
-        for name in measurement_names - set(latest):
-            rows = Measurement.objects.filter(
-                person=record.person, is_erroneous=False,
-                measurement_concept_id=measurement_concepts[name],
-                value_as_number__isnull=False)
-            qualifier = _FIELD_QUALIFIER.get(name)
-            if name == 'tumor_size':
-                rows = rows.exclude(qualifier_source_value__iexact='lymph-node')
-            elif qualifier:
-                rows = rows.filter(qualifier_source_value__iexact=qualifier)
-            value = rows.aggregate(latest=Max('measurement_date'))['latest']
-            if value is not None:
-                latest[name] = value
     if observation_concepts:
         rows = (
             Observation.objects.filter(
@@ -328,8 +294,6 @@ def patient_form_descriptors(descriptor=None, *, readable_fields=None, writable=
         if not writable and entry.get('writable'):
             entry.update(writable=False, read_only_for_caller=True,
                          reason='Editing is not available for this patient in the current session.')
-        if _is_dated_projection(name, entry):
-            entry['dated'] = True
         result[name] = entry
     if record is not None:
         _attach_latest_fact_dates(record, result)
