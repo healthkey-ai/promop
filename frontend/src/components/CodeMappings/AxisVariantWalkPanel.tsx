@@ -15,7 +15,8 @@ export type AxisEvidenceCounts = { settled: number; hint: number; varies: number
 export type AxisEvidence = {
   codes: number; axes: Record<string, AxisEvidenceCounts>;
   codes_with_units?: number; codes_with_specimens?: number;
-  distinct_units?: Record<string, number>; distinct_specimens?: Record<string, number>;
+  distinct_units?: Record<string, number>; distinct_units_total?: number;
+  distinct_specimens?: Record<string, number>; distinct_specimens_total?: number;
 };
 export type Walk = {
   id: number; outcome: 'queued' | 'running' | 'done' | 'failed'; reason: string; rebuild_evidence: boolean;
@@ -159,13 +160,13 @@ export default function AxisVariantWalkPanel({ canApprove }: { canApprove: boole
           <ul className="mt-0.5 list-disc pl-4">
             {evidence.codes_with_units != null && <li>
               <strong>{evidence.codes_with_units.toLocaleString()}</strong> of {evidence.codes.toLocaleString()} codes have unit strings
-              {evidence.distinct_units && Object.keys(evidence.distinct_units).length > 0 &&
-                <> ({Object.keys(evidence.distinct_units).length.toLocaleString()} distinct)</>}
+              {(evidence.distinct_units_total ?? 0) > 0 &&
+                <> ({(evidence.distinct_units_total ?? 0).toLocaleString()} distinct)</>}
             </li>}
             {evidence.codes_with_specimens != null && <li>
               <strong>{evidence.codes_with_specimens.toLocaleString()}</strong> of {evidence.codes.toLocaleString()} codes have specimen types
-              {evidence.distinct_specimens && Object.keys(evidence.distinct_specimens).length > 0 &&
-                <> ({Object.keys(evidence.distinct_specimens).length.toLocaleString()} distinct)</>}
+              {(evidence.distinct_specimens_total ?? 0) > 0 &&
+                <> ({(evidence.distinct_specimens_total ?? 0).toLocaleString()} distinct)</>}
             </li>}
           </ul>
           {evidence.distinct_specimens && Object.keys(evidence.distinct_specimens).length > 0 && <details className="mt-1">

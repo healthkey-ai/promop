@@ -132,8 +132,8 @@ class Summary:
 
     def add(self, evidence):
         self.codes += 1
-        units = evidence.pop('_units', [])
-        specimens = evidence.pop('_specimens', [])
+        units = evidence.get('_units', [])
+        specimens = evidence.get('_specimens', [])
         if units:
             self.codes_with_units += 1
             for u in units:
@@ -143,6 +143,8 @@ class Summary:
             for s in specimens:
                 self.distinct_specimens[s] += 1
         for axis, found in evidence.items():
+            if not isinstance(found, dict):
+                continue
             counts = self.axes[axis]
             if found['bases']:
                 counts['settled'] += 1
@@ -153,13 +155,19 @@ class Summary:
             if found['varies']:
                 counts['varies'] += 1
 
+    #: How many distinct values ``as_dict`` keeps per counter; the rest are
+    #: only represented by the ``_total`` count.
+    TOP_N = 200
+
     def as_dict(self):
         return {
             'codes': self.codes,
             'codes_with_units': self.codes_with_units,
             'codes_with_specimens': self.codes_with_specimens,
-            'distinct_units': dict(self.distinct_units.most_common()),
-            'distinct_specimens': dict(self.distinct_specimens.most_common()),
+            'distinct_units': dict(self.distinct_units.most_common(self.TOP_N)),
+            'distinct_units_total': len(self.distinct_units),
+            'distinct_specimens': dict(self.distinct_specimens.most_common(self.TOP_N)),
+            'distinct_specimens_total': len(self.distinct_specimens),
             'axes': {axis: {
                 'settled': counts['settled'], 'hint': counts['hint'], 'varies': counts['varies'],
                 'bases': {basis: counts['bases'][basis] for basis in BASES if counts['bases'][basis]},
