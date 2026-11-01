@@ -75,12 +75,19 @@ def test_the_summary_counts_a_code_once_per_axis_and_round_trips():
     summary.add(axis_evidence.code_evidence(mapping('C'), [], []))
     data = summary.as_dict()
     assert data['codes'] == 3
+    assert data['codes_with_units'] == 2, 'A has mg/dL, B has mg/dL + mmol/L, C has none'
+    assert data['codes_with_specimens'] == 1, 'only A has a specimen'
+    assert data['distinct_units'] == {'mg/dL': 2, 'mmol/L': 1}
+    assert data['distinct_specimens'] == {'Ser': 1}
     assert data['axes']['property'] == {'settled': 1, 'hint': 1, 'varies': 1, 'bases': {'unit': 1}}
     assert data['axes']['system'] == {'settled': 1, 'hint': 0, 'varies': 0, 'bases': {'specimen': 1}}
     assert data['axes']['component'] == {'settled': 0, 'hint': 0, 'varies': 0, 'bases': {}}
     resumed = axis_evidence.Summary(data)
     resumed.add(axis_evidence.code_evidence(mapping('D'), ['g/dL'], []))
-    assert resumed.as_dict()['axes']['property'] == {'settled': 2, 'hint': 1, 'varies': 1, 'bases': {'unit': 2}}
+    resumed_data = resumed.as_dict()
+    assert resumed_data['axes']['property'] == {'settled': 2, 'hint': 1, 'varies': 1, 'bases': {'unit': 2}}
+    assert resumed_data['codes_with_units'] == 3
+    assert resumed_data['distinct_units'] == {'mg/dL': 2, 'mmol/L': 1, 'g/dL': 1}
     stale = axis_evidence.Summary({'codes': 2, 'axes': {'property': {'settled': 1, 'bases': {'bogus': 3, 'unit': 1}}}})
     assert stale.as_dict()['axes']['property']['bases'] == {'unit': 1}, 'a basis the code no longer knows is dropped'
 
