@@ -13822,12 +13822,31 @@ def _serialize_suggest_run(run, *, include_activity=False):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def code_mapping_latest_suggest_run(request):
-    """Recover the latest saved run link after navigation or a page reload."""
+    """Recover the latest saved run link after navigation or a page reload.
+
+    Optional query params:
+      source  – filter by source_vocabulary_id so the page restores the
+                right tab's run after navigation.
+      include_activity – ``1`` to inline the full activity array, so the
+                         page can seed its candidates panel without a
+                         second round-trip.
+    """
     if not _can_manage_field_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'},
                         status=status.HTTP_403_FORBIDDEN)
-    run = SuggestRun.objects.filter(direction='forward').exclude(selection__contains={'mode': 'individual'}).only('id').order_by('-created_at', '-id').first()
-    return Response({'run_id': str(run.id) if run else None})
+    qs = SuggestRun.objects.filter(direction='forward').exclude(
+        selection__contains={'mode': 'individual'},
+    )
+    source = request.query_params.get('source')
+    if source:
+        qs = qs.filter(source_vocabulary_id=source)
+    include_activity = request.query_params.get('include_activity') == '1'
+    if not include_activity:
+        qs = qs.only('id')
+    run = qs.order_by('-created_at', '-id').first()
+    if run is None:
+        return Response({'run_id': None})
+    return Response(_serialize_suggest_run(run, include_activity=include_activity))
 
 
 @api_view(['GET'])

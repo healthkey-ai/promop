@@ -2028,11 +2028,16 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
         ranking_model=ranking_model,
     )
 
+    # Attach source samples (units, basedOn) so the activity log can carry them.
+    from omop_core.services.mapping_samples import attach_source_samples
+    attach_source_samples(mappings)
+
     def report(stage, done):
         if progress is not None:
             progress(stage, done, len(mappings))
 
     def source(mapping):
+        samples = getattr(mapping, '_source_samples', None) or {}
         return {
             'mapping_id': mapping.pk,
             'source_code': mapping.source_code,
@@ -2040,6 +2045,8 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
             'source_description': mapping.source_code_description,
             'omop_table': mapping.omop_table,
             'occurrences': mapping.occurrence_count,
+            'source_units': samples.get('units', []),
+            'based_on': samples.get('based_on', []),
         }
 
     def emit(stage, **details):

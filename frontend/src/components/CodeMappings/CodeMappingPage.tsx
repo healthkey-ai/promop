@@ -554,6 +554,29 @@ export default function CodeMappingPage() {
   }, [vocabularyTabs]);
 
   const selectedVocabulary = activeVocabulary ?? browse?.selected_source ?? defaultVocabulary;
+
+  // Restore the last successful suggest run's candidates when the page loads
+  // or the vocabulary tab changes, so navigating away and back doesn't lose them.
+  useEffect(() => {
+    if (!selectedVocabulary) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data } = await api.get<{ run_id: string | null; state?: string; activity?: CandidateActivity[] }>(
+          "/v1/code-mappings/suggest-runs/latest/",
+          { params: { source: selectedVocabulary, include_activity: "1" } },
+        );
+        if (cancelled || !data.run_id) return;
+        if (data.state === "success" && data.activity?.length) {
+          setAccumulatedActivity(data.activity);
+        }
+      } catch {
+        // Best-effort restore — a failure here just means the panel starts empty.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [selectedVocabulary]);
+
   const overallTab = selectedVocabulary === OVERALL_TAB;
   // Keep the latest reviewed model visible while a newer model awaits reviews.
   const scopedAccuracy = overallTab
