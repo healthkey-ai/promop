@@ -388,7 +388,7 @@ _CONCEPTS = [
     _c(3024171,  'Respiratory rate',                                           'Measurement', 'LOINC', 'Clinical Observation', 'S', '9279-1',   date(1996, 9, 6)),
     _c(1002368,  'Sleep duration',                                             'Observation', 'LOINC', 'Clinical Observation', 'S', '93832-4',  date(2019, 12, 13)),
     _c(1002246,  'Oxygen consumption (VO2)/Body weight [Volume Rate Content]', 'Measurement', 'LOINC', 'Clinical Observation', 'S', '94122-9',  date(2019, 12, 13)),
-    _c(3031111,  'Walking distance 24 hour Calculated',                        'Measurement', 'LOINC', 'Clinical Observation', 'S', '41953-1',  date(2005, 7, 27)),
+    _c(648874,   'Distance walking or running',                                'Measurement', 'LOINC', 'Clinical Observation', 'S', '112427-0', date(2026, 2, 24)),
     _c(3032289,  'Walking speed 24 hour mean Calculated',                      'Measurement', 'LOINC', 'Clinical Observation', 'S', '41957-2',  date(2005, 7, 27)),
     _c(1761351,  'Flights climbed [#] Reporting Period',                       'Observation', 'LOINC', 'Clinical Observation', 'S', '100304-5', date(2022, 8, 8)),
     _c(1001786,  'Calories burned in unspecified time --during activity',      'Measurement', 'LOINC', 'Clinical Observation', 'S', '93819-1',  date(2019, 12, 13)),
