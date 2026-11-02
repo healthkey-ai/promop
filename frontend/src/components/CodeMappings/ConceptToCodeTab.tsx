@@ -651,6 +651,43 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
     } finally { writingRef.current = false; if (active.current) setWriting(false); onWriting(false); }
   };
 
+  // Batch reject: create a mapping row if needed (same as approve), then reject.
+  const reject = async () => {
+    if (writingRef.current || !pending.length || !canApprove) return;
+    const batch = [...pending];
+    writingRef.current = true; setWriting(true); onWriting(true); setError('');
+    const failures: string[] = [];
+    let saved = 0;
+    let written = 0;
+    try {
+      for (const [index, row] of batch.entries()) {
+        if (!active.current) break;
+        setProgress(`Rejecting ${index + 1} of ${batch.length}…`);
+        try {
+          let current = row;
+          if (current.mapping_id === null) {
+            ({ data: current } = await api.post<Source>(`/v1/concept-to-code/${concept.concept_id}/mappings/`, {
+              run_id: run?.run_id, source_vocabulary_id: row.source_vocabulary_id, source_code: row.source_code, status: 'proposed',
+            }));
+            written += 1;
+            patchRow(row, current, { replace: true });
+          }
+          const { data: updated } = await api.post<Source>(`/v1/concept-to-code/${concept.concept_id}/mappings/${current.mapping_id}/`, {
+            status: 'rejected', expected_updated_at: current.updated_at,
+          });
+          saved += 1; written += 1;
+          patchRow(row, updated, { replace: true });
+        } catch (failure) { failures.push(`${row.source_code}: ${destinationError(failure)}`); }
+      }
+      if (active.current) {
+        setProgress(`Rejected ${saved} of ${batch.length} selected mappings.`);
+        setSelected(new Set());
+        if (failures.length) setError(failures.join(' '));
+        if (written) { onSaved(); setRevision(value => value + 1); }
+      }
+    } finally { writingRef.current = false; if (active.current) setWriting(false); onWriting(false); }
+  };
+
   // Approve one axis variant from the row: its stored rows in those units are
   // re-pointed, and the row shows the server's view of every variant (#2012).
   const approveVariant = async (row: Source, variant: AxisVariant) => {
@@ -767,6 +804,8 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
     {(canApprove || (mode === 'linked' && statusCounts)) && <div className="flex flex-wrap items-center gap-3">
       {canApprove && <button className="rounded bg-slate-950 px-3 py-1.5 text-sm text-white disabled:opacity-40" disabled={busy || !pending.length}
         onClick={() => void approve()}>Approve selected ({pending.length})</button>}
+      {canApprove && <button className="rounded border border-red-300 px-3 py-1.5 text-sm text-red-800 hover:bg-red-50 disabled:opacity-40" disabled={busy || !pending.length}
+        onClick={() => void reject()}>Reject selected ({pending.length})</button>}
       {mode === 'linked' && statusCounts && <span className="text-xs text-slate-500">
         {STATUSES.reduce((sum, status) => sum + statusCounts[status], 0)} matching sources{seenOnly && zeroSeen !== undefined ? ` · ${zeroSeen} zero-Seen codes excluded` : ''}</span>}
     </div>}
