@@ -344,9 +344,57 @@ def _record_proposal(*, source_vocabulary_id, source_code, source_text,
         updates['occurrence_count'] = F('occurrence_count') + 1
     if mapping.first_seen is None:
         updates['first_seen'] = now
+    named = _name_if_unnamed(mapping, source_text)
+    if named:
+        updates['source_code_description'] = named
     SourceCodeConceptMapping.objects.filter(pk=mapping.pk).update(**updates)
-    mapping.refresh_from_db(fields=['occurrence_count', 'first_seen', 'last_seen'])
+    mapping.refresh_from_db(fields=['occurrence_count', 'first_seen', 'last_seen', 'source_code_description'])
     return mapping
+
+
+def _unnamed(name, source_code):
+    return not (name or '').strip() or name.strip() == source_code
+
+
+def _name_if_unnamed(mapping, source_text):
+    """The name a later sighting gives a code first seen without one (#2168).
+
+    The description is written when the row is created. A code first seen as
+    a bare code (no display, no text) stayed unnamed even after a later
+    import sent its name, and so did the HK concept minted for it, which is
+    named after the code (``hkp:85025`` "85025"). Returns the new
+    description, or ``''`` when the row already has one or the sighting
+    brings none. A curator's text is never replaced: only an empty
+    description, or one that repeats the code, counts as unnamed.
+    """
+    text = (source_text or '').strip()[:255]
+    if _unnamed(mapping.source_code_description, mapping.source_code) and not _unnamed(text, mapping.source_code):
+        _name_minted_concept(mapping, text)
+        return text
+    return ''
+
+
+def _name_minted_concept(mapping, name):
+    """Rename the HK concept minted for this code when it is named after the code.
+
+    Only a concept no other mapping points at: one minted from a bare code
+    can be shared by another vocabulary's identical code, and that code's
+    name is not this one.
+    """
+    concept_id = mapping.target_concept_id
+    if concept_id is None:
+        return
+    concept = Concept.objects.filter(
+        concept_id=concept_id, vocabulary_id__in=_QUARANTINE_VOCABULARIES,
+    ).first()
+    if concept is None or not _unnamed(concept.concept_name, mapping.source_code):
+        return
+    shared = SourceCodeConceptMapping.objects.filter(
+        Q(target_concept_id=concept_id) | Q(suggested_target_concept_id=concept_id),
+    ).exclude(pk=mapping.pk).exists()
+    if shared:
+        return
+    Concept.objects.filter(concept_id=concept_id).update(concept_name=name)
 
 
 def _effective_direct_mapping(*, source_vocabulary_id, source_code, concept, omop_table):
