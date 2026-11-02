@@ -452,18 +452,17 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
             facts[name] = value
     # Validate the EFFECTIVE pair, not the stored birth date alone: a PATCH
     # may submit a new DOB and a death date together (the native serializer
-    # validates the submitted pair), and a DOB correction must be checked
-    # against a death date already on the record.
-    effective_dob = record.date_of_birth
-    if 'date_of_birth' in birth_changes:
-        from omop_core.services.birth_dates import normalize_birth_date
-        effective_dob, _ = normalize_birth_date(person, birth_changes)
+    # validates the submitted pair), a DOB-only edit must be checked against a
+    # death date already on the record, and a precision-only edit changes the
+    # normalized date (month/year placeholders are not assertions).
+    from omop_core.services.birth_dates import normalize_birth_date, person_birth_values
+    dob, precision = normalize_birth_date(
+        person, birth_changes) if birth_changes else (record.date_of_birth,
+                                                      record.date_of_birth_precision)
     effective_death = direct.get('death_date', record.death_date)
-    if effective_death and effective_dob and effective_death < effective_dob:
+    if effective_death and dob and effective_death < dob:
         raise ValueError('death_date: Death date cannot precede date of birth.')
     if birth_changes:
-        from omop_core.services.birth_dates import person_birth_values
-        dob, precision = normalize_birth_date(person, birth_changes)
         for name, value in person_birth_values(dob, precision).items():
             setattr(person, name, value)
             person_changes.add(name)
