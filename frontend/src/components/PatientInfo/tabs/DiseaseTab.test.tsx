@@ -571,17 +571,17 @@ describe('DiseaseTab — descriptor-driven', () => {
     );
   });
 
-  it('shows a computed status as text, never as a control', () => {
-    // tnbc_status follows from the three receptor statuses, and the tab has
-    // always rendered it as a plain Yes/No rather than a field. Converting must
-    // not turn it into a box: it has no descriptor entry to write against.
+  it('renders the computed status from its descriptor and names the inputs', () => {
+    // tnbc_status follows from the three receptor statuses. It is rendered
+    // through ClinicalField so the shared editor can offer the source inputs;
+    // without a shared store it is still a read-only value with its reason.
     render(<DiseaseTab {...baseProps} diseaseType="breast"
       formData={{ tnbc_status: true }} />);
 
-    // "Yes" appears in several read-only displays, so anchor on the label.
-    expect(screen.getByText(/Triple Negative Status \(Computed\)/)).toBeInTheDocument();
-    expect(screen.getByText(/Automatically computed from ER, PR, and HER2/)).toBeInTheDocument();
-    expect(screen.queryByTestId('reason-tnbc_status')).not.toBeInTheDocument();
+    expect(screen.getByText('Triple Negative Status')).toBeInTheDocument();
+    expect(screen.getByTestId('reason-tnbc_status')).toHaveTextContent(
+      /Computed from estrogen_receptor_status, progesterone_receptor_status, her2_status/,
+    );
   });
 
   it('recognizes the now-stored B symptom fields', () => {
