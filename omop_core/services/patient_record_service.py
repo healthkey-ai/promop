@@ -1446,13 +1446,43 @@ _DISEASE_ALIASES = {
 }
 
 # DiseaseCategory code → canonical title used by _canonicalize_disease.
-_CATEGORY_TITLES = {
+# Hardcoded fallback for the original five categories; the dynamic lookup
+# reads DiseaseCategoryChoice and covers curator-added categories (PC, PANC, …).
+_CATEGORY_TITLES_FALLBACK = {
     'BC': 'Breast Cancer',
     'MM': 'Multiple Myeloma',
     'FL': 'Follicular Lymphoma',
     'CLL': 'Chronic Lymphocytic Leukemia',
     'MCL': 'Mantle Cell Lymphoma',
 }
+
+_category_titles_cache: dict[str, str] | None = None
+
+
+def _category_titles() -> dict[str, str]:
+    """Return {code: label} from DiseaseCategoryChoice, cached for the process.
+
+    Merges the hardcoded fallback with database rows so that the original five
+    categories always resolve even when the table is empty (e.g. test databases
+    running with --no-migrations).
+    """
+    global _category_titles_cache
+    if _category_titles_cache is not None:
+        return _category_titles_cache
+    result = dict(_CATEGORY_TITLES_FALLBACK)
+    try:
+        from omop_core.models import DiseaseCategoryChoice
+        result.update(DiseaseCategoryChoice.objects.values_list('code', 'label'))
+    except DatabaseError:
+        pass  # Table may not exist during early migrations
+    _category_titles_cache = result
+    return _category_titles_cache
+
+
+def invalidate_category_titles_cache():
+    """Call after DiseaseCategoryChoice rows change."""
+    global _category_titles_cache
+    _category_titles_cache = None
 
 
 def _canonicalize_disease(name: str) -> str:
@@ -1474,7 +1504,7 @@ def _canonicalize_disease(name: str) -> str:
         from omop_core.models import DiseaseCategoryMapping
         row = DiseaseCategoryMapping.objects.filter(disease_name__iexact=name.strip()).first()
         if row:
-            return _CATEGORY_TITLES.get(row.category, name)
+            return _category_titles().get(row.category, name)
     except DatabaseError:
         pass  # Table may not exist during early migrations
     return name
