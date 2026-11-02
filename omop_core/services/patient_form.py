@@ -196,7 +196,6 @@ FORM_LABELS = {
 }
 
 DEDICATED_WRITES = {
-    'death_date': 'Use the dedicated dated assertion workflow; the scalar form writer cannot safely author this field.',
     'relapse_count': 'Use the treatment editor that preserves therapy overrides.',
     'treatment_refractory_status': 'Use the treatment editor that preserves therapy overrides.',
 }
@@ -425,6 +424,16 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
                         and isinstance(value, (int, float)) and not isinstance(value, bool)):
                     value = Decimal(str(value))
                 direct[name] = field.clean(None if value == '' else value, record)
+                if name == 'death_date' and direct[name] is not None:
+                    # The native PATCH validates the same two rules. A death
+                    # date is an assertion about a dated event, so an unknown
+                    # date must not become today and a future date is not a
+                    # fact; a date before birth is not this person's.
+                    if direct[name] > timezone.localdate():
+                        raise ValueError('death_date: Death date cannot be in the future.')
+                    dob = record.date_of_birth
+                    if dob and direct[name] < dob:
+                        raise ValueError('death_date: Death date cannot precede date of birth.')
             except ValidationError as exc:
                 raise ValueError(f'{name}: {"; ".join(exc.messages)}') from exc
         else:
