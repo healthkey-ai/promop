@@ -671,11 +671,14 @@ def refresh_all(keys=None, batch_size=REFRESH_BATCH, on_batch=None, rebuild_evid
     """Refresh ``keys`` (default :func:`multi_unit_keys`, or :func:`evidence_keys`
     with ``rebuild_evidence``) a batch at a time.
 
-    One transaction per batch: the whole backlog in one would hold its locks
-    for minutes, and one OR over every key makes a statement the planner
-    chokes on. ``on_batch(done, refreshed, last_key)`` is called after each
-    batch, which is how the worker job records its progress and where to
-    resume. Returns the number of mappings refreshed.
+    No transaction wraps a batch: ``rebuild_unit_evidence`` auto-commits its
+    ``bulk_update`` and each ``refresh()`` runs in its own transaction (line 597
+    in ``refresh_codes``), so locks are held on one mapping at a time. A
+    per-batch transaction used to hold row locks on every mapping in the batch
+    for minutes, deadlocking against concurrent suggest, approval and lookup
+    writes (#2164). The walk is idempotent and resumable, so per-mapping
+    transactions are safe. Batches still bound the OR clause and the
+    progress callback.
     """
     if keys is None:
         if rebuild_evidence:
@@ -685,8 +688,7 @@ def refresh_all(keys=None, batch_size=REFRESH_BATCH, on_batch=None, rebuild_evid
     refreshed = 0
     for start in range(0, len(keys), batch_size):
         batch = keys[start:start + batch_size]
-        with transaction.atomic():
-            refreshed += refresh_codes(batch, rebuild_evidence=rebuild_evidence, summary=summary)
+        refreshed += refresh_codes(batch, rebuild_evidence=rebuild_evidence, summary=summary)
         if on_batch is not None:
             on_batch(start + len(batch), refreshed, batch[-1])
     return refreshed
