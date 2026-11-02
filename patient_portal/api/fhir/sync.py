@@ -119,7 +119,32 @@ def _codings(codeable):
 
 
 def _source_text(codeable):
-    """Human-readable fallback for a CodeableConcept (text or first display/code)."""
+    """Human-readable text for a CodeableConcept: its text, else any coding's
+    display, else the first code.
+
+    A display on a later coding beats a bare first code: a medication coded
+    RxNorm-first with no display but an NDC coding that has one is named, not
+    stored as "2762" (#2168).
+    """
+    if not codeable:
+        return ''
+    if codeable.get('text'):
+        return codeable['text']
+    codings = _codings(codeable)
+    for coding in codings:
+        if coding.get('display'):
+            return coding['display']
+    for coding in codings:
+        if coding.get('code'):
+            return coding['code']
+    return ''
+
+
+def _legacy_source_text(codeable):
+    """What ``_source_text`` returned before #2168: the first coding's display
+    or code, even when a later coding had a display. Rows stored under it are
+    matched under it too, so a re-sync renames them instead of adding a named
+    copy beside each one."""
     if not codeable:
         return ''
     if codeable.get('text'):
@@ -130,6 +155,14 @@ def _source_text(codeable):
         if coding.get('code'):
             return coding['code']
     return ''
+
+
+def _with_legacy_source_value(row, codeable, length=50):
+    """Mark the source value a row would have had before #2168, when it differs."""
+    legacy = _legacy_source_text(codeable)[:length]
+    if legacy != _source_text(codeable)[:length]:
+        row._legacy_source_value = legacy
+    return row
 
 
 def _norm_num(value):
@@ -649,6 +682,8 @@ class FhirSyncView(APIView):
             'cid': concept.concept_id if concept else 0,
             'vcid': interpretation_concept.concept_id if interpretation_concept else None,
             'sv': _source_text(obs.get('code'))[:50],
+            # The value rows stored before #2168 carry; matched as the same result.
+            'legacy_sv': _legacy_source_text(obs.get('code'))[:50],
             'value': qty.get('value'),
             'unit': (qty.get('unit') or qty.get('code') or '')[:50],
             'vstr': (obs.get('valueString') or _source_text(obs.get('valueCodeableConcept')) or '')[:60],
@@ -697,7 +732,9 @@ class FhirSyncView(APIView):
                 self._count_skipped(skipped, 'Observation', 'missing_effective_date')
                 continue
             keys = identities(o['date'], o['dt'], o['cid'], o['sv'], o['value'])
-            if any(key in seen for key in keys):
+            legacy_keys = (identities(o['date'], o['dt'], o['cid'], o['legacy_sv'], o['value'])
+                           if o['legacy_sv'] != o['sv'] else [])
+            if any(key in seen for key in keys + legacy_keys):
                 continue
             seen.update(keys)
             rows.append(Measurement(
@@ -743,7 +780,7 @@ class FhirSyncView(APIView):
                 # curator moved its concept; concept finds it when the producer
                 # changed its display text. Matching only one way loses a row
                 # to a duplicate in the other case.
-                match = Q(measurement_source_value=sv_key)
+                match = Q(measurement_source_value__in={sv_key, o['legacy_sv']})
                 if cid:
                     match |= Q(measurement_concept_id=cid)
                 existing_qs = Measurement.objects.filter(
@@ -834,13 +871,13 @@ class FhirSyncView(APIView):
                 self._count_skipped(skipped, 'Condition', 'missing_onset_date')
                 continue
             concept = self._lookup(cond.get('code'), cache, 'condition')
-            rows.append(ConditionOccurrence(
+            rows.append(_with_legacy_source_value(ConditionOccurrence(
                 person=person,
                 condition_concept=concept or no_match,
                 condition_start_date=start,
                 condition_type_concept=ehr_type,
                 condition_source_value=_source_text(cond.get('code'))[:50],
-            ))
+            ), cond.get('code')))
         return self._upsert_clinical(
             ConditionOccurrence, 'condition_occurrence_id', 'condition_concept_id',
             'condition_start_date', 'condition_source_value', person, rows, source_user_id, org)
@@ -861,14 +898,14 @@ class FhirSyncView(APIView):
                 continue
             codeable = med.get('medicationCodeableConcept')
             concept = self._lookup(codeable, cache, 'drug_exposure')
-            rows.append(DrugExposure(
+            rows.append(_with_legacy_source_value(DrugExposure(
                 person=person,
                 drug_concept=concept or no_match,
                 drug_exposure_start_date=start,
                 drug_exposure_end_date=_parse_date((med.get('effectivePeriod') or {}).get('end')),
                 drug_type_concept=ehr_type,
                 drug_source_value=_source_text(codeable)[:50],
-            ))
+            ), codeable))
         return self._upsert_clinical(
             DrugExposure, 'drug_exposure_id', 'drug_concept_id',
             'drug_exposure_start_date', 'drug_source_value', person, rows, source_user_id, org)
@@ -882,14 +919,14 @@ class FhirSyncView(APIView):
                 self._count_skipped(skipped, 'Procedure', 'missing_performed_date')
                 continue
             concept = self._lookup(proc.get('code'), cache, 'procedure')
-            rows.append(ProcedureOccurrence(
+            rows.append(_with_legacy_source_value(ProcedureOccurrence(
                 person=person,
                 procedure_concept=concept or no_match,
                 procedure_date=date,
                 procedure_datetime=_parse_datetime(proc.get('performedDateTime')),
                 procedure_type_concept=ehr_type,
                 procedure_source_value=_source_text(proc.get('code'))[:50],
-            ))
+            ), proc.get('code')))
         return self._upsert_clinical(
             ProcedureOccurrence, 'procedure_occurrence_id', 'procedure_concept_id',
             'procedure_date', 'procedure_source_value', person, rows, source_user_id, org)
@@ -903,14 +940,14 @@ class FhirSyncView(APIView):
                 self._count_skipped(skipped, 'Immunization', 'missing_occurrence_date')
                 continue
             concept = self._lookup(imm.get('vaccineCode'), cache, 'drug_exposure')
-            rows.append(DrugExposure(
+            rows.append(_with_legacy_source_value(DrugExposure(
                 person=person,
                 drug_concept=concept or no_match,
                 drug_exposure_start_date=date,
                 drug_type_concept=ehr_type,
                 drug_source_value=_source_text(imm.get('vaccineCode'))[:50],
                 route_source_value='VACCINE',
-            ))
+            ), imm.get('vaccineCode')))
         return self._upsert_clinical(
             DrugExposure, 'drug_exposure_id', 'drug_concept_id',
             'drug_exposure_start_date', 'drug_source_value', person, rows, source_user_id, org)
@@ -944,7 +981,7 @@ class FhirSyncView(APIView):
                                     'missing_effective_date')
                 continue
             concept = self._lookup(item['code'], cache, 'observation')
-            rows.append(Observation(
+            rows.append(_with_legacy_source_value(Observation(
                 person=person,
                 observation_concept=concept or no_match,
                 observation_date=date,
@@ -954,7 +991,7 @@ class FhirSyncView(APIView):
                 observation_source_value=_source_text(item['code'])[:50],
                 qualifier_source_value=item.get('qualifier'),
                 value_source_value=item.get('value_source'),
-            ))
+            ), item['code']))
         return self._upsert_clinical(
             Observation, 'observation_id', 'observation_concept_id',
             'observation_date', 'observation_source_value', person, rows, source_user_id, org)
@@ -1097,6 +1134,13 @@ class FhirSyncView(APIView):
                 scope = dict(zip(event_fields, key[2:]))
                 existing = list(with_attribution(model.objects.filter(**{
                     'person': person, sv_field: sv, date_field: date, **scope})).order_by(pk_field))
+                legacy = getattr(inst, '_legacy_source_value', None)
+                renamed = False
+                if not existing and legacy:
+                    # Stored before #2168 under the bare code: the same event.
+                    existing = list(with_attribution(model.objects.filter(**{
+                        'person': person, sv_field: legacy, date_field: date, **scope})).order_by(pk_field))
+                    renamed = bool(existing)
                 if not existing:
                     new_rows.append(inst)
                     continue
@@ -1106,12 +1150,17 @@ class FhirSyncView(APIView):
                     ProvenanceRecord.objects.filter(
                         content_type=ct, object_id__in=extra_ids).delete()
                     model.objects.filter(**{f'{pk_field}__in': extra_ids}).delete()
+                changed = []
+                if renamed:
+                    setattr(keep, sv_field, sv)
+                    changed.append(sv_field)
                 if getattr(keep, cid_field) != getattr(inst, cid_field):
                     setattr(keep, cid_field, getattr(inst, cid_field))
+                    changed.append(cid_field)
+                if changed:
                     keep._skip_patient_record_refresh = True
-                    keep.save(update_fields=[cid_field])
-                    touched.append(getattr(keep, pk_field))
-                elif extras:
+                    keep.save(update_fields=changed)
+                if changed or extras:
                     touched.append(getattr(keep, pk_field))
             inserted = self._bulk_insert(model, pk_field, new_rows, source_user_id, person, org)
         return touched + inserted
