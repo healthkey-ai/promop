@@ -833,47 +833,16 @@ def _attestation_source(request, person):
 
 
 def _write_record_revisions(patient_record, previous_values, request):
-    """Persist field-level revision-history rows for a PatientRecord update.
-
-    PHR-S FM TI.1.2#04. ``previous_values`` maps field name -> value BEFORE the
-    update (as captured by the PATCH path). We compare against the freshly saved
-    instance and write one RecordRevision per field whose value actually
-    changed, so a record's contents can be reconstructed over time.
-
-    Returns the list of created RecordRevision instances.
-    """
-    from omop_core.models import RecordRevision
-
-    def _norm(v):
-        # Normalize to a stable string form for storage + comparison.
-        return None if v is None else str(v)
+    """Persist field-level revision-history rows for a PatientRecord update."""
+    from omop_core.services.patient_record_revisions import write_record_revisions
 
     user = getattr(request, 'user', None)
     changed_by = (
         str(user.pk) if getattr(user, 'is_authenticated', False) and user.pk is not None
         else 'system'
     )
-
-    patient_record.refresh_from_db()
-    rows = []
-    for field, old in previous_values.items():
-        # Resolve the new value the same way the PATCH path captured the old one
-        # (FK fields are stored/compared via their {field}_id attribute).
-        fk_id = f'{field}_id'
-        new = getattr(patient_record, fk_id, None) if hasattr(patient_record, fk_id) else getattr(patient_record, field, None)
-        old_s, new_s = _norm(old), _norm(new)
-        if old_s == new_s:
-            continue
-        rows.append(RecordRevision(
-            patient_record=patient_record,
-            changed_by=changed_by,
-            field=field,
-            old_value=old_s,
-            new_value=new_s,
-        ))
-    if rows:
-        RecordRevision.objects.bulk_create(rows)
-    return rows
+    return write_record_revisions(
+        patient_record, previous_values, changed_by=changed_by)
 
 
 def _delete_omop_clinical_rows(person):
@@ -5688,8 +5657,14 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
             # cannot be told apart from a clinical one, and projecting could
             # overwrite today's clinical answer. Keep the PatientRecord answer
             # and skip the best-effort side effect instead.
+            actor = getattr(request, 'user', None)
+            changed_by = (
+                str(actor.pk) if getattr(actor, 'is_authenticated', False)
+                and actor.pk is not None else 'system'
+            )
             record, result = apply_patient_form_patch(
                 person, request.data, authorship=authorship, patient_author=patient_author,
+                changed_by=changed_by,
             )
         except ValueError as exc:
             return Response({'detail': str(exc)}, status=400)
