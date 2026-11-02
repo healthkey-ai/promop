@@ -153,15 +153,19 @@ def patient_unit_evidence(mappings, totals=None):
         by_key[(m.source_vocabulary_id, m.source_code)].append(m)
     recorded = defaultdict(Counter)
     people = defaultdict(lambda: defaultdict(set))
+    # Include the person's org so scoped mappings can count their own patients
+    # in the same pass, without a separate query (#2164).
     rows = (PatientSourceCode.objects.filter(match)
             .values_list('source_vocabulary_id', 'source_value', 'omop_table', 'source_unit',
-                         'source_unit_override', 'person_id')
+                         'source_unit_override', 'person_id',
+                         'person__patient_record__organization_id')
             .annotate(records=Sum('occurrence_count')))
-    for vocab, code, table, unit, override, person_id, records in rows:
+    for vocab, code, table, unit, override, person_id, person_org, records in rows:
         if totals is not None:
             for m in by_key.get((vocab, code), ()):
                 if not m.omop_table or m.omop_table == table:
-                    totals[m.pk] = totals.get(m.pk, 0) + max(0, records or 0)
+                    if m.organization_id is None or m.organization_id == person_org:
+                        totals[m.pk] = totals.get(m.pk, 0) + max(0, records or 0)
         # Spellings that normalize to one unit are one unit, and a person seen
         # in two spellings is one person.
         normalized = unit_code(override if override is not None else unit)
@@ -184,6 +188,7 @@ def patient_unit_evidence(mappings, totals=None):
     return entries, counts
 
 
+
 def rebuild_unit_evidence(mappings):
     """Store each mapping's unit evidence as its own patient data says (#2043).
 
@@ -193,9 +198,8 @@ def rebuild_unit_evidence(mappings):
     text term's lookups) are kept. A code with no patient data here gets no
     units. Returns ``(changed, counts)``: how many mappings changed, and each
     mapping's unit Counter as the stored evidence now reads, for the variant
-    refresh that follows. The Seen count of a global mapping is set from
-    the same rows; :func:`rebuild_seen_counts` sets every mapping's, scoped
-    ones included, in one pass before the walk (#2121).
+    refresh that follows. The Seen count is set from the same rows for every
+    mapping in the batch, one row at a time (#2121, #2164).
     """
     from omop_core.models import SourceCodeConceptMapping
     from omop_core.services.mapping_unit_consistency import _imported_unit_counts
@@ -211,10 +215,9 @@ def rebuild_unit_evidence(mappings):
         # The Seen count is the per-patient rows' total, every row whether or
         # not it carries a unit (#2110, #2121), never the merged inventory or
         # text-term counts, which are the inflated values this corrects. No
-        # rows here leaves the count as it is. A hospital-scoped row counts
-        # only its hospital's patients, which :func:`rebuild_seen_counts`
-        # does for every code before the walk; this pass leaves it alone.
-        psc_total = totals.get(m.pk, 0) if m.organization_id is None else 0
+        # rows here leaves the count as it is. Hospital-scoped mappings get
+        # their org's total from the same query that gathered units (#2164).
+        psc_total = totals.get(m.pk, 0)
         if (m.source_unit_evidence or []) != rebuilt:
             m.source_unit_evidence = rebuilt
             dirty.add(m.pk)
@@ -227,7 +230,10 @@ def rebuild_unit_evidence(mappings):
             update_fields.add('occurrence_count')
     if dirty:
         to_flush = [m for m in mappings if m.pk in dirty]
-        SourceCodeConceptMapping.objects.bulk_update(to_flush, list(update_fields), batch_size=500)
+        # batch_size=1: each row is an autocommitted UPDATE, so the lock is
+        # held for microseconds and cannot deadlock against concurrent suggest,
+        # approval or lookup writes (#2164).
+        SourceCodeConceptMapping.objects.bulk_update(to_flush, list(update_fields), batch_size=1)
     _store_fhir_codings(mappings)
     return len(dirty), counts
 
@@ -671,18 +677,17 @@ def refresh_all(keys=None, batch_size=REFRESH_BATCH, on_batch=None, rebuild_evid
     """Refresh ``keys`` (default :func:`multi_unit_keys`, or :func:`evidence_keys`
     with ``rebuild_evidence``) a batch at a time.
 
-    No transaction wraps a batch: ``rebuild_unit_evidence`` auto-commits its
-    ``bulk_update`` and each ``refresh()`` runs in its own transaction (line 597
-    in ``refresh_codes``), so locks are held on one mapping at a time. A
-    per-batch transaction used to hold row locks on every mapping in the batch
-    for minutes, deadlocking against concurrent suggest, approval and lookup
-    writes (#2164). The walk is idempotent and resumable, so per-mapping
-    transactions are safe. Batches still bound the OR clause and the
+    No transaction wraps a batch: ``rebuild_unit_evidence`` auto-commits one
+    UPDATE per mapping and each ``refresh()`` runs in its own transaction, so
+    locks are held on one mapping at a time for microseconds. A per-batch
+    transaction used to hold row locks on every mapping in the batch for
+    minutes, deadlocking against concurrent suggest, approval and lookup writes
+    (#2164). The walk is idempotent and resumable, so per-mapping transactions
+    are safe. Seen counts are set per mapping inside ``rebuild_unit_evidence``,
+    not in a separate bulk pass. Batches still bound the OR clause and the
     progress callback.
     """
     if keys is None:
-        if rebuild_evidence:
-            rebuild_seen_counts()
         keys = evidence_keys() if rebuild_evidence else multi_unit_keys()
     keys = sorted(keys, key=key_text)
     refreshed = 0
