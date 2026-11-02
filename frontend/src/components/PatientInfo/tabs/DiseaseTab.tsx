@@ -66,13 +66,7 @@ function BreastCancerSection({ formData, onChange }: Omit<Props, 'diseaseType'>)
           <ClinicalField label="HR Status" name="hr_status" descriptor={descriptors.hr_status} type="select" value={formData?.hr_status} options={HR_OPTIONS} onChange={onChange} vocabSource={hrSource} />
           <ClinicalField label="HRD Status" name="hrd_status" descriptor={descriptors.hrd_status} type="select" value={formData?.hrd_status} options={HRD_OPTIONS} onChange={onChange} vocabSource={hrdSource} />
           <ClinicalField label="Androgen Receptor Status" name="androgen_receptor_status" descriptor={descriptors.androgen_receptor_status} type="select" value={formData?.androgen_receptor_status} options={ER_OPTIONS} onChange={onChange} />
-          <div className="space-y-1.5">
-            <label className="text-sm font-medium text-portal-text-primary">Triple Negative Status (Computed)</label>
-            <div className="flex h-9 w-full items-center rounded-md border border-input bg-portal-bg-secondary px-3 py-2 text-sm text-portal-text-tertiary">
-              {formData?.tnbc_status ? 'Yes' : 'No'}
-            </div>
-            <p className="text-xs text-portal-text-tertiary">Automatically computed from ER, PR, and HER2 status</p>
-          </div>
+          <ClinicalField label="Triple Negative Status" name="tnbc_status" descriptor={descriptors.tnbc_status} type="boolean" value={formData?.tnbc_status} onChange={onChange} />
         </div>
       </Section>
 

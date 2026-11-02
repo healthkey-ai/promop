@@ -44,6 +44,7 @@ DISEASE_FIELDS: dict[str, frozenset[str]] = {
         'oncotype_dx_score', 'test_methodology', 'test_date', 'test_specimen_type',
         'report_interpretation', 'lymph_node_status', 'metastasis_status',
         'pd_l1_combined_positive_score', 'pd_l1_ic_percentage', 'pd_l1_assay',
+        'tnbc_status',
     }),
     'FL': frozenset({
         'stage', 'tumor_grade', 'bulky_disease',

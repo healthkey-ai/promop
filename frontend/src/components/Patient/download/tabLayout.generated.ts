@@ -258,6 +258,10 @@ export const TAB_LAYOUT: TabLayout = {
         [
           "Androgen Receptor Status",
           "androgen_receptor_status"
+        ],
+        [
+          "Triple Negative Status",
+          "tnbc_status"
         ]
       ]
     },

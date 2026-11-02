@@ -179,6 +179,22 @@ COMPATIBILITY_GATES = {
     'high_risk_mcl_criteria': 'The complete MCL result and source-field bindings require review. '
                               'Its navigable inputs remain editable; the result is not.',
 }
+# Reviewed patient-facing labels and units for fields whose model verbose_name
+# is not the label a patient should read, or where the unit belongs beside the
+# control instead of in a separate companion field. The native tabs already use
+# these; the shared form must agree with them, including inside computed
+# subforms (MIPI, #4559).
+FORM_LABELS = {
+    'ldh_u_l': ('LDH', 'U/L'),
+    'ldh_upper_limit_normal': ('LDH upper limit of normal', 'U/L'),
+    'wbc_count_thousand_per_ul': ('WBC count', '10³/µL'),
+    'ecog_performance_status': ('ECOG performance status', None),
+    'ki67_proliferation_index': ('Ki-67 proliferation index', '%'),
+    'mipi_risk': ('MIPI Risk', None),
+    'mipi_c_risk': ('MIPI-C Risk', None),
+    'date_of_birth': ('Date of birth', None),
+}
+
 DEDICATED_WRITES = {
     'death_date': 'Use the dedicated dated assertion workflow; the scalar form writer cannot safely author this field.',
     'relapse_count': 'Use the treatment editor that preserves therapy overrides.',
@@ -251,9 +267,12 @@ def patient_form_descriptors(descriptor=None, *, readable_fields=None, writable=
             'kind': 'computed', 'writable': False, 'reason': 'Computed result; edit its source inputs.',
         })
         field = model_fields.get(name)
-        entry['label'] = entry.get('label') or (
+        reviewed_label, reviewed_unit = FORM_LABELS.get(name, (None, None))
+        entry['label'] = reviewed_label or entry.get('label') or (
             str(field.verbose_name).replace('_', ' ').capitalize() if field
             else name.replace('_', ' ').capitalize())
+        if reviewed_unit and not entry.get('unit'):
+            entry['unit'] = reviewed_unit
         entry['bindings'] = FIELD_BINDINGS.get(name, [])
         kind = field.get_internal_type() if field else ''
         entry['control'] = ('boolean' if kind == 'BooleanField' else 'number'

@@ -176,13 +176,31 @@ describe('TreatmentTab - authoring a line', () => {
   });
 
   it('opens the dialog prefilled with the next line number', async () => {
-    // Three lines on record means the next one is the fourth.
-    renderTab({ ...THREE_LINES, person_id: 262 });
+    // The two structured lines on record mean the next one is the third.
+    renderTab({ ...THREE_LINES, person_id: 262, lines_of_therapy: STRUCTURED_LINES });
     await waitFor(() => expect(mockGet).toHaveBeenCalled());
 
     fireEvent.click(screen.getByRole('button', { name: /add therapy line/i }));
     await waitFor(() => expect(screen.getByRole('dialog')).toBeInTheDocument());
-    expect(screen.getByLabelText(/line number/i)).toHaveValue(4);
+    expect(screen.getByLabelText(/line number/i)).toHaveValue(3);
+  });
+
+  it('starts at line 1 when the count has no line rows to edit', async () => {
+    // An imported patient can carry therapy_lines_count=1 with an empty
+    // lines_of_therapy; the authoring dialog must not start at 2 (#1969).
+    renderTab({ ...THREE_LINES, therapy_lines_count: 1, disease: 'C3242',
+      person_id: 262, lines_of_therapy: [] });
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+
+    // The authoring default is row-based, but the planned-regimen catalog
+    // still reads the derived count: one line given means second-line next.
+    expect(mockGet).toHaveBeenCalledWith('/v1/therapy-regimens/', {
+      params: { disease: 'C3242', round: 'second_line_therapy' },
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /add therapy line/i }));
+    await waitFor(() => expect(screen.getByRole('dialog')).toBeInTheDocument());
+    expect(screen.getByLabelText(/line number/i)).toHaveValue(1);
   });
 
   it('opens an existing line for editing', async () => {
