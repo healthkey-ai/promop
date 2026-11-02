@@ -716,7 +716,7 @@ export default function CodeMappingPage() {
     void loadGroup(entry, section);
   }, [expandedGroups, loadGroup]);
 
-  const runGroupJob = async (entry: GroupEntry, action: "suggest" | "approve", section: MappingSection) => {
+  const runGroupJob = async (entry: GroupEntry, action: "suggest" | "approve" | "reject", section: MappingSection) => {
     const key = expansionKey(entry, section);
     if (action !== "suggest" && !window.confirm(
       `${action === "approve" ? "Approve" : "Reject"} ${entry.proposed.toLocaleString()} still-proposed code(s) in this label group?`,
@@ -1234,7 +1234,13 @@ export default function CodeMappingPage() {
                               Approve {entry.proposed.toLocaleString()}
                             </button>
                           )}
-
+                          {canApprove && (
+                            <button type="button" disabled={groupRunning === cacheKey}
+                              onClick={() => void runGroupJob(entry, "reject", section)}
+                              className="rounded border border-red-300 px-2 py-1 text-xs text-red-800 hover:bg-red-50 disabled:opacity-50">
+                              Reject {entry.proposed.toLocaleString()}
+                            </button>
+                          )}
                         </div>
                       )}
                     </td>
