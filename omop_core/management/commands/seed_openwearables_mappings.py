@@ -31,6 +31,7 @@ OPENWEARABLES_METRICS = [
     # ── Blood & Respiratory ─────────────────────────────────────────────
     ('oxygen_saturation', 'Oxygen saturation (SpO2)', '%', 'Measurement', 'LOINC', '59408-5'),
     ('blood_glucose', 'Blood glucose', 'mg/dL', 'Measurement', 'LOINC', '2339-0'),
+    ('cgm_glucose', 'CGM glucose (interstitial fluid)', 'mg/dL', 'Measurement', 'LOINC', '99504-3'),
     ('blood_pressure_systolic', 'Systolic blood pressure', 'mmHg', 'Measurement', 'LOINC', '8480-6'),
     ('blood_pressure_diastolic', 'Diastolic blood pressure', 'mmHg', 'Measurement', 'LOINC', '8462-4'),
     ('respiratory_rate', 'Respiratory rate', 'breaths/min', 'Measurement', 'LOINC', '9279-1'),
@@ -40,7 +41,7 @@ OPENWEARABLES_METRICS = [
     ('forced_vital_capacity', 'Forced vital capacity (FVC)', 'L', 'Measurement', 'LOINC', '19868-9'),
     ('forced_expiratory_volume_1', 'Forced expiratory volume in 1s (FEV1)', 'L', 'Measurement', 'LOINC', '20150-9'),
     ('peak_expiratory_flow_rate', 'Peak expiratory flow rate (PEFR)', 'L/min', 'Measurement', 'LOINC', '19935-6'),
-    ('breathing_disturbance_index', 'Breathing disturbance index', 'score', 'Measurement', None, None),
+    ('breathing_disturbance_index', 'Breathing disturbance index', '/h', 'Measurement', 'LOINC', '90566-1'),
 
     # ── Body Composition ────────────────────────────────────────────────
     ('height', 'Body height', 'cm', 'Measurement', 'LOINC', '8302-2'),
@@ -50,8 +51,8 @@ OPENWEARABLES_METRICS = [
     ('lean_body_mass', 'Lean body mass', 'kg', 'Measurement', 'LOINC', '88334-8'),
     ('body_temperature', 'Body temperature', '\u00b0C', 'Measurement', 'LOINC', '8310-5'),
     ('skin_temperature', 'Skin temperature', '\u00b0C', 'Measurement', 'LOINC', '39106-0'),
-    ('waist_circumference', 'Waist circumference', 'cm', 'Measurement', 'LOINC', '56086-2'),
-    ('body_fat_mass', 'Body fat mass', 'kg', 'Measurement', None, None),
+    ('waist_circumference', 'Waist circumference', 'cm', 'Measurement', 'LOINC', '8280-0'),
+    ('body_fat_mass', 'Body fat mass', 'kg', 'Measurement', 'LOINC', '73708-0'),
     ('skeletal_muscle_mass', 'Skeletal muscle mass', 'kg', 'Measurement', None, None),
     ('skin_temperature_deviation', 'Skin temperature deviation from baseline', '\u00b0C', 'Measurement', None, None),
     ('skin_temperature_trend_deviation', 'Skin temperature trend deviation', '\u00b0C', 'Measurement', None, None),
@@ -59,12 +60,12 @@ OPENWEARABLES_METRICS = [
     # ── Fitness Metrics ─────────────────────────────────────────────────
     ('vo2_max', 'VO2 max', 'mL/kg/min', 'Measurement', 'LOINC', '94122-9'),
     ('six_minute_walk_test_distance', '6-minute walk test distance', 'm', 'Measurement', 'LOINC', '64098-7'),
-    ('cardiovascular_age', 'Cardiovascular age estimate', 'years', 'Measurement', None, None),
+    ('cardiovascular_age', 'Cardiovascular age estimate', 'years', 'Measurement', 'HK-Wearable', 'HK-WEAR-OW-CARDIO-AGE'),
 
     # ── Activity — Basic ────────────────────────────────────────────────
     ('steps', 'Steps', 'count', 'Observation', 'LOINC', '55423-8'),
     ('energy', 'Active energy burned', 'kcal', 'Measurement', 'LOINC', '93819-1'),
-    ('basal_energy', 'Basal energy expenditure', 'kcal', 'Measurement', None, None),
+    ('basal_energy', 'Basal energy expenditure', 'kcal', 'Measurement', 'HK-Wearable', 'HK-WEAR-BASAL-ENERGY'),
     ('stand_time', 'Stand time', 'min', 'Observation', None, None),
     ('exercise_time', 'Exercise time', 'min', 'Observation', 'LOINC', '55411-3'),
     ('physical_effort', 'Physical effort score', 'score', 'Observation', None, None),
@@ -73,11 +74,11 @@ OPENWEARABLES_METRICS = [
     ('active_time', 'Active time', 'min', 'Observation', None, None),
 
     # ── Activity — Distance ─────────────────────────────────────────────
-    ('distance_walking_running', 'Walking + running distance', 'm', 'Measurement', 'LOINC', '41953-1'),
-    ('distance_cycling', 'Cycling distance', 'm', 'Measurement', None, None),
-    ('distance_swimming', 'Swimming distance', 'm', 'Measurement', None, None),
-    ('distance_downhill_snow_sports', 'Downhill snow sports distance', 'm', 'Measurement', None, None),
-    ('distance_other', 'Other activity distance', 'm', 'Measurement', None, None),
+    ('distance_walking_running', 'Walking + running distance', 'm', 'Measurement', 'LOINC', '112427-0'),
+    ('distance_cycling', 'Cycling distance', 'm', 'Measurement', 'LOINC', '93818-3'),
+    ('distance_swimming', 'Swimming distance', 'm', 'Measurement', 'LOINC', '93816-7'),
+    ('distance_downhill_snow_sports', 'Downhill snow sports distance', 'm', 'Measurement', 'LOINC', '103208-5'),
+    ('distance_other', 'Other activity distance', 'm', 'Measurement', 'LOINC', '103208-5'),
 
     # ── Activity — Walking Metrics ──────────────────────────────────────
     ('walking_step_length', 'Walking step length', 'cm', 'Measurement', None, None),
@@ -106,7 +107,7 @@ OPENWEARABLES_METRICS = [
     ('power', 'Power output', 'W', 'Measurement', None, None),
     ('speed', 'Speed', 'm/s', 'Measurement', None, None),
     ('workout_effort_score', 'Workout effort score', 'score', 'Observation', None, None),
-    ('estimated_workout_effort_score', 'Estimated workout effort score', 'score', 'Observation', None, None),
+    ('estimated_workout_effort_score', 'Estimated workout effort score', 'score', 'Observation', 'HK-Wearable', 'HK-WEAR-OW-WORKOUT-EFFORT'),
 
     # ── Environmental ───────────────────────────────────────────────────
     ('environmental_audio_exposure', 'Environmental audio exposure', 'dB', 'Observation', None, None),
@@ -118,14 +119,14 @@ OPENWEARABLES_METRICS = [
     ('inhaler_usage', 'Inhaler usage', 'count', 'Observation', None, None),
     ('weather_temperature', 'Weather temperature', '\u00b0C', 'Observation', None, None),
     ('weather_humidity', 'Weather humidity', '%', 'Observation', None, None),
-    ('elevation', 'Elevation', 'm', 'Measurement', None, None),
+    ('elevation', 'Elevation', 'm', 'Measurement', 'LOINC', '41905-1'),
     ('latitude', 'Latitude', '\u00b0', 'Observation', None, None),
     ('longitude', 'Longitude', '\u00b0', 'Observation', None, None),
     ('air_temperature', 'Air temperature', '\u00b0C', 'Observation', None, None),
 
     # ── Provider-Specific — Garmin ──────────────────────────────────────
     ('garmin_stress_level', 'Stress level (Garmin)', 'score', 'Observation', None, None),
-    ('garmin_skin_temperature', 'Skin temperature deviation (Garmin)', '\u00b0C', 'Measurement', None, None),
+    ('garmin_skin_temperature', 'Skin temperature deviation (Garmin)', '\u00b0C', 'Measurement', 'LOINC', '39106-0'),
     ('garmin_fitness_age', 'Fitness age (Garmin)', 'years', 'Measurement', None, None),
     ('garmin_body_battery', 'Body battery (Garmin)', '%', 'Observation', None, None),
 
@@ -155,20 +156,20 @@ class Command(BaseCommand):
     def handle(self, **options):
         dry_run = options['dry_run']
 
-        # Collect all target codes that need concept lookup.
-        loinc_codes = set()
+        # Collect all target codes that need concept lookup, grouped by vocab.
+        vocab_codes: dict[str, set[str]] = {}
         for _code, _name, _unit, _domain, t_vocab, t_code in OPENWEARABLES_METRICS:
-            if t_vocab == 'LOINC' and t_code:
-                loinc_codes.add(t_code)
+            if t_vocab and t_code:
+                vocab_codes.setdefault(t_vocab, set()).add(t_code)
 
         # Batch-resolve OMOP concepts from the concept table.
         concepts = {}
-        if loinc_codes:
+        for vocab, codes in vocab_codes.items():
             for c in Concept.objects.filter(
-                vocabulary_id='LOINC',
-                concept_code__in=loinc_codes,
+                vocabulary_id=vocab,
+                concept_code__in=codes,
             ).only('concept_id', 'concept_code', 'vocabulary_id'):
-                concepts[('LOINC', c.concept_code)] = c
+                concepts[(vocab, c.concept_code)] = c
 
         created = existed = unresolved = 0
         with transaction.atomic():

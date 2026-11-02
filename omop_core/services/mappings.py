@@ -290,7 +290,7 @@ WEARABLE_CONCEPT_CODE = {
     'respiratory_rate':   '9279-1',    # Respiratory rate
     'sleep_duration':     '93832-4',   # Sleep duration
     'vo2_max':            '94122-9',   # Oxygen consumption (VO2)/Body weight
-    'distance':           '41953-1',   # Walking distance 24 hour Calculated
+    'distance':           '112427-0',  # Distance walking or running
     'walking_speed':      '41957-2',   # Walking speed 24 hour mean Calculated
     'walking_step_length': 'HK-WEAR-STEP-LENGTH',        # no LOINC equivalent
     'walking_double_support_pct': 'HK-WEAR-DBL-SUPPORT',  # no LOINC equivalent
