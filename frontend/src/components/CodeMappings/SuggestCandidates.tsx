@@ -49,6 +49,10 @@ export type CandidateActivity = {
   alternatives?: Alternative[];
   ranking_timings?: Record<string, number>;
   omop_table?: string;
+  /** Observed source units for this code. */
+  source_units?: string[];
+  /** FHIR basedOn display labels for this code. */
+  based_on?: string[];
   /** What the source settles on each LOINC axis (ranked/result events). */
   source_axes?: SourceAxes;
   /** Candidates hidden because they conflict with a settled source axis. */
@@ -335,11 +339,18 @@ export default function SuggestCandidates({ activity, finished, generation, onSa
         const choice = choices[mappingId];
         const canAct = !choice?.approved && !result?.dry_run && (result?.updated || !!choice);
         const canSearch = !choice?.approved && !result?.dry_run && (finished || !!result);
+        const sourceUnits = source.source_units?.length ? source.source_units : undefined;
+        const basedOn = source.based_on?.length ? source.based_on : undefined;
         return <article key={mappingId} className="rounded border border-slate-200 p-3">
           <h3 className="font-medium">
             {source.source_vocabulary_id || "Uncoded"}:{source.source_code}
             {description && <span className="ml-2 font-normal text-slate-600">{description}</span>}
           </h3>
+          {(sourceUnits || basedOn) && <p className="mt-0.5 text-xs text-slate-500">
+            {sourceUnits && <><span className="font-medium text-slate-600">Units:</span> {sourceUnits.join(", ")}</>}
+            {sourceUnits && basedOn && <span className="mx-1.5">·</span>}
+            {basedOn && <><span className="font-medium text-slate-600">BasedOn:</span> {basedOn.join("; ")}</>}
+          </p>}
           <SourceAxesSummary sourceAxes={(result?.source_axes ?? ranked?.source_axes)} />
           <SourceSnomedSummary sourceSnomed={result?.source_snomed ?? ranked?.source_snomed} />
           <AxisExcludedDisclosure excluded={(result?.axis_excluded ?? ranked?.axis_excluded)} />

@@ -1685,6 +1685,7 @@ describe("CodeMappingPage", () => {
         data: { ...suggestRun({ state: "running", total: 4, retrieved: 1, done: 0 }), activity: [{ stage: "candidates", mapping_id: 7, source_code: "LIVE", strategy: "umls", candidates: [{ concept_id: 1, concept_name: "UMLS candidate", concept_code: "A", vocabulary_id: "SNOMED" }] }] },
       });
       mockGet.mockImplementation((url: string) => {
+        if (url.includes("/latest/")) return Promise.resolve({ data: { run_id: null } });
         if (url.startsWith("/v1/code-mappings/suggest-runs/")) {
           return Promise.resolve({
             data: { ...suggestRun({ state: "success", total: 4, done: 4, destinations: 4 }), activity: [{ stage: "candidates", mapping_id: 7, source_code: "LIVE", strategy: "semantic", candidates: [{ concept_id: 2, concept_name: "Semantic candidate", concept_code: "B", vocabulary_id: "SNOMED", vector_distance: 0.25 }] }] },
@@ -1740,6 +1741,7 @@ describe("CodeMappingPage", () => {
       });
       let polls = 0;
       mockGet.mockImplementation((url: string) => {
+        if (url.includes("/latest/")) return Promise.resolve({ data: { run_id: null } });
         if (url.startsWith("/v1/code-mappings/suggest-runs/")) {
           polls += 1;
           if (polls === 1) return Promise.reject(new Error("network blip"));
