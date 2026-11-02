@@ -97,6 +97,10 @@ def code_evidence(mapping, units, resources, variant_count=0):
     evidence['component']['varies'] = len(components) >= 2
     evidence['system']['varies'] = len(specimen_systems | coding_systems) >= 2
     evidence['method_type']['varies'] = len(methods) >= 2
+    # Top-level data-availability flags: what raw data the code's patients carry,
+    # regardless of whether it settled an axis.  Read by Summary.add().
+    evidence['_units'] = sorted(set(units)) if units else []
+    evidence['_specimens'] = sorted(specimen_systems) if specimen_systems else []
     return evidence
 
 
@@ -112,6 +116,10 @@ class Summary:
     def __init__(self, data=None):
         data = data or {}
         self.codes = int(data.get('codes') or 0)
+        self.codes_with_units = int(data.get('codes_with_units') or 0)
+        self.codes_with_specimens = int(data.get('codes_with_specimens') or 0)
+        self.distinct_units = Counter(data.get('distinct_units') or {})
+        self.distinct_specimens = Counter(data.get('distinct_specimens') or {})
         self.axes = {}
         for axis in AXES:
             stored = (data.get('axes') or {}).get(axis) or {}
@@ -124,7 +132,19 @@ class Summary:
 
     def add(self, evidence):
         self.codes += 1
+        units = evidence.get('_units', [])
+        specimens = evidence.get('_specimens', [])
+        if units:
+            self.codes_with_units += 1
+            for u in units:
+                self.distinct_units[u] += 1
+        if specimens:
+            self.codes_with_specimens += 1
+            for s in specimens:
+                self.distinct_specimens[s] += 1
         for axis, found in evidence.items():
+            if not isinstance(found, dict):
+                continue
             counts = self.axes[axis]
             if found['bases']:
                 counts['settled'] += 1
@@ -135,9 +155,19 @@ class Summary:
             if found['varies']:
                 counts['varies'] += 1
 
+    #: How many distinct values ``as_dict`` keeps per counter; the rest are
+    #: only represented by the ``_total`` count.
+    TOP_N = 200
+
     def as_dict(self):
         return {
             'codes': self.codes,
+            'codes_with_units': self.codes_with_units,
+            'codes_with_specimens': self.codes_with_specimens,
+            'distinct_units': dict(self.distinct_units.most_common(self.TOP_N)),
+            'distinct_units_total': len(self.distinct_units),
+            'distinct_specimens': dict(self.distinct_specimens.most_common(self.TOP_N)),
+            'distinct_specimens_total': len(self.distinct_specimens),
             'axes': {axis: {
                 'settled': counts['settled'], 'hint': counts['hint'], 'varies': counts['varies'],
                 'bases': {basis: counts['bases'][basis] for basis in BASES if counts['bases'][basis]},

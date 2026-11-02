@@ -12,7 +12,12 @@ import api from '@/api/axios';
  */
 
 export type AxisEvidenceCounts = { settled: number; hint: number; varies: number; bases: Record<string, number> };
-export type AxisEvidence = { codes: number; axes: Record<string, AxisEvidenceCounts> };
+export type AxisEvidence = {
+  codes: number; axes: Record<string, AxisEvidenceCounts>;
+  codes_with_units?: number; codes_with_specimens?: number;
+  distinct_units?: Record<string, number>; distinct_units_total?: number;
+  distinct_specimens?: Record<string, number>; distinct_specimens_total?: number;
+};
 export type Walk = {
   id: number; outcome: 'queued' | 'running' | 'done' | 'failed'; reason: string; rebuild_evidence: boolean;
   keys: number; done: number; refreshed: number; failure_reason: string;
@@ -150,6 +155,33 @@ export default function AxisVariantWalkPanel({ canApprove }: { canApprove: boole
         </table>
         <p className="mt-1 text-slate-500">Units settle the property and scale. If no other axis is ever settled or varies,
           the data holds no evidence for more than one LOINC per unit variant.</p>
+        {(evidence.codes_with_units != null || evidence.codes_with_specimens != null) && <div className="mt-2 border-t border-slate-200 pt-1">
+          <p className="font-medium text-slate-600">Raw data availability</p>
+          <ul className="mt-0.5 list-disc pl-4">
+            {evidence.codes_with_units != null && <li>
+              <strong>{evidence.codes_with_units.toLocaleString()}</strong> of {evidence.codes.toLocaleString()} codes have unit strings
+              {(evidence.distinct_units_total ?? 0) > 0 &&
+                <> ({(evidence.distinct_units_total ?? 0).toLocaleString()} distinct)</>}
+            </li>}
+            {evidence.codes_with_specimens != null && <li>
+              <strong>{evidence.codes_with_specimens.toLocaleString()}</strong> of {evidence.codes.toLocaleString()} codes have specimen types
+              {(evidence.distinct_specimens_total ?? 0) > 0 &&
+                <> ({(evidence.distinct_specimens_total ?? 0).toLocaleString()} distinct)</>}
+            </li>}
+          </ul>
+          {evidence.distinct_specimens && Object.keys(evidence.distinct_specimens).length > 0 && <details className="mt-1">
+            <summary className="cursor-pointer text-slate-500">Specimen types</summary>
+            <ul className="mt-0.5 pl-4">{Object.entries(evidence.distinct_specimens)
+              .sort(([, a], [, b]) => b - a)
+              .map(([name, count]) => <li key={name}>{name} ({count.toLocaleString()} codes)</li>)}</ul>
+          </details>}
+          {evidence.distinct_units && Object.keys(evidence.distinct_units).length > 0 && <details className="mt-1">
+            <summary className="cursor-pointer text-slate-500">Unit strings</summary>
+            <ul className="mt-0.5 pl-4">{Object.entries(evidence.distinct_units)
+              .sort(([, a], [, b]) => b - a)
+              .map(([name, count]) => <li key={name}><code>{name}</code> ({count.toLocaleString()} codes)</li>)}</ul>
+          </details>}
+        </div>}
       </details>}
     </>}
   </section>;
