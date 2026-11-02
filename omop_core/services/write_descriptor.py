@@ -1172,6 +1172,11 @@ def build_writable_field_descriptor():
             'source_value': 'patient-record:' + field,
         }
     descriptor['death_date']['reason'] = 'Corrections are dated OMOP observations; earlier facts remain as history.'
+    # The shared form stores the record answer first and mirrors it as a
+    # best-effort side effect. Death date is that same dated assertion the
+    # native PATCH writes (`project_single_value`); without this flag the
+    # shared form saved the column and never recorded the observation.
+    descriptor['death_date']['projection']['best_effort'] = True
     from omop_core.services.clinical_input_contract import NEW_INPUT_FIELDS, descriptors
     for field, entry in descriptors(mappings=clinical_mappings).items():
         row = clinical_mappings.get(field)

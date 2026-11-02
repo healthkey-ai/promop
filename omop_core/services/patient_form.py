@@ -49,9 +49,11 @@ def _project_side_effects(person, direct, projections, authorship=None):
     carries the caller's self-report typing and provenance, exactly as the
     native PATCH does, so a patient answer never takes over a clinical fact.
     """
+    acknowledged = set()
     if not projections:
-        return
+        return acknowledged
     from omop_core.services.omop_projection import project_single_value
+    from omop_core.services.write_descriptor import PINNED_PROJECTION_FIELDS
 
     # The descriptor only advertises a projection whose concepts resolved, and
     # the view only supplies a self-report type it found, so nothing here can
@@ -62,14 +64,20 @@ def _project_side_effects(person, direct, projections, authorship=None):
         if name not in direct or not projection:
             continue
         try:
-            project_single_value(
+            changed = project_single_value(
                 person, name, direct[name], projection, acknowledge_existing=True,
                 **(authorship or {}),
             )
+            # A pinned current-state answer stays pending on the record even
+            # after its fact is written: derivation does not read that row back
+            # as the answer (matches the native PATCH's `projected` set).
+            if changed and name not in PINNED_PROJECTION_FIELDS:
+                acknowledged.add(name)
         except Exception:
             logger.warning(
                 'OMOP projection failed for %s; the PatientRecord answer is saved', name,
             )
+    return acknowledged
 
 
 FIELD_BINDINGS = {
@@ -196,7 +204,6 @@ FORM_LABELS = {
 }
 
 DEDICATED_WRITES = {
-    'death_date': 'Use the dedicated dated assertion workflow; the scalar form writer cannot safely author this field.',
     'relapse_count': 'Use the treatment editor that preserves therapy overrides.',
     'treatment_refractory_status': 'Use the treatment editor that preserves therapy overrides.',
 }
@@ -321,7 +328,7 @@ def patient_form_descriptors(descriptor=None, *, readable_fields=None, writable=
 
 @transaction.atomic
 def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor=None,
-                             authorship=None, patient_author=False):
+                             authorship=None, patient_author=False, changed_by='system'):
     """Shared form write, with explicit acknowledgements and no no-op success.
 
     The host must authorize the person first. Existing OMOP mapping/provenance
@@ -425,6 +432,13 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
                         and isinstance(value, (int, float)) and not isinstance(value, bool)):
                     value = Decimal(str(value))
                 direct[name] = field.clean(None if value == '' else value, record)
+                if name == 'death_date' and direct[name] is not None:
+                    # The native PATCH validates the same two rules. A death
+                    # date is an assertion about a dated event, so an unknown
+                    # date must not become today and a future date is not a
+                    # fact; a date before birth is not this person's.
+                    if direct[name] > timezone.localdate():
+                        raise ValueError('death_date: Death date cannot be in the future.')
             except ValidationError as exc:
                 raise ValueError(f'{name}: {"; ".join(exc.messages)}') from exc
         else:
@@ -436,9 +450,19 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
                     and value is not None and len(str(value)) > 60):
                 raise ValueError(f'{name}: this scalar write supports at most 60 characters; no value was saved.')
             facts[name] = value
+    # Validate the EFFECTIVE pair, not the stored birth date alone: a PATCH
+    # may submit a new DOB and a death date together (the native serializer
+    # validates the submitted pair), a DOB-only edit must be checked against a
+    # death date already on the record, and a precision-only edit changes the
+    # normalized date (month/year placeholders are not assertions).
+    from omop_core.services.birth_dates import normalize_birth_date, person_birth_values
+    dob, precision = normalize_birth_date(
+        person, birth_changes) if birth_changes else (record.date_of_birth,
+                                                      record.date_of_birth_precision)
+    effective_death = direct.get('death_date', record.death_date)
+    if effective_death and dob and effective_death < dob:
+        raise ValueError('death_date: Death date cannot precede date of birth.')
     if birth_changes:
-        from omop_core.services.birth_dates import normalize_birth_date, person_birth_values
-        dob, precision = normalize_birth_date(person, birth_changes)
         for name, value in person_birth_values(dob, precision).items():
             setattr(person, name, value)
             person_changes.add(name)
@@ -452,13 +476,25 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
     if record_profile_fields:
         record.save(update_fields=sorted(record_profile_fields))
     if direct:
+        previous_direct = {name: getattr(record, name, None) for name in direct}
         for name, value in direct.items():
             setattr(record, name, value)
         record.user_edited_fields = sorted(set(record.user_edited_fields or []) | set(direct))
         record.save(update_fields=sorted(direct) + ['user_edited_fields'])
+        from omop_core.services.patient_record_revisions import write_record_revisions
+        write_record_revisions(record, previous_direct, changed_by=changed_by)
         result.applied.extend(direct)
         if project_side_effects:
-            _project_side_effects(person, direct, side_effect_projections, authorship)
+            acknowledged = _project_side_effects(
+                person, direct, side_effect_projections, authorship)
+            if acknowledged:
+                # The fact is written, so the record no longer has to mask
+                # derivation: clear only what the projection acknowledged.
+                # A newer fact from another day must not be hidden forever
+                # behind a marker left by today's successful save.
+                record.user_edited_fields = sorted(
+                    set(record.user_edited_fields or []) - acknowledged)
+                record.save(update_fields=['user_edited_fields'])
     if facts:
         fact_result = apply_field_writes(person, facts, descriptor=descriptor, dates=fact_dates)
         result.applied.extend(fact_result.applied)
