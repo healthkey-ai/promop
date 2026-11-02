@@ -517,20 +517,25 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
   const start = async () => {
     // Accumulate the current run's candidates before starting a new one so
     // previous results stay visible while the next batch streams in.
-    setRun(previous => {
-      if (previous?.activity.length) {
-        const finished = previous.activity.find(event => event.concept.concept_id === concept.concept_id)?.candidates ?? [];
-        if (finished.length) {
-          setPreviousCandidates(accumulated => {
-            const seen = new Set(finished.map(sourceKey));
-            // Latest run wins: drop old duplicates, then append the finished run's rows.
-            return [...accumulated.filter(row => !seen.has(sourceKey(row))), ...finished];
-          });
-        }
+    // Read `run` directly (stable in this click handler) rather than nesting
+    // setPreviousCandidates inside a setRun updater, which would be impure.
+    if (run?.activity.length) {
+      const raw = run.activity.find(event => event.concept.concept_id === concept.concept_id)?.candidates ?? [];
+      // Apply the patched overlay so approvals made during the run survive the
+      // snapshot, and exclude rows the ranker declined (they re-surface only
+      // when the curator explicitly checks "Retry declined").
+      const finished = raw
+        .map(item => { const edit = patched[sourceKey(item)]; return edit ? { ...item, ...edit } as Source : item; })
+        .filter(item => !item.declined);
+      if (finished.length) {
+        setPreviousCandidates(accumulated => {
+          const seen = new Set(finished.map(sourceKey));
+          // Latest run wins: drop old duplicates, then append the finished run's rows.
+          return [...accumulated.filter(row => !seen.has(sourceKey(row))), ...finished];
+        });
       }
-      return null;
-    });
-    setStarting(true); setError(''); setProgress(''); setSelected(new Set()); setPatched({}); setExpanded(new Set()); setMode('candidates');
+    }
+    setRun(null); setStarting(true); setError(''); setProgress(''); setSelected(new Set()); setPatched({}); setExpanded(new Set()); setMode('candidates');
     try {
       const { data: next } = await api.post<Run>('/v1/concept-to-code/suggest/', {
         concept_ids: [concept.concept_id], strategies: Object.keys(strategies).filter(key => strategies[key as keyof typeof strategies]),
@@ -554,7 +559,7 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
   // earlier runs stay visible regardless of the current run's ranking model.
   const ranked = Boolean(run?.selection.ranking_model && run.selection.ranking_model !== 'none');
   const isFromCurrentRun = (row: Source) => currentKeys.has(sourceKey(row));
-  const scored = ranked ? candidates.filter(row => row.confidence != null || !isFromCurrentRun(row)) : candidates;
+  const scored = ranked ? candidates.filter(row => row.confidence != null || (!isFromCurrentRun(row) && !row.declined)) : candidates;
   const unscored = ranked ? candidates.filter(row => row.confidence == null && isFromCurrentRun(row)) : [];
   // A decline is the ranker's answer; a candidate it could not rank (the
   // ranker was unavailable) is hidden too, but nothing was decided (#2034).
@@ -631,10 +636,15 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
   // show; a full server row from the batch approve replaces the stored copy.
   const patchRow = (row: Source, updated: Partial<Source>, { replace = false } = {}) => {
     if (!active.current) return;
+    const key = sourceKey(row);
     STATUSES.forEach(status => groups[status].setData(previous => previous
-      ? { ...previous, results: previous.results.map(item => sourceKey(item) === sourceKey(row)
+      ? { ...previous, results: previous.results.map(item => sourceKey(item) === key
         ? (replace ? updated as Source : { ...item, ...updated }) : item) } : null));
-    setPatched(previous => ({ ...previous, [sourceKey(row)]: { ...previous[sourceKey(row)], ...updated } }));
+    setPatched(previous => ({ ...previous, [key]: { ...previous[key], ...updated } }));
+    // Keep accumulated candidates in sync so the snapshot is current when
+    // start() fires and patched is cleared.
+    setPreviousCandidates(previous => previous.map(item => sourceKey(item) === key
+      ? (replace ? updated as Source : { ...item, ...updated }) : item));
   };
 
   // One click approves: a suggested source with no mapping yet is proposed from
@@ -779,7 +789,7 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
     <p className="text-xs text-slate-500">Review clinical meaning before selecting codes. Suggestions do not change mappings; approval updates the mapping and matching stored clinical rows.
       {' '}New vocabulary codes have Seen = 0; approving one proposes it from this preview first.</p>
     {run && mode === 'candidates' && <p role="status" className="text-sm text-slate-600">
-      {running ? 'Searching local vocabulary evidence…' : `${candidates.length} candidates retrieved (limit ${run.selection.limit}).`}
+      {running ? 'Searching local vocabulary evidence…' : `${currentRunCandidates.length} candidates retrieved (limit ${run.selection.limit})${previousCandidates.length ? `, ${candidates.length} total across runs` : ''}.`}
       {!running && declinedHidden > 0 && ` ${declinedHidden} declined by the ranker and hidden${run.selection.include_declined ? '' : '; the next run moves on to other codes'}.`}
       {!running && unrankedHidden > 0 && ` ${unrankedHidden} could not be ranked (the ranker was unavailable) and ${unrankedHidden === 1 ? 'is' : 'are'} hidden.`}
       {run.error && ` ${run.error}`}
