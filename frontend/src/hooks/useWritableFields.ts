@@ -50,6 +50,10 @@ export interface FieldDescriptor {
    *  whole vocabulary — OMOP's Race holds 1,409 concepts, which is not the
    *  question a clinical form asks. */
   options?: Array<{ value: string; label?: string; code?: string }>;
+  /** A scalar fact whose clinical date the editor supplies (lab results). */
+  dated?: boolean;
+  /** The latest recorded date for this field's fact, when one exists. */
+  latest_date?: string;
   /** Several answers at once, stored comma-joined. */
   multiple?: boolean;
   /** OMOP projection metadata — present when the field has an approved mapping.

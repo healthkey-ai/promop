@@ -1100,6 +1100,20 @@ def build_writable_field_descriptor():
         entry = descriptor.get(field)
         if entry is not None and options and 'options' not in entry:
             entry['options'] = options
+    # A scalar measurement/observation may carry the clinical date it was
+    # observed (docs/clinical-event-time-policy.md). The editor offers the date
+    # control only when this marker is present; a best-effort side effect is not
+    # read back from the fact, and JSON values keep their dedicated contract.
+    # Only the numeric laboratory fields whose value a shared derivation selects
+    # get a date control: categorical, occurrence-scoped and non-lab measurements
+    # need their own winning-fact rules before an editor can correct them here.
+    for field, entry in descriptor.items():
+        projection = entry.get('projection') or {}
+        if (entry.get('writable') and not projection.get('best_effort')
+                and field in LAB_FIELD_TO_LOINC
+                and projection.get('omop_table') == 'measurement'
+                and entry.get('value_kind') == 'number'):
+            entry['dated'] = True
     # Fields the serializer adds that no PatientRecord column backs.
     #
     # The loop above walks PATIENT_RECORD_OMOP_MAPPED_FIELDS, so it can only

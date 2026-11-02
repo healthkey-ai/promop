@@ -4126,10 +4126,35 @@ def _latest_blood_count_measurements(snapshot):
     return selected_counts
 
 
-def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
+def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None,
+                         dates_out: dict = None) -> dict:
+    """Derive lab values; optionally record the winning fact's date per field.
+
+    ``dates_out`` lets the editor name the day the value it shows was measured
+    without re-implementing every selection rule here (legacy names, source
+    codes, FLC pairing, ANC/platelet selection).
+    """
     data = {}
     snapshot = snapshot or _build_snapshot(person)
     measurements = snapshot.measurements
+    selected_dates = {}
+
+    def select_lab_value(field, value, measurement):
+        """Choose the newest usable fact across supported lab representations.
+
+        Coded LOINC, historical concept-name and source-value rows are all
+        read paths for the same PatientRecord field. They must compete by
+        clinical date rather than by which extractor runs first.
+        """
+        current_date = selected_dates.get(field)
+        fact_date = measurement.measurement_date
+        if field in data and current_date is not None and fact_date <= current_date:
+            return False
+        data[field] = value
+        selected_dates[field] = fact_date
+        if dates_out is not None:
+            dates_out[field] = fact_date
+        return True
     # Approved FCM rows define the PatientRecord destination. SCCM supplies
     # additional source-code spellings for that destination; the checked-in
     # extractor table is a compatibility fallback for fields not yet backed by
@@ -4167,8 +4192,15 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
             ).values_list('source_code', 'target_concept_id'):
                 field = field_by_target[target_id]
                 code_fields[code] = (field, field_casts[field])
-    for field, measurement in _latest_blood_count_measurements(snapshot).items():
-        data.update(blood_count_projection(field, measurement))
+    selected_blood_counts = _latest_blood_count_measurements(snapshot)
+    blood_count_fields = set(selected_blood_counts)
+    for field, measurement in selected_blood_counts.items():
+        projected_count = blood_count_projection(field, measurement)
+        data.update(projected_count)
+        blood_count_fields.update(projected_count)
+        selected_dates[field] = measurement.measurement_date
+        if dates_out is not None:
+            dates_out[field] = measurement.measurement_date
 
     # --- Legacy fields via exact historic concept-name matching ---
     for measurement in measurements:
@@ -4176,16 +4208,14 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
             continue
         concept_name = measurement.measurement_concept.concept_name.casefold().strip()
         field_name = _LEGACY_LAB_CONCEPT_FIELDS.get(concept_name)
-        if not field_name or field_name in data:
+        if not field_name or field_name in blood_count_fields:
             continue
         if (field_name == 'hemoglobin_g_dl' and measurement.unit_source_value
                 and measurement.unit_source_value.strip().casefold() != 'g/dl'):
             # We have no supported conversion for arbitrary legacy units.
             field_name = 'hemoglobin_level'
-        if field_name in data:
-            continue
-        data[field_name] = measurement.value_as_number
-        if measurement.unit_source_value:
+        selected = select_lab_value(field_name, measurement.value_as_number, measurement)
+        if selected and measurement.unit_source_value:
             data[f'{field_name}_units'] = measurement.unit_source_value
 
     # --- FLC values: one chronological pass across both representations ---
@@ -4215,8 +4245,12 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
                 person.person_id, m.unit_source_value,
             )
             data[field] = Decimal(str(m.value_as_number))
+            if dates_out is not None:
+                dates_out[field] = m.measurement_date
             continue
         data[field] = canonical_flc
+        if dates_out is not None:
+            dates_out[field] = m.measurement_date
 
     # The ratio-bearing values must come from one lab event, not the newest
     # kappa and the newest lambda independently. The individual fields above
@@ -4238,12 +4272,13 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
 
     loinc_ms = [m for m in measurements if m.value_as_number is not None]
     wbc_projection_blocked = False
+    wbc_blocked_date = None
     for m in loinc_ms:
         code = _measurement_code(m)
         if code not in code_fields:
             continue
         field, cast = code_fields[code]
-        if field in _FLC_FIELDS:
+        if field in _FLC_FIELDS or field in blood_count_fields:
             continue
         canonical_value = None
         if code == '6690-2':
@@ -4254,32 +4289,63 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
                 # This is the latest WBC row due to the query ordering. Do not
                 # silently substitute an older result with a known unit.
                 wbc_projection_blocked = True
+                wbc_blocked_date = m.measurement_date
                 logger.warning(
                     'WBC projections skipped for person_id=%s: unsupported or absent '
                     'unit_source_value=%r', person.person_id, m.unit_source_value,
                 )
                 continue
-        if field not in data:
-            if code != '6690-2' or canonical_value is not None:
-                data[field] = cast(canonical_value if code == '6690-2' else m.value_as_number)
+        if code != '6690-2' or canonical_value is not None:
+            select_lab_value(
+                field, cast(canonical_value if code == '6690-2' else m.value_as_number), m)
         if code == '6690-2' and canonical_value is not None and 'white_blood_cell_count' not in data:
             data['white_blood_cell_count'] = canonical_value
             data['white_blood_cell_count_units'] = canonical_wbc_unit(_get_unit_system())
+            selected_dates['white_blood_cell_count'] = m.measurement_date
+            if dates_out is not None:
+                dates_out['white_blood_cell_count'] = m.measurement_date
 
     # --- New UI fields via display-name source_value (legacy/generator path) ---
-    unfound = {f for (f, _) in code_fields.values() if f not in data}
-    if unfound:
-        for source_value, field in _SOURCE_VALUE_LAB_FIELDS.items():
-            if field not in unfound:
-                continue
-            if field == 'wbc_count_thousand_per_ul' and wbc_projection_blocked:
-                continue
-            if field in data or field in _FLC_FIELDS:
-                continue
-            for m in snapshot.meas_by_source.get(source_value, ()):
-                if m.value_as_number is not None:
-                    data[field] = float(m.value_as_number)
-                    break
+    for source_value, field in _SOURCE_VALUE_LAB_FIELDS.items():
+        if field in blood_count_fields:
+            continue
+        if field in _FLC_FIELDS:
+            continue
+        for m in snapshot.meas_by_source.get(source_value, ()):
+            if m.value_as_number is not None:
+                if field == 'wbc_count_thousand_per_ul':
+                    if wbc_blocked_date is not None and m.measurement_date <= wbc_blocked_date:
+                        break
+                    # Keep the established source-display contract for unitless
+                    # imports (their numeric value is already stored in the
+                    # PatientRecord display scale); explicit units must be
+                    # convertible before competing with another representation.
+                    canonical_value = (
+                        float(m.value_as_number) if not (m.unit_source_value or '').strip()
+                        else wbc_to_canonical(m.value_as_number, m.unit_source_value)
+                    )
+                    if canonical_value is None:
+                        current_date = selected_dates.get(field)
+                        if current_date is None or m.measurement_date > current_date:
+                            data.pop(field, None)
+                            selected_dates.pop(field, None)
+                            data.pop('white_blood_cell_count', None)
+                            selected_dates.pop('white_blood_cell_count', None)
+                            wbc_blocked_date = m.measurement_date
+                            if dates_out is not None:
+                                dates_out.pop(field, None)
+                                dates_out.pop('white_blood_cell_count', None)
+                        break
+                    selected = select_lab_value(field, canonical_value, m)
+                    if selected:
+                        data['white_blood_cell_count'] = canonical_value
+                        data['white_blood_cell_count_units'] = canonical_wbc_unit(_get_unit_system())
+                        selected_dates['white_blood_cell_count'] = m.measurement_date
+                        if dates_out is not None:
+                            dates_out['white_blood_cell_count'] = m.measurement_date
+                else:
+                    select_lab_value(field, float(m.value_as_number), m)
+                break
 
     # --- Copy canonical values to legacy aliases (issue #471) ---
     for canonical, aliases in _LAB_FIELD_ALIASES.items():
@@ -4287,6 +4353,8 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
         if value is not None:
             for alias in aliases:
                 data[alias] = _lab_alias_value(canonical, value)
+                if dates_out is not None and canonical in dates_out:
+                    dates_out[alias] = dates_out[canonical]
             data.update(_lab_alias_units(canonical, value))
 
     return data

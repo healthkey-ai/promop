@@ -225,8 +225,34 @@ class FieldWriteResult:
         return bool(self.applied)
 
 
+def split_dated_edits(changes, descriptor):
+    """Separate a dated envelope from a plain scalar edit.
+
+    A dated entry is ``{field: {"value": ..., "date": "YYYY-MM-DD"}}``. Only a
+    descriptor that advertises ``dated`` may use it. Returns
+    ``(plain_changes, dates)``; the caller keeps its own clear/validation rules
+    on the unwrapped values.
+    """
+    values, dates = {}, {}
+    for field, value in changes.items():
+        entry = descriptor.get(field) or {}
+        if isinstance(value, dict) and entry.get('dated'):
+            if set(value) - {'value', 'date'} or 'value' not in value or 'date' not in value:
+                raise ValueError(
+                    f'{field}: a dated result must be {{"value": ..., "date": "YYYY-MM-DD"}}.')
+            from omop_core.services.patient_form import parse_fact_date
+            dates[field] = parse_fact_date(value['date'], field)
+            values[field] = value['value']
+        elif (isinstance(value, dict) and set(value) == {'value', 'date'}
+                and entry.get('value_kind') != 'json'):
+            raise ValueError(f'{field}: this field does not accept a result date.')
+        else:
+            values[field] = value
+    return values, dates
+
+
 @transaction.atomic
-def apply_field_writes(person, changes, today=None, descriptor=None):
+def apply_field_writes(person, changes, today=None, descriptor=None, dates=None):
     """Apply {projection_field: value} edits to `person` as descriptor-driven OMOP facts.
 
     Writes KIND_EDITABLE facts, buckets KIND_PROFILE for the persons endpoint, rejects the
@@ -238,6 +264,8 @@ def apply_field_writes(person, changes, today=None, descriptor=None):
         today = date.today()
     if descriptor is None:
         descriptor = build_writable_field_descriptor()
+    changes, envelope_dates = split_dated_edits(changes, descriptor)
+    dates = {**envelope_dates, **(dates or {})}
 
     result = FieldWriteResult()
     from omop_core.services.clinical_input_contract import (
@@ -257,6 +285,12 @@ def apply_field_writes(person, changes, today=None, descriptor=None):
         # Unlike legacy scalar partial rejection, one denied clinical command
         # rejects the whole batch. Descriptors can narrow, never grant approval.
         raise ValidationError(denied)
+    if set(clinical) & set(dates):
+        # A dedicated writer owns its own dated/correction contract.
+        raise ValidationError({
+            field: 'This clinical input does not accept a caller-supplied result date.'
+            for field in set(clinical) & set(dates)
+        })
     # Before scalar clear handling, and before any nonclinical writes. A supplied
     # descriptor is an envelope, never approval for a source recipe.
     validated_values(clinical)
@@ -325,7 +359,7 @@ def apply_field_writes(person, changes, today=None, descriptor=None):
                     'unit': projection.get('unit'),
                     'target': projection.get('omop_table', 'measurement'),
                 }
-            _write_editable_fact(person, field, d, value, today)
+            _write_editable_fact(person, field, d, value, dates.get(field, today))
             result.applied.append(field)
             continue
         if kind == KIND_PROFILE and d.get('writable'):
