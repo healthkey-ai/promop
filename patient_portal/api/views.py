@@ -5451,16 +5451,25 @@ def health_check(request):
 
 
 # Disease label lookup — human-readable names for known disease slugs.
-_DISEASE_LABELS = {
+# Hardcoded entries for legacy slugs that don't follow the standard pattern.
+_DISEASE_LABELS_HARDCODED = {
     'mm':                     'Multiple Myeloma',
     'MM':                     'Multiple Myeloma',
     'er-erbb2-breast-cancer': 'ER+/HER2+ Breast Cancer',
-    'breast-cancer':           'Breast Cancer',
-    'follicular-lymphoma':     'Follicular Lymphoma',
     'cll':                    'Chronic Lymphocytic Leukemia',
-    'lung-cancer':             'Lung Cancer',
-    'colon-cancer':            'Colon Cancer',
 }
+
+
+def _disease_labels() -> dict[str, str]:
+    """Build slug→label from DiseaseCategoryChoice, merged with hardcoded entries."""
+    import re
+    from omop_core.services.patient_record_service import _category_titles
+    labels = dict(_DISEASE_LABELS_HARDCODED)
+    for _code, label in _category_titles().items():
+        slug = re.sub(r'[^a-z0-9]+', '-', label.lower()).strip('-')[:100]
+        if slug and slug not in labels:
+            labels[slug] = label
+    return labels
 
 
 @api_view(['GET'])
@@ -5475,10 +5484,11 @@ def org_disease_stats(request):
             .annotate(count=Count('id'))
             .order_by('-count')
         )
+        labels = _disease_labels()
         return [
             {
                 'disease_slug': r['disease_slug'] or '',
-                'label': _DISEASE_LABELS.get(r['disease_slug'] or '', r['disease_slug'] or 'Unknown'),
+                'label': labels.get(r['disease_slug'] or '', r['disease_slug'] or 'Unknown'),
                 'count': r['count'],
             }
             for r in rows
