@@ -1263,7 +1263,7 @@ class ConditionSignalTest(_OmopBase):
 
 from django.utils import timezone
 from datetime import timedelta
-from omop_core.models import Organization, PatientGroup, GroupAccess
+from omop_core.models import Organization, PatientGroup, GroupAccess, OrgTrust
 from omop_core.services.access import get_visible_orgs
 from patient_portal.models import Identity
 
@@ -1355,6 +1355,32 @@ class GetVisibleOrgsTest(TestCase):
         )
         orgs = list(get_visible_orgs(future))
         self.assertIn(self.org_b, orgs)
+
+    def test_org_trust_from_active_granting_org_is_visible(self):
+        OrgTrust.objects.create(trusted_org=self.org_a, granting_org=self.org_b)
+        orgs = list(get_visible_orgs(self.doctor))
+        self.assertIn(self.org_b, orgs)
+
+    def test_org_trust_from_inactive_granting_org_is_not_visible(self):
+        OrgTrust.objects.create(trusted_org=self.org_a, granting_org=self.org_b)
+        Organization.objects.filter(pk=self.org_b.pk).update(is_active=False)
+        orgs = list(get_visible_orgs(self.doctor))
+        self.assertNotIn(self.org_b, orgs)
+
+    def test_domain_trust_from_active_granting_org_is_visible(self):
+        trusted = Identity.objects.create_user(email='trusted@clinic.test', password='x')
+        trusted.mark_email_verified()
+        OrgTrust.objects.create(trusted_domain='clinic.test', granting_org=self.org_b)
+        orgs = list(get_visible_orgs(trusted))
+        self.assertIn(self.org_b, orgs)
+
+    def test_domain_trust_from_inactive_granting_org_is_not_visible(self):
+        trusted = Identity.objects.create_user(email='trusted@clinic.test', password='x')
+        trusted.mark_email_verified()
+        OrgTrust.objects.create(trusted_domain='clinic.test', granting_org=self.org_b)
+        Organization.objects.filter(pk=self.org_b.pk).update(is_active=False)
+        orgs = list(get_visible_orgs(trusted))
+        self.assertNotIn(self.org_b, orgs)
 
     def test_xor_constraint_prevents_both_org_and_group_set(self):
         from django.db import IntegrityError, transaction
