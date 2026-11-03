@@ -22,6 +22,24 @@ from omop_core.services.write_descriptor import build_writable_field_descriptor
 logger = logging.getLogger(__name__)
 
 
+def _profile_record_value(name, value, entry):
+    """Translate a profile display choice to the code PatientRecord stores.
+
+    Gender is the one profile column whose stored value is a code (M/F), while
+    the form's descriptor offers display labels (Male/Female). Race and
+    ethnicity are stored as the submitted text. Whitespace-only values are
+    clears, normalized here so PatientRecord and Person/Location agree.
+    """
+    if isinstance(value, str):
+        value = value.strip() or None
+    if name != 'gender' or not isinstance(value, str):
+        return value
+    for option in entry.get('options') or []:
+        if str(option.get('value')).casefold() == value.casefold():
+            return option.get('code') or value
+    return value
+
+
 def parse_fact_date(raw, field):
     """The clinical date carried by a dated edit, or a 400-worthy error.
 
@@ -369,6 +387,7 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
     descriptor = patient_form_descriptors(
         raw_descriptor, readable_fields=allowed_fields, record=record)
     facts, direct, person_changes, profile_applied = {}, {}, set(), set()
+    profile_changes = {}
     therapy_overrides_applied = set()
     previous_override_values = {}
     override_values = {}
@@ -490,10 +509,9 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
             continue
         projection = entry.get('projection') or {}
         # PatientRecord-first: the record is the source of truth, and every
-        # mapped scalar is stored there before its OMOP fact is attempted as a
-        # best-effort side effect. Only dedicated clinical-input recipes (which
-        # own their writer) and profile fields still take the legacy facts path.
-        # Profile fields move to the direct path in the profile-projection PR.
+        # mapped scalar and profile value is stored there before its OMOP or
+        # Person/Location side effect is attempted. Only dedicated clinical-input
+        # recipes (which own their writer) still take the legacy facts path.
         best_effort = (entry.get('kind') == 'direct'
                        and entry.get('target') == 'patient_record'
                        and projection.get('best_effort') is True)
@@ -505,11 +523,26 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
             and entry.get('projection_target') not in ('person', 'location')
             and projection.get('omop_table') in ('measurement', 'observation')
         )
+        profile_projection = (
+            entry.get('kind') == 'direct'
+            and entry.get('target') == 'patient_record'
+            and entry.get('projection_target') in ('person', 'location')
+        )
+        if profile_projection:
+            # The record is the source of truth for the profile value too; the
+            # Person/Location copy is projected after the record write, without
+            # a full derivation. Person keeps the display text (e.g. "Female")
+            # while PatientRecord stores its code (e.g. "F").
+            profile_value = value
+            if isinstance(profile_value, str):
+                profile_value = profile_value.strip() or None
+            profile_changes[name] = profile_value
+            value = _profile_record_value(name, value, entry)
         if best_effort or scalar_projection:
             from omop_core.services.omop_projection import projection_for_descriptor
             side_effect_projections[name] = projection_for_descriptor(entry)
-        if ((not entry.get('projection') or best_effort or scalar_projection)
-                and entry.get('projection_target') not in ('person', 'location')
+        if ((not entry.get('projection') or best_effort or scalar_projection
+                or profile_projection)
                 and entry.get('kind') == 'direct'):
             field = record._meta.get_field(name)
             if not field.concrete or field.is_relation or field.primary_key:
@@ -596,15 +629,36 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
                 record.user_edited_fields = sorted(
                     set(record.user_edited_fields or []) - acknowledged)
                 record.save(update_fields=['user_edited_fields'])
+    if profile_changes:
+        # Validate the effective coordinate pair and the Location value ranges
+        # before any write so a bad profile edit returns 400 instead of an
+        # IntegrityError after the PatientRecord save (the native PATCH does
+        # the same).
+        from omop_core.services.field_write_service import (
+            validate_location_pair, validate_profile_changes,
+        )
+        validate_profile_changes(profile_changes)
+        validate_location_pair(person, profile_changes, record=record)
+        coordinate_keys = {'latitude', 'longitude'} & set(profile_changes)
+        if coordinate_keys:
+            final_lat = profile_changes.get('latitude', record.latitude)
+            final_lng = profile_changes.get('longitude', record.longitude)
+            if final_lat is None and final_lng is None:
+                # A full clear must clear Location too, or the projection would
+                # leave a half-set Location behind.
+                profile_changes.setdefault('latitude', None)
+                profile_changes.setdefault('longitude', None)
     if direct:
         previous_direct = {name: getattr(record, name, None) for name in direct}
         for name, value in direct.items():
             setattr(record, name, value)
-        record.user_edited_fields = sorted(set(record.user_edited_fields or []) | set(direct))
+        clinical_direct = set(direct) - set(profile_changes)
+        record.user_edited_fields = sorted(
+            set(record.user_edited_fields or []) | clinical_direct)
         record.save(update_fields=sorted(direct) + ['user_edited_fields'])
         from omop_core.services.patient_record_revisions import write_record_revisions
         write_record_revisions(record, previous_direct, changed_by=changed_by)
-        result.applied.extend(direct)
+        result.applied.extend(clinical_direct)
         if project_side_effects:
             acknowledged = _project_side_effects(
                 person, direct, side_effect_projections, authorship,
@@ -617,6 +671,35 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
                 record.user_edited_fields = sorted(
                     set(record.user_edited_fields or []) - acknowledged)
                 record.save(update_fields=['user_edited_fields'])
+        if profile_changes:
+            # The record already holds the profile value; mirror it onto
+            # Person/Location without re-deriving the whole record. A profile
+            # projection failure must not undo the saved record value.
+            result.applied.extend(profile_changes)
+            try:
+                profile_result = apply_field_writes(
+                    person, profile_changes, descriptor=descriptor, refresh=False)
+            except Exception:
+                # Keep the record value pending so a later derivation cannot
+                # restore the old Person/Location value over the saved edit.
+                record.user_edited_fields = sorted(
+                    set(record.user_edited_fields or []) | set(profile_changes))
+                record.save(update_fields=['user_edited_fields'])
+                logger.warning(
+                    'Profile projection failed; the PatientRecord value is saved')
+            else:
+                result.applied.extend(profile_result.applied)
+                result.rejected.update(profile_result.rejected)
+                result.profile.update(profile_result.profile)
+                profile_applied.update(profile_result.applied)
+                if profile_result.applied:
+                    # The projection now backs the record value, so it no longer
+                    # needs pending protection.
+                    record.user_edited_fields = sorted(
+                        set(record.user_edited_fields or [])
+                        - set(profile_result.applied))
+                    record.save(update_fields=['user_edited_fields'])
+            result.applied = list(dict.fromkeys(result.applied))
     if facts:
         fact_result = apply_field_writes(person, facts, descriptor=descriptor, dates=fact_dates)
         result.applied.extend(fact_result.applied)
