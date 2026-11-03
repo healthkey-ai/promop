@@ -79,7 +79,7 @@ def test_descriptor_offers_the_line_fields_as_writable(patient):
         assert entry['target'] == 'patient_record', field
         assert entry['authored_episode']['line_number'] == (
             3 if field.startswith('later') else 2 if field.startswith('second') else 1)
-    assert {'value': 'vrd', 'label': 'VRd'} in descriptor['later_therapy']['options']
+    assert {'value': 'VRd', 'code': 'vrd', 'label': 'VRd'} in descriptor['later_therapy']['options']
     assert descriptor['later_date']['value_kind'] == 'date'
     assert descriptor['later_outcome']['options']
     # The projection of the line stays unwritable: a client cannot write the
@@ -190,3 +190,97 @@ def test_the_native_record_patch_authors_the_line(patient):
     record = _record(patient)
     assert record.second_line_therapy == 'VRd'
     assert record.second_line_outcome == 'Complete Response'
+
+
+def test_a_regimen_without_a_concept_is_not_offered(patient):
+    """A choice the writer can only refuse is worse than no choice."""
+    TherapyRegimen.objects.create(code='no_concept', title='No Concept')
+
+    options = build_writable_field_descriptor()['later_therapy']['options']
+
+    assert all(option['code'] != 'no_concept' for option in options)
+
+
+def test_echoing_the_record_back_writes_nothing(patient):
+    """The editor PATCHes the whole GET body: a line field echoed as its derived
+    display name is not an instruction to author the line."""
+    apply_patient_form_patch(patient, {
+        'later_therapy': 'vrd', 'later_date': date(2024, 5, 1),
+        'later_outcome': 'Partial Response',
+    })
+    record = _record(patient)
+    echoed = {field: getattr(record, field) for field in (
+        'later_therapy', 'later_date', 'later_outcome', 'first_line_therapy')}
+
+    _, result = apply_patient_form_patch(patient, echoed)
+
+    assert not result.applied
+    assert not result.rejected
+    record.refresh_from_db()
+    assert record.later_therapy == 'VRd'
+    assert record.later_date == date(2024, 5, 1)
+    assert record.later_outcome == 'Partial Response'
+
+
+def test_changing_the_therapy_of_a_line_with_a_composition_is_refused(patient):
+    """The editor owns the composition; asserting another regimen here would
+    leave the stored drug exposures describing the old one."""
+    rxnorm = VocabularyFactory(vocabulary_id='RxNorm', vocabulary_name='RxNorm')
+    drug = ConceptFactory(concept_id=1301025, concept_name='bortezomib',
+                          concept_code='6360', vocabulary=rxnorm)
+    from omop_core.services.episode_service import author_therapy_line
+    author_therapy_line(patient, line_number=3, drugs=[drug.concept_id],
+                        start_date=date(2024, 4, 1))
+
+    _, result = apply_patient_form_patch(patient, {'later_therapy': 'vrd'})
+
+    assert 'therapy-lines editor' in result.rejected['later_therapy']
+    record = _record(patient)
+    assert record.later_therapy != 'VRd'
+
+
+def test_a_stale_pending_marker_does_not_hide_the_authored_line(patient):
+    """An older direct write pinned the column; the line owns it now."""
+    record = _record(patient)
+    record.user_edited_fields = ['later_therapy']
+    record.later_therapy = 'Old pinned value'
+    record.save(update_fields=['user_edited_fields', 'later_therapy'])
+
+    _, result = apply_patient_form_patch(patient, {
+        'later_therapy': 'vrd', 'later_date': date(2024, 5, 1),
+    })
+
+    assert 'later_therapy' in result.applied
+    record.refresh_from_db()
+    assert record.later_therapy == 'VRd'
+    assert 'later_therapy' not in (record.user_edited_fields or [])
+
+
+def test_an_outcome_alias_is_stored_as_the_catalog_value(patient):
+    apply_patient_form_patch(patient, {
+        'later_therapy': 'vrd', 'later_date': date(2024, 5, 1),
+    })
+
+    _, result = apply_patient_form_patch(patient, {'later_outcome': 'CR'})
+
+    assert result.applied == ['later_outcome']
+    assert _record(patient).later_outcome == 'Complete Response'
+
+
+def test_a_refused_line_rolls_back_the_rest_of_the_native_patch(patient):
+    user = get_user_model().objects.create_superuser(
+        email='provider2@example.com', password='x')
+    client = APIClient()
+    client.force_authenticate(user=user)
+
+    response = client.patch(
+        f'/api/v1/patient-records/{patient.pk}/',
+        {'later_therapy': 'not_a_regimen', 'ecog_performance_status': 2},
+        format='json',
+    )
+
+    assert response.status_code == 400
+    assert 'later_therapy' in response.json()
+    record = _record(patient)
+    assert record.ecog_performance_status != 2
+    assert not _lines(patient, 3).exists()

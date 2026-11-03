@@ -140,11 +140,24 @@ Both PATCH routes route those names to
 `omop_core/services/therapy_line_form.py`, which calls `author_therapy_line`
 (the same service the therapy-lines editor uses) and then refreshes the record
 once. Nothing writes `user_edited_fields` for them: that marker means "keep this
-column against derivation", which is the opposite of what a projection needs.
-The audit for a line is the line itself (`Episode`, `TherapyLineAssertion`),
-exactly as in the editor. `later_therapies` (the per-line read model) stays
-computed and unwritable; a second 3L+ line is authored in the editor, where the
-per-line contract lives.
+column against derivation", which is the opposite of what a projection needs —
+and a marker left by an older direct write is cleared when the line is authored,
+so it cannot pin the old value over the new line. The audit for a line is the
+line itself (`Episode`, `TherapyLineAssertion`), exactly as in the editor.
+
+Three further rules, each of which has a test:
+
+- the value is compared with the record before it is treated as an edit, because
+  the native editor PATCHes the whole GET representation and every line field
+  arrives on every save;
+- a line that already has a recorded composition refuses a therapy change: the
+  editor owns the drug list, and asserting a different regimen here would leave
+  the stored exposures describing the old one;
+- the write joins the request's transaction, so a refusal rolls back the rest of
+  the PATCH instead of committing half of it.
+
+`later_therapies` (the per-line read model) stays computed and unwritable; a
+second 3L+ line is authored in the editor, where the per-line contract lives.
 
 ### KIND_EDITABLE is retired for clinical fields
 

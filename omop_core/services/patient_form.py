@@ -810,9 +810,16 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
                     setattr(record, name, value)
                 record.save(update_fields=sorted(explicit))
     if line_changes:
+        from omop_core.services.therapy_line_form import (
+            author_lines_from_form, changed_line_values,
+        )
+        # The full-form autosave echoes the record back on every save; only a
+        # value that actually differs is an instruction to author the line.
+        line_changes = changed_line_values(line_changes, record)
+    if line_changes:
         from omop_core.services.therapy_line_form import author_lines_from_form
         applied, rejected = author_lines_from_form(
-            person, line_changes, disease=record.disease, changed_by=changed_by)
+            person, line_changes, disease=record.disease)
         result.applied.extend(applied)
         result.rejected.update(rejected)
     record.refresh_from_db()

@@ -134,10 +134,14 @@ def _therapy_line_options():
     from omop_core.services.treatment_catalog import OUTCOMES
 
     return {
+        # `value` is the title because that is what the record's derived column
+        # holds, so the control preselects it; `code` is what the writer
+        # resolves. A regimen with no concept cannot author a line, so it is
+        # not offered — a choice that always refuses is worse than none.
         'therapy': [
-            {'value': code, 'label': title}
-            for code, title in TherapyRegimen.objects.order_by('title')
-            .values_list('code', 'title')
+            {'value': title, 'code': code, 'label': title}
+            for code, title in TherapyRegimen.objects.filter(concept__isnull=False)
+            .order_by('title').values_list('code', 'title')
         ],
         'outcome': [
             {'value': value, 'label': label} for _key, value, label in OUTCOMES
