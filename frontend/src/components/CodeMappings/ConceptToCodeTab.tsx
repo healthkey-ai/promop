@@ -559,11 +559,19 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
         });
       }
     }
-    setRun(null); setStarting(true); setError(''); setProgress(''); setSelected(new Set()); setPatched({}); setExpanded(new Set()); setMode('candidates');
+    // Collect all source keys the frontend already has so the backend skips them (#2262).
+    const allPrevious = [...previousCandidates];
+    if (run?.activity.length) {
+      const raw = run.activity.find(event => event.concept.concept_id === concept.concept_id)?.candidates ?? [];
+      for (const item of raw) if (!item.declined) allPrevious.push(item);
+    }
+    const excludeKeys = [...new Set(allPrevious.map(row => JSON.stringify([row.source_vocabulary_id, row.source_code])))].map(key => JSON.parse(key) as [string, string]);
+    setRun(null); setStarting(true); setError(''); setProgress(''); setSelected(new Set()); setPatched({}); setMode('candidates');
     try {
       const { data: next } = await api.post<Run>('/v1/concept-to-code/suggest/', {
         concept_ids: [concept.concept_id], strategies: Object.keys(strategies).filter(key => strategies[key as keyof typeof strategies]),
         limit, include_zero_seen: !seenOnly, ranking_model: ranker, include_declined: retryDeclined,
+        exclude_keys: excludeKeys,
       });
       if (active.current) setRun(next);
     } catch (failure) { if (active.current) setError(destinationError(failure)); }

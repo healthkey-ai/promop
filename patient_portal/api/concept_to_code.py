@@ -294,6 +294,14 @@ def concept_to_code_suggest(request):
     include_declined = data.get('include_declined', False)
     if type(include_declined) is not bool:
         raise ValidationError({'include_declined': 'Supply a boolean.'})
+    exclude_keys = data.get('exclude_keys', [])
+    if not isinstance(exclude_keys, list) or any(
+        not isinstance(pair, list) or len(pair) != 2
+        or not isinstance(pair[0], str) or not isinstance(pair[1], str)
+        for pair in exclude_keys
+    ):
+        raise ValidationError({'exclude_keys': 'Supply a list of [vocabulary_id, code] pairs.'})
+    exclude_keys = [tuple(pair) for pair in exclude_keys]
     limit = data.get('limit', 10)
     if type(limit) is not int or not 1 <= limit <= 100:
         raise ValidationError({'limit': 'Choose a whole number from 1 to 100.'})
@@ -302,7 +310,7 @@ def concept_to_code_suggest(request):
     limit = min(limit, max(1, ceiling // len(ids)))
     params = dict(direction='reverse', concept_ids=ids, strategies=strategies, limit=limit,
                   include_zero_seen=include_zero, include_declined=include_declined, ranking_model=ranking_model,
-                  retrieval_timeout_ms=8000 if inline else 30000)
+                  exclude_keys=exclude_keys, retrieval_timeout_ms=8000 if inline else 30000)
     with transaction.atomic():
         run = SuggestRun.objects.create(
             direction='reverse', total=len(ids), created_by=request.user,

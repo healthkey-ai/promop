@@ -21,12 +21,13 @@ from omop_core.mapping.reverse_catalog import catalog_candidates, catalog_keys
 
 
 def reverse_retrieval_pool(concept, *, strategies, limit, include_zero_seen=False, include_declined=False,
-                           timeout_ms=30000):
+                           exclude_keys=(), timeout_ms=30000):
     """The best ``limit`` sources for ``concept``, skipping what a ranker already
-    declined unless ``include_declined`` (#2034)."""
+    declined unless ``include_declined`` (#2034) and any ``exclude_keys``
+    ``(source_vocabulary_id, source_code)`` the caller already has."""
     return _bounded(timeout_ms, lambda evaluate: _retrieve(
         concept, strategies=strategies, limit=limit, include_zero_seen=include_zero_seen,
-        include_declined=include_declined, evaluate=evaluate))
+        include_declined=include_declined, exclude_keys=set(exclude_keys), evaluate=evaluate))
 
 
 def estimate_reverse_pool(concept, *, strategies, include_zero_seen=False, include_declined=False, timeout_ms=8000):
@@ -207,14 +208,20 @@ def _similarity_threshold():
         cursor.execute("SET LOCAL pg_trgm.similarity_threshold = 0.3")
 
 
-def _retrieve(concept, *, strategies, limit, include_zero_seen, evaluate, include_declined=False):
+def _retrieve(concept, *, strategies, limit, include_zero_seen, evaluate, include_declined=False,
+              exclude_keys=()):
     rows = (_candidate_rows(concept, include_zero_seen, include_declined).select_related('target_concept')
             .prefetch_related('axis_variants__target_concept'))
+    # Exclude sources the caller already has from a previous run (#2262).
+    if exclude_keys:
+        exclusion = reduce(or_, (Q(source_vocabulary_id=v, source_code=c) for v, c in exclude_keys))
+        rows = rows.exclude(exclusion)
     pool = {}
     terms = []
     # Declined vocabulary codes are dropped after the catalog search, which
     # reads its best ``limit`` keys, so it is asked for that many more.
     skip = evaluate(lambda: declined_keys(concept)) if include_zero_seen and not include_declined else set()
+    skip = skip | set(exclude_keys)
 
     def collect(matches, strategy):
         for row in evaluate(matches):
