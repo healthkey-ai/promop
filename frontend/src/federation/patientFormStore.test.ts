@@ -544,3 +544,45 @@ describe('shared patient-form queue', () => {
     expect(updated).toHaveBeenCalledOnce();
   });
 });
+
+describe('planned-therapy options survive a dated descriptor reload', () => {
+  it('keeps the catalog options after a dated save', async () => {
+    let writableReads = 0;
+    const get = vi.fn(async (url: string) => {
+      if (url.includes('writable-fields')) {
+        writableReads += 1;
+        return { data: {
+          planned_therapies: { writable: true, target: 'patient_record', multiple: true,
+            options_source: 'therapy_regimens' },
+          hemoglobin_g_dl: { writable: true, target: 'patient_record', dated: true,
+            latest_date: writableReads === 1 ? '2026-07-04' : '2026-08-01' },
+        } };
+      }
+      if (url.includes('therapy-regimens')) return { data: [
+        { code: 'r_chop', title: 'R-CHOP', value: 'r_chop' },
+      ] };
+      return { data: { patient_info: { person_id: 12, disease: 'Multiple Myeloma',
+        therapy_lines_count: '1' }, write_enabled: true } };
+    });
+    const patch = vi.fn(async (_url: string, edits: Record<string, unknown>) => ({ data: {
+      patient_info: { person_id: 12, disease: 'Multiple Myeloma',
+        therapy_lines_count: '1', ...edits },
+      write: { applied: Object.keys(edits), rejected: {} },
+    } }));
+    const store = new PatientFormStore({ get, patch } as unknown as AxiosInstance, '/api');
+    await store.load();
+
+    expect(store.getSnapshot().fields.planned_therapies.options)
+      .toEqual([{ value: 'r_chop', label: 'R-CHOP' }]);
+    expect(store.getSnapshot().fields.hemoglobin_g_dl.latest_date).toBe('2026-07-04');
+
+    store.enqueue('hemoglobin_g_dl', { value: 12.5, date: '2026-07-04' });
+    await store.flush();
+
+    expect(patch).toHaveBeenCalled();
+    expect(writableReads).toBe(2);
+    expect(store.getSnapshot().fields.hemoglobin_g_dl.latest_date).toBe('2026-08-01');
+    expect(store.getSnapshot().fields.planned_therapies.options)
+      .toEqual([{ value: 'r_chop', label: 'R-CHOP' }]);
+  });
+});
