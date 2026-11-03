@@ -93,6 +93,10 @@ def test_unmapped_pending_edit_can_still_be_backfilled_after_refresh():
         person=person, observation_source_value='planned-therapies',
     ).exists()
 
+    refreshed = refresh_patient_record(person)
+    assert refreshed.planned_therapies == 'watch and wait'
+    assert 'planned_therapies' not in (refreshed.user_edited_fields or [])
+
 
 def test_pinned_answer_keeps_its_marker_across_refresh():
     person = PersonFactory()

@@ -293,3 +293,37 @@ def test_a_non_dated_field_refuses_a_result_date():
         apply_patient_form_patch(
             person, {'systolic_blood_pressure': {'value': 120, 'date': '2026-07-04'}},
             allowed_fields={'systolic_blood_pressure'})
+
+
+def test_an_older_dated_correction_is_transient_until_refresh():
+    """A historical correction lands on PatientRecord first; a refresh then
+    restores the newer fact as the current answer. This is the documented
+    PatientRecord-first trade-off, not a promise that history becomes current."""
+    person = _person_with_lab()
+    concept = Concept.objects.get(concept_code=LOINC)
+    Measurement.objects.create(
+        measurement_id=next_pk(Measurement, 'measurement_id'), person=person,
+        measurement_concept=concept, measurement_date=date(2026, 8, 1),
+        measurement_type_concept_id=32865, value_as_number=14.0,
+    )
+    record = PatientRecord.objects.get(person=person)
+    record.hemoglobin_g_dl = 14.0
+    record.save(update_fields=['hemoglobin_g_dl'])
+
+    saved, result = apply_patient_form_patch(
+        person, {FIELD: {'value': 12.5, 'date': '2026-07-04'}}, allowed_fields={FIELD},
+    )
+
+    assert FIELD in result.applied
+    saved.refresh_from_db()
+    assert float(saved.hemoglobin_g_dl) == 12.5
+    july = Measurement.objects.get(
+        person=person, measurement_concept=concept, measurement_date=date(2026, 7, 4),
+    )
+    august = Measurement.objects.get(
+        person=person, measurement_concept=concept, measurement_date=date(2026, 8, 1),
+    )
+    assert july.value_as_number == 12.5
+    assert august.value_as_number == 14.0
+    refreshed = refresh_patient_record(person)
+    assert float(refreshed.hemoglobin_g_dl) == 14.0

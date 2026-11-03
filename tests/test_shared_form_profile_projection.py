@@ -4,12 +4,14 @@ Profile edits are part of the same PatientRecord PATCH as clinical edits: the
 record value is saved first, then Person/Location is updated without a full
 OMOP derivation (docs/patient-record-first-writes.md, Profile fields).
 """
+from datetime import date
+
 import pytest
 from rest_framework.test import APIClient
 
-from omop_core.models import Location, Person
+from omop_core.models import Location, PatientRecord, Person
 from patient_portal.models import Identity
-from tests.factories import PatientRecordFactory
+from tests.factories import PatientRecordFactory, PersonFactory
 
 pytestmark = pytest.mark.django_db
 
@@ -204,3 +206,33 @@ def test_clearing_both_coordinates_is_allowed():
     record.refresh_from_db()
     assert record.latitude is None
     assert record.longitude is None
+
+
+def test_profile_record_save_precedes_person_save(monkeypatch):
+    person = PersonFactory(year_of_birth=1980, month_of_birth=5, day_of_birth=6)
+    record = PatientRecordFactory(person=person)
+    order = []
+    seen = {}
+    original_record_save = PatientRecord.save
+    original_person_save = Person.save
+
+    def record_save(self, *args, **kwargs):
+        order.append('record')
+        return original_record_save(self, *args, **kwargs)
+
+    def person_save(self, *args, **kwargs):
+        order.append('person')
+        seen['dob'] = PatientRecord.objects.get(pk=record.pk).date_of_birth
+        return original_person_save(self, *args, **kwargs)
+
+    monkeypatch.setattr(PatientRecord, 'save', record_save)
+    monkeypatch.setattr(Person, 'save', person_save)
+
+    response = _patch(_staff_client(), record, {'date_of_birth': '1980-05-06'})
+
+    assert response.status_code == 200, response.data
+    assert order.index('record') < order.index('person')
+    assert seen['dob'] == date(1980, 5, 6)
+    record.refresh_from_db()
+    assert record.date_of_birth == date(1980, 5, 6)
+    assert record.date_of_birth_precision == 'day'
