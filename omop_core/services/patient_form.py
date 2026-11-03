@@ -275,13 +275,6 @@ def patient_form_descriptors(descriptor=None, *, readable_fields=None, writable=
         # Synthetic blocked computed nodes may expose input navigation, never
         # model data withheld by the embedding host.
         names &= set(readable_fields) | (set(FORM_INPUTS) - set(model_fields))
-        # An allowed alias is the same clinical field as its canonical name.
-        # Keep the canonical descriptor so the write path still has its
-        # projection when the host lists only the alias (#5605).
-        for name in list(names):
-            canonical = (descriptor.get(name) or {}).get('canonical')
-            if canonical:
-                names.add(canonical)
     for name in sorted(names):
         entry = dict(descriptor.get(name) or {
             'kind': 'computed', 'writable': False, 'reason': 'Computed result; edit its source inputs.',
@@ -358,7 +351,19 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
     result = FieldWriteResult()
     record, _ = PatientRecord.objects.get_or_create(person=person)
     record = PatientRecord.objects.select_for_update().get(pk=record.pk)
-    descriptor = patient_form_descriptors(descriptor, readable_fields=allowed_fields, record=record)
+    raw_descriptor = descriptor or build_writable_field_descriptor()
+    # An allowed alias may be the only thing the host lists; keep its canonical
+    # entry privately for projection metadata. It is NOT added to the filtered
+    # descriptor or the write surface, so an excluded canonical field stays
+    # unwritable.
+    canonical_entries = {
+        entry.get('canonical'):
+            raw_descriptor.get(entry.get('canonical')) or entry
+        for entry in raw_descriptor.values()
+        if entry.get('canonical')
+    }
+    descriptor = patient_form_descriptors(
+        raw_descriptor, readable_fields=allowed_fields, record=record)
     facts, direct, person_changes, profile_applied = {}, {}, set(), set()
     therapy_overrides_applied = set()
     previous_override_values = {}
@@ -557,7 +562,8 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
             from omop_core.services.omop_projection import projection_for_descriptor
             projections = {}
             for canonical in therapy_overrides_applied:
-                projection = projection_for_descriptor(descriptor.get(canonical) or {})
+                entry = descriptor.get(canonical) or canonical_entries.get(canonical) or {}
+                projection = projection_for_descriptor(entry)
                 if projection:
                     projections[canonical] = projection
             acknowledged = _project_side_effects(

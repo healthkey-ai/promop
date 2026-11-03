@@ -250,3 +250,20 @@ def test_an_explicit_override_survives_recomputation(monkeypatch):
     record.refresh_from_db()
     assert record.relapse_count == 3
     assert record.therapy_overrides['relapse_count'] == 3
+
+
+def test_an_excluded_canonical_field_stays_unwritable_through_an_alias():
+    descriptors = patient_form_descriptors(
+        readable_fields={'creatinine_clearance_rate'})
+    canonical = descriptors.get('creatinine_clearance_ml_min')
+    assert canonical is None or canonical['writable'] is False
+
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    record, result = apply_patient_form_patch(
+        person, {'creatinine_clearance_ml_min': 42},
+        allowed_fields={'creatinine_clearance_rate'})
+
+    assert 'creatinine_clearance_ml_min' in result.rejected
+    record.refresh_from_db()
+    assert record.creatinine_clearance_ml_min != 42
