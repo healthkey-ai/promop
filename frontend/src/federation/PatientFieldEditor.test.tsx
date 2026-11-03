@@ -40,6 +40,37 @@ describe('computed patient field input dialogs', () => {
     expect(screen.queryByText(`${generatedLabel}:`)).not.toBeInTheDocument();
   });
 
+  it('offers both reviewed answers for a nullable boolean (#5601)', async () => {
+    const user = userEvent.setup();
+    const { store } = await setup({
+      hiv_status: {
+        writable: true, target: 'patient_record', control: 'boolean',
+        label: 'HIV Positive', value_kind: 'boolean',
+        answer_labels: { true: 'HIV Positive', false: 'No HIV' },
+      },
+    }, { hiv_status: null });
+    render(<PatientFieldEditor store={store} name="hiv_status" label="HIV Positive" />);
+
+    await user.click(screen.getByRole('combobox'));
+    expect(screen.getByRole('option', { name: 'HIV Positive' })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: 'No HIV' })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'Yes' })).not.toBeInTheDocument();
+  });
+
+  it('reads a negative answer with its reviewed wording', async () => {
+    const { store } = await setup({
+      hiv_status: {
+        writable: false, label: 'HIV Positive', value_kind: 'boolean',
+        answer_labels: { true: 'HIV Positive', false: 'No HIV' },
+        reason: 'Read-only.',
+      },
+    }, { hiv_status: false });
+    render(<PatientFieldEditor store={store} name="hiv_status" label="HIV Positive" />);
+
+    expect(screen.getByText(/No HIV/)).toBeVisible();
+    expect(screen.queryByText(/No:/)).not.toBeInTheDocument();
+  });
+
   it('keeps the descriptor label when the caller has no display label', async () => {
     const { store } = await setup({ field_without_caller_label: {
       writable: false, label: 'Descriptor label', value_kind: 'string', reason: 'Read-only.',

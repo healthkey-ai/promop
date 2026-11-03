@@ -234,6 +234,26 @@ FORM_LABELS = {
     'mipi_risk': ('MIPI Risk', None),
     'mipi_c_risk': ('MIPI-C Risk', None),
     'date_of_birth': ('Date of birth', None),
+    'hiv_status': ('HIV Positive', None),
+    'hepatitis_b_status': ('Hepatitis B Positive', None),
+    'hepatitis_c_status': ('Hepatitis C Positive', None),
+}
+
+#: Reviewed wording for both answers of a nullable boolean. `Yes`/`No` is the
+#: generic pair; a row whose question is phrased as the positive half ("HIV
+#: Positive") needs the negative answer spelled out, or the control answers a
+#: question the patient was not asked (#5601). Descriptor-driven so the native
+#: tab, the shared editor and a host's embedded Trial Details agree.
+#:
+#: The three negatives that used to exist as separate columns (`no_hiv_status`
+#: and its hepatitis siblings) were removed upstream in #2119 because a second
+#: stored boolean could contradict the first. These labels are how the negative
+#: answer is offered now: the same canonical positive column, two spelled-out
+#: answers, and `Unknown` for unanswered.
+BOOLEAN_ANSWERS = {
+    'hiv_status': ('HIV Positive', 'No HIV'),
+    'hepatitis_b_status': ('Hepatitis B Positive', 'No Hepatitis B'),
+    'hepatitis_c_status': ('Hepatitis C Positive', 'No Hepatitis C'),
 }
 
 # No PatientRecord field is refused here: death date has its dated assertion
@@ -324,6 +344,9 @@ def patient_form_descriptors(descriptor=None, *, readable_fields=None, writable=
         entry['control'] = ('boolean' if kind == 'BooleanField' else 'number'
                             if kind in ('FloatField', 'DecimalField', 'IntegerField', 'PositiveIntegerField')
                             else 'date' if kind == 'DateField' else 'text')
+        if kind == 'BooleanField' and name in BOOLEAN_ANSWERS:
+            positive, negative = BOOLEAN_ANSWERS[name]
+            entry['answer_labels'] = {'true': positive, 'false': negative}
         if name in FORM_INPUTS:
             entry['inputs'] = list(FORM_INPUTS[name])
             entry.update(kind='computed', writable=False)

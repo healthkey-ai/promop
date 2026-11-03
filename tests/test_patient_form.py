@@ -180,3 +180,47 @@ def test_cb_trial_details_can_resolve_the_behavior_assertions():
     })
     assert 'noMentalHealthDisorderStatus' in descriptors['no_mental_health_disorder_status']['bindings']
     assert 'noSubstanceUseStatus' in descriptors['no_substance_use_status']['bindings']
+
+
+def test_infection_status_rows_offer_the_reviewed_answer_words():
+    """#5601: the negative answer is a word, not a second column.
+
+    `no_hiv_status` and its hepatitis siblings were removed in #2119 because a
+    second stored boolean could contradict the first. The negative answer is
+    offered by the same canonical positive column, with both answers spelled
+    out, so the control does not answer "HIV Positive: No".
+    """
+    descriptors = patient_form_descriptors({
+        'hiv_status': {'kind': 'direct', 'writable': True, 'target': 'patient_record'},
+        'hepatitis_b_status': {'kind': 'direct', 'writable': True, 'target': 'patient_record'},
+        'hepatitis_c_status': {'kind': 'direct', 'writable': True, 'target': 'patient_record'},
+    })
+
+    expected = {
+        'hiv_status': ('HIV Positive', 'No HIV'),
+        'hepatitis_b_status': ('Hepatitis B Positive', 'No Hepatitis B'),
+        'hepatitis_c_status': ('Hepatitis C Positive', 'No Hepatitis C'),
+    }
+    for name, (positive, negative) in expected.items():
+        entry = descriptors[name]
+        assert entry['label'] == positive
+        assert entry['answer_labels'] == {'true': positive, 'false': negative}
+        assert entry['control'] == 'boolean'
+        # The reviewed wording does not introduce a second field: only the
+        # canonical positive column is writable.
+        assert entry['writable'] is True
+        for removed in (f'no_{name}', name.replace('_status', '_negative_status')):
+            assert removed not in descriptors
+
+
+def test_reviewed_answer_words_name_boolean_columns_only():
+    """The table is applied to `BooleanField` entries by name, so a name that is
+    not a boolean column would silently never carry its labels."""
+    from omop_core.models import PatientRecord
+    from omop_core.services.patient_form import BOOLEAN_ANSWERS
+
+    model_fields = {field.name: field for field in PatientRecord._meta.fields}
+    for name, (positive, negative) in BOOLEAN_ANSWERS.items():
+        field = model_fields[name]
+        assert field.get_internal_type() == 'BooleanField', name
+        assert positive and negative and positive != negative, name

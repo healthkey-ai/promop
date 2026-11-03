@@ -19,6 +19,8 @@ interface FieldProps {
   disabled?: boolean;
   readOnly?: boolean;
   triState?: boolean;
+  /** Reviewed wording for a boolean's two answers (#5601). */
+  answerLabels?: { true?: string; false?: string };
   vocabSource?: VocabSource | null;
   fullWidth?: boolean;
   precision?: 'day' | 'month' | 'year' | null;
@@ -34,6 +36,7 @@ export default function Field({
   disabled,
   readOnly,
   triState,
+  answerLabels,
   vocabSource,
   precision,
 }: FieldProps) {
@@ -110,6 +113,8 @@ export default function Field({
             value={value as boolean | null | undefined}
             disabled={isDisabled}
             triState={triState}
+            trueLabel={answerLabels?.true}
+            falseLabel={answerLabels?.false}
             onChange={(v) => onChange(name, v)}
           />
         );

@@ -99,10 +99,13 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
     setValueDraft({ set: false, value: undefined });
     setResultDateOverride(null);
   };
+  // A reviewed answer pair answers the row's own question: a read-only "No"
+  // beside "HIV Positive" is a different sentence than "No HIV" (#5601).
   const formatted = value == null || value === '' ? 'Unknown'
     : precision === 'year' ? String(value).slice(0, 4)
     : precision === 'month' ? String(value).slice(0, 7)
-    : typeof value === 'boolean' ? (value ? 'Yes' : 'No')
+    : typeof value === 'boolean'
+      ? (value ? field.answer_labels?.true ?? 'Yes' : field.answer_labels?.false ?? 'No')
     : typeof value === 'object' ? JSON.stringify(value) : String(value);
   const control = field.multiple ? 'multiselect' : field.options?.length
     ? 'select'
@@ -141,7 +144,8 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
     </> : writable ? <>
       <Field label={compact ? '' : label} name={canonical} type={control}
         value={dated ? datedValue : value} options={field.options ?? []}
-        triState={field.tri_state === true} precision={precision}
+        triState={field.tri_state === true} answerLabels={field.answer_labels}
+        precision={precision}
         onChange={(name, next) => {
           if (dated) setValueDraft({ set: true, value: next });
           else store.enqueue(name, next);
