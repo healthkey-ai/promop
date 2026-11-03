@@ -268,8 +268,8 @@ def primary_snapshot(person, snapshot):
         legacy_owners = fact_owners(raw, {}, event_concepts, measurement_concepts)
         if all(owner is _UNLINKED for owner in legacy_owners.values()):
             return snapshot, {}
-    from omop_core.services.patient_record_service import _is_oncologic, _primary_cancer_condition
-    cancers = [c for c in snapshot.conditions if not c.is_erroneous and _is_oncologic(c)]
+    from omop_core.services.patient_record_service import _cancer_conditions, _primary_cancer_condition
+    cancers = _cancer_conditions(snapshot.conditions)
     primary = _primary_cancer_condition(person, snapshot, cancers) if cancers else None
     own = {c.pk for c in cancers if primary and cancer_family(c) == cancer_family(primary)}
     fields = DetailFields()

@@ -67,7 +67,7 @@ def _usable_concept_name(concept) -> str | None:
 
 # Bump this whenever aggregation or computation logic changes in any section
 # extractor or in _compute_derived_fields.  See DERIVATION_CHANGELOG.md.
-DERIVATION_VERSION = 20
+DERIVATION_VERSION = 21
 
 # These PatientRecord columns are projections of PersonLanguageSkill, never
 # independent edits. Older PATCH requests could mark them as user-edited and
@@ -1631,22 +1631,38 @@ def _primary_cancer_condition(person, snapshot: OmopSnapshot, cancers: list):
     return max(cancers, key=rank)
 
 
-# Names a cancer without being one: a past cancer, a complication of one, a
-# benign or uncertain growth, a test or a worry. Shared with the PHR's
-# diagnoses (HealthTree/ht-phr-one#119).
+# Names a cancer without being one: a past cancer, a complication or symptom
+# of one (#2181), a benign or uncertain growth, a test or a worry. Shared with
+# the PHR's diagnoses (HealthTree/ht-phr-one#119).
 NOT_CANCER_NAME = re.compile(
     r'\bhistory of\b|\bh/o\b|\bdue to\b|\bsecondary to\b|\bbenign\b|uncertain behaviou?r|'
-    r'\bscreening\b|\bsuspected\b|\brisk of\b|\bfear of\b',
+    r'\bscreening\b|\bsuspected\b|\brisk of\b|\bfear of\b|\bpredisposition\b|'
+    r'\bpain\b|\bfatigue\b|\bcachexia\b|\banx(iety|ious)\b|\ban(a)?emia (in|assoc)|'
+    r'\bamyloidosis\b|\bneuropathy\b|\bfracture\b|\btumou?r lysis\b|\bcompression\b|'
+    r'\beffusion\b|\bmorbidity\b|\bresearch study\b',
     re.IGNORECASE,
 )
+
+# A cancer that has spread to a site, naming the site and not the cancer
+# (#2181). Metastatic melanoma or lung cancer name their cancer and are not
+# matched.
+METASTASIS_NAME = re.compile(
+    r'\bmetasta\w*\s+(to|from)\b|\bmetastatic malignant neoplas|'
+    r'\bsecondary (and unspecified )?malignant\b|\bmetastatic, nos\b',
+    re.IGNORECASE,
+)
+
+
+def _condition_names(cond) -> tuple[str, str]:
+    cname = (cond.condition_concept.concept_name or '').lower() if cond.condition_concept else ''
+    return cname, (cond.condition_source_value or '').lower()
 
 
 def _is_oncologic(cond):
     """Shared cancer predicate for the primary selector and scoped projections."""
     if cond.is_erroneous:
         return False
-    cname = (cond.condition_concept.concept_name or '').lower() if cond.condition_concept else ''
-    src = (cond.condition_source_value or '').lower()
+    cname, src = _condition_names(cond)
     if 'screening' in cname or (not cond.condition_concept_id and 'screening' in src):
         return False
     if NOT_CANCER_NAME.search(cname) or NOT_CANCER_NAME.search(src):
@@ -1657,12 +1673,22 @@ def _is_oncologic(cond):
     ))
 
 
+def _cancer_conditions(conditions) -> list:
+    """The cancers on the record, in the order given.
+
+    A metastasis stands in only when no cancer names its primary (#2181).
+    """
+    cancers = [c for c in conditions if _is_oncologic(c)]
+    primaries = [c for c in cancers if not any(METASTASIS_NAME.search(n) for n in _condition_names(c))]
+    return primaries or cancers
+
+
 def _get_disease_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     data = {}
     snapshot = snapshot or _build_snapshot(person)
 
     # snapshot.conditions is ordered -condition_start_date (newest first).
-    cancers = [c for c in snapshot.conditions if _is_oncologic(c)]
+    cancers = _cancer_conditions(snapshot.conditions)
     cancer_condition = _primary_cancer_condition(person, snapshot, cancers)
 
     if cancer_condition:
