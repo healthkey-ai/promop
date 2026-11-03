@@ -997,7 +997,14 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
         disease = self._normalize_all_param(params.get('disease'))
         if disease:
-            queryset = queryset.filter(disease__iexact=disease)
+            # Any cancer on the record, not only the primary one (#2182). The
+            # primary match also covers records not re-derived since.
+            from omop_core.services.disease_episodes import disease_slug
+            match = Q(disease__iexact=disease)
+            slug = disease_slug(disease)
+            if slug:
+                match |= Q(disease_slugs__contains=[slug])
+            queryset = queryset.filter(match)
 
         stage = self._normalize_all_param(params.get('stage'))
         if stage:
@@ -5472,6 +5479,22 @@ def _disease_labels() -> dict[str, str]:
     return labels
 
 
+def _patients_per_disease(queryset) -> list[tuple[str, int]]:
+    """(disease_slug, patients) for the records in ``queryset``, largest first.
+
+    A patient counts once under each cancer on the record (``disease_slugs``,
+    plus ``disease_slug``, which a direct edit can change alone); a patient
+    with none counts under ''. Counts therefore add up to more than the
+    patients when anyone has two cancers (#2182).
+    """
+    from collections import Counter
+
+    counts = Counter()
+    for primary, slugs in queryset.values_list('disease_slug', 'disease_slugs').iterator():
+        counts.update({s for s in (primary, *(slugs or ())) if s} or {''})
+    return sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def org_disease_stats(request):
@@ -5479,22 +5502,15 @@ def org_disease_stats(request):
     from django.db.models import Count
 
     def _disease_counts(qs):
-        rows = (
-            qs.values('disease_slug')
-            .annotate(count=Count('id'))
-            .order_by('-count')
-        )
         labels = _disease_labels()
         return [
             {
-                'disease_slug': r['disease_slug'] or '',
-                'label': labels.get(r['disease_slug'] or '', r['disease_slug'] or 'Unknown'),
-                'count': r['count'],
+                'disease_slug': slug,
+                'label': labels.get(slug, slug or 'Unknown'),
+                'count': count,
             }
-            for r in rows
+            for slug, count in _patients_per_disease(qs)
         ]
-
-    from django.db.models import Count
 
     orgs = get_visible_orgs(request.user)
     org_list = list(orgs.order_by('name'))
@@ -5517,8 +5533,9 @@ def org_disease_stats(request):
 
     result = []
     for org in org_list:
-        owned_counts = _disease_counts(PatientRecord.objects.filter(organization=org))
-        owned_count = sum(d['count'] for d in owned_counts)
+        # A patient with two cancers is in two disease rows, so totals are
+        # counted on their own, never summed from the rows (#2182).
+        owned_count = PatientRecord.objects.filter(organization=org).count()
         accessible_count = owned_count + sum(granting_counts.get(gid, 0) for gid in trusting_map[org.id])
         accessible_org_ids = {org.id} | trusting_map[org.id]
         counts = _disease_counts(PatientRecord.objects.filter(organization_id__in=accessible_org_ids))
@@ -5534,9 +5551,10 @@ def org_disease_stats(request):
 
     # For staff users: also surface patients not assigned to any org.
     if getattr(request.user, 'is_staff', False):
-        counts = _disease_counts(PatientRecord.objects.filter(organization__isnull=True))
-        if counts:
-            unassigned_total = sum(d['count'] for d in counts)
+        unassigned = PatientRecord.objects.filter(organization__isnull=True)
+        unassigned_total = unassigned.count()
+        if unassigned_total:
+            counts = _disease_counts(unassigned)
             result.insert(0, {
                 'org_slug': '__unassigned__',
                 'org_name': 'All Patients (Unassigned)',
