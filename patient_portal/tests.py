@@ -15975,7 +15975,7 @@ class SelfSignupEmailTrustTest(TestCase):
         self.assertTrue(grant.pending_email_verification)
 
     def test_promotion_counts_nothing_before_the_address_is_proved(self):
-        """An unproved address must not promote, and must not be read as a domain."""
+        """An unproved address must leave its pending grant untouched."""
         from patient_portal.api.email_verification import promote_trusted_domain_grants
         identity, grant = self._pending_domain_signup(email='unproved@trusted.org')
         self.assertEqual(promote_trusted_domain_grants(identity), 0)
