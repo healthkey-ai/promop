@@ -16,7 +16,6 @@ export const RACE_OPTIONS = [
   'Unknown',
 ];
 export const ETHNICITY_OPTIONS = ['Hispanic or Latino', 'Not Hispanic or Latino', 'Unknown'];
-export const DISEASE_OPTIONS = ['Breast Cancer', 'Follicular Lymphoma', 'Multiple Myeloma', 'Chronic Lymphocytic Leukemia (CLL)', 'Mantle Cell Lymphoma', 'Lung Cancer', 'Colon Cancer', 'Other'];
 export const STAGE_OPTIONS = ['0', 'I', 'IA', 'IB', 'II', 'IIA', 'IIB', 'III', 'IIIA', 'IIIB', 'IIIC', 'IV', 'Unknown'];
 export const HISTOLOGIC_TYPE_OPTIONS = [
   'Unknown',
