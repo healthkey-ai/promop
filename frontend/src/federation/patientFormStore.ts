@@ -2,6 +2,18 @@ import type { AxiosInstance } from 'axios';
 import type { FieldDescriptor } from '@/hooks/useWritableFields';
 import { diseaseToDiseaseCode } from '@/api/therapyContext';
 
+/**
+ * A dated edit is `{value, date}`: the pair is one clinical assertion, so a
+ * stale date is a wrong clinical day rather than a formatting detail.
+ */
+function isDatedEdit(value: unknown): value is { value: unknown; date: string } {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    && 'date' in (value as Record<string, unknown>);
+}
+
+const STALE_DATES_ERROR =
+  'The result dates could not be refreshed. Retry before saving so this result lands on the right day.';
+
 export interface FormFieldDescriptor extends FieldDescriptor {
   label?: string;
   control?: 'text' | 'number' | 'date' | 'boolean' | 'select' | 'multiselect' | 'email';
@@ -32,8 +44,7 @@ export interface PatientFormResult {
   write: { applied: string[]; rejected?: Record<string, string>; deferred_profile?: string[] };
 }
 
-/** One queue per immutable authorization context, not per mounted row/dialog.
- * A SPA unmount only removes listeners: a pending/in-flight batch still drains.
+/** One queue per immutable authorization context, not per mounted row/dialog. * A SPA unmount only removes listeners: a pending/in-flight batch still drains.
  * This deliberately does not promise delivery after closing the browser tab. */
 export class PatientFormStore {
   private snapshot: PatientFormSnapshot = {
@@ -76,6 +87,8 @@ export class PatientFormStore {
     this.snapshot = { ...this.snapshot, ...next };
     this.listeners.forEach((listener) => listener());
   }
+
+  private reloadSequence = 0;
   resolve(name: string): string | undefined {
     if (name in this.snapshot.fields) return name;
     return Object.keys(this.snapshot.fields).find((key) => this.snapshot.fields[key].bindings?.includes(name));
@@ -124,6 +137,7 @@ export class PatientFormStore {
         }
         if (revision !== this.readRevision) return;
         this.publish({ values, fields, personId, loading: false, datesStale: false,
+          errors: this.withoutStaleErrors(),
           writable: data.write_enabled !== false, error: undefined });
       } catch {
         if (revision === this.readRevision) this.publish({ loading: false, writable: false,
@@ -137,12 +151,9 @@ export class PatientFormStore {
     if (!this.snapshot.writable || !field?.writable || field.target !== 'patient_record') return;
     // A dated edit carries its correction target. After a failed descriptor
     // refresh that target is the pre-save date, so refuse it here as well as in
-    // the editor: a stale date is a wrong clinical day, not a formatting detail.
-    const datedEdit = value !== null && typeof value === 'object' && !Array.isArray(value)
-      && 'date' in (value as Record<string, unknown>);
-    if (datedEdit && this.snapshot.datesStale) {
-      this.publish({ errors: { ...this.snapshot.errors, [name]:
-        'The result dates could not be refreshed. Retry before saving so this result lands on the right day.' } });
+    // the editor and in flush().
+    if (isDatedEdit(value) && this.snapshot.datesStale) {
+      this.publish({ errors: { ...this.snapshot.errors, [name]: STALE_DATES_ERROR } });
       return;
     }
     this.queue[name] = value;
@@ -156,12 +167,19 @@ export class PatientFormStore {
   private reloadFields = async (): Promise<boolean> => {
     const personId = this.snapshot.personId;
     if (!personId) return false;
-    const revision = this.readRevision;
+    const readRevision = this.readRevision;
+    // A retry can overlap the post-save refresh it is recovering from. Only the
+    // newest attempt may publish, or a late failure would re-arm the flag after
+    // a successful retry.
+    const attempt = ++this.reloadSequence;
+    const current = () => readRevision === this.readRevision && attempt === this.reloadSequence;
     try {
       const { data } = await this.client.get<Record<string, FormFieldDescriptor>>(
         `${this.base}/v1/patient-records/writable-fields/`,
         { params: { person_id: personId }, headers: { 'X-Patient-Form': '1' } });
-      if (revision === this.readRevision) this.publish({ fields: data, datesStale: false });
+      if (current()) {
+        this.publish({ fields: data, datesStale: false, errors: this.withoutStaleErrors() });
+      }
       return true;
     } catch {
       // A failed metadata refresh must not undo the value the PATCH acknowledged.
@@ -169,10 +187,19 @@ export class PatientFormStore {
       // dates are stale: the editor and the queue refuse the next dated save
       // until a refresh succeeds, instead of pre-filling a correction target
       // that is no longer the newest result (#5608).
-      if (revision === this.readRevision) this.publish({ datesStale: true });
+      if (current()) this.publish({ datesStale: true });
       return false;
     }
   };
+
+  /** Drop the "retry first" errors a successful refresh has answered. */
+  private withoutStaleErrors(): Record<string, string> {
+    const errors = { ...this.snapshot.errors };
+    for (const [name, message] of Object.entries(errors)) {
+      if (message === STALE_DATES_ERROR && !(name in this.snapshot.pending)) delete errors[name];
+    }
+    return errors;
+  }
 
   /** Retry the descriptor refresh a failed post-save reload left behind. */
   reloadDates = () => this.reloadFields();
@@ -184,6 +211,24 @@ export class PatientFormStore {
     const revisions = { ...this.revisions };
     const explicitAtStart = this.explicitRevision;
     this.queue = {};
+    // An edit accepted while the previous save was still refreshing cannot be
+    // sent against the pre-save date once that refresh has failed (#5608).
+    // Hold it instead of sending it: pending clears, the field says why, and a
+    // successful Retry does not silently re-send a date the patient never
+    // confirmed against the new latest result.
+    const staleDated = this.snapshot.datesStale
+      ? Object.keys(batch).filter((name) => isDatedEdit(batch[name])) : [];
+    if (staleDated.length) {
+      const pending = { ...this.snapshot.pending };
+      const errors = { ...this.snapshot.errors };
+      for (const name of staleDated) {
+        if (this.revisions[name] === revisions[name]) delete pending[name];
+        errors[name] = STALE_DATES_ERROR;
+        delete batch[name];
+      }
+      this.publish({ pending, errors });
+      if (!Object.keys(batch).length) return;
+    }
     this.flight = true;
     this.publish({ saving: true });
     const batchErrors: Record<string, string> = {};

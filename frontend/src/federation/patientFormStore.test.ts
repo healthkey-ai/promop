@@ -271,6 +271,49 @@ describe('dated result edits', () => {
     await vi.advanceTimersByTimeAsync(500);
     expect(patch).toHaveBeenCalledTimes(2);
   });
+
+  it('holds a dated edit queued behind an in-flight save once the refresh fails', async () => {
+    let latest = '2026-08-01';
+    let metadataFails = false;
+    let resolvePatch!: (payload: unknown) => void;
+    const get = vi.fn(async (url: string) => {
+      if (url.includes('writable-fields')) {
+        if (metadataFails) throw new Error('metadata unavailable');
+        return { data: { hemoglobin_g_dl: { writable: true, target: 'patient_record',
+          dated: true, latest_date: latest, projection: { omop_table: 'measurement' } } } };
+      }
+      return { data: { patient_info: { person_id: 12, hemoglobin_g_dl: 12.5 }, write_enabled: true } };
+    });
+    const patch = vi.fn(() => new Promise<unknown>((resolve) => { resolvePatch = resolve; }));
+    const store = new PatientFormStore({ get, patch } as unknown as AxiosInstance, '/api');
+    await store.load();
+
+    store.enqueue('hemoglobin_g_dl', { value: 13, date: '2026-08-02' });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(patch).toHaveBeenCalledOnce();
+
+    // The first save is still in flight, so the refresh has not failed yet and
+    // the queue accepts the second dated edit. That is the window this guards.
+    store.enqueue('hemoglobin_g_dl', { value: 14, date: '2026-08-03' });
+    metadataFails = true;
+    resolvePatch({ data: { patient_info: { person_id: 12, hemoglobin_g_dl: 13 },
+      write: { applied: ['hemoglobin_g_dl'], rejected: {} } } });
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(patch).toHaveBeenCalledOnce();                 // the held edit never went out
+    expect(store.getSnapshot().pending).toEqual({});
+    expect(store.getSnapshot().errors.hemoglobin_g_dl).toMatch(/Retry/);
+
+    // A retry refreshes the dates but does not re-send an unconfirmed date.
+    metadataFails = false;
+    latest = '2026-08-03';
+    await store.reloadDates();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(patch).toHaveBeenCalledOnce();
+    expect(store.getSnapshot().datesStale).toBe(false);
+    expect(store.getSnapshot().errors.hemoglobin_g_dl).toBeUndefined();
+    expect(store.getSnapshot().fields.hemoglobin_g_dl.latest_date).toBe('2026-08-03');
+  });
 });
 
 describe('shared patient-form queue', () => {
