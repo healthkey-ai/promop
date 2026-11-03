@@ -735,6 +735,11 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
                 set(record.user_edited_fields or []) - acknowledged)
             record.save(update_fields=['user_edited_fields'])
         if profile_changes:
+            if {'latitude', 'longitude'} & set(profile_changes):
+                # Project the effective pair, not just the submitted
+                # coordinate: a half-set Location breaks the next derivation.
+                profile_changes['latitude'] = record.latitude
+                profile_changes['longitude'] = record.longitude
             # The record already holds the profile value; mirror it onto
             # Person/Location without re-deriving the whole record. A profile
             # projection failure must not undo the saved record value.

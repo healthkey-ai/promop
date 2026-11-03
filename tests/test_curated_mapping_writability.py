@@ -233,3 +233,12 @@ class TestBoundedAnswers:
 
         assert entry['writable'] is True
         assert 'options' not in entry
+
+
+def test_a_curated_wearable_mapping_stays_computed():
+    _mapping(field_name='median_daily_steps_30d', source_value='steps')
+
+    entry = build_writable_field_descriptor()['median_daily_steps_30d']
+
+    assert entry['kind'] == 'computed'
+    assert entry['writable'] is False

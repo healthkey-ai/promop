@@ -901,10 +901,6 @@ def build_writable_field_descriptor():
                 ),
             }
             continue
-        if field in curated:
-            descriptor[field] = curated[field]
-            continue
-
         if field in _WEARABLE_METRIC:
             metric = _WEARABLE_METRIC[field]
             descriptor[field] = {
@@ -917,6 +913,10 @@ def build_writable_field_descriptor():
                     'rather than entering a summary value.'
                 ),
             }
+            continue
+
+        if field in curated:
+            descriptor[field] = curated[field]
             continue
 
 

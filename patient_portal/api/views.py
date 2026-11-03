@@ -675,7 +675,7 @@ def _validate_location_fields(location_patch, person, patient_info=None):
         })
 
 
-def _project_profile_fields(person, direct_fields, patch_data):
+def _project_profile_fields(person, direct_fields, patch_data, patient_info=None):
     """Project profile fields from PatientRecord onto Person/Location.
 
     Called after the serializer has saved profile values to PatientRecord.
@@ -747,6 +747,13 @@ def _project_profile_fields(person, direct_fields, patch_data):
             location_updates[column] = incoming
 
         if location_updates:
+            if {'latitude', 'longitude'} & location_fields:
+                # Project the effective pair, not just the submitted
+                # coordinate: a half-set Location breaks the next derivation.
+                if patient_info is None:
+                    patient_info = PatientRecord.objects.filter(person=person).first()
+                location_updates['latitude'] = getattr(patient_info, 'latitude', None)
+                location_updates['longitude'] = getattr(patient_info, 'longitude', None)
             # Reuse the shared-form clone-on-write implementation: a Location
             # deduplicated across Persons must never be mutated in place.
             from omop_core.services.field_write_service import apply_location
@@ -1332,7 +1339,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             profile_patch_data = dict(serializer.validated_data)
             profile_patch_data.update(demographics)
             profile_projected = _project_profile_fields(
-                person, direct_fields, profile_patch_data,
+                person, direct_fields, profile_patch_data, patient_info,
             )
             if 'date_of_birth' in profile_projected:
                 # PatientRecord.save calculates age from its related Person when
