@@ -1023,6 +1023,16 @@ def refresh_patient_record(person: Person) -> PatientRecord:
         for field in user_edited:
             if hasattr(patient_info, field):
                 preserved[field] = getattr(patient_info, field)
+        # A pending height/weight value is meaningless without its canonical
+        # unit: derivation clears both unit columns, and BMI would then treat
+        # the number as metres. Keep the companion unit with the value.
+        preserved_units = set()
+        for value_field, unit_field in (
+            ('height', 'height_units'), ('weight', 'weight_units'),
+        ):
+            if value_field in preserved and hasattr(patient_info, unit_field):
+                preserved[unit_field] = getattr(patient_info, unit_field)
+                preserved_units.add(unit_field)
 
         # Clear all OMOP-derived fields before re-deriving so deletions are reflected.
         _clear_derived_fields(patient_info)
@@ -1105,6 +1115,11 @@ def refresh_patient_record(person: Person) -> PatientRecord:
         clinical_values = values_from_snapshot(snapshot) if preserved else {}
         still_orphaned = []
         for field, value in preserved.items():
+            if field in preserved_units:
+                # Restore the unit with its pending value; it is not an
+                # independent user edit and must not get its own marker.
+                setattr(patient_info, field, value)
+                continue
             derived_value = getattr(patient_info, field, None)
             # A retained attribute is not evidence: a field this refresh did
             # not evaluate keeps its value only because nothing cleared it.

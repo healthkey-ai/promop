@@ -15,6 +15,7 @@ from omop_core.models import (
     ProvenanceRecord,
 )
 from omop_core.services.patient_form import apply_patient_form_patch
+from omop_core.services.patient_record_service import refresh_patient_record
 from patient_portal.models import Identity, PatientUser
 from tests.factories import (
     ConceptFactory, DomainFactory, MeasurementFactory, ObservationFactory,
@@ -342,3 +343,93 @@ def test_projection_database_failure_keeps_the_saved_answer(monkeypatch):
     assert not Measurement.objects.filter(
         person=record.person, measurement_concept_id=HEMOGLOBIN_CONCEPT,
     ).exists()
+
+
+def test_nonstaff_cannot_write_staff_only_profile_fields():
+    record = PatientRecordFactory()
+
+    response = _patch(_patient_client(record.person), record, {
+        'validated': True, 'validated_by': 'Dr Example', 'city': 'NYC',
+    })
+
+    assert response.status_code == 200, response.data
+    record.refresh_from_db()
+    assert record.validated is None
+    assert record.validated_by is None
+    assert record.city == 'NYC'
+
+
+def test_nonstaff_descriptor_marks_staff_only_fields_read_only():
+    record = PatientRecordFactory()
+    client = _patient_client(record.person)
+
+    response = client.get(
+        '/api/v1/patient-records/writable-fields/',
+        {'person_id': record.person_id}, HTTP_X_PATIENT_FORM='1',
+    )
+
+    assert response.status_code == 200, response.data
+    for field in (
+        'validated', 'validated_by', 'validation_date',
+        'suppress_demographics_for_others',
+    ):
+        assert response.data[field]['writable'] is False
+        assert response.data[field]['read_only_for_caller'] is True
+
+
+def test_height_weight_save_canonical_units_and_bmi():
+    record = PatientRecordFactory(height_units=None, weight_units=None)
+
+    response = _patch(_staff_client(), record, {'height': 175, 'weight': 70})
+
+    assert response.status_code == 200, response.data
+    record.refresh_from_db()
+    assert record.height_units == 'cm'
+    assert record.weight_units == 'kg'
+    assert float(record.bmi) == pytest.approx(22.86, abs=0.01)
+    assert float(response.data['patient_info']['bmi']) == pytest.approx(22.86, abs=0.01)
+
+
+def test_missing_recipe_type_keeps_the_lab_edit_pending():
+    _seed_lab_vocab()
+    Concept.objects.filter(pk=PATIENT_SELF_REPORT).delete()
+    record = PatientRecordFactory()
+
+    response = _patch(_staff_client(), record, {'hemoglobin_g_dl': 9.5})
+
+    assert response.status_code == 200, response.data
+    record.refresh_from_db()
+    assert record.hemoglobin_g_dl == 9.5
+    assert 'hemoglobin_g_dl' in (record.user_edited_fields or [])
+    assert not Measurement.objects.filter(
+        person=record.person, measurement_concept_id=HEMOGLOBIN_CONCEPT,
+    ).exists()
+
+
+def test_failed_height_weight_projection_keeps_units_across_refresh(monkeypatch):
+    record = PatientRecordFactory(height_units=None, weight_units=None)
+    monkeypatch.setattr(
+        'omop_core.services.omop_projection.project_single_value',
+        lambda *_args, **_kwargs: False,
+    )
+
+    response = _patch(_staff_client(), record, {'height': 175, 'weight': 70})
+
+    assert response.status_code == 200, response.data
+    record.refresh_from_db()
+    assert record.height == 175
+    assert record.weight == 70
+    assert record.height_units == 'cm'
+    assert record.weight_units == 'kg'
+    assert float(record.bmi) == pytest.approx(22.86, abs=0.01)
+
+    refreshed = refresh_patient_record(record.person)
+    assert refreshed.height == 175
+    assert refreshed.weight == 70
+    assert refreshed.height_units == 'cm'
+    assert refreshed.weight_units == 'kg'
+    assert float(refreshed.bmi) == pytest.approx(22.86, abs=0.01)
+    assert 'height' in (refreshed.user_edited_fields or [])
+    assert 'weight' in (refreshed.user_edited_fields or [])
+    assert 'height_units' not in (refreshed.user_edited_fields or [])
+    assert 'weight_units' not in (refreshed.user_edited_fields or [])
