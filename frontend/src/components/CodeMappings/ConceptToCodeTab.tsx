@@ -114,6 +114,10 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange, initialC
   const [writing, setWriting] = useState(false);
   // The Edit Mapping dialog sits inside this one; Escape must not close both.
   const [editing, setEditing] = useState(false);
+  // Cache suggestion state per concept so it survives dialog close/reopen.
+  // The cache lives for the lifetime of the tab, which is the natural scope.
+  // useState (not useRef) so the identity is stable and accessible during render.
+  const [suggestCache] = useState(() => new Map<number, { run: Run | null; previousCandidates: Source[] }>());
 
   useEffect(() => {
     let active = true;
@@ -287,7 +291,7 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange, initialC
         </div>
         <SourceCoverage key={selected.concept_id} concept={selected} canApprove={canApprove}
           onWriting={value => { setWriting(value); onWritingChange?.(value); }} onSaved={() => setRevision(value => value + 1)}
-          onEditingChange={setEditing} />
+          onEditingChange={setEditing} suggestCache={suggestCache} />
       </Dialog.Content>
     </Dialog.Portal>}
   </Dialog.Root>;
@@ -411,10 +415,12 @@ function useSourceGroup(conceptId: number, status: Status, enabled: boolean, que
   return { data, setData, page, setPage, loading, failed, reset };
 }
 
-function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChange }: {
+function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChange, suggestCache }: {
   concept: Concept; canApprove: boolean; onSaved: () => void; onWriting: (value: boolean) => void;
   onEditingChange?: (value: boolean) => void;
+  suggestCache: Map<number, { run: Run | null; previousCandidates: Source[] }>;
 }) {
+  const cached = suggestCache.get(concept.concept_id);
   // Suggested source codes is the view a curator comes for, so it opens first (#2010).
   const [mode, setMode] = useState<SourceMode>('candidates');
   const [search, setSearch] = useState('');
@@ -425,10 +431,10 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
   // so the proposals waiting for review are what the curator sees first.
   const [open, setOpen] = useState<Record<Status, boolean>>({ approved: false, proposed: true, rejected: false });
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [run, setRun] = useState<Run | null>(null);
+  const [run, setRun] = useState<Run | null>(cached?.run ?? null);
   // Candidates from previous finished runs, keyed by source key for dedup.
   // A new run's results overlay these; approvals and patches apply to both.
-  const [previousCandidates, setPreviousCandidates] = useState<Source[]>([]);
+  const [previousCandidates, setPreviousCandidates] = useState<Source[]>(cached?.previousCandidates ?? []);
   // Rows saved or approved while a run is still streaming, by source key. The
   // poll replaces the run wholesale, so edits live beside it and are laid over
   // its candidates on every render (#2028).
@@ -468,6 +474,24 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
   const writingRef = useRef(false);
   const active = useRef(true);
   useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
+
+  // Keep refs to current state so the unmount cleanup captures the latest values.
+  const runRef = useRef(run);
+  const prevCandRef = useRef(previousCandidates);
+  useEffect(() => { runRef.current = run; }, [run]);
+  useEffect(() => { prevCandRef.current = previousCandidates; }, [previousCandidates]);
+  // Save suggestion state to the parent's cache on unmount so it survives
+  // dialog close/reopen (#2253).
+  useEffect(() => {
+    return () => {
+      if (runRef.current || prevCandRef.current.length) {
+        suggestCache.set(concept.concept_id, {
+          run: runRef.current, previousCandidates: prevCandRef.current,
+        });
+      }
+    };
+  }, [concept.concept_id, suggestCache]);
+
   const running = starting || run?.state === 'queued' || run?.state === 'running';
   const finishedRun = run && !running ? run.run_id : null;
 
