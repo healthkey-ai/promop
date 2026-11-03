@@ -15942,6 +15942,47 @@ class SelfSignupEmailTrustTest(TestCase):
         grant.refresh_from_db()
         self.assertEqual(grant.role, 'patient')
 
+    def _pending_domain_signup(self, email='promote@trusted.org'):
+        """A signup at a trusted-domain org that had to wait for the mailbox."""
+        from omop_core.models import OrgTrust
+        identity = Identity.objects.create_user(email=email, password=self.PASSWORD)
+        OrgTrust.objects.create(granting_org=self.private, trusted_domain='trusted.org')
+        grant = GroupAccess.objects.create(
+            identity=identity, org=self.private, role='patient',
+            pending_email_verification=True,
+        )
+        return identity, grant
+
+    def test_verification_promotes_a_pending_domain_trust_grant(self):
+        """#1454: proving the address turns the held-back patient grant into analyst."""
+        from patient_portal.api.email_verification import make_verification_link
+        identity, grant = self._pending_domain_signup()
+        token = make_verification_link(identity).split('token=')[1]
+        self.assertEqual(APIClient().post('/api/v1/auth/verify-email/', {'token': token}).status_code, 200)
+        grant.refresh_from_db()
+        self.assertEqual(grant.role, 'analyst')
+        self.assertFalse(grant.pending_email_verification)
+
+    def test_verification_does_not_promote_from_an_inactive_granting_org(self):
+        """A suspended organization cannot hand out access through its domain trust."""
+        from patient_portal.api.email_verification import make_verification_link
+        identity, grant = self._pending_domain_signup()
+        Organization.objects.filter(pk=self.private.pk).update(is_active=False)
+        token = make_verification_link(identity).split('token=')[1]
+        self.assertEqual(APIClient().post('/api/v1/auth/verify-email/', {'token': token}).status_code, 200)
+        grant.refresh_from_db()
+        self.assertEqual(grant.role, 'patient')
+        self.assertTrue(grant.pending_email_verification)
+
+    def test_promotion_counts_nothing_before_the_address_is_proved(self):
+        """An unproved address must leave its pending grant untouched."""
+        from patient_portal.api.email_verification import promote_trusted_domain_grants
+        identity, grant = self._pending_domain_signup(email='unproved@trusted.org')
+        self.assertEqual(promote_trusted_domain_grants(identity), 0)
+        grant.refresh_from_db()
+        self.assertEqual(grant.role, 'patient')
+        self.assertTrue(grant.pending_email_verification)
+
     def test_changing_the_email_clears_its_verification(self):
         identity = Identity.objects.create_user(email='first@example.com', password=self.PASSWORD)
         identity.mark_email_verified()
