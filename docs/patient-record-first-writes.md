@@ -115,11 +115,13 @@ mappings carry a `projection` key:
 }
 ```
 
-### KIND_EDITABLE is retired
+### KIND_EDITABLE is retired for clinical fields
 
-The `KIND_EDITABLE` constant still exists for backward compatibility but is no
-longer emitted by the descriptor builder. All writable clinical fields are
-`KIND_DIRECT`.
+The `KIND_EDITABLE` constant still exists for backward compatibility. It is no
+longer emitted for clinical PatientRecord fields; all writable clinical fields
+are `KIND_DIRECT`. The descriptor still uses it to label the dedicated
+genomics/structured editors (`genomics_*` and `genetic_mutations`), which have
+their own recipes rather than the scalar PATCH path.
 
 ### Vocabulary not loaded
 

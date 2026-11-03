@@ -59,15 +59,22 @@ def parse_fact_date(raw, field):
     return parsed
 
 
-def _project_side_effects(person, direct, projections, authorship=None, dates=None):
+def _project_side_effects(person, direct, projections, authorship=None, dates=None,
+                          patient_author=False):
     """Mirror PatientRecord answers into OMOP without risking the saved answer.
 
     The record write already happened and is the source of truth; a projection
     failure must not roll it back or fail the request (#5521). ``authorship``
     carries the caller's self-report typing and provenance, exactly as the
-    native PATCH does, so a patient answer never takes over a clinical fact.
+    native PATCH does, so a patient answer does not take over a clinical fact
+    when 32865 is available. Without it, only pinned current-state fields skip
+    projection; non-pinned fields keep the recipe type and may update a
+    matching same-day clinical fact, as the native PATCH also does.
     ``dates`` carries the clinical date of a dated edit, so a correction lands
     on the day the result was observed rather than the day it was typed.
+    ``patient_author`` without resolved authorship means concept 32865 is not
+    loaded: only pinned current-state fields must skip projection; other fields
+    keep the recipe type, matching the native PATCH.
     """
     acknowledged = set()
     if not projections:
@@ -82,6 +89,11 @@ def _project_side_effects(person, direct, projections, authorship=None, dates=No
     # gets there must not take the saved answer with it.
     for name, projection in projections.items():
         if name not in direct or not projection:
+            continue
+        if patient_author and not authorship and name in PINNED_PROJECTION_FIELDS:
+            # Without 32865 the patient's fact cannot be told apart from a
+            # clinical one; a current-state answer must not overwrite today's
+            # clinical fact. Non-pinned fields keep the recipe type.
             continue
         try:
             changed = project_single_value(
@@ -364,10 +376,9 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
     ``authorship`` is the caller's project_single_value typing (self-report and
     provenance) for best-effort side-effect projections; ``patient_author``
     says the caller is the patient or their representative. A patient author
-    with no authorship means the self-report type concept is not loaded, and
-    then the side effect is skipped here, by the write itself: a patient's
-    answer typed as the recipe's EHR fact would match and overwrite today's
-    clinical fact in place, whichever caller forgot to say who was writing.
+    with no authorship means the self-report type concept is not loaded:
+    pinned current-state fields are skipped, while other fields keep the
+    recipe type, matching the native PATCH.
     """
     result = FieldWriteResult()
     record, _ = PatientRecord.objects.get_or_create(person=person)
@@ -401,7 +412,6 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
     side_effect_projections = {}
     record_profile_fields = set()
     birth_changes = {}
-    project_side_effects = not (patient_author and not authorship)
     for name, value in changes.items():
         entry = descriptor.get(name, {})
         if not entry.get('writable') or entry.get('target') != 'patient_record':
@@ -612,23 +622,23 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
         # one write covers the answer, its provenance marker and the override.
         record.save(update_fields=sorted(therapy_overrides_applied)
                     + ['therapy_overrides', 'user_edited_fields'])
-        if project_side_effects:
-            from omop_core.services.omop_projection import projection_for_descriptor
-            projections = {}
-            for canonical in therapy_overrides_applied:
-                entry = descriptor.get(canonical) or canonical_entries.get(canonical) or {}
-                projection = projection_for_descriptor(entry)
-                if projection:
-                    projections[canonical] = projection
-            acknowledged = _project_side_effects(
-                person, override_values, projections, authorship)
-            if acknowledged:
-                # The fact is written; the override itself is the source of
-                # truth, so the pending marker is no longer needed. Keeping it
-                # lets a later generic backfill overwrite a cleared assertion.
-                record.user_edited_fields = sorted(
-                    set(record.user_edited_fields or []) - acknowledged)
-                record.save(update_fields=['user_edited_fields'])
+        from omop_core.services.omop_projection import projection_for_descriptor
+        projections = {}
+        for canonical in therapy_overrides_applied:
+            entry = descriptor.get(canonical) or canonical_entries.get(canonical) or {}
+            projection = projection_for_descriptor(entry)
+            if projection:
+                projections[canonical] = projection
+        acknowledged = _project_side_effects(
+            person, override_values, projections, authorship,
+            patient_author=patient_author)
+        if acknowledged:
+            # The fact is written; the override itself is the source of
+            # truth, so the pending marker is no longer needed. Keeping it
+            # lets a later generic backfill overwrite a cleared assertion.
+            record.user_edited_fields = sorted(
+                set(record.user_edited_fields or []) - acknowledged)
+            record.save(update_fields=['user_edited_fields'])
     if profile_changes:
         # Validate the effective coordinate pair and the Location value ranges
         # before any write so a bad profile edit returns 400 instead of an
@@ -659,18 +669,17 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
         from omop_core.services.patient_record_revisions import write_record_revisions
         write_record_revisions(record, previous_direct, changed_by=changed_by)
         result.applied.extend(clinical_direct)
-        if project_side_effects:
-            acknowledged = _project_side_effects(
-                person, direct, side_effect_projections, authorship,
-                dates=fact_dates)
-            if acknowledged:
-                # The fact is written, so the record no longer has to mask
-                # derivation: clear only what the projection acknowledged.
-                # A newer fact from another day must not be hidden forever
-                # behind a marker left by today's successful save.
-                record.user_edited_fields = sorted(
-                    set(record.user_edited_fields or []) - acknowledged)
-                record.save(update_fields=['user_edited_fields'])
+        acknowledged = _project_side_effects(
+            person, direct, side_effect_projections, authorship,
+            dates=fact_dates, patient_author=patient_author)
+        if acknowledged:
+            # The fact is written, so the record no longer has to mask
+            # derivation: clear only what the projection acknowledged.
+            # A newer fact from another day must not be hidden forever
+            # behind a marker left by today's successful save.
+            record.user_edited_fields = sorted(
+                set(record.user_edited_fields or []) - acknowledged)
+            record.save(update_fields=['user_edited_fields'])
         if profile_changes:
             # The record already holds the profile value; mirror it onto
             # Person/Location without re-deriving the whole record. A profile
