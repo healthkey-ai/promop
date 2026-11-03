@@ -1,6 +1,6 @@
-import { useState } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useVocabulary } from '@/hooks/useVocabulary';
-import { useDiseaseCategories } from '@/hooks/useDiseaseCategories';
+import { useCategoryObjects, useAllDiseaseMappings } from '@/hooks/useDiseaseCategories';
 import { useWritableFields } from '@/hooks/useWritableFields';
 import ClinicalField from '../ClinicalField';
 import TreatingInstitutionField from '../TreatingInstitutionField';
@@ -58,7 +58,28 @@ export default function GeneralTab({
   const { source: karnofskySource }   = useVocabulary('karnofsky-score', 'code');
   const { source: ethnicitySource }   = useVocabulary('ethnicity', 'title');
   const { source: diseaseSource }     = useVocabulary('disease', 'title');
-  const { options: diseaseOptions }   = useDiseaseCategories();
+  const { categories }               = useCategoryObjects();
+  const { categoryForDisease, diseasesByCategory } = useAllDiseaseMappings();
+
+  // Derive the selected category from the current disease value.
+  const currentDisease = (formData?.disease as string) ?? '';
+  const derivedCategory = useMemo(
+    () => (currentDisease ? categoryForDisease(currentDisease) : null),
+    [currentDisease, categoryForDisease],
+  );
+  const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
+
+  // Sync the local category state when the derived category becomes available.
+  useEffect(() => {
+    if (derivedCategory && selectedCategory === null) {
+      setSelectedCategory(derivedCategory);
+    }
+  }, [derivedCategory, selectedCategory]);
+
+  const categoryDiseaseOptions = useMemo(
+    () => (selectedCategory ? diseasesByCategory[selectedCategory] ?? [] : []),
+    [selectedCategory, diseasesByCategory],
+  );
 
   const age = formData?.date_of_birth
     ? calculateAge(formData.date_of_birth as string)
@@ -158,8 +179,32 @@ export default function GeneralTab({
           {field('Email', 'email', 'email')}
           {field('Phone Number', 'phone_number', 'text')}
 
-          <div className="sm:col-span-2">
-            {field('Disease', 'disease', 'select', { options: diseaseOptions, vocabSource: diseaseSource })}
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium text-portal-text-primary">Disease Category</label>
+            <SelectControl
+              value={selectedCategory ?? ''}
+              options={categories.map((c) => ({ value: c.value, label: c.label }))}
+              onChange={(v: unknown) => {
+                const cat = (v as string) || null;
+                setSelectedCategory(cat);
+                if (cat && currentDisease) {
+                  const newDiseases = diseasesByCategory[cat] ?? [];
+                  if (!newDiseases.some((d: string) => d.toLowerCase() === currentDisease.toLowerCase())) {
+                    onChange('disease', null);
+                  }
+                }
+                if (!cat) {
+                  onChange('disease', null);
+                }
+              }}
+            />
+          </div>
+
+          <div className="sm:col-span-1">
+            {field('Disease', 'disease', 'select', {
+              options: categoryDiseaseOptions.length > 0 ? categoryDiseaseOptions : undefined,
+              vocabSource: diseaseSource,
+            })}
           </div>
 
           <div className="sm:col-span-2">
