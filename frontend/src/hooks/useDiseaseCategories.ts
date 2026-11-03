@@ -219,3 +219,10 @@ export const useAllDiseaseMappings = (): {
 
   return { categoryForDisease, diseasesByCategory, loading };
 };
+
+/** Reset all module-level caches — for tests only. */
+export function __resetDiseaseCategoryCaches(): void {
+  labelCache = null;
+  objectCache = null;
+  allMappingsCache = null;
+}
