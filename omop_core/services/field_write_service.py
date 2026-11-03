@@ -520,6 +520,13 @@ def _stage_profile_write(person, field, value, person_dirty, location_updates):
     fields it deliberately leaves to the caller (bucketed into result.profile)."""
     if value is None or (isinstance(value, str) and value.strip() == ''):
         value = None
+    if field == 'facility_name':
+        # A simple Person column, not a demographic or a Location field.
+        value = None if value is None else str(value).strip() or None
+        if getattr(person, field) != value:
+            setattr(person, field, value)
+            person_dirty.add(field)
+        return True
     if field in _DEMOGRAPHIC_FIELDS:
         from omop_core.services.demographics import resolve_concept
         # resolve_concept returns None for a non-curated value OR an unloaded vocabulary; per its

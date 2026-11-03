@@ -323,7 +323,8 @@ def _attach_latest_fact_dates(record, entries):
         entries[name]['latest_date'] = value.isoformat()
 
 
-def patient_form_descriptors(descriptor=None, *, readable_fields=None, writable=True, record=None):
+def patient_form_descriptors(descriptor=None, *, readable_fields=None, writable=True,
+                             record=None, include_latest_dates=True):
     """Enrich the existing descriptor, without granting any additional writes."""
     descriptor = build_writable_field_descriptor() if descriptor is None else descriptor
     model_fields = {field.name: field for field in PatientRecord._meta.fields}
@@ -390,7 +391,7 @@ def patient_form_descriptors(descriptor=None, *, readable_fields=None, writable=
             entry.update(writable=False, read_only_for_caller=True,
                          reason='Editing is not available for this patient in the current session.')
         result[name] = entry
-    if record is not None:
+    if record is not None and include_latest_dates:
         _attach_latest_fact_dates(record, result)
     return result
 
@@ -426,7 +427,8 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
         if entry.get('canonical')
     }
     descriptor = patient_form_descriptors(
-        raw_descriptor, readable_fields=allowed_fields, record=record)
+        raw_descriptor, readable_fields=allowed_fields, record=record,
+        include_latest_dates=False)
     facts, direct, person_changes, profile_applied = {}, {}, set(), set()
     profile_changes = {}
     therapy_overrides_applied = set()
@@ -739,6 +741,13 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
                 result.rejected.update(profile_result.rejected)
                 result.profile.update(profile_result.profile)
                 profile_applied.update(profile_result.applied)
+                if profile_result.profile:
+                    # A deferred Person field was saved on PatientRecord but
+                    # not projected; protect it until the backing write lands.
+                    record.user_edited_fields = sorted(
+                        set(record.user_edited_fields or [])
+                        | set(profile_result.profile))
+                    record.save(update_fields=['user_edited_fields'])
                 if profile_result.applied:
                     # The projection now backs the record value, so it no longer
                     # needs pending protection.
