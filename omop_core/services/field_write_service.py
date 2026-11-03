@@ -384,7 +384,7 @@ def apply_field_writes(person, changes, today=None, descriptor=None, dates=None,
         record = PatientRecord.objects.filter(person=person).only(
             'latitude', 'longitude').first()
         validate_location_pair(person, location_updates, record=record)
-        _apply_location(person, location_updates, person_dirty)
+        apply_location(person, location_updates, person_dirty)
     if person_dirty:
         person.save(update_fields=sorted(person_dirty))
     # write_clinical_inputs derives for its readback, from the fully-applied
@@ -536,12 +536,15 @@ def _stage_profile_write(person, field, value, person_dirty, location_updates):
     return False
 
 
-def _apply_location(person, location_updates, person_dirty):
+def apply_location(person, location_updates, person_dirty):
     """Upsert the Person's OMOP Location row with the staged columns, linking by id (Person.
     location_id is a plain IntegerField, not the FK). Reuse the linked row when it belongs to
     this Person alone; if the OMOP ETL deduplicated it across several Persons, CLONE it and
     relink only this Person so editing one patient's address never rewrites a co-located
-    patient's (the persons endpoint mutates in place — this is stricter on purpose)."""
+    patient's (the persons endpoint mutates in place — this is stricter on purpose).
+
+    This helper validates nothing and does not save Person; the caller must
+    persist the fields it adds to ``person_dirty``."""
     location = None
     if person.location_id:
         location = Location.objects.filter(location_id=person.location_id).first()

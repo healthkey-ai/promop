@@ -744,24 +744,12 @@ def _project_profile_fields(person, direct_fields, patch_data):
             location_updates[column] = incoming
 
         if location_updates:
-            location = None
-            if person.location_id:
-                location = Location.objects.filter(
-                    location_id=person.location_id
-                ).first()
-            if location is None:
-                location = Location(location_id=next_pk(Location, 'location_id'))
-            location_changed = [
-                c for c, v in location_updates.items() if getattr(location, c) != v
-            ]
-            for column, value in location_updates.items():
-                setattr(location, column, value)
-            if location._state.adding:
-                location.save()
-                person.location_id = location.location_id
-                person_changed.append('location_id')
-            elif location_changed:
-                location.save(update_fields=location_changed)
+            # Reuse the shared-form clone-on-write implementation: a Location
+            # deduplicated across Persons must never be mutated in place.
+            from omop_core.services.field_write_service import apply_location
+            location_dirty = set()
+            apply_location(person, location_updates, location_dirty)
+            person_changed.extend(sorted(location_dirty))
 
     if person_changed:
         person.save(update_fields=person_changed)
