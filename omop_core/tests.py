@@ -2514,7 +2514,7 @@ class PatientRecordSchemaSyncTest(TestCase):
     catches chain-introduced drift only. It cannot see out-of-band schema
     changes made directly against a deployed database -- that is what made the
     ``patient_info`` view 297 columns in staging and production but 296 in CI.
-    Use the sync check in CLAUDE.md against those environments for that.
+    Use the sync check in AGENTS.md against those environments for that.
     """
 
     def _db_columns(self):

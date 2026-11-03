@@ -900,7 +900,7 @@ def _collapse_duplicates(model, concept_col, source_col, match,
                          concept_id, person_ids, organization_id=None):
     """Collapse rows the re-point just made identical.
 
-    "Identical" is the event identity CLAUDE.md documents for the bulk write
+    "Identical" is the event identity AGENTS.md documents for the bulk write
     path, not just (person, date). Measurement and Observation carry more of it
     on purpose: a patient legitimately has several distinct results for one
     analyte on one day, and keying on the date alone would delete real results

@@ -116,6 +116,11 @@ All notable changes to PRomop are documented here.
 
 ### Changed
 
+- **One instruction file for every coding agent** — `AGENTS.md` now holds the
+  whole rulebook (the former `CLAUDE.md` content and the former `AGENTS.md`
+  conventions), and `CLAUDE.md` is `@AGENTS.md` plus a short Claude Code
+  section, so Claude Code, Codex and the rest read the same file. Personal
+  additions go in the gitignored `CLAUDE.local.md`. (#2236)
 - **The deployed commit sits under the PRomop logo** — in tiny type, with
   the full SHA as a tooltip, so a report from staging names its build. It
   comes from the new public `GET /api/v1/version/`, which answers with

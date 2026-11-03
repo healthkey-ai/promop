@@ -8081,7 +8081,7 @@ class _OmopBulkCreateMixin:
     the batch entrance to the same fast internals ``fhir/sync.py::_bulk_insert``
     uses — batched PK allocation plus ``bulk_create`` — without going through FHIR.
 
-    Semantics (summarised in CLAUDE.md, "Bulk OMOP Row Writes"):
+    Semantics (summarised in AGENTS.md, "Bulk OMOP Row Writes"):
 
     * A single dict body with no client-supplied primary key uses the same
       natural-key upsert semantics, while preserving the single-row response
@@ -11540,7 +11540,7 @@ class TrialSearchPreferencesViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
             #
             # `select_for_update` is a no-op on SQLite, which `settings.py`
             # falls back to when DATABASE_URL is unset. Every deployment and
-            # CI run is PostgreSQL, and CLAUDE.md sends local work there too,
+            # CI run is PostgreSQL, and AGENTS.md sends local work there too,
             # so the guarantee holds everywhere it is claimed — but on that
             # dev fallback the precondition degrades to best-effort, and the
             # concurrency tests skip rather than pretend to prove otherwise.

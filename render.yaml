@@ -64,7 +64,7 @@ services:
 
       # ── Application configuration ────────────────────────────────────────
       # sync: false means Render prompts for the value rather than storing it
-      # here. Deliberate: this repository is public, and CLAUDE.md forbids
+      # here. Deliberate: this repository is public, and AGENTS.md forbids
       # committing hostnames and connection strings.
       - key: APP_BASE_URL
         sync: false

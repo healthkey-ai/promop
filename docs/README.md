@@ -203,10 +203,10 @@ inputs to measured projection and eligibility workloads.
 [Release 1.2 runbook](release-1.2-dev-to-main-runbook.md) retains release-specific
 checkpoints and migration gates; its saved status is not evidence of the currently
 deployed revision. Repository working conventions are in [AGENTS.md](../AGENTS.md)
-and agent implementation guidance is in [CLAUDE.md](../CLAUDE.md).
+and agent implementation guidance is in [AGENTS.md](../AGENTS.md).
 [Code of conduct](../CODE_OF_CONDUCT.md) and [third-party notices](../THIRD_PARTY_NOTICES.md)
 cover participation and attribution.
 
 Reference guides and implementation plans live in `docs/`. Repository entry
-points, agent instructions (`AGENTS.md` and `CLAUDE.md`), contribution and policy
+points, agent instructions (`AGENTS.md`; `CLAUDE.md` only imports it), contribution and policy
 files, and the research paper remain at the root for discovery and tooling.
