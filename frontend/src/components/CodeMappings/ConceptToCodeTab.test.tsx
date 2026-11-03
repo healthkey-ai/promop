@@ -297,7 +297,7 @@ describe('concept-first curation', () => {
     await screen.findByText('1 candidates retrieved (limit 25).');
     expect(post).toHaveBeenCalledTimes(1);
     expect(post).toHaveBeenCalledWith('/v1/concept-to-code/suggest/', {
-      concept_ids: [123], strategies: ['umls', 'lexical'], limit: 25, include_zero_seen: false, ranking_model: 'jev', include_declined: false,
+      concept_ids: [123], strategies: ['umls', 'lexical'], limit: 25, include_zero_seen: false, ranking_model: 'jev', include_declined: false, exclude_keys: [],
     });
     expect(screen.getByRole('button', { name: 'Approve selected (0)' })).toBeDisabled();
   });

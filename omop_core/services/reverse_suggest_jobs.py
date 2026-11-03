@@ -75,6 +75,7 @@ def execute_reverse_run(run_id, params):
                 concept, strategies=params['strategies'], limit=params['limit'],
                 include_zero_seen=params['include_zero_seen'],
                 include_declined=params.get('include_declined', False),
+                exclude_keys=params.get('exclude_keys', ()),
                 timeout_ms=params['retrieval_timeout_ms'],
             )
             event = {'concept': concept_payload(concept), 'candidates': candidates}
