@@ -765,6 +765,22 @@ def get_serializer_read_only_fields():
     return _CACHED_SERIALIZER_READ_ONLY
 
 
+def _descriptor_unit(unit):
+    """The unit to show, or None when the mapping has only a placeholder.
+
+    `LAB_FIELD_TO_LOINC` spells "no physical unit" as `{score}` for ECOG,
+    Karnofsky and the other ordinal scales. Sending that to a client put the
+    literal `{score}` beside an edit box (and in the projection metadata).
+    A placeholder is not a unit; the field is a score, and the value needs no
+    suffix.
+    """
+    if isinstance(unit, str):
+        stripped = unit.strip()
+        if stripped.startswith('{') and stripped.endswith('}'):
+            return None
+    return unit
+
+
 def build_writable_field_descriptor():
     """Return {field: descriptor} for every mapped PatientRecord clinical field.
 
@@ -1176,6 +1192,7 @@ def build_writable_field_descriptor():
             continue
 
         code, unit, display = mapping
+        unit = _descriptor_unit(unit)
         concept_id = loinc_ids.get(code)
         if concept_id is None:
             # The mapping exists but the vocabulary doesn't carry the concept.
@@ -1325,6 +1342,20 @@ def build_writable_field_descriptor():
             'pre-existing-conditions endpoint. The answer is an attestation '
             'with a snapshot, not a field PATCH, so a concurrent answer '
             'cannot be overwritten.'
+        ),
+    }
+
+    # A clinician's Lugano assessment has no PET/CT or bone-marrow result in
+    # the record to derive it from, so it is an input the reader supplies.
+    # The row was read-only with no door at all (#5667 follow-up).
+    descriptor['meets_lugano'] = {
+        'kind': KIND_DIRECT,
+        'writable': True,
+        'target': 'patient_record',
+        'value_kind': 'boolean',
+        'reason': (
+            'Clinician-confirmed Lugano criteria (PET/CT and bone-marrow '
+            'assessment), entered directly on the record.'
         ),
     }
 

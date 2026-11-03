@@ -3964,6 +3964,13 @@ class PatientRecord(models.Model):
     b_symptom_weight_loss = models.BooleanField(blank=True, null=True,
         help_text="B symptom: unintentional weight loss > 10% in 6 months")
     gelf_criteria_options = models.TextField(blank=True, null=True)
+    # A clinician's Lugano assessment (PET/CT plus bone-marrow involvement).
+    # It is an INPUT, not a derivation: the record has no PET/CT or marrow
+    # result to compute it from, so a reader who knows the answer enters it.
+    meets_lugano = models.BooleanField(
+        blank=True, null=True, default=None,
+        help_text="Clinician-confirmed Lugano criteria (PET/CT and bone-marrow assessment).",
+    )
     ldh_upper_limit_normal = models.PositiveIntegerField(blank=True, null=True)
     # Histologic transformation of FL to DLBCL — derived from OMOP (DLBCL
     # ConditionOccurrence, or a transformation Observation as fallback).
