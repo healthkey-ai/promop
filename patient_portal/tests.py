@@ -18882,7 +18882,7 @@ class WearableUploadEndpointTest(TestCase):
 
 # ---------------------------------------------------------------------------
 # Bulk OMOP row write endpoint
-# (contract summarised in CLAUDE.md, "Bulk OMOP Row Writes")
+# (contract summarised in AGENTS.md, "Bulk OMOP Row Writes")
 # ---------------------------------------------------------------------------
 
 @override_settings(SERVICE_AUTH_SCOPES='patient/*.read patient/*.write')
