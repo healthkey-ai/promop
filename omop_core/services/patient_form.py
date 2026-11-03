@@ -246,14 +246,17 @@ FORM_LABELS = {
 #: tab, the shared editor and a host's embedded Trial Details agree.
 #:
 #: Presentation only: it changes what the control says, never whether it can be
-#: written. A computed boolean may carry a pair as well, because its read-only
-#: row shows the same two words.
+#: written. Naming a computed boolean here would be harmless for the same
+#: reason, but the table does not: a pair on a node the reader cannot edit
+#: would describe an answer the form does not take
+#: (`test_reviewed_answer_words_do_not_collide_with_computed_nodes`).
 #:
 #: The three negatives that used to exist as separate columns (`no_hiv_status`
 #: and its hepatitis siblings) were removed upstream in #2119 because a second
 #: stored boolean could contradict the first. These labels are how the negative
-#: answer is offered now: the same canonical positive column, two spelled-out
-#: answers, and `Unknown` for unanswered.
+#: answer is offered now: the same canonical positive column and two
+#: spelled-out answers. Unanswered stays `null` -- the control's empty choice --
+#: and is never inferred from or into a negative.
 BOOLEAN_ANSWERS = {
     'hiv_status': ('HIV Positive', 'No HIV'),
     'hepatitis_b_status': ('Hepatitis B Positive', 'No Hepatitis B'),

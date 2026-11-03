@@ -6,7 +6,7 @@
  * writable and the rest are refused for three different reasons, so this is the
  * tab where "render what the server says" has to mean more than one thing.
  */
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import GeneralTab from './GeneralTab';
 import { __resetWritableFieldsCache } from '@/hooks/useWritableFields';
@@ -223,18 +223,19 @@ describe('GeneralTab', () => {
   it('answers each viral status with its own pair and never a second row (#5601)', async () => {
     await renderTab({ hiv_status: false, hepatitis_b_status: true, hepatitis_c_status: null });
     await waitFor(() => expect(mockGet).toHaveBeenCalled());
-    // One row per condition: the question is the positive label.
+    // One row per condition: the question is the positive label. A true answer
+    // repeats it as the selected value, hence `getAllByText`.
     for (const label of ['HIV Positive', 'Hepatitis B Positive', 'Hepatitis C Positive']) {
       expect(screen.getAllByText(label).length).toBeGreaterThan(0);
     }
+    const section = screen.getByText('Infection Status').closest('div')?.parentElement;
+    expect(section).not.toBeNull();
+    expect(within(section as HTMLElement).getAllByRole('combobox')).toHaveLength(3);
     // The stored negative reads as the negative answer, not as "Portion: No".
     expect(screen.getByText('No HIV')).toBeInTheDocument();
     expect(screen.queryByText('No Hepatitis B')).not.toBeInTheDocument();
     expect(screen.queryByText('No Hepatitis C')).not.toBeInTheDocument();
-    // The retired negative columns are not rows of their own.
-    for (const retired of ['No hiv status', 'No hepatitis b status', 'No hepatitis c status']) {
-      expect(screen.queryByText(retired)).not.toBeInTheDocument();
-    }
+    // Three rows, not six: the retired negative columns have no row of their own.
   });
 
   it('leaves the age display alone', async () => {
