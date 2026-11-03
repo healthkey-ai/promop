@@ -52,7 +52,11 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
   // a generated label as a fallback; when a tab supplies a reviewed label, don't
   // let that generated value replace it (for example "Hiv status" vs "HIV Positive").
   const label = callerLabel ?? field.label ?? canonical;
-  const inputs = field.inputs ?? (field.canonical ? [field.canonical] : []);
+  // An alias descriptor points at the field it mirrors. A field the server says
+  // is directly writable is edited in place: drilling into its own canonical
+  // would show a pencil for a plain select (#5605 Refractory Status).
+  const directWrite = field.writable === true && field.target === 'patient_record';
+  const inputs = field.inputs ?? (!directWrite && field.canonical ? [field.canonical] : []);
   // A dependency the host withholds has no descriptor of its own. Opening the
   // dialog anyway would promise an edit surface made only of "No reviewed
   // PROMOP field binding" rows (#5600); a partial dialog would misrepresent the

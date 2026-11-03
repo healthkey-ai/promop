@@ -203,10 +203,16 @@ FORM_LABELS = {
     'date_of_birth': ('Date of birth', None),
 }
 
-DEDICATED_WRITES = {
-    'relapse_count': 'Use the treatment editor that preserves therapy overrides.',
-    'treatment_refractory_status': 'Use the treatment editor that preserves therapy overrides.',
-}
+# No PatientRecord field is refused here: death date has its dated assertion
+# writer (#5602), and relapse/refractory answers are stored as the native
+# serializer's therapy_overrides (#5605/#5604).
+DEDICATED_WRITES = {}
+
+# Inferred by default from therapy-line outcomes, but the native serializer
+# already stores an explicit answer in PatientRecord.therapy_overrides so a
+# refresh does not replace it. The shared form must use that same contract
+# rather than writing the derived column directly (#5605/#5604).
+THERAPY_OVERRIDE_FIELDS = frozenset({'relapse_count', 'treatment_refractory_status'})
 
 
 def _attach_latest_fact_dates(record, entries):
@@ -347,6 +353,7 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
     record = PatientRecord.objects.select_for_update().get(pk=record.pk)
     descriptor = patient_form_descriptors(descriptor, readable_fields=allowed_fields, record=record)
     facts, direct, person_changes, profile_applied = {}, {}, set(), set()
+    therapy_overrides_applied = set()
     # A dated fact carries its clinical date with the value: an edit of an
     # existing result updates that date, and a new result records the day it was
     # actually measured rather than the day it was typed
@@ -362,6 +369,49 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
         entry = descriptor.get(name, {})
         if not entry.get('writable') or entry.get('target') != 'patient_record':
             result.rejected[name] = entry.get('reason') or 'No supported patient-record write path.'
+            continue
+        if name in THERAPY_OVERRIDE_FIELDS or name == 'refractory_status':
+            # These are inferred from the therapy lines, but an explicit answer
+            # is an override the native serializer already keeps in
+            # therapy_overrides. Store it there so a refresh cannot replace it,
+            # and never write the derived column as if it were a fact.
+            canonical = 'treatment_refractory_status' if name == 'refractory_status' else name
+            if canonical == 'relapse_count':
+                if value in (None, ''):
+                    override_value = None
+                elif isinstance(value, bool) or (
+                        isinstance(value, float) and not value.is_integer()):
+                    result.rejected[name] = 'Relapse count must be a whole number.'
+                    continue
+                else:
+                    try:
+                        override_value = int(value)
+                    except (TypeError, ValueError):
+                        result.rejected[name] = 'Relapse count must be a whole number.'
+                        continue
+                    if override_value < 0:
+                        result.rejected[name] = 'Relapse count cannot be negative.'
+                        continue
+            else:
+                from omop_core.services.treatment_catalog import REFRACTORY_STATUSES
+                if value in (None, ''):
+                    override_value = None
+                elif value not in REFRACTORY_STATUSES:
+                    result.rejected[name] = f'Unknown refractory status: {value!r}.'
+                    continue
+                else:
+                    override_value = value
+            overrides = dict(record.therapy_overrides or {})
+            if override_value is None:
+                overrides.pop(canonical, None)
+            else:
+                overrides[canonical] = override_value
+            record.therapy_overrides = overrides
+            setattr(record, canonical, override_value)
+            record.user_edited_fields = sorted(
+                set(record.user_edited_fields or []) | {canonical})
+            therapy_overrides_applied.add(canonical)
+            result.applied.append(name)
             continue
         # Existing profile writes belong to Person, not clinical OMOP facts.
         # Keep identity handling here portable; a host may also synchronize its
@@ -475,6 +525,11 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
         person.save(update_fields=sorted(person_changes))
     if record_profile_fields:
         record.save(update_fields=sorted(record_profile_fields))
+    if therapy_overrides_applied:
+        # The model's save applies therapy_overrides to the inferred columns;
+        # one write covers the answer, its provenance marker and the override.
+        record.save(update_fields=sorted(therapy_overrides_applied)
+                    + ['therapy_overrides', 'user_edited_fields'])
     if direct:
         previous_direct = {name: getattr(record, name, None) for name in direct}
         for name, value in direct.items():

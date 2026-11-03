@@ -141,6 +141,29 @@ describe('computed patient field input dialogs', () => {
     expect(screen.queryByRole('button', { name: 'Edit Composite partial inputs' })).not.toBeInTheDocument();
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
+
+  it('edits a directly writable alias in place instead of drilling into its canonical', async () => {
+    // Refractory Status is writable directly but also carries `canonical`, so
+    // the alias fallback opened a one-row dialog and hid the select (#5605).
+    const { store, patch } = await setup({
+      refractory_status: { label: 'Refractory Status', writable: true, target: 'patient_record',
+        value_kind: 'string', canonical: 'treatment_refractory_status',
+        options: [{ value: 'Unknown' }, { value: 'Primary Refractory' }] },
+      treatment_refractory_status: { label: 'Treatment refractory status', writable: true,
+        target: 'patient_record', value_kind: 'string',
+        options: [{ value: 'Unknown' }, { value: 'Primary Refractory' }] },
+    }, { refractory_status: 'Unknown' });
+    render(<PatientFieldEditor store={store} name="refractory_status" />);
+
+    expect(screen.queryByRole('button', { name: /Edit Refractory Status inputs/ })).not.toBeInTheDocument();
+    expect(screen.getByRole('combobox')).toHaveTextContent('Unknown');
+
+    await userEvent.click(screen.getByRole('combobox'));
+    await userEvent.click(await screen.findByText('Primary Refractory'));
+    await act(async () => { await store.flush(); });
+
+    expect(patch.mock.calls[0][1]).toEqual({ refractory_status: 'Primary Refractory' });
+  });
 });
 
 describe('current-diagnosis tri-state fields (#5521)', () => {

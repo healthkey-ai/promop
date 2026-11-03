@@ -117,12 +117,9 @@ def test_unsupported_projectors_and_special_assertions_are_not_advertised():
     descriptor = patient_form_descriptors({
         'a': {'kind': 'direct', 'writable': True, 'target': 'patient_record',
               'projection': {'omop_table': 'condition', 'concept_id': 1}},
-        'relapse_count': {'kind': 'direct', 'writable': True, 'target': 'patient_record',
-                          'projection': {'omop_table': 'observation', 'concept_id': 0}},
         'genomics_test': {'kind': 'editable', 'writable': True, 'target': 'patient_record'},
     })
     assert not descriptor['a']['writable']
-    assert not descriptor['relapse_count']['writable']
     assert not descriptor['genomics_test']['writable']
 
 
