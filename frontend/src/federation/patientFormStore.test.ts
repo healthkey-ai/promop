@@ -586,3 +586,82 @@ describe('planned-therapy options survive a dated descriptor reload', () => {
       .toEqual([{ value: 'r_chop', label: 'R-CHOP' }]);
   });
 });
+
+describe('planned-therapy options follow a disease change', () => {
+  it('re-enriches the catalog after an ordinary disease PATCH', async () => {
+    let catalogCalls = 0;
+    const get = vi.fn(async (url: string) => {
+      if (url.includes('writable-fields')) return { data: {
+        planned_therapies: { writable: true, target: 'patient_record', multiple: true,
+          options_source: 'therapy_regimens' },
+        disease: { writable: true, target: 'patient_record' },
+      } };
+      if (url.includes('therapy-regimens')) {
+        catalogCalls += 1;
+        return { data: catalogCalls === 1
+          ? [{ code: 'r_chop', title: 'R-CHOP', value: 'r_chop' }]
+          : [{ code: 'fcr', title: 'FCR', value: 'fcr' }] };
+      }
+      return { data: { patient_info: { person_id: 12, disease: 'Multiple Myeloma',
+        therapy_lines_count: '1' }, write_enabled: true } };
+    });
+    const patch = vi.fn(async (_url: string, edits: Record<string, unknown>) => ({ data: {
+      patient_info: { person_id: 12, disease: 'CLL', therapy_lines_count: '1', ...edits },
+      write: { applied: Object.keys(edits), rejected: {} },
+    } }));
+    const store = new PatientFormStore({ get, patch } as unknown as AxiosInstance, '/api');
+    await store.load();
+    expect(store.getSnapshot().fields.planned_therapies.options)
+      .toEqual([{ value: 'r_chop', label: 'R-CHOP' }]);
+
+    store.enqueue('disease', 'CLL');
+    await store.flush();
+
+    expect(patch).toHaveBeenCalled();
+    expect(catalogCalls).toBe(2);
+    const catalogRequests = get.mock.calls.filter(
+      ([url]) => String(url).includes('therapy-regimens'));
+    expect(catalogRequests).toHaveLength(2);
+    expect(catalogRequests[1][1]).toEqual({
+      params: { disease: 'C2987', round: 'second_line_therapy' },
+    });
+    expect(store.getSnapshot().fields.planned_therapies.options)
+      .toEqual([{ value: 'fcr', label: 'FCR' }]);
+  });
+
+  it('disables stale planned therapies when the context refresh fails', async () => {
+    let failWritable = false;
+    const get = vi.fn(async (url: string) => {
+      if (url.includes('writable-fields')) {
+        if (failWritable) throw new Error('metadata down');
+        return { data: {
+          planned_therapies: { writable: true, target: 'patient_record', multiple: true,
+            options_source: 'therapy_regimens' },
+          disease: { writable: true, target: 'patient_record' },
+        } };
+      }
+      if (url.includes('therapy-regimens')) return { data: [
+        { code: 'r_chop', title: 'R-CHOP', value: 'r_chop' },
+      ] };
+      return { data: { patient_info: { person_id: 12, disease: 'Multiple Myeloma',
+        therapy_lines_count: '1' }, write_enabled: true } };
+    });
+    const patch = vi.fn(async (_url: string, edits: Record<string, unknown>) => ({ data: {
+      patient_info: { person_id: 12, disease: 'CLL', therapy_lines_count: '1', ...edits },
+      write: { applied: Object.keys(edits), rejected: {} },
+    } }));
+    const store = new PatientFormStore({ get, patch } as unknown as AxiosInstance, '/api');
+    await store.load();
+    failWritable = true;
+
+    store.enqueue('disease', 'CLL');
+    await store.flush();
+
+    expect(store.getSnapshot().fields.planned_therapies.writable).toBe(false);
+    expect(store.getSnapshot().fields.planned_therapies.retryable).toBe(true);
+
+    failWritable = false;
+    await store.reloadDates();
+    expect(store.getSnapshot().fields.planned_therapies.writable).toBe(true);
+  });
+});
