@@ -73,8 +73,10 @@ function inspectInputs(
       const child = inspectInputs(store, fields, next, new Set(ancestors).add(canonical));
       graph.editable ||= child.editable;
       graph.cyclic ||= child.cyclic;
-      if (graph.editable) return graph;
-      continue;
+      if (child.editable) return graph;
+      // A dialog with no edit path does not open; the row falls through to its
+      // direct control. A cycle is the exception, since the dialog explains it.
+      if (child.cyclic) continue;
     }
     if (direct) {
       graph.editable = true;

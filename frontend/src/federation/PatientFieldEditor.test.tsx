@@ -234,6 +234,18 @@ describe('computed patient field input dialogs', () => {
     expect(within(dialog).getByText(/no record field to edit/)).toBeInTheDocument();
   });
 
+  it('follows an alias dependency to its editable canonical', async () => {
+    const { store } = await setup({
+      outer_alias: { label: 'Outer alias', writable: false, inputs: ['bmi_alias'] },
+      bmi_alias: { label: 'BMI alias', writable: false, canonical: 'bmi' },
+    });
+    render(<PatientFieldEditor store={store} name="outer_alias" />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Outer alias inputs' }));
+    expect(within(screen.getByRole('dialog')).getByRole('button', { name: 'Edit BMI alias inputs' }))
+      .toBeInTheDocument();
+  });
+
   it('does not count a branch the dialog would refuse to open', async () => {
     // `inner` has one editable input and one withheld one, so its own dialog
     // never opens (#5600). Its writable descendant is unreachable from `outer`.
@@ -244,6 +256,30 @@ describe('computed patient field input dialogs', () => {
     render(<PatientFieldEditor store={store} name="outer_mixed" />);
 
     expect(screen.queryByRole('button', { name: 'Edit Outer mixed inputs' })).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ['a derived leaf', 'derived_leaf'],
+    ['a withheld leaf', 'missing_source'],
+  ])('falls through to a direct control when the dialog has no edit path (%s)', async (_case, input) => {
+    // A field may be directly writable and still declare inputs. When those
+    // inputs cannot be edited, the row itself renders its control; the walk
+    // must not stop at the unopenable dialog.
+    const { store } = await setup({
+      outer_direct: { label: 'Outer direct', writable: false, inputs: ['direct_with_inputs'] },
+      direct_with_inputs: {
+        label: 'Direct with inputs', writable: true, target: 'patient_record',
+        control: 'text', inputs: [input],
+      },
+      derived_leaf: {
+        label: 'Derived leaf', writable: false, kind: 'computed', inputs: [],
+        reason: 'Computed from OMOP facts; there is no record field to edit.',
+      },
+    });
+    render(<PatientFieldEditor store={store} name="outer_direct" />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Outer direct inputs' }));
+    expect(within(screen.getByRole('dialog')).getByRole('textbox')).toBeEnabled();
   });
 
   it('keeps the gate reason when a gated row loses its dialog', async () => {
