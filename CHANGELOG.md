@@ -196,6 +196,13 @@ All notable changes to PRomop are documented here.
 
 ### Fixed
 
+- **Computed rows offer the pencil only when a source is editable (#2244)** —
+  a computed value whose dependency chain bottoms out in fields the record does
+  not own (No Active Infection → `active_infection_status` → OMOP condition
+  facts, and the same for No Other Active Malignancies) now renders read-only
+  with the reason instead of opening a dialog with no control. The shared
+  editor walks `inputs` and alias `canonical` through a cycle guard; genuinely
+  editable chains and the cycle explanation are unchanged.
 - **Author-sensitive medication context and partial DOB (#2129)** — mapping
   approval no longer projects pending medication attributes without reliable
   per-attribute authorship or duplicates patient self-report as EHR. Pending
