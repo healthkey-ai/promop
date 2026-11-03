@@ -189,14 +189,17 @@ def test_long_projected_clinical_string_is_rejected_without_truncation():
 
 
 @pytest.mark.parametrize('table', ['condition', 'procedure', 'drug_exposure'])
-def test_unsupported_projection_is_rejected_without_a_measurement(table):
+def test_occurrence_projection_saves_directly_without_a_measurement(table):
     from omop_core.services.patient_form import apply_patient_form_patch
     record = PatientRecordFactory()
     recipe = {'progression': {'kind': 'direct', 'writable': True, 'target': 'patient_record',
                              'value_kind': 'string', 'projection': {'omop_table': table, 'concept_id': 1}}}
-    _, result = apply_patient_form_patch(record.person, {'progression': 'yes'}, descriptor=recipe)
-    assert result.applied == []
-    assert 'progression' in result.rejected
+    saved, result = apply_patient_form_patch(
+        record.person, {'progression': 'yes'}, descriptor=recipe,
+    )
+    assert result.applied == ['progression']
+    assert 'progression' not in result.rejected
+    assert saved.progression == 'yes'
     assert not Measurement.objects.filter(person=record.person).exists()
 
 
