@@ -106,6 +106,19 @@ class TestMappedFields:
         assert entry['projection']['unit_concept_id'] is None
 
 
+    def test_a_score_has_no_unit(self):
+        """`{score}` is the mapping's placeholder, not a unit label.
+
+        Sending it to a client put the literal `{score}` beside the edit box
+        for ECOG, Karnofsky and the other ordinal scales.
+        """
+        _load_loinc('89247-1')
+        entry = build_writable_field_descriptor()['ecog_performance_status']
+
+        assert entry['unit'] is None
+        assert entry['projection']['unit'] is None
+
+
 class TestUnmappedFields:
     def test_a_field_with_no_concept_set_is_reported_not_omitted(self):
         """A client must be able to tell 'may not edit' from 'was not sent'."""
@@ -146,7 +159,7 @@ class TestUnmappedFields:
             # Not columns: the trial vocabulary's negated questions and the
             # explicit pre-existing-conditions answer (#5663/#5665).
             | set(_NEGATED_ALIASES)
-            | {'pre_existing_condition_categories'}
+            | {'pre_existing_condition_categories', 'meets_lugano'}
         )
         assert set(descriptor) == expected
 

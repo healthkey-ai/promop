@@ -8,6 +8,7 @@ descriptor's half of the fix (#5664).
 from omop_core.services.write_descriptor import (
     KIND_ALIAS,
     KIND_COMPUTED,
+    KIND_DIRECT,
     KIND_EXPLICIT_ANSWER,
     build_writable_field_descriptor,
 )
@@ -100,3 +101,17 @@ def test_the_birth_date_precision_is_offered_as_a_choice():
     assert [option['value'] for option in entry['options']] == [
         'year', 'month', 'day',
     ]
+
+
+def test_meets_lugano_is_a_writable_input():
+    """There is no PET/CT or marrow result in the record to derive it from.
+
+    Leaving it read-only left the row with no door at all; it is the
+    clinician's assessment, entered directly.
+    """
+    entry = build_writable_field_descriptor()['meets_lugano']
+
+    assert entry['kind'] == KIND_DIRECT
+    assert entry['writable'] is True
+    assert entry['target'] == 'patient_record'
+    assert entry['value_kind'] == 'boolean'
