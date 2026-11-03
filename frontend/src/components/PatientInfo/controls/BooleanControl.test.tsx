@@ -60,3 +60,30 @@ describe('BooleanControl — tri-state', () => {
     expect(screen.getByRole('option', { name: '— None —' })).toBeInTheDocument();
   });
 });
+
+describe('BooleanControl — reviewed answer words (#5601)', () => {
+  it('offers the field\'s own two answers instead of Yes and No', async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      <BooleanControl
+        value={null}
+        trueLabel="HIV Positive"
+        falseLabel="No HIV"
+        onChange={onChange}
+      />,
+    );
+
+    await user.click(screen.getByRole('combobox'));
+    expect(screen.getByRole('option', { name: 'HIV Positive' })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'Yes' })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('option', { name: 'No HIV' }));
+
+    expect(onChange).toHaveBeenCalledWith(false);
+  });
+
+  it('keeps the generic pair when a field has no reviewed wording', () => {
+    render(<BooleanControl value={true} onChange={vi.fn()} />);
+    expect(screen.getByRole('combobox')).toHaveTextContent('Yes');
+  });
+});

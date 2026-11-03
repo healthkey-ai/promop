@@ -5,11 +5,16 @@ export default function BooleanControl({
   disabled,
   onChange,
   triState = false,
+  trueLabel = 'Yes',
+  falseLabel = 'No',
 }: {
   value: boolean | null | undefined;
   disabled?: boolean;
   onChange: (v: boolean | null) => void;
   triState?: boolean;
+  /** Reviewed wording for the two answers (#5601). */
+  trueLabel?: string;
+  falseLabel?: string;
 }) {
   const strValue = value === true
     ? "true"
@@ -28,8 +33,8 @@ export default function BooleanControl({
       allowClear={!triState}
       clearLabel="— None —"
       options={[
-        { value: "true", label: "Yes" },
-        { value: "false", label: "No" },
+        { value: "true", label: trueLabel },
+        { value: "false", label: falseLabel },
         ...(triState ? [{ value: "unknown", label: "Unknown" }] : []),
       ]}
       onChange={(v) => {

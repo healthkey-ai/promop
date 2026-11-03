@@ -276,13 +276,12 @@ _COMPUTED_INPUTS = {
     'renal_adequacy_status': ['egfr_ml_min_173m2', 'serum_creatinine_mg_dl'],
     'no_active_infection_status': ['active_infection_status'],
     'no_other_active_malignancies': ['active_malignancies'],
-    # The HIV/hepatitis negatives are read back from the paired status fact by
-    # `_latest_result` in patient_record_service, so a direct write is replaced by
-    # the next derivation. Offering them as editable reported `applied` and then
-    # silently reverted (#2106). The positive field is the one to edit.
-    'no_hiv_status': ['hiv_status'],
-    'no_hepatitis_b_status': ['hepatitis_b_status'],
-    'no_hepatitis_c_status': ['hepatitis_c_status'],
+    # The HIV/hepatitis negatives were derived from the paired status fact by
+    # `_latest_result`, so a direct write was replaced by the next derivation:
+    # offering them as editable reported `applied` and then silently reverted
+    # (#2106). They were then removed as columns altogether (#2119). The positive
+    # field is the one to edit; its two answers are labelled by the descriptor
+    # (`BOOLEAN_ANSWERS` in patient_form), not by a second column.
     # Same class, found by writing each field and re-deriving (#2113). These four
     # are derived from record fields, so the inputs are the edit surface:
     # `recompute_patient_record_fields` owns the verdict, the components do not.

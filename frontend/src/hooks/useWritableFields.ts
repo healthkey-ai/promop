@@ -35,6 +35,10 @@ export interface FieldDescriptor {
   /** A nullable boolean answered Yes / No / Unknown, where Unknown is not a
    *  negative answer and must be offered as its own choice (#5521). */
   tri_state?: boolean;
+  /** Reviewed wording for the two answers of a nullable boolean, when `Yes` and
+   *  `No` would not answer the question the row asks ("HIV Positive" / "No HIV",
+   *  #5601). Absent means the generic pair. */
+  answer_labels?: { true?: string; false?: string };
   unit?: string | null;
   unit_concept_id?: number | null;
   type_concept_id?: number;
