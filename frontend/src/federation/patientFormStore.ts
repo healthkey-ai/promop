@@ -23,6 +23,8 @@ export interface PatientFormSnapshot {
   saving: boolean;
   writable: boolean;
   error?: string;
+  /** A post-save descriptor refresh failed, so `latest_date` may be stale. */
+  datesStale?: boolean;
 }
 export interface PatientFormResult {
   patient_info: Record<string, unknown>;
@@ -121,7 +123,7 @@ export class PatientFormStore {
           }
         }
         if (revision !== this.readRevision) return;
-        this.publish({ values, fields, personId, loading: false,
+        this.publish({ values, fields, personId, loading: false, datesStale: false,
           writable: data.write_enabled !== false, error: undefined });
       } catch {
         if (revision === this.readRevision) this.publish({ loading: false, writable: false,
@@ -133,6 +135,16 @@ export class PatientFormStore {
   enqueue = (name: string, value: unknown) => {
     const field = this.snapshot.fields[name];
     if (!this.snapshot.writable || !field?.writable || field.target !== 'patient_record') return;
+    // A dated edit carries its correction target. After a failed descriptor
+    // refresh that target is the pre-save date, so refuse it here as well as in
+    // the editor: a stale date is a wrong clinical day, not a formatting detail.
+    const datedEdit = value !== null && typeof value === 'object' && !Array.isArray(value)
+      && 'date' in (value as Record<string, unknown>);
+    if (datedEdit && this.snapshot.datesStale) {
+      this.publish({ errors: { ...this.snapshot.errors, [name]:
+        'The result dates could not be refreshed. Retry before saving so this result lands on the right day.' } });
+      return;
+    }
     this.queue[name] = value;
     this.revisions[name] = ++this.revision;
     const errors = { ...this.snapshot.errors };
@@ -141,19 +153,29 @@ export class PatientFormStore {
     clearTimeout(this.timer);
     this.timer = setTimeout(() => { void this.flush(); }, 500);
   };
-  private reloadFields = async () => {
+  private reloadFields = async (): Promise<boolean> => {
     const personId = this.snapshot.personId;
-    if (!personId) return;
+    if (!personId) return false;
     const revision = this.readRevision;
     try {
       const { data } = await this.client.get<Record<string, FormFieldDescriptor>>(
         `${this.base}/v1/patient-records/writable-fields/`,
         { params: { person_id: personId }, headers: { 'X-Patient-Form': '1' } });
-      if (revision === this.readRevision) this.publish({ fields: data });
+      if (revision === this.readRevision) this.publish({ fields: data, datesStale: false });
+      return true;
     } catch {
       // A failed metadata refresh must not undo the value the PATCH acknowledged.
+      // It does leave `latest_date` at the pre-save date, so record that the
+      // dates are stale: the editor and the queue refuse the next dated save
+      // until a refresh succeeds, instead of pre-filling a correction target
+      // that is no longer the newest result (#5608).
+      if (revision === this.readRevision) this.publish({ datesStale: true });
+      return false;
     }
   };
+
+  /** Retry the descriptor refresh a failed post-save reload left behind. */
+  reloadDates = () => this.reloadFields();
 
   flush = async (): Promise<void> => {
     clearTimeout(this.timer);

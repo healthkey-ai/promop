@@ -227,6 +227,50 @@ describe('dated result edits', () => {
 
     expect(store.getSnapshot().fields.hemoglobin_g_dl.latest_date).toBe('2026-09-01');
   });
+
+  it('refuses the next dated save until a failed descriptor refresh is retried', async () => {
+    let latest = '2026-08-01';
+    let metadataFails = false;
+    const get = vi.fn(async (url: string) => {
+      if (url.includes('writable-fields')) {
+        if (metadataFails) throw new Error('metadata unavailable');
+        return { data: { hemoglobin_g_dl: { writable: true, target: 'patient_record',
+          dated: true, latest_date: latest, projection: { omop_table: 'measurement' } } } };
+      }
+      return { data: { patient_info: { person_id: 12, hemoglobin_g_dl: 12.5 }, write_enabled: true } };
+    });
+    const patch = vi.fn(async (_url: string, edits: Record<string, unknown>) => ({ data: {
+      patient_info: { person_id: 12, hemoglobin_g_dl: 13 },
+      write: { applied: Object.keys(edits), rejected: {} },
+    } }));
+    const store = new PatientFormStore({ get, patch } as unknown as AxiosInstance, '/api');
+    await store.load();
+
+    // The save lands, but the refresh that would move the correction target does not.
+    latest = '2026-09-01';
+    metadataFails = true;
+    store.enqueue('hemoglobin_g_dl', { value: 13, date: '2026-08-02' });
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(store.getSnapshot().datesStale).toBe(true);
+    expect(store.getSnapshot().fields.hemoglobin_g_dl.latest_date).toBe('2026-08-01');
+
+    // A second dated save must not be queued against that stale date.
+    store.enqueue('hemoglobin_g_dl', { value: 14, date: '2026-08-01' });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(patch).toHaveBeenCalledOnce();
+    expect(store.getSnapshot().errors.hemoglobin_g_dl).toMatch(/Retry/);
+
+    // Retrying the refresh clears both the flag and the stale target.
+    metadataFails = false;
+    await store.reloadDates();
+    expect(store.getSnapshot().datesStale).toBe(false);
+    expect(store.getSnapshot().fields.hemoglobin_g_dl.latest_date).toBe('2026-09-01');
+
+    store.enqueue('hemoglobin_g_dl', { value: 14, date: '2026-09-01' });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(patch).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe('shared patient-form queue', () => {
