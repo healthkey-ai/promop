@@ -214,13 +214,28 @@ export class PatientFormStore {
     return attempt;
   };
 
+  /**
+   * Wait until no date refresh is in flight, including one that supersedes the
+   * attempt being awaited: awaiting a captured promise would dispatch a queued
+   * dated edit while its replacement is still deciding the same dates.
+   */
+  private settleDateRefresh = async (): Promise<void> => {
+    for (;;) {
+      const refresh = this.datesRefresh;
+      if (!refresh) return;
+      await refresh.catch(() => false);
+      // `refreshDates` clears the slot as the attempt settles; a superseding
+      // attempt replaces it, so keep waiting until nothing is in flight.
+      if (this.datesRefresh === refresh) return;
+    }
+  };
+
   flush = async (): Promise<void> => {
     clearTimeout(this.timer);
     if (this.flight || !Object.keys(this.queue).length || !this.snapshot.personId) return;
     // Never dispatch ahead of a date refresh: its outcome decides whether a
     // queued dated edit still has a valid correction target (#5608).
-    const pendingRefresh = this.datesRefresh;
-    if (pendingRefresh) await pendingRefresh.catch(() => false);
+    await this.settleDateRefresh();
     if (this.flight || !Object.keys(this.queue).length || !this.snapshot.personId) return;
     const batch = this.queue;
     const revisions = { ...this.revisions };
@@ -291,9 +306,8 @@ export class PatientFormStore {
     } finally {
       // A refresh started while this batch was settling decides whether the
       // queued dated edits still have a valid correction target: never dispatch
-      // them ahead of it.
-      const refresh = this.datesRefresh;
-      if (refresh) await refresh.catch(() => false);
+      // them ahead of it, and never ahead of one that supersedes it.
+      await this.settleDateRefresh();
       const pending = { ...this.snapshot.pending };
       const errors = { ...this.snapshot.errors };
       // A stale failure/success must not retire a newer edit to the same field.

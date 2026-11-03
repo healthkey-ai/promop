@@ -340,6 +340,9 @@ describe('dated result edits', () => {
     await vi.advanceTimersByTimeAsync(500);
     expect(patch).toHaveBeenCalledOnce();
     expect(refreshes).toHaveLength(1);              // the post-save refresh is pending
+    // Let the flush actually reach its wait, so the retry below supersedes the
+    // attempt it is already awaiting — the window this guards.
+    await vi.advanceTimersByTimeAsync(0);
 
     store.enqueue('hemoglobin_g_dl', { value: 14, date: '2026-08-03' });
     void store.reloadDates();                        // a retry supersedes it
@@ -355,6 +358,42 @@ describe('dated result edits', () => {
     expect(patch).toHaveBeenCalledOnce();            // the held date was never sent
     expect(store.getSnapshot().datesStale).toBe(true);
     expect(store.getSnapshot().errors.hemoglobin_g_dl).toMatch(/Retry/);
+  });
+
+  it('does not dispatch ahead of a refresh that supersedes the awaited one', async () => {
+    const fields = { height: { writable: true, target: 'patient_record', control: 'number' } };
+    let metadataCalls = 0;
+    const refreshes: Array<{ resolve: (value: unknown) => void; reject: (error: unknown) => void }> = [];
+    const get = vi.fn((url: string) => {
+      if (url.includes('writable-fields')) {
+        metadataCalls += 1;
+        if (metadataCalls === 1) return Promise.resolve({ data: fields });
+        return new Promise((resolve, reject) => { refreshes.push({ resolve, reject }); });
+      }
+      return Promise.resolve({ data: {
+        patient_info: { person_id: 12, height: 170 }, write_enabled: true } });
+    });
+    const patch = vi.fn(async (_url: string, edits: Record<string, unknown>) => ({ data: {
+      patient_info: { person_id: 12, ...edits }, write: { applied: Object.keys(edits), rejected: {} },
+    } }));
+    const store = new PatientFormStore({ get, patch } as unknown as AxiosInstance, '/api');
+    await store.load();
+
+    void store.reloadDates();                        // a host retry is pending
+    expect(refreshes).toHaveLength(1);
+    store.enqueue('height', 180);
+    await vi.advanceTimersByTimeAsync(500);          // flush is now waiting on the retry
+    expect(patch).not.toHaveBeenCalled();
+
+    void store.reloadDates();                        // superseded while it waits
+    expect(refreshes).toHaveLength(2);
+    refreshes[0].reject(new Error('superseded'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(patch).not.toHaveBeenCalled();            // still waiting on the newest refresh
+
+    refreshes[1].resolve({ data: fields });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(patch).toHaveBeenCalledOnce();
   });
 });
 
