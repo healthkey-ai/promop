@@ -138,11 +138,15 @@ class TestUnmappedFields:
         # explicitly rather than discovered -- and stating the sum here keeps the
         # descriptor's contents exact instead of merely "at least".
         from omop_core.services.write_descriptor import (
-            _SERIALIZER_ALIASES, _SERIALIZER_COMPUTED,
+            _NEGATED_ALIASES, _SERIALIZER_ALIASES, _SERIALIZER_COMPUTED,
         )
         expected = (
             (PATIENT_RECORD_OMOP_MAPPED_FIELDS - lifecycle)
             | set(_SERIALIZER_ALIASES) | set(_SERIALIZER_COMPUTED)
+            # Not columns: the trial vocabulary's negated questions and the
+            # explicit pre-existing-conditions answer (#5663/#5665).
+            | set(_NEGATED_ALIASES)
+            | {'pre_existing_condition_categories'}
         )
         assert set(descriptor) == expected
 
@@ -208,7 +212,10 @@ class TestKinds:
 
     def test_kind_is_one_of_the_known_values(self):
         allowed = {'direct', 'editable', 'selectable', 'computed', 'alias',
-                   'profile', 'unmapped', 'authored'}
+                   'profile', 'unmapped', 'authored',
+                   # Not columns: an inverted view of another field, and an
+                   # answer with its own endpoint and snapshot (#5663/#5665).
+                   'negated', 'explicit-answer'}
         for field, entry in build_writable_field_descriptor().items():
             assert entry['kind'] in allowed, (field, entry['kind'])
 
@@ -225,11 +232,11 @@ class TestCost:
         # One batch lookup per source table (LOINC codes, UCUM units, attributed
         # codes), plus the approved-mapping table and one read per *distinct*
         # answer vocabulary those mappings name — four fields sharing a set cost
-        # one query, not four. The therapy-line catalog is one more: the three
-        # groups' regimen selector is one list, read once per build. Constant in
-        # the number of fields either way; the bound guards the shape, not the
-        # exact number.
-        assert len(ctx) <= 7, [q['sql'][:80] for q in ctx]
+        # one query, not four. The therapy-line catalog and the pre-existing
+        # condition categories are two more, each a single read per build.
+        # Constant in the number of fields either way; the bound guards the
+        # shape, not the exact number.
+        assert len(ctx) <= 8, [q['sql'][:80] for q in ctx]
 
 
 class TestEndpoint:
