@@ -22,6 +22,7 @@ jobs:
       async_e2e: ${{ steps.filter.outputs.async_e2e }}
       docs_only: ${{ steps.filter.outputs.docs_only }}
       backend: ${{ steps.filter.outputs.backend }}
+      browser_runtime: ${{ steps.filter.outputs.browser_runtime }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -40,6 +41,9 @@ jobs:
       !cancelled() &&
       (needs.changes.result != 'success' || needs.changes.outputs.backend != 'false')
     runs-on: ubuntu-latest
+    # A backend leg normally completes within 16 minutes. Bound genuine hangs
+    # without making ordinary runner variance look like a failure.
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -47,7 +51,7 @@ jobs:
 
     services:
       postgres:
-        image: pgvector/pgvector:pg16
+        image: pgvector/pgvector:0.8.6-pg18
         env:
           POSTGRES_DB: promop_test
           POSTGRES_USER: postgres
@@ -68,17 +72,23 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # The deployed mapping artifact is in Git LFS. Fetch it in CI so
+          # Mapping and publisher catalog artifacts are in Git LFS. Fetch them so
           # packaging/runtime checks exercise the same asset as production.
           lfs: true
 
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-          cache: pip
+
+      - name: Set up cached uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: '0.12.20'
+          enable-cache: true
+          cache-dependency-glob: requirements.txt
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: uv pip install --system -r requirements.txt
 
       # pytest runs with --no-migrations, so the test DB is built by reflecting
       # model state. That recreates concept's GIN trigram index during CREATE
@@ -93,10 +103,6 @@ jobs:
           psql -h localhost -U postgres -d template1 -c "CREATE EXTENSION IF NOT EXISTS pg_trgm"
           psql -h localhost -U postgres -d template1 -c "CREATE EXTENSION IF NOT EXISTS vector"
 
-      - name: Run migrations
-        if: matrix.suite == 'django'
-        run: python manage.py migrate --noinput
-
       - name: Run production deploy checks
         env:
           DEBUG: 'False'
@@ -109,18 +115,59 @@ jobs:
 
       - name: Run tests (Django runner)
         if: matrix.suite == 'django'
-        run: python manage.py test omop_core patient_portal --verbosity=2 --noinput
+        # DiscoverRunner creates its test database by applying the complete
+        # migration graph. Do not run `manage.py migrate` first: that loads the
+        # large publisher catalogs into a database the tests never use.
+        run: >-
+          python manage.py test omop_core patient_portal
+          --parallel auto --timing --verbosity=2 --noinput
 
       # These suites discover different tests. Separate runners give each its
       # own PostgreSQL/test database while retaining migrations and deploy checks.
       - name: Run tests (pytest)
         if: matrix.suite == 'pytest'
+        # CI measured worksteal at 6m46s versus loadfile's 5m47s baseline for
+        # this database-heavy suite. Keep the faster scheduler and its timing
+        # report so any future sharding decision remains evidence-led.
         run: pytest -n auto --dist loadfile -q --durations=20
+
+  athena_browser:
+    name: Athena browser runtime
+    needs: changes
+    # Unit tests fake Playwright. Pay for a real Chromium install and launch
+    # only when browser/deployment packaging changes or detection is uncertain.
+    if: >-
+      !cancelled() &&
+      (needs.changes.result != 'success' || needs.changes.outputs.browser_runtime == 'true')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up cached uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: '0.12.20'
+          enable-cache: true
+          cache-dependency-glob: requirements-athena-scrape.txt
+
+      - name: Install Playwright
+        run: uv pip install --system -r requirements-athena-scrape.txt
+
+      - name: Install and launch Athena Chromium
+        env:
+          PLAYWRIGHT_BROWSERS_PATH: '0'
+        run: python scripts/install_athena_browser.py --with-deps --require-package
 
 
   backend:
     name: Backend tests
-    needs: [changes, backend_suites]
+    needs: [changes, backend_suites, athena_browser]
     # Keep the existing required check. Never turn a failed/cancelled matrix
     # into a skipped green gate; only a recognized frontend/docs diff skips it.
     if: >-
@@ -130,8 +177,18 @@ jobs:
     steps:
       - name: Require both backend suites to pass
         env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
           BACKEND_RESULT: ${{ needs.backend_suites.result }}
-        run: test "$BACKEND_RESULT" = success
+          BROWSER_REQUIRED: ${{ needs.changes.outputs.browser_runtime }}
+          BROWSER_RESULT: ${{ needs.athena_browser.result }}
+        run: |
+          set -e
+          test "$BACKEND_RESULT" = success
+          if [ "$CHANGES_RESULT" != success ] || [ "$BROWSER_REQUIRED" = true ]; then
+            test "$BROWSER_RESULT" = success
+          else
+            test "$BROWSER_RESULT" = skipped
+          fi
 
   application_ci:
     name: Application CI
@@ -163,7 +220,7 @@ jobs:
 
     services:
       postgres:
-        image: pgvector/pgvector:pg16
+        image: pgvector/pgvector:0.8.6-pg18
         env:
           POSTGRES_DB: promop_test
           POSTGRES_USER: postgres
@@ -193,14 +250,22 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          lfs: true
 
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-          cache: pip
+
+      - name: Set up cached uv
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: '0.12.20'
+          enable-cache: true
+          cache-dependency-glob: requirements.txt
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: uv pip install --system -r requirements.txt
 
       - name: Enable database extensions on template1 (required by the pytest suite)
         env:

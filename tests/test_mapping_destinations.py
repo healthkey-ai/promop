@@ -80,3 +80,30 @@ def test_patient_cannot_read_curator_candidates(mapping_setup, django_user_model
     client, mapping, _ = mapping_setup
     client.force_authenticate(django_user_model.objects.create_user(email='patient@test.com'))
     assert client.get(f'/api/v1/code-mappings/{mapping.pk}/').status_code == 403
+
+
+@pytest.mark.parametrize("save_proposal_first", [False, True])
+def test_athena_multiple_is_pending_until_curator_selects_an_athena_destination(mapping_setup, save_proposal_first):
+    client, mapping, targets = mapping_setup
+    mapping.origin_system = 'athena-multiple'
+    mapping.source = 'Athena'
+    mapping.save()
+    mapping.destination_candidates.filter(target_concept__isnull=True).delete()
+    mapping.destination_candidates.update(origins=['Athena'])
+    browse = client.get('/api/v1/code-mappings/', {'browse': '1', 'source': 'ICD10'}).data
+    assert browse['pages']['Unmapped']['total'] == 1
+    assert browse['pages']['Athena Mapped']['total'] == 0
+    if save_proposal_first:
+        proposed = client.patch(f'/api/v1/code-mappings/{mapping.pk}/',
+            {'destination_concept_id': targets[1].pk, 'status': 'proposed'}, format='json')
+        assert proposed.status_code == 200, proposed.data
+    response = client.patch(f'/api/v1/code-mappings/{mapping.pk}/',
+        {'destination_concept_id': targets[1].pk, 'status': 'approved'}, format='json')
+    assert response.status_code == 200, response.data
+    mapping.refresh_from_db()
+    assert mapping.target_concept_id == targets[1].pk and mapping.status == 'approved'
+    assert mapping.origin_system == 'athena' and mapping.reviewer_id is not None
+    browse = client.get('/api/v1/code-mappings/', {'browse': '1', 'source': 'ICD10'}).data
+    assert browse['pages']['Unmapped']['total'] == 0
+    assert browse['pages']['Athena Mapped']['total'] == 1
+    assert mapping.destination_candidates.count() == 2

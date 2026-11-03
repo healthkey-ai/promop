@@ -42,6 +42,8 @@ export default function PatientHome({
 
   return (
     <PatientDetail
+      // Editor state is per patient; remount if the account's record ever changes (#1668).
+      key={user.person_id}
       personIdOverride={String(user.person_id)}
       patientMode
       onLogout={onLogout}

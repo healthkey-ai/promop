@@ -68,7 +68,7 @@ LAB_FIELD_TO_LOINC = {
     'height':                         ('8302-2',   'cm',              'Body height'),
     'systolic_blood_pressure':        ('8480-6',   'mm[Hg]',          'Systolic blood pressure'),
     'diastolic_blood_pressure':       ('8462-4',   'mm[Hg]',          'Diastolic blood pressure'),
-    'heartrate':                      ('8867-4',   '/min',            'Heart rate'),
+    'heartrate':                      ('8867-4',   '{beats}/min',     'Heart rate'),
     # Performance status
     'ecog_performance_status':        ('89247-1',  '{score}',         'ECOG Performance Status score'),
     'karnofsky_performance_score':    ('89243-0',  '{score}',         'Karnofsky Performance Status score'),
@@ -211,7 +211,7 @@ CONDITION_FIELDS = frozenset({'disease', 'stage', 'condition_code_icd_10', 'cond
 # the birth date to Person — `patient_age` is a function of the birth date and
 # `ethnicity` is unhandled — so membership here does NOT mean a field survives
 # a re-derivation.
-DEMOGRAPHIC_FIELDS = frozenset({'gender', 'date_of_birth', 'patient_age', 'ethnicity'})
+DEMOGRAPHIC_FIELDS = frozenset({'gender', 'date_of_birth', 'date_of_birth_precision', 'patient_age', 'ethnicity'})
 
 # Maps line number (1/2/3) → PatientRecord field prefix
 THERAPY_LINE_PREFIXES = {
@@ -244,7 +244,24 @@ CONCEPT_LAB_TYPE          = 32856     # Lab (measurement type)
 CONCEPT_PATIENT_REPORTED_TYPE = 32865 # Patient self-report (measurement type)
 CONCEPT_EHR_TYPE          = 32817     # EHR (condition type)
 CONCEPT_TREATMENT_REGIMEN = 32531     # Treatment Regimen (episode concept)
+CONCEPT_DISEASE_FIRST_OCCURRENCE = 32528  # Disease First Occurrence: the cancer a line treats (episode_parent_id)
 CONCEPT_DRUG_EXPOSURE_FIELD = 1147094  # drug_exposure_id field concept (EpisodeEvent)
+CONCEPT_PROCEDURE_OCCURRENCE_FIELD = 1147082  # procedure_occurrence_id field concept (note/observation event)
+
+
+# Slice 2a: staging PatientInfo fields written as patient-authored *string* Measurements, keyed by
+# the LOINC the derivation reads back. The staging reader returns value_as_string verbatim, so a CB
+# stage code (e.g. 't1') round-trips unchanged and the matcher compares it to the trial's code list
+# directly — no normalisation or matching-surface reverse-map needed.
+# (Receptor biomarkers her2/er/pr are a SEPARATE follow-up (2a-ii): they must be normalised to
+# Positive/Negative/Equivocal for the hr_status/tnbc_status compute, which then needs a lossy
+# PromopMatchingSurface reverse-map back to the CB enum codes the matcher compares. Not in this change.)
+STAGING_MEAS_FIELDS = {
+    'stage': '21908-9',
+    'tumor_stage': '21905-5',
+    'nodes_stage': '21906-3',
+    'distant_metastasis_stage': '21901-4',
+}
 
 
 # Wearable metric → controlled-vocabulary concept_code.
@@ -273,7 +290,7 @@ WEARABLE_CONCEPT_CODE = {
     'respiratory_rate':   '9279-1',    # Respiratory rate
     'sleep_duration':     '93832-4',   # Sleep duration
     'vo2_max':            '94122-9',   # Oxygen consumption (VO2)/Body weight
-    'distance':           '41953-1',   # Walking distance 24 hour Calculated
+    'distance':           '112427-0',  # Distance walking or running
     'walking_speed':      '41957-2',   # Walking speed 24 hour mean Calculated
     'walking_step_length': 'HK-WEAR-STEP-LENGTH',        # no LOINC equivalent
     'walking_double_support_pct': 'HK-WEAR-DBL-SUPPORT',  # no LOINC equivalent
@@ -474,6 +491,13 @@ DERIVED_FIELD_TO_CODE = {
     # about the field the moment the bug was fixed — see
     # test_every_attribution_still_matches_its_extractor.
     'insurance_type':                ('408729009', 'SNOMED', '_get_social_data'),
+    # Assertion booleans — _get_assertion_data. Made writable via their EXISTING LOINC assertion codes
+    # (the same codes _ASSERTION_FIELDS already reads), so a federated edit round-trips through the
+    # existing reader with no second path to clobber it, and the patient's dated edit supersedes an
+    # older FHIR assertion of the same concept. Only the two DIRECT booleans here; the inverse_boolean
+    # no_* fields need write-side inversion, deferred to healthkey-ai/promop#699.
+    'contraceptive_use':             ('8659-8',    'LOINC',  '_get_assertion_data'),
+    'consent_capability':            ('75985-6',   'LOINC',  '_get_assertion_data'),
 }
 
 # Curator-oriented concept suggestions for fields NOT in DERIVED_FIELD_TO_CODE
@@ -512,6 +536,9 @@ SUGGESTED_FIELD_CODES: dict[str, tuple[str, str]] = {
     'gelf_criteria_status':          ('109964006', 'SNOMED'),
     'bulky_disease':                 ('277578007', 'SNOMED'),
     'b_symptoms':                    ('89268003',  'SNOMED'),
+    'b_symptom_fever':               ('386661006', 'SNOMED'),
+    'b_symptom_night_sweats':        ('42984000',  'SNOMED'),
+    'b_symptom_weight_loss':         ('262285001', 'SNOMED'),
     'bone_marrow_involvement':       ('24940005',  'SNOMED'),
     'number_of_nodal_sites':         ('370130003', 'SNOMED'),
     'tumor_grade':                   ('371469007', 'SNOMED'),
@@ -534,9 +561,6 @@ SUGGESTED_FIELD_CODES: dict[str, tuple[str, str]] = {
     'marital_status':                ('125680007', 'SNOMED'),
     # Negation fields (map to the base clinical concept being negated)
     'no_active_infection_status':    ('56051006',  'SNOMED'),
-    'no_hiv_status':                 ('86406008',  'SNOMED'),
-    'no_hepatitis_b_status':         ('66071002',  'SNOMED'),
-    'no_hepatitis_c_status':         ('50711007',  'SNOMED'),
     # Conditions
     'hiv_status':                    ('86406008',  'SNOMED'),
     'hepatitis_b_status':            ('66071002',  'SNOMED'),

@@ -54,7 +54,9 @@ The repository's domain regression fixture records 81252-9 in Observation. Paren
 | variant_category | LOINC 83005-9 | Observation when resolved; frozen seed fallback is Measurement |
 | variant_name | LOINC 81253-7; source genomics:variant_name | Observation text; v3 promotion of exact untouched seeds |
 | variant_description, origin | `genomics:<field>` | Observation text |
-| assessment, specimen_id, specimen_type, collection_date, report_id, laboratory | `genomics:<field>` | Observation text |
+| assessment, specimen_id, collection_date, report_id, laboratory | `genomics:<field>` | Observation text |
+| specimen_type | SNOMED 371439000 "Specimen type"; source genomics:specimen_type | Observation text; approved by 0297 (#1865) |
+| pathologist_notes | LOINC 77202-0 "Laboratory comment [Text] in Report Narrative"; source genomics:pathologist_notes | Observation text; added by 0297 (#1865) |
 | interpretation_date, classification_framework, evidence_source, genomic_reference_sequence_id, zygosity | `genomics:<field>` | Observation text |
 | status | LOINC 69548-6; source genomics:status | Measurement text |
 | clone_fraction | genomics:clone_fraction | Measurement number and unit; no LOINC recipe |
@@ -68,6 +70,33 @@ Recipe v3 adds portable variant-name metadata without changing the frozen v1 cat
 
 Reads retain legacy gene-specific Measurements and mappings with withdrawn approval. Legacy qualifier/value concepts can supply origin and interpretation; linked components overlay them. Editing converts a legacy parent to the current parent recipe and clears the old qualifier/value concepts. Legacy hardcoded origin/interpretation IDs remain compatibility behavior, not portable examples for new integrations.
 
+## Genomic features and finding terminology
+
+The Genomics table uses **Genomic feature** and **Finding / variant**, with
+**Add genomic finding** opening an editor for the feature, its type, finding
+category and existing report details. Feature types distinguish genes,
+chromosome(s), chromosome arms/regions and rearrangement partners. Finding
+categories distinguish sequence variants, deletions, gains, translocations,
+aneuploidy, ploidy abnormalities and complex structural rearrangements.
+
+`genomic_feature`, `feature_type` and `finding_category` are additive linked
+Observation components, seeded by migration 0252. They use local source keys
+and concept 0 until curated; chromosome findings do not masquerade as a gene
+LOINC component. The original `gene`, `variant`, `variant_category`, HGVS,
+cytogenetic location, method and provenance fields remain compatible. The
+original gene and category are visible in details. No patient facts are
+rewritten by the migration or by reading the page.
+
+For legacy records and priority placeholders, exact catalog identities provide
+feature terminology: del(17p) is a **17p** region deletion, separately from
+**TP53** gene findings; trisomy 12 is a **Chromosome 12** aneuploidy finding.
+Known region/chromosome identifiers receive their corresponding feature type.
+Free report narratives are not parsed to infer abnormalities. A gene alone
+never establishes a sequence variant; the legacy `Simple variant` category
+can supply that display classification. Unclassified findings remain
+unclassified. Explicit feature fields take precedence over compatibility
+fallbacks and round-trip through OMOP and PatientRecord projections.
+
 ## Finding state and validation
 
 | State | Representation | Meaning in the finding contract |
@@ -79,13 +108,13 @@ Reads retain legacy gene-specific Measurements and mappings with withdrawn appro
 
 Explicit stored status governs the effective state. With no stored status, legacy assessment supplies present/absent/indeterminate; no_call, not_tested and unrecognized nonempty assessments project as indeterminate while preserving their raw source text. Only a finding with neither state nor assessment keeps the historical present default. Empty lists remain unknown. New status/assessment contradictions are rejected. Legacy assessment-only edits update the effective status; state-only transitions supersede inherited assessment components while retaining erroneous history. Unchanged unrecognized source assessments survive unrelated edits. No bulk state backfill runs.
 
-For absent findings, explicitly supplied nonempty amino_acid_change, allelic_frequency, genomic_dna_change, transcript_reference_sequence_id, transcript_dna_change, amino_acid_change_type and zygosity are rejected. Inherited values for those fields are cleared on an absent edit. Method, specimen, report, laboratory, dates, interpretation and coverage context remain accepted. Raw variant/name strings may describe the tested scope and are preserved. Clone fraction applicability and other source-specific constraints still require clinical/source review; no thresholds are inferred.
+For absent findings, explicitly supplied nonempty amino_acid_change, allelic_frequency, genomic_dna_change, transcript_reference_sequence_id, transcript_dna_change, amino_acid_change_type and zygosity are rejected. Inherited values for those fields are cleared on an absent edit. Method, specimen, report, laboratory, dates, interpretation and coverage context remain accepted. Raw variant/name strings may describe the tested scope and are preserved. A positive clone fraction asserts the finding, so a newly supplied one is rejected on an absent finding, and an inherited one (or an echo of the stored value) is cleared ([#1417](https://github.com/healthkey-ai/promop/issues/1417)); zero is kept, because a negative FISH report records it. Other source-specific clone-fraction constraints still require clinical/source review; no thresholds are inferred.
 
 VAF and clone fraction are independent numeric components. Each accepts % (0–100) or 1 (0–1), defaults an omitted unit to %, preserves zero and rejects values requiring more than five decimal places. Coverage depth is a nonnegative finite number on the finding. Origin and genomic source class are independent; transcript and genomic DNA changes are independent; protein change and protein change type are independent.
 
-Text input is limited to 10,000 characters and the gene identifier to 50. Unknown payload fields, invalid dates and invalid numbers are rejected. A missing interactive test_date defaults to today. mutation aliases variant, and assay_method aliases variant_analysis_method_type.
+Text input is limited to 10,000 characters and the genomic feature / legacy gene identifier to 50. Unknown payload fields, invalid dates and invalid numbers are rejected. A missing interactive test_date defaults to today. mutation aliases variant, and assay_method aliases variant_analysis_method_type.
 
-Detected-marker summaries use the effective present state, and refresh clears stale summaries after absence or indeterminate transitions. `tp53_disruption` is a ternary field: `true` (disrupted — Pathogenic TP53 with present status), `false` (tested negative — TP53 findings exist with `status='absent'`), or `null` (unknown — no TP53 findings, or findings are indeterminate/no-call/not-tested/benign). Derivation version 8 implements this ternary contract ([#1360](https://github.com/healthkey-ai/promop/pull/1360)). Missing legacy status/assessment retains its existing positive interpretation. The derivation does not add Likely pathogenic findings, del(17p), assay completeness or source-conflict rules. API and eligibility consumers must preserve all three states; coercing `null` to `false` or `false` to `null` loses clinical meaning. See the [TP53 rollout and consumer contract](tp53_aggregate_plan.md); broader clinical aggregation and external consumer acceptance remain open.
+Detected-marker summaries use the effective present state, and refresh clears stale summaries after absence or indeterminate transitions. `tp53_disruption` is a ternary field: `true` (disrupted — Pathogenic TP53 with present status), `false` (tested negative — TP53 findings exist with `status='absent'`), or `null` (unknown — no TP53 findings, or findings are indeterminate/no-call/not-tested/benign). Derivation version 8 implements this ternary contract ([#1360](https://github.com/healthkey-ai/promop/pull/1360)). Missing legacy status/assessment retains its existing positive interpretation. The derivation does not add Likely pathogenic findings, del(17p), assay completeness or source-conflict rules. API and eligibility consumers must preserve all three states; coercing `null` to `false` or `false` to `null` loses clinical meaning. Broader clinical aggregation and external consumer acceptance remain open.
 
 ## Asserted and derived findings
 
@@ -149,7 +178,7 @@ Samar's [2026-09-11 decision](https://github.com/cancerbot-org/cancerbot/issues/
 Historical OMOP parents/components, NOTE text and provenance are unchanged by migration or reads. Legacy `genomics:palb1` parents and exact PALB1 gene values remain readable as PALB2, with read-only `source_gene` metadata on corrected findings. New writes accept the exact `PALB1` gene, `palb1` marker and `genomics_palb1` field aliases, and store the canonical gene. Responses expose the canonical field. Requests with conflicting old/new lists fail; unchanged finding echoes preserve stored facts. A subsequent edit retains superseded gene components in history. Raw variant/narrative strings are never rewritten by the naming correction. Existing curated source keys remain authoritative; fresh runtime seeds use `genomics:palb2` and do not recreate the retired mapping.
 
 
-Standalone and federated views share GenomicsTab.tsx. It provides a list, detail dialog, add/edit, confirmed deletion, read-only handling and keyboard row activation. Empty priority rows are presentation only. Changing disease changes suggested rows without removing stored findings. The dialog provides one editable finding-status control; the legacy source assessment is displayed separately. It exposes independent clone fraction/unit, VAF/unit, transcript DNA change, genomic DNA change, protein change/type and coverage depth controls. Original variant text is separate from transcript DNA change. Absent edits clear and disable inapplicable variant components. The list shows effective state and labels unsaved priority placeholders Unknown. The effective registry in [genomics_components.py](../omop_core/services/genomics_components.py) supplies all 31 components to the writer, mapping inventory and serializer validation, including the five later additions. Historical seed fixtures and persisted curator recipes remain unchanged.
+Standalone and federated views share GenomicsTab.tsx. It provides a list, detail dialog, add/edit, confirmed deletion, read-only handling and keyboard row activation. Empty priority rows are presentation only. Changing disease changes suggested rows without removing stored findings. The dialog provides one editable finding-status control; the legacy source assessment is displayed separately. It exposes independent clone fraction/unit, VAF/unit, transcript DNA change, genomic DNA change, protein change/type and coverage depth controls. Original variant text is separate from transcript DNA change. Absent edits clear and disable inapplicable variant components, and clear a positive clone fraction. The list shows effective state and labels unsaved priority placeholders Unknown. The effective registry in [genomics_components.py](../omop_core/services/genomics_components.py) supplies all 31 components to the writer, mapping inventory and serializer validation, including the five later additions. Historical seed fixtures and persisted curator recipes remain unchanged.
 
 Genomics owns all new interactive discrete finding entry, including overlapping cytogenetic markers (#1242). The Disease tab shows `cytogenetic_markers` as a read-only legacy summary; cytogenetic risk classification remains separate. The writable descriptor cannot reenable summary editing through a curator mapping. PatientRecord PATCH rejects changed summaries (including the historical `cytogenic_markers` alias); unchanged autosave echoes are ignored without writing facts or pending edits. Retained internal legacy projectors support import/history compatibility, not interactive authoring.
 
@@ -260,6 +289,6 @@ and any write failure causes a nonzero command exit with committed counts.
 
 `audit_genomics_release --environment NAME --check` combines the existing text-width audit with migration consistency/pending-plan checks, physical columns required by the writer, and the complete mapping/concept prerequisite audit. Metadata queries run read-only; missing columns fail even when migration names are recorded. It reports readiness of the inspected database for the checked code, not a deployment or clinical validation. All three 1.3 RC gates (#1315, #1316, #1317) passed on 2026-09-15; the preflight audit reported `ready: true` with 17/17 prerequisites.
 
-`reconcile_tp53_cache` performs a scoped preview/apply of the ternary true/false/null rule from current source findings, holding pending genomics edits and leaving overall derivation metadata and other fields unchanged. See the [TP53 rollout](tp53_aggregate_plan.md).
+`reconcile_tp53_cache` performs a scoped preview/apply of the ternary true/false/null rule from current source findings, holding pending genomics edits and leaving overall derivation metadata and other fields unchanged.
 
 `scripts/genomics_release_smoke.py` exercises authenticated CRUD, state transitions, source provenance, priority/aggregate readback and deletion on Render staging. All seven API checks (catalog, create_and_positive_readback, absent_readback, indeterminate_readback, present_readback, source_provenance, delete_and_unknown_readback) passed on 2026-09-15 against Render staging. The ternary TP53 contract is verified: absent readback returns `false`, indeterminate returns `null`, present returns `true`. The script requires a provisioned synthetic record with a matching run marker, never replaces an existing findings list, and retires its own unique finding during cleanup, including after an interrupted response. Retired source history and the synthetic record remain identifiable test artifacts. Deployment SHAs and retained-history counts are verified separately by the operator.

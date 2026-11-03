@@ -96,11 +96,34 @@ class PatientRecordFactory(factory.django.DjangoModelFactory):
     gender = 'M'
 
 
-class MeasurementFactory(factory.django.DjangoModelFactory):
+class _SequenceBackedFactFactory(factory.django.DjangoModelFactory):
+    """Persisted facts use the same PK allocator as SDK/API writes.
+
+    Unsaved builds keep a null PK and never query the database. Callers saving
+    a built BigInteger-PK fact must allocate its ID explicitly first.
+    """
+    class Meta:
+        abstract = True
+
+    @classmethod
+    def _create(cls, model_class, *args, **kwargs):
+        from omop_core.services.pk import next_pk
+
+        pk_name = model_class._meta.pk.name
+        explicit = kwargs.get(pk_name)
+        alias = kwargs.pop('pk', None)
+        if explicit is not None and alias is not None and explicit != alias:
+            raise ValueError('Conflicting primary keys in fact fixture.')
+        if explicit is None:
+            kwargs[pk_name] = alias if alias is not None else next_pk(model_class, pk_name)
+        return super()._create(model_class, *args, **kwargs)
+
+
+class MeasurementFactory(_SequenceBackedFactFactory):
     class Meta:
         model = Measurement
 
-    measurement_id = factory.Sequence(lambda n: n + 1)
+    measurement_id = None
     person = factory.SubFactory(PersonFactory)
     measurement_concept = factory.SubFactory(ConceptFactory)
     measurement_date = '2024-01-15'
@@ -115,11 +138,11 @@ class MeasurementFactory(factory.django.DjangoModelFactory):
     qualifier_source_value = None
 
 
-class ObservationFactory(factory.django.DjangoModelFactory):
+class ObservationFactory(_SequenceBackedFactFactory):
     class Meta:
         model = Observation
 
-    observation_id = factory.Sequence(lambda n: n + 1)
+    observation_id = None
     person = factory.SubFactory(PersonFactory)
     observation_concept = factory.SubFactory(ConceptFactory)
     observation_date = '2024-01-15'

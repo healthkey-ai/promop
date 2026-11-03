@@ -6,7 +6,434 @@ All notable changes to PRomop are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- **Versioned clinical source-input SDK on dev** — opt-in, per-field approved
+  source writes for laboratory ULN ratios, explicit swallowing answers and SCT
+  dates append corrections/clear tombstones and verify refreshed readback.
+  Three nullable projections add no medical defaults or mapping approvals.
+  Existing INR/seconds and native SCT behavior remain distinct; see
+  [the contract](docs/cb_clinical_inputs_architecture.md) and
+  [rollout gates](docs/cb_clinical_inputs_plan.md).
+- **A curator can walk the source codes again after loading patients** — the
+  Concept to Code tab's Source-code coverage heading now carries the walk
+  panel: when the last walk began, how many patients have source codes first
+  seen since, and a button (approval rights) that records a rebuild request
+  for the worker. While a walk is queued or running the panel shows its
+  progress. (#2050)
+- **The walk reports how much LOINC axis evidence the data holds** — a rebuild
+  counts, over the codes it walks, how many have each axis settled and from
+  what, how many carry only a hint, and how many have patients that disagree
+  on it. The panel shows the table, so whether anything beyond units ever
+  settles an axis is visible at a glance. (#2051)
+- **The patient can confirm that the recorded treatment history is complete** —
+  the Treatment tab now carries "This is my complete treatment history". Until it
+  is ticked, the number of recorded lines is a lower bound ("at least N"); the
+  projection exposes `therapy_history_complete` as null, and only an explicit
+  confirmation makes it true. Confirming is a statement about the list, not a
+  clinical fact: withdrawing it returns the record to the lower bound, and a
+  patient copy carries the confirmation with the record. The write goes through
+  the packaged endpoint, so an embedding host applies its own write gate and
+  per-person authorization (#1924).
+- **An ETL can write a patient's lines of therapy** — `POST
+  /api/v1/therapy-lines/bulk_upsert/` takes one person's lines as the source
+  states them (number, dates, ongoing, regimen label, outcome) and writes them
+  through the canonical line writer in one all-or-nothing request, deriving the
+  record once. Patients imported through the OMOP row endpoints had no lines,
+  because none of those endpoints writes an `Episode`, and the per-line editor
+  POST refuses the `system/etl.write` credential. Regimen labels resolve to a
+  concept only through the curated regimen table or an exact HemOnc name;
+  anything else keeps the label as the line's name and is queued as a regimen
+  mapping gap, so an abbreviation such as "R" is never guessed (#1969).
+
+- **A recorded line no longer has to name its drugs, and a wrong line can be
+  withdrawn** — the therapy editor offers "I don't know which drugs were given",
+  which records that the line happened with an unknown composition instead of
+  refusing to save. That is a deliberate choice, not an empty form: a payload
+  with no drugs, no regimen and no such statement is still rejected. Separately,
+  each line has a Remove action that retracts the claim it happened; the line
+  leaves the history and its imported drug exposures are kept, which is a
+  different action from ticking "drugs unknown" on an existing line, where the
+  line stays and only its composition is cleared. The write payload carries
+  `composition_unknown` and `DELETE /v1/therapy-lines/<id>/` performs the
+  retraction (#1924).
+
+- **The patient-info widget ships with the therapy editor** — `npm run
+  build:widget` produces the self-contained bundle a host on another React
+  version mounts, and that bundle now includes the treatment editor, so a
+  federated patient can author and correct lines instead of reading a
+  read-only history. The build entry exposes `mount`/`unmount` with
+  `{apiBase, token, readOnly}`, hands the base to the clinical transport and
+  hides tabs whose endpoints only the standalone product provides. The
+  treatment tab withholds its authoring controls when the host mounts
+  read-only, instead of offering a write the server will refuse. Structured
+  `lines_of_therapy` moved into `omop_core.api` so a host can project the same
+  per-line payload the standalone record uses (#1924).
+
+- **The therapy editor's endpoints ship in the package** — `omop_core.api`
+  serves the five calls the patient widget makes (`therapy-lines`,
+  `therapy-outcomes`, `therapy-regimens` list and detail, `concepts/search`)
+  from the installed wheel, so an embedding host can run the editor instead of
+  only deriving from data it cannot author. Host policy stays out: permissions,
+  the per-person write check and the `PatientRecord` payload shape are seams a
+  host overrides. The in-place API now imports the same serializers, queries and
+  viewset, so the two surfaces cannot drift. Requires the `api` extra
+  (`djangorestframework`) (#1924).
+
+- **Download a patient record as PDF or FHIR** — the patient record view has a
+  Download button beside the patient's name and number, for every role that can
+  open the record (patients included; it used to be patient-only and FHIR-only).
+  *PDF report* prints the tabs in order under their own labels, holding only
+  fields with a value, plus therapy lines, supportive therapy, genomic findings
+  and, for a patient's own copy, allergies and immunizations. It is generated in
+  the browser from the loaded record, so it reflects unsaved edits and needs no
+  new endpoint or dependency. Its layout is extracted from the tab components
+  (`node scripts/tab-layout.mjs`), and a test fails when the generated layout is
+  stale or misses a field the tabs render. *FHIR R4 bundle* now saves the signed
+  export byte for byte, keeping its digest and signature valid (#1961).
+
+- **Concept mapping priority** — on Code Mapping → Concept to Code, curators
+  rank concepts by dragging rows, typing a priority (1 is first; clear it to
+  unrank) or the up/down buttons. Ranked concepts come first on every page and
+  under every filter; a page-size selector (50/100/250/500) and *Ranked only*
+  bring concepts from later pages within reach. `POST
+  /api/v1/concept-to-code/priority/` moves one concept and renumbers the list.
+  Code-to-concept Suggest keeps a ranked concept that lexical search matched but
+  cut, marks ranked candidates for the ranker as a tie-breaker between equally
+  good matches, and notes when the winner is ranked. `copy_reference_data`
+  carries the ranking by concept key (#1914).
+
+- **Edit Mapping from Concept to Code, with example patients' Source
+  Metadata** — every source code listed under a concept opens the Edit Mapping
+  dialog (a code with no mapping row opens as a New Mapping), with the concept
+  offered as the destination when the code has none. The dialog lists up to
+  three patients whose source inventory carries the exact source system and
+  code, and shows the chosen patient's Source Metadata
+  (`GET /api/v1/concept-to-code/source-examples/`, administrators only, limited
+  to patients the curator can open, read-only). After a Suggest run with a
+  ranker, suggestions without a confidence score are hidden; unranked runs and
+  the Existing mappings and Find source codes lists are unchanged (#1915, #1911).
+
 ### Changed
+
+- **The deployed commit sits under the PRomop logo** — in tiny type, with
+  the full SHA as a tooltip, so a report from staging names its build. It
+  comes from the new public `GET /api/v1/version/`, which answers with
+  Render's `RENDER_GIT_COMMIT` (or a checkout's `HEAD`) only when it is a Git
+  commit (#2016).
+
+- **LOINC axes read the record units first, and lead with the variants** —
+  a code whose records all arrive in mass-concentration units showed every
+  axis as "Not settled" when its stored metadata carried only a reference-range
+  unit; record units now settle Property (when they agree) and Scale (whenever
+  records carry units) ahead of the metadata's one sample. When the units
+  imply several axis sets, the LOINC axes panel leads with the variants, their
+  units and destinations, and folds the shared axes under them. The SNOMED
+  evidence section is hidden on any LOINC axis evidence, not only a settled
+  lab property (`snomed-attributes` answers `applies: false` with
+  `loinc_evidence`) (#2014).
+
+- **Suggest fills in a LOINC for each axis variant** — a source code whose
+  units imply several LOINC axis sets no longer needs one Suggest click and
+  one pick per variant. In Edit Mapping, Suggest also posts to
+  `code-mappings/<id>/axis-variants/suggest/`, which suggests a standard LOINC
+  for every variant without a destination under that variant's axes and
+  stores it as proposed; the LOINC axes panel then shows each with Approve.
+  The Concept to Code preview does the same for each flagged candidate and
+  lists the variants, with their units and destinations, under the code, where
+  an approver can approve them. The SNOMED evidence section is hidden when
+  the source's evidence says it is a lab value, since its destination is a
+  LOINC (`snomed-attributes` answers `applies: false` with `lab_signal`)
+  (#2012).
+
+- **The concept's source-code dialog opens on Suggested source codes** — and
+  has two views instead of three: the Find source codes list is gone, since
+  Suggest reaches the same rows with the ranker's evidence attached. Existing
+  mappings is grouped by status: approved first and folded, then the proposals
+  open for review, then rejected, folded, each group fetched and paged on its
+  own (`status=` on the detail endpoint, with `status_counts` for the headers).
+  Propose selected is gone too; Approve selected proposes a vocabulary-only
+  candidate from its preview and approves it in the same click (#2010).
+
+- **A patient's own record edits are recorded as patient self-report** — a
+  `PatientRecord` PATCH by the patient (`/patient-info/me/`) or their verified
+  representative projects its OMOP facts with type 32865 (Patient self-report)
+  instead of the recipe's type, which for curated mappings defaults to EHR.
+  The patient's own facts also get a `PATIENT_SELF` provenance row, as PHR
+  entries do. Same-day matching keeps the two apart in both directions: a
+  patient's answer sits beside a clinical fact recorded the same day instead of
+  overwriting it and taking over its type and provenance, and a later clinician,
+  staff or service edit that day writes its own fact rather than the patient's.
+  Their types are otherwise unchanged. Without concept 32865 loaded, the recipe
+  type stands (#1959).
+
+- **Mapping saves return immediately** — approving or re-pointing a code
+  mapping (Concept to Code, Code to Concept, group approve, CSV upload) writes the mapping
+  and returns; the stored clinical rows move to the new concept in a background
+  job (`omop_core.repoint_mapping_rows`, Celery when `CELERY_BROKER_URL` is set,
+  inline after commit otherwise). The destinations still to move are kept in
+  `deferred_repoint_concept_ids`, so a lost or duplicate task loses nothing. The
+  save response's `repoint` is now `{"queued": true, "from_concept_ids": [...]}`
+  rather than row counts. The approval-time unit-mismatch confirmation (`409
+  unit_mismatch_confirmation_required`, `confirm_unit_mismatch`) is removed:
+  values are normalized when clinical rows are loaded from codes. A failed job
+  is retried three times; `manage.py run_queued_repoints <id>…|--all` moves
+  whatever is still queued. A CSV upload queues one job per approved mapping
+  (#1952).
+
+- **Clearer source-code curation evidence** — Edit Mapping now keeps Source
+  Code Value beside Source Description, only loads publisher terminology for
+  catalogs actually present, makes hospital/organization attribution explicit,
+  omits redundant coding counts, explains value types outside the three extract
+  categories, and labels grouped section totals and same-description record
+  counts explicitly (#1691).
+
+### Fixed
+
+- **A lookup's Seen bump is provisional** — `code-mappings/lookup/` asks once
+  per code per batch, not once per record, so its sighting now adds one only
+  while the instance holds no per-patient source-code rows for the code, and
+  sets the count from the rows once they exist; per-record callers such as
+  FHIR sync still add one. Each per-patient upload sets the Seen count of the
+  codes it wrote or removed from their rows. (#2123)
+- **Seen counts come from this instance's patients** — a rebuild walk now
+  starts by setting every mapped code's Seen count, in one statement, from the
+  per-patient source-code rows, per vocabulary and code, instead of leaving
+  the hospital-code extract's number, which counted every coding of an
+  observation and so showed one figure for the order-system and result-system
+  codes of a test. A code with no patient rows here keeps its count; a later
+  seed, inventory or snapshot load does not raise the count of a code that
+  has patient rows here. (#2121)
+- **One migration leaf again** — #2073 (`0313_widen_axis_key`) and #2072
+  (`0313_add_b_symptom_fields`, `0314_b_symptom_mappings`) both branched from
+  0312, leaving `dev` with two leaves, every PR's backend check red and the
+  deploys of `140e3601` and `10cf269f` failed in Test. Merge migration
+  `0315_merge_20261028_0615` joins them. (#2080)
+- **A refresh whose worker was killed is picked up without a deploy** — the
+  stale-heartbeat sweep ran at worker boot and twice in the next three minutes,
+  then never again. Cloud Run shuts the old instance down after the new worker
+  is up, so a walk killed that way went stale after the last recheck and stayed
+  `running` until the next deploy; the redelivered message found a row that was
+  not `queued` and skipped it. A live worker now sweeps every five minutes, so
+  a stranded request is requeued and resumed within about one stale interval.
+  (#2048)
+- **Unit counts come from the instance's own patients** — migration 0307 asks
+  the worker to rewrite every code's stored unit evidence from the source codes
+  on its loaded patients and the stored measurements, then refresh its axis
+  variants, through the same durable request as the variant walk. The seeded
+  label-level counts (#2041) are replaced, a variant the evidence no longer
+  shows is deleted unless a curator decided it, and a later seed or inventory
+  load leaves patient-derived evidence alone. `manage.py refresh_axis_variants
+  --rebuild-evidence` does the same by hand. (#2043)
+- **Unit counts in the axis variants table are the code's own** — the
+  hospital code seed took each unit's count from the inventory CSV, whose unit
+  rows are a label-level join repeated for every code with the label, so every
+  albumin code of a hospital showed the same `g/dL 10, % 1`. The seed build now
+  takes the per-code count, patients and values from the v2 extract and leaves
+  out a unit the CSV knows only for the label, so nothing reads it as the
+  code's evidence. Instances seeded before this need the seed rebuilt and
+  reloaded. (#2041)
+- **A variant's suggestion candidates say how to use them** — the blue
+  candidates area names the variant it is for ("Suggestion candidates for the
+  % variant"), every row has a **Use** button (the winner's reads **Use
+  winner**), the variant's current destination is marked, and the confirmation
+  appears with the variants. The variant row's search button reads **Search
+  destination**, so it is not mistaken for applying the suggestion. (#2036)
+- **The "Axes shared by every variant" fold is gone** — on every instance
+  measured it settled nothing but Scale, which each variant row shows, and no
+  curator had ever entered a shared axis; the six-axis table stays for a code
+  with one axis set. Saved entries still reach Suggest. (#2037)
+- **Concept to Code Suggest moves on instead of repeating declined codes** — a
+  run used to retrieve the same best-`limit` sources every time, so when the
+  ranker declined all of them ("25 without a confidence score hidden") the next
+  click found nothing new. Declines are now remembered per concept and skipped
+  by later runs and by the estimate, which says how many are skipped; "Retry
+  declined" searches them again. The Suggest button sits on the same line as
+  the ranker and the limit, and the run summary says the hidden codes were
+  declined and that the next run moves on. (#2034)
+- **A `%` variant is no longer suggested the mass-concentration LOINC** — a
+  unit that fits several LOINC properties (`%`, `U/L`, `IU/L`, `{ratio}`) now
+  settles the property to that set instead of none, so albumin in `%` keeps
+  the fraction codes and excludes 1751-7 the way the `mmol/L` variant already
+  did. The sets come from the properties of the LOINC codes that list the unit
+  among their example units; `mIU/L`, `mIU/mL` and `g/g` turned out to name one
+  property each and now settle it; on a loaded instance the sets are read from
+  the LOINC table's example units, so a new release is followed. Units with the
+  same set (`U/L`, `IU/L`) are one variant. Suggesting a variant reads the axis
+  values its units imply now, not the ones stored before this change, and a
+  variant stored under the older per-unit key is re-keyed, keeping its
+  destination. The dialog shows a set as "any of …". (#2029)
+- **A running Suggest no longer locks the Concept to Code list** — opening a
+  source code to edit it, approving a variant in place, folding a group and
+  paging wait only for a write in progress; the search's own controls and the
+  batch selection still wait for the run. An edit saved while the run streams
+  is kept when the next poll replaces the run's candidates. (#2028)
+- **The Edit Mapping dialog says it is loading the LOINC axes** — the section
+  is on screen as soon as the dialog opens, with a status line that names how
+  many axis values the queue flagged, instead of appearing without warning once
+  the unit evidence has been scanned. (#2030)
+- **A deploy mid-walk no longer costs the axis variant refresh six hours** —
+  the request row now carries a `progress_at` heartbeat written after every
+  batch. A `running` request with no heartbeat for 15 minutes lost its worker
+  to the deploy that replaced the pool, and the next worker boot requeues it
+  and resumes at its `done` offset instead of waiting for the six-hour task
+  limit and starting over. (#2023)
+- **The commit stamp is filled in on HealthTree GCP** — the Cloud Run image
+  now carries `GIT_COMMIT`, passed by the deploy workflow as a build argument,
+  so `/api/v1/version/` and the line under the logo show the deployed commit
+  there as well as on Render. (#2024)
+
+- **The bulk LOINC axis variant backfill no longer runs inside `migrate`** —
+  migrations 0300 and 0301 walked every multi-unit code during the release
+  step. On the HealthTree GCP instance, which holds the data with the most such
+  codes, the walk outlived the Cloud Run migrate job's one-hour task limit on
+  every attempt, so no deploy reached traffic between 21 and 24 October. Both
+  migrations are now no-ops and migration 0303 records an `axis_variant_refresh`
+  request that the Celery worker performs (`omop_core.refresh_axis_variants`,
+  six-hour limit, progress on the row). A worker publishes queued requests when
+  it starts, so a rolling deploy cannot lose one, and `manage.py
+  refresh_axis_variants --queue` records a request by hand. (#2021)
+
+- **A known line of therapy is no longer lost when its drugs are unknown** —
+  the canonical writer now records that a line happened, independently of the
+  exposures that describe it. A line named without a drug list (a mapped
+  regimen, or a patient-reported line whose drugs were never recorded) counts
+  as one prior line instead of reading as "no prior therapy", and reports an
+  unknown composition rather than an empty one: the per-line payload now says
+  `composition_known: false`. A header row that no writer asserted is still
+  ignored, so a partial import cannot invent treatment. Retracting a line
+  entered in error withdraws it without deleting imported exposures, and saving
+  the line again restores it; clearing composition keeps the line with unknown
+  drugs (#1924).
+
+- **Editing a line of therapy no longer rewrites unrelated administrations** —
+  every drug exposure now belongs to one line and is addressed by its own id,
+  with its own dates, instead of being re-identified by patient, drug name and
+  date. Correcting a drug or its dates updates only the exposure the line owns;
+  exposures shared with another line or imported from an EHR are copied before
+  an edit and never retracted. Saving the form again, or editing only the
+  outcome, keeps the existing ids and individual administration periods, and a
+  line's dates no longer overwrite them. Repeated administrations of the same
+  drug are preserved, an ambiguous legacy name is refused instead of guessed,
+  and a future-dated administration is refused because the history records
+  treatment received rather than planned. The write is one transaction with a
+  bounded retry on lock contention, so a concurrent bulk edit cannot leave a
+  partially written line; ARTEMIS materialization uses the same boundary
+  (#1926).
+
+### Added
+
+- **Source evidence in Edit Mapping** — the dialog now shows the hospital
+  organization (or explicit unattributed state), source record/patient counts,
+  raw units, supplied per-unit percentiles, and source reference-range evidence.
+  Source retirement and its OMOP concept id are compact inline annotations;
+  manual UMLS lookup is left to Suggest. Hospital-code imports retain the v2
+  evidence and use its deduplicated label count so sibling Epic codings on the
+  same observations do not inflate grouped Seen (#1688).
+
+- **Epic/Cerner hospital-code inventory backfill** — an idempotent management
+  command unions the deletion-cleaned HealthTree Parquet inventory with
+  supplement-only keys from the earlier CSV, preserves exact vendor tenant
+  systems, and attaches raw per-code unit evidence to approval warnings. This
+  populates the data-driven Epic and Cerner Code Mapping tabs without treating
+  ingestion-channel labels as hospital organizations (#1683).
+
+- **Asynchronous Athena setup and refresh** — deployment preparation now queues
+  durable Athena work instead of downloading and scanning the vocabulary in
+  Render pre-deploy. New instances and changed Drive artifacts load on the
+  dedicated Celery `athena` queue with deduplicated queued/running state,
+  observable success/failure receipts, retryable failures, and a task/visibility
+  window sized for the full initial release (#1674).
+
+- **Athena freshness and scoped deploy deltas** — the Athena sync compares the
+  selected artifact in the governed Google Drive folder with a durable local
+  receipt. An unchanged Drive file exits before downloading the archive or
+  touching vocabulary tables; a changed artifact is SHA-256 fingerprinted and
+  passed through the existing insert-only loader under a database advisory lock
+  and transaction. Only absent rows commit, failures roll back to the previous
+  published release, and check/dry-run/apply modes record structured outcomes
+  and per-table delta counts (#1652).
+
+- **Code Mapping CSV upload** — mapping users can upload source-code
+  inventories from the Code Mapping page with a source vocabulary and editable
+  provenance (defaulting to their email). The atomic importer accepts `source
+  code`, `source description`, and optional `seen count`, preserves existing
+  curation decisions, reports row-level validation errors, and deduplicates
+  identical artifacts so encounter counts cannot be applied twice (#1656).
+
+- **LOINC loads itself from loinc.org** — `sync_loinc_release` checks
+  `GET /api/v1/Loinc` for the published version and, when ours is older, streams
+  the release archive and loads both tables from it: `LoincTable/Loinc.csv` into
+  `LoincCodeClass` (including the `property` and `scale_type` that migration
+  0249 added and no load had ever filled), and `AccessoryFiles/PartFile/Part.csv`
+  into `LoincClass` — LOINC models CLASS as a Part, which is why the archive has
+  no file named after classes. The loaded release is recorded in `LoincRelease`,
+  so "is our copy stale" finally has an answer. The deployment bootstrap runs
+  the check and queues the load on Celery; a hand-run Cloud Run job, a one-off
+  GCS bucket and a dependency on an hk-labs checkout all go away. Needs
+  `LOINC_USER` / `LOINC_PASSWORD` (#1624).
+
+
+- **Label rollup for the Code Mapping queue** — a "Group by label" toggle shows
+  one review row per label instead of one per vendor code, ordered by the
+  group's summed Seen and paginated by group. Expanding a row fetches its codes
+  from `GET /v1/code-mappings/group/`, which renders them exactly as queue rows.
+  A group names a destination only when every member agrees. Off by default;
+  the flat queue is unchanged (#1571).
+
+- **Label grouping key for code mappings** — `SourceCodeConceptMapping` gains
+  `source_label_norm`, a database-generated normalisation of
+  `source_code_description`. Vendor-local codes are opaque (Epic flowsheet ids,
+  Cerner `codeSet/72` numbers) but their display text is not, and the same text
+  arrives under thousands of codes: in a 721,620-code HealthTree extract
+  `albumin` appeared under 2,557. The row key stays
+  `(source_vocabulary_id, source_code)` and ingest resolution is unchanged;
+  this is a grouping key, so one review row and one ranker call can stand for a
+  label instead of a code. NULL means the row belongs to no group — the label
+  is absent, blank, punctuation only, or stored at the column limit and so
+  possibly truncated (#1571).
+
+### Changed
+
+- **Security review is scoped to security-sensitive GitHub controls** — ordinary
+  CI/test workflows and repository automation under `.github/` no longer need
+  an automatic Lars review request or independent writer approval solely because
+  of their directory. CODEOWNERS and the status policy still protect security
+  policy, deployment, release, publishing, CodeQL, custom-action, ownership, and
+  dependency-update controls (#1681).
+
+- **Faster backend CI provisioning** — ordinary pytest runs no longer download
+  Chromium or install its operating-system libraries. A separate path-gated
+  smoke job performs the real browser install and launch when Playwright or
+  deployment packaging changes. Backend and async jobs use a cached, pinned
+  `uv` installer. Pytest retains its faster file-grouped xdist scheduler and
+  slow-test report after CI measurement showed work stealing was slower for
+  this database-heavy suite (#1678).
+
+- **Render staging prepares once per deploy** — the staging web service gains a
+  `preDeployCommand` running `scripts/prepare-deployment.sh`, the release phase
+  Cloud Run already has via its gated `<service>-migrate` job. A failure now
+  stops the deploy and leaves the running version serving, instead of producing
+  a crash-looping instance. `start.sh` still prepares on boot as well until a
+  Blueprint sync is confirmed to have applied the hook — the script is
+  idempotent, so the second run is a no-op. Production waits until `dev`
+  reaches `main`: a Blueprint sync applies settings to every service it
+  declares, whatever branch each deploys from, so pointing production at a
+  script only `dev` has failed its deploys with status 127 (#1625).
+
+- **Deployment preparation is stated once** — the checks, migration and
+  vocabulary bootstrap a deployment must complete before serving now live in
+  `scripts/prepare-deployment.sh`, which `start.sh` invokes. Render's sequence is
+  unchanged; the point is that Cloud Run's `<service>-migrate` job can run the
+  same steps instead of its own copy defined outside this repository (#1625).
+
+- **Code Mapping queue order** — every section now defaults to Seen descending.
+  Unmapped grouped by Provenance first; that is a no-op on a tab holding one
+  provenance, and on a tab holding several it buried the rows a Suggest run had
+  just answered, because a run rewrites `origin_system` from `''` to
+  `suggest v0.4`, which sorts last ascending. Provenance stays sortable and
+  gains a filter control, which finds curator-edited rows in one click however
+  many there are (#1575).
 
 - **Copying between instances** — models are classified as system, reference or
   patient data (`omop_core/services/instance_data.py`). `copy_curation` is

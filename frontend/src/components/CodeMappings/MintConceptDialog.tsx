@@ -1,5 +1,6 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import api from "@/api/axios";
+import { searchDestinationConcepts, type DestinationConcept } from "./destinationSearch";
 
 interface Concept {
   concept_id: number; concept_name: string; concept_code: string;
@@ -11,29 +12,84 @@ interface Props {
   domains: { domain_id: string; label: string }[];
   initialDomain: string;
   initialName: string;
+  initialVocabulary?: string;
+  initialCode?: string;
   sourceCode: string;
   sourceVocabulary: string;
   onSelect: (concept: Concept) => void;
   onClose: () => void;
 }
 
+const PARENT_SEARCH_DEBOUNCE_MS = 300;
+
 export default function MintConceptDialog(props: Props) {
-  const [fields, setFields] = useState({ vocabulary_id: "", concept_name: props.initialName,
-    concept_code: "", domain_id: props.initialDomain });
+  const [fields, setFields] = useState({ vocabulary_id: props.initialVocabulary || "", concept_name: props.initialName,
+    concept_code: props.initialCode || "", domain_id: props.initialDomain });
   const [review, setReview] = useState<{ candidates: Concept[]; review_token: string } | null>(null);
   const [confirmed, setConfirmed] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+
+  // Parent concept search state
+  const [parentQuery, setParentQuery] = useState("");
+  const [parentResults, setParentResults] = useState<DestinationConcept[]>([]);
+  const [parentConcept, setParentConcept] = useState<DestinationConcept | null>(null);
+  const [searchingParent, setSearchingParent] = useState(false);
+  const parentTimerRef = useRef<number>(0);
+
   const groups = props.vocabularies.filter(v => v.vocabulary_id.startsWith("HK-"));
   const update = (key: keyof typeof fields, value: string) => {
     setFields(prev => ({ ...prev, [key]: value }));
     setReview(null); setConfirmed(false); setError("");
+    if (key === "domain_id") { setParentConcept(null); setParentQuery(""); setParentResults([]); }
   };
+
+  // Debounced parent concept search — the early-return branch clears results
+  // via the timeout path to satisfy react-hooks/set-state-in-effect.
+  useEffect(() => {
+    const controller = new AbortController();
+    window.clearTimeout(parentTimerRef.current);
+    if (parentQuery.length < 3 || parentConcept) {
+      parentTimerRef.current = window.setTimeout(() => {
+        setParentResults([]);
+      }, 0);
+      return () => { window.clearTimeout(parentTimerRef.current); };
+    }
+    parentTimerRef.current = window.setTimeout(() => {
+      (async () => {
+        setSearchingParent(true);
+        try {
+          const matches = await searchDestinationConcepts(parentQuery, "", controller.signal, { retired: false, nonStandard: false });
+          setParentResults(matches);
+        } catch {
+          setParentResults([]);
+        } finally {
+          setSearchingParent(false);
+        }
+      })();
+    }, PARENT_SEARCH_DEBOUNCE_MS);
+    return () => { window.clearTimeout(parentTimerRef.current); controller.abort(); };
+  }, [parentQuery, parentConcept]);
+
+  const selectParent = (c: DestinationConcept) => {
+    setParentConcept(c);
+    setParentQuery("");
+    setParentResults([]);
+    setReview(null); setConfirmed(false); setError("");
+  };
+  const clearParent = () => {
+    setParentConcept(null);
+    setParentQuery("");
+    setParentResults([]);
+    setReview(null); setConfirmed(false); setError("");
+  };
+
   const submit = async () => {
     setBusy(true); setError("");
     try {
       const { data } = await api.post("/v1/code-mappings/mint-destination/", {
         ...fields, source_code: props.sourceCode, source_vocabulary_id: props.sourceVocabulary,
+        parent_concept_id: parentConcept?.concept_id ?? null,
         action: review ? "mint" : "review", review_token: review?.review_token, none_match: confirmed,
       });
       if (review) props.onSelect(data);
@@ -65,6 +121,31 @@ export default function MintConceptDialog(props: Props) {
             <option value="">Choose a domain</option>
             {props.domains.map(d => <option key={d.domain_id} value={d.domain_id}>{d.label}</option>)}
           </select></label>
+          <div>
+            <label htmlFor="parent-concept-search">Parent concept <span className="text-sm text-slate-500">(optional)</span></label>
+            {parentConcept ? (
+              <div className="mt-1 flex items-center gap-2 rounded border border-slate-300 bg-slate-50 p-2 text-sm">
+                <span className="flex-1">{parentConcept.vocabulary_id}:{parentConcept.concept_code} — {parentConcept.concept_name} (ID {parentConcept.concept_id})</span>
+                <button type="button" onClick={clearParent} className="text-slate-500 hover:text-red-600" aria-label="Clear parent concept">&#x2715;</button>
+              </div>
+            ) : (
+              <div className="relative">
+                <input id="parent-concept-search" className={inputClass} placeholder="Search for a broader concept..."
+                  value={parentQuery} onChange={e => { setParentQuery(e.target.value); setReview(null); setConfirmed(false); setError(""); }} />
+                {searchingParent && <p className="mt-1 text-xs text-slate-500">Searching...</p>}
+                {parentResults.length > 0 && (
+                  <div className="absolute z-10 mt-1 max-h-48 w-full overflow-y-auto rounded border border-slate-200 bg-white shadow-lg">
+                    {parentResults.map(c => (
+                      <button type="button" key={c.concept_id} onClick={() => selectParent(c)}
+                        className="block w-full border-b p-2 text-left text-sm hover:bg-sky-50">
+                        {c.concept_name} · {c.vocabulary_id}:{c.concept_code} · ID {c.concept_id}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
         </fieldset>
         {review && <section className="mt-4">
           <h3 className="font-semibold">Review candidate destinations</h3>

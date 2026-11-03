@@ -204,20 +204,18 @@ def has_org_admin_access(user, slug: str | None = None) -> bool:
     return admin_orgs.filter(slug=slug).exists()
 
 
-def has_professional_access(user) -> bool:
-    """Return True when the user holds any professional role (org_admin, doctor, analyst).
+def has_explicit_org_admin_access(user, slug: str) -> bool:
+    """Access administration requires a direct organization-level admin grant.
 
-    Used to gate access to mapping curation pages — any professional can view
-    and propose mappings, even if they cannot approve them.
+    Trusts provide access to data, but must not let their members delegate
+    access to others. Group-scoped grants do not administer an entire org.
     """
     if getattr(user, 'is_staff', False):
         return True
-    now = timezone.now()
     return GroupAccess.objects.filter(
-        identity=user,
-        role__in=('org_admin', 'doctor', 'analyst'),
+        identity=user, org__slug=slug, org__is_active=True, role='org_admin',
     ).filter(
-        Q(expires_at__isnull=True) | Q(expires_at__gt=now),
+        Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now()),
     ).exists()
 
 

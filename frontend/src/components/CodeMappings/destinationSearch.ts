@@ -47,6 +47,7 @@ export async function saveMappingDestination(
   conceptId: number,
   approve = false,
   expectedDestinationId?: number | null,
+  options: { requireProposed?: boolean } = {},
 ): Promise<SavedMapping> {
   const path = `/v1/code-mappings/${mappingId}/`;
   await api.post(`${path}lock/`);
@@ -55,8 +56,11 @@ export async function saveMappingDestination(
     if (current.status === 'approved' || current.mapping_origin === 'athena') {
       throw new Error('This mapping is already approved. Open the full editor to review it.');
     }
+    if (options.requireProposed && current.status !== 'proposed') {
+      throw new Error('This mapping is no longer proposed. Review its current status before approving it.');
+    }
     if (expectedDestinationId !== undefined && current.destination_concept_id !== expectedDestinationId) {
-      throw new Error('The destination changed while you were searching. Close and reopen the picker to review the latest mapping.');
+      throw new Error('The destination changed. Open the destination search or full editor to review the latest mapping.');
     }
     // A partial write preserves the source, domain, notes and other curation.
     const { data } = await api.patch<SavedMapping>(path, {

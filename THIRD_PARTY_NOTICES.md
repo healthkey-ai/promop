@@ -23,3 +23,21 @@ Lettuce is licensed under the MIT License. Its complete copyright, permission,
 and warranty notice is reproduced in [licenses/lettuce-MIT.txt](licenses/lettuce-MIT.txt).
 Retain that notice when redistributing this adaptation. PROMOP's own license
 remains in [LICENSE](LICENSE).
+
+## LOINC
+
+PRomop uses LOINC content in its clinical vocabulary and imports the LOINC
+distribution's `LoincClass.csv` and `Loinc.csv` into the `LoincClass` and
+`LoincCodeClass` tables. LOINC concepts may also be loaded from an Athena
+vocabulary export. The following notice is required by Section 10 of the
+[LOINC license](https://loinc.org/kb/license):
+
+> This material contains content from LOINC (http://loinc.org/). LOINC is
+> copyright © Regenstrief Institute, Inc. and the Logical Observation
+> Identifiers Names and Codes (LOINC) Committee and is available at no cost
+> under the license at http://loinc.org/license. LOINC® is a registered United
+> States trademark of Regenstrief Institute, Inc.
+
+LOINC content is licensed separately from PRomop. Use and redistribution of
+that content remain subject to the LOINC license, including any notices for
+third-party content identified in the LOINC distribution.

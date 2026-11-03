@@ -1,6 +1,7 @@
 import { useEffect, useId, useState } from 'react';
 import { clinicalClient, clinicalUrl } from '@/api/clinicalTransport';
 import { Input } from '@/components/shadcn/input';
+import FieldMappingLink from './FieldMappingLink';
 import type { FieldDescriptor } from '@/hooks/useWritableFields';
 
 interface Institution { id: string; label: string; state_code: string }
@@ -46,7 +47,10 @@ export default function TreatingInstitutionField({ value, descriptor, onChange }
   };
   return (
     <div className="relative space-y-1.5">
-      <label htmlFor={id} className="text-sm font-medium text-portal-text-primary">Treating Institution</label>
+      <div className="flex items-center gap-1.5">
+        <label htmlFor={id} className="text-sm font-medium text-portal-text-primary">Treating Institution</label>
+        <FieldMappingLink name="facility_name" label="Treating Institution" />
+      </div>
       <div className="flex gap-2">
         <Input id={id} role="combobox" aria-autocomplete="list" aria-expanded={open && writable}
           aria-controls={`${id}-list`} aria-activedescendant={open && active >= 0 ? `${id}-option-${active}` : undefined}

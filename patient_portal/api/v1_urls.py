@@ -1,7 +1,21 @@
 from .canonical_units import canonical_unit
 from django.urls import include, path
+from .loinc_axes import (
+    code_mapping_axis_variant, code_mapping_axis_variant_suggest, code_mapping_loinc_axes,
+    code_mapping_snomed_attributes, loinc_axis_values,
+)
+from .relevance import disease_relevance_view, relevance_signal_review, relevance_signals
+from .version import version_view
+from .concept_to_code import (
+    concept_to_code_list, concept_to_code_detail, concept_to_code_suggest,
+    concept_to_code_run, concept_to_code_apply, concept_to_code_propose,
+    concept_to_code_source_examples, concept_to_code_priority, concept_to_code_estimate,
+    concept_to_code_axis_variant_walk,
+)
 from rest_framework.routers import DefaultRouter
 from .concept_mint import mint_destination
+from .source_catalog import source_catalog
+from .source_system_facilities import source_system_facilities
 from .supportive_therapies import SupportiveTherapyViewSet, therapy_outcomes
 
 from .views import (
@@ -12,9 +26,10 @@ from .views import (
     change_password,
     PersonViewSet,
     derivation_status,
+    resolve_run_status,
     V1ConditionOccurrenceViewSet, V1DrugExposureViewSet, V1MeasurementViewSet,
     V1ObservationViewSet, V1ProcedureOccurrenceViewSet, EpisodeViewSet, EpisodeEventViewSet,
-    TherapyLineViewSet,
+    TherapyLineViewSet, TherapyHistoryCompletenessViewSet,
     PatientDocumentViewSet,
     PatientTrialEnrollmentViewSet,
     TrialSearchPreferencesViewSet,
@@ -22,11 +37,14 @@ from .views import (
     PatientConsentViewSet,
     PatientMessageViewSet,
     vocabulary_list, concept_lookup, concept_search, concept_candidates, concept_list,
+    measurement_concept_catalog,
     therapy_regimen_list, therapy_regimen_detail,
-    therapy_component_list, therapy_class_list,
+    therapy_component_list, therapy_component_detail, therapy_class_list,
     mapping_stats,
     therapy_regimen_components, therapy_component_classes,
     disease_therapy_regimen_list, disease_therapy_regimen_detail,
+    disease_category_list, disease_category_detail,
+    disease_category_mapping_list, disease_category_mapping_detail,
     concept_ancestors, concept_descendants, concept_detail, concept_graph_batch,
     concept_synonyms, concept_synonym_search, concept_replacement,
     vocab_release_list, vocab_release_detail, vocab_release_latest,
@@ -34,8 +52,9 @@ from .views import (
     org_disease_stats,
     InterchangeAgreementViewSet,
     field_mapping_list, field_mapping_detail, propose_all_mappings,
-    code_mapping_list, code_mapping_detail, code_mapping_lock,
+    code_mapping_list, code_mapping_detail, code_mapping_lock, code_mapping_upload,
     code_mapping_vocabularies,
+    code_mapping_group, code_mapping_group_action, code_mapping_group_suggest,
     code_mapping_reference,
     code_mapping_suggest,
     code_mapping_suggest_one,
@@ -45,6 +64,7 @@ from .views import (
     code_mapping_lookup,
     code_mapping_accuracy,
     code_mapping_accuracy_dashboard,
+    code_mapping_unit_search,
     custom_patient_field_list,
     field_synonyms, field_synonym_detail, field_synonyms_batch,
     field_choice_list, field_choice_detail, field_choice_codes,
@@ -87,6 +107,9 @@ router.register(r'episode-events', EpisodeEventViewSet, basename='v1-episode-eve
 # than any single row. See TherapyLineViewSet.
 router.register(r'supportive-therapies', SupportiveTherapyViewSet, basename='v1-supportive-therapies')
 router.register(r'therapy-lines', TherapyLineViewSet, basename='v1-therapy-lines')
+# The patient's statement that the recorded lines are their whole history (#1924).
+router.register(r'therapy-history/completeness', TherapyHistoryCompletenessViewSet,
+                basename='v1-therapy-history-completeness')
 router.register(r'documents', PatientDocumentViewSet, basename='v1-documents')
 router.register(r'trial-enrollments', PatientTrialEnrollmentViewSet, basename='v1-trial-enrollments')
 router.register(r'trial-search-preferences', TrialSearchPreferencesViewSet, basename='v1-trial-search-preferences')
@@ -102,9 +125,11 @@ router.register(r'survey-responses', PatientSurveyResponseViewSet, basename='v1-
 
 urlpatterns = [
     path('therapy-outcomes/', therapy_outcomes, name='v1-therapy-outcomes'),
+    path('phr/', include('patient_portal.api.phr.urls')),
     # The surveys the PROlog runner serves, for the portal's Surveys tab.
     path('prolog-surveys/', PrologSurveyListView.as_view(), name='v1-prolog-surveys'),
     path('', include(router.urls)),
+    path('version/', version_view, name='v1-version'),
     path('auth/login/', login_view, name='v1-login'),
     path('auth/logout/', logout_view, name='v1-logout'),
     path('auth/change-password/', change_password, name='v1-change-password'),
@@ -115,6 +140,8 @@ urlpatterns = [
     path('break-glass/', break_glass, name='v1-break-glass'),
     path('derivation-status/<str:task_id>/', derivation_status,
          name='v1-derivation-status'),
+    path('resolve-runs/<uuid:run_id>/', resolve_run_status,
+         name='v1-resolve-run-status'),
     path('auth/test/', auth_test, name='v1-auth-test'),
     path('patients/signup/', PatientSignupView.as_view(), name='v1-patient-signup'),
     path('patients/<int:person_id>/invite/', PatientInviteView.as_view(), name='v1-patient-invite'),
@@ -127,6 +154,8 @@ urlpatterns = [
     path('vocab-releases/latest/snapshot/<str:table>/', VocabSnapshotView.as_view(), {'release_id': None}, name='v1-vocab-snapshot-latest'),
     path('vocabularies/<str:model_name>/', vocabulary_list, name='v1-vocabulary-list'),
     path('concepts/lookup/', concept_lookup, name='v1-concept-lookup'),
+    path('concepts/measurements/', measurement_concept_catalog,
+         name='v1-measurement-concept-catalog'),
     path('concepts/<int:concept_id>/canonical-unit/', canonical_unit, name='v1-canonical-unit'),
     path('concepts/search/', concept_search, name='v1-concept-search'),
     path('concepts/candidates/', concept_candidates, name='v1-concept-candidates'),
@@ -156,20 +185,45 @@ urlpatterns = [
     path('orgs/<slug:slug>/public/', org_public_info, name='v1-org-public-info'),
     path('orgs/<slug:slug>/patient-signup/', OrgPatientSignupView.as_view(), name='v1-org-patient-signup'),
     path('field-mappings/', field_mapping_list, name='v1-field-mapping-list'),
+    path('concept-to-code/', concept_to_code_list, name='v1-concept-to-code-list'),
+    path('concept-to-code/suggest/', concept_to_code_suggest, name='v1-concept-to-code-suggest'),
+    path('concept-to-code/suggest-runs/<uuid:run_id>/', concept_to_code_run, name='v1-concept-to-code-run'),
+    path('concept-to-code/priority/', concept_to_code_priority, name='v1-concept-to-code-priority'),
+    path('concept-to-code/axis-variant-walk/', concept_to_code_axis_variant_walk, name='v1-concept-to-code-axis-variant-walk'),
+    path('concept-to-code/source-examples/', concept_to_code_source_examples, name='v1-concept-to-code-source-examples'),
+    path('concept-to-code/<int:concept_id>/', concept_to_code_detail, name='v1-concept-to-code-detail'),
+    path('concept-to-code/<int:concept_id>/mappings/<int:mapping_id>/', concept_to_code_apply, name='v1-concept-to-code-apply'),
+    path('concept-to-code/<int:concept_id>/estimate/', concept_to_code_estimate, name='v1-concept-to-code-estimate'),
+    path('concept-to-code/<int:concept_id>/mappings/', concept_to_code_propose, name='v1-concept-to-code-propose'),
     path('code-mappings/', code_mapping_list, name='v1-code-mapping-list'),
+    path('code-mappings/upload/', code_mapping_upload, name='v1-code-mapping-upload'),
     path('code-mappings/mint-destination/', mint_destination, name='v1-mint-destination'),
+    path('code-mappings/group/', code_mapping_group, name='v1-code-mapping-group'),
+    path('code-mappings/group/action/', code_mapping_group_action, name='v1-code-mapping-group-action'),
+    path('code-mappings/group/suggest/', code_mapping_group_suggest, name='v1-code-mapping-group-suggest'),
     path('code-mappings/reference/', code_mapping_reference, name='v1-code-mapping-reference'),
     path('code-mappings/suggest/', code_mapping_suggest, name='v1-code-mapping-suggest'),
     path('code-mappings/suggest-one/', code_mapping_suggest_one, name='v1-code-mapping-suggest-one'),
     path('code-mappings/suggest-runs/latest/', code_mapping_latest_suggest_run, name='v1-code-mapping-latest-suggest-run'),
     path('code-mappings/suggest-runs/<uuid:run_id>/', code_mapping_suggest_run, name='v1-code-mapping-suggest-run'),
+    path('code-mappings/source-catalog/', source_catalog, name='v1-source-catalog'),
+    path('code-mappings/source-systems/', source_system_facilities, name='v1-source-system-facilities'),
     path('code-mappings/check-umls/', code_mapping_check_umls, name='v1-code-mapping-check-umls'),
     path('code-mappings/lookup/', code_mapping_lookup, name='v1-code-mapping-lookup'),
+    path('relevance/', disease_relevance_view, name='v1-disease-relevance'),
+    path('relevance/signals/', relevance_signals, name='v1-relevance-signals'),
+    path('relevance/signals/<int:signal_id>/', relevance_signal_review, name='v1-relevance-signal-review'),
     path('code-mappings/accuracy/', code_mapping_accuracy, name='v1-code-mapping-accuracy'),
     path('code-mappings/accuracy/dashboard/', code_mapping_accuracy_dashboard, name='v1-code-mapping-accuracy-dashboard'),
+    path('code-mappings/unit-search/', code_mapping_unit_search, name='v1-code-mapping-unit-search'),
     path('code-mappings/vocabularies/', code_mapping_vocabularies, name='v1-code-mapping-vocabularies'),
     path('code-mappings/<int:mapping_id>/', code_mapping_detail, name='v1-code-mapping-detail'),
     path('code-mappings/<int:mapping_id>/lock/', code_mapping_lock, name='v1-code-mapping-lock'),
+    path('code-mappings/<int:mapping_id>/loinc-axes/', code_mapping_loinc_axes, name='v1-code-mapping-loinc-axes'),
+    path('code-mappings/<int:mapping_id>/axis-variants/', code_mapping_axis_variant, name='v1-code-mapping-axis-variant'),
+    path('code-mappings/<int:mapping_id>/axis-variants/suggest/', code_mapping_axis_variant_suggest, name='v1-code-mapping-axis-variant-suggest'),
+    path('code-mappings/<int:mapping_id>/snomed-attributes/', code_mapping_snomed_attributes, name='v1-code-mapping-snomed-attributes'),
+    path('loinc/axis-values/', loinc_axis_values, name='v1-loinc-axis-values'),
     path('custom-patient-fields/', custom_patient_field_list, name='v1-custom-patient-field-list'),
     path('field-mappings/propose-all/', propose_all_mappings, name='v1-field-mapping-propose-all'),
     path('field-mappings/<int:pk>/', field_mapping_detail, name='v1-field-mapping-detail'),
@@ -188,6 +242,7 @@ urlpatterns = [
     path('therapy-regimens/<str:regimen_code>/components/', therapy_regimen_components, name='v1-therapy-regimen-components'),
     path('therapy-regimens/<str:regimen_code>/components/<str:component_code>/', therapy_regimen_components, name='v1-therapy-regimen-component-detail'),
     path('therapy-components/', therapy_component_list, name='v1-therapy-component-list'),
+    path('therapy-components/<str:code>/', therapy_component_detail, name='v1-therapy-component-detail'),
     path('therapy-components/<str:component_code>/classes/', therapy_component_classes, name='v1-therapy-component-classes'),
     path('therapy-components/<str:component_code>/classes/<str:class_code>/', therapy_component_classes, name='v1-therapy-component-class-detail'),
     path('therapy-classes/', therapy_class_list, name='v1-therapy-class-list'),
@@ -195,4 +250,8 @@ urlpatterns = [
     path('mapping-stats/', mapping_stats, name='v1-mapping-stats'),
     path('disease-therapy-regimens/', disease_therapy_regimen_list, name='v1-disease-therapy-regimen-list'),
     path('disease-therapy-regimens/<int:pk>/', disease_therapy_regimen_detail, name='v1-disease-therapy-regimen-detail'),
+    path('disease-categories/', disease_category_list, name='v1-disease-category-list'),
+    path('disease-categories/<str:code>/', disease_category_detail, name='v1-disease-category-detail'),
+    path('disease-category-mappings/', disease_category_mapping_list, name='v1-disease-category-mapping-list'),
+    path('disease-category-mappings/<int:pk>/', disease_category_mapping_detail, name='v1-disease-category-mapping-detail'),
 ]

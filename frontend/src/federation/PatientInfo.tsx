@@ -10,7 +10,6 @@ import GeneralTab from "@/components/PatientInfo/tabs/GeneralTab";
 import DiseaseTab from "@/components/PatientInfo/tabs/DiseaseTab";
 import GenomicsTab from "@/components/PatientInfo/tabs/GenomicsTab";
 import TreatmentTab from "@/components/PatientInfo/tabs/TreatmentTab";
-import BloodTab from "@/components/PatientInfo/tabs/BloodTab";
 import LabsTab from "@/components/PatientInfo/tabs/LabsTab";
 import BehaviorTab from "@/components/PatientInfo/tabs/BehaviorTab";
 import WearableTab from "@/components/PatientInfo/tabs/WearableTab";
@@ -77,7 +76,7 @@ function PatientInfoSkeleton() {
   );
 }
 
-function PatientInfoInner({ readOnly, onPatientUpdated, showHeading = true }: Pick<PatientInfoProps, "readOnly" | "onPatientUpdated" | "showHeading">) {
+function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading = true }: Pick<PatientInfoProps, "readOnly" | "federated" | "onPatientUpdated" | "showHeading">) {
   const { data, isLoading, isError, error } = usePatientInfoMe();
   const patchMutation = usePatchPatientInfo();
 
@@ -107,14 +106,33 @@ function PatientInfoInner({ readOnly, onPatientUpdated, showHeading = true }: Pi
 
   const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingDataRef = useRef<Record<string, unknown> | null>(null);
+  const dirtyFieldsRef = useRef(new Set<string>());
+  const serverInfoRef = useRef<Record<string, unknown>>(initialInfo);
   const editedInfoRef = useRef<Record<string, unknown>>({});
   const editedNameRef = useRef("");
   const [prevData, setPrevData] = useState(data);
 
   if (data && data !== prevData) {
     setPrevData(data);
-    setEditedInfo(initialInfo);
-    setEditedName(initialName);
+    const pending = pendingDataRef.current;
+    const rebased = { ...initialInfo };
+    for (const field of dirtyFieldsRef.current) {
+      if (field === 'patient_name') continue;
+      if (pending && pending[field] !== initialInfo[field]) rebased[field] = pending[field];
+      else dirtyFieldsRef.current.delete(field);
+    }
+    if (pending && ['estrogen_receptor_status', 'progesterone_receptor_status', 'her2_status']
+      .some((field) => dirtyFieldsRef.current.has(field))) {
+      rebased.tnbc_status = pending.tnbc_status;
+    }
+    const pendingName = dirtyFieldsRef.current.has('patient_name')
+      ? pending?.patient_name : initialName;
+    pendingDataRef.current = pending
+      ? { ...rebased, ...(dirtyFieldsRef.current.has('patient_name') ? { patient_name: pendingName } : {}) }
+      : null;
+    serverInfoRef.current = { ...initialInfo };
+    setEditedInfo(rebased);
+    setEditedName(String(pendingName ?? initialName));
   }
 
   useEffect(() => { editedInfoRef.current = editedInfo; }, [editedInfo]);
@@ -123,9 +141,6 @@ function PatientInfoInner({ readOnly, onPatientUpdated, showHeading = true }: Pi
 
   // The last state the server confirmed, so an edit can be told from a value that
   // merely came back in the payload. Advanced as each write lands.
-  const serverInfoRef = useRef<Record<string, unknown>>({});
-  useEffect(() => { serverInfoRef.current = { ...initialInfo }; }, [initialInfo]);
-
   /**
    * PatientRecord is a derived read model with no writable clinical columns, so
    * this cannot be "PATCH whatever changed" — it used to send the whole record,
@@ -184,9 +199,20 @@ function PatientInfoInner({ readOnly, onPatientUpdated, showHeading = true }: Pi
         ? { ...combined, patient_name: info.patient_name }
         : combined;
 
+      const clearUnsendableEdits = () => {
+        for (const field of dirtyFieldsRef.current) {
+          const descriptor = descriptors[field];
+          if (descriptor && (!descriptor.writable || descriptor.target !== 'patient_record')
+              && info[field] === pendingDataRef.current?.[field]) {
+            dirtyFieldsRef.current.delete(field);
+          }
+        }
+      };
+
       // Nothing left to say is not a reason to say it: the OMOP writes above have
       // already done the work, and an empty PATCH can only fail.
       if (Object.keys(payload).length === 0) {
+        clearUnsendableEdits();
         setSaveStatus("saved");
         setTimeout(() => setSaveStatus((s) => (s === "saved" ? "idle" : s)), 1200);
         return;
@@ -195,7 +221,12 @@ function PatientInfoInner({ readOnly, onPatientUpdated, showHeading = true }: Pi
       const result = await patchMutation.mutateAsync(payload);
       for (const f of Object.keys(combined)) {
         serverInfoRef.current[f] = info[f];
+        if (pendingDataRef.current?.[f] === info[f]) dirtyFieldsRef.current.delete(f);
       }
+      if (renamed && pendingDataRef.current?.patient_name === info.patient_name) {
+        dirtyFieldsRef.current.delete('patient_name');
+      }
+      clearUnsendableEdits();
       setSaveStatus("saved");
       onPatientUpdated?.(result);
       setTimeout(() => setSaveStatus((s) => (s === "saved" ? "idle" : s)), 1200);
@@ -218,6 +249,8 @@ function PatientInfoInner({ readOnly, onPatientUpdated, showHeading = true }: Pi
     if (readOnly) return;
     const base = pendingDataRef.current ?? editedInfoRef.current;
     const updated = { ...base, [field]: value };
+    if (value === serverInfoRef.current[field]) dirtyFieldsRef.current.delete(field);
+    else dirtyFieldsRef.current.add(field);
 
     if (["estrogen_receptor_status", "progesterone_receptor_status", "her2_status"].includes(field)) {
       const er = String(field === "estrogen_receptor_status" ? value : updated.estrogen_receptor_status ?? "");
@@ -235,9 +268,11 @@ function PatientInfoInner({ readOnly, onPatientUpdated, showHeading = true }: Pi
   const handleNameChange = useCallback((name: string) => {
     if (readOnly) return;
     setEditedName(name);
+    if (name === initialName) dirtyFieldsRef.current.delete('patient_name');
+    else dirtyFieldsRef.current.add('patient_name');
     const base = pendingDataRef.current ?? editedInfoRef.current;
     scheduleAutoSave({ ...base, patient_name: name });
-  }, [scheduleAutoSave, readOnly]);
+  }, [scheduleAutoSave, readOnly, initialName]);
 
 
 
@@ -257,12 +292,16 @@ function PatientInfoInner({ readOnly, onPatientUpdated, showHeading = true }: Pi
             // rather than storing a value the API will refuse.
             const abbreviation = place["state abbreviation"];
             setEditedInfo((prev) => {
-              const updated = {
+              const updated: Record<string, unknown> = {
                 ...prev,
                 city: place["place name"],
                 ...(abbreviation ? { region: abbreviation } : {}),
               };
               pendingDataRef.current = updated;
+              for (const field of ['city', 'region']) {
+                if (updated[field] === serverInfoRef.current[field]) dirtyFieldsRef.current.delete(field);
+                else dirtyFieldsRef.current.add(field);
+              }
               return updated;
             });
           }
@@ -306,27 +345,39 @@ function PatientInfoInner({ readOnly, onPatientUpdated, showHeading = true }: Pi
 
   const diseaseType = getDiseaseType();
   const showDiseaseTab = diseaseType !== "other";
-  const tabLabels = [
-    "General",
-    ...(showDiseaseTab ? [getDiseaseTabLabel()] : []),
-    "Treatment", "Blood", "Labs", "Behavior", "Wearable", "Genomics", "History",
+  // Keyed rather than positional: a host that cannot serve wearable uploads
+  // drops that tab, and arithmetic indices would silently shift every tab after it.
+  const TAB_LABELS: Record<string, string> = {
+    general: "General",
+    treatment: "Treatment",
+    labs: "Labs",
+    behavior: "Behavior",
+    wearable: "Wearable",
+    genomics: "Genomics",
+    history: "History",
+  };
+  const tabKeys = [
+    "general",
+    ...(showDiseaseTab ? ["disease"] : []),
+    "treatment", "labs", "behavior",
+    ...(federated ? [] : ["wearable"]),
+    "genomics", "history",
   ];
+  const tabLabels = tabKeys.map((key) => key === "disease" ? getDiseaseTabLabel() : TAB_LABELS[key]);
 
-  const diseaseIdx = showDiseaseTab ? 1 : -1;
-  const treatmentIdx = showDiseaseTab ? 2 : 1;
-  const bloodIdx = treatmentIdx + 1;
-  const labsIdx = bloodIdx + 1;
-  const behaviorIdx = labsIdx + 1;
-  const wearableIdx = behaviorIdx + 1;
-  const genomicsIdx = wearableIdx + 1;
-  const historyIdx = genomicsIdx + 1;
+  const diseaseIdx = tabKeys.indexOf("disease");
+  const treatmentIdx = tabKeys.indexOf("treatment");
+  const labsIdx = tabKeys.indexOf("labs");
+  const behaviorIdx = tabKeys.indexOf("behavior");
+  const wearableIdx = tabKeys.indexOf("wearable");
+  const genomicsIdx = tabKeys.indexOf("genomics");
+  const historyIdx = tabKeys.indexOf("history");
 
   const tabDescriptions: Record<number, string> = {
     0: "Keep patient details up to date for accurate personalisation.",
     ...(diseaseIdx >= 0 ? { [diseaseIdx]: "Disease-specific clinical information." } : {}),
     [treatmentIdx]: "Therapy history, treatment lines, and planned therapies.",
-    [bloodIdx]: "Blood counts and differential.",
-    [labsIdx]: "Chemistry, liver function, coagulation, cardiac and tumour markers.",
+    [labsIdx]: "Blood counts, chemistry, liver function, coagulation, cardiac and tumour markers.",
     [behaviorIdx]: "Lifestyle, socioeconomic, and behavioural health factors.",
     [wearableIdx]: "Apple wearable 30-day summaries derived from synced OMOP data.",
     [genomicsIdx]: "Genes, variants, origins, interpretations, and test details.",
@@ -368,6 +419,7 @@ function PatientInfoInner({ readOnly, onPatientUpdated, showHeading = true }: Pi
         <div>
           {activeTab === 0 && (
             <GeneralTab
+              showCoordinates={!federated}
               formData={editedInfo}
               onChange={handleFieldChange}
               editedName={editedName}
@@ -387,16 +439,16 @@ function PatientInfoInner({ readOnly, onPatientUpdated, showHeading = true }: Pi
               formData={editedInfo}
               onChange={handleFieldChange}
               diseaseType={diseaseType}
+              readOnly={readOnly}
               onRecordRefreshed={(info) => {
                 setEditedInfo(info);
                 serverInfoRef.current = { ...info };
               }}
             />
           )}
-          {activeTab === bloodIdx && <BloodTab formData={editedInfo} onChange={handleFieldChange} />}
           {activeTab === labsIdx && <LabsTab formData={editedInfo} onChange={handleFieldChange} />}
           {activeTab === behaviorIdx && <BehaviorTab formData={editedInfo} onChange={handleFieldChange} />}
-          {activeTab === wearableIdx && <WearableTab formData={editedInfo} onChange={handleFieldChange} />}
+          {wearableIdx >= 0 && activeTab === wearableIdx && <WearableTab formData={editedInfo} onChange={handleFieldChange} />}
           {activeTab === genomicsIdx && <GenomicsTab formData={editedInfo} readOnly={readOnly} />}
           {activeTab === historyIdx && <ClinicalSummaryTab formData={editedInfo} onNavigateToLabs={() => setActiveTab(labsIdx)} />}
         </div>
@@ -412,6 +464,7 @@ export function PatientInfo({
   className,
   theme,
   readOnly,
+  federated,
   onPatientUpdated,
   showHeading,
 }: PatientInfoProps) {
@@ -423,7 +476,7 @@ export function PatientInfo({
       theme={theme}
       className={className}
     >
-      <PatientInfoInner readOnly={readOnly} onPatientUpdated={onPatientUpdated} showHeading={showHeading} />
+      <PatientInfoInner readOnly={readOnly} federated={federated} onPatientUpdated={onPatientUpdated} showHeading={showHeading} />
     </PatientInfoProvider>
   );
 }

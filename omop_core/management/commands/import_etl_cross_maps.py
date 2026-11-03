@@ -21,6 +21,7 @@ from pathlib import Path
 from omop_core.management.embedding_command import EmbeddingLoadCommand
 
 from omop_core.models import Concept, SourceCodeConceptMapping
+from omop_core.services.snomed_identity import is_standard_snomed, identity_values
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +94,7 @@ class Command(EmbeddingLoadCommand):
             domain_id = target_concept.domain_id or 'Procedure'
             omop_table = self.DOMAIN_TO_TABLE.get(domain_id, 'procedure')
             obj, was_created = SourceCodeConceptMapping.objects.get_or_create(
+                organization=None,
                 source_vocabulary_id='CPT4', source_code=source_code,
                 defaults={
                     'domain_id': domain_id, 'source_code_description': description,
@@ -133,7 +135,9 @@ class Command(EmbeddingLoadCommand):
         if limit:
             entries = entries[:limit]
         for snomed_code, rxnorm_code in entries:
-            rxnorm_concept = rxnorm_concepts.get(rxnorm_code)
+            snomed_concept = snomed_concepts.get(snomed_code)
+            identity = snomed_concept if is_standard_snomed(snomed_concept) else None
+            rxnorm_concept = identity or rxnorm_concepts.get(rxnorm_code)
             if not rxnorm_concept:
                 missing_target += 1
                 if not dry_run:
@@ -142,8 +146,11 @@ class Command(EmbeddingLoadCommand):
             if dry_run:
                 created += 1
                 continue
-            snomed_concept = snomed_concepts.get(snomed_code)
+            identity_defaults = identity_values(identity) if identity else {}
+            if identity:
+                identity_defaults.update(notes=f'Active standard SNOMED identity preferred to etl-cross-map RxNorm:{rxnorm_code}.')
             obj, was_created = SourceCodeConceptMapping.objects.get_or_create(
+                organization=None,
                 source_vocabulary_id='SNOMED', source_code=snomed_code[:100],
                 defaults={
                     'domain_id': 'Drug', 'source_code_description': (snomed_concept.concept_name if snomed_concept else '')[:255],
@@ -151,6 +158,7 @@ class Command(EmbeddingLoadCommand):
                     'destination_vocabulary_id': 'RxNorm', 'omop_table': 'drug_exposure',
                     'status': 'approved', 'origin': 'import', 'origin_system': 'etl-cross-map',
                     'source': 'ETL', 'occurrence_count': 0,
+                    **identity_defaults,
                 },
             )
             if was_created:

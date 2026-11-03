@@ -94,6 +94,38 @@ class TestRankCandidatesDispatch:
             assert 'jev_ms' in timings
 
 
+class TestDualRankerAnthropicStatus:
+    """A failed or declining Anthropic must say so, not read as 'Anthropic 0%'."""
+
+    def _both(self, anthropic_result, jev_choice=1):
+        j_alts = [{'concept_id': 200, 'concept_name': 'Glycated', 'confidence': 0.90, 'ranker': 'jev'}]
+        with patch('omop_core.mapping.suggestions.rank_candidates', return_value=anthropic_result), \
+             patch('omop_core.mapping.suggestions.rank_candidates_jev',
+                   return_value=(_candidates()[jev_choice], 'high confidence (Jev 90%)', j_alts)):
+            return rank_candidates_dispatch('HbA1c', _candidates(), 'Hemoglobin A1c', ranking_model='both')
+
+    def test_unavailable_anthropic_reports_its_reason(self):
+        _, note, _, _ = self._both((None, 'Ranking model unavailable; expanded search remains unresolved. '
+                                          'Details: The Anthropic API key is not scoped to a workspace.', None))
+        assert note.startswith('Jev wins (90% vs Anthropic unavailable: The Anthropic API key is not scoped to a workspace)')
+
+    def test_fallback_pick_without_a_score_is_unavailable_not_zero(self):
+        fallback = (_candidates()[0], 'Best-match fallback (score 0.5). Ranking model unavailable, so this is '
+                                      'the first candidate. Details: Anthropic rejected the configured API key (HTTP 401).', None)
+        _, note, _, _ = self._both(fallback)
+        assert 'vs Anthropic unavailable: Anthropic rejected the configured API key (HTTP 401))' in note
+        assert 'Anthropic 0%' not in note
+
+    def test_declining_anthropic_says_declined(self):
+        _, note, _, _ = self._both((None, 'No suitable concept: different analyte', None))
+        assert note.startswith('Jev wins (90% vs Anthropic declined)')
+
+    def test_scored_anthropic_keeps_its_percentage(self):
+        a_alts = [{'concept_id': 100, 'concept_name': 'HbA1c', 'confidence': 0.55, 'ranker': 'anthropic'}]
+        _, note, _, _ = self._both((_candidates()[0], 'medium confidence: ok', a_alts))
+        assert note.startswith('Jev wins (90% vs Anthropic 55%)')
+
+
 def _mock_jev_response(choice, probabilities, *, raise_exc=None):
     """Return a patcher for requests.post that returns a Jev API response."""
     json_response = {

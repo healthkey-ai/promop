@@ -171,7 +171,7 @@ verification of the intended deployed candidate.
    person/all scope) to preview. Review its counts, repeat with `--apply`, and
    retain a repeat-preview receipt. This scoped command holds pending edits and
    changes only TP53 cache; it does not perform the broader blood-unit/version-7
-   refresh or rewrite source findings. Follow [the TP53 rollout contract](tp53_aggregate_plan.md).
+   refresh or rewrite source findings. Follow [the TP53 rollout contract](genomics_architecture.md#genomic-features-and-finding-terminology).
 4. Provision a dedicated synthetic record as required by the smoke runner,
    privately set `GENOMICS_SMOKE_USERNAME` and `GENOMICS_SMOKE_PASSWORD`, and run
    `python scripts/genomics_release_smoke.py --person-id ID --run-id RUN_ID`.

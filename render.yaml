@@ -5,11 +5,24 @@ services:
     repo: https://github.com/healthkey-ai/promop
     branch: main
     autoDeploy: true
-    buildCommand: "pip install -r requirements.txt && cd frontend && npm install && npm run build && cd .. && python manage.py collectstatic --noinput"
+    # This shared Blueprint can advance on dev while production stays on an
+    # older main revision. Validate catalog payloads when that revision ships
+    # the verifier; a verifier failure must still stop the build.
+    buildCommand: "if [ -f scripts/verify_source_catalog_snapshots.py ]; then python scripts/verify_source_catalog_snapshots.py; fi && pip install -r requirements.txt && cd frontend && npm install && npm run build && cd .. && python manage.py collectstatic --noinput"
+    # No preDeployCommand here yet. A Blueprint sync applies settings to every
+    # service it declares, whatever branch each one deploys code from -- so
+    # adding it alongside staging's pointed production at
+    # scripts/prepare-deployment.sh, which does not exist on main, and every
+    # production deploy failed on "No such file or directory". It goes back
+    # when dev reaches main and the script is actually there (#1625).
     startCommand: "chmod +x start.sh && ./start.sh"
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.0
+      - key: LOINC_USER
+        sync: false
+      - key: LOINC_PASSWORD
+        sync: false
       - key: SECRET_KEY
         generateValue: true
       # Required by patient_portal.E001/E002/E003, which start.sh enforces
@@ -92,11 +105,24 @@ services:
     branch: main
     autoDeploy: true
     # No frontend build: the worker serves nothing.
-    buildCommand: "pip install -r requirements.txt"
-    startCommand: "celery -A promop worker --loglevel=info"
+    buildCommand: "if [ -f scripts/verify_source_catalog_snapshots.py ]; then python scripts/verify_source_catalog_snapshots.py; fi && pip install -r requirements.txt"
+    # Safe to apply before the corresponding main release: an older worker can
+    # listen to an empty queue, while only the new web code publishes Athena
+    # jobs. This keeps the production worker ready when async sync reaches main.
+    startCommand: "celery -A promop worker --loglevel=info --queues=celery,athena,suggest"
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.0
+      - key: LOINC_USER
+        fromService:
+          name: promop
+          type: web
+          envVarKey: LOINC_USER
+      - key: LOINC_PASSWORD
+        fromService:
+          name: promop
+          type: web
+          envVarKey: LOINC_PASSWORD
       # Taken from the web service rather than generated: two different keys
       # would be two different signing secrets for the same data.
       - key: SECRET_KEY
@@ -137,12 +163,22 @@ services:
     repo: https://github.com/healthkey-ai/promop
     branch: dev
     autoDeploy: true
-    buildCommand: pip install -r requirements.txt && cd frontend && npm install && npm run build && cd .. && python manage.py
+    buildCommand: python scripts/verify_source_catalog_snapshots.py && pip install -r requirements.txt && cd frontend && npm install && npm run build && cd .. && python manage.py
       collectstatic --noinput
+    # Prepare once per deploy, not once per instance boot. A failure here
+    # stops the deploy and leaves the running version serving, where the
+    # same failure during boot gives a crash-looping service. This is the
+    # shape Cloud Run already has, via its <service>-migrate job gated
+    # ahead of the traffic shift (#1625).
+    preDeployCommand: bash scripts/prepare-deployment.sh
     startCommand: chmod +x start.sh && ./start.sh
     envVars:
       - key: PYTHON_VERSION
         value: 3.12.0
+      - key: LOINC_USER
+        sync: false
+      - key: LOINC_PASSWORD
+        sync: false
       - key: SECRET_KEY
         generateValue: true
       - key: AUDIT_HMAC_KEY
@@ -184,6 +220,8 @@ services:
         sync: false
       - key: ANTHROPIC_API_KEY
         sync: false
+      - key: ANTHROPIC_WORKSPACE_ID
+        sync: false
       - key: CELERY_RESULT_BACKEND
         fromService:
           name: promop-staging-redis
@@ -202,7 +240,7 @@ services:
     region: oregon
     autoDeploy: true
     plan: 1c-2g
-    buildCommand: pip install -r requirements.txt
+    buildCommand: python scripts/verify_source_catalog_snapshots.py && pip install -r requirements.txt
     startCommand: bash start-worker.sh
     envVars:
       - key: SECRET_KEY
@@ -230,8 +268,23 @@ services:
           name: promop-staging
           type: web
           envVarKey: ANTHROPIC_API_KEY
+      - key: ANTHROPIC_WORKSPACE_ID
+        fromService:
+          name: promop-staging
+          type: web
+          envVarKey: ANTHROPIC_WORKSPACE_ID
       - key: PYTHON_VERSION
         value: 3.12.0
+      - key: LOINC_USER
+        fromService:
+          name: promop-staging
+          type: web
+          envVarKey: LOINC_USER
+      - key: LOINC_PASSWORD
+        fromService:
+          name: promop-staging
+          type: web
+          envVarKey: LOINC_PASSWORD
       - key: DEBUG
         value: 'False'
       - key: CELERY_BROKER_URL

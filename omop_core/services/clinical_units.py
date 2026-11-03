@@ -70,6 +70,11 @@ def blood_count_to_canonical(value, source_unit):
     return number * Decimal(factors[unit])
 
 
+def count_in_cells_per_ul(value):
+    """Convert a canonical count in thousands/µL to legacy cells/µL."""
+    return Decimal(str(value)) * 1000 if value is not None else None
+
+
 def measurement_count_unit(row):
     """Prefer explicit source units; use a UCUM concept only when text is absent."""
     if row.unit_source_value and row.unit_source_value.strip():
@@ -89,8 +94,8 @@ def blood_count_projection(field, row):
     if field == 'anc_thousand_per_ul':
         return {
             field: value,
-            'absolute_neutrophile_count': value,
-            'absolute_neutrophile_count_units': '10*3/uL' if value is not None else None,
+            'absolute_neutrophile_count': count_in_cells_per_ul(value),
+            'absolute_neutrophile_count_units': 'CELLS/UL' if value is not None else None,
         }
     # The legacy platelet column is integer-valued. Reporting cells/uL retains
     # fractional thousands and matches the downstream compatibility contract.
@@ -107,22 +112,25 @@ def blood_count_projection(field, row):
 FLC_CANONICAL_UNIT = 'mg/L'
 
 _FLC_FACTOR_TO_MG_L = {
-    'mg/l': 1.0,
-    'mg/dl': 10.0,       # 1 mg/dL = 10 mg/L
-    'mg/100ml': 10.0,
-    'ug/ml': 1.0,        # 1 ug/mL = 1 mg/L
-    'mcg/ml': 1.0,
-    'g/l': 1000.0,
+    'mg/l': Decimal('1'),
+    'mg/dl': Decimal('10'),       # 1 mg/dL = 10 mg/L
+    'mg/100ml': Decimal('10'),
+    'ug/ml': Decimal('1'),        # 1 ug/mL = 1 mg/L
+    'mcg/ml': Decimal('1'),
+    'g/l': Decimal('1000'),
 }
 
 
 def flc_to_canonical(
     value: Decimal | float | None, source_unit: str | None,
-) -> float | None:
+) -> Decimal | None:
     """Convert a free light chain result to mg/L, None if the unit is unknown.
 
     None means "cannot be established", not "zero". Labs report these in mg/L
-    and mg/dL, so guessing is a 10x error half the time.
+    and mg/dL, so guessing is a 10x error half the time. Decimal arithmetic is
+    deliberate: the IMWG window is inclusive at 0.26/1.65, and a binary-float
+    conversion such as 10.23 mg/dL -> 102.30000000000001 would move an exact
+    boundary result outside that window.
     """
     if value is None:
         return None
@@ -133,4 +141,4 @@ def flc_to_canonical(
     factor = _FLC_FACTOR_TO_MG_L.get(normalized)
     if factor is None:
         return None
-    return float(value) * factor
+    return Decimal(str(value)) * factor

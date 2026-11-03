@@ -11,6 +11,7 @@ from django.db import connection
 
 from omop_core.services.mappings import CONCEPT_PATIENT_REPORTED_TYPE, LAB_FIELD_TO_LOINC
 from omop_core.services.patient_record_service import (
+    DERIVED_LANGUAGE_FIELDS,
     PATIENT_RECORD_OMOP_MAPPED_FIELDS,
 )
 from omop_core.services.write_descriptor import build_writable_field_descriptor
@@ -36,6 +37,16 @@ def _load_ucum(unit):
 
 
 class TestMappedFields:
+    def test_language_fields_are_derived_from_skill_rows(self):
+        descriptor = build_writable_field_descriptor()
+        assert DERIVED_LANGUAGE_FIELDS <= descriptor.keys()
+        for field in DERIVED_LANGUAGE_FIELDS:
+            entry = descriptor[field]
+            assert entry['kind'] == 'computed'
+            assert entry['writable'] is False
+            assert entry['inputs'] == ['PersonLanguageSkill']
+            assert 'language-skills API' in entry['reason']
+
     def test_largest_lymph_node_recipe_uses_the_standard_cancer_modifier(self):
         concept = ConceptFactory(
             concept_id=36769292,
@@ -155,9 +166,12 @@ class TestKinds:
     def test_no_alias_is_offered_as_editable(self):
         """Writing an alias and its canonical collides on one LOINC row (#471)."""
         descriptor = build_writable_field_descriptor()
-        for alias in ('calcium_mg_dl', 'creatinine_mg_dl', 'blood_urea_nitrogen'):
+        for alias in ('calcium_mg_dl', 'creatinine_mg_dl', 'blood_urea_nitrogen',
+                      'hemoglobin_level', 'absolute_lymphocyte_count'):
             assert descriptor[alias]['kind'] == 'alias'
             assert descriptor[alias]['writable'] is False
+        assert descriptor['hemoglobin_level']['canonical'] == 'hemoglobin_g_dl'
+        assert descriptor['absolute_lymphocyte_count']['canonical'] == 'alc_thousand_per_ul'
 
     def test_a_computed_field_names_its_inputs(self):
         entry = build_writable_field_descriptor()['bmi']
@@ -507,6 +521,11 @@ class TestAttributionsTrackDerivation:
         for field, (code, _vocab, extractor) in DERIVED_FIELD_TO_CODE.items():
             source = inspect.getsource(getattr(prs, extractor))
             writes_field = f"data['{field}']" in source or f'data["{field}"]' in source
+            # _get_assertion_data writes fields data-driven from _ASSERTION_FIELDS (`data[field] = ...`
+            # in a loop, not a literal), so a field it reads counts as written when _ASSERTION_FIELDS
+            # maps this code to it.
+            if not writes_field and extractor == '_get_assertion_data':
+                writes_field = prs._ASSERTION_FIELDS.get(code, (None,))[0] == field
             # The code may be inline or reached through a module-level constant
             # the function names; both count as this extractor reading it.
             mentions_code = f"'{code}'" in source or f'"{code}"' in source

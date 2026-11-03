@@ -16,6 +16,7 @@ export interface PatientInfo {
   email?: string;
   
   // General
+  date_of_birth_precision?: 'day' | 'month' | 'year' | null;
   patient_age?: number;
   gender?: string;
   weight_kg?: number;
@@ -54,8 +55,12 @@ export interface PatientInfo {
   flipi_score?: number;
   flipi_score_options?: string;
   tumor_grade?: string;
+  b_symptom_fever?: boolean | null;
+  b_symptom_night_sweats?: boolean | null;
+  b_symptom_weight_loss?: boolean | null;
   transformed_to_dlbcl?: boolean;
   dlbcl_transformation_date?: string;
+  dlbcl_transformation_date_precision?: 'day' | 'month' | 'year' | null;
   post_transformation_outcome?: string;
   
   // Multiple Myeloma specific
@@ -67,6 +72,7 @@ export interface PatientInfo {
   mrd_status?: string | null;
   stem_cell_transplant_history?: string[] | null;
   sct_date?: string | null;
+  sct_date_precision?: 'day' | 'month' | 'year' | null;
   sct_eligibility?: string[] | null;
   // Treatment
   prior_therapy?: string;
@@ -129,7 +135,13 @@ export interface PatientInfo {
   later_discontinuation_reason?: string;
   later_outcome?: string;
   later_line_outcome?: string;  // UI uses this name
-  
+
+  // Per-line progression dates and POD24
+  first_line_progression_date?: string | null;
+  second_line_progression_date?: string | null;
+  later_progression_date?: string | null;
+  pod24?: boolean | null;
+
   // Supportive Therapy
   supportive_therapies?: string;
   supportive_therapy_start_date?: string;
@@ -169,9 +181,6 @@ export interface PatientInfo {
   hiv_status?: boolean;
   hepatitis_b_status?: boolean;
   hepatitis_c_status?: boolean;
-  no_hiv_status?: boolean;
-  no_hepatitis_b_status?: boolean;
-  no_hepatitis_c_status?: boolean;
   
   bilirubin_total_mg_dl?: number;
   alt_u_l?: number;
@@ -277,6 +286,7 @@ export interface PatientInfo {
 
   // HealthTree parity fields
   diagnosis_date?: string | null;
+  diagnosis_date_precision?: 'day' | 'month' | 'year' | null;
   condition_clinical_status?: string | null;
   disease_slug?: string | null;
   validated?: boolean | null;
@@ -311,6 +321,9 @@ export interface PatientInfo {
   active_energy_per_day_30d?: string | number;
   basal_energy_per_day_30d?: string | number;
   body_mass_avg_30d?: string | number;
+
+  // Genomic aggregates (computed, read-only)
+  tp53_disruption?: boolean | null;
 
   // Myeloma diagnostic criteria (computed, read-only)
   meets_crab?: boolean | null;

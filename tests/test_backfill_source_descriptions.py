@@ -106,11 +106,11 @@ def test_snomed_oid_alias_resolves_to_snomed(condition_domain, finding_class):
     assert counts['athena_alias'] == 1
 
 
-def test_icd10_code_present_only_as_icd10cm(condition_domain, finding_class):
-    """HT-One's ICD-10 rows are ICD-10-CM codes; C85.90 has no WHO ICD-10 entry."""
+def test_icd10cm_code_fills_description_from_athena(condition_domain, finding_class):
+    """ICD-10-CM queue rows are named from Athena concepts."""
     concept('ICD10CM', 'C85.90', 'Non-Hodgkin lymphoma, unspecified, unspecified site',
             condition_domain, finding_class)
-    row = mapping('ICD10', 'C85.90')
+    row = mapping('ICD10CM', 'C85.90')
 
     run()
 
@@ -196,7 +196,7 @@ def test_describe_source_code_walks_the_same_tiers(condition_domain, finding_cla
     umls_atoms('CPT', '00174', ('ANES NTRORL EXC RTRPHRNG TUM', 'AB', True),
                ('Anesthesia for intraoral procedures', 'PT', False))
 
-    assert describe_source_code('ICD10', 'C85.90').startswith('Non-Hodgkin lymphoma')
+    assert describe_source_code('ICD10CM', 'C85.90').startswith('Non-Hodgkin lymphoma')
     assert describe_source_code('CPT4', '00174') == 'Anesthesia for intraoral procedures'
     assert describe_source_code('SNOMED', 'nope') == ''
     assert describe_source_code('', '00174') == ''

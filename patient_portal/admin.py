@@ -170,3 +170,14 @@ class ServiceAccessTokenAdmin(admin.ModelAdmin):
 
     def has_delete_permission(self, request, obj=None):
         return False
+
+
+from .models import LabMarker  # noqa: E402
+
+
+@admin.register(LabMarker)
+class LabMarkerAdmin(admin.ModelAdmin):
+    list_display = ('loinc_code', 'label', 'rank', 'panels', 'disease_slugs')
+    list_editable = ('rank',)
+    search_fields = ('loinc_code', 'label')
+    ordering = ('rank',)

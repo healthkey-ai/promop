@@ -45,14 +45,14 @@ def test_copy_patient_covers_every_patient_table():
 
 
 def test_copy_reference_data_covers_every_copied_reference_table():
-    from omop_core.services.reference_transfer import CANDIDATES, copied_tables
+    from omop_core.services.reference_transfer import AXIS_VARIANTS, CANDIDATES, copied_tables
 
     curation = {
         'omop_core.CustomPatientField', 'omop_core.FieldChoice', 'omop_core.FieldChoiceCode',
         'omop_core.FieldConceptMapping', 'omop_core.FieldFormula', 'omop_core.FieldSynonym',
         'omop_core.SourceCodeConceptMapping',
     }
-    handled = {t.model._meta.label for t in (*copied_tables(), CANDIDATES)} | curation | {
+    handled = {t.model._meta.label for t in (*copied_tables(), CANDIDATES, AXIS_VARIANTS)} | curation | {
         'omop_core.TherapyOutcome_diseases',
     }
     assert instance_data.reference_copied() == handled

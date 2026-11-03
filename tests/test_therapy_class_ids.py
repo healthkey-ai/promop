@@ -276,7 +276,7 @@ def test_episode_path_populates_per_line_and_aggregate_class_ids():
         'episode': ConceptFactory(concept_name='Treatment Regimen', vocabulary=hemonc),
         'object': ConceptFactory(concept_name='Disease Episode', vocabulary=hemonc),
         'type': ConceptFactory(concept_name='Derived Episode', vocabulary=hemonc),
-        'field': ConceptFactory(concept_name='Episode event field'),
+        'field': ConceptFactory(concept_id=1147094, concept_name='drug_exposure.drug_exposure_id'),
     }
     drug1 = DrugExposureFactory(
         person=person, drug_concept=bort,

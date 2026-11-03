@@ -1,17 +1,29 @@
-import CanonicalUnitEditor from "./CanonicalUnitEditor";
+import ConceptToCodeTab from "./ConceptToCodeTab";
+import CodeMappingUploadDialog, { type CodeMappingUploadResult } from "./CodeMappingUploadDialog";
+import SourceQuantityCell from "./SourceQuantityCell";
 import PageTitle from '@/components/Branding/PageTitle';
-import IndividualSuggestCandidates from "./IndividualSuggestCandidates";
 import InlineDestinationPicker from "./InlineDestinationPicker";
-import { searchDestinationConcepts } from "./destinationSearch";
 import SuggestCandidates, { type CandidateActivity } from "./SuggestCandidates";
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
-import { ArrowLeft, Check, ChevronDown, ChevronRight, Download, Pencil, Plus, Search, Sparkles, Trash2, X } from "lucide-react";
-import api from "@/api/axios";
-import MintConceptDialog from "./MintConceptDialog";
+import EditMappingDialog from "./EditMappingDialog";
 import ConceptInputDetails from "@/components/UI/ConceptInputDetails";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
+import { ArrowLeft, ChevronDown, ChevronRight, Download, Pencil, Plus, Search, Sparkles, Upload } from "lucide-react";
+import api from "@/api/axios";
 import { useAuth } from "@/hooks/useAuth";
-import { HelpTip, Field, ReadOnlyField, INPUT_CLASS } from "@/components/UI/MappingFormPrimitives";
+import { AxisVariantFlag, AxisVariantList } from "./LoincAxisChips";
+import {
+  type CodeMappingRow,
+  type Reference,
+  type RepointResult,
+  repointBanner,
+  type SuggestRunProgress,
+  emptyReference,
+  STRATEGY_LABELS,
+  SUGGEST_POLL_INTERVAL_MS,
+  SUGGEST_POLL_MAX_FAILURES,
+  SUGGEST_POLL_TIMEOUT_MS,
+} from "./codeMappingTypes";
 
 /**
  * Code Mapping: incoming source codes -> destination OMOP concepts.
@@ -33,50 +45,10 @@ import { HelpTip, Field, ReadOnlyField, INPUT_CLASS } from "@/components/UI/Mapp
  * inferred is a defect.
  */
 
-interface CodeMappingRow {
-  mapping_id: number | null;
-  domain_id?: string;
-  source_vocabulary_id: string;
-  source_code: string;
-  source_code_description: string;
-  source_concept_id?: number | null;
-  source_retired?: boolean | null;
-  source_retirement_evidence?: string[];
-  umls_source_name?: string;
-  destination_concept_id: number;
-  destination_concept_name: string;
-  destination_concept_code: string;
-  destination_vocabulary_id: string;
-  destination_concept_class_id: string;
-  destination_omop_table: string;
-  destination_domain_id?: string;
-  standard_concept?: string | null;
-  destination_invalid_reason?: string | null;
-  status: "proposed" | "approved" | "rejected" | "unmapped";
-  notes: string;
-  origin: string;
-  origin_system: string;
-  suggest_strategy: string;
-  umls_cui: string;
-  created_by: string;
-  // Who signed the mapping off, and when. Distinct from created_by: approval
-  // is the transition that rewrites stored patient data, and it survives every
-  // later edit of the row.
-  reviewer?: string;
-  reviewed_at?: string | null;
-  occurrence_count: number;
-  destination_count: number;
-  has_mapping: boolean;
-  mapping_origin?: "athena" | "healthkey";
-  measurement_type?: "qualitative" | "quantitative";
-  suggested_unit?: string;
-  example_units?: string[];
-  locked_by_username?: string | null;
-  locked_at?: string | null;
-}
+// Shared types and constants are imported from codeMappingTypes.ts above.
 
 const EXPORT_COLUMNS: (keyof CodeMappingRow)[] = [
-  "source_vocabulary_id", "source_code", "source_code_description",
+  "organization_slug", "organization_name", "source_vocabulary_id", "source_code", "source_code_description",
   "occurrence_count", "origin_system", "destination_concept_id",
   "destination_concept_name", "destination_concept_code",
   "destination_vocabulary_id", "destination_domain_id", "status",
@@ -149,70 +121,6 @@ function DownloadMenu({ rows, section }: { rows: CodeMappingRow[]; section: stri
   );
 }
 
-interface ConceptResult {
-  concept_id: number;
-  concept_name: string;
-  concept_code: string;
-  vocabulary_id: string;
-  domain_id: string;
-  concept_class_id: string;
-  standard_concept: string | null;
-  invalid_reason?: string | null;
-  measurement_type?: "qualitative" | "quantitative";
-  suggested_unit?: string;
-  example_units?: string[];
-}
-
-interface SearchScope {
-  retired: boolean;
-  nonStandard: boolean;
-}
-
-const DEFAULT_SEARCH_SCOPE: SearchScope = { retired: false, nonStandard: false };
-
-interface DestinationOption extends Omit<ConceptResult, "concept_id"> {
-  concept_id: number | null;
-  selectable: boolean;
-  origins: string[];
-  selected: boolean;
-}
-
-interface VocabularyRef {
-  vocabulary_id: string;
-  vocabulary_name: string;
-  is_local?: boolean;
-}
-
-interface DomainRef {
-  domain_id: string;
-  label: string;
-}
-
-interface SourceCodeSystemRef {
-  vocabulary_id: string;
-  label: string;
-}
-
-interface SourceVocabularyTab {
-  vocabulary_id: string;
-  label: string;
-  is_standard: boolean;
-}
-
-interface Reference {
-  suggest_max_per_run?: number;
-  domains: DomainRef[];
-  source_code_systems_by_domain: Record<string, SourceCodeSystemRef[]>;
-  destination_vocabularies: VocabularyRef[];
-  omop_tables: Record<string, string>;
-  source_vocabulary_tabs?: SourceVocabularyTab[];
-}
-
-interface RepointResult {
-  rows_updated: number;
-  persons_marked_stale: number;
-  rows_collapsed: number;
-}
 
 interface SuggestionAccuracy {
   latest_reviewed?: SuggestionAccuracy | null;
@@ -238,68 +146,6 @@ interface AccuracyResponse {
 const OVERALL_TAB = "__overall__";
 const metric = (value: number | null) => value === null ? "—" : `${(value * 100).toFixed(1)}%`;
 
-interface MappingForm {
-  domain_id: string;
-  source_vocabulary_id: string;
-  source_code: string;
-  source_code_description: string;
-  source_concept_id: string;
-  destination_concept_id: string;
-  destination_concept_name: string;
-  destination_concept_code: string;
-  destination_vocabulary_id: string;
-  destination_concept_class_id: string;
-  standard_concept: string;
-  destination_invalid_reason: string;
-  omop_table: string;
-  measurement_type: string;
-  suggested_unit: string;
-  example_units: string[];
-  status: "proposed" | "approved" | "rejected";
-  notes: string;
-}
-
-const emptyForm: MappingForm = {
-  domain_id: "",
-  source_vocabulary_id: "",
-  source_code: "",
-  source_code_description: "",
-  source_concept_id: "",
-  destination_concept_id: "",
-  destination_concept_name: "",
-  destination_concept_code: "",
-  destination_vocabulary_id: "",
-  destination_concept_class_id: "",
-  standard_concept: "",
-  destination_invalid_reason: "",
-  omop_table: "",
-  measurement_type: "",
-  suggested_unit: "",
-  example_units: [],
-  status: "proposed",
-  notes: "",
-};
-
-const emptyReference: Reference = {
-  domains: [],
-  source_code_systems_by_domain: {},
-  destination_vocabularies: [],
-  omop_tables: {},
-};
-
-const statusClass: Record<string, string> = {
-  proposed: "bg-amber-100 text-amber-800",
-  approved: "bg-green-100 text-green-800",
-  rejected: "bg-red-100 text-red-800",
-  unmapped: "bg-amber-100 text-amber-800",
-};
-
-const strategyLabel: Record<string, string> = {
-  umls: "UMLS",
-  vectors: "Vectors",
-  lexical: "Lexical",
-  semantic: "Vectors",  // legacy alias
-};
 
 /** How far along a run is, counting the phase it is actually in.
 
@@ -334,39 +180,6 @@ const describeSuggestRun = (run: SuggestRunProgress) => {
   return "Starting…";
 };
 
-const SUGGEST_POLL_INTERVAL_MS = 1000;
-// Long enough that a word typed at normal speed is one request, short enough
-// that the pause is not felt once the curator stops.
-const CONCEPT_SEARCH_DEBOUNCE_MS = 250;
-// Consecutive, not cumulative: a run lasting minutes may lose the odd poll.
-const SUGGEST_POLL_MAX_FAILURES = 5;
-// Allow the worker's default 15-minute limit plus time waiting in the queue.
-const SUGGEST_POLL_TIMEOUT_MS = 20 * 60 * 1000;
-
-/** Progress of one queued Suggest run, as /suggest-runs/<id>/ reports it. */
-type SuggestRunProgress = {
-  activity?: CandidateActivity[];
-  run_id: string;
-  state: "queued" | "running" | "success" | "failure";
-  total: number;
-  retrieved: number;
-  done: number;
-  /** New destinations written — what the run achieved, and the headline number. */
-  destinations: number;
-  /** Codes still awaiting a suggestion on this tab once the run finished. */
-  remaining: number;
-  strategy_counts: Record<string, number>;
-  landed_in: Record<string, number>;
-  error: string;
-  ranking_model?: string;
-};
-
-/** Pipeline order, which is also the order the checkboxes read in. */
-const STRATEGY_LABELS = {
-  umls: "UMLS",
-  lexical: "Lexical",
-  vectors: "Vectors",
-} as const;
 
 /**
  * Which tab a row belongs to — keyed by source vocabulary.
@@ -378,10 +191,10 @@ const STRATEGY_LABELS = {
 const VOCABULARY_ALIASES: Record<string, string> = {
   Apple: "OpenWearables",
   Garmin: "OpenWearables",
-  ICD10CM: "ICD10",
+  // ICD10CM and ICD10 are now separate tabs — no alias needed.
   "urn:oid:2.16.840.1.113883.6.96": "SNOMED",
 };
-function tabForRow(row: CodeMappingRow): string {
+function tabForRow(row: Pick<CodeMappingRow, 'source_vocabulary_id'>): string {
   return VOCABULARY_ALIASES[row.source_vocabulary_id] ?? row.source_vocabulary_id;
 }
 
@@ -394,37 +207,30 @@ function tabForRow(row: CodeMappingRow): string {
 const SAME_VOCABULARY_SPELLINGS: Record<string, string> = {
   "urn:oid:2.16.840.1.113883.6.96": "SNOMED",
 };
-function duplicateScopeForRow(row: CodeMappingRow): string {
+function duplicateScopeForRow(row: Pick<CodeMappingRow, 'source_vocabulary_id'>): string {
   return SAME_VOCABULARY_SPELLINGS[row.source_vocabulary_id] ?? row.source_vocabulary_id;
 }
 
-function sectionForRow(row: CodeMappingRow): MappingSection {
-  if (row.mapping_origin === "athena") return "Athena Mapped";
-  if (row.status === "approved") return "Mapped";
-  if (row.status === "rejected") return "Rejected";
-  return "Unmapped";
+function sectionForRow(row: Pick<CodeMappingRow, 'status' | 'destination_concept_id'>): MappingSection {
+  if (!row.destination_concept_id) return "Unmapped";
+  return row.status === "approved" ? "Approved" : "Proposed";
 }
 
-function mappingRowId(row: CodeMappingRow): string {
+type MappingIdentity = Pick<CodeMappingRow, 'mapping_id' | 'source_vocabulary_id' | 'source_code'
+  | 'destination_concept_id' | 'organization_id' | 'status' | 'mapping_origin'>;
+type DuplicateSummary = MappingIdentity & { summary: true };
+
+function mappingRowId(row: MappingIdentity): string {
   return `code-mapping-${row.mapping_id ?? encodeURIComponent(JSON.stringify([
     row.source_vocabulary_id, row.source_code, row.destination_concept_id, sectionForRow(row),
   ]))}`;
 }
 
-type MappingSection = "Unmapped" | "Mapped" | "Rejected" | "Athena Mapped";
+type MappingSection = "Unmapped" | "Proposed" | "Approved";
 type SortColumn = "origin_system" | "source_code" | "occurrence_count" | "source_code_description"
   | "destination_concept_name" | "destination_concept_id" | "destination_count" | "status";
 type SectionSort = { column: SortColumn; descending: boolean };
 
-function retirementLabel(row: CodeMappingRow | null): string {
-  return row?.source_retired === true ? "Retired" : row?.source_retired === false ? "No" : "Unknown";
-}
-
-function retirementDetail(row: CodeMappingRow | null): string {
-  return row?.source_retirement_evidence?.join("; ")
-    || (row?.source_retired === false ? "No retirement indication in the loaded source metadata."
-      : "No source retirement metadata available. Missing metadata does not mean the code is retired.");
-}
 
 function sortMappingRows(rows: CodeMappingRow[], sort?: SectionSort): CodeMappingRow[] {
   if (!sort) return rows;
@@ -444,66 +250,6 @@ function sortMappingRows(rows: CodeMappingRow[], sort?: SectionSort): CodeMappin
   });
 }
 
-/**
- * OMOP domain -> the clinical table its facts land in. Only a fallback: the
- * reference endpoint is authoritative, and hardcoding the mapping in the
- * frontend is what this table exists to avoid. It covers the window before
- * the first fetch resolves.
- */
-const DOMAIN_TO_TABLE: Record<string, string> = {
-  Condition: "condition",
-  Drug: "drug_exposure",
-  Measurement: "measurement",
-  Observation: "observation",
-  Procedure: "procedure",
-};
-
-/** Tooltip copy, verbatim from the design (plan section 3.1). */
-const TIP = {
-  domain:
-    "What kind of fact this is. Chosen first: it decides which code systems are offered and which OMOP table the fact lands in.",
-  source_code_system:
-    "The external code system the value arrived in — NDC or ATC for drugs, ICD-10-CM or SNOMED for conditions. Leave as None for uncoded data; a parsed paper lab or a phrase from a note has no code system, which is normal.",
-  source_code_value:
-    "Exactly what appears in the source data — the code if there is one, otherwise the raw text.",
-  source_description:
-    "Human-readable description of the source code, where the source supplies one.",
-  source_concept_id:
-    "The OMOP concept for the source code itself, if that vocabulary is loaded. Blank is normal — most source systems are ones we receive codes in without holding their concepts.",
-  destination_concept_id:
-    "The OMOP concept this source code means. Type an id directly or pick one from the search above.",
-  destination_concept_name:
-    "Name of the destination concept. Editable only for a HealthKey-minted concept; Athena concepts are named by Athena.",
-  destination_concept_code:
-    "The destination concept's own code in its vocabulary, e.g. 33358-3.",
-  destination_vocabulary_id:
-    "Vocabulary the destination concept belongs to — SNOMED, LOINC, or an HK-* vocabulary when we minted it.",
-  destination_concept_class:
-    "The concept's class within its vocabulary, e.g. Clinical Finding, Lab Test.",
-  standard_concept:
-    "'S' means a standard Athena concept. Blank means non-standard; a retired concept is called out separately.",
-  destination_table:
-    "The OMOP clinical table the fact is stored in. Follows from Domain.",
-  search:
-    "Search OMOP concepts by name or code. Suggest seeds the search from the source description.",
-  search_include_retired:
-    "Retired concepts are hidden because they should not be new destinations. Turn this on only to find the retired concept a mapping already points at.",
-  search_include_non_standard:
-    "Only standard concepts (and HealthKey's own HK-* concepts) are offered, since OMOP analytics read standard concepts. Turn this on to see non-standard ones, such as ICD-10 or source-vocabulary codes.",
-  search_vocabulary:
-    "Which vocabulary the search looks in. Defaults to the destination's own vocabulary; widen it to re-point a minted HK-* mapping at a standard concept.",
-  status:
-    "Proposed is awaiting review. Approving also re-points the clinical rows already stored. Rejected hides the row behind a filter. Only org admins and staff can approve mappings — doctors and analysts may propose mappings for review.",
-  status_new:
-    "A new mapping always starts as Proposed. Only org admins and staff can approve it once reviewed — approval is what rewrites the clinical rows already stored.",
-  notes: "Why this decision was made, for the next curator who opens the row.",
-  ranker: "Which AI model ranks the candidates. Anthropic uses Claude, Jev uses the Typesafe SystemOne API. Both runs both concurrently and picks the higher-confidence winner.",
-} as const;
-
-function omopTableFor(reference: Reference, domainId: string): string {
-  if (!domainId) return "";
-  return reference.omop_tables[domainId] || DOMAIN_TO_TABLE[domainId] || "";
-}
 
 /** Highest occurrence count first: the code seen 400 times is worth more of a curator's time. */
 const byOccurrence = (a: CodeMappingRow, b: CodeMappingRow) =>
@@ -511,101 +257,120 @@ const byOccurrence = (a: CodeMappingRow, b: CodeMappingRow) =>
   || (a.source_code || "").localeCompare(b.source_code || "");
 
 
-/**
- * The sign-off half of the provenance line: " · approved by ada@x on 2026-08-31".
- *
- * Empty until a mapping has actually been approved. Rows approved before the
- * reviewer was recorded carry neither field, and saying nothing is honest
- * where naming whoever last edited the row would not be — that is exactly the
- * confusion updated_by created (#848).
- *
- * The date is sliced off the ISO timestamp rather than formatted locally: the
- * day a decision was made is what matters, and the server sends UTC.
- */
-function approvalNote(row: CodeMappingRow): string {
-  // Only on an approved row. The stamp is cleared server-side when a mapping is
-  // un-approved, but a client holding an older payload must not assert
-  // "approved by X" over something that is no longer approved.
-  if (row.status !== "approved") return "";
-  if (!row.reviewer && !row.reviewed_at) return "";
-  const who = row.reviewer ? ` by ${row.reviewer}` : "";
-  // Rendered in the viewer's own timezone. Slicing the UTC string showed a
-  // curator at UTC-7 approving at 17:00 the following day's date.
-  const when = row.reviewed_at
-    ? ` on ${new Date(row.reviewed_at).toLocaleDateString()}`
-    : "";
-  return ` · approved${who}${when}`;
-}
-
-function buildEditForm(row: CodeMappingRow, reference: Reference): MappingForm {
-  const domainId = row.domain_id || row.destination_domain_id || "";
-  return {
-    domain_id: domainId,
-    // No fallback to the destination vocabulary. A mapping with no source code
-    // system genuinely has none, and showing the destination's there is what
-    // put HK-Wearable in the source column to begin with.
-    source_vocabulary_id: row.source_vocabulary_id,
-    source_code: row.source_code,
-    source_code_description: row.source_code_description || "",
-    source_concept_id: row.source_concept_id ? String(row.source_concept_id) : "",
-    destination_concept_id: String(row.destination_concept_id),
-    destination_concept_name: row.destination_concept_name,
-    destination_concept_code: row.destination_concept_code || "",
-    destination_vocabulary_id: row.destination_vocabulary_id,
-    destination_concept_class_id: row.destination_concept_class_id || "",
-    standard_concept: row.standard_concept || "",
-    destination_invalid_reason: row.destination_invalid_reason || "",
-    omop_table: row.destination_omop_table || omopTableFor(reference, domainId),
-    measurement_type: row.measurement_type || "",
-    suggested_unit: row.suggested_unit || "",
-    example_units: row.example_units || [],
-    status: row.status === "unmapped" ? "proposed" : row.status,
-    notes: row.notes || "",
-  };
-}
 
 type BrowseResponse = {
+  // Source rows matching all active filters, before pagination or label grouping.
+  total?: number;
   results: CodeMappingRow[];
   duplicates: CodeMappingRow[];
+  duplicates_included?: boolean;
   tabs: { vocabulary_id: string; label: string; is_standard: boolean; proposed: number; approved: number; athena: number }[];
   selected_source: string;
   pages: Record<MappingSection, { page: number; page_size: number; total: number }>;
   rejected_count: number;
+  provenances: { origin_system: string; count: number }[];
+  selected_provenance: string;
+  organizations: { organization_id: number | null; slug: string; name: string; count: number }[];
+  selected_organization: string;
+  groups: Partial<Record<MappingSection, GroupEntry[]>>;
+  rollup: boolean;
 };
-const sectionNames: MappingSection[] = ["Unmapped", "Mapped", "Rejected", "Athena Mapped"];
+
+/** One review row standing for every vendor code sharing a label. */
+type GroupEntry = {
+  label: string | null;
+  group_key?: string;
+
+  description: string;
+  members: number;
+  seen: number;
+  proposed: number;
+  destination_concept_id: number | null;
+  destination_concept_name: string | null;
+  destination_concept_code: string | null;
+  destination_vocabulary_id: string | null;
+  mixed_destinations: boolean;
+  status: string | null;
+  mixed_statuses: boolean;
+  example_quantity?: string;
+  based_on?: string[];
+  source_units?: string[];
+  suggested_action?: string;
+  mapping_id: number | null;
+  /** Most LOINC axis variants any member's units imply (the blue flag). */
+  axis_variant_count?: number;
+};
+
+/** The key the members endpoint takes: a label, or ':<pk>' for an unlabelled row. */
+const groupKey = (entry: GroupEntry) => entry.group_key ?? entry.label ?? `:${entry.mapping_id}`;
+/** Cache key. A label whose codes span Unmapped and Mapped is two entries, and
+ *  the server scopes members by section -- keying on the label alone would let
+ *  one entry show the other's rows. */
+const expansionKey = (entry: GroupEntry, section: MappingSection) => `${section}|${groupKey(entry)}`;
+const sectionNames: MappingSection[] = ["Unmapped", "Proposed", "Approved"];
+const DEFAULT_SECTION_SORT: SectionSort = { column: "occurrence_count", descending: true };
+// A blank origin_system is a real value -- enqueue_unmapped_source_codes writes
+// it for every newly queued code -- but "" is already the select's "no filter"
+// value, so filtering to blank needs a sentinel the server translates back.
+const BLANK_PROVENANCE = "__blank__";
+const GLOBAL_ORGANIZATION = "__none__";
 
 export default function CodeMappingPage() {
   const navigate = useNavigate();
   const { currentUser } = useAuth();
   const canApprove = !!(currentUser?.is_staff || currentUser?.is_org_admin);
+  // ?direction=reverse&concept=<id>, from the field mapper's {codes} button:
+  // open Concept → Source Code on that concept's source codes.
+  const [searchParams] = useSearchParams();
+  const linkedConcept = Number(searchParams.get('concept'));
+  // Held in state and cleared once opened: switching direction remounts the
+  // reverse view, which must not reopen the concept each time.
+  const [linkedConceptId, setLinkedConceptId] = useState<number | undefined>(
+    Number.isInteger(linkedConcept) && linkedConcept > 0 ? linkedConcept : undefined);
+  const [direction, setDirection] = useState<'forward' | 'reverse'>(
+    searchParams.get('direction') === 'forward' ? 'forward' : 'reverse');
+  const [reverseWriting, setReverseWriting] = useState(false);
   const [browse, setBrowse] = useState<BrowseResponse | null>(null);
   const [pages, setPages] = useState<Partial<Record<MappingSection, number>>>({});
   const loadSequence = useRef(0);
-  const dialogRequest = useRef(0);
-  const dialogChoice = useRef<number | null>(null);
-  const conceptSearchTimer = useRef<number | null>(null);
-  const conceptSearchAbort = useRef<AbortController | null>(null);
-  const [individualSuggestion, setIndividualSuggestion] = useState<{ request: number; activity: CandidateActivity[]; running: boolean } | null>(null);
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [rows, setRows] = useState<CodeMappingRow[]>([]);
   const [reference, setReference] = useState<Reference>(emptyReference);
   const referenceCache = useRef<Reference | null>(null);
+  const referenceRequest = useRef<Promise<void> | null>(null);
+  const [referenceError, setReferenceError] = useState("");
+  const [referenceReady, setReferenceReady] = useState(false);
+  const duplicateLoadSequence = useRef(0);
+  const [loadingDuplicate, setLoadingDuplicate] = useState<number | null>(null);
+  const [duplicateRevision, setDuplicateRevision] = useState(0);
+  const [asyncDuplicates, setAsyncDuplicates] = useState<{ source: string; rows: DuplicateSummary[] } | null>(null);
+  const [checkingDuplicates, setCheckingDuplicates] = useState(false);
+  const [duplicateError, setDuplicateError] = useState("");
   const [accuracy, setAccuracy] = useState<AccuracyResponse | null>(null);
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [mintOpen, setMintOpen] = useState(false);
+  const [uploadOpen, setUploadOpen] = useState(false);
   const [error, setError] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
   // `null` means no choice has been made, so use the work-prioritized default.
   // The empty string is a real vocabulary ID: it represents the Uncoded tab.
   const [activeVocabulary, setActiveVocabulary] = useState<string | null>(null);
   const [unmappedCollapsed, setUnmappedCollapsed] = useState(false);
-  const [mappedCollapsed, setMappedCollapsed] = useState(true);
-  const [rejectedCollapsed, setRejectedCollapsed] = useState(true);
-  const [athenaCollapsed, setAthenaCollapsed] = useState(true);
-  const [sectionSorts, setSectionSorts] = useState<Partial<Record<MappingSection, SectionSort>>>({
-    Unmapped: { column: "origin_system", descending: false },
-  });
+  const [approvedCollapsed, setApprovedCollapsed] = useState(true);
+  const [proposedCollapsed, setProposedCollapsed] = useState(false);
+  // Every section defaults to Seen descending (#1575), stated explicitly so
+  // the header shows which column is sorted. The server applies the same
+  // default for a caller that sends no order.
+  const [sectionSorts, setSectionSorts] = useState<Partial<Record<MappingSection, SectionSort>>>(
+    () => sectionNames.reduce<Partial<Record<MappingSection, SectionSort>>>(
+      (sorts, section) => ({ ...sorts, [section]: DEFAULT_SECTION_SORT }), {}),
+  );
+  const [provenanceFilter, setProvenanceFilter] = useState("");
+  const [organizationFilter, setOrganizationFilter] = useState("");
+  const [rollup, setRollup] = useState(true);
+  const [seenOnly, setSeenOnly] = useState(true);
+  // key -> members, or null while the fetch is in flight.
+  const [expandedGroups, setExpandedGroups] = useState<Record<string, CodeMappingRow[] | null>>({});
+  const [groupRunning, setGroupRunning] = useState<string | null>(null);
   const [navigationTarget, setNavigationTarget] = useState<{ id: string } | null>(null);
   const [banner, setBanner] = useState<string | null>(null);
   const [suggesting, setSuggesting] = useState(false);
@@ -620,37 +385,7 @@ export default function CodeMappingPage() {
   const [inlineMappingId, setInlineMappingId] = useState<number | null>(null);
   const [dialogMode, setDialogMode] = useState<"new" | "edit" | null>(null);
   const [selectedRow, setSelectedRow] = useState<CodeMappingRow | null>(null);
-  const [form, setForm] = useState<MappingForm>(emptyForm);
-  const [searchVocabulary, setSearchVocabulary] = useState("");
-  // What the destination search leaves out unless asked (#1465). Off by
-  // default: a retired or non-standard concept is almost never the right
-  // destination, and offering them is how they came to be approved.
-  const [searchScope, setSearchScope] = useState<SearchScope>(DEFAULT_SEARCH_SCOPE);
-  const [conceptSearchQuery, setConceptSearchQuery] = useState("");
-  const [conceptResults, setConceptResults] = useState<ConceptResult[]>([]);
-  const [destinationOptions, setDestinationOptions] = useState<DestinationOption[]>([]);
-  const [loadingDestinations, setLoadingDestinations] = useState(false);
-  const [destinationError, setDestinationError] = useState("");
 
-  useEffect(() => {
-    setDestinationOptions([]);
-    setDestinationError("");
-    if (dialogMode !== "edit" || !selectedRow?.mapping_id) return;
-    let active = true;
-    setLoadingDestinations(true);
-    api.get<{ destination_options: DestinationOption[] }>(`/v1/code-mappings/${selectedRow.mapping_id}/`)
-      .then(({ data }) => { if (active) setDestinationOptions(data.destination_options || []); })
-      .catch(() => { if (active) setDestinationError("Could not load imported destinations. Close and reopen this mapping to retry."); })
-      .finally(() => { if (active) setLoadingDestinations(false); });
-    return () => { active = false; };
-  }, [dialogMode, selectedRow?.mapping_id]);
-
-  const [searchingConcepts, setSearchingConcepts] = useState(false);
-  const [checkingUmls, setCheckingUmls] = useState(false);
-  const [umlsCheckMessage, setUmlsCheckMessage] = useState("");
-  const [suggestionMessage, setSuggestionMessage] = useState("");
-  const [repointing, setRepointing] = useState<{ from: string; to: string } | null>(null);
-  const [repointResult, setRepointResult] = useState<RepointResult | null>(null);
   const [replaceExisting, setReplaceExisting] = useState(false);
   const [confirmReplace, setConfirmReplace] = useState(false);
   // Progress of the queued Suggest run, polled while it works. Null when no run
@@ -658,6 +393,12 @@ export default function CodeMappingPage() {
   // itself before settling into the banner.
   const [suggestRun, setSuggestRun] = useState<SuggestRunProgress | null>(null);
   const [suggestFlash, setSuggestFlash] = useState(false);
+  // Activity from previous runs on this tab, merged with the current run's live
+  // activity so the candidates panel accumulates across Suggest clicks.
+  const [accumulatedActivity, setAccumulatedActivity] = useState<CandidateActivity[]>([]);
+  // Incremented each run so SuggestCandidates can clear stale approval choices
+  // when a new run re-suggests the same mapping_id with a different concept.
+  const [suggestGeneration, setSuggestGeneration] = useState(0);
   // Which run the page is still interested in. A poll compares against this so
   // a superseded run — or an unmounted page — stops rather than setting state
   // nobody is showing.
@@ -665,7 +406,6 @@ export default function CodeMappingPage() {
   const flashTimer = useRef<number | null>(null);
 
   useEffect(() => () => {
-    dialogRequest.current += 1;
     suggestRunRef.current = null;
     if (flashTimer.current !== null) window.clearTimeout(flashTimer.current);
   }, []);
@@ -676,46 +416,83 @@ export default function CodeMappingPage() {
   }, [searchQuery]);
 
   const fetchAll = useCallback(async () => {
+    if (direction === 'reverse') return;
     const sequence = ++loadSequence.current;
     setLoading(true);
     setError("");
     const params: Record<string, string | number> = {
-      browse: 1, search: debouncedSearch,
+      browse: 1, include_duplicates: 0, search: debouncedSearch, seen_only: seenOnly ? "1" : "0",
+      queue_sections: "1",
+      sections: sectionNames.filter((section) => !({ Unmapped: unmappedCollapsed, Proposed: proposedCollapsed, Approved: approvedCollapsed })[section]).join(','),
     };
     if (activeVocabulary !== null) params.source = activeVocabulary;
+    if (provenanceFilter) params.provenance = provenanceFilter;
+    if (organizationFilter) params.organization = organizationFilter;
+    if (rollup) params.rollup = 1;
     sectionNames.forEach((section, index) => {
       params[`page_${index}`] = pages[section] || 1;
       const sort = sectionSorts[section];
       params[`order_${index}`] = sort ? `${sort.descending ? "-" : ""}${sort.column}` : "-occurrence_count";
     });
-    try {
-      const requests = await Promise.allSettled([
-        api.get<BrowseResponse | CodeMappingRow[]>("/v1/code-mappings/", { params }).then(({ data }) => {
-          if (sequence !== loadSequence.current) return;
-          setBrowse(Array.isArray(data) ? null : data);
-          setRows(Array.isArray(data) ? data : data.results);
-        }),
-        referenceCache.current ? Promise.resolve() : api.get<Reference>("/v1/code-mappings/reference/").then(({ data }) => {
-          if (sequence !== loadSequence.current) return;
+    // Only the browse request controls table loading. Ancillary metadata and
+    // counters must not hold the page open or turn usable rows into an error.
+    const mappingsRequest = api.get<BrowseResponse | CodeMappingRow[]>("/v1/code-mappings/", { params });
+    if (!referenceCache.current && !referenceRequest.current) {
+      referenceRequest.current = api.get<Reference>("/v1/code-mappings/reference/").then(({ data }) => {
           referenceCache.current = { ...emptyReference, ...(data || {}) };
           setReference(referenceCache.current);
+          setReferenceReady(true);
+          setReferenceError("");
           setSuggestionLimit((current) => current === "" ? current : Math.min(current, data?.suggest_max_per_run || 100));
-        }),
-        api.get<AccuracyResponse>("/v1/code-mappings/accuracy/").then(({ data }) => {
-          // Review counters can arrive before the slower table refresh.
-          if (sequence === loadSequence.current) setAccuracy(data);
-        }),
-      ]);
-      if (requests.some((request) => request.status === "rejected")) throw new Error("Refresh failed");
+      }).catch(() => {
+        setReferenceError("Could not load mapping options. Refresh to retry.");
+      }).finally(() => { referenceRequest.current = null; });
+    }
+    void api.get<AccuracyResponse>("/v1/code-mappings/accuracy/").then(({ data }) => {
+      if (sequence === loadSequence.current) setAccuracy(data);
+    }).catch(() => {
+      if (sequence === loadSequence.current) setAccuracy(null);
+    });
+    try {
+      const { data } = await mappingsRequest;
+      if (sequence !== loadSequence.current) return;
+      setBrowse(Array.isArray(data) ? null : data);
+      setRows(Array.isArray(data) ? data : data.results);
     } catch {
       if (sequence === loadSequence.current) setError("Failed to load code mappings.");
     } finally {
       if (sequence === loadSequence.current) setLoading(false);
     }
-  }, [activeVocabulary, debouncedSearch, pages, sectionSorts]);
+  }, [activeVocabulary, debouncedSearch, pages, sectionSorts, provenanceFilter, organizationFilter, rollup, seenOnly, direction,
+    unmappedCollapsed, proposedCollapsed, approvedCollapsed]);
 
   const refreshCurrent = useRef(fetchAll);
-  useEffect(() => { refreshCurrent.current = fetchAll; }, [fetchAll]);
+  useEffect(() => { refreshCurrent.current = async () => {
+    setDuplicateRevision((current) => current + 1);
+    await fetchAll();
+  }; }, [fetchAll]);
+
+  const duplicateSource = browse?.duplicates_included === false ? browse.selected_source : null;
+  useEffect(() => {
+    if (duplicateSource === null || direction === 'reverse') return;
+    let active = true;
+    (async () => {
+      setCheckingDuplicates(true);
+      setDuplicateError("");
+      try {
+        const { data } = await api.get<{ duplicate_summaries: DuplicateSummary[] }>("/v1/code-mappings/", {
+          params: { duplicates_only: 1, source: duplicateSource },
+        });
+        if (!Array.isArray(data.duplicate_summaries)) throw new Error("Duplicate summaries unavailable");
+        if (active) setAsyncDuplicates({ source: duplicateSource, rows: data.duplicate_summaries });
+      } catch {
+        if (active) setDuplicateError("Could not check duplicate source codes. Refresh to retry.");
+      } finally {
+        if (active) setCheckingDuplicates(false);
+      }
+    })();
+    return () => { active = false; };
+  }, [duplicateSource, duplicateRevision, direction]);
 
   useEffect(() => {
     (async () => { await fetchAll(); })();
@@ -729,7 +506,8 @@ export default function CodeMappingPage() {
     sourceVocabTabs.forEach((v) => {
       counts[v.vocabulary_id] = { proposed: 0, approved: 0, athena: 0 };
     });
-    rows.forEach((row) => {
+    const countedRows = seenOnly ? rows.filter((row) => row.occurrence_count > 0) : rows;
+    countedRows.forEach((row) => {
       const key = tabForRow(row);
       if (!counts[key]) counts[key] = { proposed: 0, approved: 0, athena: 0 };
       if (row.mapping_origin === "athena") counts[key].athena += 1;
@@ -759,12 +537,12 @@ export default function CodeMappingPage() {
       vocabulary_id: OVERALL_TAB,
       label: "Overall",
       is_standard: false,
-      proposed: counts ? rows.filter((r) => r.status === "proposed").length : 0,
-      approved: rows.filter((r) => r.status === "approved").length,
-      athena: rows.filter((r) => r.mapping_origin === "athena").length,
+      proposed: countedRows.filter((r) => r.status === "proposed").length,
+      approved: countedRows.filter((r) => r.status === "approved").length,
+      athena: countedRows.filter((r) => r.mapping_origin === "athena").length,
     });
     return result;
-  }, [rows, reference, browse]);
+  }, [rows, reference, browse, seenOnly]);
 
   // Land on work, not on the alphabetically-first tab.
   const defaultVocabulary = useMemo(() => {
@@ -776,6 +554,29 @@ export default function CodeMappingPage() {
   }, [vocabularyTabs]);
 
   const selectedVocabulary = activeVocabulary ?? browse?.selected_source ?? defaultVocabulary;
+
+  // Restore the last successful suggest run's candidates when the page loads
+  // or the vocabulary tab changes, so navigating away and back doesn't lose them.
+  useEffect(() => {
+    if (!selectedVocabulary) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data } = await api.get<{ run_id: string | null; state?: string; activity?: CandidateActivity[] }>(
+          "/v1/code-mappings/suggest-runs/latest/",
+          { params: { source: selectedVocabulary, include_activity: "1" } },
+        );
+        if (cancelled || !data.run_id) return;
+        if (data.state === "success" && data.activity?.length) {
+          setAccumulatedActivity(data.activity);
+        }
+      } catch {
+        // Best-effort restore — a failure here just means the panel starts empty.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [selectedVocabulary]);
+
   const overallTab = selectedVocabulary === OVERALL_TAB;
   // Keep the latest reviewed model visible while a newer model awaits reviews.
   const scopedAccuracy = overallTab
@@ -793,30 +594,47 @@ export default function CodeMappingPage() {
   // Audit the entire tab, not just expanded/search-visible rows. A hidden
   // rejected mapping still owns its source code and can block re-creation.
   const duplicateCodes = useMemo(() => {
-    const groups = new Map<string, { code: string; vocabulary: string; rows: CodeMappingRow[] }>();
-    for (const row of browse?.duplicates ?? rows) {
-      if (!overallTab && tabForRow(row) !== selectedVocabulary) continue;
+    const groups = new Map<string, { code: string; vocabulary: string; rows: (CodeMappingRow | DuplicateSummary)[] }>();
+    const duplicateRows = browse?.duplicates_included === false
+      ? (asyncDuplicates?.source === browse.selected_source ? asyncDuplicates.rows : [])
+      : browse?.duplicates ?? rows;
+    for (const row of duplicateRows) {
+      // Server duplicates already cover the exact tab, including hospital OIDs.
+      if (!browse && !overallTab && tabForRow(row) !== selectedVocabulary) continue;
       const vocabulary = duplicateScopeForRow(row);
       const code = row.source_code.trim().toUpperCase();
       if (!code) continue;
       // Keyed on the vocabulary, not the tab: LOINC:123 and ICD10:123 are not
       // duplicates on Overall, nor Apple:123 and Garmin:123 on Wearables.
-      const key = JSON.stringify([vocabulary, code]);
+      const key = JSON.stringify([row.organization_id ?? null, vocabulary, code]);
       const group = groups.get(key) ?? { code, vocabulary, rows: [] };
       group.rows.push(row);
       groups.set(key, group);
     }
     return [...groups.values()].filter((group) => group.rows.length > 1)
       .sort((a, b) => a.vocabulary.localeCompare(b.vocabulary) || a.code.localeCompare(b.code));
-  }, [rows, overallTab, selectedVocabulary, browse]);
+  }, [rows, overallTab, selectedVocabulary, browse, asyncDuplicates]);
 
-  const revealDuplicate = (row: CodeMappingRow) => {
+  const revealDuplicate = async (row: CodeMappingRow | DuplicateSummary) => {
+    if ('summary' in row) {
+      const sequence = ++duplicateLoadSequence.current;
+      setLoadingDuplicate(row.mapping_id);
+      try {
+        const { data } = await api.get<CodeMappingRow>(`/v1/code-mappings/${row.mapping_id}/`);
+        if (sequence === duplicateLoadSequence.current) openEditDialog(data);
+      } catch {
+        if (sequence === duplicateLoadSequence.current) setError("Could not load this mapping. Try again.");
+      } finally {
+        if (sequence === duplicateLoadSequence.current) setLoadingDuplicate(null);
+      }
+      return;
+    }
     if (browse) { openEditDialog(row); return; }
     setSearchQuery("");
-    if (row.mapping_origin === "athena") setAthenaCollapsed(false);
-    else if (row.status === "approved") setMappedCollapsed(false);
-    else if (row.status === "rejected") setRejectedCollapsed(false);
-    else setUnmappedCollapsed(false);
+    if (!row.occurrence_count) setSeenOnly(false);
+    if (!row.destination_concept_id) setUnmappedCollapsed(false);
+    else if (row.status === "approved") setApprovedCollapsed(false);
+    else setProposedCollapsed(false);
     // An object also retriggers navigation when the same link is clicked twice.
     setNavigationTarget({ id: mappingRowId(row) });
   };
@@ -832,6 +650,7 @@ export default function CodeMappingPage() {
     if (browse) return rows;
     const q = searchQuery.trim().toLowerCase();
     return rows.filter((row) => {
+      if (seenOnly && !(row.occurrence_count > 0)) return false;
       // A query is an intentional escape hatch from the current tab: a
       // curator should not have to try every code system to find an incoming
       // code. With no query, retain the focused, one-vocabulary-at-a-time
@@ -842,12 +661,20 @@ export default function CodeMappingPage() {
         row.source_code,
         row.source_vocabulary_id,
         row.source_code_description,
+        row.organization_name,
+        row.organization_slug,
+        row.source_system_context?.label,
+        ...(row.source_system_context?.names || []),
         row.destination_concept_name,
         row.destination_concept_code,
         String(row.destination_concept_id),
       ].some((value) => (value || "").toLowerCase().includes(q));
     });
-  }, [rows, searchQuery, selectedVocabulary, browse]);
+  }, [rows, searchQuery, selectedVocabulary, browse, seenOnly]);
+
+  const allCount = browse?.total ?? (browse
+    ? sectionNames.reduce((total, section) => total + (browse.pages[section]?.total ?? 0), 0)
+    : visibleRows.length);
 
   // Rows can arrive from other tabs: in browse mode the server searches every
   // coding system whenever a query is set, and the client filter above does
@@ -864,378 +691,162 @@ export default function CodeMappingPage() {
     () => (overallTab ? 0 : visibleRows.filter((row) => tabForRow(row) !== selectedVocabulary).length),
     [overallTab, visibleRows, selectedVocabulary],
   );
-  const showSystemColumn = foreignHits > 0;
   // The debounced query is what the server has answered, so the message
   // describes the rows on screen rather than re-announcing every keystroke.
   const crossTabSearch = !overallTab && debouncedSearch.trim() !== "";
+  // Server-supplied, and taken from the whole tab rather than the filtered
+  // rows, so picking one option does not remove the rest.
+  const provenanceOptions = browse?.provenances ?? [];
+  const organizationOptions = browse?.organizations ?? [];
+  const provenanceValue = (origin: string) => origin || BLANK_PROVENANCE;
 
-  // Four-section layout: UNMAPPED / MAPPED / REJECTED / ATHENA MAPPED.
-  const athenaRows = useMemo(
-    () => visibleRows.filter((r) => r.mapping_origin === "athena").sort(browse ? () => 0 : byOccurrence),
-    [visibleRows, browse],
-  );
-  const unmappedRows = useMemo(
-    () => visibleRows.filter((r) => r.mapping_origin !== "athena" && r.status !== "approved" && r.status !== "rejected").sort(browse ? () => 0 : byOccurrence),
-    [visibleRows, browse],
-  );
-  const rejectedRows = useMemo(
-    () => visibleRows.filter((r) => r.mapping_origin !== "athena" && r.status === "rejected").sort(browse ? () => 0 : byOccurrence),
-    [visibleRows, browse],
-  );
-  const mappedRows = useMemo(
-    () => visibleRows.filter((r) => r.mapping_origin !== "athena" && r.status === "approved").sort(browse ? () => 0 : byOccurrence),
-    [visibleRows, browse],
-  );
-
-  /** Source code systems offered for the chosen domain, blank option first. */
-  const sourceCodeSystems = useMemo(() => {
-    const offered = reference.source_code_systems_by_domain[form.domain_id] || [];
-    const withBlank = offered.some((s) => s.vocabulary_id === "")
-      ? offered
-      : [{ vocabulary_id: "", label: "None — uncoded / free text" }, ...offered];
-    // A stored system the domain's catalogue does not list still has to render
-    // as itself. Without this the select falls back to its first option and an
-    // ICD-10-CM-coded row minted into HK-Labs displays as "uncoded" — the same
-    // "the source column shows the wrong thing" defect this page exists to fix.
-    const current = form.source_vocabulary_id;
-    if (current && !withBlank.some((s) => s.vocabulary_id === current)) {
-      return [...withBlank, { vocabulary_id: current, label: `${current} — not typical for this domain` }];
+  const loadGroup = useCallback(async (entry: GroupEntry, section: MappingSection) => {
+    const cacheKey = expansionKey(entry, section);
+    setExpandedGroups((current) => ({ ...current, [cacheKey]: null }));
+    // A tab switch clears the cache; without this, a fetch already in flight
+    // resolves afterwards and re-inserts the previous tab's rows.
+    const sequence = loadSequence.current;
+    try {
+      const { data } = await api.get<{ results: CodeMappingRow[] }>("/v1/code-mappings/group/", {
+        params: {
+          label: groupKey(entry), section, queue_sections: "1",
+          seen_only: seenOnly ? "1" : "0",
+          // The server picks the default tab until one is clicked, so sending
+          // activeVocabulary would fetch across every vocabulary on first load.
+          ...(selectedVocabulary !== null ? { source: selectedVocabulary } : {}),
+          ...(debouncedSearch ? { search: debouncedSearch } : {}),
+          ...(provenanceFilter ? { provenance: provenanceFilter } : {}),
+          ...(organizationFilter ? { organization: organizationFilter } : {}),
+        },
+      });
+      if (sequence !== loadSequence.current) return;
+      setExpandedGroups((current) => ({ ...current, [cacheKey]: data.results || [] }));
+    } catch {
+      if (sequence !== loadSequence.current) return;
+      // Leave it collapsed rather than showing an empty group, which would
+      // read as "this label has no codes".
+      setExpandedGroups(({ [cacheKey]: _failed, ...rest }) => rest);
+      setError("Could not load the codes in that group.");
     }
-    return withBlank;
-  }, [reference, form.domain_id, form.source_vocabulary_id]);
+  }, [selectedVocabulary, debouncedSearch, provenanceFilter, organizationFilter, seenOnly]);
+
+  const toggleGroup = useCallback((entry: GroupEntry, section: MappingSection) => {
+    const cacheKey = expansionKey(entry, section);
+    if (cacheKey in expandedGroups) {
+      setExpandedGroups(({ [cacheKey]: _removed, ...rest }) => rest);
+      return;
+    }
+    void loadGroup(entry, section);
+  }, [expandedGroups, loadGroup]);
+
+  const runGroupJob = async (entry: GroupEntry, action: "suggest" | "approve" | "reject", section: MappingSection) => {
+    const key = expansionKey(entry, section);
+    if (action !== "suggest" && !window.confirm(
+      `${action === "approve" ? "Approve" : "Reject"} ${entry.proposed.toLocaleString()} still-proposed code(s) in this label group?`,
+    )) return;
+    setGroupRunning(key);
+    setError("");
+    setBanner(null);
+    try {
+      const payload = {
+        label: groupKey(entry), source: selectedVocabulary,
+        section, queue_sections: "1",
+        seen_only: seenOnly ? "1" : "0",
+        ...(provenanceFilter ? { provenance: provenanceFilter } : {}),
+        ...(organizationFilter ? { organization: organizationFilter } : {}),
+        ...(action === "suggest" ? {
+          strategies: Object.entries(strategies).filter(([, enabled]) => enabled).map(([name]) => name),
+          ranking_model: rankingModel,
+        } : {
+          action,
+          ...(action === "approve" ? { destination_concept_id: entry.destination_concept_id } : {}),
+        }),
+      };
+      const endpoint = action === "suggest"
+        ? "/v1/code-mappings/group/suggest/"
+        : "/v1/code-mappings/group/action/";
+      const { data: started } = await api.post<SuggestRunProgress>(endpoint, payload);
+      suggestRunRef.current = started.run_id;
+      setSuggestRun(started);
+      const finished = await pollSuggestRun(started);
+      if (finished.state === "failure") throw new Error(finished.error || "Group job failed.");
+      await refreshCurrent.current();
+      setExpandedGroups({});
+      const proposedRejection = finished.activity?.some((event) => event.action === "reject");
+      setBanner(
+        action === "suggest"
+          ? proposedRejection
+            ? `Proposed rejection for ${finished.done} eligible code(s); review the individual mappings.`
+            : finished.destinations
+              ? `Suggested once and applied the destination to ${finished.destinations} eligible code(s).`
+              : "Group Suggest found no safe destination; no mapping was changed."
+          : `${action === "approve" ? "Approved" : "Rejected"} ${finished.done} eligible code(s).`,
+      );
+    } catch (err) {
+      const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
+      setError(detail || (err instanceof Error ? err.message : "Could not update the label group."));
+    } finally {
+      setGroupRunning(null);
+    }
+  };
+  // A filter can outlive the values that produced it -- the rows carrying it
+  // get approved away, or the server's default tab moves before any tab has
+  // been clicked. Keep it listed and keep the control mounted, or there is no
+  // way left to clear it and the queue reads as empty for no visible reason.
+  const provenanceOrphaned = provenanceFilter !== ""
+    && !provenanceOptions.some((option) => provenanceValue(option.origin_system) === provenanceFilter);
+  const showProvenanceFilter = provenanceOptions.length > 1 || provenanceFilter !== "";
+
+  const unmappedRows = useMemo(() => visibleRows.filter((r) => sectionForRow(r) === "Unmapped").sort(browse ? () => 0 : byOccurrence), [visibleRows, browse]);
+  const proposedRows = useMemo(() => visibleRows.filter((r) => sectionForRow(r) === "Proposed").sort(browse ? () => 0 : byOccurrence), [visibleRows, browse]);
+  const approvedRows = useMemo(() => visibleRows.filter((r) => sectionForRow(r) === "Approved").sort(browse ? () => 0 : byOccurrence), [visibleRows, browse]);
 
   const openNewDialog = () => {
+    duplicateLoadSequence.current += 1;
+    setLoadingDuplicate(null);
     setInlineMappingId(null);
-    setSuggestionMessage("");
-    dialogRequest.current += 1;
-    setError("");
-    setSearchingConcepts(false);
-    setCheckingUmls(false);
     setSelectedRow(null);
-    setForm({ ...emptyForm });
-    setSearchVocabulary("");
-    setSearchScope(DEFAULT_SEARCH_SCOPE);
-    setConceptSearchQuery("");
-    setConceptResults([]);
-    setUmlsCheckMessage("");
-    setRepointResult(null);
     setDialogMode("new");
   };
 
-  const openEditDialog = async (row: CodeMappingRow) => {
+  const openEditDialog = (row: CodeMappingRow) => {
+    duplicateLoadSequence.current += 1;
+    setLoadingDuplicate(null);
     setInlineMappingId(null);
-    setSuggestionMessage("");
-    dialogRequest.current += 1;
-    setError("");
-    setSearchingConcepts(false);
-    setCheckingUmls(false);
-    // Acquire edit lock before opening the dialog.
-    if (row.mapping_id) {
-      try {
-        await api.post(`/v1/code-mappings/${row.mapping_id}/lock/`);
-      } catch (err) {
-        const resp = err && typeof err === "object" && "response" in err
-          ? (err as { response?: { status?: number; data?: { detail?: string; locked_by?: string } } }).response
-          : undefined;
-        if (resp?.status === 423) {
-          setError(`Locked by ${resp.data?.locked_by || "another user"}.`);
-          return;
-        }
-        // Non-lock errors — still open the dialog, editing may work.
-      }
-    }
     setSelectedRow(row);
-    setForm(buildEditForm(row, reference));
-    // Open scoped to the row's own destination vocabulary when the dialog can
-    // offer it; otherwise search everything rather than show a scope the
-    // dropdown has no entry for (an ICD10CM destination, say).
-    setSearchVocabulary(
-      reference.destination_vocabularies.some((v) => v.vocabulary_id === row.destination_vocabulary_id)
-        ? row.destination_vocabulary_id || ""
-        : "",
-    );
-    setSearchScope(DEFAULT_SEARCH_SCOPE);
-    setConceptSearchQuery("");
-    setConceptResults([]);
-    setUmlsCheckMessage("");
-    setRepointResult(null);
     setDialogMode("edit");
   };
 
   const closeDialog = () => {
-    setSuggestionMessage("");
-    dialogRequest.current += 1;
-    setError("");
-    setSearchingConcepts(false);
-    setCheckingUmls(false);
-    setMintOpen(false);
-    // Release edit lock when closing.
-    if (selectedRow?.mapping_id) {
-      api.delete(`/v1/code-mappings/${selectedRow.mapping_id}/lock/`).catch(() => {});
-    }
     setDialogMode(null);
     setSelectedRow(null);
-    setSaving(false);
-    setRepointing(null);
-    setRepointResult(null);
-    setUmlsCheckMessage("");
   };
-
-  const setField = (field: keyof MappingForm, value: string) => {
-    if (field.startsWith("source_") || field.startsWith("destination_")) setSuggestionMessage("");
-    if (field.startsWith("destination_")) dialogChoice.current = dialogRequest.current;
-    if (["source_code", "source_vocabulary_id", "source_code_description", "omop_table"].includes(field)) {
-      dialogRequest.current += 1;
-      setSearchingConcepts(false);
-      setCheckingUmls(false);
-      setError("");
-    }
-    setForm((prev) => ({ ...prev, [field]: value }));
-  };
-
-  /**
-   * Domain is the first choice and it settles two others: which source code
-   * systems are plausible, and which OMOP table the fact lands in.
-   */
-  const setDomain = (domainId: string) => {
-    setSuggestionMessage("");
-    dialogRequest.current += 1;
-    setSearchingConcepts(false);
-    setCheckingUmls(false);
-    setError("");
-    setForm((prev) => {
-      const offered = reference.source_code_systems_by_domain[domainId] || [];
-      const stillOffered =
-        !prev.source_vocabulary_id
-        || offered.some((s) => s.vocabulary_id === prev.source_vocabulary_id);
-      return {
-        ...prev,
-        domain_id: domainId,
-        source_vocabulary_id: stillOffered ? prev.source_vocabulary_id : "",
-        omop_table: omopTableFor(reference, domainId),
-      };
-    });
-  };
-
-  /** Apply a concept to the form: id, name, code, vocabulary, class, standard flag. */
-  const applyConcept = (concept: ConceptResult, adoptDomain = false) => {
-    dialogChoice.current = dialogRequest.current;
-    setSuggestionMessage("");
-    setForm((prev) => {
-      // A concept only supplies the domain when the curator has not chosen one;
-      // Domain is theirs, and the table follows from it, not from the concept.
-      const domainId = (adoptDomain ? concept.domain_id : prev.domain_id) || concept.domain_id || "";
-      return {
-        ...prev,
-        domain_id: domainId,
-        destination_concept_id: String(concept.concept_id),
-        destination_concept_name: concept.concept_name,
-        destination_concept_code: concept.concept_code || "",
-        destination_vocabulary_id: concept.vocabulary_id,
-        destination_concept_class_id: concept.concept_class_id || "",
-        standard_concept: concept.standard_concept || "",
-        destination_invalid_reason: concept.invalid_reason || "",
-        omop_table: (adoptDomain ? "" : prev.omop_table) || omopTableFor(reference, domainId),
-        measurement_type: concept.measurement_type || "",
-        suggested_unit: concept.suggested_unit || "",
-        example_units: concept.example_units || [],
-      };
-    });
-  };
-
-  /**
-   * Resolve a hand-typed concept id. Everything below the id - name, code,
-   * vocabulary, class, standard flag - follows from the concept, so it has to
-   * be fetched whenever the id changes by hand.
-   */
-  const resolveConceptId = async (rawId: string) => {
-    const id = rawId.trim();
-    if (!id) return;
-    try {
-      const resp = await api.get<ConceptResult>(`/v1/concepts/${id}/`);
-      applyConcept(resp.data);
-      setError("");
-    } catch {
-      setError(`No OMOP concept with id ${id}.`);
-      setForm((prev) => ({
-        ...prev,
-        destination_concept_code: "",
-        destination_concept_class_id: "",
-        standard_concept: "",
-        destination_invalid_reason: "",
-      }));
-    }
-  };
-
-  const selectReplacement = async () => {
-    if (!form.destination_concept_id) return;
-    try {
-      const { data } = await api.get(`/v1/concepts/${form.destination_concept_id}/replacement/`);
-      if (!data.replaced) {
-        setBanner("No active replacement is recorded; search for a current destination concept.");
-        return;
-      }
-      applyConcept(data.resolved_concept);
-      setBanner(`Replaced with active concept ${data.resolved_concept.concept_id}.`);
-    } catch {
-      setError("Could not look up a replacement concept.");
-    }
-  };
-
-  useEffect(() => () => {
-    if (conceptSearchTimer.current !== null) window.clearTimeout(conceptSearchTimer.current);
-    conceptSearchAbort.current?.abort();
-  }, []);
-
-  const searchConcepts = (query: string, vocabulary = searchVocabulary, scope = searchScope) => {
-    // Keep the raw value in state and trim only for the request. Trimming
-    // before setState meant typing a space produced the same string back, React
-    // re-rendered without it, and a multi-word search could never be typed.
-    const request = ++dialogRequest.current;
-    setConceptSearchQuery(query);
-    setCheckingUmls(false);
-    // At most one search is ever outstanding (#1466). Firing one per keystroke
-    // queued a second-long query per letter behind each other on the server —
-    // discarding the stale responses here did not stop the server running them.
-    if (conceptSearchTimer.current !== null) window.clearTimeout(conceptSearchTimer.current);
-    conceptSearchTimer.current = null;
-    conceptSearchAbort.current?.abort();
-    conceptSearchAbort.current = null;
-    const q = query.trim();
-    if (q.length < 3) {
-      setSearchingConcepts(false);
-      setConceptResults([]);
-      return;
-    }
-    setSearchingConcepts(true);
-    conceptSearchTimer.current = window.setTimeout(async () => {
-      conceptSearchTimer.current = null;
-      // The dialog moved on (closed, suggested, picked a concept) while waiting.
-      if (request !== dialogRequest.current) return;
-      const controller = new AbortController();
-      conceptSearchAbort.current = controller;
-      try {
-        const matches = await searchDestinationConcepts(q, vocabulary, controller.signal, scope);
-        if (request === dialogRequest.current) setConceptResults(matches);
-      } catch {
-        if (request === dialogRequest.current) setConceptResults([]);
-      } finally {
-        if (request === dialogRequest.current) setSearchingConcepts(false);
-      }
-    }, CONCEPT_SEARCH_DEBOUNCE_MS);
-  };
-
-  const suggestCurrentCode = async () => {
-    setSuggestionMessage("");
-    const request = ++dialogRequest.current;
-    dialogChoice.current = null;
-    setIndividualSuggestion({ request, activity: [], running: true });
-    setCheckingUmls(false);
-    setError("");
-    setSearchingConcepts(true);
-    try {
-      const enabled = Object.entries(strategies).filter(([, on]) => on).map(([name]) => name);
-      const { data: started } = await api.post<SuggestRunProgress>("/v1/code-mappings/suggest-one/", {
-        source_code: form.source_code, source_vocabulary_id: form.source_vocabulary_id,
-        source_code_description: form.source_code_description, omop_table: form.omop_table,
-        strategies: enabled, ranking_model: rankingModel, async: true,
-      });
-      let current = started;
-      const deadline = Date.now() + SUGGEST_POLL_TIMEOUT_MS;
-      let failures = 0;
-      while (request === dialogRequest.current) {
-        setIndividualSuggestion({ request, activity: current.activity ?? [], running: current.state === "queued" || current.state === "running" });
-        if (current.state !== "queued" && current.state !== "running") break;
-        if (Date.now() > deadline) throw new Error("Suggestion timed out");
-        await new Promise(resolve => setTimeout(resolve, SUGGEST_POLL_INTERVAL_MS));
-        if (request !== dialogRequest.current) return;
-        try {
-          const { data } = await api.get<SuggestRunProgress>(`/v1/code-mappings/suggest-runs/${started.run_id}/`, {
-            params: { include_activity: "1" },
-          });
-          current = data;
-          failures = 0;
-        } catch (error) {
-          if (++failures > SUGGEST_POLL_MAX_FAILURES) throw error;
-        }
-      }
-      if (request !== dialogRequest.current) return;
-      if (current.state === "failure") {
-        setError(current.error || "Failed to suggest a destination concept.");
-        return;
-      }
-      const result = current.activity?.filter(event => event.stage === "result").at(-1);
-      if (result?.suggested && dialogChoice.current !== request) {
-        applyConcept(result.suggested as ConceptResult);
-        setSuggestionMessage("Winner filled in. You can choose another candidate before saving.");
-      } else if (!result?.suggested && dialogChoice.current !== request) {
-        setSuggestionMessage("No winner selected. You can choose a candidate or search below.");
-      }
-    } catch {
-      if (request === dialogRequest.current) setError("Failed to suggest a destination concept. Any candidates already shown are still selectable.");
-    } finally {
-      if (request === dialogRequest.current) {
-        setSearchingConcepts(false);
-        setIndividualSuggestion(current => current?.request === request ? { ...current, running: false } : current);
-      }
-    }
-  };
-
-  const checkUmls = async () => {
-    const request = ++dialogRequest.current;
-    setSearchingConcepts(false);
-    setError("");
-    setCheckingUmls(true);
-    setUmlsCheckMessage("");
-    try {
-      const { data } = await api.post("/v1/code-mappings/check-umls/", {
-        source_code: form.source_code,
-        source_vocabulary_id: form.source_vocabulary_id,
-      });
-      if (request !== dialogRequest.current) return;
-      if (!data.found) {
-        setUmlsCheckMessage("Missing from UMLS");
-        return;
-      }
-      setForm((prev) => ({
-        ...prev,
-        source_code_description: data.source_code_description || prev.source_code_description,
-        source_concept_id: data.source_concept_id ? String(data.source_concept_id) : "",
-      }));
-      setUmlsCheckMessage("Found in UMLS");
-    } catch {
-      if (request === dialogRequest.current) setError("Failed to check UMLS.");
-    } finally {
-      if (request === dialogRequest.current) setCheckingUmls(false);
-    }
-  };
-
-  // Keyed on the same condition submitForm branches on. dialogMode can say
-  // "edit" for a row with no mapping_id (toggleApproval opens one that way),
-  // and the two diverging let a curator pick Approved on what the server then
-  // treats as a create and silently downgrades.
-  const isNewMapping = !selectedRow?.mapping_id;
-
-  const willRepoint =
-    dialogMode === "edit"
-    && form.status === "approved"
-    && selectedRow !== null
-    && String(selectedRow.destination_concept_id) !== form.destination_concept_id;
 
   const applySavedMapping = (saved: CodeMappingRow) => {
     if (!saved?.mapping_id || !saved.status) return;
     // Reflect a successful server write immediately, never a speculative
     // approval. Background reload reconciles ordering, totals and other users.
     setRows((current) => current.map((row) => row.mapping_id === saved.mapping_id ? saved : row));
+    // Under rollup the queue rows live in the expanded groups, not in `rows`
+    // or `browse.results` -- both of which the server leaves empty. Without
+    // this, approving an expanded member leaves it showing its old status and
+    // the curator's own write looks like it did nothing.
+    setExpandedGroups((current) => {
+      let touched = false;
+      const next = Object.fromEntries(Object.entries(current).map(([key, members]) => {
+        if (!members?.some((row) => row.mapping_id === saved.mapping_id)) return [key, members];
+        touched = true;
+        return [key, members.map((row) => row.mapping_id === saved.mapping_id ? saved : row)];
+      }));
+      return touched ? next : current;
+    });
     setBrowse((current) => {
       const previous = current?.results.find((row) => row.mapping_id === saved.mapping_id);
-      if (!current || !previous || previous.status === saved.status
-          || previous.source_vocabulary_id !== saved.source_vocabulary_id
-          || previous.mapping_origin === "athena") return current;
+      if (!current || !previous || previous.source_vocabulary_id !== saved.source_vocabulary_id) return current;
       const pages = { ...current.pages };
       for (const [row, delta] of [[previous, -1], [saved, 1]] as const) {
         const section = sectionForRow(row);
-        pages[section] = { ...pages[section], total: Math.max(0, pages[section].total + delta) };
+        pages[section] = { ...(pages[section] ?? { page: 1, page_size: 100 }), total: Math.max(0, (pages[section]?.total || 0) + delta) };
       }
       return {
         ...current, pages,
@@ -1248,52 +859,6 @@ export default function CodeMappingPage() {
         } : tab),
       };
     });
-  };
-
-  const submitForm = async (event: React.FormEvent) => {
-    event.preventDefault();
-    setSaving(true);
-    setError("");
-    if (willRepoint && selectedRow) {
-      setRepointing({
-        from: String(selectedRow.destination_concept_id),
-        to: form.destination_concept_id,
-      });
-    }
-    try {
-      const payload = {
-        ...form,
-        destination_concept_id: Number(form.destination_concept_id),
-        target_concept_id: Number(form.destination_concept_id),
-      };
-      const resp = selectedRow?.mapping_id
-        ? await api.patch(`/v1/code-mappings/${selectedRow.mapping_id}/`, payload)
-        : await api.post("/v1/code-mappings/", payload);
-      const repoint: RepointResult | null = resp.data?.repoint ?? null;
-      applySavedMapping(resp.data);
-      void refreshCurrent.current();
-      // Hold the dialog open on a re-point so the curator sees what moved;
-      // a silent close would leave them guessing whether it worked.
-      if (repoint && repoint.rows_updated) {
-        setRepointResult(repoint);
-        setRepointing(null);
-        setSaving(false);
-        return;
-      }
-      closeDialog();
-    } catch (err) {
-      const detail =
-        err && typeof err === "object" && "response" in err
-          ? (err as { response?: { data?: { detail?: string } | Record<string, string[]> } }).response?.data
-          : undefined;
-      const message =
-        detail && typeof detail === "object" && !Array.isArray(detail)
-          ? Object.entries(detail).map(([field, value]) => `${field === "detail" ? "" : `${field}: `}${Array.isArray(value) ? value.join(", ") : value}`).join(" ")
-          : "";
-      setError(message || "Failed to save code mapping.");
-      setRepointing(null);
-      setSaving(false);
-    }
   };
 
   /**
@@ -1327,6 +892,7 @@ export default function CodeMappingPage() {
     setBanner(null);
     setSuggestFlash(false);
     setSuggestRun(null);
+    setSuggestGeneration(g => g + 1);
     try {
       const activeStrategies = Object.entries(strategies)
         .filter(([, v]) => v)
@@ -1348,11 +914,19 @@ export default function CodeMappingPage() {
       setSuggestRun(started);
       const finished = await pollSuggestRun(started);
       if (suggestRunRef.current !== started.run_id) return;
-      setSuggestRun(finished);
+      // Clear the finished run's activity from suggestRun so events are not
+      // duplicated when merged with accumulatedActivity in the render prop.
+      setSuggestRun({ ...finished, activity: [] });
 
       if (finished.state === "failure") {
         setError(finished.error || "The suggest run failed.");
         return;
+      }
+
+      // Accumulate only successful runs so curators don't see candidates from
+      // an incomplete run mixed with good results.
+      if (finished.activity?.length) {
+        setAccumulatedActivity(prev => [...prev, ...finished.activity!]);
       }
       await refreshCurrent.current();
       announceSuggestRun(finished);
@@ -1452,7 +1026,7 @@ export default function CodeMappingPage() {
     const approving = row.status !== "approved";
     if (approving) setBanner(null);
     try {
-      const resp = await api.patch(`/v1/code-mappings/${row.mapping_id}/`, {
+      const payload = {
         domain_id: row.domain_id || row.destination_domain_id || "",
         source_vocabulary_id: row.source_vocabulary_id,
         source_code: row.source_code,
@@ -1462,179 +1036,249 @@ export default function CodeMappingPage() {
         omop_table: row.destination_omop_table,
         status: row.status === "approved" ? "proposed" : "approved",
         notes: row.notes,
-      });
+      };
+      const resp = await api.patch(`/v1/code-mappings/${row.mapping_id}/`, payload);
       const repoint: RepointResult | null = resp.data?.repoint ?? null;
       applySavedMapping(resp.data);
       void refreshCurrent.current();
-      if (repoint && repoint.rows_updated) {
-        setBanner(
-          `${row.source_code}: updated ${repoint.rows_updated} row(s) across `
-          + `${repoint.persons_marked_stale} patient(s)`
-          + (repoint.rows_collapsed ? `, ${repoint.rows_collapsed} duplicate(s) collapsed` : "")
-          + ". Patient records queued for re-derivation.",
-        );
-      }
+      const message = repointBanner(row.source_code, repoint);
+      if (message) setBanner(message);
     } catch (err) {
       const detail = (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail;
       setError(detail || "Failed to update code mapping status.");
     }
   };
 
-  const deleteMapping = async (row: CodeMappingRow) => {
-    if (!row.mapping_id) return;
-    setError("");
-    try {
-      const response = await api.delete(`/v1/code-mappings/${row.mapping_id}/`);
-      closeDialog();
-      if (response.status === 200 && response.data?.mapping_id) {
-        // Backend cleared the destination instead of deleting; apply locally.
-        applySavedMapping(response.data as CodeMappingRow);
-      }
-      await refreshCurrent.current();
-    } catch {
-      setError("Failed to delete code mapping.");
-    }
+  /** Callback for EditMappingDialog onSaved. */
+  const handleDialogSaved = (saved: CodeMappingRow, repoint: RepointResult | null) => {
+    applySavedMapping(saved);
+    void refreshCurrent.current();
+    const message = repointBanner(saved.source_code, repoint);
+    if (message) setBanner(message);
   };
 
-  const renderTable = (sectionRows: CodeMappingRow[], emptyText: string, section: MappingSection, { hideStatus = false }: { hideStatus?: boolean } = {}) => {
-    const colCount = 7 + (showSystemColumn ? 1 : 0) + (hideStatus ? 0 : 2);
+  /** Callback for EditMappingDialog onDeleted — remove the row from local state. */
+  const handleDialogDeleted = (row: CodeMappingRow) => {
+    setRows((current) => current.filter((r) => r.mapping_id !== row.mapping_id));
+    setExpandedGroups((current) => {
+      let touched = false;
+      const next = Object.fromEntries(Object.entries(current).map(([key, members]) => {
+        if (!members?.some((r) => r.mapping_id === row.mapping_id)) return [key, members];
+        touched = true;
+        return [key, members.filter((r) => r.mapping_id !== row.mapping_id)];
+      }));
+      return touched ? next : current;
+    });
+    void refreshCurrent.current();
+  };
+
+  const renderTable = (sectionRows: CodeMappingRow[], emptyText: string, section: MappingSection) => {
+    const colCount = 7;
     const sort = sectionSorts[section];
+    // Present only when the server grouped this response; otherwise the flat
+    // queue renders exactly as before.
+    const groupEntries = browse?.rollup ? browse.groups[section] ?? [] : null;
     const pagination = browse?.pages[section];
-    const header = (label: string, column: SortColumn) => (
-      <th className="px-4 py-3 font-semibold" aria-sort={sort?.column === column ? (sort.descending ? "descending" : "ascending") : "none"}>
-        <button type="button" title={`Sort ${section} by ${label}`} className="inline-flex items-center gap-1 hover:underline focus:outline-2"
-          onClick={() => { setPages((previous) => ({ ...previous, [section]: 1 })); setSectionSorts((previous) => ({ ...previous, [section]: {
-            column, descending: previous[section]?.column === column ? !previous[section]?.descending : false,
-          } })); }}>
-          {label}<span aria-hidden="true">{sort?.column === column ? (sort.descending ? "↓" : "↑") : "↕"}</span>
-        </button>
+    const header = (label: string, column: SortColumn) => {
+      const canSortGroup = column === "occurrence_count" || column === "source_code_description";
+      const sortable = groupEntries === null || canSortGroup;
+      return (
+      <th className="px-4 py-3 font-semibold" aria-label={column === "occurrence_count" ? label : undefined}
+        aria-sort={!sortable || sort?.column !== column ? "none" : sort.descending ? "descending" : "ascending"}>
+        {column === "occurrence_count" && <label className="mb-1 flex items-center gap-1 whitespace-nowrap text-xs font-normal normal-case tracking-normal">
+          <input type="checkbox" checked={seenOnly}
+            aria-label={`${section}: only codes with Seen greater than zero`}
+            title="Filter all source tabs and sections to codes with Seen > 0"
+            onChange={(event) => { setPages({}); setExpandedGroups({}); setSeenOnly(event.target.checked); }} />
+          &gt; 0 only
+        </label>}
+        {sortable ? (
+          <button type="button" title={`Sort ${section} by ${label}`} className="inline-flex items-center gap-1 hover:underline focus:outline-2"
+            onClick={() => { setPages((previous) => ({ ...previous, [section]: 1 })); setSectionSorts((previous) => ({ ...previous, [section]: {
+              column, descending: previous[section]?.column === column ? !previous[section]?.descending : false,
+            } })); }}>
+            {label}<span aria-hidden="true">{sort?.column === column ? (sort.descending ? "↓" : "↑") : "↕"}</span>
+          </button>
+        ) : (
+          <span>{label}</span>
+        )}
       </th>
+      );
+    };
+    // Extracted so the rollup can render the same row under a group entry.
+    // A member row must behave exactly like a queue row -- same click to
+    // edit, same lock badge, same inline destination picker -- or expanding
+    // a group would quietly become a read-only view.
+    const renderRow = (row: CodeMappingRow) => (
+      <Fragment key={mappingRowId(row)}>
+          <tr
+            id={mappingRowId(row)}
+            role="button"
+            tabIndex={0}
+            onClick={() => openEditDialog(row)}
+            onKeyDown={(e) => {
+              if (e.target !== e.currentTarget) return;
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                openEditDialog(row);
+              }
+            }}
+            className={`scroll-mt-24 cursor-pointer hover:bg-slate-50 focus:outline-2 focus:outline-red-600 ${
+              navigationTarget?.id === mappingRowId(row) ? "bg-red-50" : ""
+            }`}
+          >
+            <td className="px-4 py-3">
+              {row.locked_by_username && <span title={`Locked by ${row.locked_by_username}`} className="mr-1 text-amber-500">&#128274;</span>}
+              <div className="font-mono text-xs text-slate-900"><span data-testid="source-code">{row.source_code}</span><AxisVariantFlag count={row.axis_variant_count} /></div>
+              {row.source_code_description && <div className="text-xs text-slate-700">{row.source_code_description}</div>}
+              {row.source_vocabulary_id && <div className="text-xs text-slate-500">{systemLabel(row)}</div>}
+            </td>
+            <td className="px-4 py-3 text-xs text-slate-700">{row.domain_id || "—"}</td>
+            <td className="px-4 py-3 text-right font-mono text-xs text-slate-700">{row.occurrence_count || 0}</td>
+            <SourceQuantityCell quantity={row.example_quantity}
+              units={row.source_units?.length ? (row.source_units.length > 2 ? row.source_units.slice(0, 2).join("; ") + " .." : row.source_units.join("; ")) : row.source_unit}
+              basedOn={row.based_on} />
+            <td className="px-4 py-3">
+              {row.destination_concept_code ? (
+                <>
+                  <div className="font-mono text-xs text-slate-900">{row.destination_concept_code}</div>
+                  <div className="text-xs text-slate-700">{row.destination_concept_name}</div>
+                  {row.destination_vocabulary_id && <div className="text-xs text-slate-500">{row.destination_vocabulary_id}</div>}
+                </>
+              ) : <span className="text-xs text-slate-500">—</span>}
+              <AxisVariantList variants={row.axis_variants} canApprove={false} />
+              {(row.measurement_type || row.suggested_unit) && (
+                <ConceptInputDetails domain_id={row.destination_domain_id || ""} measurement_type={row.measurement_type} suggested_unit={row.suggested_unit} example_units={row.example_units} />
+              )}
+              {section !== "Approved" && row.mapping_id && <button type="button"
+                aria-label={`Choose destination for ${row.source_code}`}
+                aria-expanded={inlineMappingId === row.mapping_id}
+                onClick={event => { event.stopPropagation(); setInlineMappingId(current => current === row.mapping_id ? null : row.mapping_id); }}
+                className="mt-2 inline-flex items-center gap-1 rounded border border-slate-300 px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100">
+                <Search size={12} />{row.destination_concept_id ? "Change destination" : "Choose destination"}
+              </button>}
+            </td>
+            <td className="px-4 py-3">
+              <button type="button" onClick={(e) => { e.stopPropagation(); void toggleApproval(row); }}
+                disabled={!row.destination_concept_id}
+                aria-label={row.status === "approved" ? `Unapprove ${row.source_code}` : `Approve ${row.source_code}`}
+                className="mr-1 rounded border border-slate-300 px-2 py-1 text-xs">
+                {row.status === "approved" ? "Unapprove" : "Approve"}
+              </button>
+              <button type="button" onClick={(e) => { e.stopPropagation(); openEditDialog(row); }}
+                className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-300 text-slate-700 hover:bg-slate-100"
+                aria-label={`Edit ${row.source_code}`}>
+                <Pencil size={14} />
+              </button>
+            </td>
+          </tr>
+          {inlineMappingId === row.mapping_id && row.mapping_id && <tr>
+            <td colSpan={colCount} className="bg-slate-50 p-3">
+              <InlineDestinationPicker key={row.mapping_id} mappingId={row.mapping_id}
+                sourceLabel={`${row.source_vocabulary_id || "Uncoded"}:${row.source_code} — ${row.source_code_description}`}
+                vocabularies={reference.destination_vocabularies}
+                initialVocabulary={reference.destination_vocabularies.some(item => item.vocabulary_id === row.destination_vocabulary_id) ? row.destination_vocabulary_id : ""}
+                canApprove={canApprove} onCancel={() => setInlineMappingId(null)}
+                onSaved={(saved, concept) => {
+                  applySavedMapping(saved as CodeMappingRow);
+                  setInlineMappingId(null);
+                  setBanner(`${row.source_code}: saved ${concept.concept_name}${saved.status === "approved" ? " and approved the mapping" : " for review"}.`);
+                  void refreshCurrent.current();
+                }} />
+            </td>
+          </tr>}
+      </Fragment>
     );
     return (
     <div className="overflow-hidden rounded-md border border-slate-200 bg-white">
       <table aria-label={`${section} mappings`} className="w-full border-collapse text-left text-sm">
         <thead className="bg-slate-100 text-xs uppercase text-slate-600">
           <tr>
-            {header("Source code", "source_code")}
-            {showSystemColumn && <th className="px-4 py-3 font-semibold">System</th>}
+            {header("Source", "source_code")}
+            <th className="px-4 py-3 font-semibold">Domain</th>
             {header("Seen", "occurrence_count")}
-            {header("Source description", "source_code_description")}
-            {header("Provenance", "origin_system")}
-            {header("Destination concept", "destination_concept_name")}
-            {header("Concept ID", "destination_concept_id")}
-            {header("Dest count", "destination_count")}
-            {!hideStatus && header("Status", "status")}
-            {!hideStatus && <th className="w-16 px-4 py-3 font-semibold" aria-label="Actions" />}
+            <th className="px-4 py-3 font-semibold">Qty</th>
+            <th className="px-4 py-3 font-semibold">Units</th>
+            {header("Destination", "destination_concept_name")}
+            <th className="w-16 px-4 py-3 font-semibold" aria-label="Actions" />
           </tr>
         </thead>
         <tbody className="divide-y divide-slate-100">
-          {(browse ? sectionRows : sortMappingRows(sectionRows, sort)).map((row) => (
-            <Fragment key={mappingRowId(row)}>
-            <tr
-              id={mappingRowId(row)}
-              role="button"
-              tabIndex={0}
-              onClick={() => openEditDialog(row)}
-              onKeyDown={(e) => {
-                if (e.target !== e.currentTarget) return;
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  openEditDialog(row);
-                }
-              }}
-              className={`scroll-mt-24 cursor-pointer hover:bg-slate-50 focus:outline-2 focus:outline-red-600 ${
-                navigationTarget?.id === mappingRowId(row) ? "bg-red-50" : ""
-              }`}
-            >
-              <td className="px-4 py-3 font-mono text-xs text-slate-900">
-                {row.locked_by_username && <span title={`Locked by ${row.locked_by_username}`} className="mr-1 text-amber-500">&#128274;</span>}
-                {row.source_code}
-              </td>
-              {showSystemColumn && (
-                <td className="px-4 py-3 text-xs text-slate-700">{systemLabel(row)}</td>
-              )}
-              <td className="px-4 py-3 text-right font-mono text-xs text-slate-700">{row.occurrence_count || 0}</td>
-              <td className="px-4 py-3 text-xs text-slate-700">{row.source_code_description || "—"}</td>
-              <td className="px-4 py-3 text-xs text-slate-700">{row.origin_system || "—"}</td>
-              <td className="px-4 py-3">
-                <div className="font-medium text-slate-950">{row.destination_concept_name}</div>
-                <div className="font-mono text-xs text-slate-500">
-                  {row.destination_vocabulary_id}:{row.destination_concept_code}
-                </div>
-                {(row.measurement_type || row.suggested_unit) && (
-                  <ConceptInputDetails domain_id={row.destination_domain_id || ""} measurement_type={row.measurement_type} suggested_unit={row.suggested_unit} example_units={row.example_units} />
-                )}
-                {section === "Unmapped" && row.mapping_id && <button type="button"
-                  aria-label={`Choose destination for ${row.source_code}`}
-                  aria-expanded={inlineMappingId === row.mapping_id}
-                  onClick={event => { event.stopPropagation(); setInlineMappingId(current => current === row.mapping_id ? null : row.mapping_id); }}
-                  className="mt-2 inline-flex items-center gap-1 rounded border border-slate-300 px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100">
-                  <Search size={12} />{row.destination_concept_id ? "Change destination" : "Choose destination"}
-                </button>}
-              </td>
-              <td className="px-4 py-3 font-mono text-xs text-slate-900">{row.destination_concept_id}</td>
-              <td className={`px-4 py-3 text-center font-mono text-xs font-medium ${row.destination_count !== 1 ? "text-red-600" : "text-slate-700"}`}>{row.destination_count ?? 0}</td>
-              {!hideStatus && (
-              <td className="px-4 py-3">
-                <div className="inline-flex items-center gap-2">
-                  <button
-                    type="button"
-                    // Stops a one-click approve from also opening the dialog.
-                    onClick={(e) => { e.stopPropagation(); void toggleApproval(row); }}
-                    className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border ${
-                      row.status === "approved"
-                        ? "border-green-500 bg-green-500 text-white"
-                        : "border-slate-300 hover:border-slate-600"
-                    }`}
-                    title={row.status === "approved" ? "Mark mapping as proposed" : "Approve mapping"}
-                    aria-label={row.status === "approved" ? `Unapprove ${row.source_code}` : `Approve ${row.source_code}`}
-                  >
-                    {row.status === "approved" && <Check size={10} />}
-                  </button>
-                  <span className={`inline-flex rounded px-2 py-1 text-xs font-medium ${statusClass[row.status]}`}>
-                    {row.status}
-                  </span>
-                  {row.suggest_strategy && (
-                    <span className="inline-flex rounded bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700" title={`Suggested via ${strategyLabel[row.suggest_strategy] || row.suggest_strategy}`}>
-                      {strategyLabel[row.suggest_strategy] || row.suggest_strategy}
-                    </span>
+          {groupEntries
+            ? groupEntries.map((entry) => {
+              const cacheKey = expansionKey(entry, section);
+              const open = cacheKey in expandedGroups;
+              const members = expandedGroups[cacheKey];
+              return (
+                <Fragment key={cacheKey}>
+                  <tr className="bg-slate-50/60">
+                    <td className="px-4 py-3">
+                      <button type="button"
+                        aria-expanded={open}
+                        aria-label={`${open ? "Collapse" : "Expand"} ${entry.description || "unlabelled"}`}
+                        onClick={() => toggleGroup(entry, section)}
+                        className="inline-flex items-center gap-2 text-left font-medium text-slate-900 hover:underline">
+                        <span aria-hidden="true" className="inline-block w-3">{open ? "▾" : "▸"}</span>
+                        <span className="font-mono text-xs">
+                          {entry.members === 1 ? "1 code" : `${entry.members.toLocaleString()} codes`}
+                        </span>
+                      </button>
+                      <AxisVariantFlag count={entry.axis_variant_count} />
+                      {entry.description && <div className="mt-0.5 text-xs text-slate-700">{entry.description}</div>}
+                    </td>
+                    <td className="px-4 py-3" />
+                    <td className="px-4 py-3 text-right font-mono text-xs text-slate-700">{entry.seen.toLocaleString()}</td>
+                    <SourceQuantityCell quantity={entry.example_quantity} units={entry.source_units?.join("; ")} basedOn={entry.based_on} />
+                    <td className="px-4 py-3">
+                      {/* Naming one side of a disagreement is worse than
+                          naming neither, so a mixed group names no concept. */}
+                      {entry.mixed_destinations ? (
+                        <span className="text-xs font-medium text-amber-700">Mixed destinations</span>
+                      ) : entry.destination_concept_code ? (
+                        <>
+                          <div className="font-mono text-xs text-slate-900">{entry.destination_concept_code}</div>
+                          <div className="text-xs text-slate-700">{entry.destination_concept_name}</div>
+                          {entry.destination_vocabulary_id && <div className="text-xs text-slate-500">{entry.destination_vocabulary_id}</div>}
+                        </>
+                      ) : <span className="text-xs text-slate-500">—</span>}
+                    </td>
+                    <td className="px-4 py-3">
+                      {section !== "Approved" && entry.proposed > 0 && (
+                        <div className="flex flex-col gap-1">
+                          <button type="button" disabled={groupRunning === cacheKey}
+                            onClick={() => void runGroupJob(entry, "suggest", section)}
+                            className="rounded border border-slate-300 px-2 py-1 text-xs hover:bg-white disabled:opacity-50">
+                            Suggest group
+                          </button>
+                          {entry.destination_concept_id && !entry.mixed_destinations && canApprove && (
+                            <button type="button" disabled={groupRunning === cacheKey}
+                              onClick={() => void runGroupJob(entry, "approve", section)}
+                              className="rounded border border-green-300 px-2 py-1 text-xs text-green-800 hover:bg-green-50 disabled:opacity-50">
+                              Approve {entry.proposed.toLocaleString()}
+                            </button>
+                          )}
+                          {canApprove && (
+                            <button type="button" disabled={groupRunning === cacheKey}
+                              onClick={() => void runGroupJob(entry, "reject", section)}
+                              className="rounded border border-red-300 px-2 py-1 text-xs text-red-800 hover:bg-red-50 disabled:opacity-50">
+                              Reject {entry.proposed.toLocaleString()}
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </td>
+                  </tr>
+                  {open && members === null && (
+                    <tr><td colSpan={colCount} className="px-4 py-3 text-center text-xs text-slate-500" role="status">Loading codes…</td></tr>
                   )}
-                </div>
-              </td>
-              )}
-              {!hideStatus && (
-              <td className="px-4 py-3">
-                <button
-                  type="button"
-                  onClick={(e) => { e.stopPropagation(); openEditDialog(row); }}
-                  className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-slate-300 text-slate-700 hover:bg-slate-100"
-                  aria-label={`Edit ${row.source_code}`}
-                >
-                  <Pencil size={14} />
-                </button>
-              </td>
-              )}
-            </tr>
-            {inlineMappingId === row.mapping_id && row.mapping_id && <tr>
-              <td colSpan={colCount} className="bg-slate-50 p-3">
-                <InlineDestinationPicker key={row.mapping_id} mappingId={row.mapping_id}
-                  sourceLabel={`${row.source_vocabulary_id || "Uncoded"}:${row.source_code} — ${row.source_code_description}`}
-                  vocabularies={reference.destination_vocabularies}
-                  initialVocabulary={reference.destination_vocabularies.some(item => item.vocabulary_id === row.destination_vocabulary_id) ? row.destination_vocabulary_id : ""}
-                  canApprove={canApprove} onCancel={() => setInlineMappingId(null)}
-                  onSaved={(saved, concept) => {
-                    applySavedMapping(saved as CodeMappingRow);
-                    setInlineMappingId(null);
-                    setBanner(`${row.source_code}: saved ${concept.concept_name}${saved.status === "approved" ? " and approved the mapping" : " for review"}.`);
-                    void refreshCurrent.current();
-                  }} />
-              </td>
-            </tr>}
-            </Fragment>
-          ))}
-          {sectionRows.length === 0 && (
+                  {open && members && members.map(renderRow)}
+                </Fragment>
+              );
+            })
+            : (browse ? sectionRows : sortMappingRows(sectionRows, sort)).map(renderRow)}
+          {(groupEntries ? groupEntries.length === 0 : sectionRows.length === 0) && (
             <tr>
-              <td colSpan={colCount} className="px-4 py-8 text-center text-sm text-slate-500">{emptyText}</td>
+              <td colSpan={colCount} className="px-4 py-8 text-center text-sm text-slate-500">{loading ? "Loading rows…" : emptyText}</td>
             </tr>
           )}
         </tbody>
@@ -1652,13 +1296,31 @@ export default function CodeMappingPage() {
     );
   };
 
-  if (loading && rows.length === 0 && !browse) {
-    return (
-      <div className="flex min-h-[400px] items-center justify-center">
-        <div className="h-8 w-8 animate-spin rounded-full border-4 border-primary border-t-transparent" />
-      </div>
-    );
-  }
+  const directionControls = <div role="group" aria-label="Mapping direction" className="mb-5 flex gap-2 border-b border-slate-200 pb-3">
+    {([['reverse', 'Concept → Source Code'], ['forward', 'Source Code → Concept']] as const).map(([value, label]) =>
+      <button key={value} type="button" disabled={reverseWriting} aria-pressed={direction === value}
+        onClick={() => setDirection(value)}
+        className={`rounded px-3 py-2 text-sm font-medium disabled:opacity-50 ${direction === value ? 'bg-slate-950 text-white' : 'text-slate-600 hover:bg-slate-100'}`}>{label}</button>)}
+  </div>;
+
+  const releaseMarker = reference.release_commit ? (
+    <span
+      className="text-[10px] font-normal tracking-wide text-slate-400"
+      title={`Deployed commit ${reference.release_commit}`}
+      aria-label={`Deployed release ${reference.release_commit}`}
+    >
+      release {reference.release_commit.slice(0, 8)}
+    </span>
+  ) : null;
+
+  if (direction === 'reverse') return <div className="min-h-screen bg-slate-50 p-6"><div className="mx-auto max-w-7xl">
+    <div className="mb-5">
+      <PageTitle className="text-2xl font-semibold text-slate-950" meta={releaseMarker}>Code Mapping</PageTitle>
+    </div>
+    {directionControls}
+    <ConceptToCodeTab canApprove={canApprove} onWritingChange={setReverseWriting} initialConceptId={linkedConceptId}
+      onInitialConceptHandled={() => setLinkedConceptId(undefined)} />
+  </div></div>;
 
   return (
     <div className="min-h-screen bg-slate-50 p-6">
@@ -1673,22 +1335,38 @@ export default function CodeMappingPage() {
               <ArrowLeft size={16} />
             </button>
             <div>
-              <PageTitle className="text-2xl font-semibold text-slate-950">Code Mapping</PageTitle>
+              <PageTitle className="text-2xl font-semibold text-slate-950" meta={releaseMarker}>Code Mapping</PageTitle>
               <p className="text-sm text-slate-600">
                 Source codes from FHIR, paper labs and notes, mapped to destination OMOP concepts
               </p>
             </div>
           </div>
-          <button
-            onClick={openNewDialog}
-            className="inline-flex items-center gap-2 rounded-md bg-slate-950 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"
-          >
-            <Plus size={16} />
-            New Mapping
-          </button>
+          <div className="flex items-center gap-2">
+            <a href="/code-mappings/source-systems"
+              className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-800 hover:bg-slate-100">
+              Source systems / hospitals
+            </a>
+            <button type="button" onClick={() => setUploadOpen(true)} disabled={!referenceReady}
+              className="inline-flex items-center gap-2 rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-800 hover:bg-slate-100">
+              <Upload size={16} />
+              Upload
+            </button>
+            <button
+              onClick={openNewDialog}
+              disabled={!referenceReady}
+              className="inline-flex items-center gap-2 rounded-md bg-slate-950 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"
+            >
+              <Plus size={16} />
+              New Mapping
+            </button>
+          </div>
         </div>
 
+        {directionControls}
         {loading && <p role="status" className="mb-2 text-sm text-slate-500">Loading mappings…</p>}
+        {referenceError && <p role="alert" className="mb-2 text-sm text-amber-700">{referenceError}</p>}
+        {duplicateSource !== null && checkingDuplicates && <p role="status" className="mb-2 text-sm text-slate-500">Checking duplicate source codes…</p>}
+        {duplicateError && <p role="alert" className="mb-2 text-sm text-amber-700">{duplicateError}</p>}
 
         {error && !dialogMode && (
           <div role="alert" className="mb-4 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
@@ -1706,16 +1384,73 @@ export default function CodeMappingPage() {
         )}
 
         <div className="mb-4">
-          <label className="relative block">
-            <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
-            <input
-              aria-label="Search mappings"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search source codes, destination concepts, or OMOP IDs"
-              className="h-10 w-full rounded-md border border-slate-300 bg-white pl-9 pr-3 text-sm text-slate-950 outline-none focus:border-slate-700"
-            />
-          </label>
+          <div className="flex flex-col gap-2 sm:flex-row">
+            <label className="relative block flex-1">
+              <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
+              <input
+                aria-label="Search mappings"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Search source codes, destination concepts, or OMOP IDs"
+                className="h-10 w-full rounded-md border border-slate-300 bg-white pl-9 pr-3 text-sm text-slate-950 outline-none focus:border-slate-700"
+              />
+            </label>
+            {/* Provenance is a filter rather than the sort it used to be
+                (#1575): it finds curator-edited rows in one click however many
+                there are, and leaves the queue in Seen order. */}
+            <label className="inline-flex h-10 shrink-0 items-center gap-2 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-700">
+              <input type="checkbox" checked={rollup}
+                onChange={(e) => {
+                  setPages({});
+                  setExpandedGroups({});
+                  setSectionSorts((previous) => sectionNames.reduce<Partial<Record<MappingSection, SectionSort>>>((next, section) => {
+                    const current = previous[section];
+                    next[section] = current && (current.column === "occurrence_count" || current.column === "source_code_description")
+                      ? current : DEFAULT_SECTION_SORT;
+                    return next;
+                  }, {}));
+                  setRollup(e.target.checked);
+                }} />
+              {/* One decision per label rather than per vendor code: albumin
+                  arrives under 2,557 of them. */}
+              Group by label
+            </label>
+            {showProvenanceFilter && (
+              <select
+                aria-label="Filter by provenance"
+                value={provenanceFilter}
+                onChange={(e) => { setPages({}); setProvenanceFilter(e.target.value); }}
+                className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950 outline-none focus:border-slate-700 sm:w-64"
+              >
+                <option value="">All provenance</option>
+                {provenanceOptions.map((option) => (
+                  <option key={provenanceValue(option.origin_system)} value={provenanceValue(option.origin_system)}>
+                    {(option.origin_system || "No provenance")} ({option.count})
+                  </option>
+                ))}
+                {provenanceOrphaned && (
+                  <option value={provenanceFilter}>
+                    {(provenanceFilter === BLANK_PROVENANCE ? "No provenance" : provenanceFilter)} (0)
+                  </option>
+                )}
+              </select>
+            )}
+            {organizationOptions.length > 1 && (
+              <select
+                aria-label="Filter by organization"
+                value={organizationFilter}
+                onChange={(e) => { setPages({}); setExpandedGroups({}); setOrganizationFilter(e.target.value); }}
+                className="h-10 rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-950 outline-none focus:border-slate-700 sm:w-64"
+              >
+                <option value="">All organizations</option>
+                {organizationOptions.map((option) => (
+                  <option key={option.slug || GLOBAL_ORGANIZATION} value={option.slug || GLOBAL_ORGANIZATION}>
+                    {option.name} ({option.count})
+                  </option>
+                ))}
+              </select>
+            )}
+          </div>
           {crossTabSearch && (
             <p className="mt-1 text-xs text-slate-600" role="status">
               Searching all coding systems
@@ -1741,12 +1476,18 @@ export default function CodeMappingPage() {
                 aria-selected={selected}
                 onClick={() => {
                   setPages({});
+                  // Provenance values differ per tab; a stale filter would
+                  // show an empty tab with no visible reason.
+                  setProvenanceFilter("");
+                  setOrganizationFilter("");
+                  setExpandedGroups({});
+                  setAccumulatedActivity([]);
                   setActiveVocabulary(tab.vocabulary_id);
                   if (tab.vocabulary_id === OVERALL_TAB) {
                     setUnmappedCollapsed(true);
-                    setMappedCollapsed(true);
-                    setRejectedCollapsed(true);
-                    setAthenaCollapsed(true);
+                    setApprovedCollapsed(true);
+                    setProposedCollapsed(true);
+
                   }
                 }}
                 title={`Source vocabulary: ${tab.label}`}
@@ -1855,10 +1596,13 @@ export default function CodeMappingPage() {
           </section>
         </div>
 
-        {suggestRun && <SuggestCandidates key={suggestRun.run_id}
-          activity={suggestRun.activity ?? []}
-          finished={suggestRun.state === "success" || suggestRun.state === "failure"}
+        {(suggestRun || accumulatedActivity.length > 0) && <SuggestCandidates
+          key="suggest-candidates"
+          activity={[...accumulatedActivity, ...(suggestRun?.activity ?? [])]}
+          finished={!suggestRun || suggestRun.state === "success" || suggestRun.state === "failure"}
+          generation={suggestGeneration}
           canApprove={canApprove} vocabularies={reference.destination_vocabularies}
+          domains={reference.domains}
           onSaved={() => { void refreshCurrent.current(); }} />}
 
 
@@ -1937,7 +1681,7 @@ export default function CodeMappingPage() {
         {duplicateCodes.length > 0 && (
           <div role="alert" className="mb-4 rounded-md border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800">
             <p className="font-semibold">Error: {duplicateCodes.length} duplicate source code{duplicateCodes.length === 1 ? "" : "s"} on this tab</p>
-            <p className="mt-1">These source codes occur in multiple mapping rows. Follow a link, then select the row to open its edit dialog and delete unwanted duplicates. Hidden rejected mappings are included.</p>
+            <p className="mt-1">These source codes occur in multiple mapping rows. Follow a link, then select the row to open its edit dialog and delete unwanted duplicates. Rejected decisions remain available in their destination-based section.</p>
             <ul aria-label="Duplicate source codes" className="mt-2 max-h-60 space-y-2 overflow-y-auto">
               {duplicateCodes.map((group) => (
                 <li key={JSON.stringify([group.vocabulary, group.code])}>
@@ -1947,7 +1691,8 @@ export default function CodeMappingPage() {
                       <li key={mappingRowId(row)}>
                         <a
                           href={`#${mappingRowId(row)}`}
-                          onClick={(event) => { event.preventDefault(); revealDuplicate(row); }}
+                          onClick={(event) => { event.preventDefault(); void revealDuplicate(row); }}
+                          aria-busy={loadingDuplicate !== null && loadingDuplicate === row.mapping_id}
                           className="rounded underline hover:text-red-950 focus:outline-2 focus:outline-red-600"
                         >
                           {row.source_code} — {sectionForRow(row)} · {row.source_vocabulary_id || "Uncoded"}
@@ -1965,669 +1710,57 @@ export default function CodeMappingPage() {
 
         <div className="mb-4 flex items-center">
           <span className="text-sm font-semibold uppercase tracking-wide text-slate-700">All</span>
-          <span className="ml-1 text-sm font-normal text-slate-500">({visibleRows.length})</span>
+          <span className="ml-1 text-sm font-normal text-slate-500" data-testid="all-mappings-count">({allCount})</span>
           <DownloadMenu rows={visibleRows} section={`All-${selectedVocabulary}`} />
+          {browse && <span className="ml-3 text-xs text-slate-500">Downloads include loaded rows only.</span>}
         </div>
 
-        <section className="mb-6">
-          <button
-            type="button"
-            onClick={() => setUnmappedCollapsed((v) => !v)}
-            className="mb-2 inline-flex items-center gap-1 text-sm font-semibold uppercase tracking-wide text-slate-700"
-          >
-            {unmappedCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
-            Unmapped <span className="font-normal text-slate-500">({browse?.pages.Unmapped.total ?? unmappedRows.length})</span>
-          </button>
-          <DownloadMenu rows={unmappedRows} section="Unmapped" />
-          {!unmappedCollapsed && (
-            <>
-          <div className="mb-2">
-            <p className="text-xs text-slate-500">
-              The destination concept exists — an import minted or chose it — but no curator has confirmed it.
-            </p>
-          </div>
-          {renderTable(unmappedRows, "Nothing awaiting review in this vocabulary.", "Unmapped")}
-            </>
-          )}
-        </section>
-
-        <section className="mb-6">
-          <button
-            type="button"
-            onClick={() => setMappedCollapsed((v) => !v)}
-            className="mb-2 inline-flex items-center gap-1 text-sm font-semibold uppercase tracking-wide text-slate-700"
-          >
-            {mappedCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
-            Mapped <span className="font-normal text-slate-500">({browse?.pages.Mapped.total ?? mappedRows.length})</span>
-          </button>
-          <DownloadMenu rows={mappedRows} section="Mapped" />
-          {!mappedCollapsed && renderTable(mappedRows, "No approved mappings in this vocabulary.", "Mapped")}
-        </section>
-
-        {(rejectedRows.length > 0 || (browse?.pages.Rejected?.total ?? 0) > 0) && (
-          <section className="mb-6">
-            <button
-              type="button"
-              onClick={() => setRejectedCollapsed((v) => !v)}
-              className="mb-2 inline-flex items-center gap-1 text-sm font-semibold uppercase tracking-wide text-slate-700"
-            >
-              {rejectedCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
-              Rejected <span className="font-normal text-slate-500">({browse?.pages.Rejected?.total ?? rejectedRows.length})</span>
+        {sectionNames.map((section) => {
+          const sectionRows = section === "Unmapped" ? unmappedRows : section === "Proposed" ? proposedRows : approvedRows;
+          const collapsed = section === "Unmapped" ? unmappedCollapsed : section === "Proposed" ? proposedCollapsed : approvedCollapsed;
+          const setCollapsed = section === "Unmapped" ? setUnmappedCollapsed : section === "Proposed" ? setProposedCollapsed : setApprovedCollapsed;
+          return <section key={section} className="mb-6">
+            <button type="button" onClick={() => setCollapsed((v) => !v)}
+              className="mb-2 inline-flex items-center gap-2 text-sm font-semibold uppercase tracking-wide text-slate-700">
+              {collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+              <span>{section}</span>
+              <span className="font-normal text-slate-500">({browse?.pages[section]?.total ?? sectionRows.length}{browse?.rollup ? " groups" : ""})</span>
             </button>
-            <DownloadMenu rows={rejectedRows} section="Rejected" />
-            {!rejectedCollapsed && renderTable(rejectedRows, "No rejected mappings in this vocabulary.", "Rejected")}
-          </section>
-        )}
-
-        {athenaRows.length > 0 && (
-          <section>
-            <button
-              type="button"
-              onClick={() => setAthenaCollapsed((v) => !v)}
-              className="mb-2 inline-flex items-center gap-1 text-sm font-semibold uppercase tracking-wide text-slate-700"
-            >
-              {athenaCollapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
-              Athena Mapped <span className="font-normal text-slate-500">({browse?.pages["Athena Mapped"].total ?? athenaRows.length})</span>
-            </button>
-            <DownloadMenu rows={athenaRows} section="Athena Mapped" />
-            {!athenaCollapsed && renderTable(athenaRows, "No Athena mappings in this vocabulary.", "Athena Mapped", { hideStatus: true })}
-          </section>
-        )}
+            <DownloadMenu rows={sectionRows} section={section} />
+            {!collapsed && renderTable(sectionRows, `No ${section.toLowerCase()} mappings in this vocabulary.`, section)}
+          </section>;
+        })}
       </div>
 
-      {dialogMode && (
-        <div inert={mintOpen} className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4">
-          <form
-            onSubmit={submitForm}
-            role="dialog"
-            aria-label={dialogMode === "new" ? "New Mapping" : "Edit Mapping"}
-            className="w-full max-w-4xl rounded-md bg-white shadow-xl"
-          >
-            <div className="flex items-center justify-between border-b border-slate-200 px-5 py-4">
-              <h2 className="text-lg font-semibold text-slate-950">
-                {dialogMode === "new" ? "New Mapping" : "Edit Mapping"}
-              </h2>
-              <button
-                type="button"
-                onClick={closeDialog}
-                className="inline-flex h-8 w-8 items-center justify-center rounded-md text-slate-500 hover:bg-slate-100"
-                aria-label="Close"
-              >
-                <X size={16} />
-              </button>
-            </div>
-
-            <div className="max-h-[70vh] overflow-y-auto px-5 py-5">
-              {error && (
-                <div role="alert" className="mb-4 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
-                  {error}
-                </div>
-              )}
-              {/* ── SOURCE ───────────────────────────────────────────────── */}
-              <fieldset
-                data-testid="source-block"
-                className="mb-5 rounded-md border border-slate-200 p-4"
-              >
-                <legend className="px-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
-                  Source — the code as it arrived
-                </legend>
-                <div data-testid="source-fields" className="grid gap-4 md:grid-cols-2">
-                  {/* Domain is first on purpose: it decides which code systems
-                      are offered and which OMOP table the fact lands in. */}
-                  <Field id="domain_id" label="Domain" tip={TIP.domain}>
-                    <select
-                      id="domain_id"
-                      title={TIP.domain}
-                      value={form.domain_id}
-                      onChange={(e) => setDomain(e.target.value)}
-                      required
-                      className={INPUT_CLASS}
-                    >
-                      <option value="">— select —</option>
-                      {reference.domains.map((d) => (
-                        <option key={d.domain_id} value={d.domain_id}>{d.label || d.domain_id}</option>
-                      ))}
-                    </select>
-                  </Field>
-
-                  <Field id="source_vocabulary_id" label="Source Code System" tip={TIP.source_code_system}>
-                    <select
-                      id="source_vocabulary_id"
-                      title={TIP.source_code_system}
-                      value={form.source_vocabulary_id}
-                      onChange={(e) => setField("source_vocabulary_id", e.target.value)}
-                      className={INPUT_CLASS}
-                    >
-                      {/* Blank is a real answer: a paper lab or a note has no code system. */}
-                      {sourceCodeSystems.map((s) => (
-                        <option key={s.vocabulary_id || "__none__"} value={s.vocabulary_id}>
-                          {s.label || s.vocabulary_id}
-                        </option>
-                      ))}
-                    </select>
-                  </Field>
-
-                  <Field id="source_code" label="Source Code Value" tip={TIP.source_code_value}>
-                    <input
-                      id="source_code"
-                      title={TIP.source_code_value}
-                      value={form.source_code}
-                      onChange={(e) => setField("source_code", e.target.value)}
-                      required
-                      className={`${INPUT_CLASS} font-mono`}
-                    />
-                  </Field>
-
-                  <div className="flex items-end gap-2">
-                    <button
-                      type="button"
-                      onClick={checkUmls}
-                      disabled={checkingUmls || !form.source_code.trim() || !form.source_vocabulary_id}
-                      className="rounded-md border border-sky-300 px-3 py-2 text-sm font-medium text-sky-700 hover:bg-sky-50 disabled:cursor-not-allowed disabled:opacity-50"
-                    >
-                      {checkingUmls ? "Checking UMLS…" : "Check UMLS"}
-                    </button>
-                    {umlsCheckMessage && <span className="pb-2 text-sm text-slate-600">{umlsCheckMessage}</span>}
-                  </div>
-
-                  <Field id="source_code_description" label="Source Description" tip={TIP.source_description}>
-                    <input
-                      id="source_code_description"
-                      title={TIP.source_description}
-                      value={form.source_code_description}
-                      onChange={(e) => setField("source_code_description", e.target.value)}
-                      className={INPUT_CLASS}
-                    />
-                  </Field>
-
-                  <ReadOnlyField
-                    id="source_concept_id"
-                    label="Source Concept ID"
-                    tip={TIP.source_concept_id}
-                    value={form.source_concept_id}
-                    testId="source-concept-id"
-                  />
-                  <ReadOnlyField
-                    id="source_retirement"
-                    label="Source code retirement"
-                    tip="Retirement is based on the source vocabulary's invalid reason or expired validity date, never the destination or UMLS preference flag."
-                    value={retirementLabel(selectedRow && form.source_code === selectedRow.source_code
-                      && form.source_vocabulary_id === selectedRow.source_vocabulary_id ? selectedRow : null)}
-                    testId="source-retirement"
-                  />
-                  {selectedRow?.source_retired && form.source_code === selectedRow.source_code
-                    && form.source_vocabulary_id === selectedRow.source_vocabulary_id && (
-                    <p className="text-sm font-semibold text-red-700" role="status">Source code is retired. {retirementDetail(selectedRow)}</p>
-                  )}
-                  {selectedRow?.umls_source_name && (
-                    <ReadOnlyField
-                      id="umls_source_name"
-                      label="UMLS Name"
-                      tip="Canonical UMLS preferred name for this source code. Read-only — edit Source Description instead."
-                      value={selectedRow.umls_source_name}
-                      testId="umls-source-name"
-                    />
-                  )}
-                </div>
-              </fieldset>
-
-              {/* ── DESTINATION ──────────────────────────────────────────── */}
-              <fieldset
-                data-testid="destination-block"
-                className="rounded-md border border-slate-200 p-4"
-              >
-                <legend className="px-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
-                  Destination — the OMOP concept it means
-                </legend>
-
-                {dialogMode === "edit" && (
-                  <div className="mb-4 rounded-md border border-amber-300 bg-amber-50 p-3">
-                    {(selectedRow?.destination_count || destinationOptions.length) > 1 && (
-                      <p className="mb-2 font-semibold text-amber-900">
-                        Multiple destinations are available for this source code. Review the source data alternatives and choose the correct destination.
-                      </p>
-                    )}
-                    {loadingDestinations && <p role="status">Loading source destinations…</p>}
-                    {destinationError && <p role="alert" className="text-red-700">{destinationError}</p>}
-                    {destinationOptions.length > 0 && (
-                      <>
-                        <label htmlFor="imported-destination" className="mb-1 block text-sm font-medium">
-                          Source data destinations ({destinationOptions.length})
-                        </label>
-                        <select id="imported-destination" className={INPUT_CLASS}
-                          value={destinationOptions.some((option) => String(option.concept_id) === form.destination_concept_id) ? form.destination_concept_id : ""}
-                          onChange={(event) => {
-                            const option = destinationOptions.find((item) => String(item.concept_id) === event.target.value);
-                            if (option?.selectable && option.concept_id !== null) {
-                              applyConcept({ ...option, concept_id: option.concept_id }, true);
-                            }
-                          }}>
-                          <option value="">Choose a destination</option>
-                          {destinationOptions.map((option) => (
-                            <option key={`${option.vocabulary_id}:${option.concept_code}`}
-                              value={option.concept_id === null ? `unavailable:${option.vocabulary_id}:${option.concept_code}` : String(option.concept_id)}
-                              disabled={!option.selectable}>
-                              {option.concept_name} — {option.vocabulary_id}:{option.concept_code} — OMOP {option.concept_id ?? "not loaded"}
-                              {option.measurement_type ? ` · ${option.measurement_type === "quantitative" ? "Quantitative" : "Qualitative"}` : ""}
-                              {option.suggested_unit ? ` · ${option.suggested_unit}` : ""}
-                              {option.origins.length ? ` (${option.origins.join(", ")})` : ""}
-                              {!option.selectable ? " — unavailable" : ""}
-                            </option>
-                          ))}
-                        </select>
-                        <p className="mt-1 text-xs text-slate-600">
-                          Save your choice below. Imported alternatives are retained for review; unavailable targets cannot be selected.
-                        </p>
-                      </>
-                    )}
-                  </div>
-                )}
-
-                {suggestionMessage && (
-                  <p role="status" className="mb-3 rounded-md bg-blue-50 px-3 py-2 text-sm text-blue-800">
-                    {suggestionMessage}
-                  </p>
-                )}
-
-                {/* Search sits at the top: picking a concept fills everything below it. */}
-                <div className="mb-4">
-                  <div className="mb-2 flex items-end justify-between gap-3">
-                    <div className="flex items-center gap-1">
-                      <label className="text-sm font-medium text-slate-700" htmlFor="code-mapping-concept-search">
-                        Search destination concepts
-                      </label>
-                      <HelpTip tip={TIP.search} />
-                    </div>
-                    <div className="flex flex-wrap items-center gap-3">
-                      {(["umls", "lexical", "vectors"] as const).map((key) => (
-                        <div key={key} className="inline-flex items-center gap-1 text-xs text-slate-600">
-                          <label className="inline-flex items-center gap-1">
-                            <input type="checkbox" checked={strategies[key]} onChange={(e) => setStrategies((prev) => ({ ...prev, [key]: e.target.checked }))} />
-                            {STRATEGY_LABELS[key]}
-                          </label>
-                          <HelpTip tip={key === "umls" ? "Bridge the code to an equivalent concept through UMLS. A unique match wins after the other enabled searches finish." : key === "lexical" ? "Retrieve candidate destinations by matching names and synonyms." : "Find candidate destinations by meaning, including concepts whose names and synonyms do not match the source wording."} />
-                        </div>
-                      ))}
-                      <div className="inline-flex items-center gap-1 text-xs text-slate-600">
-                        <label className="inline-flex items-center gap-1">
-                          Ranker
-                          <select
-                            value={rankingModel}
-                            onChange={(e) => setRankingModel(e.target.value as "anthropic" | "jev" | "both")}
-                            className="h-7 rounded-md border border-slate-300 px-1.5 text-xs"
-                          >
-                            <option value="anthropic">Anthropic</option>
-                            <option value="jev">Jev</option>
-                            <option value="both">Both</option>
-                          </select>
-                        </label>
-                        <HelpTip tip={TIP.ranker} />
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => void suggestCurrentCode()}
-                        disabled={searchingConcepts || !hasRetrieval}
-                        className="inline-flex items-center gap-1.5 rounded-md border border-slate-300 px-2.5 py-1 text-xs font-medium text-slate-700 hover:bg-slate-100"
-                      >
-                        <Sparkles size={13} />
-                        Suggest
-                      </button>
-                    </div>
-                  </div>
-                  {individualSuggestion?.request === dialogRequest.current && <IndividualSuggestCandidates
-                    activity={individualSuggestion.activity} running={individualSuggestion.running}
-                    selectedId={form.destination_concept_id}
-                    onSelect={candidate => {
-                      applyConcept(candidate as ConceptResult);
-                      setSuggestionMessage("Candidate selected. Save the mapping to keep your choice.");
-                    }} />}
-                  <div className="flex gap-2">
-                    <div className="relative flex-1">
-                      <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={15} />
-                      <input
-                        id="code-mapping-concept-search"
-                        title={TIP.search}
-                        value={conceptSearchQuery}
-                        onChange={(e) => void searchConcepts(e.target.value)}
-                        placeholder={
-                          searchVocabulary
-                            ? `Search ${searchVocabulary} concepts...`
-                            : "Search destination concepts..."
-                        }
-                        className="h-10 w-full rounded-md border border-slate-300 bg-white pl-9 pr-3 text-sm text-slate-950 outline-none focus:border-slate-700"
-                      />
-                    </div>
-                    {/* Destination Vocabulary ID itself is read-only - it is a
-                        property of the resolved concept. The search still needs
-                        a scope a curator can widen, or re-pointing a minted
-                        HK-* mapping at a standard concept would be impossible,
-                        which is the whole point of the queue. */}
-                    <div className="flex items-center gap-1">
-                      <select
-                        id="code-mapping-search-vocabulary"
-                        aria-label="Search vocabulary"
-                        title={TIP.search_vocabulary}
-                        value={searchVocabulary}
-                        onChange={(e) => {
-                          setSearchVocabulary(e.target.value);
-                          void searchConcepts(conceptSearchQuery, e.target.value);
-                        }}
-                        className="h-10 w-40 shrink-0 rounded-md border border-slate-300 px-2 text-sm text-slate-950"
-                      >
-                        <option value="">All vocabularies</option>
-                        {reference.destination_vocabularies.map((v) => (
-                          <option key={v.vocabulary_id} value={v.vocabulary_id}>{v.vocabulary_id}</option>
-                        ))}
-                      </select>
-                      <HelpTip tip={TIP.search_vocabulary} />
-                    </div>
-                  </div>
-                  <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-600">
-                    <span>Showing active, standard concepts.</span>
-                    {([
-                      ["retired", "Include retired", TIP.search_include_retired],
-                      ["nonStandard", "Include non-standard", TIP.search_include_non_standard],
-                    ] as const).map(([key, label, tip]) => (
-                      <span key={key} className="flex items-center gap-1">
-                        <label className="flex items-center gap-1" title={tip}>
-                          <input
-                            type="checkbox"
-                            checked={searchScope[key]}
-                            onChange={(e) => {
-                              const next = { ...searchScope, [key]: e.target.checked };
-                              setSearchScope(next);
-                              void searchConcepts(conceptSearchQuery, searchVocabulary, next);
-                            }}
-                          />
-                          {label}
-                        </label>
-                        <HelpTip tip={tip} />
-                      </span>
-                    ))}
-                  </div>
-                  <div className="mt-2 max-h-40 overflow-y-auto rounded-md border border-slate-200">
-                    {searchingConcepts && <div className="px-3 py-2 text-sm text-slate-500">Searching...</div>}
-                    {!searchingConcepts && conceptResults.length === 0 && conceptSearchQuery.length >= 3 && (
-                      <div className="px-3 py-2 text-sm text-slate-500">
-                        {searchScope.retired && searchScope.nonStandard
-                          ? "No suggestions found."
-                          : "No active, standard concepts found. Widen the search with the options above."}
-                      </div>
-                    )}
-                    {!searchingConcepts && conceptResults.map((concept) => (
-                      <button
-                        key={concept.concept_id}
-                        type="button"
-                        onClick={() => applyConcept(concept)}
-                        className="w-full border-b border-slate-100 px-3 py-2 text-left text-xs last:border-0 hover:bg-slate-50"
-                      >
-                        <span className="grid grid-cols-[8rem_1fr_6rem] gap-2">
-                          <span className="font-mono text-slate-700">{concept.concept_code}</span>
-                          <span className="text-slate-900">
-                            {concept.concept_name}
-                            {/* Why a code "looks wrong" (#1465): say what kind of
-                                concept it is instead of leaving the curator to
-                                infer it from the code's shape. */}
-                            {concept.invalid_reason ? (
-                              <span className="ml-2 rounded bg-red-100 px-1 text-[10px] font-semibold uppercase text-red-800">Retired</span>
-                            ) : concept.standard_concept === "S" ? (
-                              <span className="ml-2 rounded bg-emerald-100 px-1 text-[10px] font-semibold uppercase text-emerald-800">Standard</span>
-                            ) : (
-                              <span className="ml-2 rounded bg-amber-100 px-1 text-[10px] font-semibold uppercase text-amber-800">Non-standard</span>
-                            )}
-                          </span>
-                          <span className="font-mono text-slate-500">{concept.vocabulary_id}</span>
-                        </span>
-                        <ConceptInputDetails {...concept} />
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                {/* The order a curator checks them in: the id, its name, then
-                    the four facts that follow from it, then the table. */}
-                <div data-testid="destination-fields" className="grid gap-4 md:grid-cols-2">
-                  <Field id="destination_concept_id" label="Destination Concept ID" tip={TIP.destination_concept_id}>
-                    <input
-                      id="destination_concept_id"
-                      title={TIP.destination_concept_id}
-                      type="number"
-                      value={form.destination_concept_id}
-                      onChange={(e) => setField("destination_concept_id", e.target.value)}
-                      onBlur={(e) => void resolveConceptId(e.target.value)}
-                      required
-                      className={`${INPUT_CLASS} font-mono`}
-                    />
-                  </Field>
-
-                  {/* Read-only: the API has no write path for a concept name, so an
-                      editable box accepted a rename, saved, and let the old name
-                      come back on refetch with no error. Renaming a
-                      HealthKey-minted concept is real curation, but it needs a
-                      write path first. */}
-                  <ReadOnlyField
-                    id="destination_concept_name"
-                    label="Destination Concept Name"
-                    tip={TIP.destination_concept_name}
-                    value={form.destination_concept_name}
-                    testId="destination-concept-name"
-                  />
-
-                  <ReadOnlyField
-                    id="destination_concept_code"
-                    label="Destination Concept Code"
-                    tip={TIP.destination_concept_code}
-                    value={form.destination_concept_code}
-                    testId="destination-concept-code"
-                  />
-                  <ReadOnlyField
-                    id="destination_vocabulary_id"
-                    label="Destination Vocabulary ID"
-                    tip={TIP.destination_vocabulary_id}
-                    value={form.destination_vocabulary_id}
-                    testId="destination-vocabulary-id"
-                  />
-                  <ReadOnlyField
-                    id="destination_concept_class_id"
-                    label="Destination Concept Class"
-                    tip={TIP.destination_concept_class}
-                    value={form.destination_concept_class_id}
-                    testId="destination-concept-class"
-                  />
-                  <ReadOnlyField
-                    id="standard_concept"
-                    label="Standard Concept"
-                    tip={TIP.standard_concept}
-                    value={form.standard_concept}
-                    testId="standard-concept"
-                  />
-                  <ReadOnlyField
-                    id="destination_status"
-                    label="Destination Status"
-                    tip="Active concepts can be used as destinations. A retired concept is no longer current; select an active replacement when one is available."
-                    value={form.destination_invalid_reason ? `Retired / invalid (reason ${form.destination_invalid_reason})` : form.destination_concept_id ? "Active" : ""}
-                    testId="destination-status"
-                  />
-                  <ReadOnlyField
-                    id="omop_table"
-                    label="Destination Table"
-                    tip={TIP.destination_table}
-                    value={form.omop_table}
-                    testId="destination-table"
-                  />
-                  {form.suggested_unit && (
-                    <ReadOnlyField
-                      id="suggested_unit"
-                      label="Suggested unit"
-                      tip="A suggested unit, not a unit mandated by Athena. The instance canonical unit is configured below."
-                      value={form.suggested_unit}
-                      testId="suggested-unit"
-                    />
-                  )}
-                </div>
-                {form.destination_concept_id && form.destination_vocabulary_id === "LOINC" && form.omop_table === "measurement" &&
-                  <CanonicalUnitEditor key={form.destination_concept_id} conceptId={Number(form.destination_concept_id)} />}
-                <div className="mt-3 flex justify-end">
-                  <button type="button" onClick={() => setMintOpen(true)} className="rounded border border-sky-300 px-3 py-2 text-sm text-sky-700">Mint new concept</button>
-                </div>
-                {form.destination_invalid_reason && (
-                  <div className="mt-3 flex items-center justify-between gap-3 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
-                    <span>This destination is retired. Use its active replacement when available.</span>
-                    <button type="button" onClick={() => void selectReplacement()} className="shrink-0 rounded border border-amber-400 px-2 py-1 text-xs font-medium hover:bg-amber-100">
-                      Find replacement
-                    </button>
-                  </div>
-                )}
-              </fieldset>
-
-              {selectedRow && (
-                <div className="mt-4 flex flex-wrap items-center gap-3">
-                  <span className="inline-flex items-center gap-1.5 rounded-md bg-slate-100 px-2.5 py-1.5 text-xs font-medium text-slate-700">
-                    Seen <span className="font-mono font-semibold">{selectedRow.occurrence_count || 0}</span> time{selectedRow.occurrence_count !== 1 ? "s" : ""}
-                  </span>
-                  <span className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium ${
-                    selectedRow.destination_count !== 1 ? "bg-red-50 text-red-700" : "bg-slate-100 text-slate-700"
-                  }`}>
-                    Destinations <span className="font-mono font-semibold">{selectedRow.destination_count ?? 0}</span>
-                  </span>
-                </div>
-              )}
-
-              {selectedRow
-                && (selectedRow.origin === "import"
-                  || selectedRow.created_by
-                  || approvalNote(selectedRow)) && (
-                <p className="mt-2 rounded-md bg-slate-50 px-3 py-2 text-xs text-slate-600">
-                  {selectedRow.origin === "import" ? (
-                    <>
-                      Proposed by import
-                      {selectedRow.origin_system ? ` (${selectedRow.origin_system})` : ""}
-                    </>
-                  ) : (
-                    selectedRow.created_by ? <>Created by {selectedRow.created_by}</> : null
-                  )}
-                  {approvalNote(selectedRow)}
-                  {selectedRow.suggest_strategy ? (
-                    <>
-                      {" · suggested via "}
-                      <span className="font-medium">{strategyLabel[selectedRow.suggest_strategy] || selectedRow.suggest_strategy}</span>
-                      {selectedRow.umls_cui ? ` (CUI ${selectedRow.umls_cui})` : ""}
-                    </>
-                  ) : null}
-                </p>
-              )}
-
-              <div className="mt-4 grid gap-1">
-                <div className="flex items-center gap-1">
-                  <label className="text-sm font-medium text-slate-700" htmlFor="notes">Notes</label>
-                  <HelpTip tip={TIP.notes} />
-                </div>
-                <textarea
-                  id="notes"
-                  title={TIP.notes}
-                  value={form.notes}
-                  onChange={(e) => setField("notes", e.target.value)}
-                  rows={2}
-                  className="rounded-md border border-slate-300 px-3 py-2 text-sm font-normal text-slate-950"
-                />
-              </div>
-
-              {/* Re-pointing rewrites every stored row carrying this code, which
-                  can run for a while. Without this the dialog looks frozen and a
-                  curator clicks again. */}
-              {repointing && (
-                <div
-                  role="status"
-                  className="mt-4 rounded-md border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-900"
-                >
-                  <div className="flex items-center gap-2 font-medium">
-                    <span className="h-3 w-3 animate-spin rounded-full border-2 border-blue-600 border-t-transparent" />
-                    Updating concept {repointing.from} → {repointing.to}
-                  </div>
-                  <p className="mt-1 text-xs text-blue-800">Rewriting clinical rows already stored…</p>
-                </div>
-              )}
-              {repointResult && (
-                <div
-                  role="status"
-                  className="mt-4 rounded-md border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-900"
-                >
-                  Updated {repointResult.rows_updated} row(s) across{" "}
-                  {repointResult.persons_marked_stale} patient(s).
-                  {repointResult.rows_collapsed > 0 && ` ${repointResult.rows_collapsed} duplicate(s) collapsed.`}{" "}
-                  Patient records queued for re-derivation.
-                </div>
-              )}
-            </div>
-
-            <div className="flex items-center justify-between gap-2 border-t border-slate-200 px-5 py-4">
-              <div className="flex items-center gap-3">
-                <div className="flex items-center gap-2">
-                  <label className="text-sm font-medium text-slate-700" htmlFor="status">Status</label>
-                  <HelpTip tip={TIP.status} />
-                  {/* A new mapping is always proposed; the server enforces it.
-                      Offering Approved here would promise a one-step create-and-
-                      approve the API no longer honours, and approval is the only
-                      transition that rewrites patient data. */}
-                  <select
-                    id="status"
-                    title={isNewMapping ? TIP.status_new : TIP.status}
-                    value={isNewMapping ? "proposed" : form.status}
-                    disabled={isNewMapping}
-                    onChange={(e) => setField("status", e.target.value)}
-                    className="h-9 rounded-md border border-slate-300 px-2 text-sm font-normal text-slate-950 disabled:bg-slate-100 disabled:text-slate-500"
-                  >
-                    <option value="proposed">Proposed</option>
-                    <option value="approved" disabled={!canApprove}>
-                      {canApprove ? "Approved" : "Approved (admin only)"}
-                    </option>
-                    <option value="rejected">Rejected</option>
-                  </select>
-                </div>
-                {selectedRow?.mapping_id && (
-                  <button
-                    type="button"
-                    onClick={() => void deleteMapping(selectedRow)}
-                    className="inline-flex items-center gap-1.5 rounded-md border border-red-200 px-2.5 py-1.5 text-xs font-medium text-red-700 hover:bg-red-50"
-                  >
-                    <Trash2 size={13} />
-                    Delete
-                  </button>
-                )}
-              </div>
-              <div className="flex gap-2">
-                <button
-                  type="button"
-                  onClick={closeDialog}
-                  className="rounded-md border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100"
-                >
-                  {repointResult ? "Close" : "Cancel"}
-                </button>
-                <button
-                  type="submit"
-                  disabled={saving}
-                  className="rounded-md bg-slate-950 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-60"
-                >
-                  {saving
-                    ? "Saving"
-                    : willRepoint
-                      ? "Update & Approve"
-                      : dialogMode === "edit"
-                        ? "Update Mapping"
-                        : "Save Mapping"}
-                </button>
-              </div>
-            </div>
-          </form>
-        </div>
-      )}
-      {mintOpen && dialogMode && <MintConceptDialog
-        vocabularies={reference.destination_vocabularies} domains={reference.domains}
-        initialDomain={form.domain_id} initialName={form.source_code_description || form.source_code}
-        sourceCode={form.source_code} sourceVocabulary={form.source_vocabulary_id}
-        onClose={() => setMintOpen(false)}
-        onSelect={concept => { applyConcept(concept); setMintOpen(false); }}
+      {uploadOpen && <CodeMappingUploadDialog
+        defaultProvenance={currentUser?.email || ""}
+        onClose={() => setUploadOpen(false)}
+        onUploaded={async (result: CodeMappingUploadResult) => {
+          setUploadOpen(false);
+          setPages({});
+          setBanner(result.duplicate
+            ? `This CSV was already uploaded. ${result.total} rows; no counts were added twice.`
+            : `Uploaded ${result.total} rows: ${result.inserted} inserted, ${result.updated} updated, ${result.unchanged} unchanged.`);
+          await refreshCurrent.current();
+        }}
       />}
+
+      <EditMappingDialog
+        open={dialogMode !== null}
+        onClose={closeDialog}
+        mode={dialogMode || "new"}
+        row={selectedRow}
+        reference={reference}
+        canApprove={canApprove}
+        sourceExamples
+        strategies={strategies}
+        rankingModel={rankingModel}
+        onStrategiesChange={setStrategies}
+        onRankingModelChange={setRankingModel}
+        onSaved={handleDialogSaved}
+        onDeleted={handleDialogDeleted}
+        onBanner={setBanner}
+      />
     </div>
   );
 }

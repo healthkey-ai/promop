@@ -67,6 +67,121 @@ source value according to your normal unmapped-data policy and do not write the
 }
 ```
 
+### Text terms from documents
+
+A document extractor has wording, not a code: "Hemoglobin 10.2 g/dL". Send
+the wording as the code with an **empty** `source_vocabulary_id` (the Uncoded
+vocabulary), and whatever context the document gives:
+
+```json
+{
+  "codes": [
+    {
+      "source_vocabulary_id": "",
+      "source_code": "Hemoglobin",
+      "omop_table": "measurement",
+      "source_unit": "g/dL",
+      "quantity": 10.2,
+      "specimen": "blood"
+    }
+  ]
+}
+```
+
+A term goes through the same resolver as every code, so there is one matcher,
+not two: a curated mapping for the term wins; a term with an approved **axis
+variant** in that unit resolves to the variant's LOINC, keyed `"|term|unit"`
+like a hospital code; a new term is offered to Suggest, whose candidates are
+filtered by the LOINC axes the unit, value and specimen settle (a term in
+mmol/L is never offered a mass-concentration code); and the term is queued
+for curators under the **Uncoded** tab with the unit and context stored as
+evidence. Once a curator approves it, every later document resolves.
+
+Entries are keyed `"|term"` after whitespace is collapsed and the term cut to
+100 characters, and matched case-insensitively, so "M-Protein, Serum" and
+"M-PROTEIN,  SERUM" are one queue row. Terms are global, not per
+organization.
+
+What a text entry adds to the answer:
+
+```json
+{
+  "status": "proposed",
+  "resolved": false,
+  "match": "ambiguous",
+  "candidates": [
+    {"concept_id": 3020491, "concept_name": "Glucose [Moles/volume] in Serum or Plasma",
+     "concept_code": "14749-6", "vocabulary_id": "LOINC", "domain_id": "Measurement",
+     "lexical_score": 0.42, "axes_matched": 2,
+     "loinc_axes": {"component": "Glucose", "property": "SCnc", "time_aspect": "Pt",
+                    "system": "Ser/Plas", "scale_type": "Qn", "method_type": ""}}
+  ]
+}
+```
+
+| `match` | Meaning |
+|---|---|
+| `resolved` | A curated mapping (or its variant for this unit) answered; `resolved` is `true`. |
+| `ambiguous` | Nothing curated yet. `candidates` are the axis-filtered options, best first, for a reviewer. |
+| `unresolved` | Nothing curated and nothing retrieved. |
+
+Only `resolved: true` permits a write. `candidates` are review aids, like
+`proposed_target_concept_id`. A term nothing matched is queued with **no**
+destination: no placeholder concept is minted for a document phrasing.
+
+The response carries `matcher_version`; record it on each run so a later
+re-run is explainable. A term seen in a second unit is flagged with axis
+variants in the queue, exactly as a hospital code is, and a curator can give
+each unit its own LOINC.
+
+### Axis variants and Suggest
+
+`GET /api/v1/code-mappings/<id>/loinc-axes/` lists a code's axis variants;
+`POST .../axis-variants/` points one at a destination (`approve: true`
+re-points its stored rows). `POST .../axis-variants/suggest/` (#2012) takes
+`{strategies?, ranking_model?, loinc_axes?, replace?}` and suggests a standard
+LOINC for every variant without a destination (every proposed one with
+`replace`), storing each as proposed; approved variants are never touched.
+Each variant is suggested as the code would be with that variant's axis
+values added to the curator's entries, so the mmol/L variant of a glucose
+code is only ever offered a substance concentration. A winner that is not a
+standard LOINC in the mapping's domain is dropped and reported in `note`. The
+response is the axes payload plus `suggestions`, one per variant considered.
+At most five variants are suggested per call. The Edit Mapping dialog calls
+this from its Suggest button when the code has two or more variants, and the
+Concept to Code preview calls it for each flagged candidate.
+
+Flags refresh after each source-code upload for the codes it touched. The bulk
+refresh of every multi-unit code on the instance is a worker job (#2021):
+`manage.py refresh_axis_variants --rebuild-evidence` or migration `0307` has the
+walk first rewrite each code's stored unit evidence from the instance's own
+patient data (#2043).
+`manage.py refresh_axis_variants --queue` or migration `0303` records an
+`axis_variant_refresh` request and the Celery worker performs it, with `keys`,
+`done`, `refreshed` and a `progress_at` heartbeat on the row as it goes. A
+deploy that replaces the worker mid-walk kills the task; the next sweep, at
+worker boot or on a live worker's five-minute recheck (#2048), sees the stale
+heartbeat, requeues the request and resumes it after its `cursor` (#2023). It never runs inside `migrate`:
+on the HealthTree instance it outlived the Cloud Run migrate job's hour, and
+no deploy reached traffic until the walk was moved off the release step. A
+worker publishes any request still queued when it starts, so a request a
+pre-upgrade worker dropped as an unknown task is picked up by the next one.
+
+A source with LOINC axis evidence has no SNOMED evidence: an axis the records
+or a curator settled, units that imply several axis sets (variants), or a lab
+signal (a LOINC code or coding, a laboratory category). `GET
+.../snomed-attributes/` answers `applies: false` with the reason in
+`loinc_evidence`, and the dialog hides the SNOMED section (#2014).
+
+Record units settle the shared axes before the metadata's one sample does:
+every record in a mass-concentration unit settles Property `MCnc`, and
+records carrying any unit settle Scale `Qn`, even when the stored metadata
+holds only a reference-range unit. When the units imply several axis sets the
+panel leads with the variants, their units and destinations, and folds the
+shared axes under them.
+
+The term is never written to a log.
+
 The endpoint is an ingest encounter operation, not a cacheable reference GET:
 responses include `Cache-Control: no-store`. Send one entry for each distinct
 code encounter that should count toward review priority. Clients must avoid
@@ -75,6 +190,53 @@ is another recorded encounter.
 
 The Code Mapping UI list and curator CRUD endpoints are different APIs. Browsing
 or searching those endpoints never changes `Seen`.
+
+## Uploading a source-code inventory
+
+Users with Code Mapping access can select **Upload** on the Code Mapping page,
+choose a CSV, name its source vocabulary, and set its provenance. Provenance
+defaults to the signed-in user's email but remains editable.
+
+The CSV header is case- and surrounding-whitespace-insensitive and must contain
+`source code` and `source description`. `seen count`, `destination concept ID`,
+and `state` are optional. An absent or blank seen count means zero. State accepts
+`Approved` or `Proposed` (case- and surrounding-whitespace-insensitive); an
+absent or blank state means `Proposed`. `Approved` requires a destination and
+is restricted to staff and organization admins. Unknown or duplicate headers,
+duplicate source codes, negative/non-integer counts, invalid states, malformed
+rows, and overlong values reject the entire upload with row-numbered errors.
+Uploads are limited to 5 MB and 100,000 nonblank data rows.
+
+For example, the complete five-column shape is:
+
+```csv
+source code,source description,seen count,destination concept ID,state
+A01,Albumin,8,3024561,Approved
+B02,Needs review,2,3024561,
+```
+
+The browser sends the form to:
+
+```http
+POST /api/v1/code-mappings/upload/
+Content-Type: multipart/form-data
+
+file=<CSV>
+source_vocabulary_id=VendorLab
+provenance=curator@example.com
+```
+
+New codes become proposed SCCM rows unless their state is explicitly Approved.
+A destination with Proposed or blank state remains in the review queue; only an
+Approved destination becomes effective and re-points matching clinical rows.
+Existing rows receive a nonblank description update and the uploaded count is
+added to `Seen`. When a destination is present, its state updates the mapping;
+without a destination, existing destination and review state are preserved.
+Notes and other curation fields are not changed. Provenance fills only a blank
+existing provenance value. The operation is atomic, and an immutable receipt
+records its result. Re-uploading identical CSV bytes for the same vocabulary
+and provenance returns that receipt with `duplicate: true` and does not add the
+counts again.
 
 ## What SCCM does under the hood
 
@@ -89,8 +251,12 @@ The lookup lifecycle is:
 2. Return an existing effective SCCM mapping. A curator-approved mapping wins
    over every automatic result.
 3. If an existing row is `proposed`, return it as unresolved and atomically
-   increment its `occurrence_count` and `last_seen`. Its target remains a
-   suggestion, never an effective mapping.
+   update its `last_seen` and `occurrence_count`. This endpoint asks once per
+   code per batch, not once per record, so its count is provisional (#2123):
+   it adds one only while the code has no per-patient rows on this instance,
+   and once they exist the count is set from them (per-record callers such as
+   FHIR sync always add one). Its target remains a suggestion, never an
+   effective mapping.
 4. On an SCCM miss, look up the code in loaded Athena vocabulary data. This is
    valid for every source vocabulary, including standard CPT4, LOINC, and
    SNOMED concepts. A successful direct match is materialized in SCCM as an
@@ -115,6 +281,53 @@ Curators approve, edit, reject, or replace proposed mappings in the Code
 Mapping UI. Approval makes the row effective and can re-point already stored
 clinical rows; that governed decision is why importers must never promote a
 proposal themselves.
+
+### SNOMED source identifiers
+
+The FHIR OID `urn:oid:2.16.840.1.113883.6.96` and `SNOMED` identify the same
+code system. Crossmap imports and new curator mappings store `SNOMED`; lookup
+accepts either spelling and preserves the caller's spelling in response keys.
+Source codes and destination concept IDs are not changed by this normalization.
+
+Migration `0260_normalize_snomed_oid_mappings` merges redundant imported OID
+rows into approved canonical mappings and normalizes alias-only rows. Only
+untouched HT-FHIR proposals with a matching, active standard SNOMED destination
+and consistent domain/table are automatically approved. Curator decisions,
+machine suggestions, invalid destinations and conflicting duplicates require
+review. A retained conflicting OID row continues to govern lookups using that
+OID, rather than silently falling through to the canonical row.
+
+Run `python manage.py audit_snomed_oid_mappings` for a read-only JSON preview.
+Duplicate merges retain the larger encounter count, earliest first-seen and
+latest last-seen timestamps, move candidate/review dependencies, and append the
+removed row's metadata to the survivor's notes. The migration does not rewrite
+clinical facts. It is irreversible: recovery requires a backup or manual
+reconciliation using those snapshots, accounting for subsequent curation.
+
+### Standard SNOMED identities and imported drug crossmaps
+
+A SNOMED code that is already an active OMOP standard concept does not need
+an automatic SNOMED-to-RxNorm translation. Crossmap imports prefer its exact
+SNOMED identity and its actual domain over the external crossmap destination.
+Existing mappings are not overwritten by re-imports.
+
+Migration `0261_prefer_standard_snomed_identities` corrects untouched imported
+proposals whose selected RxNorm destination is missing, nonstandard or invalid.
+It approves the matching active standard SNOMED concept, corrects domain/table
+metadata, retains imported candidates and encounter counts, and snapshots the
+old mapping in notes. Approved/rejected mappings, human edits, machine-suggestion
+decisions, locks and conflicting non-RxNorm candidates are protected. The
+resolver applies the same eligibility rules when it encounters a remaining
+crossmap proposal. Preview with `python manage.py audit_snomed_crossmap_identities`.
+
+Standard status belongs to a concept, not to the SNOMED vocabulary as a whole.
+Nonstandard or inactive SNOMED sources are not automatically self-mapped.
+An automatic Observation identity is usable for an Observation request, not a
+Drug request. Device identities remain approved reference mappings, but have
+no supported clinical table in this application and cannot resolve as drug
+exposures. Incompatible requests return `resolved: false`, the actual mapping
+domain/table, and `unresolved_reason: "destination_domain_or_validity_mismatch"`.
+Clinical facts are not moved between tables by either migration.
 
 ### Why curation lives in SCCM
 
@@ -165,3 +378,42 @@ excluded from the latest batch-run link. Requests without `async: true` retain
 the synchronous response, which now also includes the complete candidate pool.
 As with batch runs, live polling requires the queued dispatcher; inline execution
 returns all completed stages in the initial response.
+
+### Repair nonstandard SNOMED crossmap destinations from local relationships
+
+Migration `0262_reconcile_snomed_local_relationships` follows the identity repair.
+It starts with untouched imported SNOMED proposals whose RxNorm destination is
+missing or nonstandard, locates the source in `concept`, and reads its current
+outgoing `Maps to` rows from `concept_relationship`. It uses each environment's
+installed tables: there is no bundled mapping data, network lookup, export, or
+instance-specific ID list. Counts therefore depend on local vocabulary coverage.
+
+A single active standard destination becomes approved. Multiple active standard
+destinations replace the old candidates and remain proposed with no selected
+target, for curator review. No valid destination leaves the row unchanged. Only
+direct SNOMED relationships are used; indirect RxNorm recovery is deferred.
+Retired source codes can be resolved through their still-current relationships.
+Missing relationship targets are reported as incomplete evidence rather than
+approving from an incomplete target set. Destinations in deprecated vocabularies,
+locally authored concepts, and invalid/nonstandard destinations are excluded.
+
+Approval uses the destination's actual domain. Domains without clinical storage
+support (including Device) retain a blank table and cannot resolve as Drug.
+The resolver also leaves the multiple-destination queue for curator selection.
+Reimporting the HealthTree artifact preserves the repaired candidate set.
+
+Approved/rejected mappings, human attribution, locks, suggestion decisions and
+archived suggestion reviews are protected. The migration rechecks row eligibility
+under locks in bounded transactions. It preserves encounter counts, descriptions,
+source provenance and review history; original mapping/candidate definitions and
+relationship evidence are recorded in notes before replacement. Only SCCM and
+its destination candidates are written; concepts, relationships and clinical
+facts are unchanged. Repeated execution does not modify repaired rows. This is
+irreversible automatically: use the audit snapshots or a backup for manual
+recovery rather than overwriting later curation.
+
+Preview without writes or locks:
+
+```sh
+python manage.py audit_snomed_relationship_mappings
+```

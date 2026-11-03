@@ -21,6 +21,7 @@ import time
 from django.core.management.base import BaseCommand, CommandError
 from django.db import connection, transaction
 
+from omop_core.mapping.suggestions import EMBEDDING_MODEL_NAME
 from omop_core.models import Concept
 
 logger = logging.getLogger(__name__)
@@ -30,7 +31,7 @@ DEFAULT_BATCH_SIZE = 512
 # floats (~3KB as text), so 64 rows is ~200KB per INSERT, well within Render's
 # statement limits.
 DB_WRITE_BATCH = 64
-MODEL_NAME = 'BAAI/bge-small-en-v1.5'
+MODEL_NAME = EMBEDDING_MODEL_NAME
 EMBEDDING_DIM = 384
 
 

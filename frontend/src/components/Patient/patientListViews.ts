@@ -5,9 +5,9 @@ export const REVIEW_FILTER_DEFAULTS = {
 };
 export type ReviewFilters = typeof REVIEW_FILTER_DEFAULTS;
 export const VIEW_COLUMNS = {
-  doctor: ['treatment', 'status', 'ecog', 'gaps', 'freshness'],
-  foundation: ['status', 'location', 'contact', 'gaps', 'freshness'],
-  analyst: ['status', 'ecog', 'organization', 'location', 'gaps', 'freshness'],
+  doctor: ['treatment', 'ecog', 'gaps', 'freshness'],
+  foundation: ['location', 'contact', 'gaps', 'freshness'],
+  analyst: ['ecog', 'organization', 'location', 'gaps', 'freshness'],
 } as const;
 export interface SavedView {
   filters: ReviewFilters;
@@ -36,7 +36,7 @@ export function loadPreferences(key: string): Preferences {
         };
         if (!choices[field] || choices[field]?.includes(value)) filters[field] = value.slice(0, 256);
       }
-      views[name] = { filters, ordering: typeof source.ordering === 'string' && /^-?(updated|age|name|disease|stage|ecog|lines|status|freshness|gaps|organization)$/.test(source.ordering) ? source.ordering : '-updated' };
+      views[name] = { filters, ordering: typeof source.ordering === 'string' && /^-?(updated|age|name|disease|stage|ecog|lines|status|unmapped_source_codes|freshness|gaps|organization)$/.test(source.ordering) ? source.ordering : '-updated' };
     }
     return { view, views };
   } catch {

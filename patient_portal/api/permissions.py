@@ -6,7 +6,7 @@ from rest_framework.permissions import BasePermission
 
 from .providers.base import TokenClaims
 from patient_portal.service_tokens import ServiceCredential
-from omop_core.services.access import has_org_admin_access
+from omop_core.services.access import has_org_admin_access, has_explicit_org_admin_access
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +115,7 @@ _READ_SCOPES = frozenset(('patient/*.read', 'user/*.read'))
 _WRITE_SCOPES = frozenset(('patient/*.write', 'user/*.write'))
 _ETL_WRITE_SCOPE = 'system/etl.write'
 _ETL_WRITE_METHODS = frozenset(('POST', 'PUT', 'PATCH'))
+_ETL_DELETE_SCOPE = 'system/etl.delete'
 # Vocabulary/concept data is reference (system) data, not patient data, so a
 # service consumer may read it with a system/reference scope in addition to the
 # patient/user read scopes. See healthkey-ai/promop#344.
@@ -163,6 +164,10 @@ class ScopedTokenPermission(BasePermission):
             # Staff users retain full access.
             if getattr(request.user, 'is_staff', False):
                 return True
+            # Org admins (direct grant or trust-derived) retain full access.
+            from omop_core.services.access import get_admin_orgs
+            if get_admin_orgs(request.user).exists():
+                return True
             # Regular authenticated users (patients): read + PATCH own data only.
             # POST (sync, bulk upload) and DELETE (visits, measurements, bulk) are denied.
             return request.method in _SAFE_METHODS or request.method == 'PATCH'
@@ -178,6 +183,22 @@ class ScopedTokenPermission(BasePermission):
         if method in _SAFE_METHODS:
             return bool(token_scopes & self.read_scopes)
         return bool(token_scopes & _WRITE_SCOPES)
+
+
+class OrgAdminTokenScopePermission(ScopedTokenPermission):
+    """Require a write scope for bearer-backed organization administration.
+
+    Role checks on the view still decide *who* may administer an organization.
+    Session and partner-auth admins retain their existing POST access; OAuth2
+    and service credentials must additionally carry a write scope. In
+    particular, a delegated read-only SMART token cannot create an org or
+    turn an invitation into a durable org-admin grant.
+    """
+
+    def has_permission(self, request, view):
+        if request.auth is None or isinstance(request.auth, TokenClaims):
+            return bool(request.user and request.user.is_authenticated)
+        return super().has_permission(request, view)
 
 
 class VocabReadPermission(ScopedTokenPermission):
@@ -208,12 +229,51 @@ def _has_legacy_etl_write_grant(request) -> bool:
     )
 
 
+def _has_etl_delete_grant(request) -> bool:
+    """Whether a service credential holds the ETL clinical row delete capability.
+
+    Method-blind on purpose: the bulk delete is a POST. Only the classes below
+    decide which verbs and endpoints it reaches.
+    """
+    return (
+        is_service_token(request)
+        and _ETL_DELETE_SCOPE in service_token_scopes(request).split()
+    )
+
+
+class EtlDeletePermission(ScopedTokenPermission):
+    """Clinical row bulk delete: the ETL delete capability or the base rules."""
+
+    def has_permission(self, request, view):
+        return _has_etl_delete_grant(request) or super().has_permission(
+            request, view
+        )
+
+
 class EtlWritePermission(ScopedTokenPermission):
     """Allow the legacy ETL capability on an explicitly approved endpoint."""
 
     def has_permission(self, request, view):
         return _has_legacy_etl_write_grant(request) or super().has_permission(
             request, view
+        )
+
+
+class EtlProvisionPermission(BasePermission):
+    """The ETL capability, or staff. Nothing else.
+
+    Narrower than EtlWritePermission on purpose: an org-linked
+    client_credentials app is also a machine caller, and provisioning is not
+    something it should reach by holding a SMART write scope.
+    """
+
+    def has_permission(self, request, view):
+        if _has_legacy_etl_write_grant(request):
+            return True
+        return bool(
+            request.user
+            and request.user.is_authenticated
+            and getattr(request.user, 'is_staff', False)
         )
 
 
@@ -279,9 +339,11 @@ class GenomicsCrudPermission(ScopedTokenPermission):
 
 
 class EtlPatientCrudPermission(PatientCrudPermission):
-    """Patient CRUD rules plus the narrowly placed legacy ETL capability."""
+    """Patient CRUD rules plus the narrowly placed ETL capabilities."""
 
     def has_permission(self, request, view):
+        if request.method.upper() == 'DELETE' and _has_etl_delete_grant(request):
+            return True
         return _has_legacy_etl_write_grant(request) or super().has_permission(
             request, view
         )
@@ -405,3 +467,13 @@ class IsStaffOrOrgAdmin(BasePermission):
 
         slug = view.kwargs.get('slug')
         return has_org_admin_access(request.user, slug)
+
+
+class IsStaffOrAccessAdmin(BasePermission):
+    """Only explicit organization admins or staff may delegate access."""
+
+    def has_permission(self, request, view):
+        return bool(
+            request.user and request.user.is_authenticated
+            and has_explicit_org_admin_access(request.user, view.kwargs.get('slug'))
+        )

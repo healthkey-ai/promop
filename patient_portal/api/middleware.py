@@ -12,6 +12,10 @@ from promop.sentry import redact_path
 
 logger = logging.getLogger('audit')
 _deprecation_logger = logging.getLogger(__name__)
+# Operational warnings/errors live beside the audit event stream, not inside it:
+# SIEM consumers parse every `audit` record as JSON, so plain messages there are
+# both noise and a broken contract (#1929).
+ops_logger = logging.getLogger('omop.ops')
 
 # Sunset of the legacy, non-versioned /api/ prefix (#271).
 #
@@ -201,7 +205,7 @@ class AuditLogMiddleware:
                 'duration_ms': round((time.monotonic() - start) * 1000),
             }
         except Exception:
-            logger.warning("AuditLogMiddleware failed to build audit entry", exc_info=True)
+            ops_logger.warning("AuditLogMiddleware failed to build audit entry", exc_info=True)
             return response
 
         # stdout (SIEM) and DB (review API) are written independently so one
@@ -209,12 +213,12 @@ class AuditLogMiddleware:
         try:
             logger.info(json.dumps(entry))
         except Exception:
-            logger.warning("AuditLogMiddleware stdout write failed", exc_info=True)
+            ops_logger.warning("AuditLogMiddleware stdout write failed", exc_info=True)
 
         try:
             self._persist(entry)
         except Exception:
-            logger.warning("AuditLogMiddleware DB write failed", exc_info=True)
+            ops_logger.warning("AuditLogMiddleware DB write failed", exc_info=True)
 
         return response
 

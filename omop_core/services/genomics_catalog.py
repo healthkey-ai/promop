@@ -3,6 +3,7 @@ import json
 from copy import deepcopy
 from dataclasses import dataclass
 
+from django.db import DatabaseError
 from django.utils import timezone
 from functools import lru_cache
 from pathlib import Path
@@ -49,7 +50,20 @@ def disease_code(value):
         'cll': 'CLL', 'chronic lymphocytic leukemia': 'CLL',
         'chronic lymphocytic leukaemia': 'CLL',
     }
-    return aliases.get(key)
+    code = aliases.get(key)
+    if code:
+        return code
+    # Fallback: consult the DiseaseCategoryMapping table
+    try:
+        from omop_core.models import DiseaseCategoryMapping
+        row = DiseaseCategoryMapping.objects.filter(
+            disease_name__iexact=(value or '').strip(),
+        ).values_list('category', flat=True).first()
+        if row and row != 'Other':
+            return row
+    except DatabaseError:
+        pass  # Table may not exist during early migrations
+    return None
 
 
 def canonicalize_variant(variant):
@@ -74,13 +88,18 @@ def marker_for_variant(variant):
     assigned = variant.get('marker_key')
     if assigned:
         return next((m for m in markers() if m['key'] == assigned), None)
-    gene = (variant.get('gene') or '').upper()
+    gene = (variant.get('genomic_feature') or variant.get('gene') or '').upper()
     names = {str(variant.get(k) or '').lower().replace(' ', '') for k in ('variant', 'variant_name')}
     # Exact known abnormalities take precedence; do not infer a deletion from
     # a TP53 mutation, or split combined NOTCH/ATM source statements.
     for m in markers():
-        if names & {a.lower().replace(' ', '') for a in [*m['aliases'], m['label']] if a} and m['kind'] == 'abnormality':
+        aliases = [*m['aliases'], m['label']]
+        if m['key'] in ('del17p', 'del11q', 'del13q', 'trisomy12'):
+            aliases.append(m['key'])
+        if names & {a.lower().replace(' ', '') for a in aliases if a} and m['kind'] == 'abnormality':
             return m
+    if variant.get('feature_type') not in (None, '', 'Gene'):
+        return None
     return next((m for m in markers() if m['gene'].upper() == gene and m['kind'] == 'gene'), None)
 
 

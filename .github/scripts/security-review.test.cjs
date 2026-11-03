@@ -21,10 +21,10 @@ test('finds local, qualified, and URL issue references without duplicates', () =
   ]);
 });
 
-test('requires current independent approval by Lars', () => {
+test('requires approval by a writer other than the author', () => {
   assert.equal(reviewDecision(pr, [], allowed), false);
   assert.equal(reviewDecision(pr, [review('APPROVED')], allowed), true);
-  assert.equal(reviewDecision(pr, [review('APPROVED', 'old')], allowed), false);
+  assert.equal(reviewDecision(pr, [review('APPROVED', 'current', 'second', 2)], allowed), true);
   assert.equal(reviewDecision(pr, [review('APPROVED', 'current', 'author')], allowed), false);
   assert.equal(reviewDecision(pr, [review('APPROVED', 'current', 'reader')], allowed), false);
   assert.equal(reviewDecision(pr, [{ ...review('APPROVED'), user: { login: 'larsburgess', id: 23724, type: 'Bot' } }], allowed), false);
@@ -40,8 +40,8 @@ test('dismissal and requested changes invalidate approval; comments do not', () 
 const { securityFiles, evaluate, run } = require('./security-review.cjs');
 
 test('file classification covers security code and renames while excluding test-only edits', () => {
-  for (const filename of ['ctomop/settings.py', 'frontend/src/components/Auth/Login.tsx', '.github/workflows/ci.yml', 'patient_portal/api/permissions.py', '.bandit-baseline.json']) assert.equal(securityFiles([{ filename }]), true, filename);
-  for (const filename of ['patient_portal/tests.py', 'tests/test_browser_oauth_retirement.py', 'frontend/src/components/Auth/Login.test.tsx', 'omop_core/services/genomics.py', 'Dockerfile', 'render.yaml', 'start.sh', 'patient_portal/api/v1_urls.py']) assert.equal(securityFiles([{ filename }]), false, filename);
+  for (const filename of ['ctomop/settings.py', 'frontend/src/components/Auth/Login.tsx', '.github/workflows/security-review.yml', 'patient_portal/api/permissions.py', '.bandit-baseline.json']) assert.equal(securityFiles([{ filename }]), true, filename);
+  for (const filename of ['patient_portal/tests.py', 'tests/test_browser_oauth_retirement.py', 'frontend/src/components/Auth/Login.test.tsx', 'omop_core/services/genomics.py', '.github/workflows/ci.yml', 'Dockerfile', 'render.yaml', 'start.sh', 'patient_portal/api/v1_urls.py']) assert.equal(securityFiles([{ filename }]), false, filename);
   assert.equal(securityFiles([{ filename: 'retired.py', previous_filename: 'patient_portal/api/permissions.py' }]), true);
   // Renaming the OAuth validator out of the way is still a gated change.
   assert.equal(securityFiles([{ filename: 'retired.py', previous_filename: 'ctomop/oauth.py' }]), true);
@@ -86,7 +86,7 @@ test('either a file, PR label, or linked issue label requires review', async () 
 
 test('API errors publish failure, never a passing status', async () => {
   const { github, statuses } = fixture({ broken: true });
-  await run({ github, context: { repo: { owner: 'healthkey-ai', repo: 'promop' }, serverUrl: 'https://github.com', runId: 1, eventName: 'pull_request_target' }, core: { warning() {}, setFailed() {} } });
+  await run({ github, context: { repo: { owner: 'healthkey-ai', repo: 'promop' }, serverUrl: 'https://github.com', runId: 1, eventName: 'pull_request_target', payload: { pull_request: { head: { sha: 'current' } } } }, core: { warning() {}, setFailed() {} } });
   assert.deepEqual(statuses.map(status => status.state), ['pending', 'failure']);
 });
 
@@ -103,7 +103,7 @@ test('an ordinary PR cannot overwrite a security failure on a shared head', asyn
   const security = { ...current, number: 8, labels: [{ name: 'security' }] };
   github.rest.pulls.list = async () => [security, current];
   github.rest.pulls.get = async p => ({ data: p.pull_number === 8 ? security : current });
-  await run({ github, context: { repo: { owner: 'healthkey-ai', repo: 'promop' }, serverUrl: 'https://github.com', runId: 1, eventName: 'pull_request_target' }, core: { warning() {}, setFailed() {} } });
+  await run({ github, context: { repo: { owner: 'healthkey-ai', repo: 'promop' }, serverUrl: 'https://github.com', runId: 1, eventName: 'pull_request_target', payload: { pull_request: { head: { sha: 'current' } } } }, core: { warning() {}, setFailed() {} } });
   assert.deepEqual(statuses.map(status => status.state), ['pending', 'failure']);
 });
 
@@ -111,12 +111,12 @@ test('a PR changed during evaluation cannot receive a passing status', async () 
   const { github, current, statuses } = fixture();
   let reads = 0;
   github.rest.pulls.get = async () => ({ data: { ...current, updated_at: ++reads === 1 ? 'now' : 'later' } });
-  await run({ github, context: { repo: { owner: 'healthkey-ai', repo: 'promop' }, serverUrl: 'https://github.com', runId: 1, eventName: 'pull_request_target' }, core: { warning() {}, setFailed() {} } });
+  await run({ github, context: { repo: { owner: 'healthkey-ai', repo: 'promop' }, serverUrl: 'https://github.com', runId: 1, eventName: 'pull_request_target', payload: { pull_request: { head: { sha: 'current' } } } }, core: { warning() {}, setFailed() {} } });
   assert.deepEqual(statuses.map(status => status.state), ['pending', 'failure']);
 });
 
 
-test('only Lars can approve security changes with write access and no team requirement', async () => {
+test('security changes need an approver with write access and no team requirement', async () => {
   for (const permission of ['write', 'maintain', 'admin']) {
     const { github, current } = fixture({ issueLabels: [{ name: 'security' }], reviews: [review('APPROVED', 'current', 'larsburgess')] });
     github.rest.repos.getCollaboratorPermissionLevel = async () => ({ data: { permission } });
@@ -136,25 +136,47 @@ test('security control and existing protected paths require review', () => {
 });
 
 
-test('another admin cannot substitute for the named reviewer', async () => {
+test('any writer other than the author can approve', async () => {
   const { github, current } = fixture({ labels: [{ name: 'security' }], reviews: [review('APPROVED', 'current', 'another-developer')] });
   github.rest.repos.getCollaboratorPermissionLevel = async () => ({ data: { permission: 'admin' } });
-  assert.equal((await evaluate(github, 'healthkey-ai', 'promop', current)).state, 'failure');
+  assert.deepEqual(await evaluate(github, 'healthkey-ai', 'promop', current),
+    { state: 'success', description: 'Approved by a writer other than the author' });
 });
 
-test('reviewer identity and independent authorship are required', () => {
-  const wrongIdentity = { ...review('APPROVED'), user: { login: 'larsburgess', id: 98765 } };
-  assert.equal(reviewDecision(pr, [wrongIdentity], allowed), false);
+test('the author cannot approve their own PR, under any login', () => {
   const larsAsAuthor = { ...pr, user: { login: 'larsburgess', id: 23724 } };
   assert.equal(reviewDecision(larsAsAuthor, [review('APPROVED')], allowed), false);
+  assert.equal(reviewDecision(larsAsAuthor, [review('APPROVED', 'current', 'second', 2)], allowed), true);
+  const renamed = { ...review('APPROVED', 'current', 'second', 2), user: { login: 'second', id: 23724 } };
+  assert.equal(reviewDecision(larsAsAuthor, [renamed], allowed), false);
 });
 
 test('a test-named file inside the control plane is still gated', () => {
   for (const filename of [
     '.github/scripts/security-review.test.cjs', '.github/workflows/deploy.test.yml',
     '.github/workflows/security.test.yml', '.github/actions/tests/action.yml',
-    '.github/tests/policy.yml', 'docs/soc2/tests/evidence.json',
+    'docs/soc2/tests/evidence.json',
     'tests/CODEOWNERS', '.gitleaks.test.toml',
+  ]) assert.equal(securityPath(filename), true, filename);
+});
+
+test('ordinary GitHub CI and repository automation do not require security review', () => {
+  for (const filename of [
+    '.github/workflows/ci.yml', '.github/workflows/post-merge.yml',
+    '.github/workflows/draft-pdf.yml', '.github/scripts/async_e2e_changes.py',
+    '.github/scripts/application_ci_gate.py', '.github/tests/policy.yml',
+    '.github/PULL_REQUEST_TEMPLATE.md',
+  ]) assert.equal(securityPath(filename), false, filename);
+});
+
+test('security and privileged GitHub control paths remain gated', () => {
+  for (const filename of [
+    '.github/CODEOWNERS', '.github/dependabot.yml',
+    '.github/scripts/security-review.cjs', '.github/scripts/security-review.test.cjs',
+    '.github/workflows/security-review.yml', '.github/workflows/security-review-updates.yml',
+    '.github/workflows/deploy-staging.yml', '.github/workflows/release-production.yml',
+    '.github/workflows/publish-package.yml', '.github/workflows/codeql-analysis.yml',
+    '.github/actions/deploy/action.yml',
   ]) assert.equal(securityPath(filename), true, filename);
 });
 
@@ -376,8 +398,40 @@ test('a scheduled run rewrites nothing when the verdict is unchanged', async () 
 test('an event marks an existing verdict pending while it is rechecked', async () => {
   const existing = [{ context: 'Security review', state: 'success', description: 'No security-sensitive files or security-labelled PR/issues' }];
   const { github, statuses } = fixture({ labels: [{ name: 'security' }], existingStatuses: existing });
-  await run({ github, context: { repo: { owner: 'healthkey-ai', repo: 'promop' }, serverUrl: 'https://github.com', runId: 1, eventName: 'pull_request_target' }, core: { warning() {}, setFailed() {} } });
+  await run({ github, context: { repo: { owner: 'healthkey-ai', repo: 'promop' }, serverUrl: 'https://github.com', runId: 1, eventName: 'pull_request_target', payload: { pull_request: { head: { sha: 'current' } } } }, core: { warning() {}, setFailed() {} } });
   assert.deepEqual(statuses.map(status => status.state), ['pending', 'failure']);
+});
+
+test('a non-triggering PR with an existing verdict is not marked pending', async () => {
+  const existing = [{ context: 'Security review', state: 'success', description: 'No security-sensitive files or security-labelled PR/issues' }];
+  const { github, statuses } = fixture({ existingStatuses: existing });
+  const ours = { ...pr, number: 7, labels: [], title: 'Update', body: '', changed_files: 0, updated_at: 'now', base: { ref: 'dev' }, head: { sha: 'sha-ours' } };
+  const other = { ...ours, number: 8, head: { sha: 'sha-other' } };
+  github.rest.pulls.list = async () => [ours, other];
+  github.rest.pulls.get = async ({ pull_number }) => ({ data: pull_number === 7 ? ours : other });
+
+  await run({ github, context: { repo: { owner: 'healthkey-ai', repo: 'promop' }, serverUrl: 'https://github.com', runId: 1, eventName: 'pull_request_target', payload: { pull_request: { head: { sha: 'sha-ours' } } } }, core: { warning() {}, setFailed() {} } });
+
+  assert.deepEqual(statuses.map(status => [status.sha, status.state]), [
+    ['sha-ours', 'pending'],
+    ['sha-ours', 'success'],
+  ]);
+});
+
+test('a security issue-label change invalidates existing verdicts', async () => {
+  const existing = [{ context: 'Security review', state: 'success', description: 'No security-sensitive files or security-labelled PR/issues' }];
+  for (const action of ['labeled', 'unlabeled']) {
+    const { github, statuses } = fixture({ existingStatuses: existing });
+    await run({ github, context: { repo: { owner: 'healthkey-ai', repo: 'promop' }, serverUrl: 'https://github.com', runId: 1, eventName: 'issues', payload: { action, label: { name: 'security' }, issue: { number: 141, labels: action === 'labeled' ? [{ name: 'security' }] : [] } } }, core: { warning() {}, setFailed() {} } });
+    assert.deepEqual(statuses.map(status => status.state), ['pending', 'success'], action);
+  }
+});
+
+test('a non-security issue-label change does not mark verdicts pending', async () => {
+  const existing = [{ context: 'Security review', state: 'success', description: 'No security-sensitive files or security-labelled PR/issues' }];
+  const { github, statuses } = fixture({ existingStatuses: existing });
+  await run({ github, context: { repo: { owner: 'healthkey-ai', repo: 'promop' }, serverUrl: 'https://github.com', runId: 1, eventName: 'issues', payload: { action: 'labeled', label: { name: 'documentation' }, issue: { number: 141, labels: [{ name: 'documentation' }] } } }, core: { warning() {}, setFailed() {} } });
+  assert.deepEqual(statuses, []);
 });
 
 test('a scheduled run publishes a changed verdict over an existing status', async () => {
@@ -407,7 +461,7 @@ test('a status write that fails for one commit does not skip the next', async ()
     statuses.push(status);
   };
   const warnings = [];
-  await run({ github, context: { repo: { owner: 'healthkey-ai', repo: 'promop' }, serverUrl: 'https://github.com', runId: 1, eventName: 'pull_request_target' }, core: { warning: message => warnings.push(message), setFailed() {} } });
+  await run({ github, context: { repo: { owner: 'healthkey-ai', repo: 'promop' }, serverUrl: 'https://github.com', runId: 1, eventName: 'pull_request_target', payload: { pull_request: { head: { sha: 'sha-two' } } } }, core: { warning: message => warnings.push(message), setFailed() {} } });
   assert.deepEqual(statuses.map(status => [status.sha, status.state]), [['sha-two', 'pending'], ['sha-two', 'failure']]);
   assert.ok(warnings.some(message => message.includes('sha-one')));
 });
@@ -416,8 +470,52 @@ test('an unpublishable status fails the run rather than leaving it green', async
   const { github } = fixture({ labels: [{ name: 'security' }] });
   github.rest.repos.listCommitStatusesForRef = async () => { throw new Error('502 Bad Gateway'); };
   const failures = [];
-  await run({ github, context: { repo: { owner: 'healthkey-ai', repo: 'promop' }, serverUrl: 'https://github.com', runId: 1, eventName: 'pull_request_target' }, core: { warning() {}, setFailed: message => failures.push(message) } });
+  await run({ github, context: { repo: { owner: 'healthkey-ai', repo: 'promop' }, serverUrl: 'https://github.com', runId: 1, eventName: 'pull_request_target', payload: { pull_request: { head: { sha: 'current' } } } }, core: { warning() {}, setFailed: message => failures.push(message) } });
   assert.match(failures[0], /Could not publish a security review status/);
+});
+
+test('an unpublishable status on another pull request does not fail this run', async () => {
+  const { github, statuses } = fixture({ labels: [{ name: 'security' }] });
+  const ours = { ...pr, number: 7, labels: [{ name: 'security' }], title: 'Update', body: '', changed_files: 0, updated_at: 'now', base: { ref: 'dev' }, head: { sha: 'sha-ours' } };
+  const stale = { ...ours, number: 8, head: { sha: 'sha-stale' } };
+  github.rest.pulls.list = async () => [ours, stale];
+  github.rest.pulls.get = async ({ pull_number }) => ({ data: pull_number === 7 ? ours : stale });
+  github.rest.repos.createCommitStatus = async (status) => {
+    if (status.sha === 'sha-stale') {
+      const error = new Error('Validation Failed');
+      error.status = 422;
+      throw error;
+    }
+    statuses.push(status);
+  };
+  const failures = [];
+  const warnings = [];
+  await run({ github, context: { repo: { owner: 'healthkey-ai', repo: 'promop' }, serverUrl: 'https://github.com', runId: 1, eventName: 'pull_request_target', payload: { pull_request: { head: { sha: 'sha-ours' } } } }, core: { warning: message => warnings.push(message), setFailed: message => failures.push(message) } });
+  assert.deepEqual(failures, []);
+  assert.deepEqual(statuses.map(status => [status.sha, status.state]), [['sha-ours', 'pending'], ['sha-ours', 'failure']]);
+  assert.ok(warnings.some(message => message.includes('sha-stale')));
+});
+
+test('a scheduled reconciliation warns about a stale commit without failing', async () => {
+  const { github, statuses } = fixture({ labels: [{ name: 'security' }] });
+  const ours = { ...pr, number: 7, labels: [{ name: 'security' }], title: 'Update', body: '', changed_files: 0, updated_at: 'now', base: { ref: 'dev' }, head: { sha: 'sha-ours' } };
+  const stale = { ...ours, number: 8, head: { sha: 'sha-stale' } };
+  github.rest.pulls.list = async () => [ours, stale];
+  github.rest.pulls.get = async ({ pull_number }) => ({ data: pull_number === 7 ? ours : stale });
+  github.rest.repos.createCommitStatus = async (status) => {
+    if (status.sha === 'sha-stale') {
+      const error = new Error('Validation Failed');
+      error.status = 422;
+      throw error;
+    }
+    statuses.push(status);
+  };
+  const failures = [];
+  const warnings = [];
+  await run({ github, context: { repo: { owner: 'healthkey-ai', repo: 'promop' }, serverUrl: 'https://github.com', runId: 1, eventName: 'schedule' }, core: { warning: message => warnings.push(message), setFailed: message => failures.push(message) } });
+  assert.deepEqual(failures, []);
+  assert.deepEqual(statuses.map(status => [status.sha, status.state]), [['sha-ours', 'pending'], ['sha-ours', 'failure']]);
+  assert.ok(warnings.some(message => message.includes('sha-stale')));
 });
 
 test('a reference to an issue that does not exist cannot pin a PR at failure', async () => {
@@ -434,4 +532,9 @@ test('an issue lookup failing for any other reason still fails closed', async ()
   github.graphql = async () => ({ repository: { pullRequest: { closingIssuesReferences: { nodes: [], pageInfo: { hasNextPage: false } } } } });
   github.rest.issues.get = async () => { const error = new Error('Server Error'); error.status = 500; throw error; };
   await assert.rejects(() => evaluate(github, 'healthkey-ai', 'promop', current), /Server Error/);
+});
+
+test('an approval covers the whole PR, including commits pushed after it', () => {
+  assert.equal(reviewDecision(pr, [review('APPROVED', 'earlier-commit')], allowed), true);
+  assert.equal(reviewDecision(pr, [review('APPROVED', 'earlier-commit', 'second', 2), review('COMMENTED', 'current', 'second', 3)], allowed), true);
 });

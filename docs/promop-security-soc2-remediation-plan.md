@@ -254,7 +254,7 @@ All operator-evidence work is tracked in issue #753.
 3. Data protection and vendor management.
    - Maintain sub-processor inventory and DPAs for analytics, Sentry, email, cloud, LLM providers, and hosting.
    - Document PHI retention/deletion policy.
-   - Document encryption-at-rest attestation.
+   - Document encryption-at-rest attestation: [encryption at rest](soc2/encryption-at-rest.md) (#60).
    - Inventory and control local production dumps.
 
 4. Security testing.
