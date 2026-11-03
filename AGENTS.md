@@ -1416,6 +1416,24 @@ no `unit_conversion` key in the response. Unresolved codes never get the block.
 - `patient_portal/api/views.py` — `code_mapping_lookup()` batch-fetches `destination_unit_concept` and attaches the block
 - Tests: `patient_portal.tests.CodeMappingLookupUnitConversionTest` (9 cases)
 
+### Write-time conversion of stored rows
+
+The bulk measurement write, repoint and resolve convert a stored
+`value_as_number` and its range **only** to an approved mapping's curated
+`destination_unit_concept` (#2157), in `canonical_units.normalize_measurement_units`.
+`unit_source_value` keeps the unit the value was sent in; `unit_concept` names
+the unit it is stored in.
+
+- **No inferred target.** The `"property"` base-unit fallback above is for the
+  lookup response only. Written to a row, g/L and /L do not fit the column:
+  246 10\*3/uL is 2.46e11 /L (overflow), 2 ng/mL is 0.000002 g/L (stored as 0).
+  A `CanonicalUnitPreference` is a read-time display setting, never a write target.
+- **Axis variants are not converted.** A variant has no curated unit, and the
+  mapping's was chosen for the mapping's LOINC. Rows in a variant's units stay as sent.
+- **Exact or not at all.** When the converted value or either range bound
+  does not fit `Decimal(15, 5)` exactly, the row keeps its numbers *and* its
+  `unit_concept`: converting one without the other would mislabel the value.
+
 ---
 
 ## Deployment
