@@ -643,10 +643,10 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
         record.date_of_birth_precision = precision
         record.patient_age = None
         record_profile_fields |= {'date_of_birth', 'date_of_birth_precision', 'patient_age'}
-    if person_changes:
-        person.save(update_fields=sorted(person_changes))
     if record_profile_fields:
         record.save(update_fields=sorted(record_profile_fields))
+    if person_changes:
+        person.save(update_fields=sorted(person_changes))
     if therapy_overrides_applied:
         # The model's save applies therapy_overrides to the inferred columns;
         # one write covers the answer, its provenance marker and the override.
@@ -671,7 +671,7 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
             record.save(update_fields=['user_edited_fields'])
     if profile_changes:
         # Validate the effective coordinate pair and the Location value ranges
-        # before any write so a bad profile edit returns 400 instead of an
+        # before the profile write so a bad profile edit returns 400 instead of an
         # IntegrityError after the PatientRecord save (the native PATCH does
         # the same).
         from omop_core.services.field_write_service import (

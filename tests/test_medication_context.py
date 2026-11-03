@@ -343,3 +343,20 @@ def test_pending_context_attribute_is_acknowledged_while_an_import_adds_another(
         'role': 'Induction', 'category': 'Supportive',
     }
     assert 'medication_contexts' not in (refreshed.user_edited_fields or [])
+
+
+def test_pending_context_for_an_ineligible_exposure_is_acknowledged(setup):
+    """An exposure that is no longer eligible cannot keep a pending edit forever."""
+    from omop_core.services.patient_record_service import refresh_patient_record
+
+    record, exposure, client, *_ = setup
+    assert patch(client, exposure, {'role': 'Induction'}).status_code == 200
+    record.refresh_from_db()
+    assert 'medication_contexts' in (record.user_edited_fields or [])
+
+    exposure.is_erroneous = True
+    exposure.save(update_fields=['is_erroneous'])
+    refreshed = refresh_patient_record(record.person)
+
+    assert str(exposure.pk) not in (refreshed.medication_contexts or {})
+    assert 'medication_contexts' not in (refreshed.user_edited_fields or [])

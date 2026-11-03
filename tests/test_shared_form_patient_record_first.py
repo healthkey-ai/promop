@@ -17,8 +17,8 @@ from omop_core.models import (
 from omop_core.services.patient_form import apply_patient_form_patch
 from patient_portal.models import Identity, PatientUser
 from tests.factories import (
-    ConceptFactory, DomainFactory, MeasurementFactory, PatientRecordFactory,
-    VocabularyFactory,
+    ConceptFactory, DomainFactory, MeasurementFactory, ObservationFactory,
+    PatientRecordFactory, VocabularyFactory,
 )
 
 pytestmark = pytest.mark.django_db
@@ -294,3 +294,51 @@ def test_scalar_string_limit_boundary():
         apply_patient_form_patch(
             record.person, {'progression': 'a' * 61}, descriptor=recipe,
         )
+
+
+def test_patient_scalar_without_self_report_type_updates_a_same_day_clinical_fact(monkeypatch):
+    """Without 32865 the recipe type stands, so a patient answer may update a
+    matching same-day clinical fact (docs/patient-record-first-writes.md:151-156)."""
+    _curated_fever_mapping()
+    record = PatientRecordFactory()
+    clinical = ObservationFactory(
+        person=record.person, observation_concept_id=FEVER_CONCEPT,
+        observation_source_value=FEVER_CODE, value_as_number=0.0,
+        observation_date=timezone.localdate(), observation_type_concept_id=EHR_TYPE,
+    )
+    monkeypatch.setattr(
+        'omop_core.services.omop_projection.patient_self_report_type', lambda: None,
+    )
+
+    response = _patch(_patient_client(record.person), record, {'b_symptom_fever': True})
+
+    assert response.status_code == 200, response.data
+    clinical.refresh_from_db()
+    assert clinical.observation_type_concept_id == EHR_TYPE
+    assert clinical.value_as_number == 1.0
+    assert Observation.objects.filter(
+        person=record.person, observation_concept_id=FEVER_CONCEPT,
+    ).count() == 1
+
+
+def test_projection_database_failure_keeps_the_saved_answer(monkeypatch):
+    from django.db import connection
+
+    _seed_lab_vocab()
+    record = PatientRecordFactory()
+
+    def boom(*_args, **_kwargs):
+        with connection.cursor() as cursor:
+            cursor.execute('SELECT 1 / 0')
+
+    monkeypatch.setattr('omop_core.services.omop_projection.next_pk', boom)
+
+    response = _patch(_staff_client(), record, {'hemoglobin_g_dl': 9.5})
+
+    assert response.status_code == 200, response.data
+    record.refresh_from_db()
+    assert record.hemoglobin_g_dl == 9.5
+    assert 'hemoglobin_g_dl' in (record.user_edited_fields or [])
+    assert not Measurement.objects.filter(
+        person=record.person, measurement_concept_id=HEMOGLOBIN_CONCEPT,
+    ).exists()
