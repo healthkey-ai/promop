@@ -527,12 +527,15 @@ def _curated_writes(choice_options=None, genomics_recipes=None, clinical_mapping
             # can hide this invalid approved mapping.
             entries[row.field_name] = {
                 'kind': KIND_DIRECT,
-                'writable': False,
+                'writable': True,
+                'target': 'patient_record',
                 'curated': True,
+                'value_kind': row.value_kind or _value_kind(row.field_name),
                 'reason': (
-                    f'Approved mapping source_value exceeds the {width}-character '
-                    f'limit of {source_field.model._meta.db_table}.{source_field.name}. '
-                    'Shorten the mapping source_value before writing this field.'
+                    f'Written directly to PatientRecord. The approved mapping '
+                    f'source_value exceeds the {width}-character limit of '
+                    f'{source_field.model._meta.db_table}.{source_field.name}; '
+                    'fix the mapping before projection is available.'
                 ),
             }
             continue
@@ -886,6 +889,18 @@ def build_writable_field_descriptor():
             descriptor[field] = entry
             continue
 
+        if field in _COMPUTED_INPUTS:
+            inputs = _COMPUTED_INPUTS[field]
+            descriptor[field] = {
+                'kind': KIND_COMPUTED,
+                'writable': False,
+                'inputs': inputs,
+                'reason': (
+                    'Computed from ' + ', '.join(inputs) + '.' if inputs else
+                    'Computed from OMOP facts; there is no record field to edit.'
+                ),
+            }
+            continue
         if field in curated:
             descriptor[field] = curated[field]
             continue
@@ -904,18 +919,6 @@ def build_writable_field_descriptor():
             }
             continue
 
-        if field in _COMPUTED_INPUTS:
-            inputs = _COMPUTED_INPUTS[field]
-            descriptor[field] = {
-                'kind': KIND_COMPUTED,
-                'writable': False,
-                'inputs': inputs,
-                'reason': (
-                    'Computed from ' + ', '.join(inputs) + '.' if inputs else
-                    'Computed from OMOP facts; there is no record field to edit.'
-                ),
-            }
-            continue
 
         if field.endswith('_units'):
             # A unit is not a fact of its own — it is the unit_concept carried on

@@ -370,13 +370,13 @@ def patient_form_descriptors(descriptor=None, *, readable_fields=None, writable=
         projection = entry.get('projection') or {}
         unsupported = DEDICATED_WRITES.get(name)
         # A best-effort projection is written to PatientRecord first; the fact is
-        # a side effect that need not be readable back. This is the only way an
-        # occurrence target can be authored here, because an occurrence cannot
-        # be derived back into the current answer.
+        # a side effect that need not be readable back. An ordinary direct field
+        # whose mapping targets an occurrence is saved on PatientRecord without
+        # authoring that occurrence, because it cannot be derived back into the
+        # current answer.
         if (projection and not projection.get('best_effort')
-                and (projection.get('omop_table') not in ('measurement', 'observation')
-                     or entry.get('value_kind') == 'json')):
-            unsupported = 'This field requires its dedicated OMOP resource editor.'
+                and entry.get('value_kind') == 'json'):
+            unsupported = 'This field requires its dedicated structured-data editor.'
         if entry.get('kind') == 'editable' and not projection and 'concept_id' not in entry:
             unsupported = 'This field requires its dedicated structured-data editor.'
         if record is not None and name in ('height', 'weight'):
@@ -570,6 +570,13 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
             and entry.get('target') == 'patient_record'
             and entry.get('projection_target') in ('person', 'location')
         )
+        occurrence_projection = (
+            entry.get('kind') == 'direct'
+            and entry.get('target') == 'patient_record'
+            and not entry.get('clinical_input_contract')
+            and entry.get('value_kind') != 'json'
+            and projection.get('omop_table') in ('condition', 'drug_exposure', 'procedure')
+        )
         if profile_projection:
             # The record is the source of truth for the profile value too; the
             # Person/Location copy is projected after the record write, without
@@ -584,7 +591,7 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
             from omop_core.services.omop_projection import projection_for_descriptor
             side_effect_projections[name] = projection_for_descriptor(entry)
         if ((not entry.get('projection') or best_effort or scalar_projection
-                or profile_projection)
+                or profile_projection or occurrence_projection)
                 and entry.get('kind') == 'direct'):
             field = record._meta.get_field(name)
             if not field.concrete or field.is_relation or field.primary_key:

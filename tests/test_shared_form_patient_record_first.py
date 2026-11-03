@@ -11,10 +11,11 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from omop_core.models import (
-    Concept, FieldConceptMapping, Measurement, Observation, PatientRecord,
-    ProvenanceRecord,
+    Concept, ConditionOccurrence, FieldConceptMapping, Measurement, Observation,
+    PatientRecord, ProvenanceRecord,
 )
 from omop_core.services.patient_form import apply_patient_form_patch
+from omop_core.services.write_descriptor import build_writable_field_descriptor
 from omop_core.services.patient_record_service import refresh_patient_record
 from patient_portal.models import Identity, PatientUser
 from tests.factories import (
@@ -433,3 +434,61 @@ def test_failed_height_weight_projection_keeps_units_across_refresh(monkeypatch)
     assert 'weight' in (refreshed.user_edited_fields or [])
     assert 'height_units' not in (refreshed.user_edited_fields or [])
     assert 'weight_units' not in (refreshed.user_edited_fields or [])
+
+
+def test_occurrence_mapping_stays_writable_without_inventing_a_fact():
+    record = PatientRecordFactory()
+    recipe = {
+        'progression': {
+            'kind': 'direct', 'writable': True, 'target': 'patient_record',
+            'value_kind': 'string',
+            'projection': {'omop_table': 'condition', 'concept_id': 1},
+        },
+    }
+
+    saved, result = apply_patient_form_patch(
+        record.person, {'progression': 'yes'}, descriptor=recipe,
+    )
+
+    assert 'progression' in result.applied
+    assert saved.progression == 'yes'
+    assert not ConditionOccurrence.objects.filter(person=record.person).exists()
+
+
+def test_overlong_mapping_source_value_keeps_the_field_writable():
+    record = PatientRecordFactory()
+    VocabularyFactory(vocabulary_id='SNOMED')
+    concept = ConceptFactory(
+        concept_code='313059006', vocabulary_id='SNOMED',
+        concept_name='Planned therapy',
+    )
+    FieldConceptMapping.objects.create(
+        field_name='progression', concept=concept, omop_table='observation',
+        source_value='x' * 100, value_kind='string', status='approved',
+    )
+
+    entry = build_writable_field_descriptor()['progression']
+    assert entry['writable'] is True
+    assert 'projection' not in entry
+    saved, result = apply_patient_form_patch(
+        record.person, {'progression': 'yes'}, descriptor={'progression': entry},
+    )
+    assert 'progression' in result.applied
+    assert saved.progression == 'yes'
+
+
+def test_curated_mapping_cannot_make_a_computed_field_writable():
+    VocabularyFactory(vocabulary_id='SNOMED')
+    concept = ConceptFactory(
+        concept_code='313059006', vocabulary_id='SNOMED',
+        concept_name='Planned therapy',
+    )
+    FieldConceptMapping.objects.create(
+        field_name='patient_age', concept=concept, omop_table='observation',
+        source_value='age', value_kind='number', status='approved',
+    )
+
+    entry = build_writable_field_descriptor()['patient_age']
+
+    assert entry['kind'] == 'computed'
+    assert entry['writable'] is False

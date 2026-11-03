@@ -113,13 +113,13 @@ def test_mcl_dependency_graph_resolves_without_exposing_host_withheld_age():
         assert 'ldh_upper_limit_normal' in descriptors[name]['inputs']
 
 
-def test_unsupported_projectors_and_special_assertions_are_not_advertised():
+def test_occurrence_projections_are_writable_but_structured_editors_are_not():
     descriptor = patient_form_descriptors({
         'a': {'kind': 'direct', 'writable': True, 'target': 'patient_record',
               'projection': {'omop_table': 'condition', 'concept_id': 1}},
         'genomics_test': {'kind': 'editable', 'writable': True, 'target': 'patient_record'},
     })
-    assert not descriptor['a']['writable']
+    assert descriptor['a']['writable'] is True
     assert not descriptor['genomics_test']['writable']
 
 
