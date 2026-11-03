@@ -35,7 +35,7 @@ def marker_features(marker):
 
 
 def describe_finding(finding):
-    from omop_core.services.genomics_catalog import marker_for_variant
+    from omop_core.services.genomics_catalog import gene_concept_id, marker_for_variant
 
     result = dict(finding)
     marker = marker_for_variant(finding)
@@ -57,4 +57,14 @@ def describe_finding(finding):
             result.setdefault(key, value)
     if 'finding_category' not in result and finding.get('variant_category') == 'Simple variant':
         result['finding_category'] = 'Sequence variant'
+    # Gene identity is the OMOP Genomic concept whose concept_code is the HGNC
+    # id (#5673). Abnormalities keep it null: a deletion or translocation is a
+    # distinct finding, and matching must never satisfy a gene requirement from
+    # it alone. An unknown gene is null, never its display symbol.
+    if marker and marker.get('kind') == 'gene':
+        result['gene_concept_id'] = marker.get('omop_concept_id')
+    elif marker:
+        result['gene_concept_id'] = None
+    else:
+        result['gene_concept_id'] = gene_concept_id(gene)
     return result

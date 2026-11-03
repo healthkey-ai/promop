@@ -114,6 +114,10 @@ def normalize_variant(payload, existing=None):
         if not existing or payload['source_gene'] != existing.get('source_gene'):
             raise ValidationError({'source_gene': 'Read-only original gene text.'})
         payload.pop('source_gene')
+    if 'gene_concept_id' in payload:
+        proposed = payload.pop('gene_concept_id')
+        if proposed is not None and (not existing or proposed != existing.get('gene_concept_id')):
+            raise ValidationError({'gene_concept_id': 'Read-only derived gene identity.'})
     allowed = set(FIELDS) | {'id', 'variant', 'mutation', 'test_date', 'assay_method', 'allelic_frequency_unit', 'clone_fraction_unit', 'marker_key'}
     unknown = set(payload) - allowed
     if unknown:

@@ -25,7 +25,7 @@ def test_catalog_versions_reviewed_naming_without_editing_frozen_input():
     frozen = json.loads((Path(__file__).parents[1] / 'omop_core/data/genomics_catalog_v1.json').read_text())
     assert frozen['version'] == 1
     assert any(m['key'] == 'palb1' for m in frozen['markers'])
-    assert catalog()['version'] == 2
+    assert catalog()['version'] == 3
     marker = marker_for_variant({'gene': 'PALB1'})
     assert marker['key'] == 'palb2'
     assert marker['field_name'] == 'genomics_palb2'
