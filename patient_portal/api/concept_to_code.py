@@ -400,8 +400,8 @@ def concept_to_code_apply(request, concept_id, mapping_id):
     if (row.domain_id and row.domain_id != concept.domain_id) or (row.omop_table and row.omop_table != table):
         raise ValidationError({'detail': 'Source and destination domains disagree. Review this source in the full editor.'})
     selected_status = request.data.get('status', 'proposed')
-    if selected_status not in ('proposed', 'approved'):
-        raise ValidationError({'status': 'Choose proposed or approved.'})
+    if selected_status not in ('proposed', 'approved', 'rejected'):
+        raise ValidationError({'status': 'Choose proposed, approved or rejected.'})
     row, repoint = _upsert_source_code_mapping(concept, {
         'status': selected_status, 'domain_id': concept.domain_id, 'omop_table': table,
         'destination_vocabulary_id': concept.vocabulary_id,
