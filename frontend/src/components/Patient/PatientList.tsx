@@ -37,6 +37,8 @@ const ALL_FILTER_VALUE = "all";
 interface FilterOptions {
   orgs: Array<{ value: string; label: string }>;
   diseases: string[];
+  disease_categories?: Array<{ value: string; label: string }>;
+  diseases_by_category?: Record<string, string[]>;
   stages: string[];
   clinical_statuses?: string[];
 }
@@ -108,6 +110,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
   useEffect(() => () => { if (resolvePollRef.current) clearInterval(resolvePollRef.current); }, []);
   const [orgFilter, setOrgFilter] = useState(ALL_FILTER_VALUE);
   const [search, setSearch] = useState("");
+  const [diseaseCategoryFilter, setDiseaseCategoryFilter] = useState(ALL_FILTER_VALUE);
   const [diseaseFilter, setDiseaseFilter] = useState(ALL_FILTER_VALUE);
   const [stageFilter, setStageFilter] = useState(ALL_FILTER_VALUE);
   const [dateFilter, setDateFilter] = useState(ALL_FILTER_VALUE);
@@ -122,6 +125,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
           page_size: pageSize,
           org: orgFilter,
           search,
+          disease_category: diseaseCategoryFilter,
           disease: diseaseFilter,
           stage: stageFilter,
           date: dateFilter,
@@ -144,7 +148,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
     } finally {
       setLoading(false);
     }
-  }, [page, pageSize, orgFilter, search, diseaseFilter, stageFilter, dateFilter, reviewFilters, ordering]);
+  }, [page, pageSize, orgFilter, search, diseaseCategoryFilter, diseaseFilter, stageFilter, dateFilter, reviewFilters, ordering]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount
@@ -201,7 +205,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
       setDeleting(true);
       if (selectAllMode) {
         await api.delete("/patient-info/bulk_delete_filtered/", {
-          params: { org: orgFilter, search, disease: diseaseFilter, stage: stageFilter, date: dateFilter, ...reviewFilters },
+          params: { org: orgFilter, search, disease_category: diseaseCategoryFilter, disease: diseaseFilter, stage: stageFilter, date: dateFilter, ...reviewFilters },
         });
       } else {
         await api.delete("/patient-info/bulk_delete/", {
@@ -228,7 +232,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
         ? { select_all: true }
         : { person_ids: Array.from(selectedIds) };
       const params = selectAllMode
-        ? { org: orgFilter, search, disease: diseaseFilter, stage: stageFilter, date: dateFilter, ...reviewFilters }
+        ? { org: orgFilter, search, disease_category: diseaseCategoryFilter, disease: diseaseFilter, stage: stageFilter, date: dateFilter, ...reviewFilters }
         : undefined;
       const res = await api.post<{ run_id: string; total: number }>(
         "/v1/patient-records/bulk-resolve-source-codes/",
@@ -261,7 +265,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
     try {
       setDownloading(true);
       const params = selectAllMode
-        ? { org: orgFilter, search, disease: diseaseFilter, stage: stageFilter, date: dateFilter, ...reviewFilters, ordering }
+        ? { org: orgFilter, search, disease_category: diseaseCategoryFilter, disease: diseaseFilter, stage: stageFilter, date: dateFilter, ...reviewFilters, ordering }
         : { person_ids: Array.from(selectedIds).join(",") };
       const response = await api.get<Blob>("/v1/patient-records/export-csv/", { params, responseType: "blob" });
       const disposition = String(response.headers?.["content-disposition"] ?? "");
@@ -471,6 +475,26 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
           </label>
 
           <label className="flex flex-col gap-1.5 text-sm font-medium text-foreground">
+            Disease Category
+            <select
+              value={diseaseCategoryFilter}
+              onChange={(e) => {
+                resetToFirstPage();
+                setDiseaseCategoryFilter(e.target.value);
+                setDiseaseFilter(ALL_FILTER_VALUE);
+              }}
+              className="h-10 rounded-md border border-input bg-background px-3 text-sm font-normal text-foreground"
+            >
+              <option value={ALL_FILTER_VALUE}>All</option>
+              {(filterOptions.disease_categories ?? []).map((cat) => (
+                <option key={cat.value} value={cat.value}>
+                  {cat.label}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="flex flex-col gap-1.5 text-sm font-medium text-foreground">
             Disease
             <select
               value={diseaseFilter}
@@ -478,14 +502,16 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
                 resetToFirstPage();
                 setDiseaseFilter(e.target.value);
               }}
-              className="h-10 rounded-md border border-input bg-background px-3 text-sm font-normal text-foreground"
+              disabled={diseaseCategoryFilter === ALL_FILTER_VALUE}
+              className="h-10 rounded-md border border-input bg-background px-3 text-sm font-normal text-foreground disabled:opacity-50"
             >
               <option value={ALL_FILTER_VALUE}>All</option>
-              {filterOptions.diseases.map((disease) => (
-                <option key={disease} value={disease}>
-                  {disease}
-                </option>
-              ))}
+              {diseaseCategoryFilter !== ALL_FILTER_VALUE &&
+                (filterOptions.diseases_by_category?.[diseaseCategoryFilter] ?? []).map((disease) => (
+                  <option key={disease} value={disease}>
+                    {disease}
+                  </option>
+                ))}
             </select>
           </label>
 

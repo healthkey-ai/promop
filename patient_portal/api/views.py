@@ -995,6 +995,26 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             else:
                 queryset = queryset.filter(organization__slug=org_slug)
 
+        disease_category = self._normalize_all_param(params.get('disease_category'))
+        if disease_category:
+            from omop_core.models import DiseaseCategoryMapping
+            cat_diseases = list(
+                DiseaseCategoryMapping.objects
+                .filter(category__iexact=disease_category)
+                .values_list('disease_name', flat=True)
+            )
+            if cat_diseases:
+                from omop_core.services.disease_episodes import disease_slug as _cat_slug
+                cat_match = Q()
+                for d in cat_diseases:
+                    cat_match |= Q(disease__iexact=d)
+                    slug = _cat_slug(d)
+                    if slug:
+                        cat_match |= Q(disease_slugs__contains=[slug])
+                queryset = queryset.filter(cat_match)
+            else:
+                queryset = queryset.none()
+
         disease = self._normalize_all_param(params.get('disease'))
         if disease:
             # Any cancer on the record, not only the primary one (#2182). The
@@ -1066,13 +1086,30 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         if queryset.filter(organization__isnull=True).exists():
             org_options.append({'value': '__unassigned__', 'label': 'Unassigned'})
 
-        from omop_core.models import DiseaseCategory, DiseaseCategoryChoice
+        from omop_core.models import DiseaseCategory, DiseaseCategoryChoice, DiseaseCategoryMapping
         rows = list(DiseaseCategoryChoice.objects.values_list('label', flat=True))
         diseases = rows if rows else [c.label for c in DiseaseCategory]
+
+        # Categories as {value, label} objects
+        category_rows = list(DiseaseCategoryChoice.objects.values('code', 'label'))
+        if category_rows:
+            disease_categories = [{'value': r['code'], 'label': r['label']} for r in category_rows]
+        else:
+            disease_categories = [{'value': c.value, 'label': c.label} for c in DiseaseCategory]
+
+        # Diseases grouped by category code
+        mapping_rows = DiseaseCategoryMapping.objects.values_list('category', 'disease_name')
+        diseases_by_category = {}
+        for cat_code, disease_name in mapping_rows:
+            diseases_by_category.setdefault(cat_code, []).append(disease_name)
+        for v in diseases_by_category.values():
+            v.sort()
 
         return {
             'orgs': org_options,
             'diseases': diseases,
+            'disease_categories': disease_categories,
+            'diseases_by_category': diseases_by_category,
             'stages': ['I', 'II', 'III', 'IV'],
         }
     
@@ -10589,6 +10626,9 @@ def disease_category_mapping_list(request):
         search = request.query_params.get('search', '').strip()
         if search:
             qs = qs.filter(disease_name__icontains=search)
+        category_param = request.query_params.get('category', '').strip()
+        if category_param:
+            qs = qs.filter(category__iexact=category_param)
         return Response([
             {'id': m.id, 'disease_name': m.disease_name, 'category': m.category}
             for m in qs
