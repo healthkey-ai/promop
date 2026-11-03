@@ -840,3 +840,41 @@ def test_clinical_write_preserves_authored_line_with_unknown_composition(patient
         assert {field: getattr(after, field) for field in fields} == expected
         assert Episode.objects.filter(pk=line.episode.pk).values().get() == episode
         assert list(EpisodeEvent.objects.filter(episode_id=line.episode.pk).order_by('pk').values()) == events
+
+
+def test_shared_form_clinical_input_writes_record_revision(patient, staff_client):
+    from omop_core.models import RecordRevision
+    approve(BOOL)
+    response = staff_client.patch(
+        f'/api/v1/patient-records/{patient.pk}/',
+        {BOOL: False}, format='json', HTTP_X_PATIENT_FORM='1',
+    )
+    assert response.status_code == 200, response.data
+    record = PatientRecord.objects.get(person=patient)
+    revision = RecordRevision.objects.get(patient_record=record, field=BOOL)
+    assert revision.old_value is None
+    assert revision.new_value == 'False'
+
+
+def test_shared_form_clinical_input_corrects_a_pending_answer(patient, staff_client):
+    from omop_core.models import RecordRevision
+    approve(BOOL)
+    record = PatientRecord.objects.get(person=patient)
+    record.able_to_swallow_tablets_capsules = True
+    record.user_edited_fields = [BOOL]
+    record.save(update_fields=[BOOL, 'user_edited_fields'])
+
+    response = staff_client.patch(
+        f'/api/v1/patient-records/{patient.pk}/',
+        {BOOL: False}, format='json', HTTP_X_PATIENT_FORM='1',
+    )
+
+    assert response.status_code == 200, response.data
+    record.refresh_from_db()
+    assert record.able_to_swallow_tablets_capsules is False
+    assert BOOL not in (record.user_edited_fields or [])
+    revisions = RecordRevision.objects.filter(patient_record=record, field=BOOL)
+    assert revisions.count() == 1
+    revision = revisions.get()
+    assert revision.old_value == 'True'
+    assert revision.new_value == 'False'
