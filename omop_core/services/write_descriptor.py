@@ -824,6 +824,10 @@ def build_writable_field_descriptor():
                 # the writer owns the conversion to Episode/EpisodeEvent and the
                 # derivation that fills this column back.
                 'authored_episode': {'line_number': line_number, 'part': part},
+                # The published recipe stays: a host that explains how to
+                # author a line keeps its answer, and this control is the
+                # in-form route to exactly that write.
+                'authored_via': _THERAPY_RECIPE,
                 'reason': (
                     'Written as a therapy line (an Episode grouping its facts); '
                     'this column is derived from that line.'
