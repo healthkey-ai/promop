@@ -15974,10 +15974,14 @@ class SelfSignupEmailTrustTest(TestCase):
         self.assertEqual(grant.role, 'patient')
         self.assertTrue(grant.pending_email_verification)
 
-    def test_promotion_counts_nothing_for_an_unverified_address(self):
+    def test_promotion_counts_nothing_before_the_address_is_proved(self):
+        """An unproved address must not promote, and must not be read as a domain."""
         from patient_portal.api.email_verification import promote_trusted_domain_grants
-        identity = Identity.objects.create_user(email='unproved@trusted.org', password=self.PASSWORD)
+        identity, grant = self._pending_domain_signup(email='unproved@trusted.org')
         self.assertEqual(promote_trusted_domain_grants(identity), 0)
+        grant.refresh_from_db()
+        self.assertEqual(grant.role, 'patient')
+        self.assertTrue(grant.pending_email_verification)
 
     def test_changing_the_email_clears_its_verification(self):
         identity = Identity.objects.create_user(email='first@example.com', password=self.PASSWORD)
