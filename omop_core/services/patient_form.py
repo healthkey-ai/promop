@@ -41,13 +41,15 @@ def parse_fact_date(raw, field):
     return parsed
 
 
-def _project_side_effects(person, direct, projections, authorship=None):
+def _project_side_effects(person, direct, projections, authorship=None, dates=None):
     """Mirror PatientRecord answers into OMOP without risking the saved answer.
 
     The record write already happened and is the source of truth; a projection
     failure must not roll it back or fail the request (#5521). ``authorship``
     carries the caller's self-report typing and provenance, exactly as the
     native PATCH does, so a patient answer never takes over a clinical fact.
+    ``dates`` carries the clinical date of a dated edit, so a correction lands
+    on the day the result was observed rather than the day it was typed.
     """
     acknowledged = set()
     if not projections:
@@ -66,6 +68,7 @@ def _project_side_effects(person, direct, projections, authorship=None):
         try:
             changed = project_single_value(
                 person, name, direct[name], projection, acknowledge_existing=True,
+                fact_date=(dates or {}).get(name),
                 **(authorship or {}),
             )
             # A pinned current-state answer stays pending on the record even
@@ -486,22 +489,39 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
             profile_applied.add(name)
             continue
         projection = entry.get('projection') or {}
-        # PatientRecord-first: a best-effort projection is stored on the record
-        # here and only mirrored into OMOP afterwards. Facts that are derived
-        # back into the record keep the legacy facts path below.
+        # PatientRecord-first: the record is the source of truth, and every
+        # mapped scalar is stored there before its OMOP fact is attempted as a
+        # best-effort side effect. Only dedicated clinical-input recipes (which
+        # own their writer) and profile fields still take the legacy facts path.
+        # Profile fields move to the direct path in the profile-projection PR.
         best_effort = (entry.get('kind') == 'direct'
                        and entry.get('target') == 'patient_record'
                        and projection.get('best_effort') is True)
-        if best_effort:
+        scalar_projection = (
+            entry.get('kind') == 'direct'
+            and entry.get('target') == 'patient_record'
+            and not entry.get('clinical_input_contract')
+            and entry.get('value_kind') != 'json'
+            and entry.get('projection_target') not in ('person', 'location')
+            and projection.get('omop_table') in ('measurement', 'observation')
+        )
+        if best_effort or scalar_projection:
             from omop_core.services.omop_projection import projection_for_descriptor
             side_effect_projections[name] = projection_for_descriptor(entry)
-        if ((not entry.get('projection') or best_effort)
+        if ((not entry.get('projection') or best_effort or scalar_projection)
                 and entry.get('projection_target') not in ('person', 'location')
                 and entry.get('kind') == 'direct'):
             field = record._meta.get_field(name)
             if not field.concrete or field.is_relation or field.primary_key:
                 result.rejected[name] = 'Not an editable patient-record column.'
                 continue
+            if (scalar_projection and entry.get('value_kind') != 'number'
+                    and value is not None and len(str(value)) > 60):
+                # Keep the legacy scalar contract: a rejected edit is better
+                # than a successful, silently truncated clinical assertion.
+                raise ValueError(
+                    f'{name}: this scalar write supports at most 60 characters; '
+                    'no value was saved.')
             try:
                 # JSON numbers arrive as floats. Django's DecimalField converts
                 # a float with Decimal(float), which produces a long binary
@@ -587,7 +607,8 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
         result.applied.extend(direct)
         if project_side_effects:
             acknowledged = _project_side_effects(
-                person, direct, side_effect_projections, authorship)
+                person, direct, side_effect_projections, authorship,
+                dates=fact_dates)
             if acknowledged:
                 # The fact is written, so the record no longer has to mask
                 # derivation: clear only what the projection acknowledged.

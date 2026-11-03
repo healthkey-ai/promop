@@ -270,12 +270,14 @@ def project_field_to_omop(mapping) -> int:
 
 
 def project_single_value(person, field_name, value, projection, *, acknowledge_existing=False,
-                         after_pk=None, type_concept_id=None, patient_user_id=None):
-    """Update a matching non-erroneous fact today, or create today's fact.
+                         after_pk=None, type_concept_id=None, patient_user_id=None,
+                         fact_date=None):
+    """Update a matching non-erroneous fact on ``fact_date``, or create it.
 
     Matching includes the concept and source key. Earlier dates are history and
     are never updated. The person lock serializes concurrent first writes for a
     day; an atomic savepoint keeps projection failures from poisoning PATCH.
+    ``fact_date`` is the clinical date of a dated edit; it defaults to today.
 
     *type_concept_id* types the fact by who wrote it, overriding the recipe's
     type: 32865 when a patient or their representative is the author. It then
@@ -326,7 +328,7 @@ def project_single_value(person, field_name, value, projection, *, acknowledge_e
     if val_num is None and (_is_empty(value) or value is False):
         return False
 
-    today = timezone.localdate()
+    today = fact_date or timezone.localdate()
     fact_type = type_concept_id or projection.get('type_concept_id') or 32817
     try:
         with transaction.atomic():
