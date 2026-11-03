@@ -503,13 +503,13 @@ describe('suggestion confidence', () => {
     return screen.findByText('SNOMED:HIGH');
   }
 
-  it('shows the confidence of every proposed mapping in the last column', async () => {
+  it('shows the confidence of every mapping that has one, regardless of status', async () => {
     await openScored();
     const cell = (code: string) => screen.getByText(`SNOMED:${code}`).closest('tr')!.lastElementChild as HTMLElement;
     expect(cell('HIGH')).toHaveTextContent('Confidence: 85%');
     expect(cell('MID')).toHaveTextContent('Confidence: 55%');
-    expect(cell('NONE')).toHaveTextContent('Confidence: not scored');
-    expect(cell('DONE')).not.toHaveTextContent('Confidence');
+    expect(cell('NONE')).not.toHaveTextContent('Confidence');
+    expect(cell('DONE')).toHaveTextContent('Confidence: 90%');
   });
 
   it('orders by confidence from the last column header and back by Seen', async () => {

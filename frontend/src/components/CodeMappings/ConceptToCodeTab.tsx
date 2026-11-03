@@ -960,8 +960,8 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
         <td className="p-2 text-xs">{row.destination_concept_name || 'None'}{row.destination_concept_id && <div className="mt-1 text-slate-500">
           OMOP {row.destination_concept_id} · {row.destination_standard_concept === 'S' ? 'Standard' : 'Nonstandard'}</div>}</td>
         <td className="p-2 text-xs"><span className={row.status === 'approved' ? 'font-medium text-green-800' : 'text-slate-700'}>{row.status === 'unmapped' ? 'Not yet mapped' : row.status}</span>
-          {(row.status === 'proposed' || mode === 'candidates') && <div className="mt-1 text-slate-700">
-            Confidence: {row.confidence != null ? <span className="font-medium tabular-nums">{percent(row.confidence)}</span> : <span className="text-slate-500">not scored</span>}</div>}
+          {row.confidence != null && <div className="mt-1 text-slate-700">
+            Confidence: <span className="font-medium tabular-nums">{percent(row.confidence)}</span></div>}
           {row.edited && <div className="mt-1 text-slate-700">Saved in the editor</div>}</td>
       </tr>)}
     </React.Fragment>;
@@ -988,8 +988,8 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
           OMOP {row.destination_concept_id} · {row.destination_standard_concept === 'S' ? 'Standard' : 'Nonstandard'}</div>}</td>
         <td className="p-2 text-xs"><span className={row.status === 'approved' ? 'font-medium text-green-800' : 'text-slate-700'}>{row.status === 'unmapped' ? 'Not yet mapped' : row.status}</span>
           {!!row.evidence?.length && <div className="mt-1 text-slate-500">{row.evidence.join(' + ')}</div>}
-          {(row.status === 'proposed' || mode === 'candidates') && <div className="mt-1 text-slate-700">
-            Confidence: {row.confidence != null ? <span className="font-medium tabular-nums">{percent(row.confidence)}</span> : <span className="text-slate-500">not scored</span>}</div>}
+          {row.confidence != null && <div className="mt-1 text-slate-700">
+            Confidence: <span className="font-medium tabular-nums">{percent(row.confidence)}</span></div>}
           {row.verdict === 'supported' && <div className="mt-1 text-sky-800">Model-supported; curator review required</div>}
           {row.note && <p className="mt-1 max-w-xs text-slate-500">{row.note}</p>}
           {row.edited && <div className="mt-1 text-slate-700">Saved in the editor</div>}</td>
