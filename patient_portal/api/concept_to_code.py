@@ -16,6 +16,7 @@ from omop_core.models import (
 from omop_core.services.concept_to_code import (
     browse_concepts, concept_payload, eligible_sources, source_payload, standard_destinations,
 )
+from omop_core.services.mapping_samples import attach_source_samples
 from omop_core.services.source_vocabularies import DOMAIN_TO_TABLE, VOCABULARY_OID_ALIASES
 from omop_core.services.suggest_jobs import get_dispatcher, InlineDispatcher
 
@@ -153,6 +154,7 @@ def concept_to_code_detail(request, concept_id):
                         else confidence.asc(nulls_last=True))
     page, paging = _paginate(rows.select_related('target_concept').prefetch_related('axis_variants__target_concept')
                              .order_by(*ordering), request.query_params)
+    attach_source_samples(page)
     return Response({**paging, **counts, 'status_counts': status_counts, 'concept': concept_payload(concept),
                      'results': [source_payload(row) for row in page]})
 
