@@ -351,7 +351,20 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
     result = FieldWriteResult()
     record, _ = PatientRecord.objects.get_or_create(person=person)
     record = PatientRecord.objects.select_for_update().get(pk=record.pk)
-    descriptor = patient_form_descriptors(descriptor, readable_fields=allowed_fields, record=record)
+    raw_descriptor = (build_writable_field_descriptor()
+                      if descriptor is None else descriptor)
+    # An allowed alias may be the only thing the host lists; keep its canonical
+    # entry privately for projection metadata. It is NOT added to the filtered
+    # descriptor or the write surface, so an excluded canonical field stays
+    # unwritable.
+    canonical_entries = {
+        entry.get('canonical'):
+            raw_descriptor.get(entry.get('canonical')) or entry
+        for entry in raw_descriptor.values()
+        if entry.get('canonical')
+    }
+    descriptor = patient_form_descriptors(
+        raw_descriptor, readable_fields=allowed_fields, record=record)
     facts, direct, person_changes, profile_applied = {}, {}, set(), set()
     therapy_overrides_applied = set()
     previous_override_values = {}
@@ -418,8 +431,14 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
                 overrides[canonical] = override_value
             record.therapy_overrides = overrides
             setattr(record, canonical, override_value)
-            record.user_edited_fields = sorted(
-                set(record.user_edited_fields or []) | {canonical})
+            pending = set(record.user_edited_fields or [])
+            if override_value is None:
+                # A clear must not enter the generic pending-value backfill:
+                # that is how a cleared assertion is replaced by an inferred 0.
+                pending.discard(canonical)
+            else:
+                pending.add(canonical)
+            record.user_edited_fields = sorted(pending)
             therapy_overrides_applied.add(canonical)
             result.applied.append(name)
             continue
@@ -540,16 +559,23 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
         # one write covers the answer, its provenance marker and the override.
         record.save(update_fields=sorted(therapy_overrides_applied)
                     + ['therapy_overrides', 'user_edited_fields'])
-        from omop_core.services.patient_record_revisions import write_record_revisions
-        write_record_revisions(record, previous_override_values, changed_by=changed_by)
         if project_side_effects:
             from omop_core.services.omop_projection import projection_for_descriptor
             projections = {}
             for canonical in therapy_overrides_applied:
-                projection = projection_for_descriptor(descriptor.get(canonical) or {})
+                entry = descriptor.get(canonical) or canonical_entries.get(canonical) or {}
+                projection = projection_for_descriptor(entry)
                 if projection:
                     projections[canonical] = projection
-            _project_side_effects(person, override_values, projections, authorship)
+            acknowledged = _project_side_effects(
+                person, override_values, projections, authorship)
+            if acknowledged:
+                # The fact is written; the override itself is the source of
+                # truth, so the pending marker is no longer needed. Keeping it
+                # lets a later generic backfill overwrite a cleared assertion.
+                record.user_edited_fields = sorted(
+                    set(record.user_edited_fields or []) - acknowledged)
+                record.save(update_fields=['user_edited_fields'])
     if direct:
         previous_direct = {name: getattr(record, name, None) for name in direct}
         for name, value in direct.items():
@@ -595,5 +621,22 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
             PatientRecord.objects.select_for_update().get(pk=record.pk),
             changed_fields=set(direct) | profile_applied | therapy_overrides_applied,
         )
+        if therapy_overrides_applied:
+            # Active formulas run after the save; reapply the explicit answers
+            # so the recomputation cannot replace an authored override.
+            explicit = {
+                name: (record.therapy_overrides or {})[name]
+                for name in therapy_overrides_applied
+                if name in (record.therapy_overrides or {})
+            }
+            if explicit:
+                for name, value in explicit.items():
+                    setattr(record, name, value)
+                record.save(update_fields=sorted(explicit))
     record.refresh_from_db()
+    if therapy_overrides_applied:
+        from omop_core.services.patient_record_revisions import write_record_revisions
+        # After recomputation, so a clear is recorded as old -> inferred value,
+        # not old -> the transient zero the override removal left behind.
+        write_record_revisions(record, previous_override_values, changed_by=changed_by)
     return record, result
