@@ -19,7 +19,7 @@ from django.db.models import Q
 
 from omop_core.models import (
     Concept, ConditionOccurrence, DrugExposure, FieldChoice, Measurement,
-    Observation, PatientRecord, ProcedureOccurrence,
+    Observation, PatientRecord, PreExistingConditionCategory, ProcedureOccurrence,
 )
 from omop_core.services.demographics import choices as demographic_choices
 from omop_core.services.mappings import (
@@ -44,6 +44,8 @@ KIND_EDITABLE = 'editable'      # write an OMOP fact; derivation follows
 KIND_SELECTABLE = 'selectable'  # choose from a bounded set, carried on the fact
 KIND_COMPUTED = 'computed'      # derived from other fields; never authored alone
 KIND_ALIAS = 'alias'            # mirrors a canonical field; edit that one instead
+KIND_NEGATED = 'negated'        # the opposite of a canonical boolean; write it inverted
+KIND_EXPLICIT_ANSWER = 'explicit-answer'  # its own endpoint and snapshot; never a PATCH
 KIND_PROFILE = 'profile'        # a Person attribute, written at the persons endpoint
 KIND_UNMAPPED = 'unmapped'      # no write path yet — grouped by WHY, not lumped
 KIND_AUTHORED = 'authored'      # written by authoring a different resource entirely
@@ -237,6 +239,26 @@ _SERIALIZER_ALIASES = {
     'refractory_status': 'treatment_refractory_status',
 }
 
+#: Negated views of a stored boolean. The record keeps the POSITIVE status; a
+#: trial asks "No HIV required" / "No Hepatitis B required", so the row is the
+#: opposite of the column and a write has to go to the column INVERTED (#5663).
+#:
+#: These are not aliases: reading `hiv_status = false` through an alias would
+#: show "No" beside a trial that says "No HIV", which is the wrong answer, and
+#: writing the displayed value unchanged would store the opposite of the
+#: patient's answer. The dedicated kind makes that impossible to miss — a
+#: client that does not understand `negated` must leave the field alone rather
+#: than write the display value.
+#:
+#: The `no_*` columns were removed in #2119; nothing here resurrects them. The
+#: entry is a description of the QUESTION, and `canonical` is the only field a
+#: write may touch.
+_NEGATED_ALIASES = {
+    'no_hiv_status': 'hiv_status',
+    'no_hepatitis_b_status': 'hepatitis_b_status',
+    'no_hepatitis_c_status': 'hepatitis_c_status',
+}
+
 # SerializerMethodFields. Read-only by construction — DRF has nowhere to write a
 # method — and each is assembled at serialization time from data that lives
 # elsewhere.
@@ -297,6 +319,19 @@ _ALIAS_TO_CANONICAL = {
     alias: canonical
     for canonical, aliases in _LAB_FIELD_ALIASES.items()
     for alias in aliases
+}
+
+#: An alias the MATCHER recomputes from other record fields.
+#:
+#: eGFR is a stored lab fact on the record, but EXACT derives it from the
+#: CKD-EPI inputs before scoring, so a correction typed into the alias — or
+#: into its canonical column — is replaced by the next derivation (#5664).
+#: Naming the inputs is what lets a client offer the fields that actually move
+#: the value instead of a box that silently does nothing.
+_ALIAS_INPUTS = {
+    'estimated_glomerular_filtration_rate': [
+        'serum_creatinine_level', 'patient_age', 'gender',
+    ],
 }
 
 # Values computed during derivation from other projected fields, with the inputs
@@ -861,6 +896,8 @@ def build_writable_field_descriptor():
                 'canonical': canonical,
                 'reason': f'Mirrors {canonical}; edit that field instead.',
             }
+            if field in _ALIAS_INPUTS:
+                descriptor[field]['inputs'] = _ALIAS_INPUTS[field]
             continue
 
         if field in _PROFILE_DEMOGRAPHIC:
@@ -1219,6 +1256,77 @@ def build_writable_field_descriptor():
             'canonical': canonical,
             'reason': f'Mirrors {canonical}; edit that field instead.',
         })
+
+    # The trial vocabulary asks the negated question ("No Hepatitis B
+    # required"), while the record keeps the positive answer. The descriptor
+    # carries BOTH halves — the field to write and the fact that the value
+    # must be inverted — because a client that guessed one without the other
+    # would store the opposite of what the reader answered (#5663).
+    for negated, positive in _NEGATED_ALIASES.items():
+        descriptor.setdefault(negated, {
+            'kind': KIND_NEGATED,
+            'writable': False,
+            'canonical': positive,
+            'inverted': True,
+            'value_kind': 'boolean',
+            'reason': (
+                f'Inverted view of {positive}: the record stores the positive '
+                f'status, and this row asks the negated question. Write '
+                f'{positive} with the opposite value.'
+            ),
+        })
+
+    # The birth date is stored at one of three precisions. A full date typed
+    # into a year-only record must not silently promote it (or be truncated
+    # to January 1st) — the editor needs the precision as its own control
+    # (#5664). `normalize_birth_date` treats an empty value as the default
+    # `day`, so a client that sends only the date still gets a full date.
+    if 'date_of_birth_precision' in descriptor:
+        descriptor['date_of_birth_precision'].update({
+            'value_kind': 'string',
+            'options': [
+                {'value': 'year', 'label': 'Year only'},
+                {'value': 'month', 'label': 'Month and year'},
+                {'value': 'day', 'label': 'Full date'},
+            ],
+        })
+
+    # A pre-existing-conditions answer is an ATTESTATION, not a column write:
+    # it has its own endpoint, its own audit rows, and a snapshot that refuses
+    # an answer whose starting point has moved (#1988). A generic PATCH here
+    # would race another tab's answer, and a stale dialog would silently
+    # overwrite it. The descriptor names the endpoint, the actions and the
+    # vocabulary so a host can build the editor without hardcoding any of the
+    # three; `writable: false` is the truth — the field is answered, not
+    # written.
+    category_options = [
+        {'value': code, 'label': title}
+        for code, title in (
+            PreExistingConditionCategory.objects
+            .order_by('title')
+            .values_list('code', 'title')
+        )
+    ]
+    descriptor['pre_existing_condition_categories'] = {
+        'kind': KIND_EXPLICIT_ANSWER,
+        'writable': False,
+        'target': 'patient_record',
+        'endpoint': 'preexisting-conditions-answer',
+        'actions': ['confirm_none', 'set_categories', 'withdraw'],
+        'value_kind': 'string',
+        'multiple': True,
+        # `writable: false` is about the PATCH; the endpoint is a separate
+        # permission. A read-only caller must not be offered the dialog at
+        # all, so the caller-aware view clears this flag with the rest.
+        'answerable': True,
+        'options': category_options,
+        'reason': (
+            'Answered explicitly through the patient-record '
+            'pre-existing-conditions endpoint. The answer is an attestation '
+            'with a snapshot, not a field PATCH, so a concurrent answer '
+            'cannot be overwritten.'
+        ),
+    }
 
     # Fields whose OMOP write recipe is broken — the curated mapping writes to
     # the wrong table/concept.  They are still directly writable on PatientRecord;
