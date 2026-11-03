@@ -98,6 +98,35 @@ export class PatientFormStore {
     ++this.explicitRevision;
     this.publish({ values: { ...this.snapshot.values, ...values } });
   }
+  /** Fetch the host's planned-therapy choices for the current context. */
+  private enrichFields = async (
+    fields: Record<string, FormFieldDescriptor>,
+    values: Record<string, unknown>,
+  ): Promise<Record<string, FormFieldDescriptor>> => {
+    if (fields.planned_therapies?.options_source !== 'therapy_regimens') return fields;
+    const enriched = { ...fields };
+    const disease = diseaseToDiseaseCode(values.disease);
+    try {
+      if (!disease) throw new Error('Select a disease to see available therapies.');
+      const lines = Array.isArray(values.lines_of_therapy) ? values.lines_of_therapy : [];
+      const count = values.therapy_lines_count === '3+' ? 3 : parseInt(String(values.therapy_lines_count)) || 0;
+      const next = Math.max(count, ...lines.map((line: { line: number }) => line.line)) + 1;
+      const round = next === 1 ? 'first_line_therapy' : next === 2 ? 'second_line_therapy' : 'later_line_therapy';
+      const regimens = await this.client.get<Array<{ title: string; value?: string }>>(
+        `${this.base}/v1/therapy-regimens/`, { params: { disease, round } });
+      enriched.planned_therapies = { ...enriched.planned_therapies,
+        options: regimens.data.map((regimen) => ({
+          value: regimen.value ?? regimen.title, label: regimen.title,
+        })),
+        options_note: regimens.data.length ? undefined
+          : 'No planned therapies are available for this disease and treatment line.' };
+    } catch {
+      enriched.planned_therapies = { ...enriched.planned_therapies, writable: false, retryable: true,
+        reason: disease ? 'Could not load planned therapies.' : 'Select a disease to see available therapies.' };
+    }
+    return enriched;
+  };
+
   load = (): Promise<void> => {
     if (this.loading) return this.loading;
     const revision = ++this.readRevision;
@@ -114,27 +143,7 @@ export class PatientFormStore {
           params: { person_id: personId },
           headers: { 'X-Patient-Form': '1' },
         });
-        const fields = { ...response.data };
-        if (fields.planned_therapies?.options_source === 'therapy_regimens') {
-          const disease = diseaseToDiseaseCode(values.disease);
-          try {
-            if (!disease) throw new Error('Select a disease to see available therapies.');
-            const lines = Array.isArray(values.lines_of_therapy) ? values.lines_of_therapy : [];
-            const count = values.therapy_lines_count === '3+' ? 3 : parseInt(String(values.therapy_lines_count)) || 0;
-            const next = Math.max(count, ...lines.map((line: { line: number }) => line.line)) + 1;
-            const round = next === 1 ? 'first_line_therapy' : next === 2 ? 'second_line_therapy' : 'later_line_therapy';
-            const regimens = await this.client.get<Array<{ title: string; value?: string }>>(`${this.base}/v1/therapy-regimens/`, { params: { disease, round } });
-            fields.planned_therapies = { ...fields.planned_therapies,
-              options: regimens.data.map((regimen) => ({
-                value: regimen.value ?? regimen.title, label: regimen.title,
-              })),
-              options_note: regimens.data.length ? undefined
-                : 'No planned therapies are available for this disease and treatment line.' };
-          } catch {
-            fields.planned_therapies = { ...fields.planned_therapies, writable: false, retryable: true,
-              reason: disease ? 'Could not load planned therapies.' : 'Select a disease to see available therapies.' };
-          }
-        }
+        const fields = await this.enrichFields({ ...response.data }, values);
         if (revision !== this.readRevision) return;
         this.publish({ values, fields, personId, loading: false, datesStale: false,
           errors: this.withoutStaleErrors(),
@@ -177,8 +186,9 @@ export class PatientFormStore {
       const { data } = await this.client.get<Record<string, FormFieldDescriptor>>(
         `${this.base}/v1/patient-records/writable-fields/`,
         { params: { person_id: personId }, headers: { 'X-Patient-Form': '1' } });
+      const fields = await this.enrichFields({ ...data }, this.snapshot.values);
       if (current()) {
-        this.publish({ fields: data, datesStale: false, errors: this.withoutStaleErrors() });
+        this.publish({ fields, datesStale: false, errors: this.withoutStaleErrors() });
       }
       return true;
     } catch {
