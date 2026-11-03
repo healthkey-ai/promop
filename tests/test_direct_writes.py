@@ -102,8 +102,12 @@ class TestDerivationPreservesUserEdits:
         assert refreshed.hemoglobin_g_dl == 12.5
         assert 'hemoglobin_g_dl' in refreshed.user_edited_fields
 
-    def test_empty_user_edit_not_preserved(self):
-        """A user-edited field with an empty value is not preserved."""
+    def test_empty_user_edit_marker_acknowledged_when_derivation_is_empty(self):
+        """An empty pending value is acknowledged when derivation is also empty.
+
+        This is not proof that a projection succeeded; an explicit clear is
+        protected by its own tombstone row, not by an empty marker alone.
+        """
         person = PersonFactory()
         record = PatientRecordFactory(person=person, hemoglobin_g_dl=None)
         record.user_edited_fields = ['hemoglobin_g_dl']
@@ -112,7 +116,6 @@ class TestDerivationPreservesUserEdits:
         refreshed = refresh_patient_record(person)
 
         assert refreshed.hemoglobin_g_dl is None
-        # Empty value is not preserved, so it's cleaned from tracking
         assert 'hemoglobin_g_dl' not in (refreshed.user_edited_fields or [])
 
 

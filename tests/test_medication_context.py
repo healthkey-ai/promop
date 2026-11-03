@@ -323,3 +323,23 @@ def test_unchanged_retired_echo_does_not_block_another_edit(setup):
     response = client.patch(url(exposure), {'medication_contexts': values}, format='json')
     assert response.status_code == 200, response.data
     assert saved(response, other)['role'] == 'Maintenance'
+
+
+def test_pending_context_attribute_is_acknowledged_while_an_import_adds_another(setup):
+    """A fully backed pending attribute must not stay pending because an
+    imported fact also carries another attribute the edit never touched."""
+    from omop_core.services.medication_context import save_medication_context
+    from omop_core.services.patient_record_service import refresh_patient_record
+
+    record, exposure, client, *_ = setup
+    assert patch(client, exposure, {'role': 'Induction'}).status_code == 200
+    record.refresh_from_db()
+    assert 'medication_contexts' in (record.user_edited_fields or [])
+
+    save_medication_context(exposure, {'category': 'Supportive'}, type_concept_id=32817)
+    refreshed = refresh_patient_record(record.person)
+
+    assert refreshed.medication_contexts[str(exposure.pk)] == {
+        'role': 'Induction', 'category': 'Supportive',
+    }
+    assert 'medication_contexts' not in (refreshed.user_edited_fields or [])
