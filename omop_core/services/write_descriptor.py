@@ -19,7 +19,7 @@ from django.db.models import Q
 
 from omop_core.models import (
     Concept, ConditionOccurrence, DrugExposure, FieldChoice, Measurement,
-    Observation, PatientRecord, ProcedureOccurrence,
+    Observation, PatientRecord, PreExistingConditionCategory, ProcedureOccurrence,
 )
 from omop_core.services.demographics import choices as demographic_choices
 from omop_core.services.mappings import (
@@ -45,6 +45,7 @@ KIND_SELECTABLE = 'selectable'  # choose from a bounded set, carried on the fact
 KIND_COMPUTED = 'computed'      # derived from other fields; never authored alone
 KIND_ALIAS = 'alias'            # mirrors a canonical field; edit that one instead
 KIND_NEGATED = 'negated'        # the opposite of a canonical boolean; write it inverted
+KIND_EXPLICIT_ANSWER = 'explicit-answer'  # its own endpoint and snapshot; never a PATCH
 KIND_PROFILE = 'profile'        # a Person attribute, written at the persons endpoint
 KIND_UNMAPPED = 'unmapped'      # no write path yet — grouped by WHY, not lumped
 KIND_AUTHORED = 'authored'      # written by authoring a different resource entirely
@@ -1274,6 +1275,39 @@ def build_writable_field_descriptor():
                 f'{positive} with the opposite value.'
             ),
         })
+
+    # A pre-existing-conditions answer is an ATTESTATION, not a column write:
+    # it has its own endpoint, its own audit rows, and a snapshot that refuses
+    # an answer whose starting point has moved (#1988). A generic PATCH here
+    # would race another tab's answer, and a stale dialog would silently
+    # overwrite it. The descriptor names the endpoint, the actions and the
+    # vocabulary so a host can build the editor without hardcoding any of the
+    # three; `writable: false` is the truth — the field is answered, not
+    # written.
+    category_options = [
+        {'value': code, 'label': title}
+        for code, title in (
+            PreExistingConditionCategory.objects
+            .order_by('title')
+            .values_list('code', 'title')
+        )
+    ]
+    descriptor['pre_existing_condition_categories'] = {
+        'kind': KIND_EXPLICIT_ANSWER,
+        'writable': False,
+        'target': 'patient_record',
+        'endpoint': 'preexisting-conditions-answer',
+        'actions': ['confirm_none', 'set_categories', 'withdraw'],
+        'value_kind': 'string',
+        'multiple': True,
+        'options': category_options,
+        'reason': (
+            'Answered explicitly through the patient-record '
+            'pre-existing-conditions endpoint. The answer is an attestation '
+            'with a snapshot, not a field PATCH, so a concurrent answer '
+            'cannot be overwritten.'
+        ),
+    }
 
     # Fields whose OMOP write recipe is broken — the curated mapping writes to
     # the wrong table/concept.  They are still directly writable on PatientRecord;
