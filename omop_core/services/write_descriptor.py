@@ -44,6 +44,7 @@ KIND_EDITABLE = 'editable'      # write an OMOP fact; derivation follows
 KIND_SELECTABLE = 'selectable'  # choose from a bounded set, carried on the fact
 KIND_COMPUTED = 'computed'      # derived from other fields; never authored alone
 KIND_ALIAS = 'alias'            # mirrors a canonical field; edit that one instead
+KIND_NEGATED = 'negated'        # the opposite of a canonical boolean; write it inverted
 KIND_PROFILE = 'profile'        # a Person attribute, written at the persons endpoint
 KIND_UNMAPPED = 'unmapped'      # no write path yet — grouped by WHY, not lumped
 KIND_AUTHORED = 'authored'      # written by authoring a different resource entirely
@@ -235,6 +236,26 @@ _PROFILE_DEMOGRAPHIC = {
 # the API representation, so the loop over model-backed fields never sees it.
 _SERIALIZER_ALIASES = {
     'refractory_status': 'treatment_refractory_status',
+}
+
+#: Negated views of a stored boolean. The record keeps the POSITIVE status; a
+#: trial asks "No HIV required" / "No Hepatitis B required", so the row is the
+#: opposite of the column and a write has to go to the column INVERTED (#5663).
+#:
+#: These are not aliases: reading `hiv_status = false` through an alias would
+#: show "No" beside a trial that says "No HIV", which is the wrong answer, and
+#: writing the displayed value unchanged would store the opposite of the
+#: patient's answer. The dedicated kind makes that impossible to miss — a
+#: client that does not understand `negated` must leave the field alone rather
+#: than write the display value.
+#:
+#: The `no_*` columns were removed in #2119; nothing here resurrects them. The
+#: entry is a description of the QUESTION, and `canonical` is the only field a
+#: write may touch.
+_NEGATED_ALIASES = {
+    'no_hiv_status': 'hiv_status',
+    'no_hepatitis_b_status': 'hepatitis_b_status',
+    'no_hepatitis_c_status': 'hepatitis_c_status',
 }
 
 # SerializerMethodFields. Read-only by construction — DRF has nowhere to write a
@@ -1218,6 +1239,25 @@ def build_writable_field_descriptor():
             'writable': False,
             'canonical': canonical,
             'reason': f'Mirrors {canonical}; edit that field instead.',
+        })
+
+    # The trial vocabulary asks the negated question ("No Hepatitis B
+    # required"), while the record keeps the positive answer. The descriptor
+    # carries BOTH halves — the field to write and the fact that the value
+    # must be inverted — because a client that guessed one without the other
+    # would store the opposite of what the reader answered (#5663).
+    for negated, positive in _NEGATED_ALIASES.items():
+        descriptor.setdefault(negated, {
+            'kind': KIND_NEGATED,
+            'writable': False,
+            'canonical': positive,
+            'inverted': True,
+            'value_kind': 'boolean',
+            'reason': (
+                f'Inverted view of {positive}: the record stores the positive '
+                f'status, and this row asks the negated question. Write '
+                f'{positive} with the opposite value.'
+            ),
         })
 
     # Fields whose OMOP write recipe is broken — the curated mapping writes to
