@@ -2895,6 +2895,11 @@ _GENETIC_MUTATION_LOINCS = {
     '48013-7': 'KRAS',
     '62862-8': 'EGFR',
     '60033-8': 'PIK3CA',  # PIK3CA gene mutations found [Identifier] in Blood or Tissue
+    # BC trials in the CB catalog require ESR1 as a gene; without this row the
+    # writer skipped it and the derivation could not materialize a
+    # patient-authored ESR1 finding, so an ESR1-required trial could never
+    # match a patient-entered mutation.
+    '104295-1': 'ESR1',   # ESR1 gene mutation [Identifier] in Blood or Tissue
 }
 
 # Pathology report fields which have an unambiguous LOINC representation in
