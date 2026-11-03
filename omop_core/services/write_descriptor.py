@@ -320,6 +320,19 @@ _ALIAS_TO_CANONICAL = {
     for alias in aliases
 }
 
+#: An alias the MATCHER recomputes from other record fields.
+#:
+#: eGFR is a stored lab fact on the record, but EXACT derives it from the
+#: CKD-EPI inputs before scoring, so a correction typed into the alias — or
+#: into its canonical column — is replaced by the next derivation (#5664).
+#: Naming the inputs is what lets a client offer the fields that actually move
+#: the value instead of a box that silently does nothing.
+_ALIAS_INPUTS = {
+    'estimated_glomerular_filtration_rate': [
+        'serum_creatinine_level', 'patient_age', 'gender',
+    ],
+}
+
 # Values computed during derivation from other projected fields, with the inputs
 # a UI needs in order to say why the box is not typeable. A field belongs here
 # when `refresh_patient_record`/`recompute_patient_record_fields` owns its value:
@@ -882,6 +895,8 @@ def build_writable_field_descriptor():
                 'canonical': canonical,
                 'reason': f'Mirrors {canonical}; edit that field instead.',
             }
+            if field in _ALIAS_INPUTS:
+                descriptor[field]['inputs'] = _ALIAS_INPUTS[field]
             continue
 
         if field in _PROFILE_DEMOGRAPHIC:
