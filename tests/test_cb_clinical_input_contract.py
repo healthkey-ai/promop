@@ -889,3 +889,45 @@ def test_shared_form_invalid_clinical_input_returns_400(patient, staff_client):
     )
     assert response.status_code == 400, response.data
     assert BOOL in (response.data.get('errors') or {})
+
+
+def test_shared_form_invalid_clinical_input_does_not_partially_write(patient, staff_client):
+    from omop_core.models import Measurement
+    approve(BOOL)
+    response = staff_client.patch(
+        f'/api/v1/patient-records/{patient.pk}/',
+        {BOOL: 'not-a-boolean', 'weight': 73}, format='json', HTTP_X_PATIENT_FORM='1',
+    )
+    assert response.status_code == 400, response.data
+    record = PatientRecord.objects.get(person=patient)
+    assert record.weight is None
+    assert not Measurement.objects.filter(person=patient).exists()
+
+
+def test_shared_form_clinical_input_revision_repeat_clear_and_author(patient, staff_client):
+    from omop_core.models import RecordRevision
+    from patient_portal.models import Identity
+    approve(BOOL)
+    url = f'/api/v1/patient-records/{patient.pk}/'
+    assert staff_client.patch(
+        url, {BOOL: False}, format='json', HTTP_X_PATIENT_FORM='1',
+    ).status_code == 200
+    assert staff_client.patch(
+        url, {BOOL: False}, format='json', HTTP_X_PATIENT_FORM='1',
+    ).status_code == 200
+    revisions = RecordRevision.objects.filter(
+        patient_record__person=patient, field=BOOL,
+    )
+    assert revisions.count() == 1
+
+    assert staff_client.patch(
+        url, {BOOL: None}, format='json', HTTP_X_PATIENT_FORM='1',
+    ).status_code == 200
+    revisions = RecordRevision.objects.filter(
+        patient_record__person=patient, field=BOOL,
+    ).order_by('changed_at', 'pk')
+    assert revisions.count() == 2
+    assert revisions.last().old_value == 'False'
+    assert revisions.last().new_value is None
+    author = Identity.objects.get(email='clinical-contract@example.test')
+    assert all(revision.changed_by == str(author.pk) for revision in revisions)
