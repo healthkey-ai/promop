@@ -17,6 +17,7 @@ from typing import Any
 from django.db.models import Q
 
 from omop_core.models import Measurement
+from omop_core.services.canonical_units import is_unproven, measurement_stored_unit
 from omop_core.services.condition_context import measurement_context_filter
 from patient_portal.models import LabMarker
 
@@ -76,7 +77,7 @@ def _number(value: Decimal | None) -> float | int | None:
 
 def flag(row: Measurement) -> str | None:
     value = row.value_as_number
-    if value is None:
+    if value is None or is_unproven(row):
         return None
     if row.range_low is not None and value < row.range_low:
         return 'low'
@@ -88,17 +89,17 @@ def flag(row: Measurement) -> str | None:
 
 
 def result(row: Measurement, source: dict) -> dict[str, Any]:
-    unit = (row.unit_source_value or '').strip() or (
-        row.unit_concept.concept_code if row.unit_concept_id and row.unit_concept else None
-    )
+    # A number whose unit cannot be proven is not shown, nor is its range (#2249).
+    # stored_unit is then None too.
+    shown = not is_unproven(row)
     item = {
         'id': row.pk,
         'date': row.measurement_date.isoformat(),
-        'value': _number(row.value_as_number),
+        'value': _number(row.value_as_number) if shown else None,
         'value_text': (row.value_as_string or '').strip() or None,
-        'unit': unit or None,
+        'unit': (measurement_stored_unit(row) or '').strip() or None,
         'range': {'low': _number(row.range_low), 'high': _number(row.range_high)}
-        if row.range_low is not None or row.range_high is not None
+        if shown and (row.range_low is not None or row.range_high is not None)
         else None,
         'flag': flag(row),
         'source': source,
@@ -109,7 +110,7 @@ def result(row: Measurement, source: dict) -> dict[str, Any]:
 def _brief(row: Measurement) -> dict[str, Any]:
     item = {
         'date': row.measurement_date.isoformat(),
-        'value': _number(row.value_as_number),
+        'value': None if is_unproven(row) else _number(row.value_as_number),
         'value_text': (row.value_as_string or '').strip() or None,
         'flag': flag(row),
     }

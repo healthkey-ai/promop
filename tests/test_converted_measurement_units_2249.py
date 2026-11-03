@@ -132,3 +132,28 @@ def test_a_proven_newer_result_is_used_over_an_unproven_older_one():
 
     record.refresh_from_db()
     assert record.albumin_g_dl == Decimal('4.2')
+
+
+def test_phr_labs_show_a_converted_value_in_its_stored_unit_and_hide_an_unproven_one(settings):
+    """The review's case: stored 40, unit_source_value g/dL, unit_concept g/L, nothing sent."""
+    from tests.test_phr_read_model import lab, loinc, signed_in
+    settings.CELERY_BROKER_URL = ''
+    record = PatientRecordFactory(disease='')
+    albumin = loinc('1751-7', 'Albumin [Mass/volume] in Serum or Plasma')
+    g_l = _ucum_concept('g/L')
+    lab(record, albumin, '2024-01-01', Decimal('42'), unit_source_value='g/dL', unit_concept=g_l,
+        value_source_value='4.2', range_low=Decimal('35'), range_high=Decimal('50'))
+    lab(record, albumin, '2024-05-01', Decimal('40'), unit_source_value='g/dL', unit_concept=g_l,
+        range_low=Decimal('35'), range_high=Decimal('50'))
+    client = signed_in(record)
+
+    test = client.get('/api/v1/phr/labs/').data['tests'][0]
+    history = client.get(f'/api/v1/phr/labs/{albumin.concept_id}/').data['history']
+
+    unproven = {'date', 'value', 'unit', 'range', 'flag'} & set(test['latest'])
+    assert unproven == {'date'}
+    assert test['recent'] == [{'date': '2024-05-01'}, {'date': '2024-01-01', 'value': 42, 'flag': 'normal'}]
+    assert [(h['date'], h.get('value'), h.get('unit'), h.get('flag')) for h in history] == [
+        ('2024-05-01', None, None, None),
+        ('2024-01-01', 42, 'g/L', 'normal'),
+    ]

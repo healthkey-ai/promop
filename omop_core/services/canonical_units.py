@@ -450,6 +450,11 @@ def measurement_stored_unit(measurement):
     return stored_unit(**_reading_args(measurement))
 
 
+def is_unproven(measurement):
+    """True when no unit can be shown for value_as_number: show neither it nor its range."""
+    return _reading(**_reading_args(measurement))[0] == _UNKNOWN
+
+
 def value_in_source_unit(measurement):
     """value_as_number in unit_source_value's unit, or None when that cannot be shown."""
     verdict, sent = _reading(**_reading_args(measurement))
