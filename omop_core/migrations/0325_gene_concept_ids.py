@@ -7,10 +7,12 @@ to concept 0. A gene had no identity beyond its display symbol.
 The reviewed catalog now names, for each gene, the standard OMOP Genomic
 Measurement concept whose ``concept_code`` is the HGNC id (BRCA1 = 35950928 /
 1100, and so on). The migration updates only mappings that still carry the
-untouched legacy recipe; a concept a curator already chose is left alone.
+untouched legacy recipe and no curator attribution; anything else is left
+alone.
 
-Reversible: the reverse restores the legacy recipe only where this migration's
-provenance is still in force.
+Reversible: the forward writes a migration-specific note, and the reverse
+restores the legacy recipe only for rows that still carry that note and have
+not been re-saved since.
 """
 from django.db import migrations
 
@@ -43,16 +45,16 @@ GENE_CONCEPTS = {
 }
 
 LEGACY_CODE = '81252-9'
-LEGACY_PROVENANCE = 'genomics-catalog v2'
+LEGACY_PROVENANCE = ('', 'system_generated', 'genomics-catalog v1', 'genomics-catalog v2')
 PROVENANCE = 'genomics-catalog v3'
+MIGRATION_NOTE = (
+    'Genomics catalog v3 migration 0325: gene identity is the OMOP Genomic '
+    'concept whose concept_code is the HGNC id (cancerbot #5673).'
+)
 LEGACY_NOTE = (
     'Genomics catalog v1: approved storage mapping per implementation request. '
     'Source: CancerBot a840f8d9af2c35477e2b6b76f981b29f02c21eec. '
     'Unmapped source text uses concept 0; clinical nomenclature requires expert review.'
-)
-NOTE = (
-    'Genomics catalog v3: gene identity is the OMOP Genomic concept whose '
-    'concept_code is the HGNC id (cancerbot #5673).'
 )
 
 
@@ -65,10 +67,38 @@ def _usable(concept):
                 and concept.invalid_reason is None)
 
 
+def _untouched_legacy(mapping, field_name, loinc_concept_id):
+    """True only for the seeded recipe nobody has reviewed or edited since."""
+    if mapping.status != 'approved' or mapping.reviewer_id is not None:
+        return False
+    if (mapping.vocabulary_id, mapping.concept_code) != ('LOINC', LEGACY_CODE):
+        return False
+    # Legacy seeding resolved the real LOINC concept when Athena was present.
+    # Any other concept is a curator decision and must survive.
+    if mapping.concept_id not in (None, 0, loinc_concept_id):
+        return False
+    if mapping.provenance not in LEGACY_PROVENANCE:
+        return False
+    notes = mapping.notes or ''
+    if notes and not (notes.startswith('Genomics catalog v1')
+                      or notes.startswith('Genomics catalog v2')):
+        return False
+    return (
+        mapping.source_value == 'genomics:' + field_name.removeprefix('genomics_')
+        and mapping.omop_table == 'measurement'
+        and mapping.value_kind == 'json'
+        and mapping.multiple is True
+    )
+
+
 def apply_gene_concepts(apps, schema_editor):
     using = schema_editor.connection.alias
     Concept = apps.get_model('omop_core', 'Concept')
     Mapping = apps.get_model('omop_core', 'FieldConceptMapping')
+    legacy = Concept.objects.using(using).filter(
+        vocabulary_id='LOINC', concept_code=LEGACY_CODE,
+    ).first()
+    legacy_id = legacy.pk if legacy else None
     for field_name, concept_id in GENE_CONCEPTS.items():
         concept = Concept.objects.using(using).filter(pk=concept_id).first()
         if not _usable(concept):
@@ -77,16 +107,13 @@ def apply_gene_concepts(apps, schema_editor):
             # read-only audit reports it.
             continue
         mapping = Mapping.objects.using(using).filter(field_name=field_name).first()
-        if mapping is None:
-            continue
-        if mapping.vocabulary_id != 'LOINC' or mapping.concept_code != LEGACY_CODE:
-            # A curator already decided this field; never overwrite it.
+        if mapping is None or not _untouched_legacy(mapping, field_name, legacy_id):
             continue
         mapping.concept = concept
         mapping.vocabulary_id = 'OMOP Genomic'
         mapping.concept_code = str(concept.concept_code)
         mapping.provenance = PROVENANCE
-        mapping.notes = NOTE
+        mapping.notes = MIGRATION_NOTE
         mapping.save(update_fields=[
             'concept', 'vocabulary_id', 'concept_code', 'provenance', 'notes', 'updated_at',
         ])
@@ -106,13 +133,19 @@ def restore_legacy_recipe(apps, schema_editor):
             vocabulary_id='OMOP Genomic',
             concept_code=str(concept.concept_code),
             provenance=PROVENANCE,
+            notes=MIGRATION_NOTE,
+            source_value='genomics:' + field_name.removeprefix('genomics_'),
+            omop_table='measurement',
+            value_kind='json',
+            multiple=True,
+            reviewer_id__isnull=True,
         ).first()
         if mapping is None:
             continue
         mapping.concept = zero
         mapping.vocabulary_id = 'LOINC'
         mapping.concept_code = LEGACY_CODE
-        mapping.provenance = LEGACY_PROVENANCE
+        mapping.provenance = 'genomics-catalog v2'
         mapping.notes = LEGACY_NOTE
         mapping.save(update_fields=[
             'concept', 'vocabulary_id', 'concept_code', 'provenance', 'notes', 'updated_at',

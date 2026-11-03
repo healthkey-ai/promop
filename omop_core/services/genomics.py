@@ -13,7 +13,7 @@ from django.utils.timezone import localdate
 from rest_framework.exceptions import NotFound, ValidationError
 
 from omop_core.models import Concept, FieldConceptMapping, Measurement, Observation, PatientRecord
-from omop_core.services.genomics_catalog import marker_for_variant, patient_fields
+from omop_core.services.genomics_catalog import gene_concepts, marker_for_variant, patient_fields
 from omop_core.services.genomics_components import component_codes, components
 from omop_core.services.genomics_vocabulary import resolve_loinc
 from omop_core.services.genomics_state import ASSESSMENT_STATUS, effective_status
@@ -126,7 +126,7 @@ def normalize_variant(payload, existing=None):
         payload.pop('source_gene')
     if 'gene_concept_id' in payload:
         proposed = payload.pop('gene_concept_id')
-        if proposed is not None and (not existing or proposed != existing.get('gene_concept_id')):
+        if proposed != (existing or {}).get('gene_concept_id'):
             raise ValidationError({'gene_concept_id': 'Read-only derived gene identity.'})
     allowed = set(FIELDS) | {'id', 'variant', 'mutation', 'test_date', 'assay_method', 'allelic_frequency_unit', 'clone_fraction_unit', 'marker_key'}
     unknown = set(payload) - allowed
@@ -417,10 +417,14 @@ def save_variant(person, payload, variant_id=None, type_concept_id=32817, skip_r
     if marker:
         if data['genomic_feature']:
             expected = marker_features(marker)
-            if (data['genomic_feature'].casefold() != expected['genomic_feature'].casefold()
+            accepted = {expected['genomic_feature'].casefold(),
+                        (marker.get('hgnc_symbol') or '').casefold()}
+            if (data['genomic_feature'].casefold() not in accepted
                     or data['feature_type'] != expected['feature_type']):
                 raise ValidationError({'genomic_feature': 'The feature and its type must match the selected priority marker.'})
-        elif data['gene'].upper() != marker['gene'].upper():
+        elif (gene_concepts().get(data['gene'].upper()) is not marker
+              if marker['kind'] == 'gene'
+              else data['gene'].upper() != marker['gene'].upper()):
             raise ValidationError({'gene': 'The gene must match the selected priority marker.'})
     parent_mapping = recipe_mapping(marker['field_name']) if marker else None
     if parent_mapping and not mapping_is_usable(parent_mapping, parent=True):

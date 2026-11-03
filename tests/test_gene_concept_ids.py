@@ -83,6 +83,17 @@ def test_findings_expose_gene_concept_id_and_never_a_symbol():
     deletion = describe_finding({'gene': 'TP53', 'variant': 'del(17p)'})
     assert deletion['feature_type'] == 'Chromosome arm/region'
     assert deletion['gene_concept_id'] is None
+    # Explicit structure wins even when the text or a gene marker names a gene.
+    assert describe_finding({
+        'gene': 'TP53', 'genomic_feature': '17p', 'feature_type': 'Chromosome arm/region',
+        'finding_category': 'Deletion', 'variant': '17p loss',
+    })['gene_concept_id'] is None
+    assert describe_finding({
+        'gene': 'BCL2', 'feature_type': 'Gene', 'finding_category': 'Gain',
+        'variant': 'copy number gain',
+    })['gene_concept_id'] is None
+    # And unmistakable cytogenetic free text is not a sequence variant.
+    assert describe_finding({'gene': 'BCL2', 'variant': 'copy number gain'})['gene_concept_id'] is None
     unknown = describe_finding({'gene': 'UNKNOWN1'})
     assert unknown['gene_concept_id'] is None
 
@@ -100,6 +111,20 @@ def test_seeding_uses_the_gene_measurement_concept_and_writes_it():
     assert parent.measurement_source_concept_id == 35950928
     assert parent.measurement_source_value == 'genomics:brca1'
     assert variant['gene_concept_id'] == 35950928
+
+
+def test_tent5c_uses_the_fam46c_recipe_and_gene_concept():
+    """The HGNC symbol is a reviewed alias, not a separate generic finding."""
+    person = _setup('fam46c')
+    variant = save_variant(person, {
+        'gene': 'TENT5C', 'genomic_feature': 'TENT5C', 'feature_type': 'Gene',
+        'variant': 'p.S428PfsTer2',
+    })
+    assert variant['marker_key'] == 'fam46c'
+    assert variant['gene_concept_id'] == 35952051
+    parent = Measurement.objects.get(pk=variant['id'])
+    assert parent.measurement_concept_id == 35952051
+    assert parent.measurement_source_value == 'genomics:fam46c'
 
 
 def test_a_portable_gene_recipe_resolves_by_code_when_the_fk_is_unset():
@@ -135,39 +160,70 @@ def test_an_echoed_gene_concept_id_is_accepted_but_never_rewritten():
     with pytest.raises(ValidationError):
         save_variant(person, {**variant, 'gene_concept_id': 999}, variant['id'])
     with pytest.raises(ValidationError):
+        save_variant(person, {**variant, 'gene_concept_id': None}, variant['id'])
+    with pytest.raises(ValidationError):
         save_variant(person, {'gene': 'TP53', 'variant': 'p.R175H', 'gene_concept_id': 35950928})
 
 
 def test_backfill_moves_only_the_untouched_recipe_and_is_reversible():
-    concept = ConceptFactory(
-        concept_id=35950928,
-        vocabulary__vocabulary_id='OMOP Genomic',
-        concept_code='1100',
-        concept_name='BRCA1 gene variant measurement',
-        domain__domain_id='Measurement',
-        concept_class__concept_class_id='Genetic Variation',
-        standard_concept='S',
-    )
-    legacy = FieldConceptMapping.objects.create(
-        field_name='genomics_brca1', concept_id=0, vocabulary_id='LOINC',
-        concept_code='81252-9', source_value='genomics:brca1',
-        omop_table='measurement', value_kind='json', multiple=True,
-        status='approved', provenance='genomics-catalog v2',
-    )
-    curated = FieldConceptMapping.objects.create(
-        field_name='genomics_tp53', concept=concept, vocabulary_id='SNOMED',
-        concept_code='999', source_value='genomics:tp53',
-        omop_table='measurement', value_kind='json', multiple=True,
-        status='approved', provenance='curator',
-    )
+    from patient_portal.models import Identity
+
+    _gene_concepts_loaded('brca1', 'tp53', 'esr1', 'ccnd1', 'palb2', 'fam46c')
+    brca1 = Concept.objects.get(pk=35950928)
+    tp53 = Concept.objects.get(pk=35948926)
+    esr1 = Concept.objects.get(pk=35948983)
+    ccnd1 = Concept.objects.get(pk=35963336)
+    palb2 = Concept.objects.get(pk=35949597)
+    # Legacy seeding resolved the LOINC parent when Athena was already loaded.
+    loinc = ConceptFactory(concept_code='81252-9', domain__domain_id='Observation')
+    reviewer = Identity.objects.create_user(email='reviewer@example.test', password='pw')
     editor = SimpleNamespace(connection=connection)
+
+    def mapping(field_name, concept, **overrides):
+        values = dict(
+            field_name=field_name, concept=concept, vocabulary_id='LOINC',
+            concept_code='81252-9', source_value='genomics:' + field_name.removeprefix('genomics_'),
+            omop_table='measurement', value_kind='json', multiple=True,
+            status='approved', provenance='system_generated', notes=migration.LEGACY_NOTE,
+        )
+        values.update(overrides)
+        return FieldConceptMapping.objects.create(**values)
+
+    legacy = mapping('genomics_brca1', loinc)
+    curated = mapping('genomics_tp53', tp53, provenance='curator',
+                      notes='Curator kept the generic variant row.')
+    reviewed = mapping('genomics_esr1', esr1, provenance='approver@example.test',
+                       reviewer=reviewer, notes='Reviewed and approved.')
+    proposed = mapping('genomics_palb2', palb2, status='proposed')
+    # A curator replaced the concept but kept the legacy code columns.
+    different = mapping('genomics_fam46c', brca1)
+    runtime_v3 = FieldConceptMapping.objects.create(
+        field_name='genomics_ccnd1', concept=ccnd1, vocabulary_id='OMOP Genomic',
+        concept_code='1582', source_value='genomics:ccnd1',
+        omop_table='measurement', value_kind='json', multiple=True,
+        status='approved', provenance='genomics-catalog v3',
+        notes='Genomics catalog v3: gene identity is the reviewed concept.',
+    )
 
     migration.apply_gene_concepts(apps, editor)
     legacy.refresh_from_db()
-    curated.refresh_from_db()
     assert (legacy.concept_id, legacy.vocabulary_id, legacy.concept_code) == (35950928, 'OMOP Genomic', '1100')
     assert legacy.provenance == 'genomics-catalog v3'
-    assert (curated.concept_id, curated.vocabulary_id, curated.concept_code) == (concept.pk, 'SNOMED', '999')
+    assert legacy.notes == migration.MIGRATION_NOTE
+    for row, expected in (
+        (curated, (tp53, 'LOINC', '81252-9')),
+        (reviewed, (esr1, 'LOINC', '81252-9')),
+        (proposed, (palb2, 'LOINC', '81252-9')),
+        (different, (brca1, 'LOINC', '81252-9')),
+        (runtime_v3, (ccnd1, 'OMOP Genomic', '1582')),
+    ):
+        row.refresh_from_db()
+        assert (row.concept_id, row.vocabulary_id, row.concept_code) == (
+            expected[0].pk, expected[1], expected[2])
+    proposed.refresh_from_db()
+    assert proposed.status == 'proposed'
+    curated.refresh_from_db()
+    assert curated.provenance == 'curator'
 
     migration.apply_gene_concepts(apps, editor)  # idempotent
     legacy.refresh_from_db()
@@ -175,10 +231,25 @@ def test_backfill_moves_only_the_untouched_recipe_and_is_reversible():
 
     migration.restore_legacy_recipe(apps, editor)
     legacy.refresh_from_db()
-    curated.refresh_from_db()
     assert (legacy.concept_id, legacy.vocabulary_id, legacy.concept_code) == (0, 'LOINC', '81252-9')
     assert legacy.provenance == 'genomics-catalog v2'
-    assert (curated.concept_id, curated.vocabulary_id, curated.concept_code) == (concept.pk, 'SNOMED', '999')
+    assert legacy.notes == migration.LEGACY_NOTE
+    # Rows the forward did not write, including runtime-seeded v3 mappings,
+    # must survive the reverse.
+    for row, expected in (
+        (curated, (tp53, 'LOINC', '81252-9')),
+        (reviewed, (esr1, 'LOINC', '81252-9')),
+        (proposed, (palb2, 'LOINC', '81252-9')),
+        (different, (brca1, 'LOINC', '81252-9')),
+        (runtime_v3, (ccnd1, 'OMOP Genomic', '1582')),
+    ):
+        row.refresh_from_db()
+        assert (row.concept_id, row.vocabulary_id, row.concept_code) == (
+            expected[0].pk, expected[1], expected[2])
+
+    migration.restore_legacy_recipe(apps, editor)  # idempotent
+    legacy.refresh_from_db()
+    assert legacy.concept_id == 0
 
 
 def test_the_shipped_catalog_fixture_agrees_with_the_backfill():

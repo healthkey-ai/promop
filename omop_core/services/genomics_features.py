@@ -11,6 +11,35 @@ FINDING_CATEGORIES = (
     'Ploidy abnormality', 'Complex structural rearrangement',
 )
 _REGIONS = {'del17p': '17p', 'del11q': '11q', 'del13q': '13q', 'gain1q': '1q21'}
+# Structural findings that mention a gene are still not a gene-level variant:
+# a trial that requires a BRCA1 mutation must not be satisfied by a deletion.
+_STRUCTURAL_TEXT = re.compile(
+    r'copy[\s-]*number\s+(?:gain|loss)'
+    r'|\bdeletion\b|amplification|rearrangement|translocation|fusion|trisomy|monosomy'
+    r'|del\(|t\(|\+[0-9]|-[0-9]'
+    r'|\b(?:1q|17p|11q|13q)\s+(?:gain|loss)',
+    re.I,
+)
+
+
+def is_gene_level(finding, marker=None):
+    """True when the finding's subject is a gene-level sequence variant.
+
+    Explicit feature type and category win: a chromosome arm, a rearrangement
+    partner or a copy-number finding is a distinct finding even when its text
+    names a gene. Findings that predate those fields stay gene-level, except
+    when the variant text is unmistakably cytogenetic.
+    """
+    feature_type = str(finding.get('feature_type') or '').strip()
+    category = str(finding.get('finding_category') or '').strip()
+    if feature_type and feature_type != 'Gene':
+        return False
+    if category and category != 'Sequence variant':
+        return False
+    if marker is not None and marker.get('kind') != 'gene':
+        return False
+    text = ' '.join(str(finding.get(key) or '') for key in ('variant', 'variant_name', 'mutation'))
+    return not _STRUCTURAL_TEXT.search(text)
 
 
 def marker_features(marker):
@@ -61,10 +90,10 @@ def describe_finding(finding):
     # id (#5673). Abnormalities keep it null: a deletion or translocation is a
     # distinct finding, and matching must never satisfy a gene requirement from
     # it alone. An unknown gene is null, never its display symbol.
-    if marker and marker.get('kind') == 'gene':
-        result['gene_concept_id'] = marker.get('omop_concept_id')
-    elif marker:
+    if not is_gene_level(finding, marker):
         result['gene_concept_id'] = None
+    elif marker and marker.get('kind') == 'gene':
+        result['gene_concept_id'] = marker.get('omop_concept_id')
     else:
         result['gene_concept_id'] = gene_concept_id(gene)
     return result

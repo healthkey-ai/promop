@@ -126,6 +126,9 @@ def marker_for_variant(variant):
             return m
     if variant.get('feature_type') not in (None, '', 'Gene'):
         return None
+    reviewed = gene_concepts().get(gene)
+    if reviewed is not None:
+        return reviewed
     return next((m for m in markers() if m['gene'].upper() == gene and m['kind'] == 'gene'), None)
 
 
