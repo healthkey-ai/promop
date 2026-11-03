@@ -271,3 +271,25 @@ def test_a_shared_location_is_cloned_for_the_edited_person(staff_client):
     assert clone.county == 'Suffolk'
     assert float(clone.latitude) == 40.7
     assert float(clone.longitude) == -74.0
+
+
+def test_native_partial_coordinate_with_location_pair_is_rejected(staff_client):
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    location = Location.objects.create(
+        location_id=900011, latitude=40.7, longitude=-74.0,
+    )
+    person.location_id = location.location_id
+    person.save(update_fields=['location_id'])
+
+    response = _patch(staff_client, person, {'latitude': 41.0})
+
+    assert response.status_code == 400, response.data
+    person.refresh_from_db()
+    record = PatientRecord.objects.get(person=person)
+    assert record.latitude is None
+    assert record.longitude is None
+    assert person.location_id == location.location_id
+    location.refresh_from_db()
+    assert float(location.latitude) == 40.7
+    assert float(location.longitude) == -74.0
