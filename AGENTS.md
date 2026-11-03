@@ -1433,6 +1433,15 @@ the unit it is stored in.
 - **Exact or not at all.** When the converted value or either range bound
   does not fit `Decimal(15, 5)` exactly, the row keeps its numbers *and* its
   `unit_concept`: converting one without the other would mislabel the value.
+- **Reads prove the unit (#2249).** A UCUM `unit_concept` that names a different,
+  convertible unit from `unit_source_value` is only a hint of conversion.
+  `canonical_units.stored_unit` / `value_in_source_unit` let the number in
+  `value_source_value` decide: equal to the stored value, it is in the source unit;
+  equal to its conversion, in `unit_concept`'s. Anything else is unknown and is
+  not read, nor are older results of the same test; the lab-results and PHR labs
+  APIs label a value with its stored unit and show no number, range or flag for
+  an unknown one (`is_unproven`). Conversion writes the number
+  as sent into `value_source_value` when it is empty, so its rows stay provable.
 
 ---
 
