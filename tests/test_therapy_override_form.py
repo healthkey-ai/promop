@@ -179,3 +179,74 @@ def test_an_override_only_write_recomputes_dependents(monkeypatch):
 
     assert calls, 'override-only write skipped the recomputation'
     assert 'relapse_count' in calls[-1]
+
+
+def test_a_projected_override_clears_the_pending_marker():
+    person = PersonFactory()
+    record = PatientRecordFactory(person=person)
+
+    apply_patient_form_patch(person, {'relapse_count': 2})
+    record.refresh_from_db()
+    assert 'relapse_count' not in (record.user_edited_fields or [])
+    assert record.therapy_overrides['relapse_count'] == 2
+    assert refresh_patient_record(person).relapse_count == 2
+
+    apply_patient_form_patch(person, {'relapse_count': None})
+    record.refresh_from_db()
+    assert 'relapse_count' not in (record.user_edited_fields or [])
+
+
+def test_an_alias_only_host_still_projects_the_canonical_fact():
+    from omop_core.models import Observation
+
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+
+    record, result = apply_patient_form_patch(
+        person, {'refractory_status': 'Primary Refractory'},
+        allowed_fields={'refractory_status'})
+
+    assert 'refractory_status' in result.applied
+    row = Observation.objects.get(
+        person=person, observation_source_value='patient-record:treatment_refractory_status')
+    assert row.value_as_string == 'Primary Refractory'
+
+
+def test_a_cleared_override_revision_uses_the_recomputed_value(monkeypatch):
+    from omop_core.services import patient_form as form
+
+    person = PersonFactory()
+    record = PatientRecordFactory(person=person)
+    apply_patient_form_patch(person, {'relapse_count': 2})
+
+    def fake_recompute(record, **kwargs):
+        record.relapse_count = 99
+        record.save(update_fields=['relapse_count'])
+        return record
+
+    monkeypatch.setattr(form, 'recompute_patient_record_fields', fake_recompute)
+    apply_patient_form_patch(person, {'relapse_count': None})
+
+    revision = record.revisions.get(
+        field='relapse_count', old_value='2')
+    assert revision.new_value == '99'
+
+
+def test_an_explicit_override_survives_recomputation(monkeypatch):
+    from omop_core.services import patient_form as form
+
+    person = PersonFactory()
+    record = PatientRecordFactory(person=person)
+    apply_patient_form_patch(person, {'relapse_count': 2})
+
+    def fake_recompute(record, **kwargs):
+        record.relapse_count = 99
+        record.save(update_fields=['relapse_count'])
+        return record
+
+    monkeypatch.setattr(form, 'recompute_patient_record_fields', fake_recompute)
+    apply_patient_form_patch(person, {'relapse_count': 3})
+
+    record.refresh_from_db()
+    assert record.relapse_count == 3
+    assert record.therapy_overrides['relapse_count'] == 3
