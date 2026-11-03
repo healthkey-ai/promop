@@ -3,7 +3,7 @@ import * as Dialog from '@radix-ui/react-dialog';
 import { Pencil } from 'lucide-react';
 import Field from '@/components/PatientInfo/Field';
 import { usePatientFormSnapshot } from './PatientFormContext';
-import type { PatientFormStore } from './patientFormStore';
+import type { FormFieldDescriptor, PatientFormStore } from './patientFormStore';
 
 interface Props {
   store: PatientFormStore;
@@ -20,6 +20,57 @@ function todayIso() {
   const now = new Date();
   const local = new Date(now.getTime() - now.getTimezoneOffset() * 60000);
   return local.toISOString().slice(0, 10);
+}
+
+interface DependencyGraph {
+  /** Some reachable field is writable on PatientRecord. */
+  editable: boolean;
+  /** The graph revisits a field, so no edit path exists but must be explained. */
+  cyclic: boolean;
+}
+
+/**
+ * What a computed field's declared inputs can actually reach.
+ *
+ * A computed value is edited only through its sources, so the pencil is an
+ * honest affordance only when drilling in reaches a field that accepts a
+ * patient-record write. When the graph bottoms out in fields the record does
+ * not own — No Active Infection → active_infection_status → OMOP condition
+ * facts — the dialog would contain no control at all (#2244).
+ *
+ * A cycle is reported rather than hidden: the dialog is where the explanation
+ * lives. `ancestors` doubles as the path guard, so shared inputs are walked
+ * once per path without looping.
+ */
+function inspectInputs(
+  store: PatientFormStore,
+  fields: Record<string, FormFieldDescriptor>,
+  names: string[],
+  ancestors: Set<string>,
+): DependencyGraph {
+  const graph: DependencyGraph = { editable: false, cyclic: false };
+  for (const name of names) {
+    const canonical = store.resolve(name);
+    if (!canonical) continue;
+    if (ancestors.has(canonical)) {
+      graph.cyclic = true;
+      continue;
+    }
+    const field = fields[canonical];
+    if (!field) continue;
+    if (field.writable === true && field.target === 'patient_record') {
+      graph.editable = true;
+      return graph;
+    }
+    // An alias is edited through the field it mirrors, exactly as the row does.
+    const next = field.inputs ?? (field.canonical ? [field.canonical] : []);
+    if (next.length === 0) continue;
+    const child = inspectInputs(store, fields, next, new Set(ancestors).add(canonical));
+    graph.editable ||= child.editable;
+    graph.cyclic ||= child.cyclic;
+    if (graph.editable) return graph;
+  }
+  return graph;
 }
 
 /** CB's computed → source-input dialog, with recursive drill-in. Medical
@@ -66,8 +117,13 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
     return !child || !state.fields[child];
   });
   const inputsUnavailable = unavailableInputs.length > 0;
+  // Dependencies that are present but not editable are the same dead end as
+  // withheld ones: the dialog would show values and no control (#2244). A
+  // cycle still gets the dialog, because that is where the cycle is explained.
+  const inputGraph = inspectInputs(store, state.fields, inputs, new Set([canonical]));
+  const editPath = inputGraph.editable || inputGraph.cyclic;
   const writable = !readOnly && state.writable && field.writable && field.target === 'patient_record';
-  const reason = inputsUnavailable
+  const reason = inputsUnavailable || (inputs.length > 0 && !editPath)
     ? 'This value is derived from data that is not editable in this view.'
     : field.compatibility_reason ?? field.reason ?? 'Derived value; edit the source inputs.';
   // A compatibility gate withholds the RESULT, not the clinical facts it is
@@ -112,7 +168,7 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
     : field.control ?? (field.value_kind === 'number' ? 'number'
       : field.value_kind === 'boolean' ? 'boolean' : field.value_kind === 'date' ? 'date' : 'text');
   return <div className="space-y-1" data-field={canonical}>
-    {inputs.length && !inputsUnavailable ? <>
+    {inputs.length && !inputsUnavailable && editPath ? <>
       {!compact && <div className="text-sm font-medium">{label}</div>}
       <div className="flex items-center gap-2"><span>{formatted}</span>
         <Dialog.Root open={open} onOpenChange={setOpen}>

@@ -178,6 +178,59 @@ describe('computed patient field input dialogs', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 
+  it('does not offer the inputs pencil when no dependency can be edited (#2244)', async () => {
+    // No Active Infection resolves to active_infection_status, itself computed
+    // from OMOP condition facts with no PatientRecord column. Both dependencies
+    // are present, so the old availability check kept the pencil and opened a
+    // dialog with a value and no control.
+    const { store } = await setup({
+      no_active_infection_status: {
+        label: 'No Active Infection', writable: false, kind: 'computed',
+        inputs: ['active_infection_status'],
+        reason: 'Computed from active_infection_status.',
+      },
+      active_infection_status: {
+        label: 'Active Infection', writable: false, kind: 'computed', inputs: [],
+        reason: 'Computed from OMOP facts; there is no record field to edit.',
+      },
+    }, { no_active_infection_status: null, active_infection_status: null });
+    render(<PatientFieldEditor store={store} name="no_active_infection_status" />);
+
+    expect(screen.queryByRole('button', { name: /Edit .* inputs/ })).not.toBeInTheDocument();
+    expect(screen.getByText('Unknown')).toBeVisible();
+    expect(screen.getByText(/not editable in this view/)).toBeInTheDocument();
+  });
+
+  it('walks past the first dependency before promising an edit path', async () => {
+    const { store } = await setup({
+      outer: { label: 'Outer', writable: false, inputs: ['middle'] },
+      middle: { label: 'Middle', writable: false, inputs: ['inner'] },
+      inner: {
+        label: 'Inner', writable: false, kind: 'computed', inputs: [],
+        reason: 'Computed from OMOP facts; there is no record field to edit.',
+      },
+    });
+    render(<PatientFieldEditor store={store} name="outer" />);
+
+    expect(screen.queryByRole('button', { name: 'Edit Outer inputs' })).not.toBeInTheDocument();
+  });
+
+  it('keeps the pencil when another dependency is editable', async () => {
+    const { store } = await setup({
+      mixed: { label: 'Mixed', writable: false, inputs: ['weight', 'active_infection_status'] },
+      active_infection_status: {
+        label: 'Active Infection', writable: false, kind: 'computed', inputs: [],
+        reason: 'Computed from OMOP facts; there is no record field to edit.',
+      },
+    });
+    render(<PatientFieldEditor store={store} name="mixed" />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Mixed inputs' }));
+    const dialog = screen.getByRole('dialog');
+    expect(within(dialog).getByDisplayValue('60')).toBeEnabled();
+    expect(within(dialog).getByText(/no record field to edit/)).toBeInTheDocument();
+  });
+
   it('edits a directly writable alias in place instead of drilling into its canonical', async () => {
     // Refractory Status is writable directly but also carries `canonical`, so
     // the alias fallback opened a one-row dialog and hid the select (#5605).
