@@ -405,15 +405,26 @@ def test_canonical_inverse_concept_with_custom_source_still_roundtrips():
 from omop_core.services.patient_record_service import _GENETIC_MUTATION_LOINCS  # noqa: E402
 
 _GENE_CODE = {g: c for c, g in _GENETIC_MUTATION_LOINCS.items()}
-_MUT_SNOMED_IDS = (255395001, 255461003, 30166007, 10828004, 42425007)  # germline/somatic + path/benign/vus
+# The LOINC answer concepts the writer and the derivation key on, with their
+# real names: the old maps stored SNOMED codes here and meant "Struck by" by
+# pathogenic (cancerbot #5671).
+_MUT_CONCEPT_NAMES = {
+    45880308: 'Germline',
+    45880309: 'Somatic',
+    45884094: 'Pathogenic',
+    21498358: 'Likely pathogenic',
+    45880925: 'Benign',
+    21498359: 'Likely benign',
+    21498841: 'Uncertain significance',
+}
 
 
 def _seed_genetic_vocab(genes=('BRCA1', 'BRCA2', 'TP53')):
     for g in genes:
         ConceptFactory(concept_code=_GENE_CODE[g], concept_name=f'{g} gene mutation analysis')  # LOINC
     _seed_patient_reported_type()
-    for cid in _MUT_SNOMED_IDS:  # the applier/derivation key origin & interpretation by concept_id
-        ConceptFactory(concept_id=cid, concept_code=str(cid), concept_name=f'SNOMED {cid}')
+    for cid, name in _MUT_CONCEPT_NAMES.items():
+        ConceptFactory(concept_id=cid, concept_code=f'LOINC:{cid}', concept_name=name)
 
 
 def _person_with_genetic_vocab(genes=('BRCA1', 'BRCA2', 'TP53')):
@@ -434,8 +445,8 @@ def test_genetic_mutation_write_creates_measurement_and_rederives():
     m = Measurement.objects.get(person=person, measurement_concept__concept_code=_GENE_CODE['BRCA1'])
     assert m.value_as_string == 'c.68_69delAG'
     assert m.measurement_type_concept_id == 32865
-    assert m.qualifier_concept_id == 255395001            # germline
-    assert m.value_as_concept_id == 30166007              # pathogenic
+    assert m.qualifier_concept_id == 45880308             # germline (LA6683-2)
+    assert m.value_as_concept_id == 45884094              # pathogenic (LA6668-3)
     mutation = refresh_patient_record(person).genetic_mutations[0]
     assert {key: mutation[key] for key in (
         'gene', 'variant', 'test_date', 'origin', 'interpretation'
@@ -443,6 +454,74 @@ def test_genetic_mutation_write_creates_measurement_and_rederives():
         'gene': 'brca1', 'variant': 'c.68_69delAG', 'test_date': '2026-08-23',
         'origin': 'germline', 'interpretation': 'pathogenic',
     }
+
+
+def test_genetic_mutation_likely_pathogenic_and_somatic_round_trip():
+    person = _person_with_genetic_vocab()
+    muts = [{'gene': 'BRCA1', 'mutation': 'c.68_69delAG', 'origin': 'Somatic',
+             'interpretation': 'Likely pathogenic'}]
+
+    result = apply_field_writes(person, {'genetic_mutations': muts}, today=date(2026, 8, 23))
+
+    assert result.applied == ['genetic_mutations']
+    m = Measurement.objects.get(person=person, measurement_concept__concept_code=_GENE_CODE['BRCA1'])
+    assert m.qualifier_concept_id == 45880309             # somatic (LA6684-0)
+    assert m.value_as_concept_id == 21498358              # likely pathogenic (LA26332-9)
+    mutation = refresh_patient_record(person).genetic_mutations[0]
+    assert (mutation['origin'], mutation['interpretation']) == (
+        'somatic', 'likely_pathogenic',
+    )
+
+
+def test_genetic_mutation_uncertain_label_maps_to_vus():
+    person = _person_with_genetic_vocab()
+    apply_field_writes(
+        person,
+        {'genetic_mutations': [{
+            'gene': 'BRCA1', 'mutation': 'c.68_69delAG', 'interpretation': 'Uncertain',
+        }]},
+        today=date(2026, 8, 23),
+    )
+
+    mutation = refresh_patient_record(person).genetic_mutations[0]
+
+    assert mutation['interpretation'] == 'vus'
+
+
+@pytest.mark.parametrize('label,stored,concept_id', [
+    ('Pathogenic', 'pathogenic', 45884094),
+    ('Likely pathogenic', 'likely_pathogenic', 21498358),
+    ('Benign', 'benign', 45880925),
+    ('Likely benign', 'likely_benign', 21498359),
+    ('VUS', 'vus', 21498841),
+])
+def test_every_interpretation_label_round_trips(label, stored, concept_id):
+    person = _person_with_genetic_vocab()
+    apply_field_writes(
+        person,
+        {'genetic_mutations': [{
+            'gene': 'BRCA1', 'mutation': 'c.68_69delAG', 'interpretation': label,
+        }]},
+        today=date(2026, 8, 23),
+    )
+
+    m = Measurement.objects.get(person=person, measurement_concept__concept_code=_GENE_CODE['BRCA1'])
+    assert m.value_as_concept_id == concept_id
+    assert refresh_patient_record(person).genetic_mutations[0]['interpretation'] == stored
+
+
+def test_no_mutation_detected_is_rejected_until_reviewed():
+    person = _person_with_genetic_vocab()
+
+    with pytest.raises(ValueError, match='not a supported/loaded value'):
+        apply_field_writes(
+            person,
+            {'genetic_mutations': [{
+                'gene': 'BRCA1', 'mutation': 'c.68_69delAG',
+                'interpretation': 'No mutation detected',
+            }]},
+            today=date(2026, 8, 23),
+        )
 
 
 def test_genetic_mutation_same_gene_upserts_not_duplicates():
