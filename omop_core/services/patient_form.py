@@ -354,6 +354,8 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
     descriptor = patient_form_descriptors(descriptor, readable_fields=allowed_fields, record=record)
     facts, direct, person_changes, profile_applied = {}, {}, set(), set()
     therapy_overrides_applied = set()
+    previous_override_values = {}
+    override_values = {}
     # A dated fact carries its clinical date with the value: an edit of an
     # existing result updates that date, and a new result records the day it was
     # actually measured rather than the day it was typed
@@ -392,6 +394,11 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
                     if override_value < 0:
                         result.rejected[name] = 'Relapse count cannot be negative.'
                         continue
+                    try:
+                        record._meta.get_field(canonical).clean(override_value, record)
+                    except ValidationError as exc:
+                        result.rejected[name] = '; '.join(exc.messages)
+                        continue
             else:
                 from omop_core.services.treatment_catalog import REFRACTORY_STATUSES
                 if value in (None, ''):
@@ -401,6 +408,9 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
                     continue
                 else:
                     override_value = value
+            previous_override_values.setdefault(
+                canonical, getattr(record, canonical, None))
+            override_values[canonical] = override_value
             overrides = dict(record.therapy_overrides or {})
             if override_value is None:
                 overrides.pop(canonical, None)
@@ -530,6 +540,16 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
         # one write covers the answer, its provenance marker and the override.
         record.save(update_fields=sorted(therapy_overrides_applied)
                     + ['therapy_overrides', 'user_edited_fields'])
+        from omop_core.services.patient_record_revisions import write_record_revisions
+        write_record_revisions(record, previous_override_values, changed_by=changed_by)
+        if project_side_effects:
+            from omop_core.services.omop_projection import projection_for_descriptor
+            projections = {}
+            for canonical in therapy_overrides_applied:
+                projection = projection_for_descriptor(descriptor.get(canonical) or {})
+                if projection:
+                    projections[canonical] = projection
+            _project_side_effects(person, override_values, projections, authorship)
     if direct:
         previous_direct = {name: getattr(record, name, None) for name in direct}
         for name, value in direct.items():
@@ -563,7 +583,7 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
             record.user_edited_fields = sorted(set(record.user_edited_fields or []) - pending)
             record.save(update_fields=['user_edited_fields'])
             refresh_patient_record(person)
-    if direct or profile_applied:
+    if direct or profile_applied or therapy_overrides_applied:
         # PatientRecord first: the record already holds the answer, and the
         # OMOP side effect is not read back (docs/patient-record-first-writes.md).
         # There is deliberately no refresh_patient_record() here, as there is
@@ -573,7 +593,7 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
         # the saved verdict is the one the form will read back.
         record = recompute_patient_record_fields(
             PatientRecord.objects.select_for_update().get(pk=record.pk),
-            changed_fields=set(direct) | profile_applied,
+            changed_fields=set(direct) | profile_applied | therapy_overrides_applied,
         )
     record.refresh_from_db()
     return record, result

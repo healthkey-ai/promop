@@ -122,3 +122,60 @@ def test_every_catalog_choice_is_stored_verbatim(value):
     record.refresh_from_db()
     assert record.therapy_overrides['treatment_refractory_status'] == value
     assert refresh_patient_record(person).treatment_refractory_status == value
+
+
+def test_override_edits_are_projected_and_revised():
+    from omop_core.models import Observation
+
+    person = PersonFactory()
+    record = PatientRecordFactory(person=person)
+    apply_patient_form_patch(person, {'relapse_count': 2, 'refractory_status': 'Primary Refractory'})
+
+    count_row = Observation.objects.get(
+        person=person, observation_source_value='patient-record:relapse_count')
+    status_row = Observation.objects.get(
+        person=person, observation_source_value='patient-record:treatment_refractory_status')
+    assert count_row.value_as_number == 2
+    assert status_row.value_as_string == 'Primary Refractory'
+
+    apply_patient_form_patch(person, {'relapse_count': 3})
+    count_row.refresh_from_db()
+    assert count_row.value_as_number == 3
+    assert record.revisions.filter(
+        field='relapse_count', old_value='2', new_value='3').exists()
+
+    apply_patient_form_patch(person, {'relapse_count': None})
+    count_row.refresh_from_db()
+    assert count_row.value_source_value == 'PatientRecord:cleared'
+    assert count_row.value_as_number is None
+
+
+def test_an_oversized_relapse_count_is_rejected_without_a_database_error():
+    person = PersonFactory()
+    record = PatientRecordFactory(person=person)
+
+    _, result = apply_patient_form_patch(person, {'relapse_count': 2147483648})
+
+    assert 'relapse_count' in result.rejected
+    record.refresh_from_db()
+    assert 'relapse_count' not in (record.therapy_overrides or {})
+
+
+def test_an_override_only_write_recomputes_dependents(monkeypatch):
+    from omop_core.services import patient_form as form
+
+    calls = []
+    real = form.recompute_patient_record_fields
+
+    def wrapped(record, **kwargs):
+        calls.append(set(kwargs.get('changed_fields') or ()))
+        return real(record, **kwargs)
+
+    monkeypatch.setattr(form, 'recompute_patient_record_fields', wrapped)
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+
+    apply_patient_form_patch(person, {'relapse_count': 4})
+
+    assert calls, 'override-only write skipped the recomputation'
+    assert 'relapse_count' in calls[-1]
