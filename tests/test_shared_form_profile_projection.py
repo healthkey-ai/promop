@@ -10,6 +10,7 @@ import pytest
 from rest_framework.test import APIClient
 
 from omop_core.models import Location, PatientRecord, Person
+from omop_core.services.patient_record_service import refresh_patient_record
 from patient_portal.models import Identity
 from tests.factories import PatientRecordFactory, PersonFactory
 
@@ -236,3 +237,48 @@ def test_profile_record_save_precedes_person_save(monkeypatch):
     record.refresh_from_db()
     assert record.date_of_birth == date(1980, 5, 6)
     assert record.date_of_birth_precision == 'day'
+
+
+def test_facility_name_projects_to_person(monkeypatch):
+    record = PatientRecordFactory()
+    calls = []
+    monkeypatch.setattr(
+        'omop_core.services.patient_form.refresh_patient_record',
+        lambda person: calls.append(person.pk),
+    )
+
+    response = _patch(_staff_client(), record, {'facility_name': 'Clinic A'})
+
+    assert response.status_code == 200, response.data
+    record.refresh_from_db()
+    assert record.facility_name == 'Clinic A'
+    person = Person.objects.get(pk=record.person_id)
+    assert person.facility_name == 'Clinic A'
+    assert calls == []
+    assert refresh_patient_record(record.person).facility_name == 'Clinic A'
+
+
+def test_deferred_profile_field_stays_pending():
+    record = PatientRecordFactory()
+
+    response = _patch(_staff_client(), record, {'validated': True})
+
+    assert response.status_code == 200, response.data
+    record.refresh_from_db()
+    assert record.validated is True
+    assert 'validated' in (record.user_edited_fields or [])
+    assert refresh_patient_record(record.person).validated is True
+
+
+def test_shared_form_patch_does_not_attach_latest_fact_dates(monkeypatch):
+    record = PatientRecordFactory()
+    calls = []
+    monkeypatch.setattr(
+        'omop_core.services.patient_form._attach_latest_fact_dates',
+        lambda *args: calls.append(args),
+    )
+
+    response = _patch(_staff_client(), record, {'city': 'NYC'})
+
+    assert response.status_code == 200, response.data
+    assert calls == []
