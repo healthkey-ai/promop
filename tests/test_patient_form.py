@@ -213,6 +213,17 @@ def test_infection_status_rows_offer_the_reviewed_answer_words():
             assert removed not in descriptors
 
 
+def test_reviewed_answer_words_do_not_collide_with_computed_nodes():
+    """A pair on a computed node would name an answer the control cannot write.
+
+    It stays harmless in the descriptor (labels are presentation), but it would
+    mean the table and `FORM_INPUTS` disagree about what the field is.
+    """
+    from omop_core.services.patient_form import BOOLEAN_ANSWERS, FORM_INPUTS
+
+    assert not (set(BOOLEAN_ANSWERS) & set(FORM_INPUTS))
+
+
 def test_reviewed_answer_words_name_boolean_columns_only():
     """The table is applied to `BooleanField` entries by name, so a name that is
     not a boolean column would silently never carry its labels."""

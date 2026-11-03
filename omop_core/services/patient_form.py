@@ -245,6 +245,10 @@ FORM_LABELS = {
 #: question the patient was not asked (#5601). Descriptor-driven so the native
 #: tab, the shared editor and a host's embedded Trial Details agree.
 #:
+#: Presentation only: it changes what the control says, never whether it can be
+#: written. A computed boolean may carry a pair as well, because its read-only
+#: row shows the same two words.
+#:
 #: The three negatives that used to exist as separate columns (`no_hiv_status`
 #: and its hepatitis siblings) were removed upstream in #2119 because a second
 #: stored boolean could contradict the first. These labels are how the negative
@@ -344,7 +348,7 @@ def patient_form_descriptors(descriptor=None, *, readable_fields=None, writable=
         entry['control'] = ('boolean' if kind == 'BooleanField' else 'number'
                             if kind in ('FloatField', 'DecimalField', 'IntegerField', 'PositiveIntegerField')
                             else 'date' if kind == 'DateField' else 'text')
-        if kind == 'BooleanField' and name in BOOLEAN_ANSWERS and name not in FORM_INPUTS:
+        if kind == 'BooleanField' and name in BOOLEAN_ANSWERS:
             positive, negative = BOOLEAN_ANSWERS[name]
             entry['answer_labels'] = {'true': positive, 'false': negative}
         if name in FORM_INPUTS:

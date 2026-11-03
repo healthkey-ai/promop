@@ -68,6 +68,17 @@ const DESCRIPTORS: Record<string, unknown> = {
   hiv_status: {
     kind: 'unmapped', writable: false, group: 'needs-concept-set',
     reason: 'No concept set assigned yet.',
+    answer_labels: { true: 'HIV Positive', false: 'No HIV' },
+  },
+  hepatitis_b_status: {
+    kind: 'unmapped', writable: false, group: 'needs-concept-set',
+    reason: 'No concept set assigned yet.',
+    answer_labels: { true: 'Hepatitis B Positive', false: 'No Hepatitis B' },
+  },
+  hepatitis_c_status: {
+    kind: 'unmapped', writable: false, group: 'needs-concept-set',
+    reason: 'No concept set assigned yet.',
+    answer_labels: { true: 'Hepatitis C Positive', false: 'No Hepatitis C' },
   },
 };
 
@@ -209,14 +220,20 @@ describe('GeneralTab', () => {
     expect(screen.getByTestId('reason-hiv_status')).toBeInTheDocument();
   });
 
-  it('shows viral status with positive labels only', async () => {
+  it('answers each viral status with its own pair and never a second row (#5601)', async () => {
     await renderTab({ hiv_status: false, hepatitis_b_status: true, hepatitis_c_status: null });
     await waitFor(() => expect(mockGet).toHaveBeenCalled());
+    // One row per condition: the question is the positive label.
     for (const label of ['HIV Positive', 'Hepatitis B Positive', 'Hepatitis C Positive']) {
-      expect(screen.getByText(label)).toBeInTheDocument();
+      expect(screen.getAllByText(label).length).toBeGreaterThan(0);
     }
-    for (const label of ['No HIV', 'No Hepatitis B', 'No Hepatitis C']) {
-      expect(screen.queryByText(label)).not.toBeInTheDocument();
+    // The stored negative reads as the negative answer, not as "Portion: No".
+    expect(screen.getByText('No HIV')).toBeInTheDocument();
+    expect(screen.queryByText('No Hepatitis B')).not.toBeInTheDocument();
+    expect(screen.queryByText('No Hepatitis C')).not.toBeInTheDocument();
+    // The retired negative columns are not rows of their own.
+    for (const retired of ['No hiv status', 'No hepatitis b status', 'No hepatitis c status']) {
+      expect(screen.queryByText(retired)).not.toBeInTheDocument();
     }
   });
 
