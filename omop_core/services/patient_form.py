@@ -604,6 +604,8 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
                 raise ValueError(
                     f'{name}: this scalar write supports at most 60 characters; '
                     'no value was saved.')
+            from omop_core.services.clinical_field_validation import normalize_clinical_field
+            value = normalize_clinical_field(name, value)
             try:
                 # JSON numbers arrive as floats. Django's DecimalField converts
                 # a float with Decimal(float), which produces a long binary
@@ -612,7 +614,12 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
                 if (field.get_internal_type() == 'DecimalField'
                         and isinstance(value, (int, float)) and not isinstance(value, bool)):
                     value = Decimal(str(value))
-                direct[name] = field.clean(None if value == '' else value, record)
+                clean_value = value
+                if value == '' and name not in (
+                    'flipi_score_options', 'gelf_criteria_options',
+                ):
+                    clean_value = None
+                direct[name] = field.clean(clean_value, record)
                 if name == 'death_date' and direct[name] is not None:
                     # The native PATCH validates the same two rules. A death
                     # date is an assertion about a dated event, so an unknown

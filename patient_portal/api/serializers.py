@@ -580,26 +580,23 @@ class PatientRecordSerializer(serializers.ModelSerializer):
         ).data
 
     def validate_flipi_score_options(self, value):
-        from omop_core.services.flipi import parse_factors
+        from omop_core.services.clinical_field_validation import normalize_flipi_score_options
         try:
-            selected = parse_factors(value)
+            return normalize_flipi_score_options(value)
         except ValueError:
             raise serializers.ValidationError('Select recognized FLIPI risk factors.') from None
-        return None if selected is None else ','.join(selected)
 
     def validate_gelf_criteria_options(self, value):
-        from omop_core.services.sample_disease_profiles import GELF_FACTORS
-        if value is None:
-            return None
-        selected = {part.strip() for part in value.split(',') if part.strip()}
-        if selected - GELF_FACTORS.keys():
-            raise serializers.ValidationError('Select recognized GELF criteria.')
-        return ','.join(key for key in GELF_FACTORS if key in selected)
+        from omop_core.services.clinical_field_validation import normalize_gelf_criteria_options
+        try:
+            return normalize_gelf_criteria_options(value)
+        except ValueError:
+            raise serializers.ValidationError('Select recognized GELF criteria.') from None
 
     def validate_tumor_grade(self, value):
-        from omop_core.services.flipi import normalize_grade
+        from omop_core.services.clinical_field_validation import normalize_tumor_grade
         try:
-            return normalize_grade(value)
+            return normalize_tumor_grade(value)
         except ValueError:
             raise serializers.ValidationError(
                 'Use grade 1, 2, 3A, or 3B (3 for an unspecified historical grade).'

@@ -131,9 +131,9 @@ class Command(BaseCommand):
         
         # Risk factors
         risk_factors = []
-        if not patient_info.no_tobacco_use_status:
+        if patient_info.no_tobacco_use_status is False:
             risk_factors.append('Tobacco use')
-        if not patient_info.no_substance_use_status:
+        if patient_info.no_substance_use_status is False:
             risk_factors.append('Substance use')
         if not patient_info.no_active_infection_status:
             risk_factors.append('Active infection')

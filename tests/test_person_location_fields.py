@@ -293,3 +293,19 @@ def test_native_partial_coordinate_with_location_pair_is_rejected(staff_client):
     location.refresh_from_db()
     assert float(location.latitude) == 40.7
     assert float(location.longitude) == -74.0
+
+
+@pytest.mark.parametrize('latitude,longitude', [(0, 30), (0, 0), (30, 0)])
+def test_zero_coordinates_survive_refresh(latitude, longitude):
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    location = Location.objects.create(
+        location_id=900010, latitude=latitude, longitude=longitude,
+    )
+    person.location_id = location.location_id
+    person.save(update_fields=['location_id'])
+
+    record = refresh_patient_record(person)
+
+    assert record.latitude == latitude
+    assert record.longitude == longitude
