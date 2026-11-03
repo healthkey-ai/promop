@@ -252,13 +252,16 @@ def split_dated_edits(changes, descriptor):
 
 
 @transaction.atomic
-def apply_field_writes(person, changes, today=None, descriptor=None, dates=None):
+def apply_field_writes(person, changes, today=None, descriptor=None, dates=None, refresh=True):
     """Apply {projection_field: value} edits to `person` as descriptor-driven OMOP facts.
 
     Writes KIND_EDITABLE facts, buckets KIND_PROFILE for the persons endpoint, rejects the
     rest. Re-derives the PatientRecord ONCE after all fact writes (the per-fact refresh
     signal is suppressed on each write). Returns a FieldWriteResult. Raises on a genuine
     write failure — the caller's atomic() must roll the PATCH back.
+
+    ``refresh=False`` lets a caller that already saved the PatientRecord value project
+    Person/Location without a second full derivation (the shared form's profile path).
     """
     if today is None:
         today = date.today()
@@ -328,6 +331,16 @@ def apply_field_writes(person, changes, today=None, descriptor=None, dates=None)
         if d is None:
             result.rejected[field] = 'Unknown field; not part of the writable record.'
             continue
+        kind = d.get('kind')
+        if d.get('writable') and (
+                kind == KIND_PROFILE or d.get('projection_target') in ('person', 'location')):
+            # Profile values are Person/Location data, not OMOP facts: a clear
+            # is a real answer here, so it must not hit the scalar clear guard.
+            if _stage_profile_write(person, field, value, person_dirty, location_updates):
+                result.applied.append(field)
+            else:
+                result.profile[field] = value
+            continue
         if value is None or (isinstance(value, str) and value.strip() == ''):
             # A clear, not a write (the widget's inputs emit '' on clear, not null). There is no
             # provenance marker distinguishing a profile-write fact from an imported one, so
@@ -335,14 +348,6 @@ def apply_field_writes(person, changes, today=None, descriptor=None, dates=None)
             # silently applied (safe-delete is deferred, #4833). Reported (never raised) so a batch
             # PATCH carrying an emptied field does not fail the whole request.
             result.rejected[field] = 'Clearing a value is not supported yet (#4833).'
-            continue
-        kind = d.get('kind')
-        if d.get('writable') and (
-                kind == KIND_PROFILE or d.get('projection_target') in ('person', 'location')):
-            if _stage_profile_write(person, field, value, person_dirty, location_updates):
-                result.applied.append(field)
-            else:
-                result.profile[field] = value
             continue
         projection = d.get('projection')
         if d.get('writable') and (kind == KIND_EDITABLE or projection):
@@ -376,12 +381,15 @@ def apply_field_writes(person, changes, today=None, descriptor=None, dates=None)
     # fact write suppresses its own refresh signal, so the read model is rebuilt from the
     # fully-applied state, never a half-applied one).
     if location_updates:
+        record = PatientRecord.objects.filter(person=person).only(
+            'latitude', 'longitude').first()
+        validate_location_pair(person, location_updates, record=record)
         _apply_location(person, location_updates, person_dirty)
     if person_dirty:
         person.save(update_fields=sorted(person_dirty))
     # write_clinical_inputs derives for its readback, from the fully-applied
     # state, so a batch that carries a clinical field must not derive twice.
-    if result.applied and not clinical:
+    if refresh and result.applied and not clinical:
         refresh_patient_record(person)
     if clinical:
         write_clinical_inputs(person, clinical, today=today)
@@ -425,10 +433,93 @@ def _genetic_mutations_writable():
         concept_code__in=reviewed_gene_codes, vocabulary_id='LOINC').exists()
 
 
+def _clean_location_value(field, value):
+    """Normalize and validate one Location value.
+
+    Returns the stored form (Decimal/str) or None for a clear. Raises
+    ``ValueError`` for a non-numeric, non-finite, out-of-range or too-long
+    value, so the caller can return 400 before touching the database.
+    """
+    column = _LOCATION_COLUMN[field]
+    if value is None or (isinstance(value, str) and value.strip() == ''):
+        return None
+    if field in _LOCATION_DECIMAL:
+        try:
+            value = Decimal(str(value))
+        except (InvalidOperation, TypeError, ValueError):
+            raise ValueError(f'{field}: expected a number, got {value!r}')
+        # NaN parses as a Decimal but makes the range comparison raise
+        # InvalidOperation — reject non-finite (NaN/Inf) as a 400, not a 500.
+        if not value.is_finite():
+            raise ValueError(f'{field}: expected a finite number, got {value!r}')
+        lo, hi = _LOCATION_RANGE[field]
+        if not (lo <= value <= hi):
+            raise ValueError(f'{field}: must be between {lo} and {hi}')
+        return value
+    value = str(value).strip()
+    max_len = _LOCATION_MAXLEN[column]
+    if len(value) > max_len:
+        # Match the persons endpoint: a too-long value is a 400, not a
+        # truncated write or a Postgres DataError (e.g. a full state name into
+        # varchar(2)).
+        raise ValueError(f'{field}: at most {max_len} characters (OMOP Location.{column})')
+    return value
+
+
+def validate_profile_changes(changes):
+    """Validate profile values before any PatientRecord write.
+
+    The shared form saves profile values to PatientRecord first. Range and
+    length errors must be raised before that save, not by the Location upsert
+    or a database constraint afterwards.
+    """
+    for field, value in changes.items():
+        if field in _LOCATION_COLUMN:
+            _clean_location_value(field, value)
+
+
+def validate_location_pair(person, changes, record=None):
+    """Reject an edit that leaves the effective latitude/longitude pair half-set.
+
+    ``changes`` uses Location column names (``latitude``/``longitude``). The
+    PatientRecord model requires both coordinates or neither, and the native
+    PATCH validates the same pair before writing. The PatientRecord pair is the
+    one the DB constraint enforces; Location is consulted only when no record
+    is supplied. Raising ``ValueError`` makes the shared form return 400
+    instead of an IntegrityError/500.
+    """
+    updates = {
+        column: _clean_location_value(column, value)
+        for column, value in changes.items()
+        if column in ('latitude', 'longitude')
+    }
+    if not updates:
+        return
+    existing_lat = existing_lng = None
+    if record is not None:
+        # The PatientRecord pair is the one the DB constraint enforces. Do not
+        # borrow a coordinate from Location here: a partial patch would then
+        # pass validation but save a half-set PatientRecord pair.
+        existing_lat = getattr(record, 'latitude', None)
+        existing_lng = getattr(record, 'longitude', None)
+    elif person.location_id:
+        location = Location.objects.filter(location_id=person.location_id).first()
+        if location is not None:
+            existing_lat, existing_lng = location.latitude, location.longitude
+    final_lat = updates.get('latitude', existing_lat)
+    final_lng = updates.get('longitude', existing_lng)
+    if (final_lat is None) != (final_lng is None):
+        missing = 'longitude' if final_lng is None else 'latitude'
+        raise ValueError(
+            f"'{missing}': the record requires both coordinates or neither.")
+
+
 def _stage_profile_write(person, field, value, person_dirty, location_updates):
     """Stage a KIND_PROFILE write onto `person`. Returns True if this applier owns the field
     (demographic or location — staged for the batched save/upsert), False for identity/admin
     fields it deliberately leaves to the caller (bucketed into result.profile)."""
+    if value is None or (isinstance(value, str) and value.strip() == ''):
+        value = None
     if field in _DEMOGRAPHIC_FIELDS:
         from omop_core.services.demographics import resolve_concept
         # resolve_concept returns None for a non-curated value OR an unloaded vocabulary; per its
@@ -440,26 +531,7 @@ def _stage_profile_write(person, field, value, person_dirty, location_updates):
         return True
     if field in _LOCATION_COLUMN:
         column = _LOCATION_COLUMN[field]
-        if field in _LOCATION_DECIMAL:
-            try:
-                value = Decimal(str(value))
-            except (InvalidOperation, TypeError, ValueError):
-                raise ValueError(f'{field}: expected a number, got {value!r}')
-            # NaN parses as a Decimal but makes the range comparison raise InvalidOperation — reject
-            # non-finite (NaN/Inf) as a 400, not a 500.
-            if not value.is_finite():
-                raise ValueError(f'{field}: expected a finite number, got {value!r}')
-            lo, hi = _LOCATION_RANGE[field]
-            if not (lo <= value <= hi):
-                raise ValueError(f'{field}: must be between {lo} and {hi}')
-        else:
-            value = str(value).strip()
-            max_len = _LOCATION_MAXLEN[column]
-            if len(value) > max_len:
-                # Match the persons endpoint: a too-long value is a 400, not a truncated write
-                # or a Postgres DataError (e.g. a full state name into varchar(2)).
-                raise ValueError(f'{field}: at most {max_len} characters (OMOP Location.{column})')
-        location_updates[column] = value
+        location_updates[column] = _clean_location_value(field, value)
         return True
     return False
 
