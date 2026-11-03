@@ -615,6 +615,15 @@ class LegacyLaboratoryProjectionTest(_OmopBase):
 
         self.assertAlmostEqual(float(pi.albumin_level), 3.8, places=1)
 
+    def test_same_day_loinc_correction_beats_legacy_hemoglobin(self):
+        """A canonical correction must win over the legacy row it corrects."""
+        self._measurement(92337, 'Hemoglobin measurement', 9.1, code='legacy-hgb', unit='g/dL')
+        self._measurement(92338, 'Hemoglobin [Mass/volume] in Blood', 12.4, code='718-7', unit='g/dL')
+
+        pi = refresh_patient_record(self.person)
+
+        self.assertAlmostEqual(float(pi.hemoglobin_g_dl), 12.4, places=1)
+
 
 class WhiteBloodCellUnitPolicyTest(_OmopBase):
     """WBC compatibility output follows the org unit policy and fails closed (#473)."""

@@ -4138,22 +4138,28 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None,
     snapshot = snapshot or _build_snapshot(person)
     measurements = snapshot.measurements
     selected_dates = {}
+    selected_fact_keys = {}
 
     def select_lab_value(field, value, measurement):
         """Choose the newest usable fact across supported lab representations.
 
         Coded LOINC, historical concept-name and source-value rows are all
-        read paths for the same PatientRecord field. They must compete by
-        clinical date rather than by which extractor runs first.
+        read paths for the same PatientRecord field. They compete by clinical
+        date, then measurement ID for same-day corrections, rather than by
+        which extractor runs first.
         """
-        current_date = selected_dates.get(field)
-        fact_date = measurement.measurement_date
-        if field in data and current_date is not None and fact_date <= current_date:
+        fact_key = (
+            measurement.measurement_date or date.min,
+            measurement.measurement_id,
+        )
+        current_key = selected_fact_keys.get(field)
+        if current_key is not None and fact_key <= current_key:
             return False
         data[field] = value
-        selected_dates[field] = fact_date
+        selected_fact_keys[field] = fact_key
+        selected_dates[field] = measurement.measurement_date
         if dates_out is not None:
-            dates_out[field] = fact_date
+            dates_out[field] = measurement.measurement_date
         return True
     # Approved FCM rows define the PatientRecord destination. SCCM supplies
     # additional source-code spellings for that destination; the checked-in
