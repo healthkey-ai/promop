@@ -24,6 +24,12 @@ from django.db import transaction
 
 from omop_core.models import Concept, Location, Measurement, Observation, PatientRecord, Person
 from omop_core.services.patient_record_service import _ASSERTION_FIELDS, refresh_patient_record
+from omop_core.services.genomic_concepts import (
+    MUTATION_INTERPRETATION_CONCEPTS,
+    MUTATION_ORIGIN_CONCEPTS,
+    normalise_interpretation,
+    normalise_origin,
+)
 from omop_core.services.pk import next_pk
 from omop_core.services.write_descriptor import (
     build_writable_field_descriptor,
@@ -179,10 +185,13 @@ PATIENT_REPORTED_TYPE_CONCEPT_ID = 32865
 
 # genetic_mutations is a LIST field, not a scalar: each mutation is one Measurement keyed by its gene
 # LOINC (patient_record_service._GENETIC_MUTATION_LOINCS), with variant→value_as_string, origin→
-# qualifier_concept, interpretation→value_as_concept (SNOMED). The widget sends {gene, mutation (=the
-# variant), origin, interpretation}. These SNOMED ids mirror the derivation's read maps.
-_MUTATION_ORIGIN_SNOMED = {'germline': 255395001, 'somatic': 255461003}
-_MUTATION_INTERPRETATION_SNOMED = {'pathogenic': 30166007, 'benign': 10828004, 'vus': 42425007}
+# qualifier_concept, interpretation→value_as_concept. The concept ids live in one module,
+# `genomic_concepts`, shared with the derivation — a second copy is how the previous maps stored
+# SNOMED *codes* in id columns and meant "Struck by" by pathogenic (#5671).
+_MUTATION_ORIGIN_BY_VALUE = {value: cid for cid, value in MUTATION_ORIGIN_CONCEPTS.items()}
+_MUTATION_INTERPRETATION_BY_VALUE = {
+    value: cid for cid, value in MUTATION_INTERPRETATION_CONCEPTS.items()
+}
 
 # Provenance sentinel (measurement_source_value) marking a mutation Measurement as authored by the CB
 # profile editor. The list-diff upsert & retire touch ONLY rows carrying it, so an imported genomic fact
@@ -719,10 +728,16 @@ def _write_genetic_mutations(person, mutations, today):
         # value that does not resolve to a loaded SNOMED concept must fail closed, not silently drop:
         # either it is unsupported, or the vocab is only partially loaded — either way the edit would
         # not round-trip, so reject it rather than accept a write that reads back missing the value.
-        key = str(raw or '').strip().lower()
-        if not key:
+        if not str(raw or '').strip():
             return None
-        concept = Concept.objects.filter(concept_id=mapping[key]).first() if key in mapping else None
+        if kind == 'origin':
+            key = normalise_origin(raw)
+        else:
+            key = normalise_interpretation(raw)
+        concept = (
+            Concept.objects.filter(concept_id=mapping[key]).first()
+            if key is not None and key in mapping else None
+        )
         if concept is None:
             raise ValueError(
                 f'genetic_mutations ({gene}): {kind} {raw!r} is not a supported/loaded value')
@@ -752,9 +767,11 @@ def _write_genetic_mutations(person, mutations, today):
         fields = {
             'measurement_date': today,
             'value_as_string': variant[:60],
-            'qualifier_concept': _resolve_attr(mut.get('origin'), _MUTATION_ORIGIN_SNOMED, 'origin', gene),
+            'qualifier_concept': _resolve_attr(
+                mut.get('origin'), _MUTATION_ORIGIN_BY_VALUE, 'origin', gene),
             'value_as_concept': _resolve_attr(
-                mut.get('interpretation'), _MUTATION_INTERPRETATION_SNOMED, 'interpretation', gene),
+                mut.get('interpretation'), _MUTATION_INTERPRETATION_BY_VALUE,
+                'interpretation', gene),
         }
         existing = Measurement.objects.filter(**keys).order_by('measurement_id').first()
         if existing is not None:

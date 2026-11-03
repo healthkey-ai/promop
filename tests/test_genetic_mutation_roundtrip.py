@@ -30,8 +30,8 @@ def test_patient_patch_writes_gene_mutation_to_omop_and_returns_projection():
         concept_code='32865',
         concept_name='Patient self-report',
     )
-    ConceptFactory(concept_id=255395001, concept_code='255395001', concept_name='Germline')
-    ConceptFactory(concept_id=30166007, concept_code='30166007', concept_name='Pathogenic')
+    ConceptFactory(concept_id=45880308, concept_code='LA6683-2', concept_name='Germline')
+    ConceptFactory(concept_id=45884094, concept_code='LA6668-3', concept_name='Pathogenic')
     staff = Identity.objects.create_user(
         email='mutation-editor@example.test', password='pw', is_staff=True,
     )

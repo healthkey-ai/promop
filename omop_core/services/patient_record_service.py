@@ -4488,8 +4488,11 @@ def _get_genetic_mutations(person: Person, snapshot: OmopSnapshot = None) -> dic
     if 'projection' in snapshot.genomics_cache:
         return snapshot.genomics_cache['projection']
 
-    origin_concepts = {255395001: 'germline', 255461003: 'somatic'}
-    interpretation_concepts = {30166007: 'pathogenic', 10828004: 'benign', 42425007: 'vus'}
+    from omop_core.services.genomic_concepts import (
+        MUTATION_INTERPRETATION_CONCEPTS, MUTATION_ORIGIN_CONCEPTS,
+    )
+    origin_concepts = MUTATION_ORIGIN_CONCEPTS
+    interpretation_concepts = MUTATION_INTERPRETATION_CONCEPTS
 
     mutations = []
     from omop_core.models import FieldConceptMapping
