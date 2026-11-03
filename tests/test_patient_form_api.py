@@ -208,7 +208,10 @@ def test_legacy_descriptor_is_not_narrowed_by_shared_form_restrictions():
     legacy = client.get(url, {'person_id': record.person_id}).data
     assert legacy == build_writable_field_descriptor()
     shared = client.get(url, {'person_id': record.person_id}, HTTP_X_PATIENT_FORM='1').data
-    assert not shared['relapse_count']['writable']
+    # The shared form authors the relapse count as a therapy override; the
+    # legacy descriptor already advertises it (no narrowing in the other
+    # direction either).
+    assert shared['relapse_count']['writable'] is True
     # Derivation owns these columns on both surfaces: a direct write would be
     # overwritten by the next save and would hide the facts that drive them.
     expected_inputs = {
