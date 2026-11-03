@@ -604,6 +604,7 @@ def _author_therapy_line_once(
     disease=None,
     episode=None,
     asserted_by='authoring',
+    write_guard=None,
 ):
     """Record a line of therapy: its drug exposures, its Episode, and the links.
 
@@ -677,6 +678,7 @@ def _author_therapy_line_once(
             disease=disease,
             episode=episode,
             asserted_by=asserted_by,
+            write_guard=write_guard,
         )
         if result.episode is None:
             transaction.set_rollback(True)

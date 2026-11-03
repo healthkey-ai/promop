@@ -1248,6 +1248,19 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             for f in list(patch_data) if f in _PROFILE_DEMOGRAPHIC_FIELDS
         }
         mutations = patch_data.pop('genetic_mutations', None) if 'genetic_mutations' in patch_data else None
+        # Episode-derived line fields are projections of a therapy line, not
+        # columns: authoring them through the serializer would be undone by the
+        # next derivation (#2106). Collect them and write the line instead.
+        from omop_core.services.therapy_line_form import (
+            THERAPY_LINE_FORM_FIELDS, changed_line_values,
+        )
+        # The editor PATCHes the complete GET representation, so every line
+        # field arrives on every save (as the derived display name, or null).
+        # Only a value that differs from the record is an instruction.
+        therapy_line_edits = changed_line_values({
+            key: patch_data.pop(key) for key in list(patch_data)
+            if key in THERAPY_LINE_FORM_FIELDS
+        }, patient_info)
         # The editor PATCHes the complete GET representation.  A projected
         # mutation list carried back unchanged is therefore an autosave echo,
         # not an instruction to replace its OMOP rows (and it may be empty
@@ -1396,6 +1409,17 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 )
                 sync_no_preexisting_conditions(
                     patient_info, source=_attestation_source(request, person))
+
+            # Authoring a line is part of this save, not a follow-up: a refusal
+            # must roll back the rest of the PATCH with it, as any other invalid
+            # field would, and a write must not outlive a 400.
+            if therapy_line_edits:
+                from omop_core.services.therapy_line_form import author_lines_from_form
+                applied, rejected = author_lines_from_form(
+                    person, therapy_line_edits, disease=patient_info.disease)
+                if rejected:
+                    raise ValidationError(rejected)
+                patient_info.refresh_from_db()
 
         return Response({**PatientRecordSerializer(patient_info).data, 'previous_values': previous_values})
 

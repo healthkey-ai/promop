@@ -430,6 +430,7 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
         raw_descriptor, readable_fields=allowed_fields, record=record,
         include_latest_dates=False)
     facts, direct, person_changes, profile_applied = {}, {}, set(), set()
+    line_changes = {}
     profile_changes = {}
     therapy_overrides_applied = set()
     previous_override_values = {}
@@ -444,10 +445,17 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
     side_effect_projections = {}
     record_profile_fields = set()
     birth_changes = {}
+    from omop_core.services.therapy_line_form import THERAPY_LINE_FORM_FIELDS
     for name, value in changes.items():
         entry = descriptor.get(name, {})
         if not entry.get('writable') or entry.get('target') != 'patient_record':
             result.rejected[name] = entry.get('reason') or 'No supported patient-record write path.'
+            continue
+        if name in THERAPY_LINE_FORM_FIELDS:
+            # A projection of a persisted therapy line, not a column: collect
+            # it and author the line after the rest of the batch is validated,
+            # so a refused field elsewhere cannot leave a line half-written.
+            line_changes[name] = value
             continue
         if name in THERAPY_OVERRIDE_FIELDS or name == 'refractory_status':
             # These are inferred from the therapy lines, but an explicit answer
@@ -820,6 +828,19 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
                 for name, value in explicit.items():
                     setattr(record, name, value)
                 record.save(update_fields=sorted(explicit))
+    if line_changes:
+        from omop_core.services.therapy_line_form import (
+            author_lines_from_form, changed_line_values,
+        )
+        # The full-form autosave echoes the record back on every save; only a
+        # value that actually differs is an instruction to author the line.
+        line_changes = changed_line_values(line_changes, record)
+    if line_changes:
+        from omop_core.services.therapy_line_form import author_lines_from_form
+        applied, rejected = author_lines_from_form(
+            person, line_changes, disease=record.disease)
+        result.applied.extend(applied)
+        result.rejected.update(rejected)
     record.refresh_from_db()
     if therapy_overrides_applied:
         from omop_core.services.patient_record_revisions import write_record_revisions

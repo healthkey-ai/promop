@@ -115,6 +115,50 @@ mappings carry a `projection` key:
 }
 ```
 
+### Episode-derived therapy lines
+
+`first_line_*`, `second_line_*` and `later_*` are projections of a persisted
+therapy line (an `Episode` grouping its `DrugExposure`s, plus `LOT-<n>-outcome`
+and friends). A direct column write is accepted and then replaced by the next
+derivation — that was #2106 — so the descriptor offers exactly the first line of
+each group as a **writable control that authors the line**:
+
+```python
+{
+    'kind': 'direct',
+    'writable': True,
+    'target': 'patient_record',
+    'value_kind': 'string',
+    'options': [{'value': 'vrd', 'label': 'VRd'}, ...],
+    'authored_episode': {'line_number': 3, 'part': 'therapy'},
+    'reason': 'Written as a therapy line (an Episode grouping its facts); '
+              'this column is derived from that line.',
+}
+```
+
+Both PATCH routes route those names to
+`omop_core/services/therapy_line_form.py`, which calls `author_therapy_line`
+(the same service the therapy-lines editor uses) and then refreshes the record
+once. Nothing writes `user_edited_fields` for them: that marker means "keep this
+column against derivation", which is the opposite of what a projection needs —
+and a marker left by an older direct write is cleared when the line is authored,
+so it cannot pin the old value over the new line. The audit for a line is the
+line itself (`Episode`, `TherapyLineAssertion`), exactly as in the editor.
+
+Three further rules, each of which has a test:
+
+- the value is compared with the record before it is treated as an edit, because
+  the native editor PATCHes the whole GET representation and every line field
+  arrives on every save;
+- a line that already has a recorded composition refuses a therapy change: the
+  editor owns the drug list, and asserting a different regimen here would leave
+  the stored exposures describing the old one;
+- the write joins the request's transaction, so a refusal rolls back the rest of
+  the PATCH instead of committing half of it.
+
+`later_therapies` (the per-line read model) stays computed and unwritable; a
+second 3L+ line is authored in the editor, where the per-line contract lives.
+
 ### KIND_EDITABLE is retired for clinical fields
 
 The `KIND_EDITABLE` constant still exists for backward compatibility. It is no

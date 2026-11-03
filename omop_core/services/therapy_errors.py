@@ -34,6 +34,14 @@ MESSAGES = {
     'regimen_clear_requires_assertion': (
         'Clearing a regimen requires the unknown-regimen assertion workflow.'
     ),
+    'line_has_composition': (
+        'This line already has a recorded composition; change its therapy in '
+        'the therapy-lines editor.'
+    ),
+    'treatment_regimen_missing': (
+        'The Treatment Regimen vocabulary (32531) must be loaded before a '
+        'therapy line can be recorded.'
+    ),
     'unknown_drug': 'Unknown drug concept_id.',
     'drug_exposure_id_invalid': 'drug_exposure_id must be a positive integer.',
     'duplicate_drug_source': 'Duplicate drug source_value; use distinct administration IDs.',
@@ -55,6 +63,7 @@ FIELDS = {
     'future_line': 'start_date',
     'unknown_regimen': 'regimen_concept_id',
     'regimen_clear_requires_assertion': 'regimen_concept_id',
+    'line_has_composition': 'regimen_concept_id',
     'unknown_drug': 'drugs',
     'drug_exposure_id_invalid': 'drugs',
     'duplicate_drug_source': 'drugs',
