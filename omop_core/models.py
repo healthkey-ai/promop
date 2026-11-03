@@ -3992,7 +3992,7 @@ class PatientRecord(models.Model):
     condition_clinical_status = models.CharField(max_length=50, blank=True, null=True, help_text="Clinical status: active/remission/relapse")
     disease_slug = models.CharField(max_length=100, blank=True, null=True, help_text="Machine-readable disease ID e.g. 'multiple-myeloma'")
     disease_slugs = models.JSONField(
-        blank=True, default=list,
+        blank=True, null=True, default=list,
         help_text="Every cancer on the record as a disease_slug, primary first (#2182). Derived.",
     )
     validated = models.BooleanField(blank=True, null=True, help_text="Clinician validation flag")
