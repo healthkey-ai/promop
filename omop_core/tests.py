@@ -382,6 +382,58 @@ class CanonicalizeDiseaseTest(_OmopBase):
         self.assertEqual(pi.disease, 'Multiple Myeloma')
         self.assertEqual(pi.disease_slug, 'multiple-myeloma')
 
+    def test_cb_source_value_wins_over_status_variant_concept(self):
+        # A CB profile-write stores the canonical disease title in condition_source_value while the
+        # resolved standard concept may be a status/subtype variant ("Multiple myeloma in remission").
+        # The canonical source value must win, else PatientRecord.disease is a name that does not match
+        # EXACT's trial disease strings and the matcher scopes to zero (or wrong) trials.
+        remission = _concept(90051, 'Multiple myeloma in remission', self.dom_cond, self.vocab, self.cc)
+        ConditionOccurrence.objects.create(
+            condition_occurrence_id=92206,
+            person=self.person,
+            condition_concept=remission,
+            condition_source_value='multiple myeloma',
+            condition_start_date=date(2022, 5, 1),
+            condition_type_concept=self.type_concept,
+        )
+        pi = refresh_patient_record(self.person)
+        self.assertEqual(pi.disease, 'Multiple Myeloma')  # canonicalized source value, not the status variant
+
+    def test_non_canonical_source_value_keeps_concept_first(self):
+        # A non-CB row (e.g. FHIR import with a coded/free-text source value) is NOT a recognized
+        # canonical disease, so the mapped concept name is still preferred (unchanged behavior).
+        concept = _concept(90052, 'Breast Cancer', self.dom_cond, self.vocab, self.cc)
+        ConditionOccurrence.objects.create(
+            condition_occurrence_id=92207,
+            person=self.person,
+            condition_concept=concept,
+            condition_source_value='C50.9',  # ICD code, not a CB canonical title
+            condition_start_date=date(2022, 6, 1),
+            condition_type_concept=self.type_concept,
+        )
+        pi = refresh_patient_record(self.person)
+        self.assertEqual(pi.disease, 'Breast Cancer')  # concept name, not the raw code
+
+    def test_sync_condition_resolves_exact_concept_not_status_variant(self):
+        # _sync_condition must deterministically resolve the EXACT Condition concept, not arbitrarily
+        # .first() a status/subtype variant (the old `concept_name__icontains(...).first()` could pick
+        # "Multiple myeloma in remission").
+        from omop_core.services.omop_write_service import _sync_condition
+        from omop_core.services.mappings import CONCEPT_EHR_TYPE
+        _concept(CONCEPT_EHR_TYPE, 'EHR', self.dom_cond, self.vocab, self.cc)  # _sync_condition needs the type concept
+        _concept(90060, 'Multiple myeloma in remission', self.dom_cond, self.vocab, self.cc)  # variant, lower id
+        _concept(90061, 'multiple myeloma', self.dom_cond, self.vocab, self.cc)               # exact match
+
+        class _PI:  # duck-typed patient_info the writer reads
+            disease = 'multiple myeloma'
+            stage = condition_code_icd_10 = condition_code_snomed_ct = None
+
+        _sync_condition(self.person, _PI(), date(2022, 7, 1))
+        co = ConditionOccurrence.objects.filter(
+            person=self.person, condition_source_value='multiple myeloma').first()
+        self.assertIsNotNone(co)
+        self.assertEqual(co.condition_concept.concept_name, 'multiple myeloma')  # exact, not the remission variant
+
 
 class RefreshPatientRecordLabsFromMeasurementTest(_OmopBase):
     """Labs are derived from Measurement records using source_value fallback."""
@@ -520,6 +572,17 @@ class LegacyLaboratoryProjectionTest(_OmopBase):
 
         self.assertAlmostEqual(float(pi.hemoglobin_level), 11.2, places=1)
         self.assertEqual(pi.hemoglobin_level_units, 'mmol/L')
+        self.assertIsNone(pi.hemoglobin_g_dl)
+
+    def test_latest_legacy_hemoglobin_in_another_unit_wins(self):
+        self._measurement(92330, 'Hemoglobin measurement', 10.0, code='older-hgb', unit='mmol/L')
+        self._measurement(92331, 'Hemoglobin measurement', 11.2, code='newer-hgb', unit='mmol/L')
+
+        pi = refresh_patient_record(self.person)
+
+        self.assertAlmostEqual(float(pi.hemoglobin_level), 11.2, places=1)
+        self.assertEqual(pi.hemoglobin_level_units, 'mmol/L')
+        self.assertIsNone(pi.hemoglobin_g_dl)
 
     def test_direct_bilirubin_does_not_populate_total_bilirubin(self):
         self._measurement(92332, 'Direct bilirubin', 0.3, code='1968-7', unit='mg/dL')
@@ -1039,16 +1102,49 @@ class RefreshPatientRecordComputedFieldsTest(_OmopBase):
             person=self.person,
             monoclonal_protein_serum=0.1,
             monoclonal_protein_urine=50,
+            kappa_flc=10,
+            lambda_flc=10,
         )
         from omop_core.services.patient_record_service import _compute_derived_fields
         _compute_derived_fields(pi)
         self.assertFalse(pi.measurable_disease_imwg)
+
+    def test_measurable_disease_imwg_none_with_partial_values(self):
+        pi = PatientRecord.objects.create(
+            person=self.person,
+            monoclonal_protein_serum=0.1,
+        )
+        from omop_core.services.patient_record_service import _compute_derived_fields
+        _compute_derived_fields(pi)
+        self.assertIsNone(pi.measurable_disease_imwg)
+
+    def test_measurable_disease_imwg_true_with_abnormal_flc_ratio(self):
+        pi = PatientRecord.objects.create(
+            person=self.person,
+            kappa_flc=150,
+            lambda_flc=75,
+        )
+        from omop_core.services.patient_record_service import _compute_derived_fields
+        _compute_derived_fields(pi)
+        self.assertTrue(pi.measurable_disease_imwg)
 
     def test_measurable_disease_imwg_none_when_no_data(self):
         pi = PatientRecord.objects.create(person=self.person)
         from omop_core.services.patient_record_service import _compute_derived_fields
         _compute_derived_fields(pi)
         self.assertIsNone(pi.measurable_disease_imwg)
+
+    def test_flc_derivations_with_one_stored_and_one_projected_value(self):
+        # A refresh re-projects one light chain as a float while the other
+        # keeps the Decimal the database returned; mixing them must not crash.
+        from decimal import Decimal
+        pi = PatientRecord.objects.create(person=self.person, lambda_flc=Decimal('1.00'))
+        pi.refresh_from_db()
+        pi.kappa_flc = 150.0
+        from omop_core.services.patient_record_service import _compute_derived_fields
+        _compute_derived_fields(pi)
+        self.assertAlmostEqual(float(pi.involved_uninvolved_ratio), 150.0, places=3)
+        self.assertTrue(pi.measurable_disease_imwg)  # ratio > 100 and difference >= 10
 
 
 # ===========================================================================
@@ -2357,9 +2453,48 @@ class LoadLoincClassesArchiveTest(TestCase):
         with self.assertRaisesMessage(CommandError, 'File not found'):
             call_command('load_loinc_classes', archive='/nonexistent/loinc.zip')
 
-    def test_malformed_gcs_uri_is_reported(self):
-        with self.assertRaisesMessage(CommandError, 'bucket and an object'):
-            call_command('load_loinc_classes', archive='gs://bucket-only')
+    def test_a_real_release_archive_has_no_loincclass_csv_and_loads_anyway(self):
+        """The central finding of #1624: a loinc.org release carries no
+        LoincClass.csv. LOINC models CLASS as a Part, so the class table is
+        AccessoryFiles/PartFile/Part.csv filtered to PartTypeName == 'CLASS'.
+
+        This path used to demand a LoincClass.csv member, so --archive could
+        not read the very thing it names -- only the hand-assembled zip from
+        the retired upload script.
+        """
+        import zipfile
+        from omop_core.models import LoincClass, LoincCodeClass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'Loinc_2.83.zip'
+            with zipfile.ZipFile(path, 'w') as zf:
+                zf.writestr(
+                    'AccessoryFiles/PartFile/Part.csv',
+                    '"PartNumber","PartTypeName","PartName","PartDisplayName","Status"\n'
+                    '"LP7786-9","CLASS","CHEM","Chemistry - non-challenge","ACTIVE"\n'
+                    '"LP1234-5","COMPONENT","Albumin","Albumin","ACTIVE"\n')
+                zf.writestr(
+                    'LoincTable/Loinc.csv',
+                    'LOINC_NUM,CLASS,EXAMPLE_UNITS,PROPERTY,SCALE_TYP\n'
+                    '2160-0,CHEM,mg/dL,MCnc,Qn\n')
+            call_command('load_loinc_classes', archive=str(path))
+
+        self.assertEqual(
+            LoincClass.objects.get(code='CHEM').display_name, 'Chemistry - non-challenge')
+        # Only CLASS parts become classes.
+        self.assertFalse(LoincClass.objects.filter(code='Albumin').exists())
+        row = LoincCodeClass.objects.get(loinc_num='2160-0')
+        self.assertEqual((row.property, row.scale_type), ('MCnc', 'Qn'))
+
+    def test_an_archive_with_neither_class_source_is_reported(self):
+        import zipfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'loinc.zip'
+            with zipfile.ZipFile(path, 'w') as zf:
+                zf.writestr('LoincTable/Loinc.csv', 'LOINC_NUM,CLASS\n2160-0,CHEM\n')
+            with self.assertRaisesMessage(CommandError, 'Part.csv'):
+                call_command('load_loinc_classes', archive=str(path))
 
 
 # ---------------------------------------------------------------------------
@@ -4827,8 +4962,14 @@ class RefreshQueryCountTest(TestCase):
     """Ensure refresh_patient_record stays within a bounded query budget.
 
     The prefetch refactor (issue #541) reduced queries from ~80 to ~10.
-    This test catches regressions by asserting the total stays under 20.
+    This test catches regressions by asserting the total stays under the
+    budget below. Bump it only for a deliberate new lookup, and name that
+    lookup in the breakdown comment.
     """
+
+    #: 21 for the derivation itself plus the #1924 therapy-history
+    #: attestation existence check.
+    QUERY_BUDGET = 22
 
     @classmethod
     def setUpTestData(cls):
@@ -4872,16 +5013,16 @@ class RefreshQueryCountTest(TestCase):
             )
 
     def test_query_count_under_budget(self):
-        """refresh_patient_record must not exceed 21 SQL queries."""
+        """refresh_patient_record must not exceed QUERY_BUDGET SQL queries."""
         from django.test.utils import CaptureQueriesContext
         with CaptureQueriesContext(connection) as ctx:
             refresh_patient_record(self.person)
         # Budget: ~6 snapshot queries + PatientRecord SELECT FOR UPDATE + save
         # + a few ancillary lookups (Episode, concept cache, genomics OMOP
-        # projections, etc.)
+        # projections, the #1924 therapy-history attestation check, etc.)
         self.assertLessEqual(
-            len(ctx.captured_queries), 21,
-            f'Expected ≤20 queries, got {len(ctx.captured_queries)}. '
+            len(ctx.captured_queries), self.QUERY_BUDGET,
+            f'Expected ≤{self.QUERY_BUDGET} queries, got {len(ctx.captured_queries)}. '
             f'Query breakdown:\n'
             + '\n'.join(
                 f'  [{i}] {q["sql"][:120]}'
@@ -6637,6 +6778,79 @@ class OpenWearablesVocabularyTest(TestCase):
         self.assertIn('observation', tables)
 
 
+class HospitalSourceVocabularyTest(TestCase):
+    """Hospital resolver keys stay tenant-scoped while their tabs roll up."""
+
+    def test_epic_systems_are_recognised(self):
+        from omop_core.services.source_vocabularies import fhir_source_vocabulary, hospital_vendor
+
+        systems = [
+            'urn:oid:1.2.840.114350.1.13.211.2.7.5.737384.45',
+            'http://open.epic.com/FHIR/StructureDefinition/observation-flowsheet-id',
+        ]
+        for system in systems:
+            self.assertEqual(fhir_source_vocabulary(system), system)
+            self.assertEqual(hospital_vendor(system), 'EPIC')
+
+    def test_cerner_codeset_retains_the_tenant_resolver_key(self):
+        from omop_core.services.source_vocabularies import fhir_source_vocabulary, hospital_vendor
+
+        system = 'https://fhir.cerner.com/993df7f9-6163-4b2c-9388-9d472c4ef3f9/codeSet/72'
+        self.assertEqual(fhir_source_vocabulary(system), system)
+        self.assertEqual(hospital_vendor(system), 'CERNER')
+
+    def test_generic_and_unknown_systems_are_not_misclassified(self):
+        from omop_core.services.source_vocabularies import fhir_source_vocabulary
+
+        self.assertEqual(fhir_source_vocabulary('http://loinc.org'), 'LOINC')
+        self.assertEqual(fhir_source_vocabulary(
+            'http://hl7.org/fhir/us/core/CodeSystem/us-core-category'), '')
+        self.assertEqual(fhir_source_vocabulary('https://fhir.cerner.com/metadata'), '')
+
+    def test_hospital_tabs_precede_other_curation_queues(self):
+        from omop_core.services.source_vocabularies import source_tab_sort_key
+
+        self.assertLess(source_tab_sort_key('EPIC'), source_tab_sort_key('ICD10CM'))
+        self.assertLess(source_tab_sort_key('CERNER'), source_tab_sort_key('ICD10CM'))
+
+    def test_hospital_sources_are_available_for_every_clinical_domain(self):
+        from omop_core.services.source_vocabularies import DOMAIN_TO_TABLE, source_systems_for
+
+        for domain in DOMAIN_TO_TABLE:
+            with self.subTest(domain=domain):
+                vocabularies = {entry['vocabulary_id'] for entry in source_systems_for(domain)}
+                self.assertTrue({'EPIC', 'CERNER'} <= vocabularies)
+
+    def test_tabs_and_suggest_include_every_tenant_without_merging_resolver_keys(self):
+        from omop_core.mapping.suggestions import suggestable_queryset
+        from omop_core.services.mapping_browse import tab_queryset
+
+        epic_a = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='urn:oid:1.2.840.114350.1.13.211.2.7.5.737384.45',
+            source_code='10627', omop_table='measurement', status='proposed')
+        epic_b = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='urn:oid:1.2.840.114350.1.13.670.2.7.5.737384.45',
+            source_code='10627', omop_table='measurement', status='proposed')
+        cerner = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id=(
+                'https://fhir.cerner.com/993df7f9-6163-4b2c-9388-9d472c4ef3f9/codeSet/72'),
+            source_code='10627', omop_table='measurement', status='proposed')
+
+        self.assertEqual(
+            set(tab_queryset(SourceCodeConceptMapping.objects.all(), 'EPIC')
+                .values_list('pk', flat=True)),
+            {epic_a.pk, epic_b.pk},
+        )
+        self.assertEqual(
+            set(suggestable_queryset(
+                'measurement', source_vocabulary_id='EPIC', min_occurrences=1)
+                .values_list('pk', flat=True)),
+            {epic_a.pk, epic_b.pk},
+        )
+        self.assertNotEqual(epic_a.source_vocabulary_id, epic_b.source_vocabulary_id)
+        self.assertNotIn(cerner.pk, {epic_a.pk, epic_b.pk})
+
+
 class SeedOpenWearablesMappingsTest(TestCase):
     """Test the seed_openwearables_mappings management command."""
 
@@ -7010,3 +7224,157 @@ class SeedHkLabsMappingsTest(TestCase):
             origin_system='hk-labs-seed',
         ).count()
         self.assertEqual(count1, count2)
+
+
+# ===========================================================================
+# recount_source_code_occurrences management command
+# ===========================================================================
+
+class RecountSourceCodeOccurrencesTest(_OmopBase):
+    """Tests for the recount_source_code_occurrences management command."""
+
+    PERSON_ID = 90800
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        from omop_core.models import ProcedureOccurrence
+        cls.ProcedureOccurrence = ProcedureOccurrence
+
+        cls.generic_meas = _concept(
+            3090801, 'Lab test', cls.dom_meas, cls.vocab, cls.cc,
+        )
+        cls.generic_cond = _concept(
+            3090802, 'Condition finding', cls.dom_cond, cls.vocab, cls.cc,
+        )
+
+    # -- helpers --
+
+    def _create_measurement(self, mid, source_value, dt):
+        return Measurement.objects.create(
+            measurement_id=mid,
+            person=self.person,
+            measurement_concept=self.generic_meas,
+            measurement_date=dt,
+            measurement_type_concept=self.type_concept,
+            measurement_source_value=source_value,
+        )
+
+    def _create_condition(self, cid, source_value, dt):
+        return ConditionOccurrence.objects.create(
+            condition_occurrence_id=cid,
+            person=self.person,
+            condition_concept=self.generic_cond,
+            condition_start_date=dt,
+            condition_type_concept=self.type_concept,
+            condition_source_value=source_value,
+        )
+
+    def _create_sccm(self, source_code, omop_table, **kwargs):
+        defaults = dict(
+            source_vocabulary_id='',
+            source_code=source_code,
+            omop_table=omop_table,
+            domain_id='Measurement' if omop_table == 'measurement' else 'Condition',
+            status='proposed',
+            occurrence_count=0,
+            first_seen=None,
+            last_seen=None,
+            organization=None,
+        )
+        defaults.update(kwargs)
+        return SourceCodeConceptMapping.objects.create(**defaults)
+
+    # -- tests --
+
+    def test_happy_path_updates_count_and_dates(self):
+        """Clinical rows → SCCM row gets updated count and date range."""
+        self._create_measurement(908001, 'GLUCOSE', date(2024, 1, 10))
+        self._create_measurement(908002, 'GLUCOSE', date(2024, 6, 15))
+        self._create_measurement(908003, 'GLUCOSE', date(2024, 3, 20))
+        sccm = self._create_sccm('GLUCOSE', 'measurement')
+
+        call_command('recount_source_code_occurrences', verbosity=0)
+
+        sccm.refresh_from_db()
+        self.assertEqual(sccm.occurrence_count, 3)
+        self.assertEqual(sccm.first_seen.date(), date(2024, 1, 10))
+        self.assertEqual(sccm.last_seen.date(), date(2024, 6, 15))
+
+    def test_no_sccm_row_no_creation(self):
+        """Clinical rows without a mapping row are skipped, not created."""
+        self._create_measurement(908010, 'ORPHAN_CODE', date(2024, 5, 1))
+
+        before = SourceCodeConceptMapping.objects.count()
+        call_command('recount_source_code_occurrences', verbosity=0)
+        after = SourceCodeConceptMapping.objects.count()
+
+        self.assertEqual(before, after)
+
+    def test_approved_mapping_updated(self):
+        """Approved SCCM rows still get their count updated."""
+        self._create_measurement(908020, 'APPROVED_LAB', date(2024, 2, 1))
+        self._create_measurement(908021, 'APPROVED_LAB', date(2024, 8, 1))
+        sccm = self._create_sccm(
+            'APPROVED_LAB', 'measurement', status='approved', occurrence_count=1,
+        )
+
+        call_command('recount_source_code_occurrences', verbosity=0)
+
+        sccm.refresh_from_db()
+        self.assertEqual(sccm.occurrence_count, 2)
+
+    def test_dry_run_no_write(self):
+        """--dry-run reports but does not update."""
+        self._create_measurement(908030, 'DRY_CODE', date(2024, 4, 1))
+        sccm = self._create_sccm('DRY_CODE', 'measurement', occurrence_count=0)
+
+        call_command('recount_source_code_occurrences', '--dry-run', verbosity=0)
+
+        sccm.refresh_from_db()
+        self.assertEqual(sccm.occurrence_count, 0)
+
+    def test_empty_source_value_skipped(self):
+        """Rows with NULL or empty source_value are excluded."""
+        Measurement.objects.create(
+            measurement_id=908040,
+            person=self.person,
+            measurement_concept=self.generic_meas,
+            measurement_date=date(2024, 1, 1),
+            measurement_type_concept=self.type_concept,
+            measurement_source_value='',
+        )
+        Measurement.objects.create(
+            measurement_id=908041,
+            person=self.person,
+            measurement_concept=self.generic_meas,
+            measurement_date=date(2024, 1, 1),
+            measurement_type_concept=self.type_concept,
+            measurement_source_value=None,
+        )
+        # Only the non-empty row should count
+        self._create_measurement(908042, 'REAL_CODE', date(2024, 1, 1))
+        sccm = self._create_sccm('REAL_CODE', 'measurement')
+
+        call_command('recount_source_code_occurrences', verbosity=0)
+
+        sccm.refresh_from_db()
+        self.assertEqual(sccm.occurrence_count, 1)
+
+    def test_multiple_tables_independent(self):
+        """Codes in measurement and condition update their SCCM rows independently."""
+        self._create_measurement(908050, 'MEAS_MULTI', date(2024, 1, 1))
+        self._create_measurement(908051, 'MEAS_MULTI', date(2024, 2, 1))
+        self._create_condition(908060, 'COND_MULTI', date(2024, 5, 1))
+
+        sccm_meas = self._create_sccm('MEAS_MULTI', 'measurement')
+        sccm_cond = self._create_sccm('COND_MULTI', 'condition')
+
+        call_command('recount_source_code_occurrences', verbosity=0)
+
+        sccm_meas.refresh_from_db()
+        sccm_cond.refresh_from_db()
+        self.assertEqual(sccm_meas.occurrence_count, 2)
+        self.assertEqual(sccm_cond.occurrence_count, 1)
+        self.assertEqual(sccm_meas.first_seen.date(), date(2024, 1, 1))
+        self.assertEqual(sccm_cond.first_seen.date(), date(2024, 5, 1))

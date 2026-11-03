@@ -113,6 +113,55 @@ def test_approving_a_curated_row_still_records_the_model_outcome(admin_client, c
     assert row.suggestion_outcome == 'overridden', 'accuracy still sees the override'
 
 
+def test_approving_makes_the_curator_the_provenance(admin_client, concepts):
+    model_pick, _ = concepts
+    row = suggested_row(model_pick)
+
+    response = admin_client.patch(f'/api/v1/code-mappings/{row.pk}/', {'status': 'approved'}, format='json')
+
+    assert response.status_code == 200, response.data
+    assert response.data['origin_system'] == 'curator@example.test'
+    row.refresh_from_db()
+    assert row.origin_system == 'curator@example.test'
+    assert row.suggestion_outcome == 'accepted', 'accuracy reads the outcome, not provenance'
+    assert row.suggested_target_concept_id == model_pick.pk
+
+
+def test_unapproving_keeps_the_curator_and_stays_out_of_suggest(admin_client, concepts):
+    model_pick, _ = concepts
+    row = suggested_row(model_pick)
+    admin_client.patch(f'/api/v1/code-mappings/{row.pk}/', {'status': 'approved'}, format='json')
+
+    admin_client.patch(f'/api/v1/code-mappings/{row.pk}/', {'status': 'proposed'}, format='json')
+
+    row.refresh_from_db()
+    assert row.origin_system == 'curator@example.test'
+    assert row.pk not in {m.pk for m in suggestable_mappings('condition', resuggest=True, min_occurrences=1)}
+
+
+def test_a_plain_resave_of_an_approved_row_does_not_restamp(admin_client, concepts):
+    model_pick, _ = concepts
+    row = suggested_row(model_pick, status='approved', origin_system='HT-One')
+
+    admin_client.patch(f'/api/v1/code-mappings/{row.pk}/', {'notes': 'checked'}, format='json')
+
+    row.refresh_from_db()
+    assert row.origin_system == 'HT-One'
+
+
+@pytest.mark.parametrize('origin_system', ['athena', 'athena-standard-self', 'athena-local-maps-to'])
+def test_approving_an_athena_row_keeps_its_provenance(admin_client, concepts, origin_system):
+    model_pick, _ = concepts
+    row = suggested_row(model_pick, origin_system=origin_system, suggestion_model_version='',
+                        suggested_target_concept=None)
+
+    admin_client.patch(f'/api/v1/code-mappings/{row.pk}/', {'status': 'approved'}, format='json')
+
+    row.refresh_from_db()
+    assert row.status == 'approved'
+    assert row.origin_system == origin_system
+
+
 def test_approved_rows_are_never_candidates(concepts):
     model_pick, _ = concepts
     suggested_row(model_pick, status='approved')
@@ -122,6 +171,61 @@ def test_approved_rows_are_never_candidates(concepts):
 
 
 # --- the batch write path ---------------------------------------------------
+
+@pytest.mark.parametrize('use_alternative', [False, True])
+def test_curator_can_approve_a_saved_result_before_batch_finishes(
+    monkeypatch, admin_client, concepts, use_alternative,
+):
+    model_pick, curator_pick = concepts
+    rows = [suggested_row(model_pick, source_code=code) for code in ['C90.0', 'C90.1']]
+    candidate = as_candidate(model_pick)
+    monkeypatch.setattr(suggestions, 'umls_candidates', lambda *a: ([candidate], 'C1'))
+    monkeypatch.setattr(suggestions, 'rank_candidates_dispatch', lambda *a, **kw: (
+        candidate, 'ranked', [{'concept_id': model_pick.pk, 'confidence': 1.0}], {},
+    ))
+    completed = []
+
+    def activity(event):
+        if event['stage'] != 'result':
+            return
+        completed.append(event['mapping_id'])
+        if len(completed) != 1:
+            return
+        assert event['updated'] is True
+        path = f"/api/v1/code-mappings/{event['mapping_id']}/"
+        assert admin_client.post(f'{path}lock/').status_code == 200
+        current = admin_client.get(path)
+        assert current.data['destination_concept_id'] == model_pick.pk
+        assert current.data['status'] == 'proposed'
+        target = curator_pick if use_alternative else model_pick
+        if use_alternative:
+            response = admin_client.patch(path, {
+                'destination_concept_id': target.pk, 'status': 'proposed',
+            }, format='json')
+            assert response.status_code == 200, response.data
+        response = admin_client.patch(path, {
+            'destination_concept_id': target.pk, 'status': 'approved',
+        }, format='json')
+        assert response.status_code == 200, response.data
+        assert admin_client.delete(f'{path}lock/').status_code in (200, 204)
+
+    results = suggestions.suggest_mappings(
+        'condition', strategies=['umls'], min_occurrences=1, resuggest=True, activity=activity,
+    )
+    assert len(results) == len(completed) == 2
+    approved = SourceCodeConceptMapping.objects.get(pk=completed[0])
+    assert approved.status == 'approved'
+    assert approved.target_concept_id == (curator_pick.pk if use_alternative else model_pick.pk)
+    assert approved.suggested_target_concept_id == model_pick.pk
+    assert approved.suggestion_outcome == ('overridden' if use_alternative else 'accepted')
+    assert approved.reviewer_id is not None
+    assert approved.reviewed_at is not None
+    for row in rows:
+        row.refresh_from_db()
+        if row.pk != approved.pk:
+            assert row.status == 'proposed'
+            assert row.target_concept_id == model_pick.pk
+
 
 def _run_with_decision_during_ranking(monkeypatch, row, decide):
     """Fake retrieval and a ranker that lets a curator act mid-run."""

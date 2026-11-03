@@ -7,6 +7,8 @@ Covers:
 - Pipeline orchestration (UMLS winner, progressive retrieval, strategy filtering)
 - API endpoint parameter validation
 """
+import os
+
 import pytest
 
 from django.db import connection
@@ -50,6 +52,13 @@ from tests.factories import (
 )
 
 pytestmark = pytest.mark.django_db
+
+
+def test_live_ranking_credentials_are_disabled_by_default(settings):
+    assert settings.ANTHROPIC_API_KEY == ''
+    assert settings.JEV_API_KEY == ''
+    assert os.environ['ANTHROPIC_API_KEY'] == ''
+    assert os.environ['JEV_API_KEY'] == ''
 
 
 # ---------------------------------------------------------------------------
@@ -259,12 +268,7 @@ class TestVocabToUmlsRootMapping:
     """Verify the VOCAB_TO_UMLS_ROOT constant is internally consistent."""
 
     def test_reverse_mapping_roundtrips(self):
-        # ICD10 shares the ICD10CM SAB, so the reverse map prefers ICD10CM.
-        # Skip aliases that share a SAB with a canonical vocab.
-        sab_aliases = {'ICD10'}  # ICD10 → ICD10CM SAB (alias of ICD10CM)
         for omop_vocab, umls_sab in VOCAB_TO_UMLS_ROOT.items():
-            if omop_vocab in sab_aliases:
-                continue
             assert _UMLS_ROOT_TO_VOCAB[umls_sab] == omop_vocab
 
     def test_all_strategies_constant(self):
@@ -420,13 +424,12 @@ class TestSuggestableMappings:
                  suggestable_mappings('measurement', source_vocabulary_id='LOINC')]
         assert codes == ['MINE']
 
-    def test_the_icd10_tab_covers_its_merged_alias(self):
-        """HT-One sends ICD-10-CM-format codes under ICD10; Athena loads the
-        concepts under ICD10CM. Both are one tab."""
-        queue_row('A00.0', source_vocabulary_id='ICD10', omop_table='condition')
+    def test_icd10cm_tab_returns_its_own_rows(self):
+        """After migration 0266, all ICD10 rows are ICD10CM."""
+        queue_row('A00.0', source_vocabulary_id='ICD10CM', omop_table='condition')
         queue_row('A00.1', source_vocabulary_id='ICD10CM', omop_table='condition')
         codes = {m.source_code for m in
-                 suggestable_mappings('condition', source_vocabulary_id='ICD10')}
+                 suggestable_mappings('condition', source_vocabulary_id='ICD10CM')}
         assert codes == {'A00.0', 'A00.1'}
 
     def test_a_declined_code_stays_eligible(self):
@@ -536,7 +539,7 @@ class TestSuggestableMappings:
             'measurement', resuggest=True, min_occurrences=1, limit=4,
         )
         assert [m.source_code for m in rows] == [
-            'GAP BUSY', 'GAP QUIET', 'GAP UNCOUNTED', 'ANSWER BUSY',
+            'GAP BUSY', 'GAP QUIET', 'ANSWER BUSY', 'ANSWER QUIET',
         ]
 
 
@@ -943,9 +946,13 @@ class TestSuggestRunLifecycle:
         latest = SuggestRun.objects.create(state='success', activity=[{'message': 'Saved log'}])
         response = self.client.get(path)
         assert response.status_code == 200
-        assert response.data == {'run_id': str(latest.id)}
+        assert response.data['run_id'] == str(latest.id)
+        assert 'activity' not in response.data, 'activity excluded without include_activity'
         log = self.client.get(f'/api/v1/code-mappings/suggest-runs/{latest.id}/?include_activity=1')
         assert log.data['activity'] == [{'message': 'Saved log'}]
+        with_activity = self.client.get(f'{path}?include_activity=1')
+        assert with_activity.data['run_id'] == str(latest.id)
+        assert with_activity.data['activity'] == [{'message': 'Saved log'}]
         self.client.force_authenticate(user=None)
         assert self.client.get(path).status_code in (401, 403)
 
@@ -1181,6 +1188,15 @@ class TestPipelineIntegration:
         assert row.origin_system == SUGGESTION_PROVENANCE
         assert row.suggestion_model_version == SUGGESTION_MODEL_VERSION
 
+    def test_a_destination_supersedes_a_seeded_noise_rejection(self, glucose_bridge):
+        row = queue_row(
+            '2345-7', source_vocabulary_id='LOINC', suggested_action='reject',
+        )
+        suggest_mappings('measurement', min_occurrences=10, strategies=['umls'])
+        row.refresh_from_db()
+        assert row.target_concept_id == glucose_bridge.concept_id
+        assert row.suggested_action == ''
+
     def test_a_declined_row_keeps_the_provenance_that_raised_it(self):
         """Nothing was proposed, so nothing here is a suggestion. Stamping the
         provenance anyway would erase the ingest channel *and* enrol the code in
@@ -1352,32 +1368,33 @@ class TestSourceEnrichment:
 
 
 # ---------------------------------------------------------------------------
-# ICD10 vocabulary → UMLS ICD10CM SAB lookup (#1028)
+# ICD10CM vocabulary → UMLS ICD10CM SAB lookup (#1028)
 # ---------------------------------------------------------------------------
 
-class TestICD10UmlsLookup:
-    """Verify that ICD10 (HT-One) codes resolve through the ICD10CM UMLS SAB."""
+class TestICD10CMUmlsLookup:
+    """Verify that ICD10CM codes resolve through the ICD10CM UMLS SAB."""
 
-    def test_icd10_vocab_maps_to_icd10cm_sab(self):
-        assert VOCAB_TO_UMLS_ROOT.get('ICD10') == 'ICD10CM'
+    def test_icd10cm_vocab_maps_to_icd10cm_sab(self):
+        assert VOCAB_TO_UMLS_ROOT.get('ICD10CM') == 'ICD10CM'
 
-    def test_icd10_code_finds_umls_candidates(
+    def test_icd10_no_longer_in_umls_root(self):
+        """After migration 0266, ICD10 rows no longer exist."""
+        assert VOCAB_TO_UMLS_ROOT.get('ICD10') is None
+
+    def test_icd10cm_code_finds_umls_candidates(
         self, umls_release, condition_domain, snomed_vocab, concept_class,
     ):
-        """An ICD10 code should find UMLS candidates via the ICD10CM SAB."""
-        # Create ICD10 vocab (the source row's vocabulary)
-        icd10_vocab = VocabularyFactory(vocabulary_id='ICD10', vocabulary_name='ICD10')
+        """An ICD10CM code should find UMLS candidates via the ICD10CM SAB."""
+        icd10cm_vocab = VocabularyFactory(vocabulary_id='ICD10CM', vocabulary_name='ICD-10-CM')
 
         cui = UmlsConcept.objects.create(
             cui='C0008031', preferred_name='Cholera',
             release=umls_release,
         )
-        # UMLS source code under ICD10CM SAB (same code format)
         UmlsSourceCode.objects.create(
             concept=cui, root_source='ICD10CM', code='A00.0',
             term_type='PT', name='Cholera due to Vibrio cholerae 01, biovar cholerae',
         )
-        # Sibling: SNOMED concept
         UmlsSourceCode.objects.create(
             concept=cui, root_source='SNOMEDCT_US', code='63650001',
             term_type='PT', name='Cholera',
@@ -1389,8 +1406,7 @@ class TestICD10UmlsLookup:
             standard_concept='S',
         )
 
-        # Look up with vocabulary_id='ICD10' — should work via ICD10CM SAB
-        candidates, cui_str = umls_candidates('A00.0', 'ICD10', 'Condition')
+        candidates, cui_str = umls_candidates('A00.0', 'ICD10CM', 'Condition')
         assert len(candidates) == 1
         assert candidates[0]['concept_id'] == 63650001
         assert cui_str == 'C0008031'
@@ -1423,7 +1439,7 @@ def test_suggest_persists_all_bridge_cuis_without_varchar_overflow(
     assert len(mapping.umls_cui) > 20
 
 
-@pytest.mark.parametrize('source', ['ICD10', 'ICD10CM', 'ICD10PCS', 'urn:oid:2.16.840.1.113883.6.90'])
+@pytest.mark.parametrize('source', ['ICD10CM', 'ICD10PCS', 'urn:oid:2.16.840.1.113883.6.90'])
 @pytest.mark.parametrize('destination_domain', ['Observation', 'Procedure', 'Drug', 'Device'])
 def test_icd_retrieves_other_standard_domains_without_umls(source, destination_domain):
     from omop_core.mapping.suggestions import retrieval_pool

@@ -148,6 +148,7 @@ class Command(EmbeddingLoadCommand):
                 continue
 
             _obj, created = SourceCodeConceptMapping.objects.get_or_create(
+                organization=None,
                 source_vocabulary_id=c1.vocabulary_id,
                 source_code=c1.concept_code[:100],
                 defaults={

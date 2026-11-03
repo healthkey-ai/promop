@@ -33,7 +33,52 @@ This is the easiest path for local setup and staging repairs. The command
 downloads the first zip from the shared folder, extracts it under `/tmp/vocab`,
 loads the vocabulary tables, and publishes a `vocabulary_release` manifest.
 
-[Open the supplied vocabulary folder](https://drive.google.com/drive/u/0/folders/1HoRWGepqcH3pMKK03KNb1oWpaVs0Avl7).
+[Open the supplied vocabulary folder](https://drive.google.com/drive/u/1/folders/1HoRWGepqcH3pMKK03KNb1oWpaVs0Avl7).
+
+## Athena freshness and insert-only updates
+
+Deployments only create a durable sync request and publish it to the dedicated
+Celery `athena` queue. The worker resolves the selected ZIP in the governed
+Drive folder and performs both a new instance's initial load and later updates;
+archive processing, synonym refresh, and release hashing never block a web
+deploy. Repeated deploy/boot preparation deduplicates queued or running work.
+
+A file identity already recorded by a successful sync exits on the worker
+without downloading the archive or touching vocabulary tables. Queue the same
+asynchronous check manually (including to retry a failed job):
+
+```bash
+python manage.py queue_athena_vocabulary_sync --gdrive "$ATHENA_VOCABULARY_GDRIVE_URL"
+```
+
+The durable receipt progresses through `queued`, `running`, and then
+`current`, `applied`, or `failed`. Check a database synchronously without
+changing it only for diagnosis:
+
+```bash
+python manage.py sync_athena_vocabulary --gdrive
+```
+
+When that reports a different artifact, measure the missing-row delta inside a
+transaction that is rolled back:
+
+```bash
+python manage.py sync_athena_vocabulary --gdrive --dry-run
+```
+
+Apply only absent rows with the existing conflict-tolerant Athena loader:
+
+```bash
+python manage.py sync_athena_vocabulary --gdrive --apply
+```
+
+The apply path holds a database advisory lock, never enables `--replace`, and
+records an `AthenaVocabularySync` receipt containing the source identity,
+SHA-256, prior/new releases, per-table insert counts, outcome, and any failure.
+Failures roll back the vocabulary transaction and may be queued again without
+another application deploy. A repeated successful check is a metadata-only
+no-op. Workers must consume both the default `celery` queue and the `athena`
+queue; `start-worker.sh` provides that configuration.
 
 ```bash
 DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" DEBUG=True \

@@ -1,9 +1,10 @@
 import PageTitle from '@/components/Branding/PageTitle';
-import { useState, useEffect, useMemo, useCallback } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { Upload, Trash2, LogOut, Settings, Globe } from "lucide-react";
+import { Upload, Trash2, LogOut, Settings, Globe, RefreshCw, Download } from "lucide-react";
 import api from "@/api/axios";
 import { useAuth, type User } from "@/hooks/useAuth";
+import type { ResolveRunStatus } from "@/types/sourceCodes";
 import { PaginationControls } from "@/components/labs/PaginationControls";
 import { useLocalPagination } from "@/lib/pagination";
 
@@ -17,11 +18,10 @@ interface Patient {
   organization_slug?: string | null;
   disease: string;
   stage: string;
-  genomics_summary?: string;
+  unmapped_source_code_count?: number;
   therapy_lines_count?: number | null;
   updated_at: string;
   treatment_summary?: { name: string; line: number; start_date: string | null; end_date: string | null } | null;
-  disease_status?: string | null;
   subtype_biomarkers?: string;
   ecog_performance_status?: number | null;
   ecog_assessment_date?: string | null;
@@ -101,7 +101,13 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
   const [selectAllMode, setSelectAllMode] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [downloading, setDownloading] = useState(false);
+  const [resolveDialogOpen, setResolveDialogOpen] = useState(false);
+  const [resolveRun, setResolveRun] = useState<ResolveRunStatus | null>(null);
+  const resolvePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  useEffect(() => () => { if (resolvePollRef.current) clearInterval(resolvePollRef.current); }, []);
   const [orgFilter, setOrgFilter] = useState(ALL_FILTER_VALUE);
+  const [search, setSearch] = useState("");
   const [diseaseFilter, setDiseaseFilter] = useState(ALL_FILTER_VALUE);
   const [stageFilter, setStageFilter] = useState(ALL_FILTER_VALUE);
   const [dateFilter, setDateFilter] = useState(ALL_FILTER_VALUE);
@@ -115,6 +121,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
           page,
           page_size: pageSize,
           org: orgFilter,
+          search,
           disease: diseaseFilter,
           stage: stageFilter,
           date: dateFilter,
@@ -137,7 +144,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
     } finally {
       setLoading(false);
     }
-  }, [page, pageSize, orgFilter, diseaseFilter, stageFilter, dateFilter, reviewFilters, ordering]);
+  }, [page, pageSize, orgFilter, search, diseaseFilter, stageFilter, dateFilter, reviewFilters, ordering]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount
@@ -194,7 +201,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
       setDeleting(true);
       if (selectAllMode) {
         await api.delete("/patient-info/bulk_delete_filtered/", {
-          params: { org: orgFilter, disease: diseaseFilter, stage: stageFilter, date: dateFilter, ...reviewFilters },
+          params: { org: orgFilter, search, disease: diseaseFilter, stage: stageFilter, date: dateFilter, ...reviewFilters },
         });
       } else {
         await api.delete("/patient-info/bulk_delete/", {
@@ -211,6 +218,78 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
       setError(getErrorMessage(err, "Failed to delete patients"));
     } finally {
       setDeleting(false);
+    }
+  };
+
+  const handleResolveConfirm = async () => {
+    if (!selectAllMode && selectedIds.size === 0) return;
+    try {
+      const body = selectAllMode
+        ? { select_all: true }
+        : { person_ids: Array.from(selectedIds) };
+      const params = selectAllMode
+        ? { org: orgFilter, search, disease: diseaseFilter, stage: stageFilter, date: dateFilter, ...reviewFilters }
+        : undefined;
+      const res = await api.post<{ run_id: string; total: number }>(
+        "/v1/patient-records/bulk-resolve-source-codes/",
+        body,
+        { params }
+      );
+      const runId = res.data.run_id;
+      setResolveRun({ run_id: runId, state: "pending", total: res.data.total, done: 0, resolved: 0, created: 0, skipped: 0, already_resolved: 0, errors: 0, code_details: [] });
+
+      resolvePollRef.current = setInterval(async () => {
+        try {
+          const status = await api.get<ResolveRunStatus>(`/v1/resolve-runs/${runId}/`);
+          setResolveRun(status.data);
+          if (status.data.state === "completed" || status.data.state === "failed") {
+            if (resolvePollRef.current) clearInterval(resolvePollRef.current);
+            resolvePollRef.current = null;
+          }
+        } catch {
+          if (resolvePollRef.current) clearInterval(resolvePollRef.current);
+          resolvePollRef.current = null;
+        }
+      }, 2000);
+    } catch (err) {
+      setError(getErrorMessage(err, "Failed to start bulk resolve"));
+      setResolveDialogOpen(false);
+    }
+  };
+
+  const handleDownloadCsv = async () => {
+    try {
+      setDownloading(true);
+      const params = selectAllMode
+        ? { org: orgFilter, search, disease: diseaseFilter, stage: stageFilter, date: dateFilter, ...reviewFilters, ordering }
+        : { person_ids: Array.from(selectedIds).join(",") };
+      const response = await api.get<Blob>("/v1/patient-records/export-csv/", { params, responseType: "blob" });
+      const disposition = String(response.headers?.["content-disposition"] ?? "");
+      const filename = /filename="([^"]+)"/.exec(disposition)?.[1] ?? "patients.csv";
+      const url = URL.createObjectURL(response.data);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      setError(null);
+    } catch (err) {
+      // With responseType "blob" the error body arrives as a Blob too.
+      const data = (err as { response?: { data?: unknown } })?.response?.data;
+      let message = "Failed to download patients";
+      if (data instanceof Blob) {
+        try {
+          const parsed = JSON.parse(await data.text()) as { error?: string; detail?: string };
+          message = parsed.error || parsed.detail || message;
+        } catch { /* not JSON */ }
+      } else {
+        message = getErrorMessage(err, message);
+      }
+      setError(message);
+    } finally {
+      setDownloading(false);
     }
   };
 
@@ -239,6 +318,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
     (selectAllMode || visibleSelectedCount === patients.length);
   const canManageMappings = !!(currentUser?.is_staff || currentUser?.is_org_admin
     || currentUser?.org_accesses?.some(a => ['org_admin', 'doctor', 'analyst'].includes(a.role ?? '')));
+  const canAdministerOrganizations = !!(currentUser?.is_staff || currentUser?.is_org_admin);
 
   const handleLogout = () => {
     void logout();
@@ -250,13 +330,32 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
         <PageTitle className="text-2xl font-bold text-foreground">Patients</PageTitle>
         <div className="flex flex-wrap gap-2">
           {(selectedIds.size > 0 || selectAllMode) && (
-            <button
-              onClick={() => setDeleteDialogOpen(true)}
-              className="inline-flex items-center gap-2 rounded-md border border-destructive px-4 py-2 text-sm font-medium text-destructive hover:bg-destructive/10"
-            >
-              <Trash2 size={16} />
-              Delete ({selectAllMode ? `All ${patientCount}` : selectedIds.size})
-            </button>
+            <>
+              <button
+                onClick={() => setDeleteDialogOpen(true)}
+                className="inline-flex items-center gap-2 rounded-md border border-destructive px-4 py-2 text-sm font-medium text-destructive hover:bg-destructive/10"
+              >
+                <Trash2 size={16} />
+                Delete ({selectAllMode ? `All ${patientCount}` : selectedIds.size})
+              </button>
+              {!!(currentUser?.is_staff || currentUser?.is_org_admin) && (
+                <button
+                  onClick={() => { setResolveRun(null); setResolveDialogOpen(true); }}
+                  className="inline-flex items-center gap-2 rounded-md border border-input px-4 py-2 text-sm font-medium text-foreground hover:bg-accent"
+                >
+                  <RefreshCw size={16} />
+                  Generate OMOP ({selectAllMode ? `All ${patientCount}` : selectedIds.size})
+                </button>
+              )}
+              <button
+                onClick={() => void handleDownloadCsv()}
+                disabled={downloading}
+                className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+              >
+                <Download size={16} />
+                {downloading ? "Downloading…" : `Download CSV (${selectAllMode ? `All ${patientCount}` : selectedIds.size})`}
+              </button>
+            </>
           )}
           {canManageMappings && (
             <>
@@ -277,7 +376,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
             </>
           )}
           <div className="ml-auto flex gap-2">
-            {canManageMappings && (
+            {canAdministerOrganizations && (
               <button
                 onClick={() => navigate("/org-admin")}
                 className="flex items-center gap-1.5 px-3 py-1.5 text-sm text-gray-600 border border-gray-300 rounded hover:bg-gray-50"
@@ -329,13 +428,29 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
             <option value="name">Name</option><option value="age">Age: youngest first</option><option value="-age">Age: oldest first</option>
             <option value="disease">Disease</option><option value="stage">Stage</option><option value="status">Disease status</option>
             <option value="organization">Organization</option>
+            <option value="unmapped_source_codes">Unmapped Source Codes: low to high</option>
+            <option value="-unmapped_source_codes">Unmapped Source Codes: high to low</option>
           </select>
         </label>
         <span className="text-xs text-muted-foreground">View and clinical filters are saved in this browser.</span>
       </div>
 
       <div className="mb-4 rounded-lg border border-border bg-background p-4 shadow-sm">
-        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
+          <label className="flex flex-col gap-1.5 text-sm font-medium text-foreground">
+            Name or email
+            <input
+              type="search"
+              defaultValue={search}
+              placeholder="Search, then press Enter"
+              onBlur={(event) => {
+                const value = event.target.value.trim();
+                if (value !== search) { resetToFirstPage(); setSearch(value); }
+              }}
+              onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur(); }}
+              className="h-10 rounded-md border border-input bg-background px-3 text-sm font-normal text-foreground"
+            />
+          </label>
           <label className="flex flex-col gap-1.5 text-sm font-medium text-foreground">
             Org
             <select
@@ -346,7 +461,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
               }}
               className="h-10 rounded-md border border-input bg-background px-3 text-sm font-normal text-foreground"
             >
-              <option value={ALL_FILTER_VALUE}>All</option>
+              <option value={ALL_FILTER_VALUE}>{currentUser?.is_staff ? 'All (including unassigned)' : 'All accessible'}</option>
               {filterOptions.orgs.map((org) => (
                 <option key={org.value} value={org.value}>
                   {org.label}
@@ -471,13 +586,17 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
               <th className="px-4 py-3 font-medium text-muted-foreground">Age</th>
               <th className="px-4 py-3 font-medium text-muted-foreground">Disease</th>
               <th className="px-4 py-3 font-medium text-muted-foreground">Stage</th>
-              <th className="px-4 py-3 font-medium text-muted-foreground">Genomics</th>
               <th className="whitespace-nowrap px-4 py-3 text-center font-medium text-muted-foreground">Num Lines</th>
               {extraColumns.map((column) => <th key={column} className="whitespace-nowrap px-4 py-3 font-medium text-muted-foreground">{{
-                treatment: 'Latest Recorded Line', status: 'Disease Status', ecog: 'ECOG', gaps: 'Key Data Gaps',
+                treatment: 'Latest Recorded Line', ecog: 'ECOG', gaps: 'Key Data Gaps',
                 freshness: 'Latest Clinical Result', location: 'Location', contact: 'Contact Info', organization: 'Organization',
               }[column]}</th>)}
               <th className="px-4 py-3 font-medium text-muted-foreground">Last Updated</th>
+              <th aria-sort={ordering === 'unmapped_source_codes' ? 'ascending' : ordering === '-unmapped_source_codes' ? 'descending' : 'none'} className="whitespace-nowrap px-4 py-3 text-right font-medium text-muted-foreground">
+                <button type="button" onClick={() => changeOrdering(ordering === 'unmapped_source_codes' ? '-unmapped_source_codes' : 'unmapped_source_codes')}>
+                  Unmapped Source Codes{ordering === 'unmapped_source_codes' ? ' ↑' : ordering === '-unmapped_source_codes' ? ' ↓' : ''}
+                </button>
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -488,6 +607,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
                     ? "Unable to load patients."
                     : patientCount === 0 &&
                   orgFilter === ALL_FILTER_VALUE &&
+                  !search &&
                   diseaseFilter === ALL_FILTER_VALUE &&
                   stageFilter === ALL_FILTER_VALUE &&
                   dateFilter === ALL_FILTER_VALUE &&
@@ -526,11 +646,6 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
                   <td className="px-4 py-3" onClick={() => navigate(`/patient/${patient.person_id}`)}>
                     {patient.stage || "N/A"}
                   </td>
-                  <td className="px-4 py-3" onClick={() => navigate(`/patient/${patient.person_id}`)}>
-                    <span className="block max-w-72 truncate" title={patient.genomics_summary || undefined}>
-                      {patient.genomics_summary || "No genomic data"}
-                    </span>
-                  </td>
                   <td className="px-4 py-3 text-center tabular-nums" onClick={() => navigate(`/patient/${patient.person_id}`)}>
                     {patient.therapy_lines_count ?? "N/A"}
                   </td>
@@ -539,7 +654,6 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
                       <span className="block text-xs text-muted-foreground">Line {patient.treatment_summary.line} · Start: {formatDate(patient.treatment_summary.start_date)}</span>
                       <span className="block text-xs text-muted-foreground">End: {formatDate(patient.treatment_summary.end_date)}</span></> : 'Not recorded'}
                   </td>}
-                  {show('status') && <td className="px-4 py-3" onClick={() => navigate(`/patient/${patient.person_id}`)}>{patient.disease_status || 'Not recorded'}</td>}
                   {show('ecog') && <td className="px-4 py-3 tabular-nums" onClick={() => navigate(`/patient/${patient.person_id}`)}>{patient.ecog_performance_status ?? 'Not recorded'}
                     {patient.ecog_performance_status != null && <span className="block whitespace-nowrap text-xs text-muted-foreground">Assessed: {formatDate(patient.ecog_assessment_date)}</span>}
                   </td>}
@@ -550,6 +664,9 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
                   {show('freshness') && <td className="whitespace-nowrap px-4 py-3" onClick={() => navigate(`/patient/${patient.person_id}`)}>{formatDate(patient.latest_result_date)}</td>}
                   <td className="px-4 py-3" onClick={() => navigate(`/patient/${patient.person_id}`)}>
                     {formatDate(patient.updated_at)}
+                  </td>
+                  <td className={`px-4 py-3 text-right tabular-nums${patient.unmapped_source_code_count === 0 ? ' text-red-600 dark:text-red-400' : ''}`} onClick={() => navigate(`/patient/${patient.person_id}`)}>
+                    {patient.unmapped_source_code_count ?? 'Not available'}
                   </td>
                 </tr>
               ))
@@ -605,6 +722,76 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
                 {deleting ? "Deleting..." : "Delete"}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {resolveDialogOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+          <div className="w-full max-w-md rounded-lg bg-background p-6 shadow-xl">
+            <h2 className="text-lg font-semibold">Generate OMOP</h2>
+            {!resolveRun ? (
+              <>
+                <p className="mt-2 text-sm text-muted-foreground">
+                  Re-resolve source codes for {selectAllMode ? `all ${patientCount}` : selectedIds.size} selected patient{(selectAllMode ? patientCount : selectedIds.size) !== 1 ? "s" : ""}?
+                  This will update unmapped clinical rows to approved OMOP concepts.
+                </p>
+                <div className="mt-6 flex justify-end gap-3">
+                  <button
+                    onClick={() => setResolveDialogOpen(false)}
+                    className="rounded-md border border-input px-4 py-2 text-sm font-medium hover:bg-accent"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleResolveConfirm}
+                    className="rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+                  >
+                    Generate OMOP
+                  </button>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="mt-4 space-y-3">
+                  <div className="flex items-center gap-2 text-sm">
+                    {(resolveRun.state === "pending" || resolveRun.state === "running") && (
+                      <span className="h-4 w-4 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+                    )}
+                    <span className="capitalize">{resolveRun.state}</span>
+                    <span className="text-muted-foreground">
+                      &mdash; {resolveRun.done}/{resolveRun.total} patients
+                    </span>
+                  </div>
+                  {resolveRun.total > 0 && (
+                    <div className="h-2 overflow-hidden rounded-full bg-muted">
+                      <div
+                        className="h-full rounded-full bg-primary transition-all"
+                        style={{ width: `${Math.round((resolveRun.done / resolveRun.total) * 100)}%` }}
+                      />
+                    </div>
+                  )}
+                  {(resolveRun.state === "completed" || resolveRun.state === "failed") && (
+                    <p className="text-sm text-muted-foreground">
+                      Resolved {resolveRun.resolved} source code(s).
+                      {resolveRun.created > 0 && ` ${resolveRun.created} clinical row(s) created.`}
+                      {resolveRun.skipped > 0 && ` ${resolveRun.skipped} skipped.`}
+                      {resolveRun.already_resolved > 0 && ` ${resolveRun.already_resolved} already resolved.`}
+                      {resolveRun.errors > 0 && ` ${resolveRun.errors} error(s).`}
+                    </p>
+                  )}
+                </div>
+                <div className="mt-6 flex justify-end">
+                  <button
+                    onClick={() => { setResolveDialogOpen(false); setResolveRun(null); }}
+                    disabled={resolveRun.state === "pending" || resolveRun.state === "running"}
+                    className="rounded-md border border-input px-4 py-2 text-sm font-medium hover:bg-accent disabled:opacity-50"
+                  >
+                    {resolveRun.state === "completed" || resolveRun.state === "failed" ? "Close" : "Running..."}
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </div>
       )}

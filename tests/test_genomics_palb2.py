@@ -95,15 +95,15 @@ def test_legacy_field_and_marker_inputs_write_canonical_findings_and_reject_conf
     assert list_variants(person) == []
 
 
-def test_source_gene_is_server_owned_and_rejected_mapping_blocks_legacy_alias(setup):
+def test_source_gene_is_server_owned_and_rejected_mapping_still_accepts_legacy_alias(setup):
     person, _, staff = setup
     with pytest.raises(ValidationError, match='Read-only'):
         save_variant(person, {'gene': 'PALB2', 'source_gene': 'invented'})
     FieldConceptMapping.objects.filter(field_name='genomics_palb2').update(status='rejected')
     response = client_for(staff).patch(f'/api/v1/patient-records/{person.pk}/',
         {'genomics_palb1': [{'gene': 'PALB1'}]}, format='json')
-    assert response.status_code == 400
-    assert list_variants(person) == []
+    assert response.status_code == 200, response.data
+    assert len(list_variants(person)) == 1
 
 
 def test_forward_data_migration_preserves_mapping_ids_reviews_repeated_cache_rows_and_facts(setup):

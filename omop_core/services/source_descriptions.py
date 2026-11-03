@@ -9,9 +9,7 @@ exists somewhere already loaded:
 1. **Athena** — ``concept`` by ``(vocabulary_id, concept_code)``.  Covers
    SNOMED, LOINC, RxNorm, CVX, HemOnc and every other Athena vocabulary.
    ``VOCABULARY_OID_ALIASES`` folds source ids that spell a vocabulary
-   differently (the SNOMED OID); the inverse of ``ICD10CM_MERGE`` tries
-   ICD-10-CM when an "ICD-10" code has no WHO entry (HT-One's ICD-10 codes are
-   ICD-10-CM codes: ``C85.90`` exists only under ICD10CM).
+   differently (the SNOMED OID).
 2. **UMLS** — ``umls_source_code`` by ``(root_source, code)`` for vocabularies
    Athena does not carry on a deployment (MedDRA and CPT4 are licensed and
    absent from staging), or for codes Athena lacks.  The best atom per code
@@ -33,7 +31,7 @@ from django.db import connections
 from psycopg import sql
 
 from omop_core.services.source_vocabularies import (
-    ICD10CM_MERGE, VOCABULARY_OID_ALIASES, VOCAB_TO_UMLS_ROOT,
+    VOCABULARY_OID_ALIASES, VOCAB_TO_UMLS_ROOT,
 )
 
 logger = logging.getLogger(__name__)
@@ -41,9 +39,7 @@ logger = logging.getLogger(__name__)
 DESCRIPTION_MAX = 255
 
 # (source vocabulary as it arrives, Athena vocabulary to look it up in).
-ATHENA_ALIASES = list(VOCABULARY_OID_ALIASES.items()) + [
-    (merged_into, member) for member, merged_into in ICD10CM_MERGE.items()
-]
+ATHENA_ALIASES = list(VOCABULARY_OID_ALIASES.items())
 
 # (source vocabulary as it arrives, UMLS root_source), OID spellings included.
 UMLS_ROOTS = list(VOCAB_TO_UMLS_ROOT.items()) + [
@@ -174,6 +170,10 @@ def describe_source_code(source_vocabulary_id, source_code):
         )
         if name:
             return name[:DESCRIPTION_MAX]
+    from omop_core.services.source_catalog import lookup_source_term
+    source_term = lookup_source_term(source_vocabulary_id, source_code)
+    if source_term:
+        return source_term.name[:DESCRIPTION_MAX]
     root = dict(UMLS_ROOTS).get(source_vocabulary_id)
     if not root:
         return ''

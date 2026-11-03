@@ -3,6 +3,7 @@
 The migration seeds TherapyOutcome; defaults also make newly provisioned/test
 installations usable before the vocabulary data has been loaded.
 """
+from django.db import DatabaseError
 from django.db.models import Q
 
 OUTCOMES = [
@@ -17,6 +18,12 @@ OUTCOMES = [
 REFRACTORY_STATUSES = ['Unknown', 'Not Refractory', 'Primary Refractory', 'Secondary Refractory', 'Multi-Refractory']
 
 
+_CATEGORY_TO_NCI = {
+    'BC': 'C9335', 'MM': 'C3242', 'FL': 'C3209',
+    'CLL': 'C2987', 'MCL': 'MCL', 'Other': '',
+}
+
+
 def disease_code(value):
     text = (value or '').strip().lower()
     for keys, code in [
@@ -29,6 +36,18 @@ def disease_code(value):
     ]:
         if any(text == key or (len(key) > 3 and key in text) for key in keys):
             return code
+    # Fallback: consult the DiseaseCategoryMapping table
+    try:
+        from omop_core.models import DiseaseCategoryMapping
+        row = DiseaseCategoryMapping.objects.filter(
+            disease_name__iexact=(value or '').strip(),
+        ).values_list('category', flat=True).first()
+        if row:
+            nci = _CATEGORY_TO_NCI.get(row)
+            if nci:
+                return nci
+    except DatabaseError:
+        pass  # Table may not exist during early migrations
     return value or ''
 
 

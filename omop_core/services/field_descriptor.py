@@ -112,8 +112,8 @@ _COMPUTED_FIELDS = frozenset({
     'bmi', 'disease_slug',
     'meets_crab', 'meets_slim', 'involved_uninvolved_ratio',
     'active_infection_status', 'active_malignancies',
-    'no_active_infection_status', 'no_hiv_status', 'no_hepatitis_b_status',
-    'no_hepatitis_c_status', 'no_other_active_malignancies',
+    'no_active_infection_status',
+    'no_other_active_malignancies',
     'no_pre_existing_conditions', 'no_pregnancy_or_lactation_status',
     'no_mental_health_disorder_status',
     'no_tobacco_use_status', 'no_substance_use_status',
@@ -221,8 +221,8 @@ _TAB_GENERAL = frozenset({
     'ecog_performance_status', 'ecog_assessment_date', 'karnofsky_performance_score',
     'preexisting_conditions', 'peripheral_neuropathy_grade',
     'no_other_active_malignancies', 'no_active_infection_status',
-    'hiv_status', 'no_hiv_status', 'hepatitis_b_status', 'no_hepatitis_b_status',
-    'hepatitis_c_status', 'no_hepatitis_c_status',
+    'hiv_status', 'hepatitis_b_status',
+    'hepatitis_c_status',
     'weight', 'height', 'bmi', 'systolic_blood_pressure', 'diastolic_blood_pressure',
     'heartrate', 'languages_skills', 'facility_name',
     'english_speak', 'english_read', 'english_write', 'english_understand',
@@ -247,6 +247,7 @@ _TAB_DISEASE = frozenset({
     # Lymphoma
     'tumor_grade', 'gelf_criteria_status', 'flipi_score', 'flipi_risk_category',
     'flipi_score_options', 'bulky_disease', 'b_symptoms',
+    'b_symptom_fever', 'b_symptom_night_sweats', 'b_symptom_weight_loss',
     'transformed_to_dlbcl', 'dlbcl_transformation_date', 'post_transformation_outcome',
     'bone_marrow_involvement', 'number_of_nodal_sites',
     'clonal_bone_marrow_b_lymphocytes',
@@ -327,6 +328,7 @@ _TAB_BLOOD = frozenset({
 })
 
 _TAB_LABS = frozenset({
+    'prothrombin_time_uln', 'activated_partial_thromboplastin_time_uln',
     # Moved from _TAB_BLOOD with the sections that render them (#955).
     'sodium_meq_l', 'potassium_meq_l', 'calcium_mg_dl', 'magnesium_mg_dl',
     'troponin_ng_ml', 'bnp_pg_ml', 'glucose_mg_dl', 'hba1c_percent', 'ldh_u_l',
@@ -349,6 +351,7 @@ _TAB_LABS = frozenset({
 })
 
 _TAB_BEHAVIOR = frozenset({
+    'able_to_swallow_tablets_capsules',
     'smoking_status', 'pack_years', 'alcohol_use', 'drinks_per_week',
     'exercise_frequency', 'exercise_minutes_per_week', 'diet_type',
     'sleep_hours_per_night', 'sleep_quality', 'stress_level', 'social_support',
@@ -512,6 +515,46 @@ def _build_suggestion(name: str, prov_dict: dict | None) -> dict | None:
     return None
 
 
+# Concept-search text for genomics markers whose catalog label is not how the
+# vocabularies name them. Checked against staging's Athena load (#1705):
+# FAM46C is TENT5C in current HGNC, "del(11q)" and "1q21 gain / amplification"
+# match nothing, and an unspecified pair is searched by its first gene.
+_GENOMICS_SUGGEST_QUERIES = {
+    'fam46c': 'TENT5C gene',
+    'gain1q': '1q21',
+    'hyperdiploidy': 'hyperdiploid',
+    'complex_karyotype_excl_t1114': 'complex karyotype',
+    'del11q': '11q deletion',
+    'del13q': '13q deletion',
+    'atm_atr': 'ATM gene',
+    'notch1_notch2': 'NOTCH1 gene',
+}
+
+
+def _suggest_query(name: str) -> str:
+    """Return the concept-search text the mapper's Suggest button seeds.
+
+    The concept search matches the whole text or every word of it, so the
+    field's own prefix ("genomics", "genetic mutations"), which no concept
+    name contains, would rule out every concept. Search by what follows it: the gene ("BRCA1 gene") or the
+    catalog label ("t(4;14)"), unless the label is overridden above.
+    """
+    from omop_core.services.genomics_catalog import patient_fields
+
+    if name.startswith('genetic_mutations.'):
+        return name.split('.', 1)[1].replace('_', ' ')
+    if name.startswith('genomics_'):
+        marker = patient_fields().get(name)
+        if marker is None:
+            return name.removeprefix('genomics_').replace('_', ' ')
+        if marker['key'] in _GENOMICS_SUGGEST_QUERIES:
+            return _GENOMICS_SUGGEST_QUERIES[marker['key']]
+        if marker['kind'] == 'gene':
+            return f"{marker['gene']} gene"
+        return marker['label']
+    return name.replace('_', ' ')
+
+
 def get_all_field_descriptors() -> list[dict]:
     """Return a descriptor dict for every concrete PatientRecord field.
 
@@ -624,6 +667,7 @@ def get_all_field_descriptors() -> list[dict]:
             'provenance': prov_dict,
             'mapping': mapping_dict,
             'suggestion': suggestion,
+            'suggest_query': _suggest_query(name),
             'unit_options': FIELD_COMMON_UNITS.get(name, STANDARD_UNIT_CHOICES),
             'mappable': _is_mappable(category),
             'locked_table': _get_locked_table(category),
@@ -673,6 +717,7 @@ def get_all_field_descriptors() -> list[dict]:
                 'notes': mapping.notes,
             },
             'suggestion': None,
+            'suggest_query': _suggest_query(custom.field_name),
             'unit_options': STANDARD_UNIT_CHOICES,
             'mappable': True,
             'locked_table': None,
@@ -701,7 +746,8 @@ def get_all_field_descriptors() -> list[dict]:
                 'reviewed_at': mapping.reviewed_at.isoformat() if mapping.reviewed_at else None,
                 'notes': mapping.notes,
             } if mapping else None,
-            'suggestion': None, 'unit_options': STANDARD_UNIT_CHOICES,
+            'suggestion': None, 'suggest_query': _suggest_query(name),
+            'unit_options': STANDARD_UNIT_CHOICES,
             'mappable': True, 'locked_table': None, 'choices': [], 'formula': None,
             'explanation': 'Linked attribute of each Genomics finding; not a patient-level scalar.',
             'derivation_error': None,

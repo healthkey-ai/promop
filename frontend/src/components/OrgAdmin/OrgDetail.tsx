@@ -18,6 +18,7 @@ interface Org {
   is_active: boolean;
   allows_public_aggregated_data: boolean;
   allows_patient_signup: boolean;
+  can_manage_access: boolean;
   created_at: string;
 }
 
@@ -170,11 +171,12 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
 
   const fetchAll = useCallback(async () => {
     try {
-      const [orgRes, trustRes, invRes, accessRes, statsRes, allOrgsRes] = await Promise.all([
-        api.get<Org>(`${base}/`),
-        api.get<Trust[]>(`${base}/trusts/`),
-        api.get<Invitation[]>(`${base}/invitations/`),
-        api.get<AccessGrant[]>(`${base}/access/`),
+      const orgRes = await api.get<Org>(`${base}/`);
+      const canManageAccess = orgRes.data.can_manage_access;
+      const [trustRes, invRes, accessRes, statsRes, allOrgsRes] = await Promise.all([
+        canManageAccess ? api.get<Trust[]>(`${base}/trusts/`) : Promise.resolve({ data: [] as Trust[] }),
+        canManageAccess ? api.get<Invitation[]>(`${base}/invitations/`) : Promise.resolve({ data: [] as Invitation[] }),
+        canManageAccess ? api.get<AccessGrant[]>(`${base}/access/`) : Promise.resolve({ data: [] as AccessGrant[] }),
         api.get<OrgStatsData[]>('/stats/org-disease/').catch(() => ({ data: [] as OrgStatsData[] })),
         api.get<Org[]>('/orgs/').catch(() => ({ data: [] as Org[] })),
       ]);
@@ -379,9 +381,11 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
     { key: 'settings', label: 'Settings' },
     { key: 'stats', label: 'Stats' },
     { key: 'vocabulary', label: 'Vocabulary' },
-    { key: 'trusts', label: 'Access Rules' },
-    { key: 'admins', label: 'Access Grants' },
-    { key: 'invitations', label: 'Invitations' },
+    ...(org.can_manage_access ? [
+      { key: 'trusts' as const, label: 'Access Rules' },
+      { key: 'admins' as const, label: 'Access Grants' },
+      { key: 'invitations' as const, label: 'Invitations' },
+    ] : []),
   ];
   const vocabularyQuery = vocabularySearch.trim().toLowerCase();
   const vocabularyRows = [...(vocabularyData?.concepts ?? [])]
@@ -646,7 +650,7 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
       )}
 
       {/* Access Rules (Trusts) */}
-      {activeSection === 'trusts' && (
+      {org.can_manage_access && activeSection === 'trusts' && (
         <div className="space-y-4">
           <h2 className="font-medium text-gray-900">Trusted Domains & Orgs</h2>
           {trusts.length === 0 ? (
@@ -730,7 +734,7 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
       )}
 
       {/* Access grants */}
-      {activeSection === 'admins' && (
+      {org.can_manage_access && activeSection === 'admins' && (
         <div className="space-y-4">
           <h2 className="font-medium text-gray-900">Access Grants</h2>
           {accessError && <p className="text-sm text-red-500">{accessError}</p>}
@@ -933,7 +937,7 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
       )}
 
       {/* Invitations */}
-      {activeSection === 'invitations' && (
+      {org.can_manage_access && activeSection === 'invitations' && (
         <div className="space-y-3">
           <h2 className="font-medium text-gray-900">Invitations</h2>
           {cancelError && <p className="text-sm text-red-500">{cancelError}</p>}

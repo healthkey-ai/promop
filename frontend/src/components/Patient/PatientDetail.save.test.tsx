@@ -32,6 +32,10 @@ vi.mock('@/hooks/useVocabulary', () => ({
   useVocabulary: () => ({ options: [], source: null, loading: false }),
 }));
 
+vi.mock('@/hooks/useLabMeasurements', () => ({
+  useLabMeasurements: vi.fn(() => ({ grouped: new Map(), isLoading: false })),
+}));
+
 import api from '@/api/axios';
 
 const DESCRIPTORS = {
@@ -101,9 +105,9 @@ async function renderAndLoad() {
   );
 }
 
-/** The clinical fields under test live on the Blood tab, not the default one. */
-async function openBloodTab() {
-  fireEvent.click(screen.getByRole('button', { name: 'Blood' }));
+/** The clinical fields under test live on the Labs tab (blood counts section). */
+async function openLabsTab() {
+  fireEvent.click(screen.getByRole('button', { name: 'Labs' }));
   await waitFor(() => expect(screen.getByDisplayValue('3.1')).toBeInTheDocument());
 }
 
@@ -129,7 +133,7 @@ describe('PatientDetail save — the edit, not the record', () => {
 
   it('routes a clinical edit to the PatientRecord PATCH', async () => {
     await renderAndLoad();
-    await openBloodTab();
+    await openLabsTab();
     await editAndSave('3.1', '5.5');
 
     await waitFor(() => expect(api.patch).toHaveBeenCalled());
@@ -139,7 +143,7 @@ describe('PatientDetail save — the edit, not the record', () => {
 
   it('never sends an alias in the PATCH', async () => {
     await renderAndLoad();
-    await openBloodTab();
+    await openLabsTab();
     await editAndSave('3.1', '5.5');
 
     await waitFor(() => expect(api.patch).toHaveBeenCalled());
@@ -150,7 +154,7 @@ describe('PatientDetail save — the edit, not the record', () => {
   it('never sends the alias that derivation just moved', async () => {
     // The specific field the server named when refusing the save.
     await renderAndLoad();
-    await openBloodTab();
+    await openLabsTab();
     await editAndSave('3.1', '5.5');
 
     await waitFor(() => expect(api.patch).toHaveBeenCalled());
@@ -160,7 +164,7 @@ describe('PatientDetail save — the edit, not the record', () => {
 
   it('never sends lifecycle columns', async () => {
     await renderAndLoad();
-    await openBloodTab();
+    await openLabsTab();
     await editAndSave('3.1', '5.5');
 
     await waitFor(() => expect(api.patch).toHaveBeenCalled());
@@ -177,7 +181,7 @@ describe('PatientDetail save — the edit, not the record', () => {
     // Under the new architecture all writable fields go through PATCH.
     // No separate OMOP endpoint write happens.
     await renderAndLoad();
-    await openBloodTab();
+    await openLabsTab();
     await editAndSave('3.1', '5.5');
 
     await waitFor(() => expect(api.patch).toHaveBeenCalled());

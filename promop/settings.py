@@ -47,6 +47,9 @@ FRONTEND_ROOT = resolve_frontend_root(BASE_DIR, os.environ.get('WHITENOISE_ROOT'
 
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-your-default-key-change-this')
+# Previous keys that still verify during a rotation, comma-separated; signing uses
+# SECRET_KEY only. See docs/signing-key-rotation.md.
+SECRET_KEY_FALLBACKS = _env_list('SECRET_KEY_FALLBACKS')
 
 # DEBUG controls diagnostics, not the security defaults below.
 DEBUG = os.environ.get('DEBUG', 'False') == 'True'
@@ -122,6 +125,13 @@ if IS_DEPLOYED or not DEBUG:
             'CORS_ALLOWED_ORIGINS must be set to your frontend origin(s), '
             'e.g. "https://app.example.com"'
         )
+    if (not _no_http and not _running_worker
+            and _env_bool('CORS_ALLOW_ALL_ORIGINS')
+            and _env_bool('CORS_ALLOW_CREDENTIALS', True)):
+        _config_errors.append(
+            'CORS_ALLOW_ALL_ORIGINS and CORS_ALLOW_CREDENTIALS cannot both be true: '
+            'credentialed cross-origin requests require an origin allowlist'
+        )
     if _config_errors:
         raise ImproperlyConfigured(
             'Missing required production settings:\n'
@@ -196,15 +206,27 @@ LOGGING = {
         'audit_stdout': {
             'class': 'logging.StreamHandler',
             'formatter': 'audit_json',
+            # SIEM reads stdout; without this the handler inherits stderr and
+            # the operational console stream can interleave with the JSON
+            # records (#1929).
+            'stream': 'ext://sys.stdout',
         },
         'console': {
             'class': 'logging.StreamHandler',
             'formatter': 'verbose',
+            'stream': 'ext://sys.stderr',
         },
     },
     'loggers': {
         'audit': {
             'handlers': ['audit_stdout'],
+            'level': 'INFO',
+            'propagate': False,
+        },
+        # Operational warnings/errors from audit-adjacent code. Separate from
+        # `audit` so SIEM consumers never have to parse plain text (#1929).
+        'omop.ops': {
+            'handlers': ['console'],
             'level': 'INFO',
             'propagate': False,
         },
@@ -378,11 +400,34 @@ CORS_EXPOSE_HEADERS = (
     'X-Total-Count',
     'X-Page',
     'X-Page-Size',
+    # The conditional-write tag. A cross-origin client cannot read a response
+    # header that is not exposed, and the clients that write preferences are
+    # cross-origin — this service does serve its own SPA same-origin through
+    # WhiteNoise, but that SPA never touches these endpoints. EXACT prefers
+    # the body's `updated_at` and treats this as the fallback, so its absence
+    # degraded rather than broke — but the fallback documented in `state.ts`
+    # was simply never reachable from a browser.
+    'ETag',
 )
 CORS_ALLOW_HEADERS = (
     *default_headers,
     'x-provenance-source',
     'x-provenance-user-id',
+    # A shared Personal Health Record is read with its link's token in this
+    # header (patient_portal/api/phr/sharing.py), cross-origin from the app
+    # that shows it.
+    'x-share-token',
+    # Conditional writes (#1312) are opt-in on the API and unavoidable for
+    # EXACT's filter saves: `default_headers` carries neither of these, so the
+    # preflight was refused with "Request header field if-match is not allowed
+    # by Access-Control-Allow-Headers" and the request never left the browser.
+    # Not env-specific — both tuples are literals, so it is every deployment —
+    # and not new-client-specific: no cross-origin browser has ever completed
+    # a conditional write against this service. Measured in a browser against
+    # the local stack: the trial-search preferences save failed silently,
+    # which is how the saved-filters feature was failing.
+    'if-match',
+    'if-none-match',
 )
 
 # ── Pluggable partner auth providers ──────────────────────────────────────
@@ -430,7 +475,8 @@ SERVICE_AUTH_TOKENS = parse_service_tokens(os.environ.get("SERVICE_AUTH_TOKENS",
 SERVICE_AUTH_TOKEN = os.environ.get("SERVICE_AUTH_TOKEN", "")
 # The legacy credential is read-only by default. ``system/etl.write`` is a
 # narrow compatibility capability accepted only on explicitly approved ETL
-# endpoints, and never for DELETE.
+# endpoints, and never for DELETE. Deleting clinical rows is the separate
+# ``system/etl.delete`` grant.
 SERVICE_AUTH_SCOPES = os.environ.get("SERVICE_AUTH_SCOPES", "patient/*.read")
 service_credentials(SERVICE_AUTH_TOKENS, SERVICE_AUTH_TOKEN, SERVICE_AUTH_SCOPES)
 
@@ -439,8 +485,17 @@ service_credentials(SERVICE_AUTH_TOKENS, SERVICE_AUTH_TOKEN, SERVICE_AUTH_SCOPES
 # because a Suggest button that returns nothing when a third party is down is
 # worse than one that returns a guess a curator can correct.
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+# Required only by a key that is not scoped to a workspace (see
+# omop_core/mapping/anthropic_client.py).
+ANTHROPIC_WORKSPACE_ID = os.environ.get("ANTHROPIC_WORKSPACE_ID", "")
 JEV_API_KEY = os.environ.get("JEV_API_KEY", "")
 JEV_API_URL = os.environ.get("JEV_API_URL", "https://api.typesafe.ai/v1/systemone")
+
+# loinc.org release API. LOINC is licensed, so there is no anonymous access and
+# no default to fall back to -- an instance without these cannot refresh its
+# LOINC tables, and says so rather than serving a stale copy silently (#1624).
+LOINC_USER = os.environ.get("LOINC_USER", "")
+LOINC_PASSWORD = os.environ.get("LOINC_PASSWORD", "")
 
 _auth_classes = [
     'patient_portal.api.authentication.ServiceTokenAuthentication',
@@ -495,6 +550,11 @@ REST_FRAMEWORK = {
         # abuse-facing ones.
         'run.read': os.environ.get('PROLOG_THROTTLE_READ', '1200/hour'),
         'run.create': os.environ.get('PROLOG_THROTTLE_CREATE', '30/hour'),
+        # Someone opening a record a patient shared with them: no account, so
+        # keyed by IP. One visit reads about a dozen sections.
+        'phr_shared': os.environ.get('PHR_SHARED_THROTTLE_RATE', '120/minute'),
+        # Invites a patient emails from their record, per patient.
+        'phr_share_email': os.environ.get('PHR_SHARE_EMAIL_THROTTLE_RATE', '20/hour'),
         'run.capture': os.environ.get('PROLOG_THROTTLE_CAPTURE', '30/hour'),
         'run.answer': os.environ.get('PROLOG_THROTTLE_ANSWER', '600/hour'),
         'run.write': os.environ.get('PROLOG_THROTTLE_WRITE', '3000/hour'),
@@ -678,8 +738,11 @@ CELERY_TASK_TRACK_STARTED = True
 CELERY_BROKER_TRANSPORT_OPTIONS = {
     # Must exceed CELERY_TASK_TIME_LIMIT. Below it, Redis decides a still
     # running task was lost and hands the same job to a second worker.
+    # The Athena queue can perform a first full vocabulary load. Keep its
+    # message invisible longer than that task's six-hour hard limit so Redis
+    # cannot hand the same release to a second worker while the first is live.
     'visibility_timeout': int(
-        os.environ.get('CELERY_BROKER_VISIBILITY_TIMEOUT', '1800')),
+        os.environ.get('CELERY_BROKER_VISIBILITY_TIMEOUT', '25200')),
     # The refresh endpoint enqueues inside the request, so an unreachable
     # broker has to fail fast. Unset, kombu waits on the connect indefinitely
     # and the caller sits there until gunicorn kills the worker.
@@ -702,7 +765,9 @@ def _init_firebase_admin():
         return
 
     project_id = FIREBASE_PROJECT_ID
-    options = {"projectId": project_id} if project_id else {}
+    options = {"httpTimeout": 10}
+    if project_id:
+        options["projectId"] = project_id
 
     if os.environ.get("FIREBASE_AUTH_EMULATOR_HOST"):
         class _EmulatorCredential(fb_credentials.Base):
@@ -773,8 +838,43 @@ RUNNER_DIST = Path(os.environ['PROLOG_RUNNER_DIST']) if os.environ.get('PROLOG_R
 # refuses to activate a version whose translations are unreviewed unless the
 # deployment names them here — a statement that respondents will read machine
 # translations, which the runner discloses to them (PROlog DEF-5).
+# Who may read a survey's results at /s/<slug>/report: the same people the
+# Django admin lets read them, checked through the ordinary login path
+# (patient_portal.services.prolog_results_viewer).
+PROLOG_RESULTS_AUTH = 'patient_portal.services.prolog_results_viewer'
+# Callback import path, not a hardcoded credential.
+PROLOG_RESULTS_PASSWORD_CHANGE = 'patient_portal.services.prolog_results_password_change'  # nosec B105
+
 PROLOG_MACHINE_LANGUAGES = [
     lang.strip() for lang in os.environ.get('PROLOG_MACHINE_LANGUAGES', '').split(',') if lang.strip()
 ]
 PROLOG_PUBLIC_URL = os.environ.get('PROLOG_PUBLIC_URL', APP_BASE_URL)
+
+# Sharing a Personal Health Record (patient_portal/api/phr/sharing.py).
+# PHR_SHARE_URL is where the app that shows a shared record lives; the link is
+# PHR_SHARE_URL/<token>. PHR_SHARE_SECRET derives the links, so rotating it
+# closes every open link; it falls back to SECRET_KEY.
+PHR_SHARE_URL = os.environ.get('PHR_SHARE_URL', f'{APP_BASE_URL.rstrip("/")}/r')
+# The PHR's My outcomes: the PROlog surveys it lists, in order, by slug. Each
+# shows once a version of it is active (manage.py load_definition --activate).
+PHR_OUTCOME_SURVEYS = [
+    slug.strip()
+    for slug in os.environ.get('PHR_OUTCOME_SURVEYS', 'quality-of-life,side-effects').split(',')
+    if slug.strip()
+]
+PHR_SHARE_SECRET = os.environ.get('PHR_SHARE_SECRET', '')
+# The product name in the invite email ("<name> shared their <product> record").
+PHR_SHARE_PRODUCT_NAME = os.environ.get('PHR_SHARE_PRODUCT_NAME', 'HealthKey')
+# Where a scan happened is read from headers the edge sets from the client IP
+# (e.g. a load balancer's {client_city}). Only list headers the edge overwrites:
+# a client can send any header. Unset, scans are logged without a place.
+# AI explanations in the PHR are written by ONE's server, which sends this key
+# beside the patient's token; without it a patient's own token could store
+# text shown as "written by HealthTree AI". Unset, writes are refused.
+PHR_EXPLANATION_WRITE_KEY = os.environ.get('PHR_EXPLANATION_WRITE_KEY', '')
+PHR_SHARE_GEO_HEADERS = {
+    key: os.environ[f'PHR_SHARE_GEO_{key.upper()}_HEADER']
+    for key in ('city', 'region', 'country')
+    if os.environ.get(f'PHR_SHARE_GEO_{key.upper()}_HEADER')
+}
 PROLOG_EMAIL_FROM = os.environ.get('PROLOG_EMAIL_FROM', DEFAULT_FROM_EMAIL)

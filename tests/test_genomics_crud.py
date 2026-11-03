@@ -342,6 +342,19 @@ def test_absent_finding_writes_parent_and_contextual_components(setup):
     assert not parent.is_erroneous
 
 
+def test_pathologist_notes_round_trip_as_a_linked_observation(setup):
+    """Pathologist notes per genetic test (#1865): long text survives the 60-character column."""
+    person, _, _ = setup
+    notes = ('CD138-selected plasma cells. ' * 20).strip()
+    variant = save_variant(person, {'gene': 'TP53', 'specimen_type': 'Bone marrow aspirate',
+                                    'pathologist_notes': notes})
+    assert variant['pathologist_notes'] == notes
+    assert variant['specimen_type'] == 'Bone marrow aspirate'
+    row = Observation.objects.get(person=person, observation_event_id=variant['id'],
+                                  observation_source_value='genomics:pathologist_notes', is_erroneous=False)
+    assert len(row.value_as_string) <= 60
+
+
 def test_absent_finding_has_no_variant_level_components(setup):
     """Variant-level components are not stored on absent findings."""
     person, _, _ = setup
@@ -447,6 +460,65 @@ def test_clone_fraction_not_interchangeable_with_allelic_frequency(setup):
     cf_row = Measurement.objects.get(person=person, measurement_source_value='genomics:clone_fraction')
     assert float(af_row.value_as_number) == 45.0
     assert float(cf_row.value_as_number) == 80.0
+
+
+def test_absent_edit_clears_inherited_positive_clone_fraction(setup):
+    """G4 (#1417): Present -> Absent -> Indeterminate -> Present leaves no stale clone fraction."""
+    person, _, _ = setup
+    variant = save_variant(person, {
+        'gene': 'TP53', 'status': 'present', 'variant': 'c.743G>A',
+        'allelic_frequency': 37, 'clone_fraction': 62, 'clone_fraction_unit': '%',
+    })
+    variant = save_variant(person, {'status': 'absent'}, variant_id=variant['id'])
+    assert variant['status'] == 'absent'
+    assert variant.get('allelic_frequency') is None
+    assert variant.get('clone_fraction') is None
+    assert not Measurement.objects.filter(
+        person=person, measurement_source_value='genomics:clone_fraction', is_erroneous=False).exists()
+    variant = save_variant(person, {'status': 'indeterminate'}, variant_id=variant['id'])
+    assert variant.get('clone_fraction') is None
+    variant = save_variant(person, {'status': 'present'}, variant_id=variant['id'])
+    assert variant['status'] == 'present'
+    assert variant.get('clone_fraction') is None
+
+
+def test_absent_finding_rejects_supplied_positive_clone_fraction(setup):
+    """A positive clone fraction asserts the finding, so Absent cannot carry one."""
+    person, _, _ = setup
+    from rest_framework.exceptions import ValidationError
+    with pytest.raises(ValidationError, match='clone_fraction'):
+        save_variant(person, {'gene': 'TP53', 'status': 'absent', 'clone_fraction': 62, 'clone_fraction_unit': '%'})
+    assert not Measurement.objects.filter(person=person).exists()
+
+
+def test_stale_absent_finding_stays_editable_when_clone_fraction_is_echoed(setup, monkeypatch):
+    """A record saved before #1417 (Absent, 62%) accepts an edit that echoes the stored value."""
+    person, _, _ = setup
+    variant = save_variant(person, {'gene': 'TP53', 'status': 'present', 'clone_fraction': 62, 'clone_fraction_unit': '%'})
+    monkeypatch.setattr('omop_core.services.genomics._is_positive', lambda value: False)
+    stale = save_variant(person, {'status': 'absent'}, variant_id=variant['id'])
+    assert stale['clone_fraction'] == 62.0
+    monkeypatch.undo()
+    edited = save_variant(person, {**stale, 'laboratory': 'MGH'}, variant_id=stale['id'])
+    assert edited['laboratory'] == 'MGH'
+    assert edited.get('clone_fraction') is None
+    from rest_framework.exceptions import ValidationError
+    with pytest.raises(ValidationError, match='clone_fraction'):
+        save_variant(person, {'clone_fraction': 40}, variant_id=edited['id'])
+
+
+@pytest.mark.parametrize('inherited', [False, True])
+def test_absent_finding_keeps_zero_clone_fraction(setup, inherited):
+    """A negative FISH report records 0%, supplied or inherited; it is not cleared."""
+    person, _, _ = setup
+    base = {'gene': 'TP53', 'variant_analysis_method_type': 'FISH', 'clone_fraction': 0, 'clone_fraction_unit': '%'}
+    if inherited:
+        variant = save_variant(person, {**base, 'status': 'indeterminate'})
+        variant = save_variant(person, {'status': 'absent'}, variant_id=variant['id'])
+    else:
+        variant = save_variant(person, {**base, 'status': 'absent'})
+    assert variant['status'] == 'absent'
+    assert variant['clone_fraction'] == 0.0
 
 
 # --- BIDMC component alignment (§7) ---
@@ -575,3 +647,31 @@ def test_no_asserted_complex_karyotype_returns_empty(setup):
     refresh_patient_record(person)
     record.refresh_from_db()
     assert record.genomics_complex_karyotype == []
+
+
+def test_a_mapping_without_a_source_value_claims_no_linked_facts(setup):
+    """A genetic_mutations.* row with no source_value names no component code.
+
+    Readers take every such mapping regardless of status, so a proposed row
+    saved before its recipe was complete put '' into the code set: an edit then
+    superseded every linked fact with a blank source value.
+    """
+    from omop_core.models import FieldConceptMapping
+
+    person, _, _ = setup
+    FieldConceptMapping.objects.create(
+        field_name='genetic_mutations.not_yet_curated', status='proposed',
+        omop_table='measurement', source_value='',
+    )
+    saved = save_variant(person, {'gene': 'TP53', 'laboratory': 'Correct laboratory'})
+    link = Concept.objects.get(vocabulary_id='CDM', concept_name='measurement.measurement_id')
+    blank = MeasurementFactory(
+        person=person, measurement_event_id=saved['id'], meas_event_field_concept=link,
+        measurement_source_value='', value_as_string='Linked fact without a code',
+    )
+
+    assert 'not_yet_curated' not in list_variants(person)[0]
+    save_variant(person, {'laboratory': 'Updated laboratory'}, saved['id'])
+
+    blank.refresh_from_db()
+    assert not blank.is_erroneous

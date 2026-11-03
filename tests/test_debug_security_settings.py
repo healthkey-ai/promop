@@ -113,6 +113,25 @@ def test_deployed_debug_requires_hosts_without_render_hostname():
     assert 'ALLOWED_HOSTS must be set' in result.stderr
 
 
+@pytest.mark.parametrize('argv', [['gunicorn'], ['manage.py', 'check', '--deploy']])
+@pytest.mark.parametrize('credentials', [None, 'true'])
+def test_deployed_http_rejects_credentialed_all_origin_cors(argv, credentials):
+    overrides = {} if credentials is None else {'CORS_ALLOW_CREDENTIALS': credentials}
+    result = boot(True, argv, RENDER='true', CORS_ALLOW_ALL_ORIGINS='true', **overrides)
+    assert result.returncode != 0
+    assert 'CORS_ALLOW_ALL_ORIGINS and CORS_ALLOW_CREDENTIALS cannot both be true' in result.stderr
+
+
+@pytest.mark.parametrize('argv', [['gunicorn'], ['manage.py', 'check', '--deploy']])
+def test_deployed_http_all_origin_cors_requires_credentials_off(argv):
+    result = boot(True, argv, RENDER='true', CORS_ALLOW_ALL_ORIGINS='true',
+                  CORS_ALLOW_CREDENTIALS='false')
+    assert result.returncode == 0, result.stderr
+    posture = json.loads(result.stdout)
+    assert posture['CORS_ALLOW_ALL_ORIGINS'] is True
+    assert posture['CORS_ALLOW_CREDENTIALS'] is False
+
+
 @pytest.mark.parametrize('command', ['collectstatic', 'makemigrations'])
 def test_build_commands_skip_all_validation(command):
     """Build-time commands run before DATABASE_URL is available."""
@@ -207,3 +226,24 @@ def test_settings_import_skips_load_dotenv_when_the_flag_is_set():
     # the regression test for deleting that line — but not for the padded
     # values it alone catches, since the flag here is a bare '1'.
     assert _loaded_dotenv(PYTHON_DOTENV_DISABLED='1') is False
+
+
+def test_secret_key_fallbacks_keep_old_signatures_valid_during_rotation():
+    # docs/signing-key-rotation.md: the old key goes in SECRET_KEY_FALLBACKS so
+    # sessions and links signed before the rotation still verify.
+    code = '''
+import django
+django.setup()
+from django.core import signing
+from django.test.utils import override_settings
+with override_settings(SECRET_KEY='old-key-that-is-being-rotated-out', SECRET_KEY_FALLBACKS=[]):
+    token = signing.dumps('payload')
+print(signing.loads(token))
+'''
+    env = {key: os.environ[key] for key in ('PATH', 'SYSTEMROOT') if key in os.environ}
+    env.update(BASE_ENV, DEBUG='True',
+               SECRET_KEY_FALLBACKS='unrelated-key, old-key-that-is-being-rotated-out')
+    result = subprocess.run(
+        [sys.executable, '-c', code], cwd=ROOT, env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == 'payload'

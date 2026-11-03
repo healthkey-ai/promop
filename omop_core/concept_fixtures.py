@@ -114,6 +114,7 @@ _CONCEPT_CLASSES = [
     dict(concept_class_id='Qualifier Value',     concept_class_name='Qualifier Value',      concept_class_concept_id=0),
     dict(concept_class_id='Field',               concept_class_name='Field',                concept_class_concept_id=0),
     dict(concept_class_id='Treatment',           concept_class_name='Treatment',            concept_class_concept_id=0),
+    dict(concept_class_id='Disease Episode',     concept_class_name='Disease Episode',      concept_class_concept_id=0),
     dict(concept_class_id='Gender',              concept_class_name='Gender',               concept_class_concept_id=0),
     dict(concept_class_id='Regimen',             concept_class_name='Regimen',              concept_class_concept_id=0),
     dict(concept_class_id='Undefined',           concept_class_name='Undefined',            concept_class_concept_id=0),
@@ -207,6 +208,11 @@ _CONCEPTS = [
     _c(32865, 'Patient self-report', 'Type Concept', 'Type Concept', 'Type Concept', 'S', 'OMOP4976938'),
     _c(32869, 'Pharmacy claim',    'Type Concept', 'Type Concept', 'Type Concept', 'S', 'OMOP4976942'),
     _c(32531, 'Treatment Regimen', 'Episode',       'Episode',       'Treatment',    'S', 'OMOP4822256'),
+    # The cancer a line of therapy treats: Treatment Regimens hang off it via
+    # episode_parent_id (#1739). Tests key on the id; the concept_code is not
+    # verified against Athena (deployments load the real row, 'Episode' is in
+    # VOCAB_SCOPE).
+    _c(32528, 'Disease First Occurrence', 'Episode', 'Episode',   'Disease Episode', 'S', 'OMOP4822253'),
 
     # CDM metadata concept used in DrugExposure FK lookups
     _c(1147094, 'drug_exposure.drug_exposure_id', 'Metadata', 'CDM', 'Field', 'S', 'CDM150'),
@@ -382,7 +388,7 @@ _CONCEPTS = [
     _c(3024171,  'Respiratory rate',                                           'Measurement', 'LOINC', 'Clinical Observation', 'S', '9279-1',   date(1996, 9, 6)),
     _c(1002368,  'Sleep duration',                                             'Observation', 'LOINC', 'Clinical Observation', 'S', '93832-4',  date(2019, 12, 13)),
     _c(1002246,  'Oxygen consumption (VO2)/Body weight [Volume Rate Content]', 'Measurement', 'LOINC', 'Clinical Observation', 'S', '94122-9',  date(2019, 12, 13)),
-    _c(3031111,  'Walking distance 24 hour Calculated',                        'Measurement', 'LOINC', 'Clinical Observation', 'S', '41953-1',  date(2005, 7, 27)),
+    _c(648874,   'Distance walking or running',                                'Measurement', 'LOINC', 'Clinical Observation', 'S', '112427-0', date(2026, 2, 24)),
     _c(3032289,  'Walking speed 24 hour mean Calculated',                      'Measurement', 'LOINC', 'Clinical Observation', 'S', '41957-2',  date(2005, 7, 27)),
     _c(1761351,  'Flights climbed [#] Reporting Period',                       'Observation', 'LOINC', 'Clinical Observation', 'S', '100304-5', date(2022, 8, 8)),
     _c(1001786,  'Calories burned in unspecified time --during activity',      'Measurement', 'LOINC', 'Clinical Observation', 'S', '93819-1',  date(2019, 12, 13)),

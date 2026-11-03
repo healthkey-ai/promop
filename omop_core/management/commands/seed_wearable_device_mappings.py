@@ -29,7 +29,7 @@ APPLE_METRICS = [
     ('HKQuantityTypeIdentifierOxygenSaturation', 'Oxygen saturation (SpO2)', '%', 'Measurement', 'LOINC', '59408-5', 'spo2'),
     ('HKQuantityTypeIdentifierRespiratoryRate', 'Respiratory rate', 'breaths/min', 'Measurement', 'LOINC', '9279-1', 'respiratory_rate'),
     ('HKQuantityTypeIdentifierVO2Max', 'VO2 max', 'mL/kg/min', 'Measurement', 'LOINC', '94122-9', 'vo2_max'),
-    ('HKQuantityTypeIdentifierDistanceWalkingRunning', 'Walking + running distance', 'km', 'Measurement', 'LOINC', '41953-1', 'distance'),
+    ('HKQuantityTypeIdentifierDistanceWalkingRunning', 'Walking + running distance', 'km', 'Measurement', 'LOINC', '112427-0', 'distance'),
     ('HKQuantityTypeIdentifierWalkingSpeed', 'Walking speed', 'km/hr', 'Measurement', 'LOINC', '41957-2', 'walking_speed'),
     ('HKQuantityTypeIdentifierWalkingStepLength', 'Walking step length', 'cm', 'Measurement', 'HK-Wearable', 'HK-WEAR-STEP-LENGTH', 'walking_step_length'),
     ('HKQuantityTypeIdentifierWalkingDoubleSupportPercentage', 'Walking double support percentage', '%', 'Measurement', 'HK-Wearable', 'HK-WEAR-DBL-SUPPORT', 'walking_double_support_pct'),
@@ -50,7 +50,7 @@ GARMIN_METRICS = [
     ('respiratory_rate', 'Respiratory rate', 'breaths/min', 'Measurement', 'LOINC', '9279-1', 'respiratory_rate'),
     ('sleep_duration', 'Sleep duration', 'h', 'Observation', 'LOINC', '93832-4', 'sleep_duration'),
     ('vo2_max', 'VO2 max', 'mL/kg/min', 'Measurement', 'LOINC', '94122-9', 'vo2_max'),
-    ('distance', 'Walking + running distance', 'km', 'Measurement', 'LOINC', '41953-1', 'distance'),
+    ('distance', 'Walking + running distance', 'km', 'Measurement', 'LOINC', '112427-0', 'distance'),
     ('active_energy', 'Active energy burned', 'kcal', 'Measurement', 'LOINC', '93819-1', 'active_energy'),
     ('basal_energy', 'Basal energy expenditure', 'kcal', 'Measurement', 'HK-Wearable', 'HK-WEAR-BASAL-ENERGY', 'basal_energy'),
 ]
@@ -124,6 +124,7 @@ class Command(BaseCommand):
                         continue
 
                     _, was_created = SourceCodeConceptMapping.objects.get_or_create(
+                        organization=None,
                         source_vocabulary_id=source_vocab,
                         source_code=src_code,
                         defaults={

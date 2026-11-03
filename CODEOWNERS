@@ -1,8 +1,9 @@
 # Code owners for healthkey-ai/promop.
 #
 # Purpose is SOC2 CC8.1 change management: declare who should review changes to
-# security-relevant code. The Security review status requires approval from
-# @larsburgess for security-related changes once rollout is complete. Paths below are ordered least- to
+# security-relevant code. The Security review status requires approval of
+# security-related changes from a writer other than the PR's author once rollout is
+# complete. Paths below are ordered least- to
 # most-specific; the LAST matching pattern wins, so the security paths at the
 # bottom override the catch-all at the top.
 #
@@ -128,9 +129,18 @@
 /patient_portal/management/commands/create_service_client.py  @larsburgess
 /patient_portal/management/commands/create_smart_app.py       @larsburgess
 
-# ── CI and the security gates themselves ──────────────────────────────────────
-# A change that weakens a gate should be as visible as a change that trips it.
-/.github/                           @larsburgess
+# ── Security and privileged GitHub controls ───────────────────────────────────
+# Ordinary CI/test orchestration stays with the default owner. Changes to the
+# security policy, deployment/publishing workflows, dependency automation, or a
+# reusable action can alter privileged execution and route to Lars.
+/.github/dependabot.yml             @larsburgess
+/.github/actions/                   @larsburgess
+/.github/workflows/*security*.yml   @larsburgess
+/.github/workflows/*codeql*.yml     @larsburgess
+/.github/workflows/*deploy*.yml     @larsburgess
+/.github/workflows/*release*.yml    @larsburgess
+/.github/workflows/*publish*.yml    @larsburgess
+/.github/scripts/*security*         @larsburgess
 /.gitleaks*                         @larsburgess
 /.bandit*                           @larsburgess
 /SECURITY.md                        @larsburgess
@@ -150,6 +160,7 @@
 # Unanchored, mirroring the gate's `**/CODEOWNERS`: a CODEOWNERS file in any
 # directory routes review for its subtree, so all of them are owned here.
 CODEOWNERS                          @larsburgess
+/render.yaml                        @larsburgess
 /docs/soc2/                         @larsburgess
 /scripts/capture_change_management_evidence.py  @larsburgess
 /scripts/capture_change_management_evidence/    @larsburgess

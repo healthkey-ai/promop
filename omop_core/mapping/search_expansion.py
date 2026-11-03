@@ -40,8 +40,8 @@ def generate_search_query(source_context, candidates, rejection):
     if not getattr(settings, 'ANTHROPIC_API_KEY', ''):
         return None
     try:
-        import anthropic
-        response = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY).messages.create(
+        from omop_core.mapping.anthropic_client import anthropic_client
+        response = anthropic_client().messages.create(
             model='claude-opus-5', max_tokens=4096,
             system=_QUERY_SYSTEM, thinking={'type': 'adaptive'},
             output_config={'effort': 'low', 'format': {'type': 'json_schema', 'schema': _QUERY_SCHEMA}},

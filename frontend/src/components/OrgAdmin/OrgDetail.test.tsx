@@ -24,6 +24,7 @@ const ORG_DATA = {
   is_active: true,
   allows_public_aggregated_data: false,
   allows_patient_signup: false,
+  can_manage_access: true,
   created_at: "2024-01-01T00:00:00Z",
 };
 
@@ -314,5 +315,21 @@ describe("OrgDetail — Invitations list", () => {
     expect(screen.getByText("#42")).toBeInTheDocument();
     // Doctor invite does not show person_id
     expect(screen.queryByText("#null")).not.toBeInTheDocument();
+  });
+});
+
+
+describe('OrgDetail access administration permissions', () => {
+  it.each([false, undefined])('hides access administration and skips restricted requests when permission is %s', async (canManageAccess) => {
+    setupMocks({ can_manage_access: canManageAccess });
+    renderOrgDetail({ isStaff: false });
+    await screen.findByText('Acme Clinic');
+    for (const label of ['Access Rules', 'Access Grants', 'Invitations']) {
+      expect(screen.queryByText(label)).not.toBeInTheDocument();
+    }
+    for (const resource of ['trusts', 'access', 'invitations']) {
+      expect(mockGet).not.toHaveBeenCalledWith(`/orgs/acme/${resource}/`);
+    }
+    expect(screen.queryByRole('button', { name: /send invite/i })).not.toBeInTheDocument();
   });
 });

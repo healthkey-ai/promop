@@ -4,6 +4,8 @@ export interface MappingStats {
   field_mappings: { total: number; approved: number; proposed: number; unmapped: number };
   code_mappings: { total: number; approved: number; proposed: number };
   therapy: { regimens: number; components: number; classes: number; disease_links: number };
+  relevance_signals?: { proposed: number; accepted: number; rejected: number };
+  disease_category?: { total: number };
 }
 
 export interface TherapyRegimenItem {
@@ -17,6 +19,8 @@ export interface TherapyComponentItem {
   code: string;
   title: string;
   concept_id?: number | null;
+  standard_concept?: string | null;
+  invalid_reason?: string | null;
   classes?: TherapyClassItem[];
 }
 
@@ -34,6 +38,22 @@ export interface DiseaseTherapyRegimenItem {
   round_title?: string;
   regimen_code: string;
   regimen_title?: string;
+}
+
+// --- Disease Categories ---
+
+export async function fetchDiseaseCategories(): Promise<{value: string; label: string}[]> {
+  const resp = await api.get('/v1/disease-categories/');
+  return resp.data as {value: string; label: string}[];
+}
+
+export async function createDiseaseCategory(data: { code: string; label: string }): Promise<{value: string; label: string}> {
+  const resp = await api.post('/v1/disease-categories/', data);
+  return resp.data as {value: string; label: string};
+}
+
+export async function deleteDiseaseCategory(code: string): Promise<void> {
+  await api.delete(`/v1/disease-categories/${encodeURIComponent(code)}/`);
 }
 
 export async function fetchMappingStats(): Promise<MappingStats> {
@@ -93,6 +113,11 @@ export async function createComponent(data: { code: string; title: string; conce
   return resp.data as TherapyComponentItem;
 }
 
+export async function updateComponent(code: string, data: { title?: string; concept_id?: number | null }): Promise<TherapyComponentItem> {
+  const resp = await api.patch(`/v1/therapy-components/${code}/`, data);
+  return resp.data as TherapyComponentItem;
+}
+
 // --- Component Classes ---
 
 export async function addComponentClass(componentCode: string, classCode: string): Promise<void> {
@@ -135,4 +160,33 @@ export async function addDiseaseTherapyRegimen(data: {
 
 export async function removeDiseaseTherapyRegimen(id: number): Promise<void> {
   await api.delete(`/v1/disease-therapy-regimens/${id}/`);
+}
+
+// --- Disease Category Mappings ---
+
+export interface DiseaseCategoryMappingItem {
+  id: number;
+  disease_name: string;
+  category: string;
+}
+
+export async function fetchDiseaseCategoryMappings(search?: string): Promise<DiseaseCategoryMappingItem[]> {
+  const params: Record<string, string> = {};
+  if (search) params.search = search;
+  const resp = await api.get('/v1/disease-category-mappings/', { params });
+  return resp.data as DiseaseCategoryMappingItem[];
+}
+
+export async function createDiseaseCategoryMapping(data: { disease_name: string; category: string }): Promise<DiseaseCategoryMappingItem> {
+  const resp = await api.post('/v1/disease-category-mappings/', data);
+  return resp.data as DiseaseCategoryMappingItem;
+}
+
+export async function updateDiseaseCategoryMapping(id: number, data: { category?: string; disease_name?: string }): Promise<DiseaseCategoryMappingItem> {
+  const resp = await api.patch(`/v1/disease-category-mappings/${id}/`, data);
+  return resp.data as DiseaseCategoryMappingItem;
+}
+
+export async function deleteDiseaseCategoryMapping(id: number): Promise<void> {
+  await api.delete(`/v1/disease-category-mappings/${id}/`);
 }

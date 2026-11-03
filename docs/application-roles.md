@@ -70,10 +70,15 @@ authenticated human staff user; a service credential cannot administer tokens.
 
 An Org Admin administers an organization through a direct organization grant or
 one of the trust paths below. They can manage that organization's settings,
-invitations, access grants, and trusts; read and edit its patients; and import
-FHIR/CSV patient data into it. A group-scoped `org_admin` grant gives patient
+read and edit its patients, and import FHIR/CSV patient data into it. A group-scoped `org_admin` grant gives patient
 access through that group; it does not by itself confer administration of the
 group's entire organization.
+
+Invitations, access grants, and trust rules require Staff or an active, direct
+organization-level `org_admin` grant in the target organization. Trust-derived
+admin authority and group-level grants cannot delegate access, even when the
+same identity has a direct Analyst grant. The organization detail API reports
+`can_manage_access`, which controls the access-administration tabs and requests.
 
 Org Admin cannot create/delete organizations, toggle organization activation, or
 administer service application tokens. The org access-edit endpoint can switch

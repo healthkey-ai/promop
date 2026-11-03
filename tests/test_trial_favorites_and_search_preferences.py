@@ -8,6 +8,8 @@ consistency.
 """
 import threading
 
+from unittest import mock
+
 import pytest
 from django.db import connection, connections
 from rest_framework.test import APIClient
@@ -120,6 +122,500 @@ class TestFavorites:
         row.refresh_from_db()
         assert row.status == 'registered'
         assert row.is_favorite is True
+
+
+class TestWeightsWizardOffered:
+    """Whether this patient has been offered the suitability-weights wizard.
+
+    A column beside `preferences` rather than a key inside it. `reset` empties
+    that payload wholesale, so a patient who cleared their filters would be
+    offered the wizard again; and a truthy key there would count towards
+    `non_default_filter_count`, ticking the UI's "Filters (N)" badge up by one
+    for everyone who has ever been asked.
+    """
+
+    def url(self, person, suffix=''):
+        return f'/api/v1/trial-search-preferences/{suffix}?person_id={person.pk}'
+
+    def test_it_starts_unoffered(self, client, person):
+        client.patch(self.url(person, 'upsert/'), {'preferences': {}}, format='json')
+        assert TrialSearchPreferences.objects.get(person=person).weights_wizard_offered is False
+
+    def test_a_decline_is_one_write_of_the_flag_alone(self, client, person):
+        response = client.patch(
+            self.url(person, 'upsert/'),
+            {'weights_wizard_offered': True},
+            format='json',
+        )
+        assert response.status_code == 200
+        row = TrialSearchPreferences.objects.get(person=person)
+        assert row.weights_wizard_offered is True
+        assert row.preferences == {}
+
+    def test_a_combined_wizard_write_stores_both(self, client, person):
+        """The weights and the flag can travel together, but `preferences` is
+        replaced WHOLESALE, so the caller owes a read-modify-write.
+
+        The first version of this test sent weights and flag against a row
+        whose `preferences` was `{}`, so it never saw the consequence. In
+        production the row is not empty: the migration defaults every existing
+        patient to not-yet-offered, so the wizard is offered to people who
+        already have saved filters, and a client that sends only the weights
+        deletes them. Starting from a row with filters is the whole point.
+        """
+        filters = {'searchTitle': 'myeloma', 'phase': 'II', 'distance': 50}
+        client.patch(
+            self.url(person, 'upsert/'), {'preferences': filters}, format='json',
+        )
+        weights = {
+            'benefitWeight': 40, 'distancePenaltyWeight': 30,
+            'patientBurdenWeight': 20, 'riskWeight': 10,
+        }
+
+        response = client.patch(
+            self.url(person, 'upsert/'),
+            {'preferences': {**filters, **weights}, 'weights_wizard_offered': True},
+            format='json',
+        )
+
+        assert response.status_code == 200
+        row = TrialSearchPreferences.objects.get(person=person)
+        assert row.weights_wizard_offered is True
+        assert row.preferences == {**filters, **weights}
+
+    def test_a_wizard_write_that_forgets_to_merge_loses_the_filters(self, client, person):
+        """The hazard the test above exists to rule out, pinned so nobody
+        rediscovers it in production.
+
+        This is the endpoint behaving as documented — `preferences` is one
+        JSON column and a PATCH assigns it — not a defect. It is here because
+        the wizard is the first flow that writes this column from somewhere
+        other than the filter panel, and the shape that loses data is the
+        shape that looks right.
+        """
+        filters = {'searchTitle': 'myeloma', 'phase': 'II'}
+        client.patch(
+            self.url(person, 'upsert/'), {'preferences': filters}, format='json',
+        )
+
+        client.patch(
+            self.url(person, 'upsert/'),
+            {'preferences': {'riskWeight': 40}, 'weights_wizard_offered': True},
+            format='json',
+        )
+
+        row = TrialSearchPreferences.objects.get(person=person)
+        assert row.preferences == {'riskWeight': 40}
+
+    def test_clearing_the_filters_does_not_un_offer(self, client, person):
+        """The reason this is a column. `reset` sets `preferences` to `{}`;
+        a flag living in there would go with it and the patient would be
+        asked again for having pressed Reset."""
+        client.patch(
+            self.url(person, 'upsert/'),
+            {'preferences': {'searchTitle': 'myeloma'}, 'weights_wizard_offered': True},
+            format='json',
+        )
+        assert client.patch(self.url(person, 'reset/'), {}, format='json').status_code == 200
+        row = TrialSearchPreferences.objects.get(person=person)
+        assert row.preferences == {}
+        assert row.weights_wizard_offered is True
+
+    def test_a_reset_response_describes_the_row_it_saved(self, client, person):
+        """`reset` writes in the view, not through the serializer, so the
+        serializer's own re-read does not cover it. Its unconditional branch
+        takes no lock, so an offer landing between its read and its save
+        leaves it describing a flag that is no longer there.
+
+        The instance the view would hold is supplied directly. Setting the
+        column and then calling the endpoint does not reproduce this — the
+        view's own `get_or_create` reads after the offer and is therefore
+        fresh, which is why the first version of this test passed against the
+        unfixed code.
+        """
+        client.patch(
+            self.url(person, 'upsert/'), {'preferences': {'searchTitle': 'x'}},
+            format='json',
+        )
+        TrialSearchPreferences.objects.filter(person=person).update(
+            weights_wizard_offered=True
+        )
+
+        stale = TrialSearchPreferences.objects.get(person=person)
+        stale.weights_wizard_offered = False
+        # `mock.patch.object`, not `monkeypatch.setattr`, and on the manager
+        # INSTANCE. Two traps, and the obvious fix for the first walks into
+        # the second:
+        #
+        #  - `monkeypatch.setattr` on the instance shadows an inherited bound
+        #    method, and its undo re-`setattr`s rather than deletes, so the
+        #    instance keeps a `get_or_create` of its own for the rest of the
+        #    session.
+        #  - `type(TrialSearchPreferences.objects)` is `Manager` itself, the
+        #    base every default manager in the project shares — patching
+        #    there hands EVERY model's `get_or_create` a preferences row for
+        #    the duration. Harmless today because nothing else calls it during
+        #    a reset; invisible and baffling the day something does.
+        #
+        # `mock.patch.object` records whether the attribute was in the
+        # object's own `__dict__` and deletes it on exit when it was not,
+        # which is the one combination that is both narrow and clean.
+        with mock.patch.object(
+            TrialSearchPreferences.objects,
+            'get_or_create',
+            lambda **kwargs: (stale, False),
+        ):
+            response = client.patch(self.url(person, 'reset/'), {}, format='json')
+
+        assert response.status_code == 200
+        assert response.json()['preferences'] == {}
+        assert response.json()['weights_wizard_offered'] is True
+        assert TrialSearchPreferences.objects.get(person=person).weights_wizard_offered is True
+
+    def test_it_does_not_count_as_a_filter(self, client, person):
+        """The other reason. `non_default_filter_count` drives a badge."""
+        response = client.patch(
+            self.url(person, 'upsert/'),
+            {'weights_wizard_offered': True},
+            format='json',
+        )
+        assert response.json()['non_default_filter_count'] == 0
+
+    def test_asking_to_unset_it_is_ignored_not_refused(self, client, person):
+        """One-way, and quietly so.
+
+        A 400 was tried here and withdrawn. This endpoint's documented flow is
+        read-modify-write, so a client that read the row before the offer
+        sends `false` back on its next FILTER save without meaning anything by
+        it — and refusing that lost the filter edit, repeatedly, until the
+        client happened to re-read.
+        """
+        client.patch(
+            self.url(person, 'upsert/'),
+            {'weights_wizard_offered': True},
+            format='json',
+        )
+        response = client.patch(
+            self.url(person, 'upsert/'),
+            {'weights_wizard_offered': False, 'preferences': {'searchTitle': 'myeloma'}},
+            format='json',
+        )
+        assert response.status_code == 200
+        row = TrialSearchPreferences.objects.get(person=person)
+        assert row.weights_wizard_offered is True
+        # And the edit the request was actually about landed.
+        assert row.preferences == {'searchTitle': 'myeloma'}
+
+    def test_it_can_be_set_again_while_already_set(self, client, person):
+        """Idempotent, so a retry after a 412 does not need to know whether
+        its first attempt landed."""
+        for _ in range(2):
+            response = client.patch(
+                self.url(person, 'upsert/'),
+                {'weights_wizard_offered': True},
+                format='json',
+            )
+            assert response.status_code == 200
+        assert TrialSearchPreferences.objects.get(person=person).weights_wizard_offered is True
+
+    def test_a_filter_write_leaves_it_alone(self, client, person):
+        """`upsert` replaces `preferences` wholesale but merges at the field
+        level, so a body that omits the flag must not reset it.
+
+        End-to-end witness, not the guard. Both requests here re-read the row
+        through `get_or_create`, so the instance is never stale and this
+        passes against stock `ModelSerializer.update` too — measured. What
+        actually guards the property is
+        `test_a_stale_filter_save_cannot_revert_it` below, which drives the
+        serializer with a stale instance because no request sequence can
+        produce one. Kept because this is the shape a reader will look for.
+        """
+        client.patch(
+            self.url(person, 'upsert/'),
+            {'weights_wizard_offered': True},
+            format='json',
+        )
+        client.patch(
+            self.url(person, 'upsert/'),
+            {'preferences': {'searchTitle': 'myeloma'}},
+            format='json',
+        )
+        assert TrialSearchPreferences.objects.get(person=person).weights_wizard_offered is True
+
+    def test_the_read_carries_it(self, client, person):
+        """The client decides whether to offer from the same read it uses for
+        the filters, so it has to come back in the list payload."""
+        client.patch(
+            self.url(person, 'upsert/'),
+            {'weights_wizard_offered': True},
+            format='json',
+        )
+        body = rows(client.get(self.url(person)))
+        assert body[0]['weights_wizard_offered'] is True
+
+    def test_the_response_describes_the_filters_that_are_there_now(
+        self, client, person,
+    ):
+        """The mirror of the test below, and a defect the narrow save
+        introduced rather than inherited.
+
+        Writing only the columns the body carried is what stops one request
+        reverting another's — and it is also what can make the RESPONSE a lie,
+        because the serializer renders from the instance this request read. A
+        flag-only PATCH leaves `preferences` unwritten, so without a re-read
+        the 200 pairs a post-write flag with a pre-read payload and stamps it
+        with this request's own, currently valid, ETag. The client then spends
+        that tag as `If-Match` on a read-modify-write, is told the
+        precondition holds, and overwrites content it never read.
+
+        Before the custom `update()` the bare `save()` wrote the whole row, so
+        the body was true by force. The fix is to make the re-read as narrow
+        as the write, not to widen the write back.
+        """
+        from patient_portal.api.serializers import TrialSearchPreferencesSerializer
+
+        client.patch(
+            self.url(person, 'upsert/'),
+            {'preferences': {'a': 1}},
+            format='json',
+        )
+        # What an overlapping flag-only request is holding: the row as it was
+        # before somebody else's filter save.
+        stale = TrialSearchPreferences.objects.get(person=person)
+        assert stale.preferences == {'a': 1}
+
+        client.patch(
+            self.url(person, 'upsert/'),
+            {'preferences': {'a': 1, 'b': 2}},
+            format='json',
+        )
+
+        serializer = TrialSearchPreferencesSerializer(
+            stale, data={'weights_wizard_offered': True}, partial=True,
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+
+        assert serializer.data['preferences'] == {'a': 1, 'b': 2}
+        assert serializer.data['weights_wizard_offered'] is True
+        assert TrialSearchPreferences.objects.get(person=person).preferences == {
+            'a': 1, 'b': 2,
+        }
+
+    def test_the_body_and_the_etag_come_from_one_version(self, client, person):
+        """The invariant, against the race that breaks a partial re-read.
+
+        Re-reading only the columns the save skipped puts another writer's
+        value in the body beside THIS request's `updated_at`, and the client's
+        next conditional write then 412s having changed nothing. Re-reading
+        the whole row in one SELECT gives a body and a tag from one snapshot
+        whichever way the race went.
+
+        The interleave is forced rather than raced: the second writer lands
+        inside the re-read, which is the one moment that matters and the one a
+        thread pair cannot be made to hit reliably.
+        """
+        from patient_portal.api.serializers import TrialSearchPreferencesSerializer
+
+        client.patch(
+            self.url(person, 'upsert/'), {'preferences': {'a': 1}}, format='json',
+        )
+        instance = TrialSearchPreferences.objects.get(person=person)
+        real_refresh = TrialSearchPreferences.refresh_from_db
+
+        def racing_refresh(self, *args, **kwargs):
+            other = TrialSearchPreferences.objects.get(person=person)
+            other.preferences = {'a': 1, 'z': 9}
+            # Through `save`, not `queryset.update`: `auto_now` has to fire,
+            # or the tag would not move and the race would not be one.
+            other.save(update_fields=['preferences', 'updated_at'])
+            return real_refresh(self, *args, **kwargs)
+
+        with mock.patch.object(
+            TrialSearchPreferences, 'refresh_from_db', racing_refresh,
+        ):
+            serializer = TrialSearchPreferencesSerializer(
+                instance, data={'weights_wizard_offered': True}, partial=True,
+            )
+            serializer.is_valid(raise_exception=True)
+            serializer.save()
+
+        row = TrialSearchPreferences.objects.get(person=person)
+        # What the caller is handed IS the row, both halves of it.
+        assert serializer.instance.preferences == row.preferences
+        assert serializer.instance.updated_at == row.updated_at
+        assert serializer.instance.weights_wizard_offered is True
+
+    def test_reset_also_answers_from_one_version(self, client, person):
+        """The same invariant, the other place that needed it.
+
+        `reset` writes in the view, not through the serializer, so it needs
+        its own re-read — and the first version of it re-read one column,
+        which is the shape that pairs somebody else's flag with this
+        request's `updated_at`.
+        """
+        client.patch(
+            self.url(person, 'upsert/'), {'preferences': {'a': 1}}, format='json',
+        )
+        real_refresh = TrialSearchPreferences.refresh_from_db
+
+        def racing_refresh(self, *args, **kwargs):
+            other = TrialSearchPreferences.objects.get(person=person)
+            other.weights_wizard_offered = True
+            other.save(update_fields=['weights_wizard_offered', 'updated_at'])
+            return real_refresh(self, *args, **kwargs)
+
+        with mock.patch.object(
+            TrialSearchPreferences, 'refresh_from_db', racing_refresh,
+        ):
+            response = client.patch(self.url(person, 'reset/'), {}, format='json')
+
+        assert response.status_code == 200
+        row = TrialSearchPreferences.objects.get(person=person)
+        body = response.json()
+        assert body['weights_wizard_offered'] is True
+        assert body['updated_at'] == row.updated_at.isoformat().replace(
+            '+00:00', 'Z',
+        )
+
+    def test_a_stale_filter_save_cannot_revert_it(self, client, person):
+        """The race the one-way rule is actually about.
+
+        Not in `TestTwoWritersAtOnce`: that harness exists for the row LOCK,
+        which this change does not touch, and a threaded version of THIS race
+        was written and removed. Two barriers cannot force the interleave that
+        matters — the offer has to land between the filter request's read and
+        its write — so it passed against the broken code, which is worse than
+        no test. Driving the serializer with the stale instance reproduces the
+        same state deterministically.
+
+        A filter save reads the row, the offer lands, and then the filter
+        save writes — from the copy it read, in which the flag is still
+        `False`. Its body never mentioned the flag. On the unconditional path
+        there is no lock and no transaction, because `If-Match` is opt-in, so
+        nothing refuses it.
+
+        Serialized here rather than threaded: the order is the whole point,
+        and a thread pair would test the scheduler. `serializer.save()` is
+        driven directly so the stale instance is the one a real overlapping
+        request would hold.
+        """
+        from patient_portal.api.serializers import TrialSearchPreferencesSerializer
+
+        client.patch(
+            self.url(person, 'upsert/'), {'preferences': {}}, format='json',
+        )
+        stale = TrialSearchPreferences.objects.get(person=person)
+        assert stale.weights_wizard_offered is False
+
+        client.patch(
+            self.url(person, 'upsert/'),
+            {'weights_wizard_offered': True},
+            format='json',
+        )
+
+        serializer = TrialSearchPreferencesSerializer(
+            stale, data={'preferences': {'searchTitle': 'myeloma'}}, partial=True,
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+
+        row = TrialSearchPreferences.objects.get(person=person)
+        assert row.preferences == {'searchTitle': 'myeloma'}
+        assert row.weights_wizard_offered is True
+
+    def test_the_response_describes_the_row_that_was_saved(self, client, person):
+        """The same staleness one layer out.
+
+        The column survives, but the response is rendered from the instance
+        this request read — so a filter save that overlapped the offer
+        answered `weights_wizard_offered: false` beside the ETag of a row in
+        which it is true. A client that decides from its own write's response
+        rather than from a fresh read offers the wizard again.
+        """
+        from patient_portal.api.serializers import TrialSearchPreferencesSerializer
+
+        client.patch(
+            self.url(person, 'upsert/'), {'preferences': {}}, format='json',
+        )
+        stale = TrialSearchPreferences.objects.get(person=person)
+
+        client.patch(
+            self.url(person, 'upsert/'),
+            {'weights_wizard_offered': True},
+            format='json',
+        )
+
+        serializer = TrialSearchPreferencesSerializer(
+            stale, data={'preferences': {'searchTitle': 'myeloma'}}, partial=True,
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+
+        assert serializer.data['weights_wizard_offered'] is True
+
+    def test_a_stale_client_cannot_clear_it_explicitly_either(self, client, person):
+        """The same race with the flag in the body. The validator compares
+        against the row this request read, which still says `False`, so it
+        passes — and the write has to be what refuses."""
+        from patient_portal.api.serializers import TrialSearchPreferencesSerializer
+
+        client.patch(
+            self.url(person, 'upsert/'), {'preferences': {}}, format='json',
+        )
+        stale = TrialSearchPreferences.objects.get(person=person)
+
+        client.patch(
+            self.url(person, 'upsert/'),
+            {'weights_wizard_offered': True},
+            format='json',
+        )
+
+        serializer = TrialSearchPreferencesSerializer(
+            stale, data={'weights_wizard_offered': False}, partial=True,
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+
+        assert TrialSearchPreferences.objects.get(person=person).weights_wizard_offered is True
+        # And the response says so. Asserting only the row left the body free
+        # to report the stale `false` it was rendered from.
+        assert serializer.data['weights_wizard_offered'] is True
+
+    def test_the_detail_route_cannot_clear_it_either(self, client, person):
+        """`PATCH /{id}/` is the third write path and shares the serializer.
+        This file's own concurrency test is parametrized over all three
+        because a guard on one lets a refactor delete the others with a green
+        suite — the same argument applies to this one."""
+        client.patch(
+            self.url(person, 'upsert/'),
+            {'weights_wizard_offered': True},
+            format='json',
+        )
+        row = TrialSearchPreferences.objects.get(person=person)
+        response = client.patch(
+            f'/api/v1/trial-search-preferences/{row.pk}/',
+            {'weights_wizard_offered': False},
+            format='json',
+        )
+        assert response.status_code == 200
+        row.refresh_from_db()
+        assert row.weights_wizard_offered is True
+
+    def test_writing_it_bumps_the_version(self, client, person):
+        """Deliberate. The ETag is `updated_at`, and a validator that did not
+        move when the flag did would let a client hold a representation with
+        the wrong flag — which is worse than the filter save that now needs
+        one retry."""
+        client.patch(self.url(person, 'upsert/'), {'preferences': {}}, format='json')
+        before = rows(client.get(self.url(person)))[0]['updated_at']
+        client.patch(
+            self.url(person, 'upsert/'),
+            {'weights_wizard_offered': True},
+            format='json',
+        )
+        after = rows(client.get(self.url(person)))[0]['updated_at']
+        assert after > before
 
 
 class TestSearchPreferences:

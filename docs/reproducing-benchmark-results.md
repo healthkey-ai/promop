@@ -584,7 +584,7 @@ Result is a JSON array: `[{gene, origin, interpretation}, …]`
 `genetic_mutations` without further DB queries. It is true for a qualifying
 present pathogenic TP53 finding under the existing assessment/status rule,
 and null otherwise. Null is unknown, not a negative result; del(17p) is not
-aggregated. See the [consumer contract](tp53_aggregate_plan.md).
+aggregated. See the [consumer contract](genomics_architecture.md#genomic-features-and-finding-terminology).
 
 ### Wearable / device data — `_get_wearable_data`
 

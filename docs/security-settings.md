@@ -44,7 +44,7 @@ deployment into HTTP redirects.
 
 On a deployed host that override is an error rather than advice: `check --deploy`
 reports `patient_portal.E005`, which fails at the `--fail-level ERROR` that
-`start.sh` uses before migrations, so the deploy stops. An empty value reports
+`scripts/prepare-deployment.sh` uses before migrations, so the deploy stops. An empty value reports
 `E006` — django-oauth-toolkit treats the setting as mandatory and would otherwise
 raise `AttributeError` at first use. Both comparisons lowercase the configured
 schemes, because the toolkit does; `https,HTTP` is not a way around them.
@@ -53,7 +53,7 @@ schemes, because the toolkit does; `https,HTTP` is not a way around them.
 refuses to provision rather than storing a scheme the setting does not allow.
 `Model.save()` never calls `full_clean()`, so nothing else on that path would.
 
-Three limits worth knowing. The check runs where `start.sh` runs — the Render web
+Three limits worth knowing. The check runs where `scripts/prepare-deployment.sh` runs — the Render web
 services, which receive `RENDER=true` and are therefore always `IS_DEPLOYED`
 whatever `ENVIRONMENT` says. A deployment whose entrypoint is gunicorn directly,
 such as the Cloud Run staging image, never executes it.
@@ -99,7 +99,7 @@ HTTP controls. Audit/export key separation and shared throttle-cache checks also
 run on debug-enabled deployments. Warnings remain warnings so operators can
 choose staging diagnostics deliberately; configuration errors still fail
 startup. The redirect-scheme override is the exception: `W006` locally, where it
-is a real choice, and `E005` on a deployed host, where it is not. `start.sh`
+is a real choice, and `E005` on a deployed host, where it is not. The deploy script
 already runs this command before migrations, so the report also appears in
 deployment logs.
 

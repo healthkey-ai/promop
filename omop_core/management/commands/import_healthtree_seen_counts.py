@@ -8,7 +8,7 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
 from omop_core.models import SourceCodeConceptMapping
-from omop_core.services.source_vocabularies import ICD10CM_MERGE, VOCABULARY_OID_ALIASES
+from omop_core.services.source_vocabularies import VOCABULARY_OID_ALIASES
 
 
 # Exact HealthTree/FHIR identifiers only. Do not apply One's broad substring
@@ -21,7 +21,7 @@ FHIR_ALIASES = {
     'http://www.nlm.nih.gov/research/umls/rxnorm': 'RxNorm',
     'http://www.ama-assn.org/go/cpt': 'CPT4',
     'http://hl7.org/fhir/sid/icd-9': 'ICD9CM',
-    'http://hl7.org/fhir/sid/icd-10': 'ICD10',
+    'http://hl7.org/fhir/sid/icd-10': 'ICD10CM',
     'http://hl7.org/fhir/sid/icd-10-cm': 'ICD10CM',
     'http://hl7.org/fhir/sid/ndc': 'NDC',
     'CPT': 'CPT4',
@@ -32,7 +32,7 @@ for oid, vocabulary in {
     '2.16.840.1.113883.6.88': 'RxNorm',
     '2.16.840.1.113883.6.12': 'CPT4',
     '2.16.840.1.113883.6.42': 'ICD9CM',
-    '2.16.840.1.113883.6.3': 'ICD10',
+    '2.16.840.1.113883.6.3': 'ICD10CM',
     '2.16.840.1.113883.6.90': 'ICD10CM',
 }.items():
     FHIR_ALIASES[oid] = FHIR_ALIASES[f'urn:oid:{oid}'] = vocabulary
@@ -40,8 +40,7 @@ ALIASES = {**FHIR_ALIASES, **VOCABULARY_OID_ALIASES, '(no system)': ''}
 
 
 def canonical(vocabulary):
-    vocabulary = ALIASES.get(vocabulary, vocabulary)
-    return ICD10CM_MERGE.get(vocabulary, vocabulary)
+    return ALIASES.get(vocabulary, vocabulary)
 
 
 def read_counts(path):
@@ -109,6 +108,11 @@ class Command(BaseCommand):
                      alias_matches=0, changed_mappings=0, unchanged_mappings=0,
                      unmatched_mappings=0, ambiguous_mappings=0)
         matched = set()
+        # Counts this instance rebuilt from its own patients are not replaced
+        # by a snapshot's (#2121).
+        from omop_core.mapping import axis_variants
+        rebuilt = axis_variants.rebuilt_seen_keys()
+        stats['rebuilt_mappings'] = 0
         with transaction.atomic():
             pending = []
             rows = SourceCodeConceptMapping.objects.only(
@@ -122,6 +126,9 @@ class Command(BaseCommand):
                 matched.add(key)
                 stats['matched_mappings'] += 1
                 stats[f'{kind}_matches'] += 1
+                if (mapping.source_vocabulary_id, mapping.source_code) in rebuilt:
+                    stats['rebuilt_mappings'] += 1
+                    continue
                 if mapping.occurrence_count == counts[key]:
                     stats['unchanged_mappings'] += 1
                     continue

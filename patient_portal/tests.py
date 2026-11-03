@@ -2655,7 +2655,7 @@ class DrugExposureToPatientRecordTest(_SignalBase):
                 drug_exposure_start_date=date(2021 + idx, 1, 1),
                 drug_type_concept=self.type_concept,
             )
-        self.assertEqual(self._get_pi().therapy_lines_count, 0)
+        self.assertIsNone(self._get_pi().therapy_lines_count)
 
     def test_same_start_date_drugs_do_not_invent_a_line(self):
         # A shared date is not a persisted Episode/EpisodeEvent relationship.
@@ -2673,7 +2673,7 @@ class DrugExposureToPatientRecordTest(_SignalBase):
             drug_exposure_start_date=date(2022, 6, 1),
             drug_type_concept=self.type_concept,
         )
-        self.assertEqual(self._get_pi().therapy_lines_count, 0)
+        self.assertIsNone(self._get_pi().therapy_lines_count)
 
     def test_same_date_drugs_do_not_invent_a_combination_regimen(self):
         # Regimen labels require persisted episodes, not inferred drug names.
@@ -2720,7 +2720,8 @@ class DrugExposureToPatientRecordTest(_SignalBase):
         )
         pi = self._get_pi()
         self.assertIsNone(pi.first_line_therapy)
-        self.assertEqual(pi.prior_therapy, 'None')
+        # Failure to establish a line is not an assertion of no prior therapy.
+        self.assertIsNone(pi.prior_therapy)
 
 
 class MeasurementToPatientRecordTest(_SignalBase):
@@ -4811,21 +4812,47 @@ class AuditLogMiddlewareTest(_SmartBase):
     # ------------------------------------------------------------------
 
     def test_logging_failure_does_not_block_response(self):
-        """If the audit logger raises, the API response must still be returned."""
+        """If the audit logger raises, the API response must still be returned,
+        and the failure warning must not be written to the JSON audit stream."""
         import logging as _logging
         from unittest.mock import patch as mock_patch
 
         _, pi = self._make_person_and_pi(88807)
 
-        with mock_patch.object(_logging.getLogger('audit'), 'info', side_effect=RuntimeError('log exploded')):
-            response = self.write_client.patch(
-                f'/api/patient-info/{pi.pk}/',
-                {'ecog_status': '1'},
-                format='json',
-            )
+        audit_records, ops_records = [], []
+
+        class _Capture(_logging.Handler):
+            def __init__(self, records):
+                super().__init__()
+                self.records = records
+
+            def emit(self, record):
+                self.records.append(record.getMessage())
+
+        audit_capture = _Capture(audit_records)
+        ops_capture = _Capture(ops_records)
+        audit_logger = _logging.getLogger('audit')
+        ops_logger = _logging.getLogger('omop.ops')
+        audit_logger.addHandler(audit_capture)
+        ops_logger.addHandler(ops_capture)
+        try:
+            with mock_patch.object(audit_logger, 'info', side_effect=RuntimeError('log exploded')):
+                response = self.write_client.patch(
+                    f'/api/patient-info/{pi.pk}/',
+                    {'ecog_status': '1'},
+                    format='json',
+                )
+        finally:
+            audit_logger.removeHandler(audit_capture)
+            ops_logger.removeHandler(ops_capture)
 
         # Response must be returned regardless of logging failure
         self.assertIn(response.status_code, range(200, 600))
+        # The failure warning belongs to the operational stream, not `audit`.
+        self.assertFalse(any('stdout write failed' in r for r in audit_records))
+        self.assertTrue(any('stdout write failed' in r for r in ops_records))
+        for raw in audit_records:
+            json.loads(raw)
 
 
 class PatientNameRenameTest(_SmartBase):
@@ -5371,6 +5398,36 @@ class RxNavServiceTest(TestCase):
             result = resolve_drug('anything')
         self.assertIsNone(result)
 
+    def test_rxnav_error_log_is_valid_json(self):
+        """A drug name or error text with quotes/newlines must not break the log."""
+        import logging
+        from unittest.mock import patch
+        from omop_core.services.rxnav_service import resolve_drug
+
+        records = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record):
+                records.append(record.getMessage())
+
+        capture = _Capture()
+        ops_logger = logging.getLogger('omop.ops')
+        ops_logger.addHandler(capture)
+        try:
+            with patch(
+                'omop_core.services.rxnav_service._rxnav_lookup',
+                side_effect=RuntimeError('bad "quote"\nsecond line'),
+            ):
+                self.assertIsNone(resolve_drug('Drug "X"\nY'))
+        finally:
+            ops_logger.removeHandler(capture)
+
+        self.assertEqual(len(records), 1)
+        parsed = json.loads(records[0])
+        self.assertEqual(parsed['event'], 'rxnav_lookup_error')
+        self.assertEqual(parsed['drug'], 'Drug "X"\nY')
+        self.assertIn('bad "quote"', parsed['error'])
+
     def test_second_call_uses_cached_concept(self):
         """After first call caches a Concept, second call returns it without API hit."""
         from omop_core.services.rxnav_service import resolve_drug
@@ -5836,6 +5893,45 @@ class ScopedTokenPermissionTest(TestCase):
                              sub="uid4", email="s@test.com", name="S", raw={})
         req = self._req("DELETE", claims, self._user(is_staff=True))
         self.assertTrue(self.permission.has_permission(req, None))
+
+    def test_org_admin_allows_post(self):
+        """Non-staff org admin can POST (e.g. Generate OMOP)."""
+        from omop_core.models import GroupAccess, Organization
+        user = self._user()
+        org = Organization.objects.create(name="Test Org", slug="test-org")
+        GroupAccess.objects.create(identity=user, org=org, role='org_admin')
+        req = self._req("POST", None, user)
+        self.assertTrue(self.permission.has_permission(req, None))
+
+    def test_org_admin_allows_delete(self):
+        """Non-staff org admin can DELETE."""
+        from omop_core.models import GroupAccess, Organization
+        user = self._user()
+        org = Organization.objects.create(name="Test Org 2", slug="test-org-2")
+        GroupAccess.objects.create(identity=user, org=org, role='org_admin')
+        req = self._req("DELETE", None, user)
+        self.assertTrue(self.permission.has_permission(req, None))
+
+    def test_firebase_org_admin_allows_post(self):
+        """Firebase-authenticated org admin can POST."""
+        from omop_core.models import GroupAccess, Organization
+        from patient_portal.api.providers.base import TokenClaims
+        user = self._user()
+        org = Organization.objects.create(name="Test Org 3", slug="test-org-3")
+        GroupAccess.objects.create(identity=user, org=org, role='org_admin')
+        claims = TokenClaims(issuer="https://securetoken.google.com/proj",
+                             sub="uid-admin", email="admin@test.com", name="A", raw={})
+        req = self._req("POST", claims, user)
+        self.assertTrue(self.permission.has_permission(req, None))
+
+    def test_doctor_denies_post(self):
+        """A doctor role (non-admin professional) still cannot POST."""
+        from omop_core.models import GroupAccess, Organization
+        user = self._user()
+        org = Organization.objects.create(name="Test Org 4", slug="test-org-4")
+        GroupAccess.objects.create(identity=user, org=org, role='doctor')
+        req = self._req("POST", None, user)
+        self.assertFalse(self.permission.has_permission(req, None))
 
 
 # ---------------------------------------------------------------------------
@@ -7000,6 +7096,15 @@ class _ConceptFixtureBase(_SmartBase):
         from omop_core.models import Concept, Vocabulary, Domain, ConceptClass
         import datetime
 
+        # Search/list fixtures need a controlled catalog: deployment migrations
+        # may already contain these real IDs, codes and other matching names.
+        # Unloaded vocabulary mappings legitimately have a NULL concept. SQL
+        # NOT IN (NULL) matches no rows, so exclude those from the subquery.
+        Concept.objects.filter(vocabulary_id__in=('LOINC', 'SNOMED')).exclude(
+            pk__in=FieldConceptMapping.objects.filter(concept_id__isnull=False).values_list('concept_id', flat=True),
+        ).delete()
+        Vocabulary.objects.filter(pk__in=('LOINC', 'SNOMED')).update(vocabulary_version='')
+
         # Token with no read scope — must be rejected by ScopedTokenPermission
         cls.empty_scope_token = AccessToken.objects.create(
             user=cls.foundation_user,
@@ -7050,6 +7155,13 @@ class _ConceptFixtureBase(_SmartBase):
             vocabulary_id='SNOMED', domain_id='Condition', concept_class_id='Clinical Finding',
             concept_code='44054006', standard_concept='S', **common,
         )
+
+        # The catalog deletion above queues deferred FK checks in the class
+        # transaction. Validate them before per-test savepoints; otherwise each
+        # teardown repeats the same bulk checks after its savepoint rolls back.
+        # Django still validates every test's own writes during teardown.
+        from django.db import connection
+        connection.check_constraints()
 
     def _auth(self):
         return {'HTTP_AUTHORIZATION': f'Bearer {self.read_token.token}'}
@@ -9488,6 +9600,84 @@ class OrgInvitationFlowTest(TestCase):
         self.assertEqual(resp.status_code, 200, resp.data)
         self.assertFalse(resp.data['needs_password'])
 
+    # --- a federated account on the address is not a login credential (#1935) ---
+
+    def _federated_identity(self, email, sub='federated-sub'):
+        identity = Identity.objects.create(
+            issuer='https://securetoken.google.com/project',
+            sub=sub,
+            email=email,
+            email_verified_at=timezone.now(),
+        )
+        identity.set_unusable_password()
+        identity.save()
+        return identity
+
+    def test_confirm_sets_a_local_password_beside_a_federated_account(self):
+        """The login form authenticates urn:local only, so accepting with a
+        password has to create that account even when an SSO one exists."""
+        from django.contrib.auth import authenticate
+        federated = self._federated_identity('sso-invitee@example.com')
+        invitation = self._invite('sso-invitee@example.com', role='org_admin')
+
+        resp = APIClient().post('/api/orgs/confirm-invitation/',
+                                {'token': invitation.token, 'password': 'Str0ng-pass-42'})
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        local = Identity.objects.get(email='sso-invitee@example.com', issuer='urn:local')
+        self.assertTrue(local.check_password('Str0ng-pass-42'))
+        self.assertEqual(authenticate(username='sso-invitee@example.com', password='Str0ng-pass-42'), local)
+        federated.refresh_from_db()
+        self.assertFalse(federated.has_usable_password())
+
+    def test_confirm_grants_the_role_to_both_of_an_invitees_accounts(self):
+        """Authorization keys on the identity row, so the federated account must
+        keep the grant the host app's token relies on."""
+        federated = self._federated_identity('sso-both@example.com')
+        invitation = self._invite('sso-both@example.com', role='org_admin')
+
+        resp = APIClient().post('/api/orgs/confirm-invitation/',
+                                {'token': invitation.token, 'password': 'Str0ng-pass-42'})
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        local = Identity.objects.get(email='sso-both@example.com', issuer='urn:local')
+        for identity in (local, federated):
+            self.assertTrue(
+                GroupAccess.objects.filter(identity=identity, org=self.org, role='org_admin').exists(),
+                f'no grant for {identity.issuer}',
+            )
+
+    def test_confirm_without_a_password_leaves_a_federated_invitee_on_sso(self):
+        federated = self._federated_identity('sso-only@example.com')
+        invitation = self._invite('sso-only@example.com', role='doctor')
+
+        resp = APIClient().post('/api/orgs/confirm-invitation/', {'token': invitation.token})
+
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertFalse(Identity.objects.filter(email='sso-only@example.com', issuer='urn:local').exists())
+        self.assertTrue(
+            GroupAccess.objects.filter(identity=federated, org=self.org, role='doctor').exists()
+        )
+
+    def test_confirm_rejects_a_weak_password_beside_a_federated_account(self):
+        self._federated_identity('sso-weak@example.com')
+        invitation = self._invite('sso-weak@example.com')
+
+        resp = APIClient().post('/api/orgs/confirm-invitation/',
+                                {'token': invitation.token, 'password': 'short'})
+
+        self.assertEqual(resp.status_code, 400)
+        self.assertFalse(Identity.objects.filter(email='sso-weak@example.com', issuer='urn:local').exists())
+        invitation.refresh_from_db()
+        self.assertIsNone(invitation.confirmed_at)
+
+    def test_lookup_reports_needs_password_for_a_federated_only_account(self):
+        self._federated_identity('sso-lookup@example.com')
+        invitation = self._invite('sso-lookup@example.com')
+        resp = APIClient().get('/api/v1/orgs/invitation-lookup/', {'token': invitation.token})
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertTrue(resp.data['needs_password'])
+
     def test_invite_analyst_allows_custom_redirect_url(self):
         resp = self.client.post('/api/orgs/invite-org/invite/', {
             'email': 'analyst-custom@example.com',
@@ -10681,6 +10871,48 @@ class ServiceTokenOmopAccessTest(TestCase):
 
     @override_settings(
         SERVICE_AUTH_TOKEN='test-service-secret',
+        SERVICE_AUTH_SCOPES='patient/*.read system/etl.write system/etl.delete',
+    )
+    def test_etl_delete_grant_deletes_clinical_rows(self):
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION='Bearer test-service-secret')
+        response = client.delete(f'/api/measurements/{self.m_a.pk}/')
+        self.assertEqual(response.status_code, 204)
+        self.assertFalse(Measurement.objects.filter(pk=self.m_a.pk).exists())
+        response = client.post(
+            '/api/v1/measurements/bulk_delete/',
+            {'ids': [self.m_b.pk, 999999999]}, format='json',
+        )
+        self.assertEqual(response.status_code, 200, response.data)
+        self.assertEqual(response.data, {'deleted': 1, 'missing': [999999999]})
+        self.assertFalse(Measurement.objects.filter(pk=self.m_b.pk).exists())
+
+    @override_settings(
+        SERVICE_AUTH_TOKEN='test-service-secret',
+        SERVICE_AUTH_SCOPES='system/etl.delete',
+    )
+    def test_etl_delete_grant_reaches_nothing_else(self):
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION='Bearer test-service-secret')
+        url = f'/api/measurements/{self.m_a.pk}/'
+        self.assertEqual(client.get(url).status_code, 403)
+        response = client.patch(url, {'value_as_number': 8.5}, format='json')
+        self.assertEqual(response.status_code, 403)
+        response = client.delete(
+            f'/api/v1/patient-records/{self.person_a.person_id}/admin-delete/',
+            {'confirm': 'DELETE'}, format='json',
+        )
+        self.assertEqual(response.status_code, 403)
+        response = client.delete(
+            '/api/patient-info/bulk_delete/',
+            {'person_ids': [self.person_a.person_id]}, format='json',
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertTrue(Person.objects.filter(pk=self.person_a.pk).exists())
+        self.assertTrue(Measurement.objects.filter(pk=self.m_a.pk).exists())
+
+    @override_settings(
+        SERVICE_AUTH_TOKEN='test-service-secret',
         SERVICE_AUTH_SCOPES='patient/*.read system/etl.write',
     )
     def test_etl_grant_can_refresh_patient_record(self):
@@ -10691,6 +10923,50 @@ class ServiceTokenOmopAccessTest(TestCase):
             f'/api/v1/patient-records/{self.person_a.person_id}/refresh/')
         self.assertEqual(response.status_code, 202, response.data)
         self.assertIn('task_id', response.data)
+
+    @override_settings(
+        SERVICE_AUTH_TOKEN='test-service-secret',
+        SERVICE_AUTH_SCOPES='patient/*.read system/etl.write',
+    )
+    def test_etl_grant_can_post_source_codes(self):
+        """The scope the POST documents must actually reach the view."""
+        from omop_core.models import PatientSourceCode
+
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION='Bearer test-service-secret')
+        response = client.post(
+            f'/api/v1/patient-records/{self.person_a.person_id}/source-codes/',
+            {'source_codes': [{
+                'source_value': 'HGB',
+                'source_vocabulary_id': 'LOINC',
+                'omop_table': 'measurement',
+                'occurrence_count': 3,
+            }]},
+            format='json',
+        )
+        # 201: the upsert inserted this code rather than refreshing one.
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(response.data, {'created': 1, 'updated': 0})
+        self.assertTrue(PatientSourceCode.objects.filter(
+            person=self.person_a, source_value='HGB').exists())
+
+    @override_settings(
+        SERVICE_AUTH_TOKEN='test-service-secret',
+        SERVICE_AUTH_SCOPES='patient/*.read',
+    )
+    def test_read_only_token_still_cannot_post_source_codes(self):
+        """Widening the class must not let a read-only token write."""
+        from omop_core.models import PatientSourceCode
+
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION='Bearer test-service-secret')
+        response = client.post(
+            f'/api/v1/patient-records/{self.person_a.person_id}/source-codes/',
+            {'source_codes': [{'source_value': 'HGB'}]}, format='json',
+        )
+        self.assertEqual(response.status_code, 403)
+        self.assertFalse(PatientSourceCode.objects.filter(
+            person=self.person_a).exists())
 
     @override_settings(
         SERVICE_AUTH_TOKEN='test-service-secret',
@@ -16141,6 +16417,15 @@ class VocabReleaseAPITest(_SmartBase):
         self.assertEqual(resp.status_code, 200)
         self.assertIn('ETag', resp)
 
+    def test_concept_search_304_on_matching_etag(self):
+        # #1457: the 304 has no .data, and the LOINC annotation read it anyway.
+        self._make_release()
+        resp1 = self.read_client.get('/api/v1/concepts/search/?q=test')
+        resp2 = self.read_client.get(
+            '/api/v1/concepts/search/?q=test', HTTP_IF_NONE_MATCH=resp1['ETag'],
+        )
+        self.assertEqual(resp2.status_code, 304)
+
 
 class UserlessOAuthTokenDetailTest(TestCase):
     """An OAuth2 client_credentials token has no resource owner
@@ -16691,6 +16976,142 @@ class UnverifiedEmailNotStampedOnPersonTest(TestCase):
         self.assertEqual(person.email, 'owner@example.com')
 
 
+class ImportedPersonAdoptedAtLoginTest(TestCase):
+    """A Person provisioned before its owner signs in must be adopted, not forked."""
+
+    ISSUER = 'https://securetoken.google.com/promop-test'
+
+    def _identity(self, sub: str, email: str) -> Identity:
+        identity = Identity.objects.get_or_create(
+            issuer=self.ISSUER, sub=sub, defaults={'email': email},
+        )[0]
+        identity.set_unusable_password()
+        identity.save()
+        return identity
+
+    def _imported_person(self, email: str | None) -> Person:
+        """What an importer leaves behind: no Identity, no PatientUser."""
+        from omop_core.services.pk import next_pk
+        person = Person.objects.create(
+            person_id=next_pk(Person, 'person_id'), email=email,
+        )
+        PatientRecord.objects.create(person=person)
+        return person
+
+    def test_login_adopts_imported_person_when_case_differs(self):
+        from patient_portal.services import resolve_or_create_person
+
+        imported = self._imported_person('Owner.Name@Example.com')
+        identity = self._identity('case-differs', 'owner.name@example.com')
+
+        person = resolve_or_create_person(
+            identity, email='owner.name@example.com', email_verified=True,
+        )
+
+        self.assertEqual(person.person_id, imported.person_id)
+        self.assertEqual(Person.objects.count(), 1)
+        self.assertTrue(
+            PatientUser.objects.filter(identity=identity, person=imported).exists()
+        )
+
+    def test_login_adopts_imported_person_on_exact_match(self):
+        from patient_portal.services import resolve_or_create_person
+
+        imported = self._imported_person('exact@example.com')
+        identity = self._identity('exact-match', 'exact@example.com')
+
+        person = resolve_or_create_person(
+            identity, email='exact@example.com', email_verified=True,
+        )
+
+        self.assertEqual(person.person_id, imported.person_id)
+        self.assertEqual(Person.objects.count(), 1)
+
+    def test_legacy_patient_record_address_also_adopts_case_insensitively(self):
+        """The fallback for snapshots that carry an address Person does not."""
+        from omop_core.services.pk import next_pk
+        from patient_portal.services import resolve_or_create_person
+
+        person = Person.objects.create(person_id=next_pk(Person, 'person_id'))
+        PatientRecord.objects.create(person=person, email='Legacy@Example.com')
+        identity = self._identity('legacy-case', 'legacy@example.com')
+
+        resolved = resolve_or_create_person(
+            identity, email='legacy@example.com', email_verified=True,
+        )
+
+        self.assertEqual(resolved.person_id, person.person_id)
+        self.assertEqual(Person.objects.count(), 1)
+
+    def test_unverified_login_still_forks(self):
+        """The known limit of adopting by address, pinned so it stays visible."""
+        from patient_portal.services import resolve_or_create_person
+
+        imported = self._imported_person('unverified@example.com')
+        identity = self._identity('unverified-login', 'unverified@example.com')
+
+        person = resolve_or_create_person(
+            identity, email='unverified@example.com', email_verified=False,
+        )
+
+        self.assertNotEqual(person.person_id, imported.person_id)
+        self.assertEqual(Person.objects.count(), 2)
+
+    def test_duplicate_address_forks_rather_than_guessing(self):
+        """Person.email is not unique, so a shared address has no single answer."""
+        from patient_portal.services import resolve_or_create_person
+
+        first = self._imported_person('shared@example.com')
+        second = self._imported_person('Shared@example.com')
+        identity = self._identity('shared-address', 'shared@example.com')
+
+        person = resolve_or_create_person(
+            identity, email='shared@example.com', email_verified=True,
+        )
+
+        self.assertNotIn(person.person_id, {first.person_id, second.person_id})
+        self.assertFalse(PatientUser.objects.filter(person=first).exists())
+        self.assertFalse(PatientUser.objects.filter(person=second).exists())
+
+    def test_lone_snapshot_cannot_settle_an_ambiguous_address(self):
+        """Both sources are counted together, so a stale snapshot cannot decide."""
+        from patient_portal.services import resolve_or_create_person
+
+        first = self._imported_person('ambiguous@example.com')
+        second = self._imported_person('Ambiguous@Example.com')
+        PatientRecord.objects.filter(person=second).update(
+            email='ambiguous@example.com',
+        )
+        identity = self._identity('ambiguous-snapshot', 'ambiguous@example.com')
+
+        person = resolve_or_create_person(
+            identity, email='ambiguous@example.com', email_verified=True,
+        )
+
+        self.assertNotIn(person.person_id, {first.person_id, second.person_id})
+        self.assertFalse(
+            PatientUser.objects.filter(person__in=[first, second]).exists()
+        )
+
+    def test_case_variant_does_not_rebind_a_claimed_person(self):
+        """An address already held by someone else must not be taken over."""
+        from patient_portal.services import resolve_or_create_person
+
+        owner = self._identity('real-owner', 'claimed@example.com')
+        owned = self._imported_person('Claimed@Example.com')
+        PatientUser.objects.create(identity=owner, person=owned)
+        intruder = self._identity('intruder', 'claimed@example.com')
+
+        person = resolve_or_create_person(
+            intruder, email='claimed@example.com', email_verified=True,
+        )
+
+        self.assertNotEqual(person.person_id, owned.person_id)
+        self.assertEqual(
+            PatientUser.objects.get(person=owned).identity_id, owner.pk,
+        )
+
+
 class CsvCreateForNonOrgCallerTest(TestCase):
     """A write-scoped non-org caller can still introduce new patients (#748).
 
@@ -16954,19 +17375,18 @@ class VocabSnapshotStreamTransactionTest(TransactionTestCase):
     the stream fails on Postgres if the fix is reverted.
     """
 
-    # TransactionTestCase truncates all tables on teardown and does NOT restore
-    # migration-seeded reference data (concept-zero, vocab rows, lookups, ...).
-    # This is currently the only non-TestCase DB test, and Django runs all
-    # TestCase subclasses first, so nothing DB-touching runs after this truncation
-    # — but serialize+restore removes the reliance on that ordering luck so a
-    # future TransactionTestCase can't inherit emptied reference tables.
-    serialized_rollback = True
+    # Recreate our small reference fixture after each TransactionTestCase flush.
+    # Restoring the entire migration-seeded database imports the large source
+    # catalogs before every test, even though these tests only stream vocabulary
+    # metadata. Explicit fixtures also make the tests independent of order.
 
     def setUp(self):
         from oauth2_provider.models import Application, AccessToken
+        from django.db import connection
         from django.utils import timezone as tz
         import datetime
         from omop_core.models import VocabularyRelease
+        self.assertFalse(connection.in_atomic_block, 'Streaming regression requires autocommit')
         _make_vocab_fixtures()
         user = Identity.objects.create_user(email='snap_svc@test.com', password='pw')
         app = Application.objects.create(
@@ -18600,7 +19020,8 @@ class BulkOmopWriteTest(TestCase):
     def test_empty_list_is_a_noop(self):
         resp = self.client.post('/api/v1/measurements/', [], format='json')
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
-        self.assertEqual(resp.data, {'created': 0, 'updated': 0, 'ids': []})
+        self.assertEqual(resp.data, {'created': 0, 'updated': 0,
+                                     'unattributed_matches': 0, 'ids': []})
 
     # --- query count ------------------------------------------------------
 
@@ -19751,6 +20172,283 @@ class PartialPatchValueColumnTest(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
         m.refresh_from_db()
         self.assertEqual(m.measurement_source_value, 'PLAIN')
+
+
+@override_settings(SERVICE_AUTH_SCOPES='patient/*.read patient/*.write')
+class ConceptDuplicateDetectionTest(TestCase):
+    """Opt-in concept+date duplicate detection on Measurement writes (#1699).
+
+    Two query params control the check:
+    - ?warn_concept_duplicates=true  — 201, rows written, warnings in response
+    - ?reject_concept_duplicates=true — 409, batch rolled back
+    Neither → no check performed.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        _make_vocab_fixtures()
+        cls.person = Person.objects.create(person_id=33001)
+        PatientRecord.objects.create(person=cls.person)
+
+        cls.m_concept = Concept.objects.get(concept_id=3000963)
+        cls.alt_concept = Concept.objects.get(concept_id=4112853)
+        cls.type_concept = Concept.objects.get(concept_id=32817)
+
+        cls.service_identity = Identity.objects.get_or_create(
+            issuer='urn:service', sub='concept-dup-test',
+        )[0]
+        cls.service_identity.set_unusable_password()
+        cls.service_identity.save()
+
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+        self.client = APIClient()
+        self.client.force_authenticate(
+            user=self.service_identity, token="service-token")
+
+    def _row(self, source_value, day='2024-01-01', concept=None,
+             value=5.0):
+        concept = concept or self.m_concept
+        return {
+            'person': self.person.person_id,
+            'measurement_concept': concept.concept_id,
+            'measurement_date': day,
+            'measurement_type_concept': self.type_concept.concept_id,
+            'value_as_number': value,
+            'measurement_source_value': source_value,
+        }
+
+    def _post(self, rows, query='?skip_refresh=true'):
+        if isinstance(rows, dict):
+            return self.client.post(
+                f'/api/v1/measurements/{query}', rows, format='json')
+        return self.client.post(
+            f'/api/v1/measurements/{query}', rows, format='json')
+
+    # --- warn mode --------------------------------------------------------
+
+    def test_warn_no_duplicates(self):
+        """Distinct concept+date pairs produce no warnings."""
+        rows = [
+            self._row('A', '2024-01-01'),
+            self._row('B', '2024-01-02'),
+        ]
+        resp = self._post(rows, '?skip_refresh=true&warn_concept_duplicates=true')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertNotIn('concept_duplicates', resp.data)
+
+    def test_warn_existing_conflict(self):
+        """Pre-existing row with same concept+date triggers a warning."""
+        from omop_core.models import Measurement
+        # Seed an existing row.
+        self._post([self._row('GLUCOSE-SERUM', '2024-02-01')])
+        count_before = Measurement.objects.filter(person=self.person).count()
+
+        # POST a new row with different source_value but same concept+date.
+        resp = self._post(
+            [self._row('GLU-RANDOM', '2024-02-01')],
+            '?skip_refresh=true&warn_concept_duplicates=true')
+
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertIn('concept_duplicates', resp.data)
+        dups = resp.data['concept_duplicates']
+        self.assertTrue(any(d['type'] == 'existing_conflict' for d in dups))
+        # Row was still written.
+        self.assertEqual(
+            Measurement.objects.filter(person=self.person).count(),
+            count_before + 1)
+
+    def test_warn_intra_batch(self):
+        """Two rows in one batch with same concept+date triggers a warning."""
+        rows = [
+            self._row('SRC-A', '2024-03-01', value=1.0),
+            self._row('SRC-B', '2024-03-01', value=2.0),
+        ]
+        resp = self._post(
+            rows, '?skip_refresh=true&warn_concept_duplicates=true')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertIn('concept_duplicates', resp.data)
+        dups = resp.data['concept_duplicates']
+        intra = [d for d in dups if d['type'] == 'intra_batch']
+        self.assertEqual(len(intra), 1)
+        self.assertEqual(sorted(intra[0]['batch_indices']), [0, 1])
+
+    # --- reject mode ------------------------------------------------------
+
+    def test_reject_rolls_back(self):
+        """Reject mode returns 409 and writes no rows."""
+        from omop_core.models import Measurement
+        self._post([self._row('EXISTING', '2024-04-01')])
+        count_before = Measurement.objects.filter(person=self.person).count()
+
+        resp = self._post(
+            [self._row('DUPLICATE', '2024-04-01')],
+            '?skip_refresh=true&reject_concept_duplicates=true')
+
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+        self.assertIn('concept_duplicates', resp.data)
+        # No new row written.
+        self.assertEqual(
+            Measurement.objects.filter(person=self.person).count(),
+            count_before)
+
+    # --- exclusions -------------------------------------------------------
+
+    def test_concept_zero_excluded(self):
+        """concept_id=0 rows do not trigger warnings."""
+        from omop_core.test_utils import ensure_test_concept_zero
+        ensure_test_concept_zero()
+        rows = [
+            self._row('UNMAPPED-A', '2024-05-01', concept=Concept.objects.get(concept_id=0)),
+            self._row('UNMAPPED-B', '2024-05-01', concept=Concept.objects.get(concept_id=0)),
+        ]
+        resp = self._post(
+            rows, '?skip_refresh=true&warn_concept_duplicates=true')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertNotIn('concept_duplicates', resp.data)
+
+    def test_upserted_rows_not_flagged(self):
+        """A re-POST that upserts (matches by source_value+date+value) does not warn."""
+        row = self._row('STABLE', '2024-06-01')
+        self._post([row])
+        # Re-POST the same row — upsert matches, no new insert.
+        resp = self._post(
+            [row], '?skip_refresh=true&warn_concept_duplicates=true')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertNotIn('concept_duplicates', resp.data)
+
+    def test_erroneous_rows_excluded(self):
+        """An existing is_erroneous row does not trigger a warning."""
+        from omop_core.models import Measurement
+        resp = self._post([self._row('OLD-VALUE', '2024-07-01')])
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        old_id = resp.data['ids'][0]
+        Measurement.objects.filter(measurement_id=old_id).update(is_erroneous=True)
+
+        resp = self._post(
+            [self._row('NEW-VALUE', '2024-07-01')],
+            '?skip_refresh=true&warn_concept_duplicates=true')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        # The erroneous row should not count as a conflict.
+        existing_conflicts = [
+            d for d in resp.data.get('concept_duplicates', [])
+            if d['type'] == 'existing_conflict'
+        ]
+        self.assertEqual(len(existing_conflicts), 0)
+
+    # --- no flag = no check -----------------------------------------------
+
+    def test_no_flag_no_check(self):
+        """Without query params, colliding rows produce no warnings."""
+        self._post([self._row('BASE', '2024-08-01')])
+        resp = self._post(
+            [self._row('COLLIDER', '2024-08-01')],
+            '?skip_refresh=true')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertNotIn('concept_duplicates', resp.data)
+
+    # --- single-row path --------------------------------------------------
+
+    def test_single_row_warns(self):
+        """Single-dict POST with warn flag returns warning in response."""
+        self._post([self._row('SINGLE-BASE', '2024-09-01')])
+        resp = self._post(
+            self._row('SINGLE-DUP', '2024-09-01'),
+            '?skip_refresh=true&warn_concept_duplicates=true')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED)
+        self.assertIn('concept_duplicates', resp.data)
+
+    def test_single_row_rejects(self):
+        """Single-dict POST with reject flag returns 409."""
+        from omop_core.models import Measurement
+        self._post([self._row('SINGLE-OK', '2024-10-01')])
+        count_before = Measurement.objects.filter(person=self.person).count()
+
+        resp = self._post(
+            self._row('SINGLE-REJECT', '2024-10-01'),
+            '?skip_refresh=true&reject_concept_duplicates=true')
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(
+            Measurement.objects.filter(person=self.person).count(),
+            count_before)
+
+    # --- query count ------------------------------------------------------
+
+    def test_query_count_flat(self):
+        """The duplicate check adds one query regardless of batch size."""
+        from django.test.utils import CaptureQueriesContext
+        from django.db import connection
+
+        rows_2 = [
+            self._row(f'QC-{i}', f'2024-11-{i+1:02d}')
+            for i in range(2)
+        ]
+        with CaptureQueriesContext(connection) as ctx_2:
+            self._post(
+                rows_2,
+                '?skip_refresh=true&warn_concept_duplicates=true')
+        q2 = len(ctx_2.captured_queries)
+
+        rows_10 = [
+            self._row(f'QC-{i}', f'2024-12-{i+1:02d}')
+            for i in range(10)
+        ]
+        with CaptureQueriesContext(connection) as ctx_10:
+            self._post(
+                rows_10,
+                '?skip_refresh=true&warn_concept_duplicates=true')
+        q10 = len(ctx_10.captured_queries)
+
+        # The concept-dup check is one query; so query count growth comes only
+        # from the DRF validation path (flat in batch size already). Allow a
+        # tolerance of 2 for cache/content-type lookups that may or may not
+        # be cached across calls.
+        self.assertLessEqual(abs(q10 - q2), 2,
+                             f'queries grew from {q2} to {q10}; '
+                             f'the concept-duplicate check should be O(1)')
+
+    # --- reject + intra-batch, both flags, non-Measurement ----------------
+
+    def test_reject_intra_batch(self):
+        """Reject mode fires on intra-batch duplicates too."""
+        from omop_core.models import Measurement
+        count_before = Measurement.objects.filter(person=self.person).count()
+        rows = [
+            self._row('INTRA-A', '2024-12-01', value=1.0),
+            self._row('INTRA-B', '2024-12-01', value=2.0),
+        ]
+        resp = self._post(
+            rows, '?skip_refresh=true&reject_concept_duplicates=true')
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(
+            Measurement.objects.filter(person=self.person).count(),
+            count_before)
+
+    def test_reject_takes_precedence_over_warn(self):
+        """When both flags are set, reject mode wins."""
+        self._post([self._row('BOTH-BASE', '2025-01-01')])
+        resp = self._post(
+            [self._row('BOTH-DUP', '2025-01-01')],
+            '?skip_refresh=true'
+            '&warn_concept_duplicates=true'
+            '&reject_concept_duplicates=true')
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT)
+
+    def test_non_measurement_endpoint_returns_400(self):
+        """Duplicate flags on a non-Measurement endpoint return 400."""
+        row = {
+            'person': self.person.person_id,
+            'condition_concept': self.m_concept.concept_id,
+            'condition_start_date': '2025-02-01',
+            'condition_type_concept': self.type_concept.concept_id,
+            'condition_source_value': 'TEST',
+        }
+        resp = self.client.post(
+            '/api/v1/conditions/?skip_refresh=true'
+            '&warn_concept_duplicates=true',
+            [row], format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
 
 @override_settings(SERVICE_AUTH_SCOPES='patient/*.read patient/*.write')
@@ -21437,6 +22135,34 @@ class CodeMappingApiTest(TestCase):
         SourceCodeConceptMapping.objects.filter(origin_system='hk-labs-seed').delete()
         self.client = APIClient()
 
+    def test_hospital_system_context_is_display_only_in_list_and_detail(self):
+        oid = 'urn:oid:1.2.840.114350.1.13.88.2.7.5.737384.2050'
+        mapping = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id=oid, source_code='LOCAL-1826',
+            source_code_description='Local lab', status='proposed',
+            source_metadata={'facilities': [
+                {'name': 'UPMC', 'level': 'brand', 'confidence': 'high'},
+                {'name': 'Patient alias', 'level': 'unknown', 'confidence': 'low'},
+            ]},
+        )
+        self.client.force_authenticate(user=self.staff)
+        response = self.client.get('/api/v1/code-mappings/', {'source': oid})
+        self.assertEqual(response.status_code, 200, response.data)
+        row = next(row for row in response.data if row['mapping_id'] == mapping.pk)
+        self.assertEqual(row['source_vocabulary_id'], oid)
+        self.assertEqual(row['source_system_context']['kind'], 'observed')
+        self.assertEqual(row['source_system_context']['label'], 'UPMC')
+        detail = self.client.get(f'/api/v1/code-mappings/{mapping.pk}/')
+        self.assertEqual(detail.status_code, 200, detail.data)
+        self.assertEqual(detail.data['source_system_context'], row['source_system_context'])
+        self.assertEqual(detail.data['source_evidence']['system_context'], row['source_system_context'])
+        browse = self.client.get('/api/v1/code-mappings/', {
+            'browse': '1', 'source': 'EPIC', 'rollup': '0',
+        })
+        self.assertEqual(browse.status_code, 200, browse.data)
+        browsed = next(row for row in browse.data['results'] if row['mapping_id'] == mapping.pk)
+        self.assertEqual(browsed['source_system_context'], row['source_system_context'])
+
     # ---------------------------------------------------------------- access
 
     def test_list_requires_mapping_admin(self):
@@ -21497,6 +22223,16 @@ class CodeMappingApiTest(TestCase):
         with self.assertRaises(DjangoValidationError):
             mapping.clean()
 
+    def test_model_rejects_organization_scope_for_standard_vocabulary(self):
+        mapping = SourceCodeConceptMapping(
+            organization=self.org,
+            source_vocabulary_id='LOINC',
+            source_code='33358-3',
+            target_concept=self.standard,
+        )
+        with self.assertRaises(DjangoValidationError):
+            mapping.clean()
+
     # ------------------------------------------------------------ CRUD
 
     def test_create_mapping_to_existing_standard_concept(self):
@@ -21534,6 +22270,34 @@ class CodeMappingApiTest(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn('omop_table', resp.data)
 
+    def test_create_rejects_organization_scope_for_standard_vocabulary(self):
+        self.client.force_authenticate(user=self.org_admin)
+        resp = self.client.post('/api/v1/code-mappings/', {
+            'organization_id': self.org.pk,
+            'source_vocabulary_id': 'LOINC',
+            'source_code': '33358-3',
+            'destination_concept_id': self.standard.concept_id,
+            'omop_table': 'measurement',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('organization_id', resp.data)
+
+    def test_org_admin_cannot_delete_another_organizations_mapping(self):
+        other_org = Organization.objects.create(
+            name='Other Code Mapping Org', slug='other-code-mapping-org',
+        )
+        mapping = SourceCodeConceptMapping.objects.create(
+            organization=other_org,
+            source_vocabulary_id='EPIC',
+            source_code='OTHER-ORG-CODE',
+            omop_table='measurement',
+            status='proposed',
+        )
+        self.client.force_authenticate(user=self.org_admin)
+        resp = self.client.delete(f'/api/v1/code-mappings/{mapping.pk}/')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertTrue(SourceCodeConceptMapping.objects.filter(pk=mapping.pk).exists())
+
     def test_two_source_codes_may_share_one_destination(self):
         """The normal case, and what made the old concept-keyed URL ambiguous."""
         self.client.force_authenticate(user=self.staff)
@@ -21562,12 +22326,8 @@ class CodeMappingApiTest(TestCase):
             {'reviewed C90.00', 'reviewed MULTIPLE MYELOMA'},
         )
 
-    def test_delete_without_a_destination_removes_one_row_and_leaves_the_sibling(self):
-        """A queue entry with nothing to clear is still deleted outright.
-
-        #1441 made DELETE clear a destination rather than remove the row, but
-        only when there is a destination to clear.
-        """
+    def test_delete_unmapped_row_rejected(self):
+        """An unmapped source code cannot be deleted — it represents real patient data."""
         self.client.force_authenticate(user=self.staff)
         sibling = SourceCodeConceptMapping.objects.create(
             source_vocabulary_id='ICD10CM',
@@ -21575,12 +22335,11 @@ class CodeMappingApiTest(TestCase):
             omop_table='measurement',
         )
         resp = self.client.delete(f'/api/v1/code-mappings/{sibling.id}/')
-        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
-        self.assertFalse(SourceCodeConceptMapping.objects.filter(id=sibling.id).exists())
-        self.assertTrue(SourceCodeConceptMapping.objects.filter(id=self.mapping.id).exists())
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertTrue(SourceCodeConceptMapping.objects.filter(id=sibling.id).exists())
 
-    def test_delete_with_a_destination_clears_it_and_leaves_the_sibling(self):
-        """The row stays in the queue so it can receive new proposals."""
+    def test_delete_mapped_row_truly_deletes(self):
+        """A mapped row is truly deleted (not just cleared)."""
         self.client.force_authenticate(user=self.staff)
         sibling = SourceCodeConceptMapping.objects.create(
             source_vocabulary_id='ICD10CM',
@@ -21591,12 +22350,40 @@ class CodeMappingApiTest(TestCase):
             status='approved',
         )
         resp = self.client.delete(f'/api/v1/code-mappings/{sibling.id}/')
-        self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        sibling.refresh_from_db()
-        self.assertIsNone(sibling.target_concept_id)
-        self.assertEqual(sibling.destination_vocabulary_id, '')
-        self.assertEqual(sibling.status, 'proposed')
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertFalse(SourceCodeConceptMapping.objects.filter(id=sibling.id).exists())
         self.assertTrue(SourceCodeConceptMapping.objects.filter(id=self.mapping.id).exists())
+
+    def test_delete_mapped_row_repoints_clinical_rows_to_zero(self):
+        """Deleting a mapped row repoints its clinical rows back to concept 0."""
+        from omop_core.test_utils import ensure_test_concept_zero
+        concept_zero = ensure_test_concept_zero()
+
+        self.client.force_authenticate(user=self.staff)
+        person = Person.objects.create(person_id=990099)
+        PatientRecord.objects.create(person=person, derivation_version=1)
+        m = Measurement.objects.create(
+            measurement_id=990099001,
+            person=person,
+            measurement_concept=self.standard,
+            measurement_date=date(2024, 6, 1),
+            measurement_type_concept_id=0,
+            measurement_source_value='C90.00',
+        )
+        sibling = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='ICD10CM',
+            source_code='C90.00',
+            target_concept=self.standard,
+            destination_vocabulary_id='LOINC',
+            omop_table='measurement',
+            status='approved',
+        )
+        resp = self.client.delete(f'/api/v1/code-mappings/{sibling.id}/')
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        m.refresh_from_db()
+        self.assertEqual(m.measurement_concept_id, 0)
+        pr = PatientRecord.objects.get(person=person)
+        self.assertEqual(pr.derivation_version, 0)
 
     def test_blank_source_systems_stay_distinct(self):
         """'' is a value, not NULL, so two uncoded codes do not collide."""
@@ -21831,6 +22618,107 @@ class CodeMappingApiTest(TestCase):
                                          'review_token': review.data['review_token']}, format='json')
         self.assertEqual(response.status_code, 400)
 
+    def test_mint_creates_self_ancestor(self):
+        """Minting without a parent creates a self-ancestor row."""
+        self.client.force_authenticate(user=self.staff)
+        url = '/api/v1/code-mappings/mint-destination/'
+        payload = {**self._mint_payload(), 'concept_code': 'mint-anc-self'}
+        review = self.client.post(url, {**payload, 'action': 'review'}, format='json')
+        self.assertEqual(review.status_code, 200, review.data)
+        response = self.client.post(url, {**payload, 'action': 'mint', 'none_match': True,
+                                         'review_token': review.data['review_token']}, format='json')
+        self.assertEqual(response.status_code, 201, response.data)
+        concept_id = response.data['concept_id']
+        self_row = ConceptAncestor.objects.filter(
+            ancestor_concept_id=concept_id, descendant_concept_id=concept_id,
+        )
+        self.assertTrue(self_row.exists())
+        self.assertEqual(self_row.first().min_levels_of_separation, 0)
+        self.assertEqual(self_row.first().max_levels_of_separation, 0)
+        # No other ancestry rows
+        self.assertEqual(ConceptAncestor.objects.filter(descendant_concept_id=concept_id).count(), 1)
+
+    def test_mint_with_parent_creates_full_ancestry(self):
+        """Minting with a parent creates self-ancestor + parent link + transitive ancestors."""
+        from omop_core.services.pk import next_pk
+        self.client.force_authenticate(user=self.staff)
+        url = '/api/v1/code-mappings/mint-destination/'
+        # Create a grandparent → parent chain in ConceptAncestor
+        grandparent = Concept.objects.create(
+            concept_id=next_pk(Concept, 'concept_id'),
+            vocabulary_id='SNOMED', concept_name='Grandparent', concept_code='GP-test',
+            domain_id='Measurement', concept_class_id='Procedure',
+            valid_start_date='2000-01-01', valid_end_date='2099-12-31',
+        )
+        parent = Concept.objects.create(
+            concept_id=next_pk(Concept, 'concept_id'),
+            vocabulary_id='SNOMED', concept_name='Parent concept', concept_code='P-test',
+            domain_id='Measurement', concept_class_id='Procedure',
+            valid_start_date='2000-01-01', valid_end_date='2099-12-31',
+        )
+        # grandparent self-ancestor
+        ConceptAncestor.objects.create(
+            ancestor_concept=grandparent, descendant_concept=grandparent,
+            min_levels_of_separation=0, max_levels_of_separation=0,
+        )
+        # parent self-ancestor
+        ConceptAncestor.objects.create(
+            ancestor_concept=parent, descendant_concept=parent,
+            min_levels_of_separation=0, max_levels_of_separation=0,
+        )
+        # grandparent → parent
+        ConceptAncestor.objects.create(
+            ancestor_concept=grandparent, descendant_concept=parent,
+            min_levels_of_separation=1, max_levels_of_separation=1,
+        )
+        # Now mint a child with parent_concept_id
+        payload = {**self._mint_payload(), 'concept_code': 'mint-anc-child',
+                   'parent_concept_id': parent.concept_id}
+        review = self.client.post(url, {**payload, 'action': 'review'}, format='json')
+        self.assertEqual(review.status_code, 200, review.data)
+        response = self.client.post(url, {**payload, 'action': 'mint', 'none_match': True,
+                                         'review_token': review.data['review_token']}, format='json')
+        self.assertEqual(response.status_code, 201, response.data)
+        child_id = response.data['concept_id']
+        ancestors = ConceptAncestor.objects.filter(descendant_concept_id=child_id).order_by('min_levels_of_separation')
+        self.assertEqual(ancestors.count(), 3)  # self + parent + grandparent
+        # Self-ancestor
+        self_row = ancestors.get(ancestor_concept_id=child_id)
+        self.assertEqual(self_row.min_levels_of_separation, 0)
+        # Direct parent
+        parent_row = ancestors.get(ancestor_concept_id=parent.concept_id)
+        self.assertEqual(parent_row.min_levels_of_separation, 1)
+        # Grandparent (transitive)
+        gp_row = ancestors.get(ancestor_concept_id=grandparent.concept_id)
+        self.assertEqual(gp_row.min_levels_of_separation, 2)
+
+    def test_mint_with_invalid_parent_rejects(self):
+        """Minting with a nonexistent parent_concept_id returns 400."""
+        self.client.force_authenticate(user=self.staff)
+        url = '/api/v1/code-mappings/mint-destination/'
+        payload = {**self._mint_payload(), 'concept_code': 'mint-anc-bad',
+                   'parent_concept_id': 999999999}
+        response = self.client.post(url, {**payload, 'action': 'review'}, format='json')
+        self.assertEqual(response.status_code, 400)
+
+    def test_mint_rejects_cross_domain_parent(self):
+        """Minting with a parent from a different domain returns 400."""
+        from omop_core.services.pk import next_pk
+        self.client.force_authenticate(user=self.staff)
+        url = '/api/v1/code-mappings/mint-destination/'
+        # Create a Condition-domain parent
+        condition_parent = Concept.objects.create(
+            concept_id=next_pk(Concept, 'concept_id'),
+            vocabulary_id='SNOMED', concept_name='Condition parent', concept_code='CP-test',
+            domain_id='Condition', concept_class_id='Clinical Finding',
+            valid_start_date='2000-01-01', valid_end_date='2099-12-31',
+        )
+        # Mint payload is Measurement domain — parent is Condition domain
+        payload = {**self._mint_payload(), 'concept_code': 'mint-cross-domain',
+                   'parent_concept_id': condition_parent.concept_id}
+        response = self.client.post(url, {**payload, 'action': 'review'}, format='json')
+        self.assertEqual(response.status_code, 400)
+
     # ------------------------------------------------------------ reference
 
     def test_reference_returns_all_five_domains(self):
@@ -21921,8 +22809,10 @@ class CodeMappingApiTest(TestCase):
     def test_audit_reports_a_retired_destination_with_its_replacement(self):
         from io import StringIO
         successor = self._retire_standard_with_replacement()
+        SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id='ICD10CM', source_code='F98.8').delete()
         SourceCodeConceptMapping.objects.create(
-            source_vocabulary_id='ICD10', source_code='F98.8', omop_table='measurement',
+            source_vocabulary_id='ICD10CM', source_code='F98.8', omop_table='measurement',
             target_concept=self.standard, destination_vocabulary_id='LOINC',
             status='approved', origin='import',
         )
@@ -21931,7 +22821,7 @@ class CodeMappingApiTest(TestCase):
             call_command('audit_retired_mapping_destinations', stdout=out)
         self.assertEqual(raised.exception.code, 1)
         report = out.getvalue()
-        self.assertIn('ICD10:F98.8', report)
+        self.assertIn('ICD10CM:F98.8', report)
         self.assertIn(f'-> {successor.concept_id} LOINC:33358-4', report)
         self.assertIn('1 mapping(s)', report)
 
@@ -21950,8 +22840,10 @@ class CodeMappingApiTest(TestCase):
     def test_audit_status_filter(self):
         from io import StringIO
         self._retire_standard_with_replacement()
+        SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id='ICD10CM', source_code='Z76.82').delete()
         SourceCodeConceptMapping.objects.create(
-            source_vocabulary_id='ICD10', source_code='Z76.82', omop_table='measurement',
+            source_vocabulary_id='ICD10CM', source_code='Z76.82', omop_table='measurement',
             target_concept=self.standard, destination_vocabulary_id='LOINC',
             status='proposed', origin='import',
         )
@@ -22000,7 +22892,33 @@ class CodeMappingApiTest(TestCase):
         self.assertEqual(set(tables.values()), set(CLINICAL_TABLES))
 
 
-class CodeMappingRepointTest(TestCase):
+class RunsRepointJobsMixin:
+    """Run a mapping save's queued re-point as soon as it is queued.
+
+    The save returns before stored rows move; a job moves them after commit,
+    which never comes inside a TestCase transaction. These tests are about what
+    the move does, so the job runs in place and ``last_repoint`` holds its
+    counts, the numbers the save response used to carry.
+    """
+
+    def _callSetUp(self):
+        from omop_core.services import repoint_jobs
+        self.last_repoint = None
+
+        def run_now(pk):
+            self.last_repoint = repoint_jobs.run_repoint(pk)
+
+        for target, value in (
+            ('omop_core.services.repoint_jobs._after_commit', lambda func: func()),
+            ('omop_core.services.repoint_jobs.dispatch_repoint', run_now),
+        ):
+            patcher = patch(target, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        super()._callSetUp()
+
+
+class CodeMappingRepointTest(RunsRepointJobsMixin, TestCase):
     """Approving a re-pointed mapping must rewrite the rows already stored.
 
     Without this, approval only changes what the *next* import produces, so a
@@ -22108,7 +23026,138 @@ class CodeMappingRepointTest(TestCase):
         self.assertEqual(self.row.measurement_concept_id, self.standard.concept_id)
         # One row, not two: the point of the whole exercise.
         self.assertEqual(Measurement.objects.filter(person=self.person).count(), 1)
-        self.assertEqual(resp.data['repoint']['rows_updated'], 1)
+        self.assertEqual(self.last_repoint['rows_updated'], 1)
+
+    def test_patient_source_code_save_skips_repoint(self):
+        """Saving with patient_id skips repoint entirely — Generate OMOP
+        from the patients list handles resolution for all patients."""
+        other_person = Person.objects.create(
+            person_id=910002, gender_concept_id=0, year_of_birth=1970,
+            race_concept_id=0, ethnicity_concept_id=0,
+        )
+        other_row = Measurement.objects.create(
+            measurement_id=8892099, person=other_person,
+            measurement_concept=self.minted,
+            measurement_date=date(2026, 8, 12),
+            measurement_type_concept=self.type_concept,
+            measurement_source_value='M-PROTEIN, SERUM',
+            value_as_number=Decimal('4.1'),
+        )
+
+        resp = self.client.patch(f'/api/v1/code-mappings/{self.mapping.id}/', {
+            'patient_id': self.person.person_id,
+            'destination_concept_id': self.standard.concept_id,
+            'status': 'approved',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        # No repoint — clinical rows are untouched until Generate OMOP.
+        self.assertIsNone(resp.data['repoint'])
+        self.mapping.refresh_from_db()
+        self.assertIn(self.minted.concept_id, self.mapping.deferred_repoint_concept_ids)
+        self.row.refresh_from_db()
+        other_row.refresh_from_db()
+        self.assertEqual(self.row.measurement_concept_id, self.minted.concept_id)
+        self.assertEqual(other_row.measurement_concept_id, self.minted.concept_id)
+
+        # Generate OMOP resolves both patients afterward.
+        from omop_core.mapping.code_resolution import resolve_person_source_codes
+        result = resolve_person_source_codes(self.person)
+        self.assertEqual(result['resolved'], 1)
+        self.row.refresh_from_db()
+        self.assertEqual(self.row.measurement_concept_id, self.standard.concept_id)
+
+        result = resolve_person_source_codes(other_person)
+        self.assertEqual(result['resolved'], 1)
+        other_row.refresh_from_db()
+        self.assertEqual(other_row.measurement_concept_id, self.standard.concept_id)
+
+    def test_invalid_patient_scope_cannot_fall_back_to_all_patients(self):
+        resp = self.client.patch(f'/api/v1/code-mappings/{self.mapping.id}/', {
+            'patient_id': '',
+            'destination_concept_id': self.standard.concept_id,
+            'status': 'approved',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.mapping.refresh_from_db()
+        self.row.refresh_from_db()
+        self.assertEqual(self.mapping.status, 'proposed')
+        self.assertEqual(self.row.measurement_concept_id, self.minted.concept_id)
+
+    def test_generate_omop_finishes_patient_scoped_standard_target_change(self):
+        """Patient-scoped save defers the standard-to-standard repoint;
+        Generate OMOP resolves both patients afterward."""
+        self.mapping.status = 'approved'
+        self.mapping.target_concept = self.standard
+        self.mapping.save(update_fields=['status', 'target_concept'])
+        self.row.measurement_concept = self.standard
+        self.row.save(update_fields=['measurement_concept'])
+        other_person = Person.objects.create(
+            person_id=910003, gender_concept_id=0, year_of_birth=1970,
+            race_concept_id=0, ethnicity_concept_id=0,
+        )
+        other_row = Measurement.objects.create(
+            measurement_id=8892100, person=other_person,
+            measurement_concept=self.standard,
+            measurement_date=date(2026, 8, 12),
+            measurement_type_concept=self.type_concept,
+            measurement_source_value='M-PROTEIN, SERUM',
+            value_as_number=Decimal('4.1'),
+        )
+
+        resp = self.client.patch(f'/api/v1/code-mappings/{self.mapping.id}/', {
+            'patient_id': self.person.person_id,
+            'destination_concept_id': self.corrected.concept_id,
+            'status': 'approved',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        # No repoint — both rows untouched.
+        self.assertIsNone(resp.data['repoint'])
+        self.row.refresh_from_db()
+        other_row.refresh_from_db()
+        self.mapping.refresh_from_db()
+        self.assertEqual(self.row.measurement_concept_id, self.standard.concept_id)
+        self.assertEqual(other_row.measurement_concept_id, self.standard.concept_id)
+        self.assertIn(self.standard.concept_id, self.mapping.deferred_repoint_concept_ids)
+
+        # Generate OMOP resolves both patients.
+        from omop_core.mapping.code_resolution import resolve_person_source_codes
+        result = resolve_person_source_codes(self.person)
+        self.assertEqual(result['resolved'], 1)
+        self.row.refresh_from_db()
+        self.assertEqual(self.row.measurement_concept_id, self.corrected.concept_id)
+
+        result = resolve_person_source_codes(other_person)
+        self.assertEqual(result['resolved'], 1)
+        other_row.refresh_from_db()
+        self.assertEqual(other_row.measurement_concept_id, self.corrected.concept_id)
+
+    def test_code_mappings_approve_after_patient_save_sweeps_deferred_ids(self):
+        """Patient-tab save populates deferred_repoint_concept_ids, then
+        a Code Mappings page approve (no patient_id) sweeps and clears them."""
+        # Step 1: patient-tab save defers the repoint.
+        resp = self.client.patch(f'/api/v1/code-mappings/{self.mapping.id}/', {
+            'patient_id': self.person.person_id,
+            'destination_concept_id': self.standard.concept_id,
+            'status': 'approved',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertIsNone(resp.data['repoint'])
+        self.mapping.refresh_from_db()
+        self.assertNotEqual(self.mapping.deferred_repoint_concept_ids, [])
+        self.row.refresh_from_db()
+        self.assertEqual(self.row.measurement_concept_id, self.minted.concept_id)
+
+        # Step 2: Code Mappings page approve (no patient_id) clears deferred
+        # and repoints the stored rows.
+        resp = self.client.patch(f'/api/v1/code-mappings/{self.mapping.id}/', {
+            'destination_concept_id': self.standard.concept_id,
+            'status': 'approved',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.mapping.refresh_from_db()
+        self.assertEqual(self.mapping.deferred_repoint_concept_ids, [])
+        self.row.refresh_from_db()
+        self.assertEqual(self.row.measurement_concept_id, self.standard.concept_id)
 
     def test_repoint_marks_patient_records_for_re_derivation(self):
         """Derivation is deferred, not skipped: 12-32s per patient is too slow
@@ -22136,7 +23185,7 @@ class CodeMappingRepointTest(TestCase):
         nothing moves."""
         resp = self._approve_at(self.minted.concept_id)
         self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
-        self.assertEqual(resp.data['repoint']['rows_updated'], 0)
+        self.assertEqual(self.last_repoint['rows_updated'], 0)
         self.row.refresh_from_db()
         self.assertEqual(self.row.measurement_concept_id, self.minted.concept_id)
 
@@ -22147,7 +23196,7 @@ class CodeMappingRepointTest(TestCase):
             8892003, self.standard.concept_id, date(2026, 8, 12), Decimal('3.2'),
         )
         resp = self._approve_at(self.standard.concept_id)
-        self.assertEqual(resp.data['repoint']['rows_collapsed'], 1)
+        self.assertEqual(self.last_repoint['rows_collapsed'], 1)
         self.assertEqual(
             Measurement.objects.filter(
                 person=self.person, measurement_source_value='M-PROTEIN, SERUM',
@@ -22313,7 +23362,8 @@ class CodeMappingResolutionTest(TestCase):
             source_code='33358-4', source_vocabulary_id='ICD10CM', omop_table='measurement',
         )
         self.assertIsNone(concept)
-        self.assertEqual(mapping.id, SourceCodeConceptMapping.objects.get().id)
+        self.assertEqual(mapping.id, SourceCodeConceptMapping.objects.get(
+            source_vocabulary_id='ICD10CM', source_code='33358-4').id)
         self.assertEqual(mapping.occurrence_count, 1)
 
     def test_import_does_not_bump_an_approved_mapping_back_to_proposed(self):
@@ -22892,6 +23942,70 @@ class FieldSynonymBatchTest(TestCase):
         resp = self.client.get('/api/v1/field-synonyms/batch/?fields=hemoglobin_g_dl')
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(len(resp.data['hemoglobin_g_dl']), 5)
+
+
+class TherapyHistoryCompletenessTest(TestCase):
+    """POST /api/v1/therapy-history/completeness/ under PROMOP's own policy (#1924).
+
+    The packaged endpoint is mounted here with the same gate as therapy-line
+    authoring, and who is speaking is read off the request, not the body.
+    """
+
+    def setUp(self):
+        self.person = Person.objects.create(person_id=77101, year_of_birth=1961)
+        self.other = Person.objects.create(person_id=77102, year_of_birth=1962)
+        PatientRecord.objects.get_or_create(person=self.person)
+        PatientRecord.objects.get_or_create(person=self.other)
+        self.staff = Identity.objects.create_user(
+            email='history_staff@test.com', password='pw', is_staff=True,
+        )
+        self.patient = Identity.objects.create_user(
+            email='history_patient@test.com', password='pw',
+        )
+        PatientUser.objects.create(identity=self.patient, person=self.person)
+        self.client = APIClient()
+
+    def _confirm(self, person, complete=True, **extra):
+        return self.client.post(
+            '/api/v1/therapy-history/completeness/',
+            {'person': person.person_id, 'complete': complete, **extra}, format='json',
+        )
+
+    def test_the_patient_confirms_their_own_history(self):
+        from omop_core.models import TherapyHistoryAttestation
+
+        self.client.force_authenticate(user=self.patient)
+        resp = self._confirm(self.person, source='clinician')
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertIs(resp.data['therapy_history_complete'], True)
+        self.assertIs(resp.data['patient_info']['therapy_history_complete'], True)
+        self.assertIs(PatientRecord.objects.get(person=self.person).therapy_history_complete, True)
+        # The body's claim to be a clinician is ignored.
+        self.assertEqual(TherapyHistoryAttestation.objects.get(person=self.person).source, 'patient')
+
+        resp = self._confirm(self.person, complete=False)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertIsNone(PatientRecord.objects.get(person=self.person).therapy_history_complete)
+
+    def test_a_patient_cannot_confirm_for_somebody_else(self):
+        from omop_core.models import TherapyHistoryAttestation
+
+        self.client.force_authenticate(user=self.patient)
+        resp = self._confirm(self.other)
+        self.assertEqual(resp.status_code, 403, resp.data)
+        self.assertFalse(TherapyHistoryAttestation.objects.filter(person=self.other).exists())
+
+    def test_staff_confirm_as_a_clinician(self):
+        from omop_core.models import TherapyHistoryAttestation
+
+        self.client.force_authenticate(user=self.staff)
+        resp = self._confirm(self.other)
+        self.assertEqual(resp.status_code, 200, resp.data)
+        self.assertEqual(TherapyHistoryAttestation.objects.get(person=self.other).source, 'clinician')
+
+    def test_unauthenticated_callers_are_refused(self):
+        resp = self._confirm(self.person)
+        self.assertIn(resp.status_code, (401, 403))
 
 
 class TherapyLineAuthoringTest(TestCase):
@@ -23627,8 +24741,8 @@ class FieldFormulaAPITest(TestCase):
 
     def test_delete_formula(self):
         resp = self.client.post('/api/v1/field-formulas/', {
-            'field_name': 'no_hiv_status',
-            'formula': '@not(hiv_status)',
+            'field_name': 'no_active_infection_status',
+            'formula': '@not(active_infection_status)',
             'is_active': False,
         }, format='json')
         self.assertEqual(resp.status_code, 201, resp.data)
@@ -23977,6 +25091,54 @@ class PersonLanguageSkillPatchTest(_SmartBase):
         self.assertFalse(
             self.PersonLanguageSkill.objects.filter(person=self.person).exists())
         self.assertIsNone(self._record().english_speak)
+        self.assertIsNone(self._record().languages_skills)
+
+    def test_patient_record_patch_cannot_edit_derived_language_columns(self):
+        """A whole-record autosave must not invent trial-matching capabilities."""
+        from omop_core.services.patient_record_service import DERIVED_LANGUAGE_FIELDS
+        from patient_portal.api.serializers import PatientRecordSerializer
+
+        serializer = PatientRecordSerializer()
+        self.assertTrue(all(serializer.fields[name].read_only for name in DERIVED_LANGUAGE_FIELDS))
+
+        payload = {name: True for name in DERIVED_LANGUAGE_FIELDS if name != 'languages_skills'}
+        payload['languages_skills'] = 'English language: speak'
+        response = self.write_client.patch(
+            f'/api/patient-info/{self.person.person_id}/', payload, format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        record = self._record()
+        self.assertTrue(all(getattr(record, name) is None for name in DERIVED_LANGUAGE_FIELDS))
+        self.assertFalse(set(record.user_edited_fields) & DERIVED_LANGUAGE_FIELDS)
+
+    def test_refresh_discards_historical_language_edit_markers(self):
+        """Existing direct edits must stop overriding PersonLanguageSkill rows."""
+        from omop_core.services.patient_record_service import refresh_patient_record
+
+        self._patch({'english': ['read']})
+        record = self._record()
+        record.english_read = False
+        record.english_speak = True
+        record.languages_skills = 'English language: speak'
+        record.disease = 'Unmapped direct edit'
+        record.user_edited_fields = [
+            'english_read', 'english_speak', 'languages_skills', 'disease',
+        ]
+        record.save(update_fields=[
+            'english_read', 'english_speak', 'languages_skills', 'disease',
+            'user_edited_fields',
+        ])
+
+        refresh_patient_record(self.person)
+        record = self._record()
+        self.assertTrue(record.english_read)
+        self.assertFalse(record.english_speak)
+        self.assertEqual(record.languages_skills, 'English language: read')
+        self.assertEqual(record.disease, 'Unmapped direct edit')
+        self.assertIn('disease', record.user_edited_fields)
+        self.assertFalse(set(record.user_edited_fields) & {
+            'english_read', 'english_speak', 'languages_skills',
+        })
 
     def test_an_unchanged_write_reports_no_update(self):
         self._patch({'english': ['speak']})
@@ -24054,7 +25216,7 @@ class PersonLanguageSkillPatchTest(_SmartBase):
         self.assertTrue(self._record().english_read)
 
 
-class CodeMappingRepointSafetyTest(TestCase):
+class CodeMappingRepointSafetyTest(RunsRepointJobsMixin, TestCase):
     """The re-point must move rows without destroying distinct facts.
 
     Found in review of PR #845: the collapse keyed on (person, date) alone, so
@@ -24091,7 +25253,16 @@ class CodeMappingRepointSafetyTest(TestCase):
 
         cls.minted = concept(2039000301, 'hkl:glucose', 'GLUCOSE')
         cls.standard = concept(3046320, '2345-7', 'Glucose [Mass/volume] in Serum')
-        cls.type_concept = concept(32817, 'EHR', 'EHR')
+        cls.type_concept, _ = Concept.objects.get_or_create(
+            concept_id=32817,
+            defaults={
+                'concept_name': 'EHR', 'domain': cls.domain,
+                'vocabulary': cls.vocab, 'concept_class': cls.concept_class,
+                'standard_concept': 'S', 'concept_code': 'EHR',
+                'valid_start_date': date(1970, 1, 1),
+                'valid_end_date': date(2099, 12, 31),
+            },
+        )
 
     def setUp(self):
         self.client = APIClient()
@@ -24135,7 +25306,7 @@ class CodeMappingRepointSafetyTest(TestCase):
         self.assertEqual(
             {r.measurement_concept_id for r in rows}, {self.standard.concept_id},
         )
-        self.assertEqual(resp.data['repoint']['rows_collapsed'], 0)
+        self.assertEqual(self.last_repoint['rows_collapsed'], 0)
 
     def test_genuine_duplicates_still_collapse(self):
         """Same value, same instant: one fact stored twice."""
@@ -24147,7 +25318,7 @@ class CodeMappingRepointSafetyTest(TestCase):
             'destination_concept_id': self.standard.concept_id,
             'status': 'approved',
         }, format='json')
-        self.assertEqual(resp.data['repoint']['rows_collapsed'], 1)
+        self.assertEqual(self.last_repoint['rows_collapsed'], 1)
         self.assertEqual(Measurement.objects.filter(person=self.person).count(), 1)
 
     def test_partial_patch_does_not_blank_the_omop_table(self):
@@ -24164,7 +25335,7 @@ class CodeMappingRepointSafetyTest(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
         self.mapping.refresh_from_db()
         self.assertEqual(self.mapping.omop_table, 'measurement')
-        self.assertEqual(resp.data['repoint']['rows_updated'], 1)
+        self.assertEqual(self.last_repoint['rows_updated'], 1)
 
     def test_approving_a_new_mapping_repoints_rows_sitting_at_concept_zero(self):
         """"New Mapping" on an unresolved code is the most direct curation
@@ -24193,7 +25364,7 @@ class CodeMappingRepointSafetyTest(TestCase):
         resp = self.client.patch(f'/api/v1/code-mappings/{created.data["mapping_id"]}/',
                                  {'status': 'approved'}, format='json')
         self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
-        self.assertEqual(resp.data['repoint']['rows_updated'], 1)
+        self.assertEqual(self.last_repoint['rows_updated'], 1)
         self.assertEqual(
             Measurement.objects.get(measurement_id=8893007).measurement_concept_id,
             self.standard.concept_id,
@@ -24221,7 +25392,7 @@ class CodeMappingRepointSafetyTest(TestCase):
         resp = self.client.patch(f'/api/v1/code-mappings/{created.data["mapping_id"]}/',
                                  {'status': 'approved'}, format='json')
         self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
-        self.assertEqual(resp.data['repoint']['rows_updated'], 1)
+        self.assertEqual(self.last_repoint['rows_updated'], 1)
 
     def test_collapse_removes_provenance_for_the_rows_it_deletes(self):
         when = timezone.make_aware(datetime(2026, 8, 12, 8, 0))
@@ -24272,7 +25443,7 @@ class CodeMappingRepointSafetyTest(TestCase):
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
         self.assertEqual(
-            resp.data['repoint']['rows_updated'], 1,
+            self.last_repoint['rows_updated'], 1,
             'approval reported success but moved no rows',
         )
         self.assertEqual(
@@ -24280,14 +25451,69 @@ class CodeMappingRepointSafetyTest(TestCase):
             self.standard.concept_id,
         )
 
+    def test_hospital_mapping_repoints_only_rows_attributed_to_that_organization(self):
+        org_a = Organization.objects.create(name='Repoint Hospital A', slug='repoint-a')
+        org_b = Organization.objects.create(name='Repoint Hospital B', slug='repoint-b')
+        other_person = Person.objects.create(
+            person_id=910003, gender_concept_id=0, year_of_birth=1970,
+            race_concept_id=0, ethnicity_concept_id=0,
+        )
+        PatientRecord.objects.update_or_create(
+            person=self.person, defaults={'organization': org_a},
+        )
+        PatientRecord.objects.update_or_create(
+            person=other_person, defaults={'organization': org_b},
+        )
+        row_a = self._measurement(8893012, date(2026, 9, 11), Decimal('4.1'))
+        row_b = Measurement.objects.create(
+            measurement_id=8893013, person=other_person,
+            measurement_concept_id=self.minted.concept_id,
+            measurement_date=date(2026, 9, 11),
+            measurement_type_concept=self.type_concept,
+            measurement_source_value='10627', value_as_number=Decimal('4.1'),
+        )
+        other_org_target = Measurement.objects.create(
+            measurement_id=8893014, person=self.person,
+            measurement_concept_id=self.standard.concept_id,
+            measurement_date=date(2026, 9, 11),
+            measurement_type_concept=self.type_concept,
+            measurement_source_value='10627', value_as_number=Decimal('4.1'),
+        )
+        # Match the same opaque code at both hospitals.
+        row_a.measurement_source_value = '10627'
+        row_a.save(update_fields=['measurement_source_value'])
+        content_type = ContentType.objects.get_for_model(Measurement)
+        for row, organization in (
+            (row_a, org_a), (row_b, org_b), (other_org_target, org_b),
+        ):
+            ProvenanceRecord.objects.create(
+                content_type=content_type, object_id=row.pk,
+                source='EHR_SYNC', organization=organization,
+            )
+        mapping = SourceCodeConceptMapping.objects.create(
+            organization=org_a,
+            source_vocabulary_id='http://open.epic.com/FHIR/StructureDefinition/observation-flowsheet-id',
+            source_code='10627', target_concept=self.minted,
+            destination_vocabulary_id='HK-Labs', omop_table='measurement',
+            status='proposed', origin='import',
+        )
 
-class CodeMappingCuratorWorkflowTest(TestCase):
-    """A curator-created mapping is proposed, and approval is what moves rows.
+        response = self.client.patch(f'/api/v1/code-mappings/{mapping.id}/', {
+            'destination_concept_id': self.standard.concept_id,
+            'status': 'approved',
+        }, format='json')
 
-    Creating and approving in one act removed the review step the Unmapped
-    queue exists for, and it made a create write clinical data. Approval is now
-    the only transition that does.
-    """
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        row_a.refresh_from_db()
+        row_b.refresh_from_db()
+        self.assertEqual(row_a.measurement_concept_id, self.standard.concept_id)
+        self.assertEqual(row_b.measurement_concept_id, self.minted.concept_id)
+        self.assertTrue(Measurement.objects.filter(pk=other_org_target.pk).exists())
+        self.assertEqual(self.last_repoint['rows_updated'], 1)
+
+
+class CodeMappingCuratorWorkflowTest(RunsRepointJobsMixin, TestCase):
+    """Admins can create mappings in any status; approval moves clinical rows."""
 
     @classmethod
     def setUpTestData(cls):
@@ -24319,11 +25545,15 @@ class CodeMappingCuratorWorkflowTest(TestCase):
             standard_concept='S', concept_code='1111-1',
             valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
         )
-        cls.type_concept = Concept.objects.create(
-            concept_id=32817, concept_name='EHR',
-            domain=cls.domain, vocabulary=cls.vocab, concept_class=cls.concept_class,
-            standard_concept='S', concept_code='EHR',
-            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        cls.type_concept, _ = Concept.objects.get_or_create(
+            concept_id=32817,
+            defaults={
+                'concept_name': 'EHR', 'domain': cls.domain,
+                'vocabulary': cls.vocab, 'concept_class': cls.concept_class,
+                'standard_concept': 'S', 'concept_code': 'EHR',
+                'valid_start_date': date(1970, 1, 1),
+                'valid_end_date': date(2099, 12, 31),
+            },
         )
 
     def setUp(self):
@@ -24341,7 +25571,7 @@ class CodeMappingCuratorWorkflowTest(TestCase):
             measurement_source_value='POTASSIUM', value_as_number=Decimal('4.1'),
         )
 
-    def _create(self, status_value='approved'):
+    def _create(self, status_value='proposed'):
         return self.client.post('/api/v1/code-mappings/', {
             'domain_id': 'Measurement',
             'source_vocabulary_id': '',
@@ -24351,16 +25581,22 @@ class CodeMappingCuratorWorkflowTest(TestCase):
             'status': status_value,
         }, format='json')
 
-    def test_creation_is_always_proposed(self):
-        """Even when the client asks for approved."""
-        resp = self._create(status_value='approved')
+    def test_creation_defaults_to_proposed(self):
+        """When no status is given, a new mapping is proposed."""
+        resp = self._create(status_value='')
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
         self.assertEqual(resp.data['status'], 'proposed')
         self.assertEqual(resp.data['origin'], 'curator')
 
-    def test_creation_moves_no_clinical_data(self):
-        """Approval is the only transition that rewrites patient rows."""
-        resp = self._create()
+    def test_admin_can_create_as_approved(self):
+        """An admin can save a new mapping directly as approved."""
+        resp = self._create(status_value='approved')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(resp.data['status'], 'approved')
+
+    def test_proposed_creation_moves_no_clinical_data(self):
+        """A proposed create does not rewrite patient rows."""
+        resp = self._create(status_value='proposed')
         self.assertIsNone(resp.data['repoint'])
         self.row.refresh_from_db()
         self.assertEqual(self.row.measurement_concept_id, 0)
@@ -24374,7 +25610,7 @@ class CodeMappingCuratorWorkflowTest(TestCase):
             'status': 'approved',
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
-        self.assertEqual(resp.data['repoint']['rows_updated'], 1)
+        self.assertEqual(self.last_repoint['rows_updated'], 1)
         self.row.refresh_from_db()
         self.assertEqual(self.row.measurement_concept_id, self.destination.concept_id)
 
@@ -24386,7 +25622,7 @@ class CodeMappingCuratorWorkflowTest(TestCase):
             'destination_concept_id': self.other.concept_id,
             'status': 'approved',
         }, format='json')
-        self.assertEqual(resp.data['repoint']['rows_updated'], 1)
+        self.assertEqual(self.last_repoint['rows_updated'], 1)
         self.row.refresh_from_db()
         self.assertEqual(self.row.measurement_concept_id, self.other.concept_id)
 
@@ -24429,7 +25665,7 @@ class CodeMappingCuratorWorkflowTest(TestCase):
             'status': 'approved',
         }, format='json')
         self.assertEqual(resp.data['status'], 'approved', 'the mapping was un-approved')
-        self.assertEqual(resp.data['repoint']['rows_updated'], 1)
+        self.assertEqual(self.last_repoint['rows_updated'], 1)
         self.row.refresh_from_db()
         self.assertEqual(self.row.measurement_concept_id, self.other.concept_id)
 
@@ -24588,6 +25824,7 @@ class CodeMappingReviewerStampTest(TestCase):
         re-point match set when origin == 'import'. Flipping it to 'curator' on
         approve broke exactly that -- an import-proposed mapping approved and
         moved zero rows. reviewer carries the human so origin does not have to.
+        origin_system, the displayed provenance, does name the approver (#1707).
         """
         mapping = SourceCodeConceptMapping.objects.create(
             source_vocabulary_id='', source_code='CHLORIDE',
@@ -24599,7 +25836,7 @@ class CodeMappingReviewerStampTest(TestCase):
         self._approve(mapping.id)
         mapping.refresh_from_db()
         self.assertEqual(mapping.origin, 'import')
-        self.assertEqual(mapping.origin_system, 'fhir-sync')
+        self.assertEqual(mapping.origin_system, 'signoff_curator@t.com')
         self.assertEqual(mapping.reviewer, self.curator)
 
     def test_the_serialized_row_carries_the_sign_off(self):
@@ -24791,6 +26028,21 @@ class MappingStatsTest(MappingHubTestBase):
         self.assertIn('therapy', resp.data)
         self.assertIn('unmapped', resp.data['field_mappings'])
         self.assertGreaterEqual(resp.data['therapy']['regimens'], 1)
+
+    def test_relevance_signals_count_pairs_not_periods(self):
+        from omop_core.models import RelevanceSignal
+        for period in ('2026-09', '2026-10'):
+            RelevanceSignal.objects.create(source='cdew', disease='MM', concept_id=1, period=period,
+                                           document_count=5, status='accepted')
+        RelevanceSignal.objects.create(source='cdew', disease='FL', concept_id=1, period='2026-10',
+                                       document_count=5)
+        RelevanceSignal.objects.create(source='cdew', disease='MM', concept_id=2, period='2026-10',
+                                       document_count=5)
+        self.client.force_authenticate(user=self.admin)
+
+        resp = self.client.get('/api/v1/mapping-stats/')
+
+        self.assertEqual(resp.data['relevance_signals'], {'proposed': 2, 'accepted': 1, 'rejected': 0})
 
     def test_org_admin_can_see_stats(self):
         org_admin = Identity.objects.create_user(
@@ -25302,6 +26554,10 @@ class CodeMappingSourceVocabTabsTest(TestCase):
 
     @classmethod
     def setUpTestData(cls):
+        # These tests exercise their own ICD-10 proposals, independently of
+        # the authoritative mappings installed by deployment migrations.
+        SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id__in=('ICD10', 'ICD10CM')).delete()
         cls.staff = Identity.objects.create_user(
             email='svt_staff@t.com', password='x', is_staff=True,
         )
@@ -25371,13 +26627,32 @@ class CodeMappingSourceVocabTabsTest(TestCase):
             vocabulary=cls.snomed_vocab,
             concept_class=cls.concept_class,
             standard_concept='S',
-            concept_code='44054006',
+            concept_code='TEST-SVT-DIABETES',
             valid_start_date=date(1970, 1, 1),
             valid_end_date=date(2099, 12, 31),
         )
 
     def setUp(self):
         self.client = APIClient()
+
+    def test_reference_includes_valid_render_release_commit(self):
+        """The mapping header can identify the exact deployed Render build."""
+        commit = '8798ec24f4cc16e47f8c0ceec69d38d7e5858b17'
+        self.client.force_authenticate(user=self.staff)
+        with patch.dict(os.environ, {'RENDER_GIT_COMMIT': commit}):
+            resp = self.client.get('/api/v1/code-mappings/reference/')
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['release_commit'], commit)
+
+    def test_reference_omits_invalid_render_release_commit(self):
+        """Unexpected environment values are never reflected into the UI."""
+        self.client.force_authenticate(user=self.staff)
+        with patch.dict(os.environ, {'RENDER_GIT_COMMIT': 'not-a-commit'}):
+            resp = self.client.get('/api/v1/code-mappings/reference/')
+
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['release_commit'], '')
 
     def test_reference_includes_source_vocabulary_tabs(self):
         """The reference endpoint returns a tab for every mapped source system."""
@@ -25414,6 +26689,19 @@ class CodeMappingSourceVocabTabsTest(TestCase):
                 status='proposed',
                 origin='import',
             ),
+            SourceCodeConceptMapping(
+                source_vocabulary_id='urn:oid:1.2.840.114350.1.13.211.2.7.5.737384.45',
+                source_code='EPIC#31000013118',
+                source_code_description='Albumin', domain_id='Measurement',
+                omop_table='measurement', status='proposed', origin='import',
+            ),
+            SourceCodeConceptMapping(
+                source_vocabulary_id=(
+                    'https://fhir.cerner.com/993df7f9-6163-4b2c-9388-9d472c4ef3f9/codeSet/72'),
+                source_code='674310',
+                source_code_description='Albumin', domain_id='Measurement',
+                omop_table='measurement', status='proposed', origin='import',
+            ),
         ]
         SourceCodeConceptMapping.objects.bulk_create(mappings)
         self.client.force_authenticate(user=self.staff)
@@ -25422,16 +26710,20 @@ class CodeMappingSourceVocabTabsTest(TestCase):
         self.assertIn('source_vocabulary_tabs', resp.data)
         tabs = resp.data['source_vocabulary_tabs']
         self.assertTrue(len(tabs) > 0)
-        # ICD10CM is merged into the ICD10 tab (#1028).
-        icd_tab = next((t for t in tabs if t['vocabulary_id'] == 'ICD10'), None)
+        # ICD10CM has its own tab since the tab split.
+        icd_tab = next((t for t in tabs if t['vocabulary_id'] == 'ICD10CM'), None)
         self.assertIsNotNone(icd_tab)
-        self.assertEqual(icd_tab['label'], 'ICD-10')
+        self.assertEqual(icd_tab['label'], 'ICD-10-CM')
         self.assertFalse(icd_tab['is_standard'])
         self.assertIn('MedDRA', [tab['vocabulary_id'] for tab in tabs])
         self.assertIn('PartnerCodes', [tab['vocabulary_id'] for tab in tabs])
+        self.assertEqual(
+            [(tab['vocabulary_id'], tab['label']) for tab in tabs[:2]],
+            [('EPIC', 'Epic'), ('CERNER', 'Cerner')],
+        )
         # Clean up
         SourceCodeConceptMapping.objects.filter(
-            source_code__in=['E11', '10000001', 'CUSTOM-1'],
+            source_code__in=['E11', '10000001', 'CUSTOM-1', 'EPIC#31000013118', '674310'],
         ).delete()
 
     def test_list_includes_mapping_origin(self):
@@ -25455,6 +26747,42 @@ class CodeMappingSourceVocabTabsTest(TestCase):
         self.assertIsNotNone(row)
         self.assertEqual(row['mapping_origin'], 'healthkey')
         mapping.delete()
+
+    def test_vendor_browse_exposes_and_filters_organization(self):
+        other_org = Organization.objects.create(
+            name='Other Hospital', slug='other-hospital',
+        )
+        system = 'http://open.epic.com/FHIR/StructureDefinition/observation-flowsheet-id'
+        rows = [
+            SourceCodeConceptMapping(
+                organization=organization,
+                source_vocabulary_id=system,
+                source_code=f'LOCAL-{organization.pk}',
+                source_code_description='Albumin',
+                target_concept=self.target_concept,
+                destination_vocabulary_id='SNOMED',
+                domain_id='Measurement', omop_table='measurement',
+                status='proposed', origin='import', occurrence_count=1,
+            )
+            for organization in (self.org, other_org)
+        ]
+        SourceCodeConceptMapping.objects.bulk_create(rows)
+        self.client.force_authenticate(user=self.staff)
+
+        response = self.client.get('/api/v1/code-mappings/', {
+            'browse': '1', 'source': 'EPIC', 'seen_only': '0',
+            'organization': self.org.slug,
+        })
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+        self.assertEqual(
+            {row['organization_slug'] for row in response.data['results']},
+            {self.org.slug},
+        )
+        self.assertEqual(
+            {option['slug'] for option in response.data['organizations']},
+            {self.org.slug, other_org.slug},
+        )
+        self.assertEqual(response.data['selected_organization'], self.org.slug)
 
     def test_list_athena_origin(self):
         """Rows with origin_system='athena' report mapping_origin='athena'."""
@@ -25668,6 +26996,25 @@ class CodeMappingLookupTest(TestCase):
             status='proposed',
             origin='import',
         )
+        cls.org_a = Organization.objects.create(name='Hospital A', slug='hospital-a')
+        cls.org_b = Organization.objects.create(name='Hospital B', slug='hospital-b')
+        cls.epic_system = 'http://open.epic.com/FHIR/StructureDefinition/observation-flowsheet-id'
+        for organization, target in (
+            (cls.org_a, cls.target_concept),
+            (cls.org_b, cls.proposed_target),
+        ):
+            SourceCodeConceptMapping.objects.create(
+                organization=organization,
+                source_vocabulary_id=cls.epic_system,
+                source_code='10627',
+                source_code_description='Hospital-local result',
+                target_concept=target,
+                destination_vocabulary_id='SNOMED',
+                domain_id='Procedure',
+                omop_table='procedure',
+                status='approved',
+                origin='import',
+            )
 
     def setUp(self):
         self.client = APIClient()
@@ -25706,6 +27053,82 @@ class CodeMappingLookupTest(TestCase):
         self.assertEqual(hit['target_concept_code'], '12345')
         self.assertEqual(hit['destination_vocabulary_id'], 'SNOMED')
         self.assertEqual(hit['domain_id'], 'Procedure')
+
+    def test_hospital_local_mapping_is_scoped_by_organization(self):
+        def lookup(organization):
+            return self.client.post(self.url, {
+                'organization_id': organization.pk,
+                'codes': [{
+                    'source_vocabulary_id': self.epic_system,
+                    'source_code': '10627',
+                    'omop_table': 'procedure',
+                }],
+            }, format='json')
+
+        response_a = lookup(self.org_a)
+        response_b = lookup(self.org_b)
+        self.assertEqual(response_a.status_code, 200, response_a.data)
+        self.assertEqual(response_b.status_code, 200, response_b.data)
+        self.assertEqual(
+            response_a.data['mappings'][f'{self.epic_system}|10627']['target_concept_id'],
+            self.target_concept.concept_id,
+        )
+        self.assertEqual(
+            response_b.data['mappings'][f'{self.epic_system}|10627']['target_concept_id'],
+            self.proposed_target.concept_id,
+        )
+
+    def test_new_hospital_code_is_enqueued_with_organization(self):
+        response = self.client.post(self.url, {
+            'organization_id': self.org_a.pk,
+            'codes': [{
+                'source_vocabulary_id': self.epic_system,
+                'source_code': 'NEW-FLOWSHEET',
+                'source_text': 'Local observation',
+                'omop_table': 'measurement',
+            }],
+        }, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+        mapping = SourceCodeConceptMapping.objects.get(
+            organization=self.org_a,
+            source_vocabulary_id=self.epic_system,
+            source_code='NEW-FLOWSHEET',
+        )
+        self.assertEqual(mapping.source_code_description, 'Local observation')
+        self.assertEqual(
+            response.data['mappings'][f'{self.epic_system}|NEW-FLOWSHEET']['organization_id'],
+            self.org_a.pk,
+        )
+
+    def test_hospital_local_code_requires_organization_context(self):
+        response = self.client.post(self.url, {
+            'codes': [{
+                'source_vocabulary_id': self.epic_system,
+                'source_code': 'UNATTRIBUTED-FLOWSHEET',
+                'source_text': 'Local observation',
+                'omop_table': 'measurement',
+            }],
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('organization_id', response.data)
+        self.assertFalse(SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id=self.epic_system,
+            source_code='UNATTRIBUTED-FLOWSHEET',
+        ).exists())
+
+    def test_global_standard_mapping_resolves_with_organization_context(self):
+        response = self.client.post(self.url, {
+            'organization_id': self.org_a.pk,
+            'codes': [{
+                'source_vocabulary_id': 'CPT4',
+                'source_code': '99213',
+                'omop_table': 'procedure',
+            }],
+        }, format='json')
+        self.assertEqual(response.status_code, 200, response.data)
+        hit = response.data['mappings']['CPT4|99213']
+        self.assertTrue(hit['resolved'])
+        self.assertIsNone(hit['organization_id'])
 
     def test_lookup_reports_proposed_mapping_and_increments_seen(self):
         resp = self.client.post(self.url, {
@@ -25762,6 +27185,228 @@ class CodeMappingLookupTest(TestCase):
             'codes': [{'source_vocabulary_id': 'CPT4', 'source_code': '99213', 'omop_table': 'procedure'}],
         }, format='json')
         self.assertIn(resp.status_code, [401, 403])
+
+
+class CodeMappingLookupUnitConversionTest(TestCase):
+    """Tests for unit_conversion in POST /api/v1/code-mappings/lookup/."""
+
+    @classmethod
+    def setUpTestData(cls):
+        _make_vocab_fixtures()
+        Vocabulary.objects.get_or_create(
+            vocabulary_id='LOINC',
+            defaults={'vocabulary_name': 'LOINC', 'vocabulary_concept_id': 0},
+        )
+        Vocabulary.objects.get_or_create(
+            vocabulary_id='UCUM',
+            defaults={'vocabulary_name': 'UCUM', 'vocabulary_concept_id': 0},
+        )
+        Domain.objects.get_or_create(
+            domain_id='Unit',
+            defaults={'domain_name': 'Unit', 'domain_concept_id': 0},
+        )
+        ConceptClass.objects.get_or_create(
+            concept_class_id='Unit',
+            defaults={'concept_class_name': 'Unit', 'concept_class_concept_id': 0},
+        )
+        ConceptClass.objects.get_or_create(
+            concept_class_id='Lab Test',
+            defaults={'concept_class_name': 'Lab Test', 'concept_class_concept_id': 0},
+        )
+        cls.admin = Identity.objects.create_superuser(
+            email='unit-lookup@test.com', password='testpass'
+        )
+        # Target LOINC concept for glucose
+        cls.glucose_concept = Concept.objects.create(
+            concept_id=3004410,
+            concept_name='Glucose [Mass/volume] in Serum or Plasma',
+            domain_id='Measurement',
+            vocabulary_id='LOINC',
+            concept_class_id='Lab Test',
+            concept_code='2345-7',
+            standard_concept='S',
+            valid_start_date='1970-01-01',
+            valid_end_date='2099-12-31',
+        )
+        # UCUM unit concept for mmol/L
+        cls.mmol_concept = Concept.objects.create(
+            concept_id=8753,
+            concept_name='millimole per liter',
+            domain_id='Unit',
+            vocabulary_id='UCUM',
+            concept_class_id='Unit',
+            concept_code='mmol/L',
+            standard_concept='S',
+            valid_start_date='1970-01-01',
+            valid_end_date='2099-12-31',
+        )
+        # Approved mapping WITH destination_unit_concept
+        cls.mapping_with_unit = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='LOINC',
+            source_code='2345-7',
+            source_code_description='Glucose',
+            target_concept=cls.glucose_concept,
+            destination_vocabulary_id='LOINC',
+            domain_id='Measurement',
+            omop_table='measurement',
+            status='approved',
+            origin='import',
+            destination_unit_concept=cls.mmol_concept,
+        )
+        # A non-LOINC concept for testing property fallback
+        cls.procedure_concept = Concept.objects.create(
+            concept_id=990101,
+            concept_name='Test Procedure X',
+            domain_id='Procedure',
+            vocabulary_id='SNOMED',
+            concept_class_id='Clinical Finding',
+            concept_code='PROC-1',
+            standard_concept='S',
+            valid_start_date='1970-01-01',
+            valid_end_date='2099-12-31',
+        )
+        cls.mapping_no_unit = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='CPT4',
+            source_code='99999',
+            source_code_description='Procedure test',
+            target_concept=cls.procedure_concept,
+            destination_vocabulary_id='SNOMED',
+            domain_id='Procedure',
+            omop_table='procedure',
+            status='approved',
+            origin='import',
+        )
+
+    def setUp(self):
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.admin)
+        self.url = '/api/v1/code-mappings/lookup/'
+
+    def test_no_unit_fields_backward_compat(self):
+        """Response is unchanged when no unit fields are provided."""
+        resp = self.client.post(self.url, {
+            'codes': [{'source_vocabulary_id': 'LOINC', 'source_code': '2345-7', 'omop_table': 'measurement'}],
+        }, format='json')
+        self.assertEqual(resp.status_code, 200)
+        hit = resp.json()['mappings']['LOINC|2345-7']
+        self.assertTrue(hit['resolved'])
+        self.assertNotIn('unit_conversion', hit)
+
+    def test_exact_match_same_unit(self):
+        """When source_unit equals destination_unit, match_type is exact."""
+        resp = self.client.post(self.url, {
+            'codes': [{
+                'source_vocabulary_id': 'LOINC', 'source_code': '2345-7',
+                'omop_table': 'measurement',
+                'source_unit': 'mmol/L', 'quantity': 5.5,
+            }],
+        }, format='json')
+        self.assertEqual(resp.status_code, 200)
+        conv = resp.json()['mappings']['LOINC|2345-7']['unit_conversion']
+        self.assertEqual(conv['match_type'], 'exact')
+        self.assertEqual(conv['source_unit'], 'mmol/L')
+        self.assertEqual(conv['destination_unit'], 'mmol/L')
+        self.assertEqual(conv['destination_unit_source'], 'mapping')
+        self.assertEqual(conv['destination_unit_concept_id'], self.mmol_concept.concept_id)
+        # quantity unchanged for exact match
+        self.assertIsNotNone(conv['converted_quantity'])
+
+    def test_convertible_units(self):
+        """mg/dL → mmol/L conversion via mapping destination_unit_concept."""
+        resp = self.client.post(self.url, {
+            'codes': [{
+                'source_vocabulary_id': 'LOINC', 'source_code': '2345-7',
+                'omop_table': 'measurement',
+                'source_unit': 'mol/L', 'quantity': 0.001,
+            }],
+        }, format='json')
+        self.assertEqual(resp.status_code, 200)
+        conv = resp.json()['mappings']['LOINC|2345-7']['unit_conversion']
+        self.assertEqual(conv['match_type'], 'convertible')
+        self.assertIsNotNone(conv['converted_quantity'])
+        # 0.001 mol/L = 1 mmol/L
+        from decimal import Decimal
+        self.assertEqual(Decimal(conv['converted_quantity']), Decimal('1'))
+
+    def test_incompatible_units(self):
+        """Units from different property groups yield match_type incompatible."""
+        resp = self.client.post(self.url, {
+            'codes': [{
+                'source_vocabulary_id': 'LOINC', 'source_code': '2345-7',
+                'omop_table': 'measurement',
+                'source_unit': 'kg', 'quantity': 100,
+            }],
+        }, format='json')
+        self.assertEqual(resp.status_code, 200)
+        conv = resp.json()['mappings']['LOINC|2345-7']['unit_conversion']
+        self.assertEqual(conv['match_type'], 'incompatible')
+        self.assertIsNone(conv['converted_quantity'])
+
+    def test_source_unit_without_quantity(self):
+        """source_unit without quantity returns match_type but no converted_quantity."""
+        resp = self.client.post(self.url, {
+            'codes': [{
+                'source_vocabulary_id': 'LOINC', 'source_code': '2345-7',
+                'omop_table': 'measurement',
+                'source_unit': 'mmol/L',
+            }],
+        }, format='json')
+        self.assertEqual(resp.status_code, 200)
+        conv = resp.json()['mappings']['LOINC|2345-7']['unit_conversion']
+        self.assertEqual(conv['match_type'], 'exact')
+        self.assertIsNone(conv['converted_quantity'])
+
+    def test_quantity_without_source_unit_no_conversion(self):
+        """quantity without source_unit yields no unit_conversion key."""
+        resp = self.client.post(self.url, {
+            'codes': [{
+                'source_vocabulary_id': 'LOINC', 'source_code': '2345-7',
+                'omop_table': 'measurement',
+                'quantity': 100,
+            }],
+        }, format='json')
+        self.assertEqual(resp.status_code, 200)
+        hit = resp.json()['mappings']['LOINC|2345-7']
+        self.assertNotIn('unit_conversion', hit)
+
+    def test_destination_unit_from_mapping(self):
+        """destination_unit_source is 'mapping' when destination_unit_concept is set."""
+        resp = self.client.post(self.url, {
+            'codes': [{
+                'source_vocabulary_id': 'LOINC', 'source_code': '2345-7',
+                'omop_table': 'measurement',
+                'source_unit': 'mmol/L',
+            }],
+        }, format='json')
+        self.assertEqual(resp.status_code, 200)
+        conv = resp.json()['mappings']['LOINC|2345-7']['unit_conversion']
+        self.assertEqual(conv['destination_unit_source'], 'mapping')
+        self.assertEqual(conv['destination_unit_concept_id'], self.mmol_concept.concept_id)
+
+    def test_invalid_quantity(self):
+        """Non-numeric quantity returns 400."""
+        resp = self.client.post(self.url, {
+            'codes': [{
+                'source_vocabulary_id': 'LOINC', 'source_code': '2345-7',
+                'omop_table': 'measurement',
+                'source_unit': 'mg/dL', 'quantity': 'not-a-number',
+            }],
+        }, format='json')
+        self.assertEqual(resp.status_code, 400)
+
+    def test_unresolved_code_no_conversion(self):
+        """Unresolved codes do not get unit_conversion even with source_unit."""
+        resp = self.client.post(self.url, {
+            'codes': [{
+                'source_vocabulary_id': 'LOINC', 'source_code': 'NONEXISTENT',
+                'omop_table': 'measurement',
+                'source_unit': 'mg/dL', 'quantity': 100,
+            }],
+        }, format='json')
+        self.assertEqual(resp.status_code, 200)
+        hit = resp.json()['mappings']['LOINC|NONEXISTENT']
+        self.assertFalse(hit['resolved'])
+        self.assertNotIn('unit_conversion', hit)
 
 
 class PrologSurveyParticipantTest(TestCase):
@@ -28177,6 +29822,120 @@ class LegacyServiceGrantKillSwitchTest(TestCase):
             self._authenticate()
 
 
+class OrgAdminDelegatedTokenScopeTest(TestCase):
+    """A delegated read grant must not become durable organization authority."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from oauth2_provider.models import AccessToken, Application
+
+        cls.staff = Identity.objects.create_user(
+            email='org-scope-staff@test.com', password='x', is_staff=True,
+        )
+        cls.admin = Identity.objects.create_user(
+            email='org-scope-admin@test.com', password='x',
+        )
+        cls.member = Identity.objects.create_user(
+            email='org-scope-member@test.com', password='x',
+        )
+        cls.org = Organization.objects.create(name='Scoped Org', slug='scoped-org')
+        cls.other_org = Organization.objects.create(name='Other Org', slug='other-scoped-org')
+        GroupAccess.objects.create(identity=cls.admin, org=cls.org, role='org_admin')
+        cls.member_grant = GroupAccess.objects.create(
+            identity=cls.member, org=cls.org, role='analyst',
+        )
+        app = Application.objects.create(
+            name='Delegated org client', client_id='delegated-org-client',
+            client_type=Application.CLIENT_CONFIDENTIAL,
+            authorization_grant_type=Application.GRANT_AUTHORIZATION_CODE,
+            user=cls.staff,
+        )
+        expiry = timezone.now() + timedelta(hours=1)
+        cls.staff_read_token = AccessToken.objects.create(
+            user=cls.staff, application=app, token='staff-org-read-only',
+            expires=expiry, scope='patient/*.read',
+        )
+        cls.admin_read_token = AccessToken.objects.create(
+            user=cls.admin, application=app, token='admin-org-read-only',
+            expires=expiry, scope='user/*.read',
+        )
+        cls.admin_write_token = AccessToken.objects.create(
+            user=cls.admin, application=app, token='admin-org-write',
+            expires=expiry, scope='user/*.write',
+        )
+
+    @staticmethod
+    def _bearer(token):
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.token}')
+        return client
+
+    def test_read_only_admin_token_cannot_invite_org_admin_on_either_api(self):
+        from omop_core.models import OrgInvitation
+
+        for prefix in ('/api', '/api/v1'):
+            with self.subTest(prefix=prefix):
+                response = self._bearer(self.admin_read_token).post(
+                    f'{prefix}/orgs/scoped-org/invite/',
+                    {'email': 'attacker@test.com', 'role': 'org_admin'},
+                )
+                self.assertEqual(response.status_code, 403)
+        self.assertFalse(OrgInvitation.objects.filter(email='attacker@test.com').exists())
+        self.assertFalse(Identity.objects.filter(email='attacker@test.com').exists())
+
+    def test_read_only_staff_token_cannot_create_org(self):
+        for prefix in ('/api', '/api/v1'):
+            with self.subTest(prefix=prefix):
+                response = self._bearer(self.staff_read_token).post(
+                    f'{prefix}/orgs/', {'name': 'Unauthorized', 'slug': 'unauthorized'},
+                )
+                self.assertEqual(response.status_code, 403)
+        self.assertFalse(Organization.objects.filter(slug='unauthorized').exists())
+
+    def test_read_only_admin_token_cannot_mutate_other_org_admin_routes(self):
+        from omop_core.models import OrgTrust
+
+        client = self._bearer(self.admin_read_token)
+        self.assertEqual(client.patch(
+            '/api/v1/orgs/scoped-org/', {'name': 'Changed'},
+        ).status_code, 403)
+        self.assertEqual(client.post(
+            '/api/v1/orgs/scoped-org/trusts/',
+            {'trusted_org': self.other_org.pk},
+        ).status_code, 403)
+        self.assertEqual(client.patch(
+            f'/api/v1/orgs/scoped-org/access/{self.member_grant.pk}/',
+            {'role': 'doctor'},
+        ).status_code, 403)
+        self.assertEqual(client.delete(
+            f'/api/v1/orgs/scoped-org/access/{self.member_grant.pk}/',
+        ).status_code, 403)
+        self.assertEqual(client.delete(
+            '/api/v1/orgs/scoped-org/trusts/1/',
+        ).status_code, 403)
+        self.assertEqual(client.delete(
+            '/api/v1/orgs/scoped-org/invitations/1/',
+        ).status_code, 403)
+        self.assertEqual(self._bearer(self.staff_read_token).delete(
+            '/api/v1/orgs/scoped-org/',
+        ).status_code, 403)
+        self.org.refresh_from_db()
+        self.member_grant.refresh_from_db()
+        self.assertEqual(self.org.name, 'Scoped Org')
+        self.assertEqual(self.member_grant.role, 'analyst')
+        self.assertFalse(OrgTrust.objects.filter(granting_org=self.org).exists())
+
+    def test_write_scoped_admin_token_can_still_invite(self):
+        response = self._bearer(self.admin_write_token).post(
+            '/api/v1/orgs/scoped-org/invite/',
+            {'email': 'allowed@test.com', 'role': 'doctor'},
+        )
+        self.assertEqual(response.status_code, 201)
+        self.assertTrue(GroupAccess.objects.filter(
+            identity__email='allowed@test.com', org=self.org, role='doctor',
+        ).exists())
+
+
 class ServiceTokenAdministrationBoundaryTest(TestCase):
     """Who may mint a service credential — #1218 review, finding 3.
 
@@ -28361,6 +30120,30 @@ class CodeMappingLockTest(TestCase):
         self.assertEqual(resp.status_code, 423)
         self.assertIn('locked_by', resp.json())
 
+    def test_org_admin_cannot_lock_another_organizations_mapping(self):
+        own_org = Organization.objects.create(name='Lock Owner Org', slug='lock-owner-org')
+        other_org = Organization.objects.create(name='Lock Other Org', slug='lock-other-org')
+        owner = Identity.objects.create_user(email='lock-owner@test.com', password='x')
+        outsider = Identity.objects.create_user(email='lock-outsider@test.com', password='x')
+        GroupAccess.objects.create(identity=owner, org=own_org, role='org_admin')
+        GroupAccess.objects.create(identity=outsider, org=other_org, role='org_admin')
+        mapping = SourceCodeConceptMapping.objects.create(
+            organization=own_org,
+            source_vocabulary_id='EPIC',
+            source_code='LOCK-OWNER-CODE',
+            omop_table='measurement',
+            status='proposed',
+        )
+
+        self.client.force_login(outsider)
+        resp = self.client.post(
+            f'/api/v1/code-mappings/{mapping.pk}/lock/',
+            content_type='application/json',
+        )
+        self.assertEqual(resp.status_code, 403)
+        mapping.refresh_from_db()
+        self.assertIsNone(mapping.locked_by_id)
+
     def test_acquire_lock_expired(self):
         """An expired lock can be taken over."""
         self.mapping.locked_by = self.alice
@@ -28453,3 +30236,2282 @@ class CodeMappingLockTest(TestCase):
         self.assertIsNotNone(locked_row)
         self.assertIsNotNone(locked_row['locked_by_username'])
         self.assertIsNotNone(locked_row['locked_at'])
+
+
+# ---------------------------------------------------------------------------
+# Patient Source Codes Endpoint Tests (Issue 1)
+# ---------------------------------------------------------------------------
+
+class PatientSourceCodesTest(_SmartBase):
+    """Tests for GET /api/v1/patient-records/{person_id}/source-codes/."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        # source-codes requires _is_admin_actor — make foundation_user staff.
+        cls.foundation_user.is_staff = True
+        cls.foundation_user.save(update_fields=['is_staff'])
+        # Create measurement rows with same source_value to test aggregation.
+        cls.m1 = Measurement.objects.create(
+            measurement_id=90001,
+            person=cls.person,
+            measurement_concept=cls.condition_concept,  # any concept
+            measurement_date=date(2023, 1, 1),
+            measurement_type_concept=cls.type_concept,
+            measurement_source_value='GLU',
+        )
+        cls.m2 = Measurement.objects.create(
+            measurement_id=90002,
+            person=cls.person,
+            measurement_concept=cls.condition_concept,
+            measurement_date=date(2023, 1, 2),
+            measurement_type_concept=cls.type_concept,
+            measurement_source_value='GLU',
+        )
+        cls.m3 = Measurement.objects.create(
+            measurement_id=90003,
+            person=cls.person,
+            measurement_concept=cls.condition_concept,
+            measurement_date=date(2023, 1, 3),
+            measurement_type_concept=cls.type_concept,
+            measurement_source_value='HGB',
+        )
+        # Create a condition row.
+        cls.c1 = ConditionOccurrence.objects.create(
+            condition_occurrence_id=90010,
+            person=cls.person,
+            condition_concept=cls.condition_concept,
+            condition_start_date=date(2023, 2, 1),
+            condition_type_concept=cls.type_concept,
+            condition_source_value='DIABETES',
+        )
+        # Create a mapping for GLU.
+        cls.glu_mapping = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='',
+            source_code='GLU',
+            omop_table='measurement',
+            status='approved',
+            target_concept=cls.condition_concept,
+        )
+
+    def _url(self, person_id=None):
+        pid = person_id or self.person.person_id
+        return f'/api/v1/patient-records/{pid}/source-codes/'
+
+    def test_source_codes_returns_correct_aggregation(self):
+        """Multiple rows with same source_value grouped with count."""
+        resp = self.write_client.get(self._url())
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        glu_entries = [sc for sc in data['source_codes'] if sc['source_value'] == 'GLU']
+        self.assertEqual(len(glu_entries), 1)
+        self.assertEqual(glu_entries[0]['row_count'], 2)
+
+    def test_source_codes_joins_mapping_status(self):
+        """Approved mapping shows status=approved; unmapped shows unmapped."""
+        resp = self.write_client.get(self._url())
+        data = resp.json()
+        glu = next(sc for sc in data['source_codes'] if sc['source_value'] == 'GLU')
+        self.assertEqual(glu['mapping_status'], 'approved')
+        self.assertIsNotNone(glu['mapping_id'])
+
+        hgb = next(sc for sc in data['source_codes'] if sc['source_value'] == 'HGB')
+        self.assertEqual(hgb['mapping_status'], 'unmapped')
+
+    def test_source_codes_across_tables(self):
+        """Codes from measurement and condition both appear."""
+        resp = self.write_client.get(self._url())
+        data = resp.json()
+        tables = {sc['omop_table'] for sc in data['source_codes']}
+        self.assertIn('measurement', tables)
+        self.assertIn('condition', tables)
+
+    def test_source_codes_summary(self):
+        """Summary counts are correct."""
+        resp = self.write_client.get(self._url())
+        data = resp.json()
+        self.assertIn('summary', data)
+        self.assertGreater(data['summary']['total'], 0)
+
+    def test_source_codes_empty_patient(self):
+        """Patient with no clinical rows returns empty list."""
+        person2 = Person.objects.create(
+            person_id=90099,
+            given_name='Empty', family_name='Patient',
+            year_of_birth=1990,
+            gender_source_value='male',
+            race_source_value='unknown',
+            ethnicity_source_value='unknown',
+        )
+        PatientRecord.objects.create(person=person2, organization=self.organization)
+        resp = self.write_client.get(f'/api/v1/patient-records/{person2.person_id}/source-codes/')
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data['source_codes'], [])
+        self.assertEqual(data['summary']['total'], 0)
+
+    def test_proposed_without_destination_shown_as_unmapped(self):
+        """A proposed mapping with no target_concept is reported as unmapped (#1889)."""
+        SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='',
+            source_code='HGB',
+            omop_table='measurement',
+            status='proposed',
+            target_concept=None,
+        )
+        resp = self.write_client.get(self._url())
+        data = resp.json()
+        hgb = next(sc for sc in data['source_codes'] if sc['source_value'] == 'HGB')
+        self.assertEqual(hgb['mapping_status'], 'unmapped')
+        self.assertIsNotNone(hgb['mapping_id'])
+        # Summary should count it as unmapped, not proposed.
+        self.assertEqual(data['summary']['proposed'], 0)
+
+    def test_proposed_with_destination_stays_proposed(self):
+        """A proposed mapping WITH a target_concept keeps its proposed status."""
+        SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='',
+            source_code='HGB',
+            omop_table='measurement',
+            status='proposed',
+            target_concept=self.condition_concept,
+        )
+        resp = self.write_client.get(self._url())
+        data = resp.json()
+        hgb = next(sc for sc in data['source_codes'] if sc['source_value'] == 'HGB')
+        self.assertEqual(hgb['mapping_status'], 'proposed')
+
+
+# ---------------------------------------------------------------------------
+# Per-Patient Resolve Source Codes Tests (Issue 2)
+# ---------------------------------------------------------------------------
+
+class ResolvePersonSourceCodesTest(_SmartBase):
+    """Tests for POST /api/v1/patient-records/{person_id}/resolve-source-codes/."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        # resolve-source-codes requires _is_admin_actor — make foundation_user staff.
+        cls.foundation_user.is_staff = True
+        cls.foundation_user.save(update_fields=['is_staff'])
+        from omop_core.models import Concept
+        # Zero concept for unresolved rows.
+        cls.zero_concept = Concept.objects.get(concept_id=0)
+
+        # Target concept for approved mapping.
+        cls.target_concept = cls.condition_concept  # Breast cancer, concept_id=4112853
+
+        # Measurement rows with concept_id=0 (unresolved).
+        cls.m_unresolved = Measurement.objects.create(
+            measurement_id=91001,
+            person=cls.person,
+            measurement_concept=cls.zero_concept,
+            measurement_date=date(2023, 3, 1),
+            measurement_type_concept=cls.type_concept,
+            measurement_source_value='TESTCODE',
+        )
+        # Measurement row already resolved.
+        cls.m_resolved = Measurement.objects.create(
+            measurement_id=91002,
+            person=cls.person,
+            measurement_concept=cls.target_concept,
+            measurement_date=date(2023, 3, 2),
+            measurement_type_concept=cls.type_concept,
+            measurement_source_value='TESTCODE',
+        )
+        # Measurement with no mapping available.
+        cls.m_no_mapping = Measurement.objects.create(
+            measurement_id=91003,
+            person=cls.person,
+            measurement_concept=cls.zero_concept,
+            measurement_date=date(2023, 3, 3),
+            measurement_type_concept=cls.type_concept,
+            measurement_source_value='NOMAP',
+        )
+        # Approved mapping for TESTCODE.
+        cls.mapping = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='',
+            source_code='TESTCODE',
+            omop_table='measurement',
+            status='approved',
+            target_concept=cls.target_concept,
+        )
+
+    def _url(self, person_id=None):
+        pid = person_id or self.person.person_id
+        return f'/api/v1/patient-records/{pid}/resolve-source-codes/'
+
+    def _resolve_and_poll(self, url=None):
+        """POST resolve, assert 202, return the completed run status."""
+        resp = self.write_client.post(url or self._url(), {}, format='json')
+        self.assertEqual(resp.status_code, 202)
+        data = resp.json()
+        self.assertIn('run_id', data)
+        self.assertEqual(data['total'], 1)
+        # Inline dispatcher: run already completed by the time 202 returns.
+        poll = self.write_client.get(f'/api/v1/resolve-runs/{data["run_id"]}/')
+        self.assertEqual(poll.status_code, 200)
+        return poll.json()
+
+    def test_resolve_updates_zero_concept(self):
+        """concept_id=0 row updated to approved mapping's target."""
+        run = self._resolve_and_poll()
+        self.assertGreater(run['resolved'], 0)
+        self.assertEqual(run['state'], 'completed')
+        self.m_unresolved.refresh_from_db()
+        self.assertEqual(self.m_unresolved.measurement_concept_id, self.target_concept.concept_id)
+
+    def test_resolve_skips_already_resolved(self):
+        """Row with correct approved concept unchanged."""
+        run = self._resolve_and_poll()
+        self.assertEqual(run['state'], 'completed')
+
+    def test_resolve_skips_no_mapping(self):
+        """No approved mapping → row left at concept 0."""
+        self._resolve_and_poll()
+        self.m_no_mapping.refresh_from_db()
+        self.assertEqual(self.m_no_mapping.measurement_concept_id, 0)
+
+    def test_resolve_idempotent(self):
+        """Calling twice produces same result."""
+        self._resolve_and_poll()
+        run = self._resolve_and_poll()
+        self.assertEqual(run['resolved'], 0)  # Already resolved on second call
+
+
+# ---------------------------------------------------------------------------
+# Bulk Resolve Source Codes Tests (Issue 3)
+# ---------------------------------------------------------------------------
+
+class BulkResolveSourceCodesTest(_SmartBase):
+    """Tests for POST /api/v1/patient-records/bulk-resolve-source-codes/."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        # bulk-resolve requires _is_admin_actor — make foundation_user staff.
+        cls.foundation_user.is_staff = True
+        cls.foundation_user.save(update_fields=['is_staff'])
+        # Second person for bulk test.
+        cls.person2 = Person.objects.create(
+            person_id=92001,
+            given_name='Bob', family_name='Bulk',
+            year_of_birth=1985,
+            gender_source_value='male',
+            race_source_value='unknown',
+            ethnicity_source_value='unknown',
+        )
+        PatientRecord.objects.create(person=cls.person2, organization=cls.organization)
+
+        cls.zero_concept = Concept.objects.get(concept_id=0)
+        cls.target_concept = cls.condition_concept
+
+        # Unresolved rows for both persons.
+        Measurement.objects.create(
+            measurement_id=92010,
+            person=cls.person,
+            measurement_concept=cls.zero_concept,
+            measurement_date=date(2023, 4, 1),
+            measurement_type_concept=cls.type_concept,
+            measurement_source_value='BULKCODE',
+        )
+        Measurement.objects.create(
+            measurement_id=92011,
+            person=cls.person2,
+            measurement_concept=cls.zero_concept,
+            measurement_date=date(2023, 4, 1),
+            measurement_type_concept=cls.type_concept,
+            measurement_source_value='BULKCODE',
+        )
+        # Approved mapping.
+        SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='',
+            source_code='BULKCODE',
+            omop_table='measurement',
+            status='approved',
+            target_concept=cls.target_concept,
+        )
+
+    def _url(self):
+        return '/api/v1/patient-records/bulk-resolve-source-codes/'
+
+    def test_bulk_resolve_creates_run(self):
+        """Returns 202 with run_id."""
+        resp = self.write_client.post(
+            self._url(),
+            {'person_ids': [self.person.person_id]},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 202)
+        data = resp.json()
+        self.assertIn('run_id', data)
+        self.assertEqual(data['total'], 1)
+
+    def test_bulk_resolve_progress(self):
+        """Poll shows progress."""
+        resp = self.write_client.post(
+            self._url(),
+            {'person_ids': [self.person.person_id]},
+            format='json',
+        )
+        run_id = resp.json()['run_id']
+        poll = self.write_client.get(f'/api/v1/resolve-runs/{run_id}/')
+        self.assertEqual(poll.status_code, 200)
+        data = poll.json()
+        # Inline dispatch: already completed.
+        self.assertEqual(data['state'], 'completed')
+        self.assertEqual(data['done'], 1)
+
+    def test_bulk_resolve_max_limit(self):
+        """>500 ids → 413."""
+        resp = self.write_client.post(
+            self._url(),
+            {'person_ids': list(range(501))},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 413)
+
+    def test_bulk_resolve_resolves_across_patients(self):
+        """Two patients each get resolved."""
+        resp = self.write_client.post(
+            self._url(),
+            {'person_ids': [self.person.person_id, self.person2.person_id]},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 202)
+        run_id = resp.json()['run_id']
+        poll = self.write_client.get(f'/api/v1/resolve-runs/{run_id}/')
+        data = poll.json()
+        self.assertEqual(data['done'], 2)
+        self.assertGreaterEqual(data['resolved'], 2)
+
+    def test_select_all_rejected_without_celery(self):
+        """select_all without CELERY_BROKER_URL → 503."""
+        with self.settings(CELERY_BROKER_URL=''):
+            resp = self.write_client.post(
+                self._url(),
+                {'select_all': True},
+                format='json',
+            )
+        self.assertEqual(resp.status_code, 503)
+
+
+# ---------------------------------------------------------------------------
+# Resolve Creates New Clinical Rows Tests
+# ---------------------------------------------------------------------------
+
+class ResolveCreatesNewRowsTest(_SmartBase):
+    """Tests that Generate OMOP creates clinical rows for PSC entries with no
+    existing OMOP row but an approved mapping.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.foundation_user.is_staff = True
+        cls.foundation_user.save(update_fields=['is_staff'])
+
+        cls.zero_concept = Concept.objects.get(concept_id=0)
+        cls.target_concept = cls.condition_concept  # Breast cancer, 4112853
+
+    def _resolve_and_poll(self, person_ids):
+        """POST bulk resolve, poll, return completed run status dict."""
+        resp = self.write_client.post(
+            '/api/v1/patient-records/bulk-resolve-source-codes/',
+            {'person_ids': person_ids},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 202)
+        run_id = resp.json()['run_id']
+        poll = self.write_client.get(f'/api/v1/resolve-runs/{run_id}/')
+        self.assertEqual(poll.status_code, 200)
+        return poll.json()
+
+    def test_creates_measurement_for_psc_with_approved_mapping(self):
+        """PSC + approved SCCM + no clinical row → Measurement created."""
+        from omop_core.models import PatientSourceCode
+        PatientSourceCode.objects.create(
+            person=self.person,
+            source_value='CREATE_ME',
+            omop_table='measurement',
+        )
+        SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='',
+            source_code='CREATE_ME',
+            omop_table='measurement',
+            status='approved',
+            target_concept=self.target_concept,
+        )
+
+        run = self._resolve_and_poll([self.person.person_id])
+        self.assertEqual(run['created'], 1)
+
+        row = Measurement.objects.filter(
+            person=self.person,
+            measurement_source_value='CREATE_ME',
+        ).first()
+        self.assertIsNotNone(row)
+        self.assertEqual(row.measurement_concept_id, self.target_concept.concept_id)
+        self.assertEqual(row.measurement_type_concept_id, 32817)  # EHR type
+
+    def test_no_creation_when_clinical_row_exists(self):
+        """Existing clinical row → no new row created (repoint only)."""
+        from omop_core.models import PatientSourceCode
+        PatientSourceCode.objects.create(
+            person=self.person,
+            source_value='EXISTING_CODE',
+            omop_table='measurement',
+        )
+        Measurement.objects.create(
+            measurement_id=93010,
+            person=self.person,
+            measurement_concept=self.zero_concept,
+            measurement_date=date(2023, 5, 1),
+            measurement_type_concept=self.type_concept,
+            measurement_source_value='EXISTING_CODE',
+        )
+        SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='',
+            source_code='EXISTING_CODE',
+            omop_table='measurement',
+            status='approved',
+            target_concept=self.target_concept,
+        )
+
+        run = self._resolve_and_poll([self.person.person_id])
+        self.assertEqual(run['created'], 0)
+        # Existing row should be repointed, not duplicated.
+        count = Measurement.objects.filter(
+            person=self.person,
+            measurement_source_value='EXISTING_CODE',
+        ).count()
+        self.assertEqual(count, 1)
+
+    def test_no_creation_without_approved_mapping(self):
+        """PSC with no approved mapping → no clinical row created."""
+        from omop_core.models import PatientSourceCode
+        PatientSourceCode.objects.create(
+            person=self.person,
+            source_value='NO_MAP_CODE',
+            omop_table='measurement',
+        )
+
+        run = self._resolve_and_poll([self.person.person_id])
+        self.assertEqual(run['created'], 0)
+        self.assertFalse(
+            Measurement.objects.filter(
+                person=self.person,
+                measurement_source_value='NO_MAP_CODE',
+            ).exists()
+        )
+
+    def test_idempotent_on_second_run(self):
+        """Running twice creates only one row."""
+        from omop_core.models import PatientSourceCode
+        PatientSourceCode.objects.create(
+            person=self.person,
+            source_value='IDEM_CODE',
+            omop_table='measurement',
+        )
+        SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='',
+            source_code='IDEM_CODE',
+            omop_table='measurement',
+            status='approved',
+            target_concept=self.target_concept,
+        )
+
+        self._resolve_and_poll([self.person.person_id])
+        run2 = self._resolve_and_poll([self.person.person_id])
+        self.assertEqual(run2['created'], 0)
+        count = Measurement.objects.filter(
+            person=self.person,
+            measurement_source_value='IDEM_CODE',
+        ).count()
+        self.assertEqual(count, 1)
+
+    def test_creates_across_multiple_tables(self):
+        """PSC entries for different tables each create a row."""
+        from omop_core.models import PatientSourceCode
+        PatientSourceCode.objects.create(
+            person=self.person,
+            source_value='MULTI_MEAS',
+            omop_table='measurement',
+        )
+        PatientSourceCode.objects.create(
+            person=self.person,
+            source_value='MULTI_COND',
+            omop_table='condition',
+        )
+        SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='',
+            source_code='MULTI_MEAS',
+            omop_table='measurement',
+            status='approved',
+            target_concept=self.target_concept,
+        )
+        SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='',
+            source_code='MULTI_COND',
+            omop_table='condition',
+            status='approved',
+            target_concept=self.target_concept,
+        )
+
+        run = self._resolve_and_poll([self.person.person_id])
+        self.assertEqual(run['created'], 2)
+        self.assertTrue(
+            Measurement.objects.filter(
+                person=self.person,
+                measurement_source_value='MULTI_MEAS',
+            ).exists()
+        )
+        self.assertTrue(
+            ConditionOccurrence.objects.filter(
+                person=self.person,
+                condition_source_value='MULTI_COND',
+            ).exists()
+        )
+
+    def test_created_count_in_run_status(self):
+        """The run status response includes the created count."""
+        from omop_core.models import PatientSourceCode
+        PatientSourceCode.objects.create(
+            person=self.person,
+            source_value='COUNT_TEST',
+            omop_table='measurement',
+        )
+        SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='',
+            source_code='COUNT_TEST',
+            omop_table='measurement',
+            status='approved',
+            target_concept=self.target_concept,
+        )
+
+        run = self._resolve_and_poll([self.person.person_id])
+        self.assertIn('created', run)
+        self.assertEqual(run['created'], 1)
+        # Also check code_details has 'created' outcome.
+        created_details = [d for d in run['code_details'] if d['outcome'] == 'created']
+        self.assertEqual(len(created_details), 1)
+        self.assertEqual(created_details[0]['source_value'], 'COUNT_TEST')
+
+    def test_code_details_capped_at_500(self):
+        """code_details list is truncated to 500 entries."""
+        from omop_core.models import PatientSourceCode
+        from omop_core.services.resolve_jobs import run_bulk_resolve
+        from omop_core.models import SourceCodeResolveRun
+
+        # Create 510 PSC entries with approved mappings (no clinical rows).
+        for i in range(510):
+            sv = f'CAP_{i:04d}'
+            PatientSourceCode.objects.create(
+                person=self.person,
+                source_value=sv,
+                omop_table='measurement',
+            )
+            SourceCodeConceptMapping.objects.create(
+                source_vocabulary_id='',
+                source_code=sv,
+                omop_table='measurement',
+                status='approved',
+                target_concept=self.target_concept,
+            )
+
+        run_obj = SourceCodeResolveRun.objects.create(
+            total=1,
+        )
+        run_bulk_resolve(run_obj.id, [self.person.person_id])
+        run_obj.refresh_from_db()
+        self.assertLessEqual(len(run_obj.code_details), 500)
+
+
+# ---------------------------------------------------------------------------
+# Source Code Context Fields Tests
+# ---------------------------------------------------------------------------
+
+class SourceCodeContextFieldsTest(_SmartBase):
+    """Tests for source_unit, example_quantity, source_metadata on PatientSourceCode,
+    and the UCUM unit-search endpoint.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.foundation_user.is_staff = True
+        cls.foundation_user.save(update_fields=['is_staff'])
+
+    def _url(self, person_id=None):
+        pid = person_id or self.person.person_id
+        return f'/api/v1/patient-records/{pid}/source-codes/'
+
+    def test_post_source_codes_with_context_fields(self):
+        """POST source-codes accepts and stores source_unit, example_quantity, source_metadata."""
+        resp = self.write_client.post(
+            self._url(),
+            {
+                'source_codes': [
+                    {
+                        'source_value': 'GLUCOSE',
+                        'omop_table': 'measurement',
+                        'occurrence_count': 5,
+                        'source_unit': 'mg/dL',
+                        'example_quantity': '95-120',
+                        'source_metadata': {'reference_range': '70-100', 'category': 'chemistry'},
+                    },
+                ],
+            },
+            format='json',
+        )
+        self.assertIn(resp.status_code, [200, 201])
+        from omop_core.models import PatientSourceCode
+        psc = PatientSourceCode.objects.get(
+            person=self.person, source_value='GLUCOSE', omop_table='measurement',
+        )
+        self.assertEqual(psc.source_unit, 'mg/dL')
+        self.assertEqual(psc.example_quantity, '95-120')
+        self.assertEqual(psc.source_metadata['reference_range'], '70-100')
+
+    def test_get_source_codes_returns_context_fields(self):
+        """GET source-codes includes source_unit, example_quantity, source_metadata."""
+        from omop_core.models import PatientSourceCode
+        PatientSourceCode.objects.create(
+            person=self.person,
+            source_value='HGB_CTX',
+            omop_table='measurement',
+            occurrence_count=3,
+            source_unit='g/dL',
+            example_quantity='12.5',
+            source_metadata={'category': 'hematology'},
+        )
+        resp = self.write_client.get(self._url())
+        self.assertEqual(resp.status_code, 200)
+        codes = resp.json()['source_codes']
+        hgb = next(sc for sc in codes if sc['source_value'] == 'HGB_CTX')
+        self.assertEqual(hgb['source_unit'], 'g/dL')
+        self.assertEqual(hgb['example_quantity'], '12.5')
+        self.assertEqual(hgb['source_metadata']['category'], 'hematology')
+
+    def test_post_upsert_updates_context_fields(self):
+        """Re-posting same source code updates context fields."""
+        from omop_core.models import PatientSourceCode
+        PatientSourceCode.objects.create(
+            person=self.person,
+            source_value='WBC_UP',
+            omop_table='measurement',
+            occurrence_count=1,
+            source_unit='',
+            example_quantity='',
+        )
+        resp = self.write_client.post(
+            self._url(),
+            {
+                'source_codes': [
+                    {
+                        'source_value': 'WBC_UP',
+                        'omop_table': 'measurement',
+                        'occurrence_count': 10,
+                        'source_unit': 'K/uL',
+                        'example_quantity': '5.0-10.0',
+                        'source_metadata': {'flag': 'normal'},
+                    },
+                ],
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        psc = PatientSourceCode.objects.get(
+            person=self.person, source_value='WBC_UP', omop_table='measurement',
+        )
+        self.assertEqual(psc.source_unit, 'K/uL')
+        self.assertEqual(psc.example_quantity, '5.0-10.0')
+        self.assertEqual(psc.source_metadata['flag'], 'normal')
+
+    def test_curator_correction_survives_etl_upsert_and_can_be_cleared(self):
+        from django.test import Client
+        from omop_core.models import PatientSourceCode
+
+        row = PatientSourceCode.objects.create(
+            person=self.person, source_value='WBC_CORRECT', omop_table='measurement',
+            source_unit='wrong', example_quantity='10-20',
+            source_metadata={'fhir_valueQuantity': {'unit': 'cells/uL'}},
+        )
+        curator = Client()
+        curator.force_login(self.foundation_user)
+        response = curator.patch(
+            self._url(), data=json.dumps({
+                'source_code_id': row.pk,
+                'source_unit_override': 'cells/uL',
+                'example_quantity_override': '12',
+            }), content_type='application/json',
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(response.json()['source_unit'], 'cells/uL')
+        row.refresh_from_db()
+        self.assertEqual(row.source_unit, 'wrong')
+        self.assertEqual(row.source_metadata['fhir_valueQuantity']['unit'], 'cells/uL')
+        self.assertEqual(row.source_corrected_by, self.foundation_user)
+
+        self.write_client.post(self._url(), {'source_codes': [{
+            'source_value': 'WBC_CORRECT', 'omop_table': 'measurement',
+            'source_unit': 'new extraction', 'example_quantity': '15',
+        }]}, format='json')
+        code = next(c for c in curator.get(self._url()).json()['source_codes']
+                    if c['source_value'] == 'WBC_CORRECT')
+        self.assertEqual(code['source_unit'], 'cells/uL')
+        self.assertEqual(code['example_quantity'], '12')
+        self.assertEqual(code['extracted_source_unit'], 'new extraction')
+        self.assertEqual(code['source_code_id'], row.pk)
+
+        response = curator.patch(self._url(), data=json.dumps({
+            'source_code_id': row.pk, 'source_unit_override': None,
+            'example_quantity_override': None,
+        }), content_type='application/json')
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()['source_unit'], 'new extraction')
+
+    def test_etl_token_cannot_correct_source_context(self):
+        from omop_core.models import PatientSourceCode
+        row = PatientSourceCode.objects.create(person=self.person, source_value='WBC_DENY')
+        response = self.write_client.patch(self._url(), {
+            'source_code_id': row.pk, 'source_unit_override': 'cells/uL',
+        }, format='json')
+        self.assertEqual(response.status_code, 403)
+
+    def test_correction_rejects_invalid_or_other_patient_row(self):
+        from django.test import Client
+        from omop_core.models import PatientSourceCode
+        other_person = Person.objects.create(
+            person_id=70002, given_name='Bob', family_name='Foundation',
+            year_of_birth=1980, gender_source_value='male',
+            race_source_value='unknown', ethnicity_source_value='unknown',
+        )
+        PatientRecord.objects.create(person=other_person, organization=self.organization)
+        row = PatientSourceCode.objects.create(person=other_person, source_value='OTHER')
+        curator = Client()
+        curator.force_login(self.foundation_user)
+        other = curator.patch(self._url(), data=json.dumps({
+            'source_code_id': row.pk, 'source_unit_override': 'g/dL',
+        }), content_type='application/json')
+        self.assertEqual(other.status_code, 404)
+        invalid = curator.patch(self._url(other_person.person_id), data=json.dumps({
+            'source_code_id': row.pk, 'source_unit_override': 'x' * 51,
+        }), content_type='application/json')
+        self.assertEqual(invalid.status_code, 400)
+        row.refresh_from_db()
+        self.assertIsNone(row.source_unit_override)
+
+    def test_post_invalid_metadata_becomes_empty_dict(self):
+        """source_metadata that is not a dict becomes {}."""
+        resp = self.write_client.post(
+            self._url(),
+            {
+                'source_codes': [
+                    {
+                        'source_value': 'BAD_META',
+                        'omop_table': 'measurement',
+                        'source_metadata': 'not a dict',
+                    },
+                ],
+            },
+            format='json',
+        )
+        self.assertIn(resp.status_code, [200, 201])
+        from omop_core.models import PatientSourceCode
+        psc = PatientSourceCode.objects.get(
+            person=self.person, source_value='BAD_META',
+        )
+        self.assertEqual(psc.source_metadata, {})
+
+    def test_unit_search_exact_match(self):
+        """Unit search returns exact match when UCUM concept_code matches."""
+        from omop_core.models import Concept, ConceptClass, Domain, Vocabulary
+        Vocabulary.objects.get_or_create(
+            vocabulary_id='UCUM',
+            defaults={
+                'vocabulary_name': 'UCUM',
+                'vocabulary_reference': 'http://unitsofmeasure.org',
+                'vocabulary_version': '1.0',
+                'vocabulary_concept_id': 0,
+            },
+        )
+        Domain.objects.get_or_create(
+            domain_id='Unit',
+            defaults={'domain_name': 'Unit', 'domain_concept_id': 0},
+        )
+        ConceptClass.objects.get_or_create(
+            concept_class_id='Unit',
+            defaults={'concept_class_name': 'Unit', 'concept_class_concept_id': 0},
+        )
+        Concept.objects.get_or_create(
+            concept_id=8840,
+            defaults={
+                'concept_name': 'milligram per deciliter',
+                'concept_code': 'mg/dL',
+                'vocabulary_id': 'UCUM',
+                'domain_id': 'Unit',
+                'concept_class_id': 'Unit',
+                'standard_concept': 'S',
+                'valid_start_date': date(2020, 1, 1),
+                'valid_end_date': date(2099, 12, 31),
+            },
+        )
+        # Use session auth (staff user) since write_client is a service token
+        from django.test import Client
+        client = Client()
+        client.force_login(self.foundation_user)
+        resp = client.get('/api/v1/code-mappings/unit-search/', {'q': 'mg/dL'})
+        self.assertEqual(resp.status_code, 200)
+        results = resp.json()['results']
+        self.assertTrue(len(results) >= 1)
+        self.assertEqual(results[0]['concept_code'], 'mg/dL')
+        self.assertEqual(results[0]['match'], 'exact')
+
+    def test_unit_search_empty_query(self):
+        """Unit search with empty query returns empty results."""
+        from django.test import Client
+        client = Client()
+        client.force_login(self.foundation_user)
+        resp = client.get('/api/v1/code-mappings/unit-search/', {'q': ''})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()['results'], [])
+
+
+# ---------------------------------------------------------------------------
+# Source Codes Replace Tests (Issue #1774)
+# ---------------------------------------------------------------------------
+
+class SourceCodeReplaceTest(_SmartBase):
+    """Tests for POST /api/v1/patient-records/{pid}/source-codes/ with replace=true."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        cls.foundation_user.is_staff = True
+        cls.foundation_user.save(update_fields=['is_staff'])
+
+    def _url(self, person_id=None):
+        pid = person_id or self.person.person_id
+        return f'/api/v1/patient-records/{pid}/source-codes/'
+
+    def _seed(self, codes):
+        """Seed PatientSourceCode rows for self.person."""
+        from omop_core.models import PatientSourceCode
+        for c in codes:
+            PatientSourceCode.objects.create(person=self.person, **c)
+
+    def test_replace_deletes_absent_rows(self):
+        """replace=true removes rows not in the payload."""
+        from omop_core.models import PatientSourceCode
+        self._seed([
+            {'source_value': 'OLD_CODE', 'omop_table': 'measurement', 'occurrence_count': 1},
+            {'source_value': 'KEEP_CODE', 'omop_table': 'measurement', 'occurrence_count': 2},
+        ])
+        resp = self.write_client.post(
+            self._url(),
+            {
+                'replace': True,
+                'source_codes': [
+                    {'source_value': 'KEEP_CODE', 'omop_table': 'measurement', 'occurrence_count': 5},
+                    {'source_value': 'NEW_CODE', 'omop_table': 'measurement', 'occurrence_count': 1},
+                ],
+            },
+            format='json',
+        )
+        self.assertIn(resp.status_code, [200, 201])
+        data = resp.json()
+        self.assertEqual(data['deleted'], 1)
+        remaining = set(
+            PatientSourceCode.objects.filter(person=self.person)
+            .values_list('source_value', flat=True)
+        )
+        self.assertEqual(remaining, {'KEEP_CODE', 'NEW_CODE'})
+
+    def test_replace_false_keeps_old_rows(self):
+        """Without replace (default), old rows survive."""
+        from omop_core.models import PatientSourceCode
+        self._seed([
+            {'source_value': 'EXISTING', 'omop_table': 'measurement', 'occurrence_count': 1},
+        ])
+        resp = self.write_client.post(
+            self._url(),
+            {
+                'source_codes': [
+                    {'source_value': 'BRAND_NEW', 'omop_table': 'measurement', 'occurrence_count': 1},
+                ],
+            },
+            format='json',
+        )
+        self.assertIn(resp.status_code, [200, 201])
+        self.assertNotIn('deleted', resp.json())
+        remaining = set(
+            PatientSourceCode.objects.filter(person=self.person)
+            .values_list('source_value', flat=True)
+        )
+        self.assertIn('EXISTING', remaining)
+        self.assertIn('BRAND_NEW', remaining)
+
+    def test_replace_updates_existing_rows(self):
+        """replace=true still upserts rows that match existing keys."""
+        from omop_core.models import PatientSourceCode
+        self._seed([
+            {'source_value': 'GLU', 'omop_table': 'measurement', 'occurrence_count': 3},
+        ])
+        resp = self.write_client.post(
+            self._url(),
+            {
+                'replace': True,
+                'source_codes': [
+                    {'source_value': 'GLU', 'omop_table': 'measurement', 'occurrence_count': 10},
+                ],
+            },
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(data['updated'], 1)
+        self.assertEqual(data['created'], 0)
+        self.assertEqual(data['deleted'], 0)
+        psc = PatientSourceCode.objects.get(
+            person=self.person, source_value='GLU', omop_table='measurement',
+        )
+        self.assertEqual(psc.occurrence_count, 10)
+
+    def test_replace_different_vocabulary_deletes_old(self):
+        """Changing source_vocabulary_id with replace=true drops the old row."""
+        from omop_core.models import PatientSourceCode
+        self._seed([
+            {'source_value': 'ABC', 'source_vocabulary_id': 'OLD_VOCAB',
+             'omop_table': 'measurement', 'occurrence_count': 1},
+        ])
+        resp = self.write_client.post(
+            self._url(),
+            {
+                'replace': True,
+                'source_codes': [
+                    {'source_value': 'ABC', 'source_vocabulary_id': 'NEW_VOCAB',
+                     'omop_table': 'measurement', 'occurrence_count': 1},
+                ],
+            },
+            format='json',
+        )
+        self.assertIn(resp.status_code, [200, 201])
+        data = resp.json()
+        self.assertEqual(data['deleted'], 1)
+        remaining = list(
+            PatientSourceCode.objects.filter(person=self.person)
+            .values_list('source_vocabulary_id', flat=True)
+        )
+        self.assertEqual(remaining, ['NEW_VOCAB'])
+
+    def test_replace_response_includes_deleted_count(self):
+        """replace=true response has a deleted key; replace=false does not."""
+        resp = self.write_client.post(
+            self._url(),
+            {
+                'replace': True,
+                'source_codes': [
+                    {'source_value': 'X', 'omop_table': 'measurement', 'occurrence_count': 1},
+                ],
+            },
+            format='json',
+        )
+        self.assertIn(resp.status_code, [200, 201])
+        self.assertIn('deleted', resp.json())
+
+    def test_replace_empty_source_codes_returns_400(self):
+        """replace=true with empty source_codes must not delete all rows."""
+        from omop_core.models import PatientSourceCode
+        self._seed([
+            {'source_value': 'MUST_SURVIVE', 'omop_table': 'measurement', 'occurrence_count': 1},
+        ])
+        resp = self.write_client.post(
+            self._url(),
+            {'replace': True, 'source_codes': []},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertTrue(PatientSourceCode.objects.filter(person=self.person).exists())
+
+    def test_replace_empty_existing_set(self):
+        """replace=true on a person with no existing source codes reports deleted=0."""
+        from omop_core.models import PatientSourceCode
+        PatientSourceCode.objects.filter(person=self.person).delete()
+        resp = self.write_client.post(
+            self._url(),
+            {
+                'replace': True,
+                'source_codes': [
+                    {'source_value': 'FRESH', 'omop_table': 'measurement', 'occurrence_count': 1},
+                ],
+            },
+            format='json',
+        )
+        self.assertIn(resp.status_code, [200, 201])
+        self.assertEqual(resp.json()['deleted'], 0)
+
+
+# ---------------------------------------------------------------------------
+# export-csv Tests
+# ---------------------------------------------------------------------------
+
+class PatientExportCsvTest(TestCase):
+    """GET /api/v1/patient-records/export-csv/ — full PatientRecord rows as CSV."""
+
+    URL = '/api/v1/patient-records/export-csv/'
+
+    def setUp(self):
+        from oauth2_provider.models import Application, AccessToken
+        from omop_core.models import Organization, ApplicationOrganization
+        from django.utils import timezone as tz
+        import datetime
+
+        self.org_a = Organization.objects.create(name='CSV Org A', slug='csv-org-a')
+        self.org_b = Organization.objects.create(name='CSV Org B', slug='csv-org-b')
+        self.p1 = Person.objects.create(person_id=9101, given_name='Ada', family_name='Lovelace')
+        self.p2 = Person.objects.create(person_id=9102, given_name='Bea', family_name='Bee')
+        self.p3 = Person.objects.create(person_id=9103, given_name='Cy', family_name='Other')
+        PatientRecord.objects.create(person=self.p1, organization=self.org_a, disease='Breast Cancer')
+        PatientRecord.objects.create(person=self.p2, organization=self.org_a, disease='=HYPERLINK("x")')
+        PatientRecord.objects.create(person=self.p3, organization=self.org_b, disease='Breast Cancer')
+
+        self.staff = Identity.objects.create_user(email='csv_staff@t.com', password='x', is_staff=True)
+        user_a = Identity.objects.create_user(email='csv_svc_a@t.com', password='x')
+        app_a = Application.objects.create(
+            name='CSV Org A App', client_id='csv-org-a-client',
+            client_type=Application.CLIENT_CONFIDENTIAL,
+            authorization_grant_type=Application.GRANT_CLIENT_CREDENTIALS, user=user_a,
+        )
+        ApplicationOrganization.objects.create(application=app_a, organization=self.org_a)
+        self.read_token_a = AccessToken.objects.create(
+            user=user_a, application=app_a, token='csv-org-a-read-token',
+            expires=tz.now() + datetime.timedelta(hours=1), scope='patient/*.read',
+        )
+
+    def _rows(self, resp):
+        import csv as _csv
+        import io
+        return list(_csv.DictReader(io.StringIO(resp.content.decode('utf-8'))))
+
+    def test_selected_ids_export_full_records(self):
+        client = APIClient()
+        client.force_authenticate(user=self.staff)
+        resp = client.get(self.URL, {'person_ids': '9101,9103'})
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp['Content-Type'].startswith('text/csv'))
+        self.assertIn('attachment; filename="patients_', resp['Content-Disposition'])
+        rows = self._rows(resp)
+        self.assertEqual([r['person_id'] for r in rows], ['9101', '9103'])
+        # Full record: serializer columns, not just the list summary.
+        self.assertIn('disease', rows[0])
+        self.assertIn('lines_of_therapy', rows[0])
+        self.assertEqual(rows[0]['disease'], 'Breast Cancer')
+        # Nested values are written as JSON.
+        self.assertIsInstance(json.loads(rows[0]['lines_of_therapy']), list)
+
+    def test_formula_text_is_neutralised(self):
+        client = APIClient()
+        client.force_authenticate(user=self.staff)
+        rows = self._rows(client.get(self.URL, {'person_ids': '9102'}))
+        self.assertEqual(rows[0]['disease'], '\'=HYPERLINK("x")')
+
+    def test_org_token_cannot_export_other_org(self):
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION=f'Bearer {self.read_token_a.token}')
+        rows = self._rows(client.get(self.URL, {'person_ids': '9101,9102,9103'}))
+        self.assertEqual(sorted(r['person_id'] for r in rows), ['9101', '9102'])
+
+    def test_user_without_access_gets_header_only(self):
+        outsider = Identity.objects.create_user(email='csv_outsider@t.com', password='x')
+        client = APIClient()
+        client.force_authenticate(user=outsider)
+        resp = client.get(self.URL, {'person_ids': '9101'})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self._rows(resp), [])
+
+    def test_filters_select_rows_without_ids(self):
+        client = APIClient()
+        client.force_authenticate(user=self.staff)
+        rows = self._rows(client.get(self.URL, {'disease': 'Breast Cancer', 'search': ''}))
+        self.assertEqual(sorted(r['person_id'] for r in rows if r['person_id'] in {'9101', '9102', '9103'}),
+                         ['9101', '9103'])
+
+    def test_invalid_ids_rejected(self):
+        client = APIClient()
+        client.force_authenticate(user=self.staff)
+        self.assertEqual(client.get(self.URL, {'person_ids': '9101,abc'}).status_code, 400)
+        self.assertEqual(client.get(self.URL, {'person_ids': ','}).status_code, 400)
+
+    def test_too_many_ids_rejected(self):
+        client = APIClient()
+        client.force_authenticate(user=self.staff)
+        ids = ','.join(str(i) for i in range(1, 503))
+        self.assertEqual(client.get(self.URL, {'person_ids': ids}).status_code, 413)
+
+    def test_unauthenticated_rejected(self):
+        resp = APIClient().get(self.URL, {'person_ids': '9101'})
+        self.assertIn(resp.status_code, [401, 403])
+
+    def test_post_not_allowed(self):
+        client = APIClient()
+        client.force_authenticate(user=self.staff)
+        self.assertEqual(client.post(self.URL, {'person_ids': '9101'}).status_code, 405)
+
+
+class CsvCellTest(TestCase):
+    def test_cell_conversion(self):
+        from patient_portal.api.views import _csv_cell
+        self.assertEqual(_csv_cell(None), '')
+        self.assertEqual(_csv_cell(True), 'true')
+        self.assertEqual(_csv_cell(['a', 1]), '["a", 1]')
+        self.assertEqual(_csv_cell('=SUM(A1)'), "'=SUM(A1)")
+        self.assertEqual(_csv_cell('@cmd'), "'@cmd")
+        self.assertEqual(_csv_cell('-1.50'), '-1.50')
+        self.assertEqual(_csv_cell(3.2), 3.2)
+
+
+# ---------------------------------------------------------------------------
+# Source organization on clinical writes (#1690)
+# ---------------------------------------------------------------------------
+
+_ORG_ROUTES = [
+    ('conditions', 'condition_occurrence_id', ConditionOccurrence, {
+        'condition_start_date': '2024-01-01',
+        'condition_source_value': '10627',
+    }, 'condition'),
+    ('drug-exposures', 'drug_exposure_id', DrugExposure, {
+        'drug_exposure_start_date': '2024-01-01',
+        'drug_source_value': '10627',
+    }, 'drug'),
+    ('measurements', 'measurement_id', Measurement, {
+        'measurement_date': '2024-01-01',
+        'measurement_source_value': '10627',
+        'value_as_number': 4.1,
+    }, 'measurement'),
+    ('observations', 'observation_id', Observation, {
+        'observation_date': '2024-01-01',
+        'observation_source_value': '10627',
+    }, 'observation'),
+    ('procedures', 'procedure_occurrence_id', ProcedureOccurrence, {
+        'procedure_date': '2024-01-01',
+        'procedure_source_value': '10627',
+    }, 'procedure'),
+]
+
+
+class ProvenanceOrganizationIdParsingTest(TestCase):
+
+    def test_accepts_positive_integers_and_their_strings(self):
+        from patient_portal.api.provenance_org import parse_organization_id
+
+        for raw, expected in ((41, 41), ('41', 41), (' 41 ', 41),
+                              (2 ** 63 - 1, 2 ** 63 - 1)):
+            with self.subTest(raw=raw):
+                self.assertEqual(parse_organization_id(raw), expected)
+
+    def test_rejects_everything_else(self):
+        from rest_framework.exceptions import ValidationError as DrfValidationError
+        from patient_portal.api.provenance_org import parse_organization_id
+
+        for raw in ('', ' ', 'abc', '0', '-3', '1.5', '041', '9223372036854775808',
+                    0, -3, 2 ** 63, True, False, 1.0, 1.9, None, [1], {'id': 1}):
+            with self.subTest(raw=raw):
+                with self.assertRaises(DrfValidationError):
+                    parse_organization_id(raw)
+
+
+@override_settings(SERVICE_AUTH_SCOPES='patient/*.read patient/*.write')
+class BulkOmopProvenanceOrganizationTest(TestCase):
+    """X-Provenance-Organization-ID (#1690)."""
+
+    @classmethod
+    def setUpTestData(cls):
+        from oauth2_provider.models import AccessToken, Application
+        from omop_core.models import ApplicationOrganization
+
+        _make_vocab_fixtures()
+        cls.concept = Concept.objects.get(concept_id=3000963)
+        cls.other_concept = Concept.objects.get(concept_id=4112853)
+        cls.type_concept = Concept.objects.get(concept_id=32817)
+        cls.org_a = Organization.objects.create(name='Prov Hospital A', slug='prov-a')
+        cls.org_b = Organization.objects.create(name='Prov Hospital B', slug='prov-b')
+        cls.tenant = Organization.objects.create(name='Prov Tenant', slug='prov-tenant')
+        cls.person = Person.objects.create(person_id=33001)
+        cls.person_b = Person.objects.create(person_id=33002)
+        PatientRecord.objects.create(person=cls.person)
+        PatientRecord.objects.create(person=cls.person_b)
+
+        cls.service_identity = Identity.objects.get_or_create(
+            issuer='urn:service', sub='prov-org-test')[0]
+        cls.service_identity.set_unusable_password()
+        cls.service_identity.save()
+        cls.staff = Identity.objects.create_user(
+            email='prov-org-staff@test.com', password='x', is_staff=True)
+        cls.patient_user = Identity.objects.create_user(
+            email='prov-org-patient@test.com', password='x')
+
+        owner = Identity.objects.create_user(email='prov-org-app@test.com', password='x')
+        cls.bound_app = Application.objects.create(
+            name='Prov bound app', client_id='prov-bound-client',
+            client_type=Application.CLIENT_CONFIDENTIAL,
+            authorization_grant_type=Application.GRANT_CLIENT_CREDENTIALS,
+            user=owner,
+        )
+        ApplicationOrganization.objects.create(
+            application=cls.bound_app, organization=cls.org_a)
+        expires = timezone.now() + timedelta(hours=1)
+        cls.bound_token = AccessToken.objects.create(
+            user=owner, application=cls.bound_app, token='prov-bound-write',
+            expires=expires, scope='patient/*.write')
+        cls.bound_read_token = AccessToken.objects.create(
+            user=owner, application=cls.bound_app, token='prov-bound-read',
+            expires=expires, scope='patient/*.read')
+
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.service_identity, token='service-token')
+
+
+    def _bound_client(self, token=None):
+        client = APIClient()
+        client.credentials(
+            HTTP_AUTHORIZATION=f'Bearer {(token or self.bound_token).token}')
+        return client
+
+    @staticmethod
+    def _headers(org=None, source='EHR_SYNC'):
+        headers = {}
+        if source is not None:
+            headers['HTTP_X_PROVENANCE_SOURCE'] = source
+        if org is not None:
+            headers['HTTP_X_PROVENANCE_ORGANIZATION_ID'] = (
+                str(org.pk) if isinstance(org, Organization) else org)
+        return headers
+
+    def _row(self, person=None, concept=None, value=4.1, sv='10627', day='2024-01-01'):
+        return {
+            'person': (person or self.person).person_id,
+            'measurement_concept': (concept or self.concept).concept_id,
+            'measurement_date': day,
+            'measurement_type_concept': self.type_concept.concept_id,
+            'measurement_source_value': sv,
+            'value_as_number': value,
+        }
+
+    def _post(self, rows, org=None, client=None, query='', **extra):
+        return (client or self.client).post(
+            f'/api/v1/measurements/{query}', rows, format='json',
+            **self._headers(org), **extra)
+
+    def _seed(self, org=None, person=None, concept=None, pk=None, value=4.1):
+        pk = pk or (Measurement.objects.order_by('-measurement_id')
+                    .values_list('measurement_id', flat=True).first() or 9_300_000) + 1
+        row = Measurement.objects.create(
+            measurement_id=pk, person=person or self.person,
+            measurement_concept=concept or self.concept,
+            measurement_date=date(2024, 1, 1),
+            measurement_type_concept=self.type_concept,
+            measurement_source_value='10627', value_as_number=Decimal(str(value)),
+        )
+        if org is not None:
+            self._attribute(row, org)
+        return row
+
+    @staticmethod
+    def _attribute(row, org, source='EHR_SYNC', actor='seed'):
+        ProvenanceRecord.objects.create(
+            content_type=ContentType.objects.get_for_model(type(row)),
+            object_id=row.pk, source=source, source_user_id=actor,
+            organization=org)
+
+    @staticmethod
+    def _orgs(model, pk):
+        return set(ProvenanceRecord.objects.filter(
+            content_type=ContentType.objects.get_for_model(model), object_id=pk,
+        ).values_list('organization_id', flat=True))
+
+    def _counts(self):
+        return (Measurement.objects.count(), ProvenanceRecord.objects.count())
+
+
+    def test_header_attributes_inserted_rows_on_all_five_endpoints(self):
+        for route, pk_field, model, fields, prefix in _ORG_ROUTES:
+            with self.subTest(route=route):
+                row = dict(fields, person=self.person.person_id, **{
+                    f'{prefix}_concept': self.concept.concept_id,
+                    f'{prefix}_type_concept': self.type_concept.concept_id,
+                })
+                resp = self.client.post(
+                    f'/api/v1/{route}/', [row], format='json',
+                    **self._headers(self.org_a))
+                self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+                self.assertEqual(resp.data['unattributed_matches'], 0)
+                self.assertEqual(self._orgs(model, resp.data['ids'][0]), {self.org_a.pk})
+
+    def test_attribution_does_not_change_the_patient_tenant(self):
+        PatientRecord.objects.filter(person=self.person_b).update(organization=self.tenant)
+        self._post([self._row()], org=self.org_a)
+        self._post([self._row(person=self.person_b)], org=self.org_a)
+        self.assertIsNone(PatientRecord.objects.get(person=self.person).organization_id)
+        self.assertEqual(
+            PatientRecord.objects.get(person=self.person_b).organization_id, self.tenant.pk)
+
+    def test_absent_header_keeps_credential_attribution(self):
+        unbound = self._post([self._row(value=1)])
+        bound = self._post([self._row(value=2)], client=self._bound_client())
+        self.assertEqual(unbound.status_code, status.HTTP_201_CREATED, unbound.data)
+        self.assertEqual(bound.status_code, status.HTTP_201_CREATED, bound.data)
+        self.assertEqual(self._orgs(Measurement, unbound.data['ids'][0]), {None})
+        self.assertEqual(self._orgs(Measurement, bound.data['ids'][0]), {self.org_a.pk})
+        self.assertEqual(unbound.data['unattributed_matches'], 0)
+
+    def test_staff_may_name_an_organization(self):
+        self.client.force_authenticate(user=self.staff)
+        resp = self._post([self._row()], org=self.org_b)
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(self._orgs(Measurement, resp.data['ids'][0]), {self.org_b.pk})
+
+
+    def test_malformed_ids_are_rejected_before_writing(self):
+        before = self._counts()
+        for raw in ('', '   ', 'abc', '0', '-3', '1.5', '9223372036854775808'):
+            with self.subTest(raw=raw):
+                resp = self._post([self._row()], org=raw)
+                self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+                self.assertIn('organization_id', resp.data)
+        self.assertEqual(self._counts(), before)
+
+    def test_unknown_id_is_rejected(self):
+        resp = self._post([self._row()], org='987654321')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(str(resp.data['organization_id']), 'Organization not found.')
+        self.assertEqual(Measurement.objects.count(), 0)
+
+    def test_bound_credential_must_name_its_own_organization(self):
+        mismatch = self._post([self._row()], org=self.org_b, client=self._bound_client())
+        self.assertEqual(mismatch.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(Measurement.objects.count(), 0)
+        same = self._post([self._row()], org=self.org_a, client=self._bound_client())
+        self.assertEqual(same.status_code, status.HTTP_201_CREATED, same.data)
+
+    def test_interactive_user_cannot_name_an_organization(self):
+        self.client.force_authenticate(user=self.patient_user)
+        resp = self._post([self._row()], org=self.org_a)
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(Measurement.objects.count(), 0)
+
+    def test_header_grants_no_access(self):
+        resp = self._post([self._row()], org=self.org_a,
+                          client=self._bound_client(self.bound_read_token))
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        anonymous = APIClient().post('/api/v1/measurements/', [self._row()], format='json',
+                                     **self._headers(self.org_a))
+        self.assertIn(anonymous.status_code,
+                      (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN))
+        self.assertEqual(Measurement.objects.count(), 0)
+
+    def test_header_requires_a_source(self):
+        resp = self.client.post('/api/v1/measurements/', [self._row()], format='json',
+                                **self._headers(self.org_a, source=None))
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(Measurement.objects.count(), 0)
+
+        resp = self.client.post('/api/v1/measurements/', dict(self._row(), source='EHR_SYNC'),
+                                format='json', **self._headers(self.org_a, source=None))
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(self._orgs(Measurement, resp.data['measurement_id']), {self.org_a.pk})
+
+    def test_oversized_body_is_refused_before_provenance_is_resolved(self):
+        from unittest import mock
+        with mock.patch('patient_portal.api.views.OMOP_BULK_MAX_BYTES', 10), \
+                mock.patch('patient_portal.api.views._provenance_context') as resolve:
+            resp = self._post([self._row()], org=self.org_a)
+        self.assertEqual(resp.status_code, status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
+        resolve.assert_not_called()
+
+    def test_a_bad_header_writes_nothing_on_any_entrance(self):
+        row = self._seed(org=None, concept=self.concept)
+        before = self._counts()
+        bad = self._headers('abc')
+        attempts = [
+            ('single upsert', lambda: self.client.post(
+                '/api/v1/measurements/', self._row(value=9), format='json', **bad)),
+            ('append-only single', lambda: self.client.post(
+                '/api/v1/measurements/?upsert=false', self._row(value=9), format='json', **bad)),
+            ('patch', lambda: self.client.patch(
+                f'/api/v1/measurements/{row.pk}/', {'value_as_number': 9}, format='json', **bad)),
+            ('put', lambda: self.client.put(
+                f'/api/v1/measurements/{row.pk}/', dict(self._row(value=9)), format='json', **bad)),
+            ('bulk_update', lambda: self.client.patch(
+                '/api/v1/measurements/bulk_update/',
+                [{'measurement_id': row.pk, 'value_as_number': 9}], format='json', **bad)),
+        ]
+        for name, call in attempts:
+            with self.subTest(entrance=name):
+                self.assertEqual(call().status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(self._counts(), before)
+        row.refresh_from_db()
+        self.assertEqual(row.value_as_number, Decimal('4.1'))
+
+    def test_provenance_is_resolved_once_per_request(self):
+        from unittest import mock
+        from patient_portal.api import provenance_org
+        with mock.patch('patient_portal.api.views.header_organization',
+                        wraps=provenance_org.header_organization) as resolve:
+            self._post([self._row()], org=self.org_a)
+        self.assertEqual(resolve.call_count, 1)
+        row_id = Measurement.objects.get().pk
+        with mock.patch('patient_portal.api.views.header_organization',
+                        wraps=provenance_org.header_organization) as resolve:
+            self.client.patch(f'/api/v1/measurements/{row_id}/', {'value_as_number': 5},
+                              format='json', **self._headers(self.org_a))
+        self.assertEqual(resolve.call_count, 1)
+
+
+    def test_two_hospitals_reporting_one_event_keep_two_attributed_rows(self):
+        a = self._post([self._row()], org=self.org_a)
+        b = self._post([self._row()], org=self.org_b)
+        self.assertEqual((a.data['created'], b.data['created']), (1, 1))
+        self.assertNotEqual(a.data['ids'], b.data['ids'])
+        self.assertEqual(self._orgs(Measurement, a.data['ids'][0]), {self.org_a.pk})
+        self.assertEqual(self._orgs(Measurement, b.data['ids'][0]), {self.org_b.pk})
+
+    def test_another_hospital_never_rewrites_a_rows_concept(self):
+        a = self._post([self._row(concept=self.concept)], org=self.org_a)
+        b = self._post([self._row(concept=self.other_concept)], org=self.org_b)
+        row_a = Measurement.objects.get(pk=a.data['ids'][0])
+        row_b = Measurement.objects.get(pk=b.data['ids'][0])
+        self.assertEqual(row_a.measurement_concept_id, self.concept.concept_id)
+        self.assertEqual(row_b.measurement_concept_id, self.other_concept.concept_id)
+        self.assertEqual(self._orgs(Measurement, row_a.pk), {self.org_a.pk})
+
+    def test_same_hospital_replay_and_correction_match_as_before(self):
+        first = self._post([self._row()], org=self.org_a)
+        replay = self._post([self._row()], org=self.org_a)
+        self.assertEqual(replay.data['created'], 0)
+        self.assertEqual(replay.data['ids'], first.data['ids'])
+        corrected = self._post([self._row(concept=self.other_concept)], org=self.org_a)
+        self.assertEqual((corrected.data['created'], corrected.data['updated']), (0, 1))
+        self.assertEqual(
+            Measurement.objects.get(pk=first.data['ids'][0]).measurement_concept_id,
+            self.other_concept.concept_id)
+
+    def test_an_unattributed_row_is_left_exactly_as_stored(self):
+        stored = self._seed(org=None)
+        resp = self._post([self._row(concept=self.other_concept)], org=self.org_a)
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual((resp.data['created'], resp.data['updated']), (0, 0))
+        self.assertEqual(resp.data['unattributed_matches'], 1)
+        self.assertEqual(resp.data['ids'], [stored.pk])
+        stored.refresh_from_db()
+        self.assertEqual(stored.measurement_concept_id, self.concept.concept_id)
+        self.assertEqual(self._orgs(Measurement, stored.pk), set())
+
+    def test_stacked_unattributed_duplicates_are_not_collapsed(self):
+        first, second = self._seed(org=None), self._seed(org=None)
+        self._post([self._row()], org=self.org_a)
+        self.assertEqual(
+            set(Measurement.objects.values_list('pk', flat=True)), {first.pk, second.pk})
+
+    def test_own_duplicates_collapse_and_a_foreign_duplicate_survives(self):
+        own_1, own_2 = self._seed(org=self.org_a), self._seed(org=self.org_a)
+        foreign = self._seed(org=self.org_b)
+        resp = self._post([self._row()], org=self.org_a)
+        self.assertEqual(resp.data['ids'], [own_1.pk])
+        self.assertEqual(
+            set(Measurement.objects.values_list('pk', flat=True)), {own_1.pk, foreign.pk})
+        self.assertFalse(Measurement.objects.filter(pk=own_2.pk).exists())
+
+    def test_a_row_attributed_to_two_hospitals_is_foreign(self):
+        mixed = self._seed(org=self.org_a)
+        self._attribute(mixed, self.org_b, actor='other-actor')
+        resp = self._post([self._row(concept=self.other_concept)], org=self.org_a)
+        self.assertEqual(resp.data['created'], 1)
+        mixed.refresh_from_db()
+        self.assertEqual(mixed.measurement_concept_id, self.concept.concept_id)
+
+    def test_an_own_row_takes_precedence_over_unattributed_rows(self):
+        unattributed = self._seed(org=None)
+        own = self._seed(org=self.org_a)
+        resp = self._post([self._row(concept=self.other_concept)], org=self.org_a)
+        self.assertEqual(resp.data['ids'], [own.pk])
+        self.assertEqual((resp.data['updated'], resp.data['unattributed_matches']), (1, 0))
+        own.refresh_from_db()
+        unattributed.refresh_from_db()
+        self.assertEqual(own.measurement_concept_id, self.other_concept.concept_id)
+        self.assertEqual(unattributed.measurement_concept_id, self.concept.concept_id)
+
+    def test_unattributed_matches_counts_input_positions(self):
+        self._seed(org=None)
+        twice = [self._row(), self._row()]
+        self.assertEqual(self._post(twice, org=self.org_a).data['unattributed_matches'], 2)
+        self.assertEqual(self._post(twice, org=self.org_a).data['unattributed_matches'], 2)
+        self.assertEqual(self._post(twice).data['unattributed_matches'], 0)
+
+    def test_a_hospital_retry_converges(self):
+        self._seed(org=self.org_a)
+        first = self._post([self._row()], org=self.org_b)
+        retry = self._post([self._row()], org=self.org_b)
+        self.assertEqual((first.data['created'], retry.data['created']), (1, 0))
+        self.assertEqual(retry.data['ids'], first.data['ids'])
+
+    def test_single_row_upsert_keeps_its_response_shape(self):
+        stored = self._seed(org=None)
+        resp = self.client.post('/api/v1/measurements/', self._row(), format='json',
+                                **self._headers(self.org_a))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(resp.data['measurement_id'], stored.pk)
+        self.assertNotIn('unattributed_matches', resp.data)
+
+    def test_query_count_stays_flat_with_the_header(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        def run(n, day):
+            rows = [self._row(value=i, day=day) for i in range(n)]
+            with CaptureQueriesContext(connection) as ctx:
+                resp = self._post(rows, org=self.org_a, query='?skip_refresh=true')
+            self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+            return len(ctx.captured_queries)
+
+        self._seed(org=None)
+        self.assertEqual(run(3, '2024-02-01'), run(30, '2024-03-01'))
+
+
+    def test_update_attribution_rules(self):
+        cases = [
+            ('A to A', self.org_a, self.org_a, status.HTTP_200_OK, {self.org_a.pk}),
+            ('A to absent', self.org_a, None, status.HTTP_200_OK, {self.org_a.pk}),
+            ('NULL to A', None, self.org_a, status.HTTP_200_OK, {self.org_a.pk}),
+            ('A to B', self.org_a, self.org_b, status.HTTP_409_CONFLICT, {self.org_a.pk}),
+        ]
+        actor = f'urn:service|{self.service_identity.sub}'
+        for name, stored, named, expected, orgs in cases:
+            with self.subTest(case=name):
+                row = self._seed(org=None)
+                self._attribute(row, stored, actor=actor)
+                resp = self.client.patch(
+                    f'/api/v1/measurements/{row.pk}/', {'value_as_number': 7},
+                    format='json', **self._headers(named))
+                self.assertEqual(resp.status_code, expected, resp.data)
+                self.assertEqual(self._orgs(Measurement, row.pk), orgs)
+                row.refresh_from_db()
+                self.assertEqual(
+                    row.value_as_number,
+                    Decimal('7') if expected == status.HTTP_200_OK else Decimal('4.1'))
+
+    def test_put_cannot_relabel_a_row(self):
+        row = self._seed(org=self.org_a)
+        resp = self.client.put(f'/api/v1/measurements/{row.pk}/', self._row(value=8),
+                               format='json', **self._headers(self.org_b))
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT, resp.data)
+        self.assertEqual(resp.data['conflicts'], [{'id': row.pk, 'organization_id': self.org_a.pk}])
+
+    def test_bulk_update_with_one_conflicting_row_writes_nothing(self):
+        free = self._seed(org=None)
+        taken = self._seed(org=self.org_b)
+        resp = self.client.patch(
+            '/api/v1/measurements/bulk_update/',
+            [{'measurement_id': free.pk, 'value_as_number': 9},
+             {'measurement_id': taken.pk, 'value_as_number': 9}],
+            format='json', **self._headers(self.org_a))
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT, resp.data)
+        for row in (free, taken):
+            row.refresh_from_db()
+            self.assertEqual(row.value_as_number, Decimal('4.1'))
+        self.assertEqual(self._orgs(Measurement, free.pk), set())
+
+    def test_bulk_update_without_organization_keeps_a_stored_one(self):
+        row = self._seed(org=None)
+        self._attribute(row, self.org_a, actor=f'urn:service|{self.service_identity.sub}')
+        resp = self.client.patch(
+            '/api/v1/measurements/bulk_update/',
+            [{'measurement_id': row.pk, 'value_as_number': 9}],
+            format='json', **self._headers())
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(self._orgs(Measurement, row.pk), {self.org_a.pk})
+
+    def test_a_conflict_through_another_actor_still_counts(self):
+        row = self._seed(org=None)
+        self._attribute(row, self.org_b, source='ADMIN_CORRECTION', actor='someone-else')
+        resp = self.client.patch(f'/api/v1/measurements/{row.pk}/', {'value_as_number': 7},
+                                 format='json', **self._headers(self.org_a))
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT, resp.data)
+
+    def test_a_bound_credential_cannot_relabel_another_hospitals_row(self):
+        PatientRecord.objects.filter(person=self.person).update(organization=self.org_a)
+        row = self._seed(org=self.org_b)
+        resp = self._bound_client().patch(
+            f'/api/v1/measurements/{row.pk}/', {'value_as_number': 7},
+            format='json', **self._headers())
+        self.assertEqual(resp.status_code, status.HTTP_409_CONFLICT, resp.data)
+
+    def test_bulk_update_locks_rows_in_primary_key_order(self):
+        from django.db import connection
+        from django.test.utils import CaptureQueriesContext
+
+        rows = [self._seed(org=None) for _ in range(3)]
+        with CaptureQueriesContext(connection) as ctx:
+            self.client.patch(
+                '/api/v1/measurements/bulk_update/',
+                [{'measurement_id': r.pk, 'value_as_number': 9} for r in reversed(rows)],
+                format='json', **self._headers(self.org_a))
+        locking = [q['sql'] for q in ctx.captured_queries if 'FOR UPDATE' in q['sql']
+                   and 'measurement' in q['sql']]
+        self.assertTrue(locking)
+        self.assertIn('ORDER BY', locking[0])
+
+
+    def test_record_provenance_sets_the_organization_once(self):
+        from patient_portal.api.views import _record_provenance
+        row = self._seed(org=None)
+        _record_provenance(row, 'EHR_SYNC', 'fhir-upload', organization=self.org_a)
+        _record_provenance(row, 'EHR_SYNC', 'fhir-upload', organization=None,
+                           modification_reason='re-upload')
+        record = ProvenanceRecord.objects.get(object_id=row.pk, source_user_id='fhir-upload')
+        self.assertEqual(record.organization_id, self.org_a.pk)
+        self.assertEqual(record.modification_reason, 're-upload')
+        _record_provenance(row, 'EHR_SYNC', 'fhir-upload', organization=self.org_b)
+        record.refresh_from_db()
+        self.assertEqual(record.organization_id, self.org_a.pk)
+        _record_provenance(row, 'EHR_SYNC', 'new-actor', organization=None)
+        self.assertIsNone(ProvenanceRecord.objects.get(
+            object_id=row.pk, source_user_id='new-actor').organization_id)
+
+
+    def _scoped_mapping(self, org):
+        return SourceCodeConceptMapping.objects.create(
+            organization=org,
+            source_vocabulary_id='http://open.epic.com/FHIR/StructureDefinition/observation-flowsheet-id',
+            source_code='10627', target_concept=self.concept,
+            destination_vocabulary_id='HK-Labs', omop_table='measurement',
+            status='proposed', origin='import',
+        )
+
+    def test_approving_a_hospital_mapping_moves_only_that_hospitals_rows(self):
+        from omop_core.mapping.code_resolution import repoint_clinical_rows
+
+        a = self._post([self._row(person=self.person)], org=self.org_a)
+        b = self._post([self._row(person=self.person_b)], org=self.org_b)
+        unattributed = self._seed(org=None, person=self.person_b, value=5.5)
+        mixed = self._seed(org=self.org_a, person=self.person_b, value=6.5)
+        self._attribute(mixed, self.org_b, actor='other-actor')
+        PatientRecord.objects.update(derivation_version=7)
+
+        mapping = self._scoped_mapping(self.org_a)
+        preview = repoint_clinical_rows(
+            mapping=mapping, old_concept_id=self.concept.concept_id,
+            new_concept_id=self.other_concept.concept_id, apply_changes=False)
+        self.assertEqual(preview['rows_updated'], 1)
+        result = repoint_clinical_rows(
+            mapping=mapping, old_concept_id=self.concept.concept_id,
+            new_concept_id=self.other_concept.concept_id)
+
+        self.assertEqual(result['rows_updated'], 1)
+        self.assertEqual(result['person_ids'], {self.person.person_id})
+
+        def concept_of(pk):
+            return Measurement.objects.get(pk=pk).measurement_concept_id
+
+        self.assertEqual(concept_of(a.data['ids'][0]), self.other_concept.concept_id)
+        for pk in (b.data['ids'][0], unattributed.pk, mixed.pk):
+            self.assertEqual(concept_of(pk), self.concept.concept_id)
+        self.assertEqual(PatientRecord.objects.get(person=self.person).derivation_version, 0)
+        self.assertEqual(PatientRecord.objects.get(person=self.person_b).derivation_version, 7)
+
+    def test_scoped_repoint_collapses_only_that_hospitals_duplicates(self):
+        from omop_core.mapping.code_resolution import repoint_clinical_rows
+
+        own_1, own_2 = self._seed(org=self.org_a), self._seed(org=self.org_a)
+        foreign = self._seed(org=self.org_b, concept=self.other_concept)
+        mixed = self._seed(org=self.org_a, concept=self.other_concept)
+        self._attribute(mixed, self.org_b, actor='other-actor')
+
+        result = repoint_clinical_rows(
+            mapping=self._scoped_mapping(self.org_a),
+            old_concept_id=self.concept.concept_id,
+            new_concept_id=self.other_concept.concept_id)
+
+        self.assertEqual((result['rows_updated'], result['rows_collapsed']), (2, 1))
+        surviving = set(Measurement.objects.values_list('pk', flat=True))
+        self.assertEqual(surviving, {own_1.pk, foreign.pk, mixed.pk})
+        self.assertNotIn(own_2.pk, surviving)
+
+    def test_an_inactive_organization_is_rejected(self):
+        Organization.objects.filter(pk=self.org_b.pk).update(is_active=False)
+        resp = self._post([self._row()], org=self.org_b)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(str(resp.data['organization_id']), 'Organization is inactive.')
+        self.assertEqual(Measurement.objects.count(), 0)
+
+    def test_the_legacy_path_ignores_the_header(self):
+        for raw in (str(self.org_b.pk), 'abc'):
+            with self.subTest(raw=raw):
+                resp = self.client.post('/api/measurements/', [self._row(value=len(raw))],
+                                        format='json', **self._headers(raw))
+                self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+                self.assertEqual(self._orgs(Measurement, resp.data['ids'][0]), {None})
+
+    def test_a_write_without_the_header_keeps_each_hospitals_row(self):
+        a = self._post([self._row()], org=self.org_a)
+        b = self._post([self._row()], org=self.org_b)
+        resp = self._post([self._row(concept=self.other_concept)])
+        self.assertEqual(resp.data['ids'], a.data['ids'])
+        self.assertEqual(self._orgs(Measurement, b.data['ids'][0]), {self.org_b.pk})
+        self.assertEqual(
+            Measurement.objects.get(pk=b.data['ids'][0]).measurement_concept_id,
+            self.concept.concept_id)
+
+    def test_a_write_without_the_header_still_collapses_unattributed_duplicates(self):
+        first, second = self._seed(org=None), self._seed(org=None)
+        resp = self._post([self._row()])
+        self.assertEqual(resp.data['ids'], [first.pk])
+        self.assertFalse(Measurement.objects.filter(pk=second.pk).exists())
+
+    def test_fhir_sync_upsert_collapses_only_within_one_hospital(self):
+        from patient_portal.api.fhir.sync import FhirSyncView
+
+        own_1, own_2 = self._seed(org=self.org_a), self._seed(org=self.org_a)
+        foreign = self._seed(org=self.org_b)
+        incoming = Measurement(
+            person=self.person, measurement_concept=self.concept,
+            measurement_date=date(2024, 1, 1), measurement_type_concept=self.type_concept,
+            measurement_source_value='10627', value_as_number=Decimal('4.1'))
+        FhirSyncView()._upsert_clinical(
+            Measurement, 'measurement_id', 'measurement_concept_id', 'measurement_date',
+            'measurement_source_value', self.person, [incoming], 'fhir-actor', None)
+        self.assertEqual(
+            set(Measurement.objects.values_list('pk', flat=True)), {own_1.pk, foreign.pk})
+        self.assertFalse(Measurement.objects.filter(pk=own_2.pk).exists())
+
+    def test_a_global_repoint_keeps_each_hospitals_row(self):
+        from omop_core.mapping.code_resolution import repoint_clinical_rows
+
+        own_1, own_2 = self._seed(org=self.org_a), self._seed(org=self.org_a)
+        foreign = self._seed(org=self.org_b)
+        unattributed = self._seed(org=None)
+        result = repoint_clinical_rows(
+            mapping=self._scoped_mapping(None),
+            old_concept_id=self.concept.concept_id,
+            new_concept_id=self.other_concept.concept_id)
+        self.assertEqual((result['rows_updated'], result['rows_collapsed']), (4, 1))
+        self.assertEqual(
+            set(Measurement.objects.values_list('pk', flat=True)),
+            {own_1.pk, foreign.pk, unattributed.pk})
+        self.assertNotIn(own_2.pk, set(Measurement.objects.values_list('pk', flat=True)))
+
+
+    def test_lookup_rejects_ids_that_only_round_to_an_organization(self):
+        self.client.force_authenticate(user=self.staff)
+        for raw in (True, 1.9, '0', '   '):
+            with self.subTest(raw=raw):
+                resp = self.client.post('/api/v1/code-mappings/lookup/', {
+                    'organization_id': raw,
+                    'codes': [{'source_vocabulary_id': 'CPT4', 'source_code': '99213',
+                               'omop_table': 'procedure'}],
+                }, format='json')
+                self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
+                self.assertEqual(str(resp.data['organization_id']),
+                                 'Must be a positive integer organization id.')
+
+    def test_schema_declares_the_header_on_every_write(self):
+        schema = APIClient().get('/api/v1/schema/').data
+        for route, pk_field, *_ in _ORG_ROUTES:
+            for path, method in ((f'/api/v1/{route}/', 'post'),
+                                 (f'/api/v1/{route}/{{{pk_field}}}/', 'patch'),
+                                 (f'/api/v1/{route}/{{{pk_field}}}/', 'put'),
+                                 (f'/api/v1/{route}/bulk_update/', 'patch')):
+                with self.subTest(path=path, method=method):
+                    operation = schema['paths'][path][method]
+                    self.assertIn('X-Provenance-Organization-ID', {
+                        p['name'] for p in operation.get('parameters', [])
+                        if p.get('in') == 'header'})
+
+
+@override_settings(SERVICE_AUTH_SCOPES='patient/*.read patient/*.write')
+class ProvenanceOrganizationLockTest(TransactionTestCase):
+
+    def setUp(self):
+        _make_vocab_fixtures()
+        self.org_a = Organization.objects.create(name='Lock Hospital A', slug='lock-a')
+        self.org_b = Organization.objects.create(name='Lock Hospital B', slug='lock-b')
+        self.person = Person.objects.create(person_id=33101)
+        PatientRecord.objects.create(person=self.person)
+        self.row = Measurement.objects.create(
+            measurement_id=9_310_001, person=self.person,
+            measurement_concept_id=3000963, measurement_date=date(2024, 1, 1),
+            measurement_type_concept_id=32817, measurement_source_value='10627',
+            value_as_number=Decimal('4.1'))
+        self.service_identity = Identity.objects.get_or_create(
+            issuer='urn:service', sub='prov-lock-test')[0]
+
+    def test_the_second_writer_waits_for_the_lock_and_sees_the_first_hospital(self):
+        import threading
+        from django.db import connection, transaction as db_transaction
+
+        locked, release = threading.Event(), threading.Event()
+        responses = {}
+
+        def first_writer():
+            try:
+                with db_transaction.atomic():
+                    Measurement.objects.select_for_update().get(pk=self.row.pk)
+                    ProvenanceRecord.objects.create(
+                        content_type=ContentType.objects.get_for_model(Measurement),
+                        object_id=self.row.pk, source='EHR_SYNC', source_user_id='writer-a',
+                        organization=self.org_a)
+                    locked.set()
+                    release.wait(10)
+            finally:
+                connection.close()
+
+        def second_writer():
+            try:
+                client = APIClient()
+                client.force_authenticate(user=self.service_identity, token='service-token')
+                responses['b'] = client.patch(
+                    f'/api/v1/measurements/{self.row.pk}/', {'value_as_number': 9},
+                    format='json', HTTP_X_PROVENANCE_SOURCE='EHR_SYNC',
+                    HTTP_X_PROVENANCE_ORGANIZATION_ID=str(self.org_b.pk))
+            finally:
+                connection.close()
+
+        a = threading.Thread(target=first_writer)
+        a.start()
+        self.assertTrue(locked.wait(10))
+        b = threading.Thread(target=second_writer)
+        b.start()
+        b.join(1.0)
+        self.assertTrue(b.is_alive(), 'the second writer did not wait for the row lock')
+        release.set()
+        a.join(10)
+        b.join(10)
+
+        self.assertEqual(responses['b'].status_code, status.HTTP_409_CONFLICT)
+        self.assertEqual(
+            set(ProvenanceRecord.objects.filter(object_id=self.row.pk)
+                .values_list('organization_id', flat=True)),
+            {self.org_a.pk})
+        self.row.refresh_from_db()
+        self.assertEqual(self.row.value_as_number, Decimal('4.1'))
+
+    def test_an_update_writes_the_row_as_it_stands_after_the_lock(self):
+        import threading
+        from django.db import connection, transaction as db_transaction
+
+        locked, release = threading.Event(), threading.Event()
+        responses = {}
+
+        def first_writer():
+            try:
+                with db_transaction.atomic():
+                    row = Measurement.objects.select_for_update().get(pk=self.row.pk)
+                    row.unit_source_value = 'mg/dL'
+                    row.save(update_fields=['unit_source_value'])
+                    locked.set()
+                    release.wait(10)
+            finally:
+                connection.close()
+
+        def second_writer():
+            try:
+                client = APIClient()
+                client.force_authenticate(user=self.service_identity, token='service-token')
+                responses['b'] = client.patch(
+                    f'/api/v1/measurements/{self.row.pk}/', {'value_as_number': 9},
+                    format='json', HTTP_X_PROVENANCE_SOURCE='EHR_SYNC',
+                    HTTP_X_PROVENANCE_ORGANIZATION_ID=str(self.org_b.pk))
+            finally:
+                connection.close()
+
+        a = threading.Thread(target=first_writer)
+        a.start()
+        self.assertTrue(locked.wait(10))
+        b = threading.Thread(target=second_writer)
+        b.start()
+        b.join(1.0)
+        release.set()
+        a.join(10)
+        b.join(10)
+
+        self.assertEqual(responses['b'].status_code, status.HTTP_200_OK, responses['b'].data)
+        self.row.refresh_from_db()
+        self.assertEqual(self.row.value_as_number, Decimal('9'))
+        self.assertEqual(self.row.unit_source_value, 'mg/dL')
+
+
+from omop_core.models import PatientSourceCode, PersonMergeCandidate  # noqa: E402
+
+
+@override_settings(
+    EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend',
+    APP_BASE_URL='https://app.test',
+)
+class ProvisionedPersonAdoptionTest(TestCase):
+    """Verification joins a self-signup account to the Person ETL provisioned (#1817).
+
+    Signup mints a Person before the address is proved, so an imported patient
+    who signs up gets a second, empty record while their history stays on the
+    provisioned one. The join happens here, at verification, because only
+    ``email_verified_at`` is proof -- and only when the signup Person is empty.
+    """
+
+    PASSWORD = 'Str0ng!Pass99'
+    EMAIL = 'imported@example.org'
+
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()  # DRF throttle state leaks between tests.
+        self.org = Organization.objects.create(
+            name='Public Demo', slug='public-demo', allows_patient_signup=True,
+        )
+        self.importer_org = Organization.objects.create(name='Curehub', slug='curehub')
+
+    def _provision(self, email=EMAIL, organization=None, **person_fields):
+        """What POST /api/persons/provision/ leaves behind."""
+        from omop_core.services.pk import next_pk
+        person = Person.objects.create(
+            person_id=next_pk(Person, 'person_id'), email=email, **person_fields,
+        )
+        PatientRecord.objects.create(person=person, organization=organization)
+        return person
+
+    def _signup(self, email=EMAIL):
+        client = APIClient()
+        resp = client.post(f'/api/v1/orgs/{self.org.slug}/patient-signup/',
+                           {'email': email, 'password': self.PASSWORD,
+                            'given_name': 'Ann', 'family_name': 'Lee'})
+        self.assertEqual(resp.status_code, 201, resp.data)
+        return client, resp.data['person_id']
+
+    def _verify(self):
+        import re
+        from django.core import mail
+        token = re.search(r'verify-email\?token=(\S+)', mail.outbox[-1].body).group(1)
+        return APIClient().post('/api/v1/auth/verify-email/', {'token': token})
+
+    def _linked_person_id(self):
+        return PatientUser.objects.get(identity__email=self.EMAIL).person_id
+
+    def test_verification_adopts_the_provisioned_person(self):
+        provisioned = self._provision()
+        PatientSourceCode.objects.create(person=provisioned, source_value='1234-5')
+        _, signup_person_id = self._signup()
+        self.assertNotEqual(signup_person_id, provisioned.person_id)
+
+        resp = self._verify()
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['person_id'], provisioned.person_id)
+        self.assertEqual(self._linked_person_id(), provisioned.person_id)
+        self.assertFalse(Person.objects.filter(person_id=signup_person_id).exists())
+        self.assertEqual(PatientSourceCode.objects.filter(person=provisioned).count(), 1)
+
+    def test_signup_alone_adopts_nothing(self):
+        """Before the link is clicked the address is still only a claim."""
+        provisioned = self._provision()
+        _, signup_person_id = self._signup()
+        self.assertEqual(self._linked_person_id(), signup_person_id)
+        self.assertTrue(Person.objects.filter(person_id=provisioned.person_id).exists())
+
+    def test_signup_organization_and_name_fill_the_provisioned_blanks(self):
+        provisioned = self._provision()
+        self._signup()
+        self._verify()
+        provisioned.refresh_from_db()
+        record = PatientRecord.objects.get(person=provisioned)
+        self.assertEqual(record.organization_id, self.org.pk)
+        self.assertEqual((provisioned.given_name, provisioned.family_name), ('Ann', 'Lee'))
+
+    def test_the_importers_own_values_are_never_overwritten(self):
+        provisioned = self._provision(
+            organization=self.importer_org, given_name='Anna', family_name='Li',
+        )
+        self._signup()
+        self._verify()
+        provisioned.refresh_from_db()
+        record = PatientRecord.objects.get(person=provisioned)
+        self.assertEqual(record.organization_id, self.importer_org.pk)
+        self.assertEqual((provisioned.given_name, provisioned.family_name), ('Anna', 'Li'))
+
+    def test_a_signup_person_holding_data_is_left_alone_with_a_merge_candidate(self):
+        """Joining two populated records is a decision for a human, not for this."""
+        provisioned = self._provision()
+        _, signup_person_id = self._signup()
+        PatientSourceCode.objects.create(person_id=signup_person_id, source_value='9999-9')
+
+        resp = self._verify()
+
+        self.assertEqual(resp.data['person_id'], signup_person_id)
+        self.assertEqual(self._linked_person_id(), signup_person_id)
+        self.assertTrue(Person.objects.filter(person_id=provisioned.person_id).exists())
+        candidate = PersonMergeCandidate.objects.get()
+        self.assertEqual(candidate.claimed_id, signup_person_id)
+        self.assertEqual(candidate.provisioned_id, provisioned.person_id)
+        self.assertEqual(candidate.email, self.EMAIL)
+        self.assertIsNone(candidate.resolved_at)
+
+    def test_verifying_twice_changes_nothing_and_files_nothing(self):
+        provisioned = self._provision()
+        self._signup()
+        self._verify()
+        resp = self._verify()
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.data['person_id'], provisioned.person_id)
+        self.assertEqual(PersonMergeCandidate.objects.count(), 0)
+        self.assertEqual(Person.objects.filter(email__iexact=self.EMAIL).count(), 1)
+
+    def test_nothing_provisioned_leaves_the_signup_person_in_place(self):
+        _, signup_person_id = self._signup()
+        resp = self._verify()
+        self.assertEqual(resp.data['person_id'], signup_person_id)
+        self.assertEqual(self._linked_person_id(), signup_person_id)
+
+    def test_a_provisioned_person_without_the_address_is_not_a_candidate(self):
+        """ETL provisions without an email today, so there is nothing to match."""
+        provisioned = self._provision(email=None)
+        _, signup_person_id = self._signup()
+        self._verify()
+        self.assertEqual(self._linked_person_id(), signup_person_id)
+        self.assertTrue(Person.objects.filter(person_id=provisioned.person_id).exists())
+
+    def test_two_unclaimed_persons_for_one_address_adopt_neither(self):
+        first = self._provision()
+        second = self._provision()
+        _, signup_person_id = self._signup()
+        self._verify()
+        self.assertEqual(self._linked_person_id(), signup_person_id)
+        for person in (first, second):
+            self.assertTrue(Person.objects.filter(person_id=person.person_id).exists())
+        self.assertEqual(PersonMergeCandidate.objects.count(), 0)
+
+    def test_a_claimed_duplicate_beside_a_provisioned_one_still_settles(self):
+        """An address that already forked by some other route is not a dead end."""
+        provisioned = self._provision()
+        claimed = self._provision()
+        other = Identity.objects.create_user(email='someone.else@example.org', password=self.PASSWORD)
+        PatientUser.objects.create(identity=other, person=claimed)
+        self._signup()
+
+        self._verify()
+
+        self.assertEqual(self._linked_person_id(), provisioned.person_id)
+        self.assertEqual(PatientUser.objects.get(identity=other).person_id, claimed.person_id)
+
+    def test_an_account_with_no_person_adopts_without_deleting_anything(self):
+        provisioned = self._provision()
+        identity = Identity.objects.create_user(email=self.EMAIL, password=self.PASSWORD)
+        self.assertFalse(PatientUser.objects.filter(identity=identity).exists())
+
+        from patient_portal.person_adoption import adopt_provisioned_person
+        identity.mark_email_verified()
+        outcome = adopt_provisioned_person(identity)
+
+        self.assertTrue(outcome.adopted)
+        self.assertEqual(outcome.person_id, provisioned.person_id)
+        self.assertEqual(PatientUser.objects.get(identity=identity).person_id, provisioned.person_id)
+
+    def test_an_unverified_identity_adopts_nothing(self):
+        provisioned = self._provision()
+        identity = Identity.objects.create_user(email=self.EMAIL, password=self.PASSWORD)
+
+        from patient_portal.person_adoption import adopt_provisioned_person
+        outcome = adopt_provisioned_person(identity)
+
+        self.assertFalse(outcome.adopted)
+        self.assertFalse(PatientUser.objects.filter(person=provisioned).exists())
+
+    def test_a_record_the_patient_edited_counts_as_their_own_data(self):
+        """The placeholder is not pristine just because no clinical row landed."""
+        provisioned = self._provision()
+        _, signup_person_id = self._signup()
+        RecordRevision.objects.create(
+            patient_record=PatientRecord.objects.get(person_id=signup_person_id),
+            field='year_of_birth', old_value='1900', new_value='1972', changed_by='self',
+        )
+
+        self._verify()
+
+        self.assertEqual(self._linked_person_id(), signup_person_id)
+        self.assertEqual(PersonMergeCandidate.objects.count(), 1)
+        self.assertTrue(Person.objects.filter(person_id=provisioned.person_id).exists())
+
+    def test_a_placeholder_something_else_points_at_is_kept(self):
+        """An EHR connection on the empty placeholder makes it a human's call."""
+        provisioned = self._provision()
+        _, signup_person_id = self._signup()
+        FhirConnection.objects.create(
+            person_id=signup_person_id,
+            access_token='a', refresh_token='r', expires_at=timezone.now() + timedelta(hours=1),
+            institution=Institution.objects.create(
+                slug='clinic', display_name='Clinic', fhir_base='https://ehr.test/fhir',
+                smart_config_url='https://ehr.test/.well-known/smart-configuration',
+                client_id='cid', scopes='launch/patient',
+            ),
+        )
+
+        resp = self._verify()
+
+        self.assertEqual(resp.data['person_id'], signup_person_id)
+        self.assertEqual(self._linked_person_id(), signup_person_id)
+        self.assertTrue(Person.objects.filter(person_id=signup_person_id).exists())
+        self.assertEqual(PersonMergeCandidate.objects.count(), 1)
+
+
+class TherapyComponentDetailTest(MappingHubTestBase):
+    """GET/PATCH/DELETE on /api/v1/therapy-components/<code>/."""
+
+    @classmethod
+    def setUpTestData(cls):
+        super().setUpTestData()
+        # Create a standard concept to link components to
+        from omop_core.models import Concept, TherapyComponent
+        vocab, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='HemOnc',
+            defaults={'vocabulary_name': 'HemOnc', 'vocabulary_concept_id': 0},
+        )
+        domain, _ = Domain.objects.get_or_create(
+            domain_id='Drug', defaults={'domain_name': 'Drug', 'domain_concept_id': 0},
+        )
+        cc, _ = ConceptClass.objects.get_or_create(
+            concept_class_id='Component',
+            defaults={'concept_class_name': 'Component', 'concept_class_concept_id': 0},
+        )
+        cls.standard_concept, _ = Concept.objects.get_or_create(
+            concept_id=35_803_100,
+            defaults={
+                'concept_name': 'Lenalidomide',
+                'domain': domain,
+                'vocabulary': vocab,
+                'concept_class': cc,
+                'concept_code': '35803100',
+                'standard_concept': 'S',
+                'valid_start_date': '1970-01-01',
+                'valid_end_date': '2099-12-31',
+                'invalid_reason': None,
+            },
+        )
+        cls.non_standard_concept, _ = Concept.objects.get_or_create(
+            concept_id=35_803_200,
+            defaults={
+                'concept_name': 'Lenalidomide [non-std]',
+                'domain': domain,
+                'vocabulary': vocab,
+                'concept_class': cc,
+                'concept_code': '35803200',
+                'standard_concept': None,
+                'valid_start_date': '1970-01-01',
+                'valid_end_date': '2099-12-31',
+                'invalid_reason': 'U',
+            },
+        )
+        # Link comp to standard concept
+        cls.comp.concept = cls.standard_concept
+        cls.comp.save()
+
+    def test_get_returns_concept_status(self):
+        self.client.force_authenticate(user=self.admin)
+        resp = self.client.get(f'/api/v1/therapy-components/{self.comp.code}/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['code'], self.comp.code)
+        self.assertEqual(resp.data['concept_id'], self.standard_concept.concept_id)
+        self.assertEqual(resp.data['standard_concept'], 'S')
+        self.assertIsNone(resp.data['invalid_reason'])
+        self.assertIn('classes', resp.data)
+
+    def test_get_no_concept_returns_nulls(self):
+        self.client.force_authenticate(user=self.admin)
+        resp = self.client.get(f'/api/v1/therapy-components/{self.comp2.code}/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIsNone(resp.data['concept_id'])
+        self.assertIsNone(resp.data['standard_concept'])
+        self.assertIsNone(resp.data['invalid_reason'])
+
+    def test_patch_updates_concept_id(self):
+        self.client.force_authenticate(user=self.admin)
+        resp = self.client.patch(
+            f'/api/v1/therapy-components/{self.comp2.code}/',
+            {'concept_id': self.standard_concept.concept_id},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.data['concept_id'], self.standard_concept.concept_id)
+        self.assertEqual(resp.data['standard_concept'], 'S')
+
+    def test_patch_with_invalid_concept_returns_400(self):
+        self.client.force_authenticate(user=self.admin)
+        resp = self.client.patch(
+            f'/api/v1/therapy-components/{self.comp.code}/',
+            {'concept_id': 999_999_999},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('does not exist', resp.data['detail'])
+
+    def test_patch_null_concept_clears_it(self):
+        self.client.force_authenticate(user=self.admin)
+        resp = self.client.patch(
+            f'/api/v1/therapy-components/{self.comp.code}/',
+            {'concept_id': None},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertIsNone(resp.data['concept_id'])
+        self.assertIsNone(resp.data['standard_concept'])
+
+    def test_non_standard_concept_flagged_in_list(self):
+        self.client.force_authenticate(user=self.admin)
+        # Point comp at a non-standard concept (rolled back by per-test savepoint)
+        self.comp.concept = self.non_standard_concept
+        self.comp.save()
+        resp = self.client.get('/api/v1/therapy-components/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        lena = next(c for c in resp.data if c['code'] == self.comp.code)
+        self.assertIsNone(lena['standard_concept'])
+        self.assertEqual(lena['invalid_reason'], 'U')
+
+    def test_unauthenticated_returns_401_or_403(self):
+        resp = self.client.get(f'/api/v1/therapy-components/{self.comp.code}/')
+        self.assertIn(resp.status_code, (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN))
+
+    def test_non_admin_cannot_patch(self):
+        self.client.force_authenticate(user=self.regular)
+        resp = self.client.patch(
+            f'/api/v1/therapy-components/{self.comp.code}/',
+            {'concept_id': self.standard_concept.concept_id},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_not_found_returns_404(self):
+        self.client.force_authenticate(user=self.admin)
+        resp = self.client.get('/api/v1/therapy-components/NONEXISTENT/')
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_delete_removes_component(self):
+        self.client.force_authenticate(user=self.admin)
+        resp = self.client.delete(f'/api/v1/therapy-components/{self.comp2.code}/')
+        self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
+        from omop_core.models import TherapyComponent
+        self.assertFalse(TherapyComponent.objects.filter(code=self.comp2.code).exists())
+
+    def test_non_admin_cannot_delete(self):
+        self.client.force_authenticate(user=self.regular)
+        resp = self.client.delete(f'/api/v1/therapy-components/{self.comp2.code}/')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_regimen_detail_includes_concept_status(self):
+        """Nested components in regimen detail include standard_concept/invalid_reason."""
+        self.client.force_authenticate(user=self.admin)
+        resp = self.client.get(f'/api/v1/therapy-regimens/{self.reg.code}/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        comp_data = next(
+            (c for c in resp.data['components'] if c['code'] == self.comp.code), None,
+        )
+        self.assertIsNotNone(comp_data)
+        self.assertIn('standard_concept', comp_data)
+        self.assertIn('invalid_reason', comp_data)

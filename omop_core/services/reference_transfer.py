@@ -17,14 +17,18 @@ from functools import cache
 from typing import Any, TypedDict
 
 from django.db import transaction
-from django.db.models import Field, Model
+from django.db.models import Field, Model, Q
 
 from omop_core.models import (
     Concept,
     ConceptClass,
+    ConceptMappingPriority,
+    DiseaseCategoryChoice,
+    DiseaseCategoryMapping,
     DiseaseTherapyRegimen,
     Domain,
     MappingDestinationCandidate,
+    SourceCodeAxisVariant,
     SourceCodeConceptMapping,
     TherapyComponentClassLink,
     TherapyOutcome,
@@ -75,6 +79,7 @@ class ReferencePayload(TypedDict):
     tables: dict[str, Iterable[ReferenceRow]]
     curation: dict[str, Any]
     candidates: Iterable[ReferenceRow]
+    axis_variants: Iterable[ReferenceRow]
 
 
 @dataclass(frozen=True)
@@ -106,20 +111,40 @@ def copied_tables() -> list[ReferenceTable]:
         ReferenceTable(TherapyComponentClassLink, ('component', 'therapy_class')),
         ReferenceTable(DiseaseTherapyRegimen, ('disease', 'round', 'regimen')),
         ReferenceTable(TherapyOutcome, ('code',)),
+        ReferenceTable(_lab_marker(), ('loinc_code',)),
+        # Curator priority (#1914), matched on the concept's natural key. A
+        # concept not loaded here is skipped with a warning.
+        ReferenceTable(ConceptMappingPriority, ('concept',)),
+        ReferenceTable(DiseaseCategoryChoice, ('code',)),
+        ReferenceTable(DiseaseCategoryMapping, ('disease_name',)),
     ]
+
+
+def _lab_marker() -> type[Model]:
+    # Imported here: patient_portal's models import omop_core's at load time.
+    from patient_portal.models import LabMarker
+
+    return LabMarker
 
 
 # After the code mappings, because each candidate belongs to one.
 CANDIDATES = ReferenceTable(
     MappingDestinationCandidate, ('mapping', 'target_vocabulary_id', 'target_concept_code'),
 )
+# After the code mappings too: each variant belongs to one.
+AXIS_VARIANTS = ReferenceTable(SourceCodeAxisVariant, ('mapping', 'axis_key'))
 
 
 @cache
 def _related_keys() -> dict[type[Model], tuple[str, ...]]:
-    """Natural key of every model a copied row may point at. Plain columns only."""
+    """Natural key of every model a copied row may point at."""
     keys = {t.model: t.key for t in copied_tables() if len(t.key) == 1}
-    keys[SourceCodeConceptMapping] = ('source_vocabulary_id', 'source_code')
+    # Organization slugs are stable across instances; organization PKs are not.
+    # Relation traversal keeps candidate links unambiguous when hospitals reuse
+    # the same Epic or Cerner source code.
+    keys[SourceCodeConceptMapping] = (
+        'organization__slug', 'source_vocabulary_id', 'source_code',
+    )
     return keys
 
 
@@ -138,6 +163,7 @@ def read_reference(using: str, stream: bool = False) -> ReferencePayload:
         'tables': {t.label: rows(t) for t in copied_tables()},
         'curation': read_payload(using, tables=CURATION_TABLES, stream=stream),
         'candidates': rows(CANDIDATES),
+        'axis_variants': rows(AXIS_VARIANTS),
     }
 
 
@@ -155,6 +181,7 @@ def apply_reference(payload: ReferencePayload, prune: bool = False, dry_run: boo
                 _apply_table(table, payload['tables'][table.label], stats)
             _merge(stats, apply_payload(payload['curation'], tables=CURATION_TABLES, prune=prune))
             _apply_table(CANDIDATES, payload['candidates'], stats)
+            _apply_table(AXIS_VARIANTS, payload.get('axis_variants', []), stats)
             if dry_run:
                 raise _Rollback
     except _Rollback:
@@ -163,8 +190,8 @@ def apply_reference(payload: ReferencePayload, prune: bool = False, dry_run: boo
 
 
 def _foreign_keys(model: type[Model]) -> list[Field]:
-    """Concrete many-to-one fields of model."""
-    return [f for f in model._meta.concrete_fields if f.many_to_one]
+    """Concrete many-to-one and one-to-one fields of model: every link a row carries."""
+    return [f for f in model._meta.concrete_fields if f.many_to_one or f.one_to_one]
 
 
 def _read_table(table: ReferenceTable, using: str) -> Iterator[ReferenceRow]:
@@ -217,10 +244,17 @@ def _key_to_pk(model: type[Model], keys: Iterable[Key | None]) -> dict[Key, Any]
     if not wanted:
         return {}
     fields = _related_keys()[model]
-    lookup = {f'{name}__in': {k[i] for k in wanted} for i, name in enumerate(fields)}
+    lookup = Q()
+    for i, name in enumerate(fields):
+        values = {key[i] for key in wanted}
+        present = values - {None}
+        dimension = Q(**{f'{name}__in': present}) if present else Q(pk__in=[])
+        if None in values:
+            dimension |= Q(**{f'{name}__isnull': True})
+        lookup &= dimension
     return {
         tuple(rest): pk
-        for pk, *rest in model.objects.filter(**lookup).values_list('pk', *fields)
+        for pk, *rest in model.objects.filter(lookup).values_list('pk', *fields)
         if tuple(rest) in wanted
     }
 

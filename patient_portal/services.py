@@ -134,6 +134,10 @@ def resolve_or_create_person(identity, email=None, allow_create=True, email_veri
     always returned) but step 3 is skipped — returns None instead of creating.
 
     Returns the linked Person, or None if not found and allow_create=False.
+
+    Step 2 is what adopts a Person an importer provisioned before its owner
+    signed in. It needs a verified address, and an ambiguous one forks, so an
+    import keyed on email loses the unverified and the duplicated.
     """
     pu = PatientUser.objects.filter(identity=identity).first()
     if pu:
@@ -147,17 +151,26 @@ def resolve_or_create_person(identity, email=None, allow_create=True, email_veri
 
     email = (email or getattr(identity, 'email', None) or "").strip()
     if email and email_verified:
-        person_qs = Person.objects.filter(email=email)
-        # Legacy fallback while older PatientRecord snapshots still exist.
-        email_qs = PatientRecord.objects.filter(email=email)
-        # Guard against cross-org collision: if multiple patients share the
-        # same email, skip the email match and auto-provision a new person
-        # rather than silently linking to the wrong patient.
-        if person_qs.count() == 1:
-            person = person_qs.first()
-        else:
-            pi = email_qs.first() if email_qs.count() == 1 else None
-            person = pi.person if pi else None
+        # Case-insensitively: an importer stores the case its source holds,
+        # the IdP presents its own.
+        candidate_ids = set(
+            Person.objects
+            .filter(email__iexact=email)
+            .values_list('person_id', flat=True)
+        )
+        # Legacy fallback while older PatientRecord snapshots still exist. It
+        # is counted with Person, not consulted after it: a lone stale snapshot
+        # must not settle an address two Persons disagree over.
+        candidate_ids |= set(
+            PatientRecord.objects
+            .filter(email__iexact=email)
+            .values_list('person_id', flat=True)
+        )
+        person = (
+            Person.objects.filter(person_id=candidate_ids.pop()).first()
+            if len(candidate_ids) == 1
+            else None
+        )
         if person:
             holder = PatientUser.objects.filter(person=person).first()
             if holder is None:
@@ -232,7 +245,7 @@ def prolog_participant_id(request):
     return person.person_id if person is not None else None
 
 
-def create_unidentified_person(source='prolog'):
+def create_unidentified_person(source='prolog', organization=None):
     """Create a Person with no Identity, no PatientUser and no demographics.
 
     The counterpart to resolve_or_create_person, which provisions a person *for
@@ -254,6 +267,12 @@ def create_unidentified_person(source='prolog'):
       year_of_birth=1900 and "unknown" source values because it is provisioning
       a patient. This person is not a patient yet, and a placeholder birth year
       is an identifying attribute that is also false.
+    * **Takes the organization here, not later.** A record created without one
+      drops out of every org-scoped query (#1764), and the stamp cannot be
+      applied afterwards by the caller that knows the org: an importer runs
+      `refresh_patient_record` once its OMOP rows are in, which builds a bare
+      `PatientRecord(person=person)` when none exists. The same reason
+      `import_org_patients` creates the row before it refreshes.
 
     Callers that later learn who this is promote the same row in place — an
     Identity and a PatientUser are attached to it — so no answer moves and no
@@ -261,6 +280,68 @@ def create_unidentified_person(source='prolog'):
     """
     with transaction.atomic():
         person = Person.objects.create(person_id=next_pk(Person, 'person_id'))
-        PatientRecord.objects.create(person=person)
+        PatientRecord.objects.create(person=person, organization=organization)
     logger.info('minted unidentified person %s for %s', person.person_id, source)
     return person
+
+
+def prolog_results_viewer(email, password):
+    """PROLOG_RESULTS_AUTH: who may read a survey's results on the report page.
+
+    The same people the Django admin lets read them, checked the same way. The
+    survey runner holds no accounts and hashes no passwords: it hands the pair
+    here, and this goes through the ordinary login path — `EmailBackend`, so
+    lockout after repeated failures applies exactly as it does to the portal —
+    then asks the permission questions the admin asks of its own pages:
+
+    * staff, active, and may view responses → may read the results at all;
+    * may view contacts → may download the email addresses, which is a separate
+      permission because the answers and the addresses are separate files.
+
+    Returns None for anyone else, including a correct password without the
+    permissions: "not a reader" and "wrong password" look the same from outside.
+    """
+    from django.contrib.auth import authenticate
+
+    from prolog_surveys.results import ResultsViewer
+
+    identity = authenticate(username=email, password=password)
+    if identity is None or not (identity.is_active and identity.is_staff):
+        return None
+    if not identity.has_perm('prolog_surveys.view_surveyresponse'):
+        return None
+    logger.info('prolog results access by identity %s', identity.pk)
+    return ResultsViewer(
+        label=identity.email,
+        may_read_responses=True,
+        may_read_contacts=identity.has_perm('prolog_surveys.view_surveycontact'),
+    )
+
+
+def prolog_results_password_change(email, current_password, new_password):
+    """PROLOG_RESULTS_PASSWORD_CHANGE: a results reader changing their own password.
+
+    The same policy as everywhere else in this project — the current password
+    must be right, the new one must satisfy Django's validators and the no-reuse
+    rules (TI.1.1#04/#05), and setting it records history and clears the
+    force-change flag and lockout counters (`set_new_password`).
+
+    Refusals are raised as `PasswordRefused` with the messages the reader
+    should see; the survey runner has no policy of its own to apply.
+    """
+    from django.contrib.auth import authenticate
+
+    from prolog_surveys.results import PasswordRefused
+
+    identity = authenticate(username=email, password=current_password)
+    if identity is None:
+        raise PasswordRefused(['Your current password is not right.'])
+    try:
+        validate_password(new_password, identity)
+    except ValidationError as exc:
+        raise PasswordRefused(list(exc.messages)) from None
+    reuse = password_reuse_error(identity, new_password)
+    if reuse:
+        raise PasswordRefused([reuse])
+    set_new_password(identity, new_password)
+    logger.info('prolog results password changed for identity %s', identity.pk)

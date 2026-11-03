@@ -83,7 +83,9 @@ def test_variant_name_aliases_survive_read_and_edit(setup, source):
     assert changed['variant_name'] == 'new name'
     row.refresh_from_db()
     assert row.is_erroneous
-    assert Observation.objects.filter(person=person, observation_event_id=saved['id'], is_erroneous=False).count() == 1
+    assert Observation.objects.filter(person=person, observation_event_id=saved['id'],
+        observation_source_value=source if source.startswith('reviewed:') else 'genomics:variant_name',
+        is_erroneous=False).count() == 1
 
 
 def complete_vocabulary():

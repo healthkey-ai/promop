@@ -1,7 +1,7 @@
 import BrandLogo from '@/components/Branding/BrandLogo';
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { ArrowLeft, Check, AlertCircle, ChevronDown, Download, ShieldCheck } from "lucide-react";
+import { ArrowLeft, Check, AlertCircle, ChevronDown, ShieldCheck } from "lucide-react";
 import api from "@/api/axios";
 import { fetchWritableFields, LIFECYCLE, type FieldDescriptors } from "@/hooks/useWritableFields";
 // Profile fields now write through PatientRecord PATCH alongside clinical fields.
@@ -9,6 +9,7 @@ import type { User } from "@/hooks/useAuth";
 import DeleteAccountDialog from "./DeleteAccountDialog";
 import AllergyList from "./AllergyList";
 import ImmunizationList from "./ImmunizationList";
+import DownloadRecordMenu from "./download/DownloadRecordMenu";
 import PatientSurveys from "./PatientSurveys";
 import PatientConsents from "./PatientConsents";
 import AdvanceDirectives from "./AdvanceDirectives";
@@ -16,14 +17,16 @@ import PatientMessages from "./PatientMessages";
 import GeneralTab from "@/components/PatientInfo/tabs/GeneralTab";
 import DiseaseTab from "@/components/PatientInfo/tabs/DiseaseTab";
 import TreatmentTab from "@/components/PatientInfo/tabs/TreatmentTab";
-import BloodTab from "@/components/PatientInfo/tabs/BloodTab";
 import LabsTab from "@/components/PatientInfo/tabs/LabsTab";
 import GenomicsTab from "@/components/PatientInfo/tabs/GenomicsTab";
 import BehaviorTab from "@/components/PatientInfo/tabs/BehaviorTab";
 import WearableTab from "@/components/PatientInfo/tabs/WearableTab";
 import ClinicalSummaryTab from "@/components/PatientInfo/tabs/ClinicalSummaryTab";
 import PatientOmopTab from "./PatientOmopTab";
+import PatientSourceCodesTab from "./PatientSourceCodesTab";
 import { confirmRecord } from "@/api/clinicalFacts";
+import { mayBeUnitedStates } from "@/lib/usZip";
+import { FieldMappingLinksProvider } from "@/components/PatientInfo/fieldMappingLinks";
 
 type SaveStatus = "idle" | "pending" | "saving" | "saved" | "error";
 
@@ -281,6 +284,35 @@ interface PatientDetailProps {
   user?: User | null;
 }
 
+/** The record as the editor holds it: ECOG as a select value, TNBC derived. */
+function normalizeRecord(raw: Record<string, unknown>): Record<string, unknown> {
+  const d = { ...raw };
+  if (d.ecog_performance_status != null)
+    d.ecog_performance_status = String(d.ecog_performance_status);
+
+  if (d.estrogen_receptor_status && d.progesterone_receptor_status && d.her2_status) {
+    const erNeg = d.estrogen_receptor_status === "Negative";
+    const prNeg = d.progesterone_receptor_status === "Negative";
+    const her2Neg = d.her2_status === "Negative";
+    d.tnbc_status = erNeg && prNeg && her2Neg;
+  }
+  return d;
+}
+
+/**
+ * The /patient/:personId route, remounted per patient.
+ *
+ * PatientDetail's editor state -- the pending autosave, the save baseline, the
+ * timer, the save sequence -- belongs to one patient. React Router keeps the
+ * element mounted when only the param changes (e.g. picking another patient
+ * from the browser's history menu), and B's first edit was then built on A's
+ * values and PATCHed into B. Keying by id drops all of it at once (#1668).
+ */
+export function PatientDetailRoute({ user }: { user?: User | null }) {
+  const { personId } = useParams<{ personId: string }>();
+  return <PatientDetail key={personId} user={user} />;
+}
+
 export default function PatientDetail({
   personIdOverride,
   patientMode = false,
@@ -308,8 +340,6 @@ export default function PatientDetail({
   const [activeTab, setActiveTab] = useState(0);
   const [patientView, setPatientView] = useState<PatientView>("tabs");
 
-  const [downloading, setDownloading] = useState(false);
-  const [downloadError, setDownloadError] = useState<string | null>(null);
 
   type InviteState = "idle" | "sending" | "sent" | "error";
   const [inviteState, setInviteState] = useState<InviteState>("idle");
@@ -317,6 +347,9 @@ export default function PatientDetail({
 
   const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const saveSeqRef = useRef(0);
+  const saveRevisionRef = useRef(0);
+  const dirtyFieldsRef = useRef(new Set<string>());
+  const confirmedWritesRef = useRef<Record<string, unknown>>({});
    
   const pendingDataRef = useRef<{ info: Record<string, unknown>; name: string } | null>(null);
    
@@ -339,29 +372,55 @@ export default function PatientDetail({
   useEffect(() => { editedInfoRef.current = editedInfo; }, [editedInfo]);
   useEffect(() => { editedNameRef.current = editedName; }, [editedName]);
   useEffect(() => { patientNameRef.current = patientName; }, [patientName]);
-  useEffect(() => () => { if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current); }, []);
+  // Take a record the server returned as the new save baseline and editor state.
+  //
+  // pendingDataRef is the synchronous copy of the editor state -- every edit is
+  // built on it -- so replacing editedInfo alone let the next edit resurrect the
+  // pre-refresh values, and diffed against the new baseline they were sent as
+  // edits. Edits not yet saved are kept on top of the fresh record, so a refresh
+  // landing inside the autosave window neither drops them nor shows them reverted.
+  const adoptServerRecord = useCallback((raw: Record<string, unknown>, readRevision?: number) => {
+    const fresh = normalizeRecord(raw);
+    // A read begun before our PATCH can arrive after it and carry old values.
+    // Keep confirmed writes until a read begun after that PATCH acknowledges
+    // them. Child components that hand back a record without a request marker
+    // conservatively keep mismatching confirmed values as well.
+    if (readRevision !== undefined && readRevision === saveRevisionRef.current) {
+      confirmedWritesRef.current = {};
+    } else {
+      for (const [field, value] of Object.entries(confirmedWritesRef.current)) {
+        if (fresh[field] === value) delete confirmedWritesRef.current[field];
+        else fresh[field] = value;
+      }
+    }
+    const pending = pendingDataRef.current;
+    const unsaved: Record<string, unknown> = {};
+    if (pending) {
+      for (const field of dirtyFieldsRef.current) {
+        if (!LIFECYCLE.has(field) && pending.info[field] !== fresh[field]) {
+          unsaved[field] = pending.info[field];
+        } else {
+          dirtyFieldsRef.current.delete(field);
+        }
+      }
+    }
+    const edited = { ...fresh, ...unsaved };
+
+    patientInfoRef.current = { ...fresh };
+    setPatientInfo(fresh);
+    if (pending) pendingDataRef.current = { ...pending, info: edited };
+    setEditedInfo(edited);
+  }, []);
 
   useEffect(() => {
     if (!personId) return;
+    const readRevision = saveRevisionRef.current;
     (async () => {
       try {
         setLoading(true);
         const res = await api.get(`/patient-info/${personId}/`);
         const d = res.data.patient_info;
-
-        if (d.ecog_performance_status != null)
-          d.ecog_performance_status = String(d.ecog_performance_status);
-
-        if (d.estrogen_receptor_status && d.progesterone_receptor_status && d.her2_status) {
-          const erNeg = d.estrogen_receptor_status === "Negative";
-          const prNeg = d.progesterone_receptor_status === "Negative";
-          const her2Neg = d.her2_status === "Negative";
-          d.tnbc_status = erNeg && prNeg && her2Neg;
-        }
-
-        setPatientInfo(d);
-        patientInfoRef.current = { ...d };
-        setEditedInfo(d);
+        adoptServerRecord(d, readRevision);
 
         const user = res.data.user;
         const name = d.patient_name
@@ -380,26 +439,14 @@ export default function PatientDetail({
         setLoading(false);
       }
     })();
-  }, [personId]);
+  }, [personId, adoptServerRecord]);
 
    
-  const doSave = useCallback(async () => {
-    const data = pendingDataRef.current;
-    if (!data || !personId) return;
+  const performSave = useCallback(async () => {
+    if (!pendingDataRef.current || !personId) return;
     const seq = ++saveSeqRef.current;
     setSaveStatus("saving");
     try {
-      // scheduleAutoSave carries the edited name alongside the field data, but
-      // only data.info was ever sent — and data.info is the whole GET response,
-      // which already carries the ORIGINAL patient_name. So a rename never
-      // reached the server, and every autosave echoed the old name back.
-      //
-      // Strip it unconditionally and re-add only on a real rename. Sending the
-      // server's own value back is never useful, and for a patient with no name
-      // it is harmful: the rendered value is the synthesised "Patient 3542".
-      const { patient_name: _echoed, ...info } = data.info as Record<string, unknown>;
-      const renamed = !!data.name && data.name !== patientNameRef.current;
-
       // All fields — clinical and profile alike — go through PatientRecord
       // PATCH. The backend projects profile fields to Person/Location and
       // clinical fields to OMOP tables after the PATCH lands.
@@ -414,7 +461,24 @@ export default function PatientDetail({
           + 'attempted. Retry once the connection is back.',
         );
       }
+      // The snapshot and the baseline it is diffed against are read together,
+      // after the await: a server refresh landing while the descriptor loads
+      // moves the baseline and rebases pendingDataRef, and a snapshot taken
+      // before it would send the server's moved values back as edits (#1668).
+      // Checked on entry, and nothing resets it to null.
+      const data = pendingDataRef.current!;
       const baseline = patientInfoRef.current ?? {};
+
+      // scheduleAutoSave carries the edited name alongside the field data, but
+      // only data.info was ever sent — and data.info is the whole GET response,
+      // which already carries the ORIGINAL patient_name. So a rename never
+      // reached the server, and every autosave echoed the old name back.
+      //
+      // Strip it unconditionally and re-add only on a real rename. Sending the
+      // server's own value back is never useful, and for a patient with no name
+      // it is harmful: the rendered value is the synthesised "Patient 3542".
+      const { patient_name: _echoed, ...info } = data.info as Record<string, unknown>;
+      const renamed = !!data.name && data.name !== patientNameRef.current;
       const patchFields: Record<string, unknown> = {};
 
       for (const [f, v] of Object.entries(info)) {
@@ -434,8 +498,21 @@ export default function PatientDetail({
           `/patient-info/${personId}/`,
           renamed ? { ...patchFields, patient_name: data.name } : patchFields,
         );
+        saveRevisionRef.current += 1;
         for (const f of Object.keys(patchFields)) {
           if (patientInfoRef.current) patientInfoRef.current[f] = info[f];
+          confirmedWritesRef.current[f] = info[f];
+          if (pendingDataRef.current?.info[f] === info[f]) dirtyFieldsRef.current.delete(f);
+        }
+      }
+      // Derived/read-only fields may change in the editor as a side effect of
+      // an actual edit (for example tnbc_status). They were not sent, so they
+      // must not remain an unsaved overlay across later server refreshes.
+      for (const field of dirtyFieldsRef.current) {
+        const descriptor = descriptors[field];
+        if (descriptor && (!descriptor.writable || descriptor.target !== 'patient_record')
+            && pendingDataRef.current?.info[field] === info[field]) {
+          dirtyFieldsRef.current.delete(field);
         }
       }
       if (seq === saveSeqRef.current) {
@@ -486,6 +563,32 @@ export default function PatientDetail({
     }
   }, [personId]);
 
+  const saveInFlightRef = useRef<Promise<void> | null>(null);
+  const doSave = useCallback(() => {
+    // An edit made while a prior PATCH is still in flight must not reach the
+    // server first: the older response could otherwise overwrite it. This also
+    // orders a save flushed during unmount behind the previous save.
+    const next = Promise.resolve(saveInFlightRef.current).then(() => performSave());
+    saveInFlightRef.current = next;
+    void next.then(
+      () => { if (saveInFlightRef.current === next) saveInFlightRef.current = null; },
+      () => { if (saveInFlightRef.current === next) saveInFlightRef.current = null; },
+    );
+    return next;
+  }, [performSave]);
+
+  const doSaveRef = useRef(doSave);
+  doSaveRef.current = doSave;
+  useEffect(() => () => {
+    if (autoSaveTimerRef.current) {
+      clearTimeout(autoSaveTimerRef.current);
+      autoSaveTimerRef.current = null;
+      // The old PatientDetail instance retains its personId when a route switch
+      // unmounts it; flush its edit instead of dropping the two-second timer.
+      void doSaveRef.current();
+    }
+  }, []);
+
    
   const scheduleAutoSave = useCallback((info: Record<string, unknown>, name: string) => {
     pendingDataRef.current = { info, name };
@@ -504,18 +607,17 @@ export default function PatientDetail({
   // patched directly.
   const reloadPatientInfo = useCallback(() => {
     if (!personId) return;
+    const readRevision = saveRevisionRef.current;
     api.get(`/patient-info/${personId}/`)
-      .then((res) => {
-        const d = res.data.patient_info;
-        setPatientInfo(d);
-        setEditedInfo(d);
-      })
+      .then((res) => adoptServerRecord(res.data.patient_info, readRevision))
       .catch(() => {});
-  }, [personId]);
+  }, [personId, adoptServerRecord]);
 
   const handleFieldChange = useCallback((field: string, value: unknown) => {
     const base = pendingDataRef.current?.info ?? editedInfoRef.current;
     const updated = { ...base, [field]: value };
+    if (value === patientInfoRef.current?.[field]) dirtyFieldsRef.current.delete(field);
+    else dirtyFieldsRef.current.add(field);
 
     if (["estrogen_receptor_status", "progesterone_receptor_status", "her2_status"].includes(field)) {
       const er = String(field === "estrogen_receptor_status" ? value : updated.estrogen_receptor_status ?? "");
@@ -564,46 +666,46 @@ export default function PatientDetail({
 
   const handleZipcodeChange = useCallback(async (zipcode: string) => {
     handleFieldChange("postal_code", zipcode);
+    // Only a country that is set and not the US skips the lookup -- one entered after the
+    // ZIP does not re-run it, so requiring a US country would block ZIP-first patients.
+    const countryAllowsLookup = () =>
+      mayBeUnitedStates((pendingDataRef.current?.info ?? editedInfoRef.current)?.country);
+    if (!countryAllowsLookup()) return;
     if (zipcode.length === 5 && /^\d{5}$/.test(zipcode)) {
       try {
         const res = await fetch(`https://api.zippopotam.us/us/${zipcode}`);
         if (res.ok) {
           const data = await res.json();
-          if (data.places?.length > 0) {
+          // Re-checked for a country picked while the lookup was in flight, and dropped when
+          // the ZIP has changed since: ZIP A's place must not land next to ZIP B.
+          const current = pendingDataRef.current?.info ?? editedInfoRef.current;
+          if (data.places?.length > 0 && countryAllowsLookup()
+              && String(current?.postal_code ?? "") === zipcode) {
             const place = data.places[0];
-             
-            setEditedInfo((prev: Record<string, unknown>) => {
-              const updated = { ...prev, city: place["place name"], region: place["state"] };
-              pendingDataRef.current = { info: updated, name: editedNameRef.current };
-              return updated;
-            });
+            // `state` is the full name ("California"); `region` is projected to OMOP
+            // Location.state, two characters, and the PATCH is refused whole for a longer
+            // value. Take the abbreviation, and leave region alone when the lookup has none.
+            const abbreviation = place["state abbreviation"];
+            // Schedule a save of its own, like handleFieldChange: the keystroke's 2s autosave
+            // may already have run, and then nothing would send city/region.
+            const updated = {
+              ...(pendingDataRef.current?.info ?? editedInfoRef.current),
+              city: place["place name"],
+              ...(abbreviation ? { region: abbreviation } : {}),
+            };
+            setEditedInfo(updated);
+            if (updated.city === patientInfoRef.current?.city) dirtyFieldsRef.current.delete('city');
+            else dirtyFieldsRef.current.add('city');
+            if (abbreviation) {
+              if (updated.region === patientInfoRef.current?.region) dirtyFieldsRef.current.delete('region');
+              else dirtyFieldsRef.current.add('region');
+            }
+            scheduleAutoSave(updated, editedNameRef.current);
           }
         }
       } catch { /* ignore zip lookup failures */ }
     }
-  }, [handleFieldChange]);
-
-  const handleDownloadFhir = useCallback(async () => {
-    if (!personId) return;
-    setDownloading(true);
-    setDownloadError(null);
-    try {
-      const response = await api.get(`/v1/patient-records/${personId}/export-fhir/`);
-      const blob = new Blob([JSON.stringify(response.data, null, 2)], { type: "application/fhir+json" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = "my-health-record.fhir.json";
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-    } catch {
-      setDownloadError("Failed to download your health record. Please try again.");
-    } finally {
-      setDownloading(false);
-    }
-  }, [personId]);
+  }, [handleFieldChange, scheduleAutoSave]);
 
   const getDiseaseType = (): "breast" | "lymphoma" | "myeloma" | "cll" | "mcl" | "other" => {
     const d = (typeof editedInfo?.disease === "string" ? editedInfo.disease : "").toLowerCase();
@@ -646,45 +748,56 @@ export default function PatientDetail({
   const canViewOmop = !patientMode && !!(user?.is_staff || user?.is_org_admin);
   const diseaseType = getDiseaseType();
   const showDiseaseTab = diseaseType !== "other";
-  const coreTabs = ["General", ...(showDiseaseTab ? [getDiseaseTabLabel()] : []), "Treatment", "Blood", "Labs", "Genomics"];
+  const coreTabs = ["General", ...(showDiseaseTab ? [getDiseaseTabLabel()] : []), "Treatment", "Labs", "Genomics"];
   const afterLabsTabs = patientMode ? ["Allergies"] : [];
   const trailingTabs = ["Behavior", "Wearables", "History"];
   const surveyTabs = patientMode ? ["Surveys"] : [];
-  const adminTabs = canViewOmop ? ["OMOP"] : [];
+  const adminTabs = canViewOmop ? ["Source Codes", "OMOP"] : [];
   const tabLabels = [...coreTabs, ...afterLabsTabs, ...trailingTabs, ...surveyTabs, ...adminTabs];
 
   // Compute dynamic indices — disease tab shifts everything when absent.
   const diseaseIdx = showDiseaseTab ? 1 : -1;
   const treatmentIdx = showDiseaseTab ? 2 : 1;
-  const bloodIdx = treatmentIdx + 1;
-  const labsIdx = bloodIdx + 1;
+  const labsIdx = treatmentIdx + 1;
   const genomicsIdx = labsIdx + 1;
   const allergiesIdx = patientMode ? coreTabs.length : -1;
   const behaviorIdx = coreTabs.length + afterLabsTabs.length;
   const wearablesIdx = behaviorIdx + 1;
   const summaryIdx = wearablesIdx + 1;
   const surveysIdx = patientMode ? summaryIdx + 1 : -1;
+  const sourceCodesIdx = canViewOmop ? tabLabels.length - 2 : -1;
   const omopIdx = canViewOmop ? tabLabels.length - 1 : -1;
 
   const tabDescriptions: Record<number, string> = {
     0: "Keep patient details up to date for accurate personalisation.",
     ...(diseaseIdx >= 0 ? { [diseaseIdx]: "Staging and disease-specific clinical information." } : {}),
     [treatmentIdx]: "Therapy history, treatment lines, and planned therapies.",
-    [bloodIdx]: "Blood counts and differential.",
-    [labsIdx]: "Chemistry, liver function, coagulation, cardiac and tumour markers.",
+    [labsIdx]: "Blood counts, chemistry, liver function, coagulation, cardiac and tumour markers.",
     [genomicsIdx]: "Genes, variants, origins, interpretations, and test details.",
     ...(allergiesIdx >= 0 ? { [allergiesIdx]: "Known allergies and intolerances from your health records." } : {}),
     [behaviorIdx]: "Lifestyle, socioeconomic, and behavioural health factors.",
     [wearablesIdx]: "30 day summaries derived from synced OMOP data.",
     [summaryIdx]: "Read-only overview of all clinical data grouped by domain.",
     ...(surveysIdx >= 0 ? { [surveysIdx]: "Surveys assigned to you by your care team." } : {}),
+    ...(sourceCodesIdx >= 0 ? { [sourceCodesIdx]: "Source codes from imported data and their OMOP mapping status." } : {}),
     ...(omopIdx >= 0 ? { [omopIdx]: "Raw OMOP rows associated with this patient." } : {}),
   };
 
   const initials = getInitials(patientName);
   const avatarBg = getAvatarBg(patientName);
+  const downloadMenu = personId ? (
+    <DownloadRecordMenu
+      personId={Number(personId)}
+      patientMode={patientMode}
+      record={editedInfo}
+      name={patientName}
+      diseaseType={diseaseType}
+      diseaseLabel={getDiseaseTabLabel()}
+    />
+  ) : null;
 
   return (
+    <FieldMappingLinksProvider value={canViewOmop}>
     <div className="min-h-screen bg-[#f5f7fa]">
       <div className="sticky top-0 z-20 border-b border-border bg-background/90 shadow-[0_1px_3px_rgba(0,0,0,0.05)] backdrop-blur-md">
         <div className={`mx-auto flex min-h-14 max-w-5xl items-center justify-between gap-4 px-6 py-2 ${patientMode ? "flex-wrap sm:flex-nowrap" : ""}`}>
@@ -702,14 +815,7 @@ export default function PatientDetail({
             {patientMode && (
               <div className="flex items-center gap-3">
                 <span className="text-sm font-semibold text-foreground">My Health Record</span>
-                <button
-                  onClick={handleDownloadFhir}
-                  disabled={downloading}
-                  className="inline-flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1 text-xs font-medium text-muted-foreground transition-colors hover:bg-[#eef0f4] hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  <Download className="h-3.5 w-3.5" />
-                  {downloading ? "Downloading..." : "Download"}
-                </button>
+                {downloadMenu}
               </div>
             )}
           </div>
@@ -733,6 +839,7 @@ export default function PatientDetail({
                       {editedInfo.disease}
                     </span>
                   )}
+                  {downloadMenu}
                 </div>
               </>
             )}
@@ -811,22 +918,15 @@ export default function PatientDetail({
                         validated={!!editedInfo.validated}
                         validationDate={editedInfo.validation_date as string | null}
                         onConfirm={async () => {
+                          const readRevision = saveRevisionRef.current;
                           try {
                             const result = await confirmRecord();
-                            setEditedInfo((prev) => ({
-                              ...prev,
+                            adoptServerRecord({
+                              ...patientInfoRef.current,
                               validated: result.validated,
                               validated_by: result.validated_by,
                               validation_date: result.validation_date,
-                            }));
-                            setPatientInfo((prev) =>
-                              prev ? {
-                                ...prev,
-                                validated: result.validated,
-                                validated_by: result.validated_by,
-                                validation_date: result.validation_date,
-                              } : prev,
-                            );
+                            }, readRevision);
                           } catch {
                             setSaveErrorMsg('Failed to confirm record. Please try again.');
                           }
@@ -861,9 +961,7 @@ export default function PatientDetail({
                         // Advancing the baseline too stops the next autosave
                         // reading these derived moves as edits to read-only
                         // columns — the failure #627 fixed.
-                        setPatientInfo(info);
-                        setEditedInfo(info);
-                        patientInfoRef.current = { ...info };
+                        adoptServerRecord(info);
                       }}
                     />
                     {patientMode && (
@@ -873,7 +971,6 @@ export default function PatientDetail({
                     )}
                   </>
                 )}
-                {activeTab === bloodIdx && <BloodTab formData={editedInfo} onChange={handleFieldChange} />}
                 {activeTab === labsIdx && <LabsTab formData={editedInfo} onChange={handleFieldChange} />}
                 {activeTab === genomicsIdx && <GenomicsTab formData={editedInfo} />}
                 {allergiesIdx >= 0 && activeTab === allergiesIdx && <AllergyList user={user ?? null} />}
@@ -881,6 +978,7 @@ export default function PatientDetail({
                 {activeTab === wearablesIdx && <WearableTab formData={editedInfo} onChange={handleFieldChange} onRefresh={reloadPatientInfo} />}
                 {activeTab === summaryIdx && <ClinicalSummaryTab formData={editedInfo} onNavigateToLabs={() => setActiveTab(labsIdx)} />}
                 {surveysIdx >= 0 && activeTab === surveysIdx && <PatientSurveys user={user ?? null} />}
+                {sourceCodesIdx >= 0 && activeTab === sourceCodesIdx && personId && <PatientSourceCodesTab personId={personId} />}
                 {omopIdx >= 0 && activeTab === omopIdx && personId && <PatientOmopTab personId={personId} />}
               </div>
             </div>
@@ -920,9 +1018,7 @@ export default function PatientDetail({
       {saveErrorMsg && (
         <ErrorToast message={saveErrorMsg} onDismiss={() => setSaveErrorMsg(null)} />
       )}
-      {downloadError && (
-        <ErrorToast message={downloadError} onDismiss={() => setDownloadError(null)} />
-      )}
     </div>
+    </FieldMappingLinksProvider>
   );
 }

@@ -1,5 +1,6 @@
 """Project PatientRecord edits into today's OMOP facts, retaining earlier days."""
 import logging
+from datetime import date
 
 from django.core.exceptions import ValidationError
 from django.db import transaction
@@ -10,12 +11,16 @@ from omop_core.models import (
     PatientRecord, Person, ProcedureOccurrence,
 )
 from omop_core.services.breast_mapping_safety import wrong_breast_field_mappings
+from omop_core.services.mappings import CONCEPT_PATIENT_REPORTED_TYPE
 from omop_core.services.pk import next_pk
 
 logger = logging.getLogger(__name__)
 
 # An explicit empty result stops derivation from falling back to older results.
 CLEAR_VALUE = 'PatientRecord:cleared'
+
+# OMOP type concept "Patient self-report" (Type Concept vocabulary).
+PATIENT_SELF_REPORT_TYPE = CONCEPT_PATIENT_REPORTED_TYPE
 
 _TARGET_CONFIG = {
     'measurement': (
@@ -52,7 +57,8 @@ def _is_empty(value):
 
 def projection_for_descriptor(entry):
     """Use the same recipe and value/unit semantics the editor advertises."""
-    if not entry or not entry.get('writable') or entry.get('target') != 'patient_record':
+    if (not entry or entry.get('clinical_input_contract')
+            or not entry.get('writable') or entry.get('target') != 'patient_record'):
         return None
     if not entry.get('projection'):
         return None
@@ -63,7 +69,7 @@ def projection_for_descriptor(entry):
     }
 
 
-def curated_values_from_snapshot(snapshot):
+def curated_values_from_snapshot(snapshot, *, confirmed_clinical_fields=None):
     """Read approved scalar mappings during external OMOP refreshes only.
 
     Direct saves acknowledge successful projections without reading them back.
@@ -72,10 +78,12 @@ def curated_values_from_snapshot(snapshot):
     All facts come from the snapshot already loaded by that external refresh.
     """
     from omop_core.services.patient_record_service import (
-        PATIENT_RECORD_OMOP_MAPPED_FIELDS, _latest_blood_count_measurements,
+        PATIENT_RECORD_OMOP_MAPPED_FIELDS, _ASSERTION_DETAIL_FIELDS,
+        _latest_assertion_rows, _latest_blood_count_measurements,
         _latest_loinc_measurement,
     )
     from omop_core.services.clinical_units import blood_count_projection
+    from omop_core.services.field_write_service import _invert_inverse_assertion
     from omop_core.services.write_descriptor import (
         _LIFECYCLE_FIELDS, _WRITE_RECIPE_INCOMPLETE,
         get_serializer_read_only_fields, mapping_target_for,
@@ -97,7 +105,23 @@ def curated_values_from_snapshot(snapshot):
         for row in rows:
             by_key.setdefault((getattr(row, concept_field), getattr(row, source_field)), row)
         indexed[target] = by_key
-    values = {}
+    from omop_core.services.clinical_input_contract import (
+        NEW_INPUT_FIELDS, select_sct_source, values_from_snapshot,
+    )
+    values = values_from_snapshot(snapshot, confirmed_fields=confirmed_clinical_fields)
+    values.pop('sct_date', None)
+    if confirmed_clinical_fields is not None:
+        confirmed_clinical_fields.discard('sct_date')
+    # Assertion fields are answered across both OMOP tables: the latest row
+    # wins, and a newer unusable answer deliberately leaves the field unknown.
+    # An exact mapping reads only one table, so use the same selected row as
+    # the assertion extractor for precedence. A reviewed mapping to another
+    # concept is still read when no assertion-code row answers the field.
+    assertion_rows = dict(_latest_assertion_rows(snapshot))
+    for field, selected in list(assertion_rows.items()):
+        detail_field = _ASSERTION_DETAIL_FIELDS.get(selected[2])
+        if detail_field:
+            assertion_rows.setdefault(detail_field, selected)
     count_dates = {
         field: (row.measurement_date, row.pk)
         for field, row in _latest_blood_count_measurements(snapshot).items()
@@ -110,15 +134,34 @@ def curated_values_from_snapshot(snapshot):
     ).exclude(wrong_breast_field_mappings()).exclude(value_kind='json').exclude(field_name='cytogenetic_markers', vocabulary_id='SNOMED', concept_code='107675007').values(
         'field_name', 'omop_table', 'concept_id', 'concept__concept_code', 'source_value',
     )
+    sct_mapping = None
     for mapping in mappings:
         name = mapping['field_name']
+        if name == 'sct_date':
+            sct_mapping = mapping
+            continue
+        source_value = mapping['source_value'] or mapping['concept__concept_code']
+        if name in NEW_INPUT_FIELDS:
+            # Dedicated decoder owns units, tombstones and invalid latest facts;
+            # generic conversion must not resurrect an older mapped result.
+            continue
         target = mapping_target_for(mapping['omop_table'])
         if target not in indexed:
             continue
-        source_value = mapping['source_value'] or mapping['concept__concept_code']
         row = indexed[target].get((mapping['concept_id'], source_value))
         if row is None:
             continue
+        selected = assertion_rows.get(name)
+        if selected is not None:
+            row_date = (getattr(row, 'measurement_date', None)
+                        or getattr(row, 'observation_date', None))
+            # Only a strictly older approved mapping is suppressed. A mapped
+            # row and the selected assertion can share a date on different
+            # tables, and their table-local ids are not comparable (separate
+            # sequences); deferring to the other table there would silently
+            # undo a reviewed same-day edit on the next refresh.
+            if (row_date or date.min) < (selected[0] or date.min):
+                continue
         question = {
             'ki67_proliferation_index': '29593-1',
             'test_methodology': '85069-3',
@@ -146,6 +189,11 @@ def curated_values_from_snapshot(snapshot):
         if value is None:
             continue
         try:
+            # The stored row carries the source answer. Invert only when the
+            # mapping is the reviewed inverse code for this field; another
+            # approved concept already describes the field directly.
+            value = _invert_inverse_assertion(
+                name, value, source_value, mapping['concept__concept_code'])
             value = readable_fields[name].to_python(value)
             if name == 'cytogenetic_markers':
                 from omop_core.services.cytogenetics import (
@@ -155,6 +203,11 @@ def curated_values_from_snapshot(snapshot):
             values[name] = value
         except (ValidationError, ValueError, TypeError):
             continue
+    sct = select_sct_source(snapshot, sct_mapping)
+    if sct.has_value:
+        values['sct_date'] = sct.value
+    if sct.confirmed and confirmed_clinical_fields is not None:
+        confirmed_clinical_fields.add('sct_date')
     return values
 
 
@@ -166,7 +219,14 @@ def project_field_to_omop(mapping) -> int:
     """
     from omop_core.services.patient_record_service import refresh_patient_record
     from omop_core.services.write_descriptor import build_writable_field_descriptor
+    from omop_core.services.clinical_input_contract import uses_dedicated_writer
 
+    if mapping.field_name in ('drug_exposure.role', 'drug_exposure.category'):
+        from omop_core.services.medication_context import backfill_record_contexts
+        return backfill_record_contexts(mapping)
+    if uses_dedicated_writer(mapping.field_name):
+        # Curation is not evidence of who authored pending projection values.
+        return 0
     if mapping.status != 'approved':
         return 0
     projection = projection_for_descriptor(
@@ -196,18 +256,31 @@ def project_field_to_omop(mapping) -> int:
 
 
 def project_single_value(person, field_name, value, projection, *, acknowledge_existing=False,
-                         after_pk=None):
+                         after_pk=None, type_concept_id=None, patient_user_id=None):
     """Update a matching non-erroneous fact today, or create today's fact.
 
     Matching includes the concept and source key. Earlier dates are history and
     are never updated. The person lock serializes concurrent first writes for a
     day; an atomic savepoint keeps projection failures from poisoning PATCH.
 
+    *type_concept_id* types the fact by who wrote it, overriding the recipe's
+    type: 32865 when a patient or their representative is the author. It then
+    also narrows matching to facts of that type, so a patient's answer never
+    updates a clinical fact in place and takes over its type and provenance;
+    it sits beside it as its own fact. The rule holds the other way too: an
+    edit by anyone else never updates a patient's self-report fact, unless the
+    recipe itself is typed self-report. *patient_user_id* (``issuer|sub``)
+    records a PATIENT_SELF provenance row whenever the patient themselves
+    writes, the same row the PHR entry endpoints record.
+
     Normally returns whether a fact changed. Direct saves can acknowledge an
     identical existing fact too, so it is not mistaken for a failed projection.
     Collection edits can supply after_pk to keep corrections newer than an
     aggregate import that superseded earlier individual rows on the same day.
     """
+    from omop_core.services.clinical_input_contract import uses_dedicated_writer
+    if uses_dedicated_writer(field_name):
+        raise ValidationError('Clinical inputs require the dedicated source writer.')
     if field_name == 'cytogenetic_markers' and 'choice_projections' in projection:
         from omop_core.services.cytogenetics import project_selections
         try:
@@ -220,6 +293,11 @@ def project_single_value(person, field_name, value, projection, *, acknowledge_e
     source_value = projection.get('source_value')
     if target not in _TARGET_CONFIG or concept_id is None or not source_value:
         return False
+    # This path carries the PatientRecord value. A reviewed inverse assertion
+    # code stores the opposite answer; other approved concepts keep their own.
+    from omop_core.services.field_write_service import _invert_inverse_assertion
+    value = _invert_inverse_assertion(
+        field_name, value, source_value, projection.get('concept_code'))
     model, pk_field, concept_field, date_field, type_field, src_field, val_num, val_str = _TARGET_CONFIG[target]
     # Occurrence tables cannot encode a null/negative answer. Leave that edit
     # pending on PatientRecord instead of inventing an affirmative occurrence.
@@ -227,13 +305,20 @@ def project_single_value(person, field_name, value, projection, *, acknowledge_e
         return False
 
     today = timezone.localdate()
+    fact_type = type_concept_id or projection.get('type_concept_id') or 32817
     try:
         with transaction.atomic():
             Person.objects.select_for_update().get(pk=person.pk)
+            from omop_core.services.cancer_details import projection_scope
+            scope = projection_scope(person, field_name, model)
             candidates = model.objects.filter(
                 person=person, is_erroneous=False,
-                **{concept_field: concept_id, src_field: source_value, date_field: today},
+                **{concept_field: concept_id, src_field: source_value, date_field: today}, **scope,
             )
+            if type_concept_id is not None:
+                candidates = candidates.filter(**{type_field: type_concept_id})
+            elif fact_type != PATIENT_SELF_REPORT_TYPE:
+                candidates = candidates.exclude(**{type_field: PATIENT_SELF_REPORT_TYPE})
             if after_pk is not None:
                 candidates = candidates.filter(pk__gt=after_pk)
             instance = candidates.order_by('-' + pk_field).first()
@@ -242,7 +327,7 @@ def project_single_value(person, field_name, value, projection, *, acknowledge_e
                 instance = model(**{
                     pk_field: next_pk(model, pk_field), 'person': person,
                     concept_field: concept_id, src_field: source_value,
-                    date_field: today, type_field: projection.get('type_concept_id') or 32817,
+                    date_field: today, type_field: fact_type, **scope,
                 })
             answer_fields = ('value_as_number', 'value_as_string', 'value_as_concept_id',
                              'value_source_value', 'unit_source_value', 'unit_concept_id')
@@ -262,6 +347,11 @@ def project_single_value(person, field_name, value, projection, *, acknowledge_e
                             instance.value_as_string, note_changed = store_cytogenetic_summary(instance, str(value))
                         else:
                             instance.value_as_string = str(value)
+                    elif kind == 'concept':
+                        instance.value_as_string = str(value)
+                        concept_pk = projection.get('value_concept_map', {}).get(str(value))
+                        if concept_pk is not None:
+                            instance.value_as_concept_id = concept_pk
                     else:
                         try:
                             instance.value_as_number = float(value)
@@ -271,12 +361,43 @@ def project_single_value(person, field_name, value, projection, *, acknowledge_e
                 instance.unit_concept_id = projection.get('unit_concept_id') or None
             if existing and not note_changed and all(getattr(instance, f) == v for f, v in previous.items()):
                 return acknowledge_existing
+            if scope and any(value is not None for value in scope.values()):
+                setattr(instance, f'{target}_datetime', timezone.now())
             instance._skip_patient_record_refresh = True
             instance.save()
+            if patient_user_id:
+                _record_patient_provenance(instance, patient_user_id)
         return True
     except Exception:
         logger.warning('OMOP value projection failed; edit remains pending')
         return False
+
+
+def patient_self_report_type():
+    """32865 when this database has the concept, else None.
+
+    Fact type columns are foreign keys checked when the request's transaction
+    commits, after the projection savepoint has closed. A type the vocabulary
+    lacks would fail the whole save there rather than leave the edit pending,
+    so without the concept the recipe's type stands, as it did before.
+    """
+    from omop_core.models import Concept
+
+    if Concept.objects.filter(concept_id=PATIENT_SELF_REPORT_TYPE).exists():
+        return PATIENT_SELF_REPORT_TYPE
+    logger.warning('Concept %s (Patient self-report) is not loaded; patient edits keep the recipe type',
+                   PATIENT_SELF_REPORT_TYPE)
+    return None
+
+
+def _record_patient_provenance(instance, patient_user_id):
+    from django.contrib.contenttypes.models import ContentType
+    from omop_core.models import ProvenanceRecord
+
+    ProvenanceRecord.objects.get_or_create(
+        content_type=ContentType.objects.get_for_model(type(instance)), object_id=instance.pk,
+        source='PATIENT_SELF', source_user_id=patient_user_id,
+    )
 
 
 def without_cleared_history(rows, target):
@@ -288,8 +409,11 @@ def without_cleared_history(rows, target):
     _, _, concept_field, _, _, source_field, _, _ = _TARGET_CONFIG[target]
     cleared = set()
     result = []
+    event = 'measurement_event_id' if target == 'measurement' else 'observation_event_id'
+    kind = 'meas_event_field_concept_id' if target == 'measurement' else 'obs_event_field_concept_id'
     for row in rows:
-        key = (getattr(row, concept_field), getattr(row, source_field))
+        key = (getattr(row, concept_field), getattr(row, source_field),
+               getattr(row, event, None), getattr(row, kind, None))
         if row.value_source_value == CLEAR_VALUE:
             cleared.add(key)
         elif key not in cleared:

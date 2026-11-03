@@ -23,7 +23,7 @@ from typing import Any, TypedDict
 
 from django.contrib.contenttypes.models import ContentType
 from django.db import connection, models, transaction
-from django.db.models import Max, Model, Q
+from django.db.models import Exists, Max, Model, OuterRef, Q, QuerySet
 from psycopg import sql
 
 from omop_core.models import (
@@ -40,6 +40,7 @@ from omop_core.models import (
     Measurement,
     MeasurementOwnership,
     Note,
+    ImageOccurrence,
     NoteNlp,
     Observation,
     ObservationPeriod,
@@ -48,6 +49,7 @@ from omop_core.models import (
     PatientDocument,
     PatientGroupMembership,
     PatientRecord,
+    PatientSourceCode,
     PatientTrialEnrollment,
     Person,
     PersonalRepresentative,
@@ -58,6 +60,7 @@ from omop_core.models import (
     Specimen,
     SupportiveTherapyCourse,
     TherapyRegimen,
+    TherapyHistoryAttestation,
     TrialSearchPreferences,
     VisitDetail,
     VisitOccurrence,
@@ -74,8 +77,10 @@ from omop_oncology.models import (
     EpisodeEvent,
     Histology,
     StemTable,
+    TherapyLineAssertion,
+    TherapyLineExposure,
 )
-from patient_portal.models import BreakGlassGrant, PatientInvitation, PatientUser
+from patient_portal.models import BreakGlassGrant, PatientInvitation, PatientStatement, PatientUser
 from prolog_surveys.models import (
     MintedParticipant,
     SurveyAnswer,
@@ -129,6 +134,7 @@ PATIENT_TABLES: tuple[PatientTable, ...] = (
     PatientTable(ConditionOccurrence, 'person_id'),
     PatientTable(DrugExposure, 'person_id'),
     PatientTable(ProcedureOccurrence, 'person_id'),
+    PatientTable(ImageOccurrence, 'person_id'),
     PatientTable(Measurement, 'person_id'),
     PatientTable(Observation, 'person_id'),
     PatientTable(Death, 'person_id'),
@@ -140,6 +146,10 @@ PATIENT_TABLES: tuple[PatientTable, ...] = (
     PatientTable(DoseEra, 'person_id'),
     PatientTable(Episode, 'person_id'),
     PatientTable(EpisodeEvent, 'episode_id__in', parent=Episode),
+    # Which exposures a line authored. Copied with the line, so an edit on the
+    # copy corrects the copy's own facts rather than leaving them unowned.
+    PatientTable(TherapyLineExposure, 'episode_id__in', parent=Episode),
+    PatientTable(TherapyLineAssertion, 'episode_id__in', parent=Episode),
     PatientTable(CancerModifier, 'person_id'),
     PatientTable(StemTable, 'person_id'),
     PatientTable(Histology, 'person_id'),
@@ -148,9 +158,12 @@ PATIENT_TABLES: tuple[PatientTable, ...] = (
     PatientTable(SupportiveTherapyCourse, 'person_id'),
     PatientTable(WearableUpload, 'person_id'),
     PatientTable(PatientDocument, 'person_id'),
+    PatientTable(PatientSourceCode, 'person_id'),
     PatientTable(PatientTrialEnrollment, 'person_id'),
     PatientTable(TrialSearchPreferences, 'person_id'),
     PatientTable(PatientRecord, 'person_id'),
+    PatientTable(TherapyHistoryAttestation, 'person_id'),
+    PatientTable(PatientStatement, 'person_id'),
     PatientTable(RecordRevision, 'patient_record__person_id'),
     PatientTable(SurveyResponse, 'participant_id'),
     PatientTable(SurveyAnswer, 'response__participant_id'),
@@ -173,6 +186,8 @@ _INT_REFS: dict[str, type[Model] | None] = {
     'visit_occurrence_id': VisitOccurrence,
     'provider_id': None,
     'care_site_id': None,
+    # PatientDocument: the imaging study a report documents (#1731).
+    'procedure_occurrence_id': ProcedureOccurrence,
 }
 
 # Polymorphic id column and the column holding its field concept.
@@ -180,6 +195,7 @@ _EVENT_REFS: dict[type[Model], tuple[str, str]] = {
     EpisodeEvent: ('event_id', 'episode_event_field_concept_id'),
     Measurement: ('measurement_event_id', 'meas_event_field_concept_id'),
     Observation: ('observation_event_id', 'obs_event_field_concept_id'),
+    Note: ('note_event_id', 'note_event_field_concept_id'),
 }
 
 # System rows that would be deleted with the person, or that point at it by id.
@@ -442,6 +458,13 @@ class _Copier:
             references.append((attname, row[field_attname], row[attname]))
         if model is RecordRevision and values['changed_by'] != 'system':
             values['changed_by'] = None
+        if model is PatientStatement and row['subject'] == PatientStatement.SUBJECT_THERAPY_LINE:
+            # A line is keyed by its Episode id, and Episodes are renumbered here.
+            episode = self.ids.get(Episode, {}).get(int(row['subject_key'])) if row['subject_key'].isdigit() else None
+            if episode is None:
+                self.stats.skipped[label] += 1
+                return None
+            values['subject_key'] = str(episode)
         if model is ProvenanceRecord and not self._provenance(row, values):
             self.stats.skipped[label] += 1
             return None
@@ -563,16 +586,46 @@ def _new_ids(model: type[Model], attname: str, count: int) -> list[int]:
 COPY_SOURCE: str = 'copy_patient'
 
 
-def copied_person_id(source_person_id: int) -> int | None:
-    """person_id here of a patient already copied from that source id."""
+# The marker's patient is still here. EXISTS with a correlated key rather than
+# `object_id__in=Person.objects...`, for the negation below: Postgres pulls a
+# positive IN up into a semi-join, but NOT IN cannot be pulled up because of
+# its NULL semantics, so it is planned as a hashed subplan over the whole
+# person table — measured at 173-265ms against a million rows, against 24-26ms
+# for NOT EXISTS, and _record_copy runs once per copied patient. The positive
+# use is the same plan either way and is written this way for symmetry.
+_MARKER_PATIENT_IS_HERE = Exists(Person.objects.filter(person_id=OuterRef('object_id')))
+
+
+def _copy_markers(source_person_id: int) -> QuerySet:
+    """Every marker written for that source patient, newest first."""
     return ProvenanceRecord.objects.filter(
         source=COPY_SOURCE, source_user_id=str(source_person_id),
         content_type=ContentType.objects.get_for_model(Person),
+    ).order_by('-created_at', '-id')
+
+
+def copied_person_id(source_person_id: int) -> int | None:
+    """person_id here of a patient already copied from that source id.
+
+    Only a patient who is still here counts. The marker holds a generic
+    foreign key, so nothing cascades when the Person row goes. delete_patient()
+    clears it; nothing else does, including account self-deletion, the admin
+    delete, either bulk delete, bulk_import_fhir_bundle, delete_org_patients
+    and the Django admin. A marker pointing at a patient who is gone would
+    otherwise answer "already copied here" with a person_id that no longer
+    resolves, and a re-copy would fail on it forever.
+
+    Newest first, because a chained copy (A to B to C) brings B's own markers
+    with it, so more than one can name a patient who is here.
+    """
+    return _copy_markers(source_person_id).filter(
+        _MARKER_PATIENT_IS_HERE,
     ).values_list('object_id', flat=True).first()
 
 
 def _record_copy(source_person_id: int, person_id: int, organization: Organization) -> None:
-    """Record where this patient came from."""
+    """Record where this patient came from, replacing any marker left behind."""
+    _copy_markers(source_person_id).filter(~_MARKER_PATIENT_IS_HERE).delete()
     ProvenanceRecord.objects.create(
         source=COPY_SOURCE, source_user_id=str(source_person_id), target_patient_id=str(person_id),
         content_type=ContentType.objects.get_for_model(Person), object_id=person_id,

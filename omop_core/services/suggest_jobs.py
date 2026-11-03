@@ -56,6 +56,7 @@ def selection_summary(params):
 
     return {
         'order': (
+            'Codes with Seen greater than zero before zero-Seen codes. Within each group: '
             'Codes without destinations first, regardless of provenance, ordered '
             'by Seen count highest first. Then eligible replacements not yet tried '
             'by this model version, followed by previously tried replacements, '
@@ -98,7 +99,9 @@ class CeleryDispatcher:
         # transaction cannot see the SuggestRun row the caller just created and
         # fails looking it up.
         transaction.on_commit(
-            lambda: suggest_mappings_task.apply_async(args=[run_id, params])
+            lambda: suggest_mappings_task.apply_async(
+                args=[run_id, params], queue='suggest',
+            )
         )
 
 
@@ -175,10 +178,44 @@ def execute_preview(run_id: str, params: dict) -> None:
         preview_params = dict(params['preview'])
         preview_params['ranking_model'] = params.get('ranking_model', 'anthropic')
         result = suggest_one_mapping(**preview_params, activity=activity)
-        activity({'stage': 'result', **params['preview'], **result, 'dry_run': True, 'updated': False})
+        preview = {k: v for k, v in params['preview'].items() if k != 'row_metadata'}
+        activity({'stage': 'result', **preview, **result, 'dry_run': True, 'updated': False})
         runs.update(state=SuggestRun.SUCCESS, done=1, retrieved=1, finished_at=timezone.now())
     except Exception as exc:  # noqa: BLE001 - retain partial candidates on failure
         activity({'stage': 'failure', 'note': str(exc)[:2000]})
+        runs.update(state=SuggestRun.FAILURE, error=str(exc)[:2000], finished_at=timezone.now())
+
+
+def execute_variants(run_id: str, params: dict) -> None:
+    """Suggest a proposed LOINC for each axis variant of one code (#2012).
+
+    The dialog's Suggest already runs one pipeline through this dispatcher
+    because one takes seconds; a code's variants are up to five of them, so
+    they take the same path. The result event carries the suggestions and the
+    variants as stored afterwards.
+    """
+    from omop_core.mapping import axis_variants
+
+    runs = SuggestRun.objects.filter(pk=run_id)
+    # A redelivered task must not suggest the same variants twice.
+    if not runs.filter(state=SuggestRun.QUEUED).update(state=SuggestRun.RUNNING):
+        return
+    run = runs.first()
+    spec = params['variants']
+    try:
+        mapping = SourceCodeConceptMapping.objects.filter(pk=spec['mapping_id']).first()
+        if mapping is None:
+            raise ValueError('Mapping not found.')
+        suggestions = axis_variants.suggest_destinations(
+            mapping, ranking_model=spec['ranking_model'], user=run.created_by,
+            strategies=spec.get('strategies'), overrides=spec.get('overrides'),
+            limit=spec.get('limit', axis_variants.SUGGEST_MAX),
+        )
+        runs.update(activity=[{
+            'at': timezone.now().isoformat(), 'stage': 'result', 'mapping_id': mapping.pk,
+            'suggestions': suggestions, 'variants': axis_variants.serialize_all(mapping),
+        }], state=SuggestRun.SUCCESS, done=1, retrieved=1, finished_at=timezone.now())
+    except Exception as exc:  # noqa: BLE001 - the row is where the dialog looks
         runs.update(state=SuggestRun.FAILURE, error=str(exc)[:2000], finished_at=timezone.now())
 
 
@@ -197,8 +234,19 @@ def execute_run(run_id: str, params: dict) -> None:
     Never raises: a failure belongs on the row, where the page is already
     looking, rather than in a worker log the curator cannot see.
     """
+    if params.get('mode') in {'group-action', 'group-suggest'}:
+        from omop_core.services.group_mapping_jobs import execute_group_run
+        execute_group_run(run_id, params)
+        return
+    if params.get('direction') == 'reverse':
+        from omop_core.services.reverse_suggest_jobs import execute_reverse_run
+        execute_reverse_run(run_id, params)
+        return
     if 'preview' in params:
         execute_preview(run_id, params)
+        return
+    if 'variants' in params:
+        execute_variants(run_id, params)
         return
 
     from omop_core.mapping.suggestions import (

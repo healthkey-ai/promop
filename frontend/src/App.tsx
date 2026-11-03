@@ -12,7 +12,7 @@ import AcceptPatientInvite from "@/components/Auth/AcceptPatientInvite";
 import ResetPassword from "@/components/Auth/ResetPassword";
 import ChangePassword from "@/components/Auth/ChangePassword";
 import PatientList from "@/components/Patient/PatientList";
-import PatientDetail from "@/components/Patient/PatientDetail";
+import { PatientDetailRoute } from "@/components/Patient/PatientDetail";
 import PatientHome from "@/components/Patient/PatientHome";
 import UploadPage from "@/components/Patient/UploadPage";
 import UploadFHIR from "@/components/Patient/UploadFHIR";
@@ -21,9 +21,12 @@ import OrgAdminPage from "@/components/OrgAdmin/OrgAdminPage";
 import ServiceApplicationsPage from "@/components/OrgAdmin/ServiceApplicationsPage";
 import FieldMappingPage from "@/components/FieldMappings/FieldMappingPage";
 import CodeMappingPage from "@/components/CodeMappings/CodeMappingPage";
+import SourceSystemManagementPage from "@/components/CodeMappings/SourceSystemManagementPage";
 import SuggestRunLogPage from "@/components/CodeMappings/SuggestRunLogPage";
+import RelevanceSignalsPage from "@/components/MappingHub/RelevanceSignalsPage";
 import CodeMappingAccuracyPage from "@/components/CodeMappings/CodeMappingAccuracyPage";
 import MappingHubPage from "@/components/MappingHub/MappingHubPage";
+import DiseaseCategoryPage from "@/components/MappingHub/DiseaseCategoryPage";
 import TherapyMappingPage from "@/components/TherapyMappings/TherapyMappingPage";
 import OrgLogin from "@/components/Auth/OrgLogin";
 import OrgSignup from "@/components/Auth/OrgSignup";
@@ -113,7 +116,7 @@ function AppRoutes() {
     return element;
   };
 
-  const uploadRoute = (element: ReactNode) => {
+  const orgAdminRoute = (element: ReactNode) => {
     if (!currentUser) return <Navigate to="/login" replace />;
     if (!(currentUser.is_staff || currentUser.is_org_admin)) return <Navigate to="/" replace />;
     return element;
@@ -157,19 +160,22 @@ function AppRoutes() {
           )
         }
       />
-      <Route path="/patient/:personId" element={providerRoute(<PatientDetail user={currentUser} />)} />
-      <Route path="/upload" element={uploadRoute(<UploadPage />)} />
-      <Route path="/upload-fhir" element={uploadRoute(<UploadFHIR />)} />
-      <Route path="/upload-csv" element={uploadRoute(<UploadCSV />)} />
+      <Route path="/patient/:personId" element={providerRoute(<PatientDetailRoute user={currentUser} />)} />
+      <Route path="/upload" element={orgAdminRoute(<UploadPage />)} />
+      <Route path="/upload-fhir" element={orgAdminRoute(<UploadFHIR />)} />
+      <Route path="/upload-csv" element={orgAdminRoute(<UploadCSV />)} />
       <Route path="/stats" element={<Navigate to="/org-admin" replace />} />
       <Route path="/service-applications" element={currentUser?.is_staff ? <ServiceApplicationsPage /> : <Navigate to={currentUser ? "/" : "/login"} replace />} />
-      <Route path="/org-admin" element={providerRoute(<OrgAdminPage />)} />
+      <Route path="/org-admin" element={orgAdminRoute(<OrgAdminPage />)} />
       <Route path="/mappings" element={mappingAdminRoute(<MappingHubPage />)} />
       <Route path="/field-mappings" element={mappingAdminRoute(<FieldMappingPage />)} />
       <Route path="/code-mappings" element={mappingAdminRoute(<CodeMappingPage />)} />
+      <Route path="/code-mappings/source-systems" element={mappingAdminRoute(<SourceSystemManagementPage />)} />
       <Route path="/code-mappings/suggest-runs/:runId" element={mappingAdminRoute(<SuggestRunLogPage />)} />
       <Route path="/code-mappings/accuracy" element={mappingAdminRoute(<CodeMappingAccuracyPage />)} />
       <Route path="/therapy-mappings" element={mappingAdminRoute(<TherapyMappingPage />)} />
+      <Route path="/relevance-signals" element={mappingAdminRoute(<RelevanceSignalsPage />)} />
+      <Route path="/disease-category-mappings" element={mappingAdminRoute(<DiseaseCategoryPage />)} />
       <Route
         path="/profile"
         element={

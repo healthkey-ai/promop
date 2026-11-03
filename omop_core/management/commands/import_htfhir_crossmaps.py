@@ -5,7 +5,7 @@ from django.core.management.base import CommandError
 from omop_core.management.embedding_command import EmbeddingLoadCommand
 
 from omop_core.models import Concept, SourceCodeConceptMapping
-from omop_core.services.source_vocabularies import DOMAIN_TO_TABLE
+from omop_core.services.source_vocabularies import DOMAIN_TO_TABLE, canonical_source_vocabulary
 
 
 DEFAULT_ARTIFACT = Path(__file__).resolve().parents[3] / 'docs' / 'ht-fhir-code-concept-mapping.md'
@@ -63,6 +63,7 @@ class Command(EmbeddingLoadCommand):
                 stats['existing'] += 1
                 continue
             stats['created'] += 1
+            existing.add(key)
             pending.append(SourceCodeConceptMapping(
                 source_vocabulary_id=row['source_vocabulary_id'],
                 source_code=row['source_code'],
@@ -99,7 +100,7 @@ class Command(EmbeddingLoadCommand):
                 continue
             source_vocab, source_code, target_vocab, target_code, domain, status, origins, candidate_targets = cells
             mappings.append({
-                'source_vocabulary_id': source_vocab,
+                'source_vocabulary_id': canonical_source_vocabulary(source_vocab),
                 'source_code': source_code.replace('\\|', '|'),
                 'source_code_description': '',
                 'target_vocabulary_id': target_vocab,

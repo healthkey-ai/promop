@@ -32,6 +32,7 @@ from omop_core.mapping.code_resolution import _QUARANTINE_TARGETS
 from omop_core.mapping.suggestions import (
     CANDIDATE_LIMIT,
     DEFAULT_MIN_OCCURRENCES,
+    EMBEDDING_MODEL_NAME,
     LEXICAL_LIMIT_MAX,
     SUGGESTION_MODEL_VERSION,
     _find_source_concept,
@@ -43,7 +44,7 @@ from omop_core.mapping.suggestions import (
 from omop_core.models import ConceptEmbedding, SuggestEmbeddingSnapshot
 from omop_core.services.embedding_snapshot import read_snapshot, snapshot_key
 
-MODEL_NAME = 'BAAI/bge-small-en-v1.5'
+MODEL_NAME = EMBEDDING_MODEL_NAME
 ENCODE_BATCH = 256
 DB_WRITE_BATCH = 64
 
