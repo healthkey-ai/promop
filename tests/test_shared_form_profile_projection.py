@@ -258,18 +258,6 @@ def test_facility_name_projects_to_person(monkeypatch):
     assert refresh_patient_record(record.person).facility_name == 'Clinic A'
 
 
-def test_deferred_profile_field_stays_pending():
-    record = PatientRecordFactory()
-
-    response = _patch(_staff_client(), record, {'validated': True})
-
-    assert response.status_code == 200, response.data
-    record.refresh_from_db()
-    assert record.validated is True
-    assert 'validated' in (record.user_edited_fields or [])
-    assert refresh_patient_record(record.person).validated is True
-
-
 def test_shared_form_patch_does_not_attach_latest_fact_dates(monkeypatch):
     record = PatientRecordFactory()
     calls = []
@@ -282,3 +270,37 @@ def test_shared_form_patch_does_not_attach_latest_fact_dates(monkeypatch):
 
     assert response.status_code == 200, response.data
     assert calls == []
+
+
+def test_staff_profile_validation_fields_project_to_person():
+    record = PatientRecordFactory()
+
+    response = _patch(_staff_client(), record, {
+        'validated': True,
+        'validated_by': 'Dr Example',
+        'validation_date': '2026-11-03',
+        'suppress_demographics_for_others': True,
+    })
+
+    assert response.status_code == 200, response.data
+    record.refresh_from_db()
+    assert record.validated is True
+    assert record.validated_by == 'Dr Example'
+    assert record.validation_date == date(2026, 11, 3)
+    assert record.suppress_demographics_for_others is True
+    person = Person.objects.get(pk=record.person_id)
+    assert person.validated is True
+    assert person.validated_by == 'Dr Example'
+    assert person.validation_date == date(2026, 11, 3)
+    assert person.suppress_demographics_for_others is True
+    for field in (
+        'validated', 'validated_by', 'validation_date',
+        'suppress_demographics_for_others',
+    ):
+        assert field not in (record.user_edited_fields or [])
+    assert response.data['write']['deferred_profile'] == []
+    refreshed = refresh_patient_record(record.person)
+    assert refreshed.validated is True
+    assert refreshed.validated_by == 'Dr Example'
+    assert refreshed.validation_date == date(2026, 11, 3)
+    assert refreshed.suppress_demographics_for_others is True

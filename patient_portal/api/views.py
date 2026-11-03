@@ -655,7 +655,10 @@ def _validate_location_fields(location_patch, person, patient_info=None):
     # and also against Location values for the projection.
     existing_lat = getattr(patient_info, 'latitude', None) if patient_info else None
     existing_lng = getattr(patient_info, 'longitude', None) if patient_info else None
-    if existing_lat is None and existing_lng is None and person.location_id:
+    if patient_info is None and person.location_id:
+        # Only a caller without a PatientRecord may borrow the Location pair;
+        # the DB constraint is on PatientRecord, so a partial patch against an
+        # empty record must be rejected rather than validated against Location.
         loc = Location.objects.filter(location_id=person.location_id).first()
         if loc:
             existing_lat = loc.latitude
