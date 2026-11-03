@@ -351,7 +351,8 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
     result = FieldWriteResult()
     record, _ = PatientRecord.objects.get_or_create(person=person)
     record = PatientRecord.objects.select_for_update().get(pk=record.pk)
-    raw_descriptor = descriptor or build_writable_field_descriptor()
+    raw_descriptor = (build_writable_field_descriptor()
+                      if descriptor is None else descriptor)
     # An allowed alias may be the only thing the host lists; keep its canonical
     # entry privately for projection metadata. It is NOT added to the filtered
     # descriptor or the write surface, so an excluded canonical field stays

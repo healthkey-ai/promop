@@ -267,3 +267,17 @@ def test_an_excluded_canonical_field_stays_unwritable_through_an_alias():
     assert 'creatinine_clearance_ml_min' in result.rejected
     record.refresh_from_db()
     assert record.creatinine_clearance_ml_min != 42
+
+
+def test_an_empty_descriptor_rejects_clinical_writes():
+    # An explicitly empty permission descriptor must not fall back to the
+    # deployment-wide descriptor: {} means "nothing is allowed".
+    person = PersonFactory()
+    record = PatientRecordFactory(person=person)
+
+    record, result = apply_patient_form_patch(
+        person, {'relapse_count': 2}, descriptor={})
+
+    assert 'relapse_count' in result.rejected
+    record.refresh_from_db()
+    assert 'relapse_count' not in (record.therapy_overrides or {})
