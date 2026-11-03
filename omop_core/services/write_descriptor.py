@@ -102,6 +102,49 @@ _EPISODE_COMPUTED_FIELDS = frozenset(
     if field.name.startswith(('first_line_', 'second_line_', 'later_'))
 )
 
+#: Flat shared-form fields that author one therapy line each. They stay
+#: projections of an Episode, so the descriptor offers them as writable and the
+#: write path routes them to the line authoring service instead of the column
+#: (`omop_core/services/therapy_line_form.py`). Only the first line of each group
+#: is flat: derivation reads `later_therapy`/`later_date`/`later_outcome` back
+#: from the first 3L+ line, so a second flat later line would have no column to
+#: land in.
+_AUTHORABLE_LINE_FIELDS = {
+    'first_line_therapy': (1, 'string', 'therapy'),
+    'first_line_date': (1, 'date', 'start_date'),
+    'first_line_outcome': (1, 'string', 'outcome'),
+    'second_line_therapy': (2, 'string', 'therapy'),
+    'second_line_date': (2, 'date', 'start_date'),
+    'second_line_outcome': (2, 'string', 'outcome'),
+    'later_therapy': (3, 'string', 'therapy'),
+    'later_date': (3, 'date', 'start_date'),
+    'later_outcome': (3, 'string', 'outcome'),
+}
+
+
+def _therapy_line_options():
+    """The catalog choices the three line fields take.
+
+    A regimen is stored by its catalog `code` and resolved to its HemOnc
+    concept by the writer, so the option VALUE has to be PROMOP's code — a host
+    slug would author a line whose regimen derivation cannot name. Outcomes are
+    the disease-independent catalog; the writer narrows to the patient's disease.
+    """
+    from omop_core.models import TherapyRegimen
+    from omop_core.services.treatment_catalog import OUTCOMES
+
+    return {
+        'therapy': [
+            {'value': code, 'label': title}
+            for code, title in TherapyRegimen.objects.order_by('title')
+            .values_list('code', 'title')
+        ],
+        'outcome': [
+            {'value': value, 'label': label} for _key, value, label in OUTCOMES
+        ],
+    }
+
+
 # How a therapy line is authored. Not a missing mapping — the write path exists
 # and works; it is simply not a single fact, so no concept could describe it. A
 # line is an Episode grouping the DrugExposures given during it, and derivation
@@ -719,6 +762,7 @@ def build_writable_field_descriptor():
     curated = _curated_writes(choice_options, genomics_recipes, clinical_mappings)
 
     descriptor = {}
+    line_options = None
     for field in sorted(PATIENT_RECORD_OMOP_MAPPED_FIELDS - _LIFECYCLE_FIELDS):
         if field in DERIVED_LANGUAGE_FIELDS:
             descriptor[field] = {
@@ -752,6 +796,27 @@ def build_writable_field_descriptor():
                 'endpoint': '/api/v1/patient-records/{person_id}/genomics/',
                 'reason': 'Edit individual variants in the Genomics tab; each variant writes linked OMOP facts.',
             }
+            continue
+        if field in _AUTHORABLE_LINE_FIELDS:
+            line_number, value_kind, part = _AUTHORABLE_LINE_FIELDS[field]
+            if line_options is None:
+                line_options = _therapy_line_options()
+            descriptor[field] = {
+                'kind': KIND_DIRECT,
+                'writable': True,
+                'target': 'patient_record',
+                'value_kind': value_kind,
+                # Which line the write authors. The client shows the control;
+                # the writer owns the conversion to Episode/EpisodeEvent and the
+                # derivation that fills this column back.
+                'authored_episode': {'line_number': line_number, 'part': part},
+                'reason': (
+                    'Written as a therapy line (an Episode grouping its facts); '
+                    'this column is derived from that line.'
+                ),
+            }
+            if line_options.get(part):
+                descriptor[field]['options'] = line_options[part]
             continue
         if field in _EPISODE_COMPUTED_FIELDS:
             descriptor[field] = {

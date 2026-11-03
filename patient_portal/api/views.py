@@ -1241,6 +1241,14 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             for f in list(patch_data) if f in _PROFILE_DEMOGRAPHIC_FIELDS
         }
         mutations = patch_data.pop('genetic_mutations', None) if 'genetic_mutations' in patch_data else None
+        # Episode-derived line fields are projections of a therapy line, not
+        # columns: authoring them through the serializer would be undone by the
+        # next derivation (#2106). Collect them and write the line instead.
+        from omop_core.services.therapy_line_form import THERAPY_LINE_FORM_FIELDS
+        therapy_line_edits = {
+            key: patch_data.pop(key) for key in list(patch_data)
+            if key in THERAPY_LINE_FORM_FIELDS
+        }
         # The editor PATCHes the complete GET representation.  A projected
         # mutation list carried back unchanged is therefore an autosave echo,
         # not an instruction to replace its OMOP rows (and it may be empty
@@ -1389,6 +1397,16 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 )
                 sync_no_preexisting_conditions(
                     patient_info, source=_attestation_source(request, person))
+
+        if therapy_line_edits:
+            from omop_core.services.therapy_line_form import author_lines_from_form
+            applied, rejected = author_lines_from_form(
+                person, therapy_line_edits, disease=patient_info.disease,
+                changed_by=str(getattr(request.user, 'pk', None) or 'system'),
+            )
+            if rejected:
+                raise ValidationError(rejected)
+            patient_info.refresh_from_db()
 
         return Response({**PatientRecordSerializer(patient_info).data, 'previous_values': previous_values})
 

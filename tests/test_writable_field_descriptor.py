@@ -225,9 +225,11 @@ class TestCost:
         # One batch lookup per source table (LOINC codes, UCUM units, attributed
         # codes), plus the approved-mapping table and one read per *distinct*
         # answer vocabulary those mappings name — four fields sharing a set cost
-        # one query, not four. Constant in the number of fields either way; the
-        # bound guards the shape, not the exact number.
-        assert len(ctx) <= 6, [q['sql'][:80] for q in ctx]
+        # one query, not four. The therapy-line catalog is one more: the three
+        # groups' regimen selector is one list, read once per build. Constant in
+        # the number of fields either way; the bound guards the shape, not the
+        # exact number.
+        assert len(ctx) <= 7, [q['sql'][:80] for q in ctx]
 
 
 class TestEndpoint:
@@ -407,11 +409,28 @@ class TestEveryFieldIsCategorised:
                 assert entry.get('reason'), field
 
     def test_therapy_line_fields_are_computed_from_persisted_episode_events(self):
-        """Per-line columns are projections, not direct PatientRecord inputs."""
+        """Per-line columns are projections, not direct PatientRecord inputs.
+
+        The first line of each group is the exception: it is offered as a
+        writable control that authors the line itself (`authored_episode`), not
+        as a column a client may set. Everything else derived from the episodes
+        stays computed.
+        """
         d = build_writable_field_descriptor()
         for field in ('first_line_outcome', 'second_line_start_date', 'later_end_date'):
+            if field in d and d[field].get('authored_episode'):
+                assert d[field]['writable'] is True
+                assert d[field]['target'] == 'patient_record'
+                continue
             assert d[field]['kind'] == 'computed', field
             assert d[field]['source_tables'] == ['Episode', 'EpisodeEvent']
+        for field in ('later_start_date', 'later_end_date', 'later_therapy_ids',
+                      'first_line_component_ids', 'second_line_therapy_display'):
+            assert d[field]['kind'] == 'computed', field
+            assert d[field]['writable'] is False
+        for field in ('first_line_therapy', 'second_line_date', 'later_outcome'):
+            assert d[field]['authored_episode']['line_number'] in (1, 2, 3), field
+            assert d[field]['writable'] is True
         # Other treatment summaries retain their existing episode-authoring
         # guidance; they are not individual first/second/later-line columns.
         assert d['line_of_therapy']['group'] == 'therapy-inference'
