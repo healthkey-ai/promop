@@ -54,55 +54,61 @@ def _regimen_concept_id(value):
 
     from omop_core.models import TherapyRegimen
 
+    rows = TherapyRegimen.objects.filter(concept__isnull=False).order_by('id')
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        row = rows.filter(concept_id=value).first()
+        return row.concept_id if row is not None else None
     code = value.strip() if isinstance(value, str) else value
     if not code:
         return None
-    rows = TherapyRegimen.objects.filter(concept__isnull=False)
-    if isinstance(code, str) and code.isdigit():
+    if code.isdigit():
         row = rows.filter(concept_id=int(code)).first()
         if row is not None:
             return row.concept_id
-    row = rows.filter(Q(code=code) | Q(title=code)).first()
+    # The record holds the concept's own name; the catalog holds a curated
+    # title and a code. All three name the regimen, so all three resolve.
+    row = rows.filter(
+        Q(code=code) | Q(title=code) | Q(concept__concept_name=code)).first()
     return row.concept_id if row is not None else None
 
 
-def _same_line_value(value, current):
+def _same_line_value(name, value, current, disease=None):
     """Whether a submitted line value is the record's own value echoed back.
 
     The native editor PATCHes the whole GET representation, so every line field
-    arrives on every save — as the derived display name, or null. Treating that
-    as an instruction would rewrite the line on each unrelated edit (and refuse,
-    since the display name is not a catalog code).
+    arrives on every save — as the derived display name, a catalog code, a
+    concept id, or null. Comparison is semantic, because a spelling the client
+    did not change must not re-author the line on an unrelated save.
     """
     if value in (None, '') and current in (None, ''):
         return True
-    if isinstance(current, date):
+    part = THERAPY_LINE_FORM_FIELDS[name][1]
+    if part == 'start_date':
         parsed = value if isinstance(value, date) else parse_date(str(value or ''))
-        return parsed == current
+        existing = current if isinstance(current, date) else parse_date(str(current or ''))
+        return parsed == existing
+    if part == 'outcome':
+        aliases = _outcome_aliases(disease)
+        return aliases.get(value, value) == aliases.get(current, current)
+    if part == 'therapy':
+        resolved = _regimen_concept_id(value)
+        existing = _regimen_concept_id(current)
+        if resolved is not None and existing is not None:
+            return resolved == existing
     return str(value) == str(current or '')
 
 
 def changed_line_values(changes, record):
     """The submitted line fields that actually differ from the record."""
+    disease = getattr(record, 'disease', None)
     return {
         name: value for name, value in changes.items()
         if name in THERAPY_LINE_FORM_FIELDS
-        and not _same_line_value(value, getattr(record, name, None))
+        and not _same_line_value(
+            name, value, getattr(record, name, None), disease)
     }
-
-
-def _line_has_drugs(person, line_number):
-    from omop_core.services.mappings import CONCEPT_DRUG_EXPOSURE_FIELD
-    from omop_oncology.models import Episode, EpisodeEvent
-
-    episode_ids = Episode.objects.filter(
-        person=person, episode_number=line_number,
-        episode_concept_id=32531,
-    ).values_list('episode_id', flat=True)
-    return EpisodeEvent.objects.filter(
-        episode_id__in=list(episode_ids),
-        episode_event_field_concept_id=CONCEPT_DRUG_EXPOSURE_FIELD,
-    ).exists()
 
 
 def _outcome_aliases(disease):
@@ -119,6 +125,40 @@ def _outcome_aliases(disease):
         for row in outcomes_for_disease(disease or '')
         for alias in (row['code'], row['value'], row['label'])
     }
+
+
+def _composition_guard(submitted_concept_id):
+    """Refuse a regimen change on a line that already has a recorded composition.
+
+    Runs on the writer's own locked target Episode, so it sees exactly the line
+    the write would change — the other cancer's line numbering and lines written
+    before the Treatment Regimen concept was standard included. The editor owns
+    the drug list; asserting a different regimen here would leave the stored
+    exposures describing the old one.
+    """
+    def guard(model, pks):
+        if submitted_concept_id is None:
+            return
+        from omop_core.models import DrugExposure
+        from omop_core.services.mappings import CONCEPT_DRUG_EXPOSURE_FIELD
+        from omop_oncology.models import Episode, EpisodeEvent
+
+        if model is not Episode:
+            return
+        for episode in Episode.objects.filter(pk__in=pks):
+            current = (episode.episode_source_concept_id
+                       or episode.episode_object_concept_id)
+            if current == submitted_concept_id:
+                continue
+            linked = EpisodeEvent.objects.filter(
+                episode_id=episode.pk,
+                episode_event_field_concept_id=CONCEPT_DRUG_EXPOSURE_FIELD,
+            ).values_list('event_id', flat=True)
+            if DrugExposure.objects.filter(
+                    person_id=episode.person_id, is_erroneous=False,
+                    drug_exposure_id__in=list(linked)).exists():
+                raise TherapyLineValidationError('line_has_composition')
+    return guard
 
 
 def author_lines_from_form(person, changes, *, disease=None):
@@ -140,6 +180,7 @@ def author_lines_from_form(person, changes, *, disease=None):
     for line_number, parts in sorted(by_line.items()):
         names = [name for name, _value in parts.values()]
         kwargs = {}
+        guard = None
         refusal = None
 
         if 'therapy' in parts:
@@ -151,14 +192,9 @@ def author_lines_from_form(person, changes, *, disease=None):
                 concept_id = _regimen_concept_id(code)
                 if concept_id is None:
                     refusal = (names, f'Unknown therapy: {code}. Choose one from the list.')
-                elif _line_has_drugs(person, line_number):
-                    # The line's composition is owned by the therapy-lines
-                    # editor: asserting a different regimen here would leave the
-                    # stored drug exposures describing the old one.
-                    refusal = (names, 'This line already has a recorded composition; '
-                                      'change its therapy in the therapy-lines editor.')
                 else:
                     kwargs['regimen_concept_id'] = concept_id
+                    guard = _composition_guard(concept_id)
 
         if refusal is None and 'start_date' in parts:
             name, value = parts['start_date']
@@ -190,7 +226,8 @@ def author_lines_from_form(person, changes, *, disease=None):
         try:
             from omop_core.services.episode_service import author_therapy_line
             result = author_therapy_line(
-                person, line_number=line_number, disease=disease, replace=True, **kwargs)
+                person, line_number=line_number, disease=disease, replace=True,
+                write_guard=guard, **kwargs)
         except TherapyLineValidationError as exc:
             # The catalog's text, never the exception's own: the service puts a
             # patient value in `detail` for logs and Python callers only.
@@ -209,7 +246,7 @@ def author_lines_from_form(person, changes, *, disease=None):
             # The treatment-regimen vocabulary is not loaded: the service
             # answered "nothing written", which must not read as a save.
             for name in names:
-                rejected[name] = MESSAGES['vocabulary_missing']
+                rejected[name] = MESSAGES['treatment_regimen_missing']
             continue
         wrote = True
         applied.extend(names)
@@ -220,9 +257,9 @@ def author_lines_from_form(person, changes, *, disease=None):
         # A marker left by an older direct write would pin the old value and
         # hide the line that was just authored; the line owns these columns now.
         stale = set(applied)
-        record = PatientRecord.objects.get(person=person)
-        pending = set(record.user_edited_fields or [])
-        if pending & stale:
+        record = PatientRecord.objects.filter(person=person).first()
+        pending = set(getattr(record, 'user_edited_fields', None) or [])
+        if record is not None and pending & stale:
             record.user_edited_fields = sorted(pending - stale)
             record.save(update_fields=['user_edited_fields'])
         refresh_patient_record(person)

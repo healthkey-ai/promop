@@ -284,3 +284,48 @@ def test_a_refused_line_rolls_back_the_rest_of_the_native_patch(patient):
     record = _record(patient)
     assert record.ecog_performance_status != 2
     assert not _lines(patient, 3).exists()
+
+
+def test_echo_with_a_catalog_code_or_concept_id_is_a_no_op(patient):
+    """The record holds the concept name, but a client may echo the code or the
+    concept id: a spelling it did not change is not an instruction."""
+    apply_patient_form_patch(patient, {
+        'later_therapy': 'vrd', 'later_date': date(2024, 5, 1),
+        'later_outcome': 'Partial Response',
+    })
+
+    for value in ('vrd', 'VRd', REGIMEN, str(REGIMEN)):
+        _, result = apply_patient_form_patch(patient, {'later_therapy': value})
+        assert not result.applied, value
+        assert not result.rejected, value
+
+    # The same answer in its catalog code spelling is the record's value.
+    _, result = apply_patient_form_patch(patient, {'later_outcome': 'PR'})
+    assert not result.applied
+    assert not result.rejected
+    assert _record(patient).later_outcome == 'Partial Response'
+
+
+def test_the_composition_guard_follows_the_line_being_written(patient):
+    """A composed line elsewhere does not block a different line's therapy."""
+    rxnorm = VocabularyFactory(vocabulary_id='RxNorm', vocabulary_name='RxNorm')
+    drug = ConceptFactory(concept_id=1301026, concept_name='lenalidomide',
+                          concept_code='6360', vocabulary=rxnorm)
+    from omop_core.services.episode_service import author_therapy_line
+    author_therapy_line(patient, line_number=2, drugs=[drug.concept_id],
+                        start_date=date(2024, 4, 1))
+
+    _, result = apply_patient_form_patch(patient, {
+        'later_therapy': 'vrd', 'later_date': date(2024, 5, 1),
+    })
+
+    assert result.applied and not result.rejected
+    assert _record(patient).later_therapy == 'VRd'
+
+
+def test_options_offer_the_value_the_column_holds(patient):
+    """The select preselects the record's derived name, so the option value has
+    to be the concept's own name, not the catalog code."""
+    options = build_writable_field_descriptor()['later_therapy']['options']
+
+    assert {'value': 'VRd', 'code': 'vrd', 'label': 'VRd'} in options

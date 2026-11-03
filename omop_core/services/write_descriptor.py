@@ -139,9 +139,19 @@ def _therapy_line_options():
         # resolves. A regimen with no concept cannot author a line, so it is
         # not offered — a choice that always refuses is worse than none.
         'therapy': [
-            {'value': title, 'code': code, 'label': title}
-            for code, title in TherapyRegimen.objects.filter(concept__isnull=False)
-            .order_by('title').values_list('code', 'title')
+            {
+                # `value` is the concept's own name because that is what
+                # derivation writes into the column, so the control preselects
+                # the record's value; `code` is what the writer resolves.
+                'value': concept_name or title,
+                'code': code,
+                'label': title,
+            }
+            for code, title, concept_name in (
+                TherapyRegimen.objects.filter(concept__isnull=False)
+                .order_by('title')
+                .values_list('code', 'title', 'concept__concept_name')
+            )
         ],
         'outcome': [
             {'value': value, 'label': label} for _key, value, label in OUTCOMES
