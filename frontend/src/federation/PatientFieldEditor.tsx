@@ -83,12 +83,18 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
   const resultDate = resultDateOverride
     ?? (typeof pendingDate === 'string' ? pendingDate : undefined)
     ?? field.latest_date ?? todayIso();
+  // The correction target comes from the server. If the post-save refresh
+  // failed, `latest_date` is the pre-save date and saving against it would
+  // record the result on the wrong clinical day, so the pair waits for a
+  // successful refresh (#5608).
+  const datesStale = state.datesStale === true;
   // A dated value and its date are one edit. Autosaving the value alone would
   // attach it to the previous result's date before the user has chosen one, so
   // the pair waits for an explicit commit.
   const datedValue = dated && valueDraft.set ? valueDraft.value : value;
   const datedDirty = dated && (valueDraft.set || resultDateOverride !== null);
   const commitDated = () => {
+    if (datesStale) return;
     store.enqueue(canonical, { value: datedValue, date: resultDate });
     setValueDraft({ set: false, value: undefined });
     setResultDateOverride(null);
@@ -149,11 +155,15 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
             setResultDateOverride(event.target.value || todayIso());
           }}
           className="rounded-md border border-input px-2 py-1 text-xs" />
-        <button type="button" disabled={!datedDirty} onClick={commitDated}
+        <button type="button" disabled={!datedDirty || datesStale} onClick={commitDated}
           className="rounded-md border border-input px-2 py-1 text-xs disabled:opacity-50">
           Save result
         </button>
       </div>}
+      {dated && datesStale && <p role="alert" className="text-xs text-red-600">
+        The latest result date could not be refreshed, so the correction target may be out of date.
+        {' '}<button type="button" className="underline" onClick={() => void store.reloadDates()}>Retry</button>
+      </p>}
       {dated && field.latest_date && resultDate < field.latest_date
         && <p role="status" className="text-xs text-muted-foreground">
           Older than the latest recorded result; it will be stored as history, not as the current value.

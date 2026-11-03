@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import type { AxiosInstance } from 'axios';
@@ -330,5 +330,49 @@ describe('dated lab results', () => {
     fireEvent.change(screen.getByLabelText('Result date'), { target: { value: '2026-07-01' } });
 
     expect(screen.getByRole('status')).toHaveTextContent('stored as history');
+  });
+
+  it('blocks the next dated save when the descriptor refresh failed, until Retry', async () => {
+    const fields = { hemoglobin_g_dl: { label: 'Hemoglobin', writable: true,
+      target: 'patient_record', control: 'number', dated: true, latest_date: '2026-08-01',
+      projection: { omop_table: 'measurement' } } };
+    let metadataFails = false;
+    const get = vi.fn(async (url: string) => {
+      if (url.includes('writable-fields')) {
+        if (metadataFails) throw new Error('metadata unavailable');
+        return { data: fields };
+      }
+      return { data: { patient_info: { person_id: 12, hemoglobin_g_dl: 12.5 }, write_enabled: true } };
+    });
+    const patch = vi.fn(async (_url: string, values: Record<string, unknown>) => ({ data: {
+      patient_info: { person_id: 12, hemoglobin_g_dl: 13 }, write: { applied: Object.keys(values) },
+    } }));
+    const store = new PatientFormStore({ get, patch } as unknown as AxiosInstance, '/api');
+    await store.load();
+    render(<PatientFieldEditor store={store} name="hemoglobin_g_dl" />);
+
+    metadataFails = true;
+    fireEvent.change(screen.getByRole('spinbutton'), { target: { value: '13' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save result' }));
+    await act(async () => { await store.flush(); });
+
+    expect(screen.getByText(/correction target may be out of date/)).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Save result' })).toBeDisabled();
+
+    metadataFails = false;
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Retry' })); });
+    await waitFor(() => expect(
+      screen.queryByText(/correction target may be out of date/)).not.toBeInTheDocument());
+
+    // The refreshed target is usable again, but only after the patient commits
+    // a pair for it: nothing was re-sent on their behalf.
+    fireEvent.change(screen.getByRole('spinbutton'), { target: { value: '14' } });
+    expect(screen.getByRole('button', { name: 'Save result' })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Save result' }));
+    await act(async () => { await store.flush(); });
+
+    expect(patch).toHaveBeenCalledTimes(2);
+    expect(patch.mock.calls[1][1])
+      .toEqual({ hemoglobin_g_dl: { value: 14, date: '2026-08-01' } });
   });
 });

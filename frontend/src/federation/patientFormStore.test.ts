@@ -227,6 +227,206 @@ describe('dated result edits', () => {
 
     expect(store.getSnapshot().fields.hemoglobin_g_dl.latest_date).toBe('2026-09-01');
   });
+
+  it('refuses the next dated save until a failed descriptor refresh is retried', async () => {
+    let latest = '2026-08-01';
+    let metadataFails = false;
+    const get = vi.fn(async (url: string) => {
+      if (url.includes('writable-fields')) {
+        if (metadataFails) throw new Error('metadata unavailable');
+        return { data: { hemoglobin_g_dl: { writable: true, target: 'patient_record',
+          dated: true, latest_date: latest, projection: { omop_table: 'measurement' } } } };
+      }
+      return { data: { patient_info: { person_id: 12, hemoglobin_g_dl: 12.5 }, write_enabled: true } };
+    });
+    const patch = vi.fn(async (_url: string, edits: Record<string, unknown>) => ({ data: {
+      patient_info: { person_id: 12, hemoglobin_g_dl: 13 },
+      write: { applied: Object.keys(edits), rejected: {} },
+    } }));
+    const store = new PatientFormStore({ get, patch } as unknown as AxiosInstance, '/api');
+    await store.load();
+
+    // The save lands, but the refresh that would move the correction target does not.
+    latest = '2026-09-01';
+    metadataFails = true;
+    store.enqueue('hemoglobin_g_dl', { value: 13, date: '2026-08-02' });
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(store.getSnapshot().datesStale).toBe(true);
+    expect(store.getSnapshot().fields.hemoglobin_g_dl.latest_date).toBe('2026-08-01');
+
+    // A second dated save must not be queued against that stale date.
+    store.enqueue('hemoglobin_g_dl', { value: 14, date: '2026-08-01' });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(patch).toHaveBeenCalledOnce();
+    expect(store.getSnapshot().errors.hemoglobin_g_dl).toMatch(/Retry/);
+
+    // Retrying the refresh clears both the flag and the stale target.
+    metadataFails = false;
+    await store.reloadDates();
+    expect(store.getSnapshot().datesStale).toBe(false);
+    expect(store.getSnapshot().fields.hemoglobin_g_dl.latest_date).toBe('2026-09-01');
+
+    store.enqueue('hemoglobin_g_dl', { value: 14, date: '2026-09-01' });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(patch).toHaveBeenCalledTimes(2);
+  });
+
+  it('holds a dated edit queued behind an in-flight save once the refresh fails', async () => {
+    let latest = '2026-08-01';
+    let metadataFails = false;
+    let resolvePatch!: (payload: unknown) => void;
+    const get = vi.fn(async (url: string) => {
+      if (url.includes('writable-fields')) {
+        if (metadataFails) throw new Error('metadata unavailable');
+        return { data: { hemoglobin_g_dl: { writable: true, target: 'patient_record',
+          dated: true, latest_date: latest, projection: { omop_table: 'measurement' } } } };
+      }
+      return { data: { patient_info: { person_id: 12, hemoglobin_g_dl: 12.5 }, write_enabled: true } };
+    });
+    const patch = vi.fn(() => new Promise<unknown>((resolve) => { resolvePatch = resolve; }));
+    const store = new PatientFormStore({ get, patch } as unknown as AxiosInstance, '/api');
+    await store.load();
+
+    store.enqueue('hemoglobin_g_dl', { value: 13, date: '2026-08-02' });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(patch).toHaveBeenCalledOnce();
+
+    // The first save is still in flight, so the refresh has not failed yet and
+    // the queue accepts the second dated edit. That is the window this guards.
+    store.enqueue('hemoglobin_g_dl', { value: 14, date: '2026-08-03' });
+    metadataFails = true;
+    resolvePatch({ data: { patient_info: { person_id: 12, hemoglobin_g_dl: 13 },
+      write: { applied: ['hemoglobin_g_dl'], rejected: {} } } });
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(patch).toHaveBeenCalledOnce();                 // the held edit never went out
+    expect(store.getSnapshot().pending).toEqual({});
+    expect(store.getSnapshot().errors.hemoglobin_g_dl).toMatch(/Retry/);
+
+    // A retry refreshes the dates but does not re-send an unconfirmed date.
+    metadataFails = false;
+    latest = '2026-08-03';
+    await store.reloadDates();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(patch).toHaveBeenCalledOnce();
+    expect(store.getSnapshot().datesStale).toBe(false);
+    expect(store.getSnapshot().errors.hemoglobin_g_dl).toBeUndefined();
+    expect(store.getSnapshot().fields.hemoglobin_g_dl.latest_date).toBe('2026-08-03');
+  });
+
+  it('does not dispatch a dated edit ahead of an overlapping refresh', async () => {
+    const fields = { hemoglobin_g_dl: { writable: true, target: 'patient_record',
+      dated: true, latest_date: '2026-08-01', projection: { omop_table: 'measurement' } } };
+    let metadataCalls = 0;
+    const refreshes: Array<{ resolve: (value: unknown) => void; reject: (error: unknown) => void }> = [];
+    const get = vi.fn((url: string) => {
+      if (url.includes('writable-fields')) {
+        metadataCalls += 1;
+        if (metadataCalls === 1) return Promise.resolve({ data: fields });
+        return new Promise((resolve, reject) => { refreshes.push({ resolve, reject }); });
+      }
+      return Promise.resolve({ data: {
+        patient_info: { person_id: 12, hemoglobin_g_dl: 12.5 }, write_enabled: true } });
+    });
+    const patch = vi.fn(async (_url: string, edits: Record<string, unknown>) => ({ data: {
+      patient_info: { person_id: 12, hemoglobin_g_dl: 13 },
+      write: { applied: Object.keys(edits), rejected: {} },
+    } }));
+    const store = new PatientFormStore({ get, patch } as unknown as AxiosInstance, '/api');
+    await store.load();
+
+    store.enqueue('hemoglobin_g_dl', { value: 13, date: '2026-08-02' });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(patch).toHaveBeenCalledOnce();
+    expect(refreshes).toHaveLength(1);              // the post-save refresh is pending
+    // Let the flush actually reach its wait, so the retry below supersedes the
+    // attempt it is already awaiting — the window this guards.
+    await vi.advanceTimersByTimeAsync(0);
+
+    store.enqueue('hemoglobin_g_dl', { value: 14, date: '2026-08-03' });
+    void store.reloadDates();                        // a retry supersedes it
+    expect(refreshes).toHaveLength(2);
+
+    refreshes[0].reject(new Error('superseded'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(patch).toHaveBeenCalledOnce();            // still waiting on the newest refresh
+
+    refreshes[1].reject(new Error('metadata unavailable'));
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(patch).toHaveBeenCalledOnce();            // the held date was never sent
+    expect(store.getSnapshot().datesStale).toBe(true);
+    expect(store.getSnapshot().errors.hemoglobin_g_dl).toMatch(/Retry/);
+  });
+
+  it('does not dispatch ahead of a refresh that supersedes the awaited one', async () => {
+    const fields = { height: { writable: true, target: 'patient_record', control: 'number' } };
+    let metadataCalls = 0;
+    const refreshes: Array<{ resolve: (value: unknown) => void; reject: (error: unknown) => void }> = [];
+    const get = vi.fn((url: string) => {
+      if (url.includes('writable-fields')) {
+        metadataCalls += 1;
+        if (metadataCalls === 1) return Promise.resolve({ data: fields });
+        return new Promise((resolve, reject) => { refreshes.push({ resolve, reject }); });
+      }
+      return Promise.resolve({ data: {
+        patient_info: { person_id: 12, height: 170 }, write_enabled: true } });
+    });
+    const patch = vi.fn(async (_url: string, edits: Record<string, unknown>) => ({ data: {
+      patient_info: { person_id: 12, ...edits }, write: { applied: Object.keys(edits), rejected: {} },
+    } }));
+    const store = new PatientFormStore({ get, patch } as unknown as AxiosInstance, '/api');
+    await store.load();
+
+    void store.reloadDates();                        // a host retry is pending
+    expect(refreshes).toHaveLength(1);
+    store.enqueue('height', 180);
+    await vi.advanceTimersByTimeAsync(500);          // flush is now waiting on the retry
+    expect(patch).not.toHaveBeenCalled();
+
+    void store.reloadDates();                        // superseded while it waits
+    expect(refreshes).toHaveLength(2);
+    refreshes[0].reject(new Error('superseded'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(patch).not.toHaveBeenCalled();            // still waiting on the newest refresh
+
+    refreshes[1].resolve({ data: fields });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(patch).toHaveBeenCalledOnce();
+  });
+
+  it('does not overtake a refresh started in the same turn as flush', async () => {
+    const fields = { height: { writable: true, target: 'patient_record', control: 'number' } };
+    let metadataCalls = 0;
+    const refreshes: Array<{ resolve: (value: unknown) => void; reject: (error: unknown) => void }> = [];
+    const get = vi.fn((url: string) => {
+      if (url.includes('writable-fields')) {
+        metadataCalls += 1;
+        if (metadataCalls === 1) return Promise.resolve({ data: fields });
+        return new Promise((resolve, reject) => { refreshes.push({ resolve, reject }); });
+      }
+      return Promise.resolve({ data: {
+        patient_info: { person_id: 12, height: 170 }, write_enabled: true } });
+    });
+    const patch = vi.fn(async (_url: string, edits: Record<string, unknown>) => ({ data: {
+      patient_info: { person_id: 12, ...edits }, write: { applied: Object.keys(edits), rejected: {} },
+    } }));
+    const store = new PatientFormStore({ get, patch } as unknown as AxiosInstance, '/api');
+    await store.load();
+
+    store.enqueue('height', 180);
+    const saving = store.flush();                    // nothing is in flight yet
+    void store.reloadDates();                        // starts before flush resumes
+    expect(refreshes).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(0);            // let flush resume
+    expect(patch).not.toHaveBeenCalled();            // the refresh is still pending
+
+    refreshes[0].resolve({ data: fields });
+    await saving;
+    await vi.advanceTimersByTimeAsync(0);
+    expect(patch).toHaveBeenCalledOnce();
+  });
 });
 
 describe('shared patient-form queue', () => {
