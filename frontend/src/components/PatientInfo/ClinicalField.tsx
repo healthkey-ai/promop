@@ -106,6 +106,7 @@ export default function ClinicalField({
           onChange={onChange}
           readOnly
           triState={triState}
+          answerLabels={descriptor?.answer_labels}
           precision={precision}
         />
         {showReason && (
@@ -127,6 +128,7 @@ export default function ClinicalField({
         options={choices}
         vocabSource={vocabSource}
         triState={triState}
+        answerLabels={descriptor?.answer_labels}
         onChange={onChange}
         precision={precision}
       />

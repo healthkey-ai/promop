@@ -140,7 +140,8 @@ export default function Field({
         );
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [type, value, optionObjects, isDisabled, name, selectedValues, msDisplay, triState, precision]);
+  }, [type, value, optionObjects, isDisabled, name, selectedValues, msDisplay, triState,
+      answerLabels?.true, answerLabels?.false, precision]);
 
   return (
     <div className="space-y-1.5">

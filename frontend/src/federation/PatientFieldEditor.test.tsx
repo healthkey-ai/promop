@@ -42,7 +42,7 @@ describe('computed patient field input dialogs', () => {
 
   it('offers both reviewed answers for a nullable boolean (#5601)', async () => {
     const user = userEvent.setup();
-    const { store } = await setup({
+    const { store, patch } = await setup({
       hiv_status: {
         writable: true, target: 'patient_record', control: 'boolean',
         label: 'HIV Positive', value_kind: 'boolean',
@@ -53,8 +53,13 @@ describe('computed patient field input dialogs', () => {
 
     await user.click(screen.getByRole('combobox'));
     expect(screen.getByRole('option', { name: 'HIV Positive' })).toBeInTheDocument();
-    expect(screen.getByRole('option', { name: 'No HIV' })).toBeInTheDocument();
     expect(screen.queryByRole('option', { name: 'Yes' })).not.toBeInTheDocument();
+    // The negative answer is `false` on the canonical column, not a second field.
+    await user.click(screen.getByRole('option', { name: 'No HIV' }));
+    await act(async () => { await store.flush(); });
+    const [url, body] = patch.mock.calls.at(-1) ?? [];
+    expect(String(url)).toContain('patient-records');
+    expect(body).toEqual({ hiv_status: false });
   });
 
   it('reads a negative answer with its reviewed wording', async () => {
