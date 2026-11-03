@@ -202,10 +202,25 @@ export class PatientFormStore {
   }
 
   /** Retry the descriptor refresh a failed post-save reload left behind. */
-  reloadDates = () => this.reloadFields();
+  reloadDates = () => this.refreshDates();
+
+  /** The newest date refresh, awaited by `flush()` before it dispatches again. */
+  private datesRefresh?: Promise<boolean>;
+
+  private refreshDates = (): Promise<boolean> => {
+    const attempt = this.reloadFields();
+    this.datesRefresh = attempt;
+    void attempt.finally(() => { if (this.datesRefresh === attempt) this.datesRefresh = undefined; });
+    return attempt;
+  };
 
   flush = async (): Promise<void> => {
     clearTimeout(this.timer);
+    if (this.flight || !Object.keys(this.queue).length || !this.snapshot.personId) return;
+    // Never dispatch ahead of a date refresh: its outcome decides whether a
+    // queued dated edit still has a valid correction target (#5608).
+    const pendingRefresh = this.datesRefresh;
+    if (pendingRefresh) await pendingRefresh.catch(() => false);
     if (this.flight || !Object.keys(this.queue).length || !this.snapshot.personId) return;
     const batch = this.queue;
     const revisions = { ...this.revisions };
@@ -262,7 +277,7 @@ export class PatientFormStore {
         return sent && typeof sent === 'object' && !Array.isArray(sent)
           && typeof (sent as { date?: unknown }).date === 'string';
       });
-      if (datedApplied) await this.reloadFields();
+      if (datedApplied) await this.refreshDates();
       for (const name of Object.keys(batch)) {
         if (!data.write.applied.includes(name)) batchErrors[name] = data.write.rejected?.[name]
           ?? 'This field was not saved. It may require a different editing workflow.';
@@ -274,6 +289,11 @@ export class PatientFormStore {
       for (const name of Object.keys(batch)) batchErrors[name] = rejected?.[name]
         ?? 'Could not save this value. Your last saved value has been restored.';
     } finally {
+      // A refresh started while this batch was settling decides whether the
+      // queued dated edits still have a valid correction target: never dispatch
+      // them ahead of it.
+      const refresh = this.datesRefresh;
+      if (refresh) await refresh.catch(() => false);
       const pending = { ...this.snapshot.pending };
       const errors = { ...this.snapshot.errors };
       // A stale failure/success must not retire a newer edit to the same field.

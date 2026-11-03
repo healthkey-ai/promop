@@ -314,6 +314,48 @@ describe('dated result edits', () => {
     expect(store.getSnapshot().errors.hemoglobin_g_dl).toBeUndefined();
     expect(store.getSnapshot().fields.hemoglobin_g_dl.latest_date).toBe('2026-08-03');
   });
+
+  it('does not dispatch a dated edit ahead of an overlapping refresh', async () => {
+    const fields = { hemoglobin_g_dl: { writable: true, target: 'patient_record',
+      dated: true, latest_date: '2026-08-01', projection: { omop_table: 'measurement' } } };
+    let metadataCalls = 0;
+    const refreshes: Array<{ resolve: (value: unknown) => void; reject: (error: unknown) => void }> = [];
+    const get = vi.fn((url: string) => {
+      if (url.includes('writable-fields')) {
+        metadataCalls += 1;
+        if (metadataCalls === 1) return Promise.resolve({ data: fields });
+        return new Promise((resolve, reject) => { refreshes.push({ resolve, reject }); });
+      }
+      return Promise.resolve({ data: {
+        patient_info: { person_id: 12, hemoglobin_g_dl: 12.5 }, write_enabled: true } });
+    });
+    const patch = vi.fn(async (_url: string, edits: Record<string, unknown>) => ({ data: {
+      patient_info: { person_id: 12, hemoglobin_g_dl: 13 },
+      write: { applied: Object.keys(edits), rejected: {} },
+    } }));
+    const store = new PatientFormStore({ get, patch } as unknown as AxiosInstance, '/api');
+    await store.load();
+
+    store.enqueue('hemoglobin_g_dl', { value: 13, date: '2026-08-02' });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(patch).toHaveBeenCalledOnce();
+    expect(refreshes).toHaveLength(1);              // the post-save refresh is pending
+
+    store.enqueue('hemoglobin_g_dl', { value: 14, date: '2026-08-03' });
+    void store.reloadDates();                        // a retry supersedes it
+    expect(refreshes).toHaveLength(2);
+
+    refreshes[0].reject(new Error('superseded'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(patch).toHaveBeenCalledOnce();            // still waiting on the newest refresh
+
+    refreshes[1].reject(new Error('metadata unavailable'));
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(patch).toHaveBeenCalledOnce();            // the held date was never sent
+    expect(store.getSnapshot().datesStale).toBe(true);
+    expect(store.getSnapshot().errors.hemoglobin_g_dl).toMatch(/Retry/);
+  });
 });
 
 describe('shared patient-form queue', () => {
