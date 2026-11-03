@@ -5487,31 +5487,12 @@ def _patients_per_disease(queryset) -> list[tuple[str, int]]:
     with none counts under ''. Counts therefore add up to more than the
     patients when anyone has two cancers (#2182).
     """
-    from django.db import connection
+    from collections import Counter
 
-    ids_sql, params = queryset.values('pk').query.sql_with_params()
-    table = connection.ops.quote_name(PatientRecord._meta.db_table)
-    pk = connection.ops.quote_name(PatientRecord._meta.pk.column)
-    sql = f"""
-        SELECT COALESCE(s.slug, '') AS slug, COUNT(*) AS n
-        FROM {table} pr
-        LEFT JOIN LATERAL (
-            SELECT DISTINCT x.slug FROM (
-                SELECT jsonb_array_elements_text(
-                    CASE WHEN jsonb_typeof(pr.disease_slugs) = 'array'
-                         THEN pr.disease_slugs ELSE '[]'::jsonb END) AS slug
-                UNION ALL
-                SELECT pr.disease_slug
-            ) x
-            WHERE x.slug IS NOT NULL AND x.slug <> ''
-        ) s ON TRUE
-        WHERE pr.{pk} IN ({ids_sql})
-        GROUP BY 1
-        ORDER BY 2 DESC, 1
-    """
-    with connection.cursor() as cursor:
-        cursor.execute(sql, params)
-        return [(slug, n) for slug, n in cursor.fetchall()]
+    counts = Counter()
+    for primary, slugs in queryset.values_list('disease_slug', 'disease_slugs').iterator():
+        counts.update({s for s in (primary, *(slugs or ())) if s} or {''})
+    return sorted(counts.items(), key=lambda item: (-item[1], item[0]))
 
 
 @api_view(['GET'])

@@ -1715,6 +1715,8 @@ def _get_disease_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     # is found under both (#2182). Same cancers the primary is chosen from.
     slugs = [data['disease_slug']] if data.get('disease_slug') else []
     for condition in cancers:
+        if condition is cancer_condition:
+            continue  # its slug is disease_slug, named by the rule above
         slug = _condition_slug(condition)
         if slug and slug not in slugs:
             slugs.append(slug)

@@ -109,7 +109,7 @@ _COMPUTED_FIELDS = frozenset({
     # the next refresh.
     'english_speak', 'english_read', 'english_write', 'english_understand',
     'spanish_speak', 'spanish_read', 'spanish_write', 'spanish_understand',
-    'bmi', 'disease_slug',
+    'bmi', 'disease_slug', 'disease_slugs',
     'meets_crab', 'meets_slim', 'involved_uninvolved_ratio',
     'active_infection_status', 'active_malignancies',
     'no_active_infection_status',
@@ -165,6 +165,7 @@ def _get_explanation(field_name: str, category: str) -> str | None:
         explanations = {
             'bmi': 'Calculated from weight and height',
             'disease_slug': 'URL-safe slug derived from disease name',
+            'disease_slugs': 'Every cancer on the record, as disease slugs',
             'meets_crab': 'Derived from CRAB criteria fields',
             'meets_slim': 'Derived from SLiM criteria fields',
             'involved_uninvolved_ratio': 'Calculated from kappa and lambda FLC values',
@@ -271,7 +272,7 @@ _TAB_DISEASE = frozenset({
     # beta2_microglobulin moved to _TAB_LABS with the section that renders it
     # (#955). _TAB_DISEASE is tested first, so leaving it here would make the
     # Labs entry dead and put the field on a tab that no longer shows it.
-    'ldh_level', 'disease_slug',
+    'ldh_level', 'disease_slug', 'disease_slugs',
     # Reclassified from "other"
     'tumor_size', 'lymph_node_status', 'metastasis_status',
     'biopsy_grade', 'biopsy_grade_depr', 'plasma_cell_leukemia',

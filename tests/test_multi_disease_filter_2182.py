@@ -163,3 +163,29 @@ def test_stats_count_an_edited_primary_not_in_the_list(staff_client):
     _, counts = _org_stats(staff_client, org)
 
     assert counts == {'multiple-myeloma': 1, 'follicular-lymphoma': 1}
+
+
+def test_the_primary_is_one_entry_when_its_concept_names_a_variant():
+    """A profile edit stores the canonical title as source; the concept is a variant of it."""
+    from tests.factories import ConceptFactory, ConditionOccurrenceFactory, VocabularyFactory
+
+    person = PatientRecordFactory(disease=None).person
+    with suppress_patient_record_refresh():
+        ConditionOccurrenceFactory(
+            person=person, condition_start_date=ago(100), condition_source_value='Multiple Myeloma',
+            condition_concept=ConceptFactory(
+                concept_name='Multiple myeloma in remission', concept_code='C90.01',
+                vocabulary=VocabularyFactory(vocabulary_id='ICD10CM', vocabulary_name='ICD10CM'),
+            ),
+        )
+
+    assert _refreshed(person).disease_slugs == ['multiple-myeloma']
+
+
+def test_disease_slugs_is_not_writable(staff_client):
+    record = _patient(OrganizationFactory(), (100, MYELOMA))
+
+    staff_client.patch(f'/api/v1/patient-records/{record.pk}/', {'disease_slugs': ['breast-cancer']}, format='json')
+
+    record.refresh_from_db()
+    assert record.disease_slugs == ['multiple-myeloma']
