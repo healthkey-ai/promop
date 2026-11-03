@@ -197,7 +197,19 @@ export class PatientFormStore {
       // dates are stale: the editor and the queue refuse the next dated save
       // until a refresh succeeds, instead of pre-filling a correction target
       // that is no longer the newest result (#5608).
-      if (current()) this.publish({ datesStale: true });
+      if (current()) {
+        const fields = { ...this.snapshot.fields };
+        const planned = fields.planned_therapies;
+        if (planned) {
+          // The disease/line may have changed; the old catalog is no longer
+          // safe to offer. Disable it until a retry refreshes the descriptors.
+          fields.planned_therapies = {
+            ...planned, writable: false, retryable: true,
+            reason: 'Could not refresh planned therapies for the current disease. Retry.',
+          };
+        }
+        this.publish({ datesStale: true, fields });
+      }
       return false;
     }
   };
@@ -307,7 +319,11 @@ export class PatientFormStore {
         return sent && typeof sent === 'object' && !Array.isArray(sent)
           && typeof (sent as { date?: unknown }).date === 'string';
       });
-      if (datedApplied) await this.refreshDates();
+      // A disease/treatment-line change changes the planned-therapy catalog;
+      // refresh descriptors so the picker does not keep the old context.
+      const contextChanged = ['disease', 'therapy_lines_count', 'lines_of_therapy']
+        .some((name) => data.write.applied.includes(name));
+      if (datedApplied || contextChanged) await this.refreshDates();
       for (const name of Object.keys(batch)) {
         if (!data.write.applied.includes(name)) batchErrors[name] = data.write.rejected?.[name]
           ?? 'This field was not saved. It may require a different editing workflow.';
