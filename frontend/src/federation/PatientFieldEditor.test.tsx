@@ -215,9 +215,12 @@ describe('computed patient field input dialogs', () => {
     expect(screen.queryByRole('button', { name: 'Edit Outer inputs' })).not.toBeInTheDocument();
   });
 
-  it('keeps the pencil when another dependency is editable', async () => {
+  it.each([
+    ['derived first', ['active_infection_status', 'weight']],
+    ['editable first', ['weight', 'active_infection_status']],
+  ])('keeps the pencil when another dependency is editable (%s)', async (_order, inputs) => {
     const { store } = await setup({
-      mixed: { label: 'Mixed', writable: false, inputs: ['weight', 'active_infection_status'] },
+      mixed: { label: 'Mixed', writable: false, inputs },
       active_infection_status: {
         label: 'Active Infection', writable: false, kind: 'computed', inputs: [],
         reason: 'Computed from OMOP facts; there is no record field to edit.',
@@ -229,6 +232,36 @@ describe('computed patient field input dialogs', () => {
     const dialog = screen.getByRole('dialog');
     expect(within(dialog).getByDisplayValue('60')).toBeEnabled();
     expect(within(dialog).getByText(/no record field to edit/)).toBeInTheDocument();
+  });
+
+  it('does not count a branch the dialog would refuse to open', async () => {
+    // `inner` has one editable input and one withheld one, so its own dialog
+    // never opens (#5600). Its writable descendant is unreachable from `outer`.
+    const { store } = await setup({
+      outer_mixed: { label: 'Outer mixed', writable: false, inputs: ['inner_mixed'] },
+      inner_mixed: { label: 'Inner mixed', writable: false, inputs: ['weight', 'missing_source'] },
+    });
+    render(<PatientFieldEditor store={store} name="outer_mixed" />);
+
+    expect(screen.queryByRole('button', { name: 'Edit Outer mixed inputs' })).not.toBeInTheDocument();
+  });
+
+  it('keeps the gate reason when a gated row loses its dialog', async () => {
+    const { store } = await setup({
+      gated_derived: {
+        label: 'Gated derived', writable: false, inputs: ['active_infection_status'],
+        compatibility_reason: 'Clinical equivalence review required.',
+      },
+      active_infection_status: {
+        label: 'Active Infection', writable: false, kind: 'computed', inputs: [],
+        reason: 'Computed from OMOP facts; there is no record field to edit.',
+      },
+    });
+    render(<PatientFieldEditor store={store} name="gated_derived" />);
+
+    expect(screen.queryByRole('button', { name: /Edit .* inputs/ })).not.toBeInTheDocument();
+    expect(screen.getByText(/not editable in this view/)).toBeVisible();
+    expect(screen.getByText(/Clinical equivalence review required/)).toBeVisible();
   });
 
   it('edits a directly writable alias in place instead of drilling into its canonical', async () => {

@@ -58,17 +58,28 @@ function inspectInputs(
     }
     const field = fields[canonical];
     if (!field) continue;
-    if (field.writable === true && field.target === 'patient_record') {
+    const direct = field.writable === true && field.target === 'patient_record';
+    // Same precedence as the row: a field that declares inputs is edited
+    // through them, and an alias is edited through the field it mirrors.
+    const next = field.inputs ?? (!direct && field.canonical ? [field.canonical] : []);
+    // A field with a withheld input renders read-only instead of a dialog
+    // (#5600), so that branch cannot reach an editor. The row then falls
+    // through to the direct control, which is why `direct` is checked second.
+    const opensDialog = next.length > 0 && !next.some((input) => {
+      const child = store.resolve(input);
+      return !child || !fields[child];
+    });
+    if (opensDialog) {
+      const child = inspectInputs(store, fields, next, new Set(ancestors).add(canonical));
+      graph.editable ||= child.editable;
+      graph.cyclic ||= child.cyclic;
+      if (graph.editable) return graph;
+      continue;
+    }
+    if (direct) {
       graph.editable = true;
       return graph;
     }
-    // An alias is edited through the field it mirrors, exactly as the row does.
-    const next = field.inputs ?? (field.canonical ? [field.canonical] : []);
-    if (next.length === 0) continue;
-    const child = inspectInputs(store, fields, next, new Set(ancestors).add(canonical));
-    graph.editable ||= child.editable;
-    graph.cyclic ||= child.cyclic;
-    if (graph.editable) return graph;
   }
   return graph;
 }
@@ -123,8 +134,11 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
   const inputGraph = inspectInputs(store, state.fields, inputs, new Set([canonical]));
   const editPath = inputGraph.editable || inputGraph.cyclic;
   const writable = !readOnly && state.writable && field.writable && field.target === 'patient_record';
+  // The gate reason used to be reachable inside the dialog. Rows that lose the
+  // dialog must keep it, or the clinical restriction disappears with the pencil.
   const reason = inputsUnavailable || (inputs.length > 0 && !editPath)
-    ? 'This value is derived from data that is not editable in this view.'
+    ? ['This value is derived from data that is not editable in this view.',
+      field.compatibility_reason].filter(Boolean).join(' ')
     : field.compatibility_reason ?? field.reason ?? 'Derived value; edit the source inputs.';
   // A compatibility gate withholds the RESULT, not the clinical facts it is
   // computed from. Editing an input never writes the verdict; the result remains
