@@ -530,3 +530,23 @@ def test_explicit_empty_gelf_selection_is_not_unknown():
     record.refresh_from_db()
     assert record.gelf_criteria_options == ''
     assert record.gelf_criteria_status == 'Not Met'
+
+
+def test_shared_form_rejects_a_curated_wearable_mapping():
+    VocabularyFactory(vocabulary_id='SNOMED')
+    concept = ConceptFactory(
+        concept_code='313059006', vocabulary_id='SNOMED',
+        concept_name='Planned therapy',
+    )
+    FieldConceptMapping.objects.create(
+        field_name='median_daily_steps_30d', concept=concept,
+        omop_table='observation', source_value='steps',
+        value_kind='number', status='approved',
+    )
+    record = PatientRecordFactory()
+
+    response = _patch(_staff_client(), record, {'median_daily_steps_30d': 1000})
+
+    assert response.status_code == 400, response.data
+    record.refresh_from_db()
+    assert record.median_daily_steps_30d is None

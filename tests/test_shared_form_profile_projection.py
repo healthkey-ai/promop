@@ -304,3 +304,38 @@ def test_staff_profile_validation_fields_project_to_person():
     assert refreshed.validated_by == 'Dr Example'
     assert refreshed.validation_date == date(2026, 11, 3)
     assert refreshed.suppress_demographics_for_others is True
+
+
+def test_shared_partial_coordinate_projects_the_effective_pair():
+    record = PatientRecordFactory(latitude=10, longitude=20)
+
+    response = _patch(_staff_client(), record, {'latitude': 11})
+
+    assert response.status_code == 200, response.data
+    person = Person.objects.get(pk=record.person_id)
+    location = Location.objects.get(location_id=person.location_id)
+    assert float(location.latitude) == 11
+    assert float(location.longitude) == 20
+    refreshed = refresh_patient_record(record.person)
+    assert refreshed.latitude == 11
+    assert refreshed.longitude == 20
+
+
+def test_shared_full_coordinate_clear_clears_location():
+    record = PatientRecordFactory(latitude=10, longitude=20)
+    person = Person.objects.get(pk=record.person_id)
+    location = Location.objects.create(
+        location_id=900012, latitude=10, longitude=20,
+    )
+    person.location_id = location.location_id
+    person.save(update_fields=['location_id'])
+
+    response = _patch(_staff_client(), record, {'latitude': '', 'longitude': ''})
+
+    assert response.status_code == 200, response.data
+    record.refresh_from_db()
+    assert record.latitude is None
+    assert record.longitude is None
+    location.refresh_from_db()
+    assert location.latitude is None
+    assert location.longitude is None

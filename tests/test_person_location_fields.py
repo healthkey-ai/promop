@@ -309,3 +309,19 @@ def test_zero_coordinates_survive_refresh(latitude, longitude):
 
     assert record.latitude == latitude
     assert record.longitude == longitude
+
+
+def test_partial_coordinate_projects_the_effective_pair(staff_client):
+    person = PersonFactory()
+    PatientRecordFactory(person=person, latitude=10, longitude=20)
+
+    response = _patch(staff_client, person, {'latitude': 11})
+
+    assert response.status_code == 200, response.data
+    person.refresh_from_db()
+    location = _loc(person)
+    assert float(location.latitude) == 11
+    assert float(location.longitude) == 20
+    refreshed = refresh_patient_record(person)
+    assert refreshed.latitude == 11
+    assert refreshed.longitude == 20
