@@ -59,9 +59,12 @@ const CONTROL_PATHS = [
   // while the pins cannot be relaxed in the same ungated change:
   // `test_web_startup` asserts the exact command sequence of start.sh, so
   // deleting its `check --deploy` line turns the suite red, and the render
-  // blueprint tests pin DEBUG, CORS_ALLOWED_ORIGINS, SERVICE_AUTH_SCOPES and
-  // the broker's empty ipAllowList. This list is matched before TEST_PATHS, so
-  // naming them here is what overrides the test exemption.
+  // blueprint tests pin DEBUG, SERVICE_AUTH_SCOPES and the broker's empty
+  // ipAllowList. For ALLOWED_HOSTS and CORS_ALLOWED_ORIGINS they reject only a
+  // wildcard written into the blueprint; production supplies both from the
+  // dashboard (`sync: false`), so their values are not pinned. This list is
+  // matched before TEST_PATHS, so naming them here is what overrides the test
+  // exemption.
   'tests/test_web_startup.py', 'tests/test_deployment_startup_contract.py',
   'tests/test_render_*.py',
   // The sole pin on ops/artemis/Dockerfile: USER artemis, no EXPOSE, and the
@@ -87,11 +90,17 @@ const CONTROL_PATHS = [
 // ran in production.
 //
 // What the argument still does not reach, and is accepted risk: the root
-// Dockerfile and Dockerfile.gcp carry no security pin of their own (only the
-// wsgi entrypoint and build command are asserted), .dockerignore has none, and
-// no test constrains a service's buildCommand. Bandit and gitleaks cover the
-// secret case. The root URLconf is the one path the pinning argument cannot
-// cover at all; it is gated above with the rest of its package.
+// Dockerfile, Procfile, nixpacks.toml and the compose files have no pin at
+// all, and nixpacks.toml's start command skips `check --deploy`. Dockerfile.gcp
+// has two assertions (wsgi entrypoint, build command), but they live in
+// tests/test_project_package_compatibility.py, which is not gated, so the file
+// and its pins can move together. .dockerignore has no pin, no test constrains
+// a service's buildCommand, and production ALLOWED_HOSTS and
+// CORS_ALLOWED_ORIGINS are reviewed by nothing here. Of the scanners, only
+// gitleaks reaches these files, and only for committed secrets; bandit scans
+// Python packages. docs/soc2/change-management.md records each of these. The
+// root URLconf is the one path the pinning argument cannot cover at all; it is
+// gated above with the rest of its package.
 //
 // Both dependency manifests are here, because the scanners answer a different
 // question than review does. `pip-audit -r requirements.txt` and Dependabot
@@ -150,6 +159,72 @@ const SECURITY_PATHS = [
   'patient_portal/service_tokens.py', 'patient_portal/service_tokens/**',
   'patient_portal/service_applications.py', 'patient_portal/service_applications/**',
   'patient_portal/management/commands/*service_token*.py',
+  // The other two credential-minting commands, which that glob misses on the
+  // filename alone — the same accident as the two service_applications modules.
+  // create_service_client mints an OAuth2 client secret (secrets.token_urlsafe);
+  // create_smart_app is, by its own comment, the only place redirect-URI
+  // validation happens on the supported provisioning path.
+  'patient_portal/management/commands/create_service_client.py',
+  'patient_portal/management/commands/create_smart_app.py',
+  // ...and the viewset that actually issues them. The line above covers
+  // patient_portal/service_applications.py, which holds ALLOWED_SCOPES,
+  // MAX_TOKEN_LIFETIME and issue_token; this one covers the staff API that
+  // calls issue_token, performs the one-time secret disclosure and applies
+  // is_interactive_session. Gating the definitions and not the endpoint that
+  // hands out the credential was an accident of the two files having the same
+  // name in different packages, not a decision.
+  'patient_portal/api/service_applications.py', 'patient_portal/api/service_applications/**',
+  // The password backend: authenticate() itself, plus the lockout threshold and
+  // the deliberate timing equalisation that resists account enumeration. A
+  // change here is an authentication-policy change by definition.
+  'patient_portal/backends.py', 'patient_portal/backends/**',
+  // Who may act as an administrator of an organization: get_admin_access_paths,
+  // get_admin_orgs, has_org_admin_access. Every authorization decision scoped to
+  // an org reads these.
+  'omop_core/services/access.py', 'omop_core/services/access/**',
+  // ...and the only module that WRITES the rows those functions read.
+  // org_views.py creates and upgrades GroupAccess, including role 'org_admin'
+  // (ROLE_RANK), from an invitation token; it carries five AllowAny endpoints,
+  // one of which sets a password and marks the address verified. Gating the
+  // reader of an authorization table while leaving its sole writer out is the
+  // same mistake as gating the token definitions and not the endpoint that
+  // issues them. It is the busiest file on this list (29 commits in the last 12
+  // months, against 0-6 for the others), and that is the cost of it being the
+  // place org roles are granted.
+  'patient_portal/api/org_views.py', 'patient_portal/api/org_views/**',
+  // Proxy authorization — who may act for a patient. Structurally the same as
+  // audit_views.py below: a ReadOnlyModelViewSet whose _is_privileged() widens
+  // the queryset for staff and service tokens.
+  'patient_portal/api/representatives.py', 'patient_portal/api/representatives/**',
+  // The credential lifecycle of a patient account. Each of these mints or
+  // consumes something that stands in for a password:
+  //   password_reset       — signed single-use reset links
+  //   email_verification   — the signed proof that binds an address to an
+  //                          account, which domain trust then relies on to hand
+  //                          out another organization's patients
+  //   patient_signup       — account creation for a trusted server-to-server
+  //                          caller, org taken from the caller's token
+  //   patient_invitations  — carries two PUBLIC endpoints, lookup-by-token and
+  //                          accept, and accept sets a password
+  'patient_portal/api/password_reset.py', 'patient_portal/api/password_reset/**',
+  'patient_portal/api/email_verification.py', 'patient_portal/api/email_verification/**',
+  'patient_portal/api/patient_signup.py', 'patient_portal/api/patient_signup/**',
+  'patient_portal/api/patient_invitations.py', 'patient_portal/api/patient_invitations/**',
+  // The audit trail's read API. It is the evidence the other controls are
+  // audited by, and it branches on privilege: staff and service tokens see
+  // every event, everyone else sees only their own.
+  'patient_portal/api/audit_views.py', 'patient_portal/api/audit_views/**',
+  // The two commands that create accounts with standing privilege.
+  // setup_admin runs from start.sh on every deploy and resets the password of
+  // whatever local identity matches ADMIN_EMAIL. No directory form: Django's
+  // find_commands skips packages (`if not is_pkg`), so a command cannot become
+  // one. Residual risk, since that same filter also skips leading-underscore
+  // modules and this tree already uses the pattern (commands/_mm_generator.py):
+  // reducing setup_admin.py to `from ._setup_admin_impl import Command` moves
+  // the ADMIN_PASSWORD read and the set_password call to a filename these two
+  // exact patterns do not match.
+  'omop_core/management/commands/create_staff_user.py',
+  'omop_core/management/commands/setup_admin.py',
   'frontend/src/utils/oauth.ts', 'frontend/src/utils/oauth/**',
   'frontend/src/hooks/useAuth.ts', 'frontend/src/hooks/useAuth/**',
   // The transports that attach (or deliberately omit) a credential — not the
