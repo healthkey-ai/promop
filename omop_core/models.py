@@ -3991,6 +3991,10 @@ class PatientRecord(models.Model):
     death_date = models.DateField(blank=True, null=True, help_text="Date of death (from OMOP Death)")
     condition_clinical_status = models.CharField(max_length=50, blank=True, null=True, help_text="Clinical status: active/remission/relapse")
     disease_slug = models.CharField(max_length=100, blank=True, null=True, help_text="Machine-readable disease ID e.g. 'multiple-myeloma'")
+    disease_slugs = models.JSONField(
+        blank=True, default=list,
+        help_text="Every cancer on the record as a disease_slug, primary first (#2182). Derived.",
+    )
     validated = models.BooleanField(blank=True, null=True, help_text="Clinician validation flag")
     validated_by = models.CharField(max_length=100, blank=True, null=True, help_text="Name of clinician who validated")
     validation_date = models.DateField(blank=True, null=True, help_text="Date validated by clinician")

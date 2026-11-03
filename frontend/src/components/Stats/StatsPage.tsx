@@ -49,6 +49,7 @@ export default function StatsPage() {
   return (
     <div className="p-6 space-y-6">
       <h1 className="text-2xl font-semibold text-gray-900">Patient Summary by Organization</h1>
+      <p className="text-sm text-gray-500">A patient with more than one cancer is counted under each.</p>
       {data.map(org => (
         <div key={org.org_slug} className="bg-white rounded-lg border border-gray-200 shadow-sm">
           <div className="px-6 py-4 border-b border-gray-100 flex items-center justify-between">

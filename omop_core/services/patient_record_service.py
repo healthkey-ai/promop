@@ -67,7 +67,7 @@ def _usable_concept_name(concept) -> str | None:
 
 # Bump this whenever aggregation or computation logic changes in any section
 # extractor or in _compute_derived_fields.  See DERIVATION_CHANGELOG.md.
-DERIVATION_VERSION = 19
+DERIVATION_VERSION = 20
 
 # These PatientRecord columns are projections of PersonLanguageSkill, never
 # independent edits. Older PATCH requests could mark them as user-edited and
@@ -92,7 +92,7 @@ _OMOP_DERIVED_FIELDS = [
     'validation_date', 'suppress_demographics_for_others',
     # Disease / condition
     'disease', 'diagnosis_date', 'diagnosis_date_precision',
-    'death_date', 'condition_clinical_status', 'disease_slug',
+    'death_date', 'condition_clinical_status', 'disease_slug', 'disease_slugs',
     'active_infection_status', 'no_active_infection_status',
     'active_malignancies', 'no_other_active_malignancies',
     # Therapy lines
@@ -680,7 +680,7 @@ def _clear_derived_fields(patient_info: PatientRecord) -> None:
                 'later_component_ids', 'therapy_component_ids',
                 'first_line_therapy_type_ids', 'second_line_therapy_type_ids',
                 'later_therapy_type_ids', 'therapy_type_ids',
-                'stem_cell_transplant_history', 'sct_eligibility',
+                'stem_cell_transplant_history', 'sct_eligibility', 'disease_slugs',
             ) or field in _genomic_patient_fields() else None
             if field == 'medication_contexts':
                 default = {}
@@ -1710,6 +1710,15 @@ def _get_disease_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     disease_name = data.get('disease', '')
     if disease_name:
         data['disease_slug'] = _disease_name_to_slug(disease_name)
+
+    # Every cancer on the record, primary first, so a patient with two cancers
+    # is found under both (#2182). Same cancers the primary is chosen from.
+    slugs = [data['disease_slug']] if data.get('disease_slug') else []
+    for condition in cancers:
+        slug = _condition_slug(condition)
+        if slug and slug not in slugs:
+            slugs.append(slug)
+    data['disease_slugs'] = slugs
 
     return data
 

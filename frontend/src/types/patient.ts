@@ -289,6 +289,8 @@ export interface PatientInfo {
   diagnosis_date_precision?: 'day' | 'month' | 'year' | null;
   condition_clinical_status?: string | null;
   disease_slug?: string | null;
+  /** Every cancer on the record, primary first (derived, read-only). */
+  disease_slugs?: string[];
   validated?: boolean | null;
   validated_by?: string | null;
   validation_date?: string | null;
