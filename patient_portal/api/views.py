@@ -5796,9 +5796,19 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
         )
         return Response({
             field: (
-                entry if not entry.get('writable')
-                else {**entry, 'writable': False, 'read_only_for_caller': True,
-                      'reason': reason}
+                entry if not (entry.get('writable') or entry.get('answerable'))
+                else {
+                    **entry,
+                    'writable': False,
+                    'read_only_for_caller': True,
+                    # An explicit answer has its own endpoint, so its
+                    # `writable` was already false and the old branch left it
+                    # looking answerable to a read-only caller (#5665). The
+                    # permission is the same write access; this flag is what
+                    # the client honours.
+                    **({'answerable': False} if entry.get('answerable') else {}),
+                    'reason': reason,
+                }
             )
             for field, entry in descriptor.items()
         })

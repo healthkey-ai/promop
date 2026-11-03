@@ -67,6 +67,7 @@ def test_preexisting_conditions_is_an_explicit_answer_not_a_column_write():
     )
     assert entry['endpoint'] == 'preexisting-conditions-answer'
     assert set(entry['actions']) == {'confirm_none', 'set_categories', 'withdraw'}
+    assert entry['answerable'] is True
 
 
 def test_the_explicit_answer_carries_the_category_vocabulary_in_code_space():
@@ -85,3 +86,17 @@ def test_the_explicit_answer_carries_the_category_vocabulary_in_code_space():
 
     assert 'cardiacIssues' in options
     assert options['cardiacIssues'] == 'Cardiac Issues'
+
+
+def test_the_birth_date_precision_is_offered_as_a_choice():
+    """A full date in a year-only record must not be silently truncated.
+
+    PROMOP keeps `date_of_birth_precision` beside the date; the editor needs
+    it as its own control or the reader's intent cannot be carried.
+    """
+    entry = build_writable_field_descriptor()['date_of_birth_precision']
+
+    assert entry['writable'] is True
+    assert [option['value'] for option in entry['options']] == [
+        'year', 'month', 'day',
+    ]

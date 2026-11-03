@@ -1276,6 +1276,21 @@ def build_writable_field_descriptor():
             ),
         })
 
+    # The birth date is stored at one of three precisions. A full date typed
+    # into a year-only record must not silently promote it (or be truncated
+    # to January 1st) — the editor needs the precision as its own control
+    # (#5664). `normalize_birth_date` treats an empty value as the default
+    # `day`, so a client that sends only the date still gets a full date.
+    if 'date_of_birth_precision' in descriptor:
+        descriptor['date_of_birth_precision'].update({
+            'value_kind': 'string',
+            'options': [
+                {'value': 'year', 'label': 'Year only'},
+                {'value': 'month', 'label': 'Month and year'},
+                {'value': 'day', 'label': 'Full date'},
+            ],
+        })
+
     # A pre-existing-conditions answer is an ATTESTATION, not a column write:
     # it has its own endpoint, its own audit rows, and a snapshot that refuses
     # an answer whose starting point has moved (#1988). A generic PATCH here
@@ -1300,6 +1315,10 @@ def build_writable_field_descriptor():
         'actions': ['confirm_none', 'set_categories', 'withdraw'],
         'value_kind': 'string',
         'multiple': True,
+        # `writable: false` is about the PATCH; the endpoint is a separate
+        # permission. A read-only caller must not be offered the dialog at
+        # all, so the caller-aware view clears this flag with the rest.
+        'answerable': True,
         'options': category_options,
         'reason': (
             'Answered explicitly through the patient-record '

@@ -24614,6 +24614,24 @@ class WritableFieldsPerCallerTest(TestCase):
         self.assertTrue(reader_view[blocked]['read_only_for_caller'])
         self.assertIn('read-only access', reader_view[blocked]['reason'])
 
+    def test_a_read_only_caller_is_not_offered_the_explicit_answer(self):
+        """`writable: false` was already true for this field.
+
+        The explicit answer goes through its own endpoint, so the old
+        `writable`-only mask left it looking answerable to a reader whose
+        every POST would be refused (#5665).
+        """
+        writer_view = self._descriptor(self.staff, '?person_id=770101')
+        reader_view = self._descriptor(self.reader, '?person_id=770101')
+
+        self.assertTrue(
+            writer_view['pre_existing_condition_categories']['answerable']
+        )
+        reader_entry = reader_view['pre_existing_condition_categories']
+        self.assertFalse(reader_entry['answerable'])
+        self.assertTrue(reader_entry['read_only_for_caller'])
+        self.assertIn('read-only access', reader_entry['reason'])
+
     def test_without_a_person_the_answer_describes_the_deployment(self):
         # The old behaviour, kept: "which fields could be written by someone
         # permitted to write them" is a real question, asked by tooling.
