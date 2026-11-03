@@ -189,6 +189,7 @@ _OMOP_DERIVED_FIELDS = [
     'biopsy_grade_depr',
     # Behavior / lifestyle
     'smoking_status', 'pack_years', 'alcohol_use', 'drinks_per_week',
+    'no_tobacco_use_status', 'tobacco_use_details',
     'exercise_frequency', 'exercise_minutes_per_week', 'diet_type',
     'sleep_hours_per_night', 'sleep_quality', 'stress_level', 'social_support',
     'employment_status', 'education_level', 'marital_status', 'insurance_type',
@@ -1472,8 +1473,8 @@ def _get_location_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
                 'region': location.state,
                 'city': location.city,
                 'postal_code': location.zip,
-                'latitude': float(location.latitude) if location.latitude else None,
-                'longitude': float(location.longitude) if location.longitude else None,
+                'latitude': float(location.latitude) if location.latitude is not None else None,
+                'longitude': float(location.longitude) if location.longitude is not None else None,
             })
         except Location.DoesNotExist:
             pass

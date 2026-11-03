@@ -492,3 +492,41 @@ def test_curated_mapping_cannot_make_a_computed_field_writable():
 
     assert entry['kind'] == 'computed'
     assert entry['writable'] is False
+
+
+@pytest.mark.parametrize('field,value', [
+    ('gelf_criteria_options', 'not-a-real-criterion'),
+    ('flipi_score_options', 'not-a-factor'),
+    ('tumor_grade', 'grade 9'),
+])
+def test_shared_form_rejects_invalid_assessment_values(field, value):
+    record = PatientRecordFactory()
+
+    response = _patch(_staff_client(), record, {field: value})
+
+    assert response.status_code == 400, response.data
+    record.refresh_from_db()
+    assert getattr(record, field) is None
+
+
+def test_explicit_empty_flipi_selection_is_not_unknown():
+    record = PatientRecordFactory()
+
+    response = _patch(_staff_client(), record, {'flipi_score_options': '   '})
+
+    assert response.status_code == 200, response.data
+    record.refresh_from_db()
+    assert record.flipi_score_options == ''
+    assert record.flipi_score == 0
+    assert record.flipi_risk_category == 'Low'
+
+
+def test_explicit_empty_gelf_selection_is_not_unknown():
+    record = PatientRecordFactory()
+
+    response = _patch(_staff_client(), record, {'gelf_criteria_options': '   '})
+
+    assert response.status_code == 200, response.data
+    record.refresh_from_db()
+    assert record.gelf_criteria_options == ''
+    assert record.gelf_criteria_status == 'Not Met'

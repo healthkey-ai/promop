@@ -3758,7 +3758,7 @@ class PatientRecord(models.Model):
     pregnancy_test_date = models.DateField(blank=True, null=True, help_text="Pregnancy Test Date")
     pregnancy_test_result_value = models.CharField(max_length=50, blank=True, null=True, help_text="Pregnancy Test Result (Positive/Negative)")
 
-    no_tobacco_use_status = models.BooleanField(help_text="Does the patient use tobacco?", blank=False, null=False, default=True)
+    no_tobacco_use_status = models.BooleanField(help_text="Does the patient use tobacco?", blank=True, null=True, default=None)
     tobacco_use_details = models.CharField(max_length=255, help_text="Details about the patient's tobacco use", blank=True, null=True)
     no_substance_use_status = models.BooleanField(help_text="Does the patient use substances?", blank=True, null=True, default=None)
     substance_use_details = models.CharField(max_length=255, help_text="Details about the patient's substance use", blank=True, null=True)
