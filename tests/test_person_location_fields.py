@@ -240,3 +240,34 @@ class TestDescriptor:
 
         groups = {e.get('group') for e in build_writable_field_descriptor().values()}
         assert 'location' not in groups
+
+
+def test_a_shared_location_is_cloned_for_the_edited_person(staff_client):
+    shared = Location.objects.create(
+        location_id=900001, city='Old', state='MA', address_1='1 Main St',
+        county='Suffolk', latitude=40.7, longitude=-74.0,
+    )
+    person_a = PersonFactory(location_id=shared.location_id)
+    person_b = PersonFactory(location_id=shared.location_id)
+    PatientRecordFactory(person=person_a)
+    PatientRecordFactory(person=person_b)
+
+    response = _patch(
+        staff_client, person_a, {'city': 'New', 'email': 'new@example.test'},
+    )
+
+    assert response.status_code == 200, response.data
+    person_a.refresh_from_db()
+    person_b.refresh_from_db()
+    assert person_a.location_id != shared.location_id
+    assert person_a.email == 'new@example.test'
+    assert person_b.location_id == shared.location_id
+    shared.refresh_from_db()
+    assert shared.city == 'Old'
+    clone = _loc(person_a)
+    assert clone.city == 'New'
+    assert clone.state == 'MA'
+    assert clone.address_1 == '1 Main St'
+    assert clone.county == 'Suffolk'
+    assert float(clone.latitude) == 40.7
+    assert float(clone.longitude) == -74.0
