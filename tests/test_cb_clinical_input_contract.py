@@ -648,7 +648,7 @@ def test_self_report_type_in_wrong_vocabulary_fails_closed(patient):
     assert not Observation.objects.filter(person=patient).exists()
 
 
-@pytest.mark.parametrize('old_version', [16, 18])
+@pytest.mark.parametrize('old_version', [16, 18, 19])
 def test_normal_backfill_selects_older_records_for_source_reader_update(patient, old_version):
     from django.core.management import call_command
     from omop_core.services.patient_record_service import DERIVATION_VERSION
@@ -657,7 +657,7 @@ def test_normal_backfill_selects_older_records_for_source_reader_update(patient,
     PatientRecord.objects.filter(person=patient).update(derivation_version=old_version, prothrombin_time_uln=None)
     call_command('backfill_patient_records', organization=patient.patient_record.organization.slug)
     record = PatientRecord.objects.get(person=patient)
-    assert record.derivation_version == DERIVATION_VERSION == 19
+    assert record.derivation_version == DERIVATION_VERSION == 20
     assert getattr(record, RATIO) == Decimal('1.2')
     assert list(Observation.objects.filter(person=patient).values()) == original
 
