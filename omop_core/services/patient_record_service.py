@@ -3532,6 +3532,18 @@ def _assertion_value(row, value_kind):
     return not parsed if value_kind == 'inverse_boolean' else parsed
 
 
+def _pregnancy_test_answer(value):
+    """The answer line of a pregnancy test result, without the lab's comment (#2250).
+
+    Labs append notes such as "NEG\\nSamples with Specific Gravity <1.010 ...",
+    which do not fit the column and are not the answer.
+    """
+    lines = value.strip().splitlines()
+    answer = lines[0].strip() if lines else ''
+    max_length = PatientRecord._meta.get_field('pregnancy_test_result_value').max_length
+    return answer[:max_length] or None
+
+
 def _assertion_detail(row):
     """Return optional detail text carried beside an assertion answer."""
     for attr in ('value_source_value', 'qualifier_source_value'):
@@ -3596,6 +3608,8 @@ def _get_assertion_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     for field, (row_date, _, code, row) in _latest_assertion_rows(snapshot).items():
         value_kind = _ASSERTION_FIELDS[code][1]
         value = _assertion_value(row, value_kind)
+        if field == 'pregnancy_test_result_value' and value is not None:
+            value = _pregnancy_test_answer(value)
         if value is None:
             continue
         data[field] = value
