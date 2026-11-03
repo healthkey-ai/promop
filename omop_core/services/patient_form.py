@@ -701,10 +701,18 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
                     record.save(update_fields=['user_edited_fields'])
             result.applied = list(dict.fromkeys(result.applied))
     if facts:
+        previous_facts = {name: getattr(record, name, None) for name in facts}
         fact_result = apply_field_writes(person, facts, descriptor=descriptor, dates=fact_dates)
         result.applied.extend(fact_result.applied)
         result.rejected.update(fact_result.rejected)
         result.profile.update(fact_result.profile)
+        if fact_result.applied:
+            # The dedicated clinical-input writer updates the record through
+            # its own readback; record the resulting values like the direct
+            # path does, so the revisions endpoint sees them too.
+            # write_record_revisions refreshes the record itself.
+            from omop_core.services.patient_record_revisions import write_record_revisions
+            write_record_revisions(record, previous_facts, changed_by=changed_by)
         # A previously direct edit must stop masking the successfully projected
         # fact once an approved mapping exists. Remove only acknowledged fields.
         pending = set(record.user_edited_fields or []) & set(fact_result.applied)
