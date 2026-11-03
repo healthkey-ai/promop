@@ -90,8 +90,7 @@ const CONTROL_PATHS = [
 // ran in production.
 //
 // What the argument still does not reach, and is accepted risk: the root
-// Dockerfile, Procfile, nixpacks.toml and the compose files have no pin at
-// all, and nixpacks.toml's start command skips `check --deploy`. Dockerfile.gcp
+// Dockerfile and the compose files have no pin at all. Dockerfile.gcp
 // has two assertions (wsgi entrypoint, build command), but they live in
 // tests/test_project_package_compatibility.py, which is not gated, so the file
 // and its pins can move together. .dockerignore has no pin, no test constrains

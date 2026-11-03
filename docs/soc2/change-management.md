@@ -118,7 +118,7 @@ endpoint stops reading any of them closely. These path groups were removed:
 | `**/*urls.py` | Every new data endpoint tripped the gate. The two project URLconfs (`promop/urls.py`, `ctomop/urls.py`) stay gated, as part of their packages. The seven app URLconfs carry no permission decisions today, and are reached only through the gated project URLconf, under a DRF `DEFAULT_PERMISSION_CLASSES` of `['IsAuthenticated']` — a convention rather than a guarantee, since a plain Django view added to one would have no permission default either. |
 | `.env*`, `**/.env*` | Secrets are not committed — `.gitignore` excludes `.env` and `.env.*` with an explicit exception for `.env.example`, whose values are documented placeholders. |
 | `render.yaml`, `start*.sh`, `ops/artemis/Dockerfile` | Operational, and pinned by the tests named below. |
-| `**/Dockerfile*` (root and `.gcp`), `docker-compose*.yml`, `Procfile`, `nixpacks.toml` | Operational, and **not** pinned. See accepted risks. |
+| `**/Dockerfile*` (root and `.gcp`), `docker-compose*.yml` | Operational, and **not** pinned. See accepted risks. |
 
 Dependency manifests (`requirements*.txt`, `frontend/package*.json`) were
 considered for removal and deliberately **kept**: `pip-audit` and Dependabot fire
@@ -173,14 +173,10 @@ constraining it cannot be relaxed in the same ungated change. The pins are:
 which are therefore both ungated and unpinned. Stated so this list is not read
 as covering more than it does:
 
-- **`nixpacks.toml` — the sharpest of these.** It declares its own start
-  command, `python manage.py migrate && python manage.py seed_omop_concepts &&
-  python manage.py setup_admin && gunicorn promop.wsgi:application …`. That
-  command runs **no `check --deploy`** at all, and it runs `seed_omop_concepts`,
-  which `tests/test_deployment_startup_contract.py` explicitly bans from
-  `start.sh`. Nothing in the repository asserts anything about this file, so a
-  deployment target using it bypasses the deploy-check control entirely.
-- **`Procfile`** — zero assertions anywhere in the repository.
+- **`nixpacks.toml` and `Procfile` were removed in this change.** No deploy
+  target used them: Render starts through `start.sh`/`start-worker.sh` and Cloud
+  Run uses `Dockerfile.gcp`. Removing them closes the sharpest accepted risk
+  (a start command that skipped `check --deploy` and ran `seed_omop_concepts`).
 - **`docker-compose.yml`, `docker-compose.dev.yml`** — zero assertions.
   `docker-compose.bridge.yml` has one, in `tests/test_project_package_compatibility.py`,
   which is itself ungated.

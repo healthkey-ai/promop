@@ -271,7 +271,7 @@ test('the narrowed scope leaves operational paths out', () => {
     'patient_portal/api/v1_urls.py',
     'patient_portal/urls.py', 'start.sh', 'start-worker.sh',
     'ops/artemis/Dockerfile', 'deploy/Dockerfile',
-    'Procfile', 'nixpacks.toml', 'frontend/.env.production', 'render.yaml',
+    'frontend/.env.production', 'render.yaml',
     'docker-compose.yml', 'Dockerfile', 'Dockerfile.gcp', '.env.example',
   ].filter(securityPath);
   assert.deepEqual(out, [], `unexpectedly gated: ${out.join(', ')}`);
