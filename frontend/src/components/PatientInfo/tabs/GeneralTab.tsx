@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { useVocabulary } from '@/hooks/useVocabulary';
+import { useDiseaseCategories } from '@/hooks/useDiseaseCategories';
 import { useWritableFields } from '@/hooks/useWritableFields';
 import ClinicalField from '../ClinicalField';
 import TreatingInstitutionField from '../TreatingInstitutionField';
@@ -10,7 +11,6 @@ import { today } from '@/api/clinicalFacts';
 import {
   COUNTRY_OPTIONS, US_STATES,
   ECOG_OPTIONS, KARNOFSKY_OPTIONS,
-  DISEASE_OPTIONS,
 } from '../patientConstants';
 
 interface Props {
@@ -58,6 +58,7 @@ export default function GeneralTab({
   const { source: karnofskySource }   = useVocabulary('karnofsky-score', 'code');
   const { source: ethnicitySource }   = useVocabulary('ethnicity', 'title');
   const { source: diseaseSource }     = useVocabulary('disease', 'title');
+  const { options: diseaseOptions }   = useDiseaseCategories();
 
   const age = formData?.date_of_birth
     ? calculateAge(formData.date_of_birth as string)
@@ -158,7 +159,7 @@ export default function GeneralTab({
           {field('Phone Number', 'phone_number', 'text')}
 
           <div className="sm:col-span-2">
-            {field('Disease', 'disease', 'select', { options: DISEASE_OPTIONS, vocabSource: diseaseSource })}
+            {field('Disease', 'disease', 'select', { options: diseaseOptions, vocabSource: diseaseSource })}
           </div>
 
           <div className="sm:col-span-2">
