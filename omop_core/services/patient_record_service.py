@@ -289,6 +289,10 @@ PATIENT_RECORD_OMOP_MAPPED_FIELDS = frozenset(_OMOP_DERIVED_FIELDS) | frozenset(
     # _OMOP_DERIVED_FIELDS, because derivation must not clear an answer.
     'mgus', 'smoldering_multiple_myeloma', 'waldenstrom_macroglobulinemia',
     'igm_multiple_myeloma', 'al_amyloidosis', 'poems_syndrome',
+    # A clinician's Lugano assessment. User-entered, never derived: there is
+    # no PET/CT or marrow result to compute it from. Listed for descriptor
+    # coverage (and because every concrete data column must be classified).
+    'meets_lugano',
     'supportive_therapies', 'supportive_therapy_date',
     'supportive_therapy_start_date', 'supportive_therapy_end_date',
     'supportive_therapy_intent', 'absolute_neutrophile_count_units',
