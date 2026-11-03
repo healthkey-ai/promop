@@ -94,6 +94,16 @@ def mapped_concept(mapping):
     if mapping.vocabulary_id == 'LOINC' and mapping.concept_code:
         concept, source, domain = _resolve(mapping.concept_code, mapping.omop_table.title())
         return (concept if domain.lower() == mapping.omop_table else 0), source
+    if mapping.vocabulary_id and mapping.concept_code:
+        # Portable non-LOINC recipe (e.g. an OMOP Genomic gene). The code names
+        # the concept even when the fixture was seeded before Athena was loaded
+        # and the local FK was never resolved.
+        concept = Concept.objects.filter(
+            vocabulary_id=mapping.vocabulary_id, concept_code=mapping.concept_code,
+            standard_concept='S', invalid_reason__isnull=True,
+        ).first()
+        if concept is not None and concept.domain_id.lower() == mapping.omop_table:
+            return concept.pk, concept.pk
     return 0, None
 
 

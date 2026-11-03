@@ -102,6 +102,15 @@ def test_seeding_uses_the_gene_measurement_concept_and_writes_it():
     assert variant['gene_concept_id'] == 35950928
 
 
+def test_a_portable_gene_recipe_resolves_by_code_when_the_fk_is_unset():
+    """The shipped fixture can be seeded before Athena is loaded."""
+    person = _setup('brca1')
+    FieldConceptMapping.objects.filter(field_name='genomics_brca1').update(concept=None)
+    variant = save_variant(person, {'gene': 'BRCA1', 'variant': 'c.68_69delAG'})
+    parent = Measurement.objects.get(pk=variant['id'])
+    assert parent.measurement_concept_id == 35950928
+
+
 def test_seeding_leaves_the_recipe_unmapped_when_the_gene_concept_is_not_loaded():
     person = _setup('brca1')
     FieldConceptMapping.objects.filter(field_name='genomics_brca1').delete()
