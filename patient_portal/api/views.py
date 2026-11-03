@@ -5371,6 +5371,22 @@ def login_view(request):
                 user = authenticate(request, username=identity.uid, password=password)
 
         if user is not None:
+            # Block login for NEW local accounts that have not verified their email.
+            # last_login is None for accounts that have never logged in (new signups).
+            # Existing accounts (last_login is set) are not affected — they were
+            # created before email verification was enforced at signup.
+            # OAuth/SSO accounts (no usable_password) are verified by the provider.
+            if (user.has_usable_password()
+                    and not user.has_verified_email
+                    and user.last_login is None):
+                from patient_portal.api.email_verification import send_verification_email
+                send_verification_email(user)
+                return Response({
+                    'error': 'Please verify your email address before signing in. '
+                             'We have sent a new verification link to your email.',
+                    'code': 'email_not_verified',
+                }, status=status.HTTP_403_FORBIDDEN)
+
             login(request, user)
             user_serializer = UserSerializer(user)
             return Response({

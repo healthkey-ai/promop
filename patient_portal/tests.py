@@ -15511,13 +15511,15 @@ class OrgPatientSignupTest(TestCase):
         })
         self.assertEqual(resp.status_code, 201)
         self.assertIn('person_id', resp.data)
-        self.assertEqual(resp.data['redirect_url'], '/org/signup-org/')
+        # Signup no longer auto-logs in; email verification is required first.
+        self.assertTrue(resp.data['email_verification_required'])
+        self.assertNotIn('redirect_url', resp.data)
+        self.assertNotIn('_auth_user_id', client.session)
 
         identity = Identity.objects.get(email='self-signup@test.com')
         self.assertTrue(identity.has_usable_password())
         self.assertFalse(identity.is_staff)
         self.assertFalse(identity.is_superuser)
-        self.assertEqual(client.session['_auth_user_id'], str(identity.pk))
         self.assertTrue(PatientUser.objects.filter(identity=identity).exists())
         self.assertTrue(
             GroupAccess.objects.filter(identity=identity, org=self.org, role='analyst').exists()
@@ -15564,6 +15566,8 @@ class OrgPatientSignupTest(TestCase):
 
         # Typed, not proved: self-access only, and nobody else's record.
         self.assertEqual(roles(), ['patient'])
+        # Signup no longer auto-logs in; authenticate explicitly for the checks.
+        client.force_authenticate(user=identity)
         user = client.get('/api/v1/user/').data['user']
         self.assertTrue(user['is_patient'])
         self.assertFalse(user['email_verified'])
@@ -15606,6 +15610,8 @@ class OrgPatientSignupTest(TestCase):
                  .values_list('role', flat=True)),
             ['patient'],
         )
+        # Signup no longer auto-logs in; authenticate explicitly for the checks.
+        client.force_authenticate(user=identity)
         self.assertTrue(client.get('/api/v1/user/').data['user']['is_patient'])
         self.assertEqual(
             client.get('/api/v1/patient-records/77801/').status_code, 404,
@@ -15732,6 +15738,127 @@ class OrgPatientSignupTest(TestCase):
         # Also includes field-level errors for frontend display
         self.assertIn('errors', resp.data)
         self.assertIn('email', resp.data['errors'])
+
+
+@override_settings(
+    EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend',
+    APP_BASE_URL='https://app.test',
+)
+class EmailVerificationLoginGateTest(TestCase):
+    """Login is blocked for local accounts that have not verified their email."""
+
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+        self.org = Organization.objects.create(
+            name='Gate Org', slug='gate-org', allows_patient_signup=True,
+        )
+
+    def test_new_unverified_local_account_cannot_login(self):
+        """A new signup (last_login=None) that has not verified its email gets 403."""
+        Identity.objects.create_user(
+            email='unverified@test.com', password='Str0ng!Pass99',
+        )
+        resp = APIClient().post('/api/auth/login/', {
+            'username': 'unverified@test.com',
+            'password': 'Str0ng!Pass99',
+        })
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(resp.data['code'], 'email_not_verified')
+
+    def test_existing_unverified_account_can_still_login(self):
+        """An existing account (last_login set) is not blocked even without
+        email verification — only new signups are gated."""
+        identity = Identity.objects.create_user(
+            email='existing@test.com', password='Str0ng!Pass99',
+        )
+        # Simulate a prior login by setting last_login.
+        Identity.objects.filter(pk=identity.pk).update(last_login=timezone.now())
+        resp = APIClient().post('/api/auth/login/', {
+            'username': 'existing@test.com',
+            'password': 'Str0ng!Pass99',
+        })
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('user', resp.data)
+
+    def test_verified_local_account_can_login(self):
+        """A local account that has verified its email can login normally."""
+        identity = Identity.objects.create_user(
+            email='verified@test.com', password='Str0ng!Pass99',
+        )
+        identity.mark_email_verified()
+        resp = APIClient().post('/api/auth/login/', {
+            'username': 'verified@test.com',
+            'password': 'Str0ng!Pass99',
+        })
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('user', resp.data)
+
+    def test_login_gate_resends_verification_email(self):
+        """Blocked login resends the verification email."""
+        from django.core import mail
+        identity = Identity.objects.create_user(
+            email='resend@test.com', password='Str0ng!Pass99',
+        )
+        resp = APIClient().post('/api/auth/login/', {
+            'username': 'resend@test.com',
+            'password': 'Str0ng!Pass99',
+        })
+        self.assertEqual(resp.status_code, 403)
+        self.assertTrue(any('resend@test.com' in m.to for m in mail.outbox))
+
+    def test_signup_then_login_blocked_until_verified(self):
+        """Full flow: signup -> login blocked -> verify -> login succeeds."""
+        import re
+        from django.core import mail
+        client = APIClient()
+        # Sign up
+        resp = client.post('/api/v1/orgs/gate-org/patient-signup/', {
+            'email': 'flow@test.com',
+            'password': 'Str0ng!Pass99',
+            'given_name': 'Flow',
+            'family_name': 'Test',
+        })
+        self.assertEqual(resp.status_code, 201)
+        self.assertTrue(resp.data['email_verification_required'])
+
+        # Login blocked
+        login_resp = client.post('/api/auth/login/', {
+            'username': 'flow@test.com',
+            'password': 'Str0ng!Pass99',
+        })
+        self.assertEqual(login_resp.status_code, 403)
+        self.assertEqual(login_resp.data['code'], 'email_not_verified')
+
+        # Verify email via token
+        token = re.search(r'verify-email\?token=(\S+)', mail.outbox[-1].body).group(1)
+        verify_resp = APIClient().post('/api/v1/auth/verify-email/', {'token': token})
+        self.assertEqual(verify_resp.status_code, 200)
+
+        # Login succeeds
+        login_resp = client.post('/api/auth/login/', {
+            'username': 'flow@test.com',
+            'password': 'Str0ng!Pass99',
+        })
+        self.assertEqual(login_resp.status_code, 200)
+        self.assertIn('user', login_resp.data)
+
+    def test_oauth_account_without_password_can_login(self):
+        """OAuth/SSO accounts (no usable password) bypass the email check."""
+        identity = Identity.objects.create_user(
+            email='oauth@test.com', password='Str0ng!Pass99',
+        )
+        identity.set_unusable_password()
+        identity.save()
+        # OAuth users authenticate through their provider, not through login_view.
+        # But if they somehow hit login_view with credentials, the unusable password
+        # means authenticate() returns None, not a 403.
+        resp = APIClient().post('/api/auth/login/', {
+            'username': 'oauth@test.com',
+            'password': 'anything',
+        })
+        # authenticate() returns None for unusable password -> 401 not 403
+        self.assertEqual(resp.status_code, 401)
 
 
 @override_settings(
