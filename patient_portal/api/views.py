@@ -5653,10 +5653,10 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
             return Response({'detail': 'Provide a non-empty object of field edits.'}, status=400)
         try:
             patient_author, authorship = _patient_author(request.user, person)
-            # Without the Patient self-report type concept the patient's fact
-            # cannot be told apart from a clinical one, and projecting could
-            # overwrite today's clinical answer. Keep the PatientRecord answer
-            # and skip the best-effort side effect instead.
+            # Without 32865 the patient's fact cannot be told apart from a
+            # clinical one. _project_side_effects skips pinned current-state
+            # fields; non-pinned fields project with the recipe type, matching
+            # the native PATCH. The PatientRecord answer is already saved.
             actor = getattr(request, 'user', None)
             changed_by = (
                 str(actor.pk) if getattr(actor, 'is_authenticated', False)
@@ -5668,6 +5668,13 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
             )
         except ValueError as exc:
             return Response({'detail': str(exc)}, status=400)
+        except DjangoValidationError as exc:
+            detail = '; '.join(exc.messages)
+            body = {'detail': detail}
+            errors = getattr(exc, 'message_dict', None)
+            if errors:
+                body['errors'] = errors
+            return Response(body, status=400)
         if not result.applied:
             return Response({'detail': 'No fields were saved.', 'rejected': result.rejected}, status=400)
         return Response({'patient_info': PatientRecordSerializer(record, context={'request': request}).data,

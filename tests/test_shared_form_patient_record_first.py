@@ -254,7 +254,7 @@ def test_staff_does_not_overwrite_a_patient_self_report_fact():
     assert clinical.value_as_number == 0.0
 
 
-def test_patient_scalar_without_self_report_type_stays_pending(monkeypatch):
+def test_patient_scalar_without_self_report_type_projects_with_recipe_type(monkeypatch):
     _curated_fever_mapping()
     record = PatientRecordFactory()
     monkeypatch.setattr(
@@ -266,10 +266,11 @@ def test_patient_scalar_without_self_report_type_stays_pending(monkeypatch):
     assert response.status_code == 200, response.data
     record.refresh_from_db()
     assert record.b_symptom_fever is True
-    assert 'b_symptom_fever' in (record.user_edited_fields or [])
-    assert not Observation.objects.filter(
+    fact = Observation.objects.get(
         person=record.person, observation_concept_id=FEVER_CONCEPT,
-    ).exists()
+        observation_source_value=FEVER_CODE,
+    )
+    assert fact.observation_type_concept_id == EHR_TYPE
 
 
 def test_scalar_string_limit_boundary():

@@ -878,3 +878,14 @@ def test_shared_form_clinical_input_corrects_a_pending_answer(patient, staff_cli
     revision = revisions.get()
     assert revision.old_value == 'True'
     assert revision.new_value == 'False'
+
+
+def test_shared_form_invalid_clinical_input_returns_400(patient, staff_client):
+    """A wrong-typed dedicated input is a client error, not a 500."""
+    approve(BOOL)
+    response = staff_client.patch(
+        f'/api/v1/patient-records/{patient.pk}/',
+        {BOOL: 'not-a-boolean'}, format='json', HTTP_X_PATIENT_FORM='1',
+    )
+    assert response.status_code == 400, response.data
+    assert BOOL in (response.data.get('errors') or {})
