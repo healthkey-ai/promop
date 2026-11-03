@@ -23,6 +23,8 @@ BREAST, MYELOMA = 'Breast Cancer', 'Multiple myeloma (disorder)'
     'Pathologic fracture of vertebra at site of neoplasm',
     'Tumor lysis syndrome',
     'BAP1 tumor predisposition syndrome',
+    'Malignant ascites',
+    'Nausea (cancer)',
 ])
 def test_a_later_symptom_or_complication_is_not_a_cancer(later):
     """The issue's patient A: the fatigue row is the newest on the record."""
@@ -34,6 +36,28 @@ def test_a_later_symptom_or_complication_is_not_a_cancer(later):
 
     assert record.disease == BREAST
     assert record.disease_slugs == [disease_slug(BREAST)]
+
+
+@pytest.mark.parametrize('later', [
+    'Malignant hypertension',
+    'Malignant hyperthermia caused by anesthetic',
+    'Neuroleptic malignant syndrome',
+    'Encounter for follow-up examination after completed treatment for malignant neoplasm',
+    'Cancer chemotherapy',
+    'Elevated tumor markers',
+    'Breast cancer genetic marker of susceptibility detected',
+    'Genetic cancer risk evaluation',
+    'Hereditary cancer genetic counseling',
+    'PTEN hamartoma tumor syndrome',
+    'MHAV CC CANCER - PROBLEM TEMPLATE',
+])
+def test_a_later_visit_risk_or_other_malignant_is_not_a_cancer(later):
+    """Names that say cancer or malignant about something else."""
+    person = _person()
+    _condition(person, BREAST, ago(600))
+    _condition(person, later, ago(20))
+
+    assert _refreshed(person).disease_slugs == [disease_slug(BREAST)]
 
 
 @pytest.mark.parametrize('later', [
@@ -70,9 +94,11 @@ def test_a_metastasis_alone_is_still_the_cancer():
     'Metastatic non-small cell lung cancer',
     'Extranodal marginal zone B-cell lymphoma of mucosa-associated lymphoid tissue',
     'Acute myeloid leukemia with myelodysplasia-related changes',
+    'Acute myeloid leukemia with recurrent genetic abnormalities',
+    "Basal cell carcinoma recurrent following Mohs' excision",
 ])
 def test_a_cancer_that_names_its_type_still_counts(cancer):
-    """Metastatic, associated and related are not markers on their own."""
+    """Metastatic, associated, related, genetic and following are not markers on their own."""
     person = _person()
     _condition(person, BREAST, ago(900))
     _condition(person, cancer, ago(20))

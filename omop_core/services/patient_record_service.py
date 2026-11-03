@@ -1632,14 +1632,18 @@ def _primary_cancer_condition(person, snapshot: OmopSnapshot, cancers: list):
 
 
 # Names a cancer without being one: a past cancer, a complication or symptom
-# of one (#2181), a benign or uncertain growth, a test or a worry. Shared with
-# the PHR's diagnoses (HealthTree/ht-phr-one#119).
+# of one (#2181), a benign or uncertain growth, a test, a visit, an inherited
+# risk or a worry, or "malignant" in its other sense (malignant hypertension).
+# Shared with the PHR's diagnoses (HealthTree/ht-phr-one#119).
 NOT_CANCER_NAME = re.compile(
     r'\bhistory of\b|\bh/o\b|\bdue to\b|\bsecondary to\b|\bbenign\b|uncertain behaviou?r|'
     r'\bscreening\b|\bsuspected\b|\brisk of\b|\bfear of\b|\bpredisposition\b|'
-    r'\bpain\b|\bfatigue\b|\bcachexia\b|\banx(iety|ious)\b|\ban(a)?emia (in|assoc)|'
+    r'\bpain\b|\bfatigue\b|\bcachexia\b|\bnausea\b|\bascites\b|\banx(iety|ious)\b|\ban(a)?emia (in|assoc)|'
     r'\bamyloidosis\b|\bneuropathy\b|\bfracture\b|\btumou?r lysis\b|\bcompression\b|'
-    r'\beffusion\b|\bmorbidity\b|\bresearch study\b',
+    r'\beffusion\b|\bmorbidity\b|\bresearch study\b|'
+    r'\bencounter\b|\bfollow.?up\b|\baftercare\b|\bchemotherapy\b|\btumou?r markers?\b|\btemplate\b|'
+    r'\bsusceptibility\b|\bcounsell?ing\b|\brisk evaluation\b|\bhamartoma\b|'
+    r'\bhypertension\b|\bhyperthermia\b|\bneuroleptic\b',
     re.IGNORECASE,
 )
 
