@@ -395,6 +395,38 @@ describe('dated result edits', () => {
     await vi.advanceTimersByTimeAsync(500);
     expect(patch).toHaveBeenCalledOnce();
   });
+
+  it('does not overtake a refresh started in the same turn as flush', async () => {
+    const fields = { height: { writable: true, target: 'patient_record', control: 'number' } };
+    let metadataCalls = 0;
+    const refreshes: Array<{ resolve: (value: unknown) => void; reject: (error: unknown) => void }> = [];
+    const get = vi.fn((url: string) => {
+      if (url.includes('writable-fields')) {
+        metadataCalls += 1;
+        if (metadataCalls === 1) return Promise.resolve({ data: fields });
+        return new Promise((resolve, reject) => { refreshes.push({ resolve, reject }); });
+      }
+      return Promise.resolve({ data: {
+        patient_info: { person_id: 12, height: 170 }, write_enabled: true } });
+    });
+    const patch = vi.fn(async (_url: string, edits: Record<string, unknown>) => ({ data: {
+      patient_info: { person_id: 12, ...edits }, write: { applied: Object.keys(edits), rejected: {} },
+    } }));
+    const store = new PatientFormStore({ get, patch } as unknown as AxiosInstance, '/api');
+    await store.load();
+
+    store.enqueue('height', 180);
+    const saving = store.flush();                    // nothing is in flight yet
+    void store.reloadDates();                        // starts before flush resumes
+    expect(refreshes).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(0);            // let flush resume
+    expect(patch).not.toHaveBeenCalled();            // the refresh is still pending
+
+    refreshes[0].resolve({ data: fields });
+    await saving;
+    await vi.advanceTimersByTimeAsync(0);
+    expect(patch).toHaveBeenCalledOnce();
+  });
 });
 
 describe('shared patient-form queue', () => {

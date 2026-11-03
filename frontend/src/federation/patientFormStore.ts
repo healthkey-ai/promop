@@ -235,8 +235,13 @@ export class PatientFormStore {
     if (this.flight || !Object.keys(this.queue).length || !this.snapshot.personId) return;
     // Never dispatch ahead of a date refresh: its outcome decides whether a
     // queued dated edit still has a valid correction target (#5608).
-    await this.settleDateRefresh();
-    if (this.flight || !Object.keys(this.queue).length || !this.snapshot.personId) return;
+    for (;;) {
+      await this.settleDateRefresh();
+      if (this.flight || !Object.keys(this.queue).length || !this.snapshot.personId) return;
+      // No await between this check and taking the batch below, so a refresh
+      // cannot start in the gap and be overtaken by the dispatch.
+      if (!this.datesRefresh) break;
+    }
     const batch = this.queue;
     const revisions = { ...this.revisions };
     const explicitAtStart = this.explicitRevision;
