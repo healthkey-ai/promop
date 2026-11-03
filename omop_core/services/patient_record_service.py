@@ -1035,8 +1035,10 @@ def refresh_patient_record(person: Person) -> PatientRecord:
         # Explicit demo/local assessment codes are fallbacks. Real extractors
         # and approved mappings below retain precedence during imports.
         from omop_core.services.sample_disease_profiles import read_profile_rows
+        derived_fields = set()
         for field, value in read_profile_rows(snapshot.measurements + snapshot.observations).items():
             setattr(patient_info, field, value)
+            derived_fields.add(field)
 
         # Populate all sections
         lab_derived_fields = set()
@@ -1073,6 +1075,7 @@ def refresh_patient_record(person: Person) -> PatientRecord:
                 lab_derived_fields = set(section_values)
             for field, value in section_values.items():
                 setattr(patient_info, field, value)
+                derived_fields.add(field)
 
         patient_info.custom_fields = _get_custom_patient_field_data(snapshot)
         from omop_core.services.omop_projection import curated_values_from_snapshot
@@ -1085,11 +1088,13 @@ def refresh_patient_record(person: Person) -> PatientRecord:
             # An older exact FCM row must not overwrite that latest result.
             if field not in lab_derived_fields:
                 setattr(patient_info, field, value)
+            derived_fields.add(field)
 
         for field, value in linked_cancer_values.items():
             width = PatientRecord._meta.get_field(field).max_length
             # Preserve the complete source fact; this is the legacy-width mirror.
             setattr(patient_info, field, value[:width] if width and isinstance(value, str) else value)
+            derived_fields.add(field)
 
         # Pending edits (including explicit clears) win until OMOP actually
         # represents the saved value. A stale fact or a failed projection must
@@ -1101,13 +1106,22 @@ def refresh_patient_record(person: Person) -> PatientRecord:
         still_orphaned = []
         for field, value in preserved.items():
             derived_value = getattr(patient_info, field, None)
-            matches = _derived_value_matches(field, derived_value, value)
+            # A retained attribute is not evidence: a field this refresh did
+            # not evaluate keeps its value only because nothing cleared it.
+            # Dropping its marker there would let a later derivation or a
+            # mapping approval treat an unbacked edit as confirmed.
+            has_evidence = field in derived_fields or field in _OMOP_DERIVED_FIELDS
             if field == 'medication_contexts':
                 from omop_core.services.medication_context import context_delta, merge_contexts
                 eligible = {str(row.pk) for row in snapshot.drug_exposures}
                 value = {pk: attributes for pk, attributes in (value or {}).items() if pk in eligible}
-                matches = not context_delta(derived_value or {}, value)
+                # Per-attribute evidence: the imported object may carry
+                # attributes the pending edit never touched, so whole-object
+                # equality would keep a fully backed edit pending.
+                matches = has_evidence and not context_delta(derived_value or {}, value)
                 value = merge_contexts(derived_value or {}, value or {})
+            else:
+                matches = has_evidence and _derived_value_matches(field, derived_value, value)
             if field in NEW_INPUT_FIELDS or field in clinical_values:
                 matches = matches and field in confirmed_inputs
             if (field == 'flipi_score_options' and value is None
