@@ -67,7 +67,7 @@ def _usable_concept_name(concept) -> str | None:
 
 # Bump this whenever aggregation or computation logic changes in any section
 # extractor or in _compute_derived_fields.  See DERIVATION_CHANGELOG.md.
-DERIVATION_VERSION = 21
+DERIVATION_VERSION = 22
 
 # These PatientRecord columns are projections of PersonLanguageSkill, never
 # independent edits. Older PATCH requests could mark them as user-edited and
@@ -804,6 +804,35 @@ def _fact_recency_key(row):
     raise TypeError(f'not an OMOP fact row: {type(row)!r}')
 
 
+def _read_values_in_source_units(person, measurements):
+    """Give every extractor the value in unit_source_value's unit (#2249).
+
+    Extractors read value_as_number in unit_source_value's unit, but a row
+    converted on write holds it in unit_concept's. These instances are only
+    read, never saved. A row whose unit cannot be shown loses its value, so
+    nothing presents it in the wrong unit, and so do the older results of the
+    same test: the newest decides, and an older one is not the current value.
+    *measurements* is newest first.
+    """
+    from omop_core.services.canonical_units import value_in_source_unit
+    unknown = 0
+    blocked = set()
+    for measurement in measurements:
+        concept = measurement.measurement_concept if measurement.measurement_concept_id else None
+        test = concept.concept_code if concept else measurement.measurement_source_value
+        value = None if test in blocked else value_in_source_unit(measurement)
+        if value is None and measurement.value_as_number is not None:
+            unknown += 1
+            blocked.add(test)
+        measurement.value_as_number = value
+    if unknown:
+        logger.warning(
+            'Ignoring %s measurement value(s) for person_id=%s: stored in a unit that '
+            'is neither unit_source_value nor a proven conversion of it, or older than one',
+            unknown, person.person_id,
+        )
+
+
 def _build_snapshot(person: Person) -> OmopSnapshot:
     """Fetch all OMOP rows for *person* in ~6 SQL queries and build lookup indexes."""
     measurements = list(
@@ -817,6 +846,7 @@ def _build_snapshot(person: Person) -> OmopSnapshot:
         )
         .order_by('-measurement_date', '-measurement_id')
     )
+    _read_values_in_source_units(person, measurements)
     observations = list(
         Observation.objects
         .filter(person=person, is_erroneous=False)

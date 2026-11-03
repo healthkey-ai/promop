@@ -1,4 +1,6 @@
-from omop_core.services.canonical_units import policies, normalize, measurement_normalized
+from omop_core.services.canonical_units import (
+    measurement_normalized, measurement_stored_unit, normalize, policies, stored_unit,
+)
 from collections import defaultdict
 from django.contrib.contenttypes.models import ContentType
 from django.db import connection, transaction
@@ -279,6 +281,7 @@ class ResultsSummaryView(APIView):
             m.measurement_type_concept_id,
             m.unit_concept_id,
             m.unit_source_value,
+            m.value_source_value,
             m.visit_occurrence_id,
             m.measurement_source_value,
             ROW_NUMBER() OVER (
@@ -340,9 +343,12 @@ class ResultsSummaryView(APIView):
 
             values = []
             for row in meas_rows:
-                unit_str = row['unit_source_value']
-                if not unit_str and row['unit_concept_code']:
-                    unit_str = row['unit_concept_code']
+                unit_str = stored_unit(
+                    value=row['value_as_number'], unit_source_value=row['unit_source_value'],
+                    unit_concept_code=row['unit_concept_code'],
+                    unit_vocabulary_id=row['unit_vocabulary_id'],
+                    value_source_value=row['value_source_value'],
+                )
 
                 type_label = None
                 if row['measurement_type_concept_id']:
@@ -362,9 +368,7 @@ class ResultsSummaryView(APIView):
 
                 values.append({
                     'normalized': normalize(preferences.get(cid), row['value_as_number'],
-                        row['unit_source_value'] if (row['unit_source_value'] or '').strip() else
-                        (row['unit_concept_code'] if row['unit_vocabulary_id'] == 'UCUM' else None),
-                        row['range_low'], row['range_high']),
+                        unit_str, row['range_low'], row['range_high']),
                     'measurement_id': row['measurement_id'],
                     'value': row['value_as_number'],
                     'value_string': row['value_as_string'],
@@ -459,9 +463,7 @@ class ValuesView(APIView):
         preferences = policies()
         values = []
         for m in page:
-            unit_str = m.unit_source_value
-            if not unit_str and m.unit_concept:
-                unit_str = m.unit_concept.concept_code
+            unit_str = measurement_stored_unit(m)
 
             type_label = None
             if m.measurement_type_concept_id:
@@ -606,9 +608,7 @@ class MeasurementDetailView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
-        unit_str = m.unit_source_value
-        if not unit_str and m.unit_concept:
-            unit_str = m.unit_concept.concept_code
+        unit_str = measurement_stored_unit(m)
 
         type_label = None
         if m.measurement_type_concept_id:
