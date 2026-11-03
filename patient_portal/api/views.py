@@ -5651,6 +5651,13 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
             return Response({'detail': 'You have read-only access to this patient.'}, status=403)
         if not isinstance(request.data, dict) or not request.data:
             return Response({'detail': 'Provide a non-empty object of field edits.'}, status=400)
+        payload = request.data.copy()
+        # Sensitive profile fields are staff-only, matching the native PATCH.
+        # Silent drop (not 400) so an autosave carrying the full GET
+        # representation cannot write them.
+        if not getattr(request.user, 'is_staff', False):
+            for field in self._STAFF_ONLY_FIELDS:
+                payload.pop(field, None)
         try:
             patient_author, authorship = _patient_author(request.user, person)
             # Without 32865 the patient's fact cannot be told apart from a
@@ -5663,7 +5670,7 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
                 and actor.pk is not None else 'system'
             )
             record, result = apply_patient_form_patch(
-                person, request.data, authorship=authorship, patient_author=patient_author,
+                person, payload, authorship=authorship, patient_author=patient_author,
                 changed_by=changed_by,
             )
         except ValueError as exc:
@@ -5747,6 +5754,15 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
             if shared_form:
                 record = PatientRecord.objects.filter(person_id=person_id).first()
                 descriptor = patient_form_descriptors(descriptor, record=record)
+                if not getattr(request.user, 'is_staff', False):
+                    for field in self._STAFF_ONLY_FIELDS:
+                        entry = descriptor.get(field)
+                        if entry is not None:
+                            descriptor[field] = {
+                                **entry, 'writable': False,
+                                'read_only_for_caller': True,
+                                'reason': 'Staff only.',
+                            }
             return Response(descriptor)
 
         # Read-only for this caller: keep every entry, so the client still knows

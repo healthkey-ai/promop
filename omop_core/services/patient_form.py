@@ -662,10 +662,18 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
         previous_direct = {name: getattr(record, name, None) for name in direct}
         for name, value in direct.items():
             setattr(record, name, value)
+        unit_fields = set()
+        for field, unit in (('height', 'cm'), ('weight', 'kg')):
+            if field in direct:
+                # The shared editor's height/weight inputs are canonical; set
+                # the companion unit before Model.save computes BMI.
+                setattr(record, f'{field}_units', unit)
+                unit_fields.add(f'{field}_units')
         clinical_direct = set(direct) - set(profile_changes)
         record.user_edited_fields = sorted(
             set(record.user_edited_fields or []) | clinical_direct)
-        record.save(update_fields=sorted(direct) + ['user_edited_fields'])
+        record.save(update_fields=sorted(set(direct) | unit_fields)
+                    + ['user_edited_fields'])
         from omop_core.services.patient_record_revisions import write_record_revisions
         write_record_revisions(record, previous_direct, changed_by=changed_by)
         result.applied.extend(clinical_direct)

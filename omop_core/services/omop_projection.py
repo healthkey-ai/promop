@@ -7,8 +7,8 @@ from django.db import transaction
 from django.utils import timezone
 
 from omop_core.models import (
-    ConditionOccurrence, DrugExposure, FieldConceptMapping, Measurement, Observation,
-    PatientRecord, Person, ProcedureOccurrence,
+    Concept, ConditionOccurrence, DrugExposure, FieldConceptMapping, Measurement,
+    Observation, PatientRecord, Person, ProcedureOccurrence,
 )
 from omop_core.services.breast_mapping_safety import wrong_breast_field_mappings
 from omop_core.services.mappings import CONCEPT_PATIENT_REPORTED_TYPE
@@ -330,6 +330,15 @@ def project_single_value(person, field_name, value, projection, *, acknowledge_e
 
     today = fact_date or timezone.localdate()
     fact_type = type_concept_id or projection.get('type_concept_id') or 32817
+    if not Concept.objects.filter(pk=fact_type).exists():
+        # A missing type concept would fail the deferred FK check at commit,
+        # outside this savepoint, and roll back the PatientRecord edit. Keep
+        # the edit pending instead; the projection is best-effort.
+        logger.warning(
+            'OMOP projection skipped: type concept %s is not loaded; edit remains pending',
+            fact_type,
+        )
+        return False
     try:
         with transaction.atomic():
             Person.objects.select_for_update().get(pk=person.pk)
