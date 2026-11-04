@@ -15583,6 +15583,10 @@ class OrgPatientSignupTest(TestCase):
         self.assertEqual(verified.status_code, 200)
 
         self.assertEqual(roles(), ['analyst'])
+        # Re-authenticate with a fresh identity — force_authenticate caches the
+        # model instance, so the stale one still has email_verified_at=None.
+        identity.refresh_from_db()
+        client.force_authenticate(user=identity)
         user = client.get('/api/v1/user/').data['user']
         self.assertFalse(user['is_patient'])
         self.assertTrue(user['email_verified'])
