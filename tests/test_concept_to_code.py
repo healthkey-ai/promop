@@ -321,6 +321,32 @@ def test_a_ranked_run_remembers_what_the_ranker_declined_and_the_next_run_moves_
     assert rest  # the B rows exist throughout
 
 
+def test_a_queued_run_skips_exclude_keys_that_arrive_as_json_lists(client, concept):
+    """Celery hands the worker its params as JSON, so each exclude key is a list,
+    not a tuple. The run must still skip them rather than fail (#2274)."""
+    import json
+    source('A0', occurrence_count=10)
+    source('A1', occurrence_count=9)
+    source('B0', occurrence_count=2)
+    dispatcher = FakeDispatcher()
+    body = {'concept_ids': [concept.pk], 'strategies': ['lexical'], 'limit': 2, 'ranking_model': 'none'}
+    with use_dispatcher(dispatcher):
+        assert client.post(f'{BASE}suggest/', body, format='json').status_code == 202
+        run_id, params = dispatcher.calls[-1]
+        execute_run(run_id, params)
+    event = client.get(f'{BASE}suggest-runs/{run_id}/').data['activity'][0]
+    shown = [[c['source_vocabulary_id'], c['source_code']] for c in event['candidates']]
+    assert [key[1] for key in shown] == ['A0', 'A1']
+
+    with use_dispatcher(dispatcher):
+        assert client.post(f'{BASE}suggest/', {**body, 'exclude_keys': shown}, format='json').status_code == 202
+        run_id, params = dispatcher.calls[-1]
+        execute_run(run_id, json.loads(json.dumps(params)))
+    data = client.get(f'{BASE}suggest-runs/{run_id}/').data
+    assert data['state'] == 'success', data.get('error')
+    assert [c['source_code'] for c in data['activity'][0]['candidates']] == ['B0']
+
+
 def test_an_unavailable_ranker_declines_nothing(client, concept):
     """A missing key or a failed request is not the ranker's answer; the sources stay in the pool."""
     from omop_core.models import ReverseSuggestDecline
