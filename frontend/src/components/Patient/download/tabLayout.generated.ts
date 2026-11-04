@@ -23,10 +23,6 @@ export const TAB_LAYOUT: TabLayout = {
         [
           "Phone Number",
           "phone_number"
-        ],
-        [
-          "Disease",
-          "disease"
         ]
       ]
     },
