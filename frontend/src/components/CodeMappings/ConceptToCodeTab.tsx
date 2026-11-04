@@ -525,7 +525,12 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
     const timer = window.setTimeout(async () => {
       try {
         const { data: next } = await api.get<Run>(`/v1/concept-to-code/suggest-runs/${run.run_id}/`);
-        if (current) setRun(next);
+        if (current) {
+          setRun(next);
+          // Auto-proposed mappings land in the Existing Mappings groups; bump
+          // revision so those groups reload once the run finishes (#2269).
+          if (next.state === 'success' && next.destinations) setRevision(v => v + 1);
+        }
       } catch {
         if (current) { setError('Could not read search progress. Run the search again to retry.'); setRun(previous => previous ? { ...previous, state: 'failure' } : null); }
       }
