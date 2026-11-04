@@ -24,7 +24,7 @@ import requests
 import logging
 
 from omop_core.services import vocabulary_source
-from omop_core.services.vocabulary_source import DEFAULT_LFS_URL
+from omop_core.services.vocabulary_source import DEFAULT_LFS_URL, LOINC_ZIP_RE, sha256_file
 from omop_core.models import (
     Vocabulary, Domain, ConceptClass, Concept,
     Relationship, ConceptRelationship, ConceptAncestor, CdmSource,
@@ -203,11 +203,10 @@ def _resolve_gdrive_vocabulary(url, log):
         )
         if result is None:
             raise CommandError(f'Google Drive folder listing failed: {url}')
-        _loinc_re = re.compile(r'(?i)loinc.*\.zip$')
         zips = sorted(
             (item for item in result
              if Path(item.path).suffix.lower() == '.zip'
-             and not _loinc_re.match(PurePosixPath(item.path).name)),
+             and not LOINC_ZIP_RE.match(PurePosixPath(item.path).name)),
             key=lambda item: item.path,
         )
         if not zips:
@@ -220,7 +219,7 @@ def _resolve_gdrive_vocabulary(url, log):
         name = Path(zips[0].path).name
         loinc_zips = sorted(
             (item for item in result
-             if re.match(r'(?i)loinc.*\.zip$', PurePosixPath(item.path).name)),
+             if LOINC_ZIP_RE.match(PurePosixPath(item.path).name)),
             key=lambda item: item.path,
             reverse=True,
         )
@@ -387,12 +386,8 @@ def _validate_umls_archive(path):
         raise CommandError(f'UMLS archive {path} is not a valid zip file.') from exc
 
 
-def _sha256_file(path):
-    digest = hashlib.sha256()
-    with open(path, 'rb') as source:
-        for chunk in iter(lambda: source.read(1024 * 1024), b''):
-            digest.update(chunk)
-    return digest.hexdigest()
+# Kept under this name for its importers; the one definition is the service's.
+_sha256_file = sha256_file
 
 
 def _cache_umls_release(api_key, cache_dir, release_url=None, log=lambda _msg: None,

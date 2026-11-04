@@ -74,7 +74,19 @@ python manage.py queue_athena_vocabulary_sync --lfs "$ATHENA_VOCABULARY_LFS_URL"
 ```
 
 The receipt records the primary source; a worker that finds an LFS URL there
-falls back to `ATHENA_VOCABULARY_GDRIVE_URL` from its own environment.
+falls back to `ATHENA_VOCABULARY_GDRIVE_URL` from its own environment, and to
+nothing when that is unset (`render.yaml` gives both workers the web service's
+value). A LOINC release that is new while the Athena bundle is unchanged is
+loaded on its own, under the same locks as the full delta; when it cannot be
+(download failed, the LOINC release job held the lock) the receipt omits it so
+the next sync tries again. A check run or `--dry-run` reports it instead.
+
+For production, pin the LFS URL to a tag (`.../tree/athena-YYYYMMDD-loinc-x.yy`)
+rather than `main`: `raw.githubusercontent.com` caches branch refs for a few
+minutes, so a deploy right after a publish on `main` can read the previous
+manifest. The first deploy of this change may record one `failed` receipt with a
+`gdown` error against a `github.com` URL: a worker still on the previous image
+took a receipt the new web service queued. The next boot queues again.
 
 The durable receipt progresses through `queued`, `running`, and then
 `current`, `applied`, or `failed`. Check a database synchronously without

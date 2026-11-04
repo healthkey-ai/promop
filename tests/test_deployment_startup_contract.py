@@ -243,3 +243,10 @@ def test_render_requires_the_athena_source_for_the_web_service():
     # blueprint carries its value; the Drive fallback stays dashboard-managed.
     assert '- key: ATHENA_VOCABULARY_LFS_URL' in web_service
     assert 'value: https://github.com/healthkey-ai/omop-vocabularies' in web_service
+    # The queued sync runs on the workers, which hold their own copy of the
+    # environment: both sources must reach them too, or an LFS outage on the
+    # worker has no configured fallback.
+    for worker in ('promop-worker', 'promop-staging-worker'):
+        block = blueprint.split(f'name: {worker}', 1)[1].split('  - type:', 1)[0]
+        assert '- key: ATHENA_VOCABULARY_LFS_URL' in block, worker
+        assert '- key: ATHENA_VOCABULARY_GDRIVE_URL' in block, worker

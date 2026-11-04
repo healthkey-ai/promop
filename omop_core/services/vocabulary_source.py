@@ -35,10 +35,22 @@ LFS_ENV = 'ATHENA_VOCABULARY_LFS_URL'
 GDRIVE_ENV = 'ATHENA_VOCABULARY_GDRIVE_URL'
 DEFAULT_LFS_URL = 'https://github.com/healthkey-ai/omop-vocabularies'
 MANIFEST_NAME = 'manifest.json'
-_LOINC_RE = re.compile(r'(?i)loinc.*\.zip$')
+LOINC_ZIP_RE = re.compile(r'(?i)loinc.*\.zip$')
+_LOINC_RE = LOINC_ZIP_RE
 _CHUNK = 1024 * 1024
 MANIFEST_TIMEOUT = 30
 DOWNLOAD_TIMEOUT = (30, 300)
+# The identity column is CharField(500) and holds two names beside two hashes.
+MAX_FILE_NAME = 150
+LOINC_LOCAL_NAME = 'loinc-release.zip'
+
+
+def sha256_file(path):
+    digest = hashlib.sha256()
+    with open(path, 'rb') as source:
+        for chunk in iter(lambda: source.read(_CHUNK), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 class LfsSourceError(Exception):
@@ -114,17 +126,27 @@ def _manifest_entry(manifest, key):
         return None
     name = entry.get('file')
     sha256 = str(entry.get('sha256') or '').lower()
-    if not name or not re.fullmatch(r'[0-9a-f]{64}', sha256):
+    if not isinstance(name, str) or not name or not re.fullmatch(r'[0-9a-f]{64}', sha256):
         raise LfsSourceError(f'manifest entry {key!r} needs "file" and a SHA-256')
-    if '/' in name or name.startswith('.'):
-        raise LfsSourceError(f'manifest entry {key!r} has an unsafe file name: {name}')
+    # The name reaches a local path and the identity column; the manifest is
+    # public data, so it is trusted for nothing.
+    if (
+        '/' in name or '\\' in name or '\x00' in name or name.startswith('.')
+        or len(name) > MAX_FILE_NAME
+    ):
+        raise LfsSourceError(f'manifest entry {key!r} has an unsafe file name: {name!r}')
     return {'name': name, 'sha256': sha256, 'size': entry.get('size')}
 
 
-def fetch_manifest(url, log=lambda _msg: None):
+def fetch_manifest(url):
     target = manifest_url(url)
     try:
-        response = requests.get(target, timeout=MANIFEST_TIMEOUT)
+        # raw.githubusercontent.com caches branch refs for minutes; a deploy
+        # right after a publish must not read an old manifest against a new
+        # object (the SHA mismatch would send it to Drive).
+        response = requests.get(
+            target, timeout=MANIFEST_TIMEOUT, headers={'Cache-Control': 'no-cache'},
+        )
         response.raise_for_status()
         manifest = response.json()
     except (requests.RequestException, ValueError) as exc:
@@ -142,11 +164,13 @@ def resolve_lfs_vocabulary(url, log=lambda _msg: None):
     release with the same Athena bundle invalidates the deploy-time check, as
     the Drive identity does with file ids.
     """
-    manifest = fetch_manifest(url, log)
+    manifest = fetch_manifest(url)
     athena = _manifest_entry(manifest, 'athena')
     if not athena:
         raise LfsSourceError(f'LFS manifest at {manifest_url(url)} has no "athena" entry')
     loinc = _manifest_entry(manifest, 'loinc')
+    if loinc and (not LOINC_ZIP_RE.match(loinc['name']) or loinc['name'] == athena['name']):
+        raise LfsSourceError(f'manifest "loinc" entry does not name a LOINC release: {loinc["name"]!r}')
     loinc_suffix = f'+loinc:{loinc["sha256"]}:{loinc["name"]}' if loinc else ''
     log(f'  Resolved {athena["name"]} from {url} (sha256:{athena["sha256"][:12]}...)')
     return {
@@ -164,14 +188,22 @@ def resolve_lfs_vocabulary(url, log=lambda _msg: None):
     }
 
 
+def _discard(path):
+    """Remove a partial download; the disk that failed the write may refuse this too."""
+    try:
+        path.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def download_lfs_file(url, dest, sha256=None, log=lambda _msg: None):
     """Stream one LFS object to ``dest`` and verify its SHA-256 when given."""
     dest = Path(dest)
-    dest.parent.mkdir(parents=True, exist_ok=True)
     partial = dest.with_name(dest.name + '.part')
     digest = hashlib.sha256()
     log(f'  Downloading {dest.name} from {url}...')
     try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
         with requests.get(url, stream=True, timeout=DOWNLOAD_TIMEOUT) as response:
             response.raise_for_status()
             with open(partial, 'wb') as out:
@@ -179,14 +211,15 @@ def download_lfs_file(url, dest, sha256=None, log=lambda _msg: None):
                     if chunk:
                         out.write(chunk)
                         digest.update(chunk)
-    except (requests.RequestException, OSError) as exc:
+    except (requests.RequestException, OSError, ValueError) as exc:
         # OSError: the scratch disk, not GitHub -- but the caller's fallback
         # decision is the same, and the receipt should say which file failed.
-        partial.unlink(missing_ok=True)
+        # ValueError: a path open() refuses.
+        _discard(partial)
         raise LfsSourceError(f'LFS download failed for {url}: {exc}') from exc
     actual = digest.hexdigest()
     if sha256 and actual != sha256:
-        partial.unlink(missing_ok=True)
+        _discard(partial)
         raise LfsSourceError(
             f'LFS download of {dest.name} does not match the manifest: '
             f'expected sha256 {sha256}, got {actual}'
@@ -234,7 +267,13 @@ def resolve_vocabulary_source(lfs=None, gdrive=None, log=lambda _msg: None):
             if not gdrive:
                 raise CommandError(str(exc)) from exc
             log(f'  WARNING: {exc}; falling back to Google Drive.')
-    selection = resolve_gdrive_vocabulary(gdrive, log)
+    try:
+        selection = resolve_gdrive_vocabulary(gdrive, log)
+    except CommandError as drive_exc:
+        # The receipt keeps only the exception text, so both failures go in it.
+        if lfs_error is not None:
+            raise CommandError(f'{drive_exc} (LFS failed first: {lfs_error})') from drive_exc
+        raise
     if lfs_error is not None:
         selection['fallback_from'] = str(lfs_error)
     return selection
@@ -259,7 +298,10 @@ def download_vocabulary_archive(selection, download_dir, log=lambda _msg: None):
             if not gdrive:
                 raise CommandError(str(exc)) from exc
             log(f'  WARNING: {exc}; falling back to Google Drive.')
-            replacement = resolve_gdrive_vocabulary(gdrive, log)
+            try:
+                replacement = resolve_gdrive_vocabulary(gdrive, log)
+            except CommandError as drive_exc:
+                raise CommandError(f'{drive_exc} (LFS failed first: {exc})') from drive_exc
             replacement['fallback_from'] = str(exc)
             selection.clear()
             selection.update(replacement)
@@ -280,9 +322,11 @@ def download_loinc_archive(selection, download_dir, log=lambda _msg: None):
     download_dir = Path(download_dir)
     if selection.get('kind') == 'lfs':
         try:
+            # A fixed local name: the manifest's name is for the identity and
+            # the log, never for where the bytes land beside the Athena ZIP.
             return download_lfs_file(
                 selection['loinc_download_url'],
-                download_dir / selection['loinc_archive_name'],
+                download_dir / LOINC_LOCAL_NAME,
                 selection['loinc_archive_id'], log,
             )
         except LfsSourceError as exc:
@@ -312,10 +356,7 @@ def build_manifest(directory, athena=None, loinc=None, released=None):
         raise CommandError(f'No Athena vocabulary ZIP in {directory}')
 
     def entry(path):
-        return {
-            'file': path.name, 'sha256': _gdrive()._sha256_file(path),
-            'size': path.stat().st_size,
-        }
+        return {'file': path.name, 'sha256': sha256_file(path), 'size': path.stat().st_size}
 
     manifest = {'athena': entry(athena)}
     if loinc is not None:

@@ -113,6 +113,9 @@ class Command(BaseCommand):
                         lfs=lfs, gdrive=gdrive, log=self.stdout.write,
                     )
                     identity = selection['identity']
+                    # The resolve step may already have fallen back to Drive;
+                    # the receipt names the source that answered.
+                    source_url = selection.get('source_url') or source_url
                     if self._identity_is_current(identity):
                         self._receipt(
                             source_url, identity, '', previous, previous, {},
@@ -132,14 +135,14 @@ class Command(BaseCommand):
                     manifest_sha = selection.get('sha256') or ''
                     if manifest_sha and self._sha_is_current(manifest_sha):
                         sha256 = manifest_sha
-                        self._refresh_loinc_axes(selection, Path(directory))
+                        identity, outcome = self._settle_loinc(
+                            selection, Path(directory), identity, None, options,
+                        )
                         self._receipt(
                             source_url, identity, sha256, previous, previous, {},
-                            'current', started_at,
+                            outcome, started_at,
                         )
-                        self.stdout.write(self.style.SUCCESS(
-                            f'Athena vocabulary content is current (sha256:{sha256}); no archive download.'
-                        ))
+                        self._report_current(outcome, sha256, 'no archive download')
                         return
                     archive = vocabulary_source.download_vocabulary_archive(
                         selection, Path(directory), self.stdout.write,
@@ -163,15 +166,13 @@ class Command(BaseCommand):
                 if self._sha_is_current(sha256):
                     # Same Athena content under a new identity: the LOINC
                     # release is the only thing that can have moved.
-                    if loinc_archive and not self._loinc_is_current(identity):
-                        self.stdout.write('  Athena content unchanged; loading the new LOINC release only.')
-                        load_loinc_axes_from_archive(loinc_archive, self.stdout.write)
-                    self._receipt(
-                        source_url, identity, sha256, previous, previous, {}, 'current', started_at,
+                    identity, outcome = self._settle_loinc(
+                        selection, Path(directory), identity, loinc_archive, options,
                     )
-                    self.stdout.write(self.style.SUCCESS(
-                        f'Athena vocabulary content is current (sha256:{sha256}); no table work.'
-                    ))
+                    self._receipt(
+                        source_url, identity, sha256, previous, previous, {}, outcome, started_at,
+                    )
+                    self._report_current(outcome, sha256, 'no table work')
                     return
 
                 if not options['apply'] and not options['dry_run']:
@@ -210,28 +211,97 @@ class Command(BaseCommand):
                 )
             raise
 
-    def _refresh_loinc_axes(self, selection, directory):
-        """Load the LOINC release a current-Athena identity newly names."""
-        if not selection.get('loinc_archive_id') or self._loinc_is_current(selection['identity']):
+    LOINC_DELTA_MESSAGE = (
+        'The published LOINC release differs from the installed release. '
+        'Run again with --apply to load it.'
+    )
+
+    def _report_current(self, outcome, sha256, detail):
+        if outcome == 'delta_available':
+            # Matches the Athena delta's contract: a check run reports and
+            # exits non-zero rather than writing; the receipt is already kept.
+            raise CommandError(self.LOINC_DELTA_MESSAGE)
+        if outcome == 'dry_run':
+            self.stdout.write(
+                f'Athena vocabulary content is current (sha256:{sha256}); '
+                'a new LOINC release is published (dry run, not loaded).'
+            )
             return
-        self.stdout.write('  Athena content unchanged; loading the new LOINC release only.')
-        loinc_archive = vocabulary_source.download_loinc_archive(
-            selection, directory, self.stdout.write,
-        )
-        if loinc_archive:
-            load_loinc_axes_from_archive(loinc_archive, self.stdout.write)
+        self.stdout.write(self.style.SUCCESS(
+            f'Athena vocabulary content is current (sha256:{sha256}); {detail}.'
+        ))
+
+    def _settle_loinc(self, selection, directory, identity, loinc_archive, options):
+        """Decide the LOINC side of a current-Athena identity.
+
+        Returns ``(identity to record, outcome)``. The identity carries the LOINC
+        release, which may be the only thing that moved. With ``--apply`` the
+        new release is loaded alone; a check or dry run reports it instead. When
+        it could not be loaded -- download failed, another LOINC load held the
+        lock -- the identity is recorded **without** its LOINC suffix, so the
+        next sync tries again rather than reading the release as installed.
+        """
+        if not selection or not selection.get('loinc_archive_id') or self._loinc_is_current(identity):
+            return identity, 'current'
+        without_loinc = identity.partition('+loinc:')[0]
+        name = selection.get('loinc_archive_name') or 'the LOINC release'
+        if not options.get('apply'):
+            self.stdout.write(f'  Athena content unchanged; {name} is new and not yet loaded.')
+            return without_loinc, 'dry_run' if options.get('dry_run') else 'delta_available'
+        self.stdout.write(f'  Athena content unchanged; loading {name} only.')
+        if loinc_archive is None:
+            loinc_archive = vocabulary_source.download_loinc_archive(
+                selection, directory, self.stdout.write,
+            )
+        if loinc_archive is None or not self._load_loinc_only(loinc_archive):
+            self.stdout.write(self.style.WARNING(
+                f'  {name} was not loaded; the next sync will try again.'
+            ))
+            return without_loinc, 'current'
+        return identity, 'current'
+
+    def _load_loinc_only(self, loinc_archive):
+        """Load the LOINC axes under the same locks the full delta takes.
+
+        The sync's transactional lock keeps two syncs apart; the LOINC
+        release loader's session lock keeps this apart from
+        ``check_loinc_release``, which the same boot dispatches and which
+        upserts the same rows (concurrent ON CONFLICT updates can deadlock).
+        """
+        from omop_core.services import loinc_release
+
+        with transaction.atomic():
+            self._acquire_lock()
+            if not loinc_release._try_lock():
+                self.stdout.write('  Another LOINC load holds the lock; leaving the LOINC axes to it.')
+                return False
+            try:
+                return load_loinc_axes_from_archive(loinc_archive, self.stdout.write) > 0
+            finally:
+                loinc_release._unlock()
 
     @staticmethod
     def _loinc_is_current(identity):
-        """Whether a successful sync already recorded this identity's LOINC release."""
+        """Whether a successful sync already recorded this identity's LOINC release.
+
+        Matched on the release's file name (``Loinc_2.83.zip``), not the whole
+        suffix: a Drive identity carries the file's Drive id there and an LFS
+        identity its SHA-256, and switching sources must not reload the same
+        release.
+        """
         _, sep, loinc = identity.partition('+loinc:')
         if not sep:
             return True
+        name = loinc.rpartition(':')[2]
+        suffix = ':' + name if name else sep + loinc
         return AthenaVocabularySync.objects.filter(
-            source_artifact_identity__endswith=sep + loinc,
+            source_artifact_identity__contains=sep,
+            source_artifact_identity__endswith=suffix,
             outcome__in=('current', 'applied'),
         ).exists() or VocabularyRelease.objects.filter(
-            status='published', source_artifact_identity__endswith=sep + loinc,
+            status='published',
+            source_artifact_identity__contains=sep,
+            source_artifact_identity__endswith=suffix,
         ).exists()
 
     @staticmethod
@@ -244,9 +314,11 @@ class Command(BaseCommand):
             if lfs or gdrive:
                 raise CommandError('--source cannot be combined with --lfs or --gdrive')
             if vocabulary_source.is_lfs_url(source):
+                # The fallback is the worker's own configured Drive folder,
+                # never the historic default: an LFS-only deployment must not
+                # reach for Google because GitHub blinked.
                 lfs = source
                 _, gdrive = vocabulary_source.configured_sources()
-                gdrive = gdrive or DEFAULT_GDRIVE_URL
             else:
                 gdrive = source
         return lfs, gdrive

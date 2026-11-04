@@ -138,6 +138,13 @@ def test_loinc_is_optional_in_the_manifest(monkeypatch):
     _Response(body={'loinc': MANIFEST['loinc']}),
     _Response(body={'athena': {'file': 'x.zip', 'sha256': 'short'}}),
     _Response(body={'athena': {'file': '../x.zip', 'sha256': ATHENA_SHA}}),
+    _Response(body={'athena': {'file': ['x.zip'], 'sha256': ATHENA_SHA}}),
+    _Response(body={'athena': {'file': 'x' * 200 + '.zip', 'sha256': ATHENA_SHA}}),
+    _Response(body={'athena': {'file': 'a\\b.zip', 'sha256': ATHENA_SHA}}),
+    _Response(body={'athena': MANIFEST['athena'],
+                    'loinc': {'file': 'athena-vocabulary.zip', 'sha256': LOINC_SHA}}),
+    _Response(body={'athena': MANIFEST['athena'],
+                    'loinc': {'file': MANIFEST['athena']['file'], 'sha256': LOINC_SHA}}),
 ])
 def test_an_unusable_manifest_falls_back_to_drive(monkeypatch, response):
     monkeypatch.setattr(vs.requests, 'get', lambda url, **kw: response)
@@ -164,6 +171,16 @@ def test_lfs_failure_without_a_drive_url_is_an_error(monkeypatch):
     monkeypatch.setattr(vs.requests, 'get', lambda url, **kw: _Response(status=404))
     with pytest.raises(CommandError, match='LFS manifest unavailable'):
         vs.resolve_vocabulary_source(lfs=LFS, gdrive=None)
+
+
+def test_when_both_sources_fail_the_error_names_both(monkeypatch):
+    monkeypatch.setattr(vs.requests, 'get', lambda url, **kw: _Response(status=404))
+    monkeypatch.setattr(
+        vs, 'resolve_gdrive_vocabulary',
+        Mock(side_effect=CommandError('Google Drive folder listing failed')),
+    )
+    with pytest.raises(CommandError, match='Drive folder listing failed .*LFS failed first: LFS manifest'):
+        vs.resolve_vocabulary_source(lfs=LFS, gdrive=GDRIVE)
 
 
 def test_no_source_at_all_is_an_error():
@@ -197,10 +214,10 @@ def test_lfs_download_verifies_the_manifest_sha(monkeypatch, tmp_path):
 
 def test_a_write_failure_is_an_lfs_error_so_the_fallback_still_applies(monkeypatch, tmp_path):
     monkeypatch.setattr(vs.requests, 'get', lambda url, **kw: _Response(content=b'data'))
-    unwritable = tmp_path / 'missing' / 'y.zip'
-    monkeypatch.setattr(vs.Path, 'mkdir', lambda self, **kw: None)
+    blocker = tmp_path / 'blocker'
+    blocker.write_text('')  # a file where the parent directory must go
     with pytest.raises(vs.LfsSourceError, match='LFS download failed'):
-        vs.download_lfs_file('https://x/y.zip', unwritable, None)
+        vs.download_lfs_file('https://x/y.zip', blocker / 'y.zip', None)
 
 
 def test_failed_lfs_download_falls_back_to_drive_and_rewrites_the_selection(monkeypatch, tmp_path):
@@ -235,6 +252,16 @@ def test_failed_lfs_download_without_drive_is_an_error(monkeypatch, tmp_path):
     }
     with pytest.raises(CommandError, match='LFS download failed'):
         vs.download_vocabulary_archive(selection, tmp_path)
+
+
+def test_loinc_lands_under_a_fixed_local_name(monkeypatch, tmp_path):
+    content = b'loinc'
+    monkeypatch.setattr(vs.requests, 'get', lambda url, **kw: _Response(content=content))
+    selection = {
+        'kind': 'lfs', 'loinc_archive_id': hashlib.sha256(content).hexdigest(),
+        'loinc_archive_name': 'Loinc_2.83.zip', 'loinc_download_url': 'https://media/Loinc_2.83.zip',
+    }
+    assert vs.download_loinc_archive(selection, tmp_path) == tmp_path / vs.LOINC_LOCAL_NAME
 
 
 def test_failed_loinc_download_is_a_warning_not_a_failure(monkeypatch, tmp_path):
@@ -323,7 +350,7 @@ def test_sync_loads_only_the_loinc_axes_when_the_athena_sha_is_current(monkeypat
     loaded = Mock(return_value=100)
     monkeypatch.setattr(sync, 'load_loinc_axes_from_archive', loaded)
 
-    command.handle(**_sync_options(lfs=LFS, gdrive=GDRIVE))
+    command.handle(**_sync_options(lfs=LFS, gdrive=GDRIVE, apply=True))
 
     download.assert_not_called()
     loaded.assert_called_once()
@@ -335,8 +362,101 @@ def test_sync_loads_only_the_loinc_axes_when_the_athena_sha_is_current(monkeypat
 
     # Recorded now, so the next run is a metadata-only no-op.
     loaded.reset_mock()
-    command.handle(**_sync_options(lfs=LFS, gdrive=GDRIVE))
+    command.handle(**_sync_options(lfs=LFS, gdrive=GDRIVE, apply=True))
     loaded.assert_not_called()
+
+
+def _loinc_only_command(monkeypatch, tmp_path, loinc_result):
+    AthenaVocabularySync.objects.create(
+        source_url=GDRIVE, outcome='applied', started_at=timezone.now(),
+        source_artifact_identity='gdrive-file:f:x.zip+loinc:old:Loinc_2.82.zip',
+        source_artifact_sha256=ATHENA_SHA,
+    )
+    command = sync.Command(stdout=StringIO())
+    monkeypatch.setattr(command, '_latest_release', lambda: None)
+    selection = {
+        'kind': 'lfs', 'sha256': ATHENA_SHA, 'name': 'x.zip',
+        'identity': f'lfs-file:{ATHENA_SHA}:x.zip+loinc:{LOINC_SHA}:Loinc_2.83.zip',
+        'loinc_archive_id': LOINC_SHA, 'loinc_archive_name': 'Loinc_2.83.zip',
+    }
+    monkeypatch.setattr(vs, 'resolve_vocabulary_source', lambda **kw: selection)
+    monkeypatch.setattr(
+        vs, 'download_vocabulary_archive',
+        Mock(side_effect=AssertionError('the Athena archive must not download')),
+    )
+    download = Mock(return_value=loinc_result(tmp_path))
+    monkeypatch.setattr(vs, 'download_loinc_archive', download)
+    loaded = Mock(return_value=100)
+    monkeypatch.setattr(sync, 'load_loinc_axes_from_archive', loaded)
+    return command, selection, download, loaded
+
+
+@pytest.mark.django_db
+def test_a_check_run_reports_a_new_loinc_release_without_loading_it(monkeypatch, tmp_path):
+    """A bare sync is diagnosis only: like the Athena delta, it reports and exits non-zero."""
+    command, selection, download, loaded = _loinc_only_command(
+        monkeypatch, tmp_path, lambda d: d / 'Loinc_2.83.zip',
+    )
+    with pytest.raises(CommandError, match='LOINC release differs .* --apply'):
+        command.handle(**_sync_options(lfs=LFS, gdrive=GDRIVE))
+
+    download.assert_not_called()
+    loaded.assert_not_called()
+    receipt = AthenaVocabularySync.objects.latest('pk')
+    assert receipt.outcome == 'delta_available'
+    assert '+loinc:' not in receipt.source_artifact_identity
+
+
+@pytest.mark.django_db
+def test_a_dry_run_does_not_load_the_new_loinc_release(monkeypatch, tmp_path):
+    command, selection, download, loaded = _loinc_only_command(
+        monkeypatch, tmp_path, lambda d: d / 'Loinc_2.83.zip',
+    )
+    command.handle(**_sync_options(lfs=LFS, gdrive=GDRIVE, dry_run=True))
+
+    download.assert_not_called()
+    loaded.assert_not_called()
+    receipt = AthenaVocabularySync.objects.latest('pk')
+    assert receipt.outcome == 'dry_run'
+    assert '+loinc:' not in receipt.source_artifact_identity
+    assert 'dry run, not loaded' in command.stdout.getvalue()
+
+
+@pytest.mark.django_db
+def test_a_failed_loinc_download_is_retried_on_the_next_sync(monkeypatch, tmp_path):
+    """Recording the full identity would read a release that never loaded as installed."""
+    command, selection, download, loaded = _loinc_only_command(monkeypatch, tmp_path, lambda d: None)
+
+    command.handle(**_sync_options(lfs=LFS, gdrive=GDRIVE, apply=True))
+
+    loaded.assert_not_called()
+    receipt = AthenaVocabularySync.objects.latest('pk')
+    assert receipt.outcome == 'current'
+    assert receipt.source_artifact_identity == f'lfs-file:{ATHENA_SHA}:x.zip'
+    assert 'will try again' in command.stdout.getvalue()
+
+    # Next run: the identity is not current, the SHA is, so LOINC is tried again.
+    download.return_value = tmp_path / 'Loinc_2.83.zip'
+    command.handle(**_sync_options(lfs=LFS, gdrive=GDRIVE, apply=True))
+    assert download.call_count == 2
+    loaded.assert_called_once()
+    assert AthenaVocabularySync.objects.latest('pk').source_artifact_identity == selection['identity']
+
+
+@pytest.mark.django_db
+def test_loinc_only_load_yields_to_the_loinc_release_loader(monkeypatch, tmp_path):
+    from omop_core.services import loinc_release
+
+    command, selection, download, loaded = _loinc_only_command(
+        monkeypatch, tmp_path, lambda d: d / 'Loinc_2.83.zip',
+    )
+    monkeypatch.setattr(loinc_release, '_try_lock', lambda: False)
+
+    command.handle(**_sync_options(lfs=LFS, gdrive=GDRIVE, apply=True))
+
+    loaded.assert_not_called()
+    assert 'Another LOINC load holds the lock' in command.stdout.getvalue()
+    assert '+loinc:' not in AthenaVocabularySync.objects.latest('pk').source_artifact_identity
 
 
 @pytest.mark.django_db
@@ -349,6 +469,14 @@ def test_sync_does_not_reload_a_loinc_release_it_already_recorded(monkeypatch):
     assert sync.Command._loinc_is_current(f'lfs-file:{ATHENA_SHA}:y.zip+loinc:{LOINC_SHA}:Loinc_2.83.zip')
     assert not sync.Command._loinc_is_current(f'lfs-file:{ATHENA_SHA}:y.zip+loinc:{"c" * 64}:Loinc_2.84.zip')
     assert sync.Command._loinc_is_current('lfs-file:no-loinc-at-all')
+    # The same release file recorded under a Drive id counts: switching sources
+    # must not reload Loinc_2.83.zip.
+    AthenaVocabularySync.objects.create(
+        source_url=GDRIVE, outcome='applied', started_at=timezone.now(),
+        source_artifact_identity='gdrive-file:f:x.zip+loinc:drive-id:Loinc_2.90.zip',
+    )
+    assert sync.Command._loinc_is_current(f'lfs-file:{ATHENA_SHA}:y.zip+loinc:{"d" * 64}:Loinc_2.90.zip')
+    assert not sync.Command._loinc_is_current(f'lfs-file:{ATHENA_SHA}:y.zip+loinc:{"d" * 64}:Loinc_2.91.zip')
 
 
 def test_sync_identity_follows_a_download_that_fell_back_to_drive(tmp_path, monkeypatch):
@@ -404,7 +532,8 @@ def test_a_queued_lfs_source_falls_back_to_the_environment_drive_url(monkeypatch
     monkeypatch.setenv(vs.GDRIVE_ENV, GDRIVE)
     assert sync.Command._remote_sources(_sync_options(source=LFS)) == (LFS, GDRIVE)
     monkeypatch.delenv(vs.GDRIVE_ENV)
-    assert sync.Command._remote_sources(_sync_options(source=LFS)) == (LFS, sync.DEFAULT_GDRIVE_URL)
+    # No configured Drive folder means no Drive fallback -- never the historic default.
+    assert sync.Command._remote_sources(_sync_options(source=LFS)) == (LFS, None)
     # A receipt queued before #2288 names the Drive folder and stays Drive-only.
     assert sync.Command._remote_sources(_sync_options(source=GDRIVE)) == (None, GDRIVE)
     with pytest.raises(CommandError, match='--source cannot be combined'):
@@ -544,6 +673,14 @@ def test_loader_keeps_an_explicit_loinc_archive_over_the_published_one(monkeypat
             loinc_archive=str(tmp_path / 'mine.zip'), stdout=StringIO(),
         )
     loinc.assert_not_called()
+
+
+@pytest.mark.parametrize('extra', [{'path': '/tmp/vocab'}, {'archive': '/tmp/x.zip', 'gdrive': GDRIVE}])
+def test_loader_rejects_lfs_beside_a_local_source(extra):
+    from omop_core.management.commands import load_athena_vocabularies as loader
+
+    with pytest.raises(CommandError, match='exactly one of'):
+        call_command('load_athena_vocabularies', lfs=LFS, dry_run=True, stdout=StringIO(), **extra)
 
 
 @pytest.mark.django_db
