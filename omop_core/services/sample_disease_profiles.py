@@ -231,9 +231,15 @@ def recover_sample_source_fields(record, rows, disease, lab_code_fields=None):
 
 
 def complete_demo_fhir_bundle(bundle, disease):
-    """Add disease-profile source facts to newly generated bundles, before import."""
+    """Add disease-profile source facts to newly generated bundles, before import.
+
+    Runs inside ``generate_fhir_bundle`` before anything is imported, with no
+    database in reach, so it reads the generators' own code inventory
+    (``_LOINC_LAB_FIELDS``, whose codes they emit) rather than the resolved
+    routing a derivation reader would use.
+    """
     from types import SimpleNamespace
-    from omop_core.services.patient_record_service import resolve_lab_code_fields
+    from omop_core.services.patient_record_service import _LOINC_LAB_FIELDS
     resources = [entry['resource'] for entry in bundle.get('entry', []) if 'resource' in entry]
     by_patient = {}
     for resource in resources:
@@ -242,7 +248,7 @@ def complete_demo_fhir_bundle(bundle, disease):
                 person_id=resource['id'], date_of_birth=date.fromisoformat(resource['birthDate']) if resource.get('birthDate') else None,
                 diagnosis_date=None, stage=None,
             )
-    code_fields = {code: field for code, (field, _) in resolve_lab_code_fields().items()}
+    code_fields = {code: field for code, (field, _) in _LOINC_LAB_FIELDS.items()}
     code_fields.update({'16112-5': 'estrogen_receptor_status', '16113-3': 'progesterone_receptor_status',
                         '48676-1': 'her2_status', '21908-9': 'stage', '21908-9-riss': 'stage',
                         '21901-4': 'distant_metastasis_stage', '21906-3': 'nodes_stage'})

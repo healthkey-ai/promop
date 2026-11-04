@@ -2,16 +2,14 @@
 import importlib
 import json
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
-from django.apps import apps
-from django.db import connection
 
 from omop_core.models import FieldConceptMapping, SourceCodeConceptMapping
 from omop_core.mapping.code_resolution import resolve_source_code
 from omop_core.services.patient_record_service import _LOINC_LAB_FIELDS
 from tests.factories import ConceptFactory, VocabularyFactory
+from tests.migration_utils import run_data_migration
 
 pytestmark = pytest.mark.django_db
 
@@ -30,7 +28,7 @@ def test_alias_seed_covers_every_real_approved_extractor_alias():
 
 
 def _seed():
-    seed.approve_aliases(apps, SimpleNamespace(connection=connection))
+    run_data_migration('0285_approve_lab_extractor_aliases', 'approve_aliases')
 
 
 def test_seeds_approved_alias_before_athena_and_is_idempotent():

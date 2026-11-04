@@ -1,8 +1,6 @@
 """Fixtures shared by the pytest suite."""
-import importlib
 import json
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
@@ -23,14 +21,12 @@ def lab_field_mappings(db):
 
     Returns the resolved LOINC code → (field, cast) routing.
     """
-    from django.apps import apps
-    from django.db import connection
-
     from omop_core.services.field_curation_transfer import apply_payload
     from omop_core.services.patient_record_service import (
         LAB_FIELDS, resolve_lab_code_fields,
     )
     from tests.factories import ConceptFactory, VocabularyFactory
+    from tests.migration_utils import run_data_migration
 
     data = json.loads(FIELD_CURATION_FIXTURE.read_text())
     rows = [row for row in data['mappings'] if row['field_name'] in LAB_FIELDS]
@@ -41,8 +37,5 @@ def lab_field_mappings(db):
             vocabulary=vocabulary, concept_name=f"LOINC {row['concept_code']}",
         )
     apply_payload({'mappings': rows}, tables=('mappings',))
-    aliases = importlib.import_module(
-        'omop_core.migrations.0285_approve_lab_extractor_aliases',
-    )
-    aliases.approve_aliases(apps, SimpleNamespace(connection=connection))
+    run_data_migration('0285_approve_lab_extractor_aliases', 'approve_aliases')
     return resolve_lab_code_fields()

@@ -10,10 +10,8 @@ import importlib
 import json
 from datetime import date
 from decimal import Decimal
-from types import SimpleNamespace
 
 import pytest
-from django.apps import apps
 from django.contrib.auth import get_user_model
 from django.db import connection
 
@@ -26,6 +24,7 @@ from omop_core.services.patient_record_service import (
 from omop_core.services.provenance_registry import get_registry
 from tests.conftest import FIELD_CURATION_FIXTURE
 from tests.factories import ConceptFactory, MeasurementFactory, PersonFactory
+from tests.migration_utils import run_data_migration
 
 pytestmark = pytest.mark.django_db
 
@@ -89,6 +88,19 @@ def test_no_curation_query_without_a_loinc_lab(django_assert_num_queries):
     with django_assert_num_queries(0):
         routing = resolve_lab_code_fields(measurements=[])
     assert routing == _LOINC_LAB_FIELDS
+
+
+def test_demo_bundle_completion_needs_no_database(django_assert_num_queries):
+    """generate_fhir_bundle runs before import, often with no database at all
+    (AGENTS.md invokes it with DEBUG=True and no DATABASE_URL)."""
+    from omop_core.services.sample_disease_profiles import complete_demo_fhir_bundle
+    bundle = {'entry': [
+        {'resource': {'resourceType': 'Patient', 'id': 'p1', 'birthDate': '1960-01-01'}},
+        {'resource': {'resourceType': 'Observation', 'subject': {'reference': 'Patient/p1'},
+                      'code': {'coding': [{'code': '33944-8'}]}, 'valueQuantity': {'value': 1000}}},
+    ]}
+    with django_assert_num_queries(0):
+        complete_demo_fhir_bundle(bundle, 'MM')
 
 
 # ── The tables are the authority ────────────────────────────────────────────
@@ -186,7 +198,7 @@ def test_one_refresh_resolves_the_routing_once(lab_field_mappings):
 # ── Migration 0326 ──────────────────────────────────────────────────────────
 
 def _migrate():
-    migration.approve_lab_field_mappings(apps, SimpleNamespace(connection=connection))
+    run_data_migration('0326_approve_lab_field_mappings', 'approve_lab_field_mappings')
 
 
 def test_migration_creates_missing_rows_and_approves_the_untouched_proposal():
