@@ -131,6 +131,8 @@ PATIENT: frozenset[str] = frozenset({
     'omop_core.TherapyHistoryAttestation',
     # The patient's explicit "no pre-existing conditions" answer (#1988).
     'omop_core.PreexistingConditionsAttestation',
+    # The patient's explicit negative confirmations (#5666).
+    'omop_core.ExplicitNegativeAnswer',
     'omop_core.ProcedureOccurrence', 'omop_core.ProvenanceRecord', 'omop_core.RecordRevision',
     'omop_core.Specimen', 'omop_core.SupportiveTherapyCourse', 'omop_core.TrialSearchPreferences',
     'omop_core.VisitDetail', 'omop_core.VisitOccurrence', 'omop_core.WearableUpload',

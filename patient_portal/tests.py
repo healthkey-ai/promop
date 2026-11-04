@@ -24856,8 +24856,8 @@ class FieldFormulaAPITest(TestCase):
 
     def test_delete_formula(self):
         resp = self.client.post('/api/v1/field-formulas/', {
-            'field_name': 'no_active_infection_status',
-            'formula': '@not(active_infection_status)',
+            'field_name': 'bmi',
+            'formula': 'weight / (height / 100) ^ 2',
             'is_active': False,
         }, format='json')
         self.assertEqual(resp.status_code, 201, resp.data)
@@ -24865,6 +24865,14 @@ class FieldFormulaAPITest(TestCase):
 
         resp = self.client.delete(f'/api/v1/field-formulas/{pk}/')
         self.assertEqual(resp.status_code, 204)
+
+    def test_explicit_answer_formula_is_rejected(self):
+        resp = self.client.post('/api/v1/field-formulas/', {
+            'field_name': 'no_active_infection_status',
+            'formula': '@not(active_infection_status)',
+            'is_active': False,
+        }, format='json')
+        self.assertEqual(resp.status_code, 400, resp.data)
 
 
 class FhirUploadDeniedWriteRollbackTest(TestCase):

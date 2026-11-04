@@ -8159,12 +8159,12 @@
     {
       "field_name": "no_active_infection_status",
       "formula": "@not(active_infection_status)",
-      "is_active": true
+      "is_active": false
     },
     {
       "field_name": "no_other_active_malignancies",
       "formula": "@count(active_malignancies) <= 1",
-      "is_active": true
+      "is_active": false
     },
     {
       "field_name": "no_pre_existing_conditions",
