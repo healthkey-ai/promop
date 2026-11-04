@@ -1444,7 +1444,8 @@ the unit it is stored in.
   as sent into `value_source_value` when it is empty, so its rows stay provable.
 - **The ETL cleans units, promop reads only valid ones (#2248).** The ETL keeps
   `unit_source_value` as received and puts the UCUM unit it means in
-  `unit_concept`. Blood counts (`clinical_units.count_unit`) read the text when
+  `unit_concept`. Blood counts (WBC, ANC, ALC, AMC, platelets;
+  `clinical_units.count_unit`) read the text when
   promop knows it, else that concept. promop keeps no table of lab spellings.
   Rows whose text promop can't read are never converted on write.
 

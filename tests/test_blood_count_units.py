@@ -226,3 +226,84 @@ def test_fhir_upload_retains_source_scale_and_projects_counts(code_only, request
     assert response.status_code in (200, 201), response.data
     record.refresh_from_db()
     assert record.anc_thousand_per_ul == Decimal('1500')
+
+
+# --- Lymphocyte and monocyte counts (#2282) -------------------------------
+
+@pytest.mark.django_db
+def test_alc_and_amc_in_cells_per_ul_are_scaled_to_thousands():
+    """The issue's repro: ALC 900 /MM3 (with the UCUM unit the ETL read it as) is 0.9, not 900."""
+    person = PersonFactory()
+    per_ul = ConceptFactory(vocabulary__vocabulary_id='UCUM', concept_code='/uL')
+    MeasurementFactory(
+        person=person, measurement_concept=ConceptFactory(concept_code='731-0'), measurement_source_value='731-0',
+        value_as_number=900, unit_source_value='/MM3', unit_concept=per_ul,
+    )
+    MeasurementFactory(
+        person=person, measurement_concept=ConceptFactory(concept_code='742-7'), measurement_source_value='742-7',
+        value_as_number=450, unit_source_value='cells/uL',
+    )
+    record = refresh_patient_record(person)
+    record.refresh_from_db()
+    assert record.alc_thousand_per_ul == Decimal('0.9')
+    assert record.absolute_lymphocyte_count == 900
+    assert record.amc_thousand_per_ul == Decimal('0.5')
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize('code,field,source,value,expected', [
+    ('731-0', 'alc_thousand_per_ul', 'cells/uL', 1500, 1.5),
+    ('731-0', 'alc_thousand_per_ul', '10*9/L', 1.5, 1.5),
+    ('742-7', 'amc_thousand_per_ul', '/uL', 600, 0.6),
+    ('742-7', 'amc_thousand_per_ul', 'K/uL', 0.6, 0.6),
+])
+@pytest.mark.parametrize('path', ['loinc', 'source-code', 'source-display', 'legacy-name', 'curated'])
+def test_alc_amc_projection_paths_preserve_scale_and_source(code, field, source, value, expected, path):
+    person = PersonFactory()
+    display = 'Absolute Lymphocyte Count' if code == '731-0' else 'Absolute Monocyte Count'
+    kwargs = {'person': person, 'value_as_number': value, 'unit_source_value': source}
+    if path in ('loinc', 'curated'):
+        concept = ConceptFactory(concept_code=code)
+        kwargs.update(measurement_concept=concept, measurement_source_value=code)
+        if path == 'curated':
+            FieldConceptMapping.objects.create(
+                field_name=field, concept=concept, vocabulary_id='LOINC', concept_code=code,
+                status='approved', omop_table='measurement', source_value=code, value_kind='number',
+            )
+    elif path == 'source-code':
+        kwargs.update(measurement_concept_id=0, measurement_source_value=code)
+    elif path == 'source-display':
+        kwargs.update(measurement_concept_id=0, measurement_source_value=display)
+    else:
+        kwargs['measurement_concept'] = ConceptFactory(concept_name=display.lower())
+    measurement = MeasurementFactory(**kwargs)
+    for _ in range(2):
+        record = refresh_patient_record(person)
+        record.refresh_from_db()
+        assert float(getattr(record, field)) == expected
+        if field == 'alc_thousand_per_ul':
+            assert record.absolute_lymphocyte_count == expected * 1000
+    measurement.refresh_from_db()
+    assert float(measurement.value_as_number) == value
+    assert measurement.unit_source_value == source
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize('code,field', [('731-0', 'alc_thousand_per_ul'), ('742-7', 'amc_thousand_per_ul')])
+@pytest.mark.parametrize('unit,value', [(None, 900), ('/MM3', 900), ('mg/dL', 900), ('cells/uL', None)])
+def test_latest_unknown_alc_amc_leaves_field_empty_and_blocks_older(code, field, unit, value):
+    """An unreadable unit without a UCUM concept is unknown, never taken as thousands/µL."""
+    person = PersonFactory()
+    concept = ConceptFactory(concept_code=code)
+    MeasurementFactory(
+        person=person, measurement_concept=concept, measurement_source_value=code,
+        measurement_date=date(2024, 1, 1), value_as_number=1500, unit_source_value='cells/uL',
+    )
+    MeasurementFactory(
+        person=person, measurement_concept=concept, measurement_source_value=code,
+        measurement_date=date(2024, 1, 2), value_as_number=value, unit_source_value=unit,
+    )
+    record = refresh_patient_record(person)
+    assert getattr(record, field) is None
+    if field == 'alc_thousand_per_ul':
+        assert record.absolute_lymphocyte_count is None

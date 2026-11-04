@@ -32,6 +32,7 @@ from omop_core.services.mappings import (
     WEARABLE_TREND_IMPROVING_PCT, WEARABLE_TREND_DECLINING_PCT,
 )
 from omop_core.services.clinical_units import (
+    BLOOD_COUNT_FIELDS, BLOOD_COUNT_LOINC,
     canonical_wbc_unit, flc_to_canonical, wbc_to_canonical, blood_count_projection,
     count_in_cells_per_ul, measurement_count_unit,
 )
@@ -67,7 +68,7 @@ def _usable_concept_name(concept) -> str | None:
 
 # Bump this whenever aggregation or computation logic changes in any section
 # extractor or in _compute_derived_fields.  See DERIVATION_CHANGELOG.md.
-DERIVATION_VERSION = 23
+DERIVATION_VERSION = 24
 
 # These PatientRecord columns are projections of PersonLanguageSkill, never
 # independent edits. Older PATCH requests could mark them as user-edited and
@@ -4069,19 +4070,22 @@ def _get_assessment_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
 
 
 def _latest_blood_count_measurements(snapshot):
-    # Select ANC/platelets once across coded, source-only and legacy-name facts.
-    # The latest result owns the projection even if its value/unit is unknown.
-    count_fields = {'751-8': 'anc_thousand_per_ul', '777-3': 'platelet_count_thousand_per_ul'}
+    # Select ANC/ALC/AMC/platelets once across coded, source-only and
+    # legacy-name facts (#640, #2282). The latest result owns the projection
+    # even if its value/unit is unknown.
+    count_fields = BLOOD_COUNT_LOINC
     selected_counts = {}
     for measurement in snapshot.measurements:
         code = _measurement_code(measurement)
         field = count_fields.get(code)
         if field is None:
             field = _SOURCE_VALUE_LAB_FIELDS.get(measurement.measurement_source_value)
-        if field not in count_fields.values():
+        if field not in BLOOD_COUNT_FIELDS:
             name = (getattr(measurement.measurement_concept, 'concept_name', '') or '').casefold().strip()
             field = {'platelet count': 'platelet_count_thousand_per_ul',
-                     'absolute neutrophil count': 'anc_thousand_per_ul'}.get(name)
+                     'absolute neutrophil count': 'anc_thousand_per_ul',
+                     'absolute lymphocyte count': 'alc_thousand_per_ul',
+                     'absolute monocyte count': 'amc_thousand_per_ul'}.get(name)
         if field is None or field in selected_counts:
             continue
         selected_counts[field] = measurement
