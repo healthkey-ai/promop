@@ -19,9 +19,9 @@ from django.db import connection
 
 from omop_core.models import FieldConceptMapping, SourceCodeConceptMapping
 from omop_core.services.patient_record_service import (
-    LAB_FIELDS, _LOINC_LAB_FIELDS, _build_snapshot, _get_mm_specific_data,
-    _latest_blood_count_measurements, refresh_patient_record,
-    resolve_lab_code_fields,
+    LAB_FIELDS, _DEMO_ONLY_LAB_CODES, _LOINC_LAB_FIELDS, _build_snapshot,
+    _get_mm_specific_data, _latest_blood_count_measurements,
+    refresh_patient_record, resolve_lab_code_fields,
 )
 from omop_core.services.provenance_registry import get_registry
 from tests.conftest import FIELD_CURATION_FIXTURE
@@ -32,11 +32,6 @@ pytestmark = pytest.mark.django_db
 migration = importlib.import_module(
     'omop_core.migrations.0326_approve_lab_field_mappings',
 )
-
-# Not LOINC codes at all; they resolve only against the demo concepts the app
-# seeds, so no mapping row carries them (see 0285).
-DEMO_ONLY_CODES = {'33944-8', '33945-5'}
-
 
 def _approve_alias(code, field, **extra):
     target = FieldConceptMapping.objects.get(field_name=field).concept_id
@@ -50,27 +45,30 @@ def _approve_alias(code, field, **extra):
 
 def test_fixture_approves_every_extractor_field_on_a_code_the_table_routes():
     """Each lab field in the table has an approved LOINC measurement mapping in
-    the fixture 0240 seeds, on a code the table sends to that same field, and
-    0326 carries the identical pair."""
+    the fixture 0240 seeds, on a code the table sends to that same field; 0326
+    carries the identical pair for the fields it froze. A field added after
+    0326 ran is seeded by the fixture on a fresh install and derives from the
+    table on an existing one until a curator (or a later migration) approves
+    it, so the migration's set is a subset, never pinned to the inventory."""
     rows = {row['field_name']: row
             for row in json.loads(FIELD_CURATION_FIXTURE.read_text())['mappings']}
-    assert set(migration.LAB_FIELD_CONCEPTS) == LAB_FIELDS
+    assert set(migration.LAB_FIELD_CONCEPTS) <= LAB_FIELDS
     for field in sorted(LAB_FIELDS):
         row = rows[field]
         assert row['status'] == 'approved', field
         assert row['vocabulary_id'] == 'LOINC', field
         assert row['omop_table'].lower() == 'measurement', field
         assert _LOINC_LAB_FIELDS[row['concept_code']][0] == field, field
-        assert migration.LAB_FIELD_CONCEPTS[field] == (
-            row['concept_code'], row['concept_id']), field
+    for field, pair in migration.LAB_FIELD_CONCEPTS.items():
+        assert pair == (rows[field]['concept_code'], rows[field]['concept_id']), field
 
 
-def test_seeded_tables_route_every_real_table_code_to_the_same_field(lab_field_mappings):
-    """Once the tables are seeded they route every code the table lists, so the
-    table itself is not consulted for any of them."""
-    expected = {code: entry for code, entry in _LOINC_LAB_FIELDS.items()
-                if code not in DEMO_ONLY_CODES}
-    assert lab_field_mappings == expected
+def test_seeded_tables_route_every_table_code_to_the_same_field(lab_field_mappings):
+    """Once the tables are seeded they route every real code the table lists,
+    and the two demo-only codes (no mapping row can carry them) still come
+    from the table, so the routing is the table's content exactly."""
+    assert lab_field_mappings == _LOINC_LAB_FIELDS
+    assert _DEMO_ONLY_LAB_CODES <= set(lab_field_mappings)
     approved = FieldConceptMapping.objects.filter(
         field_name__in=LAB_FIELDS, status='approved', concept__isnull=False,
     ).count()
@@ -133,6 +131,22 @@ def test_curator_alias_feeds_the_blood_count_selection(lab_field_mappings):
     record.refresh_from_db()
     assert record.alc_thousand_per_ul == Decimal('1.5')
     assert record.absolute_lymphocyte_count == Decimal('1500')
+
+
+def test_demo_flc_codes_still_form_the_pair_once_tables_are_seeded(lab_field_mappings):
+    """Staging's synthea-mm cohort carries FLC only under the generator's codes."""
+    person = PersonFactory()
+    for code, value in (('33944-8', 1000), ('33945-5', 5)):
+        MeasurementFactory(
+            person=person, measurement_concept=ConceptFactory(concept_code=code),
+            measurement_source_value=code, measurement_date=date(2024, 3, 1),
+            value_as_number=value, unit_source_value='mg/L',
+        )
+    assert _get_mm_specific_data(person)['meets_slim'] is True
+    record = refresh_patient_record(person)
+    record.refresh_from_db()
+    assert record.kappa_flc == Decimal('1000')
+    assert record.lambda_flc == Decimal('5')
 
 
 def test_slim_scan_reads_an_alias_code_for_plasma_cells(lab_field_mappings):

@@ -12,6 +12,7 @@ import math
 import re
 import statistics
 from collections import defaultdict
+from collections.abc import Callable, Iterable, Mapping
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from datetime import date, datetime, timedelta
 from django.db import DatabaseError, models, transaction
@@ -402,6 +403,12 @@ _LOINC_LAB_FIELDS = {
 LAB_FIELDS = frozenset(field for field, _ in _LOINC_LAB_FIELDS.values())
 _LAB_FIELD_CASTS = {field: cast for field, cast in _LOINC_LAB_FIELDS.values()}
 
+# The MM demo generator's kappa/lambda codes (_mm_generator, bulk_import_fhir_bundle).
+# Not LOINC, so no mapping row can carry them (0285 leaves them out on purpose);
+# they route from the table whatever the field's mapping says, as the demo
+# cohorts on staging depend on them for the FLC pair and SLiM.
+_DEMO_ONLY_LAB_CODES = frozenset({'33944-8', '33945-5'})
+
 # Keyed by field name not by code, so a new LOINC spelling above feeds both the
 # lab projection and the SLiM criteria.
 _SLIM_FIELDS = frozenset({
@@ -542,7 +549,7 @@ _SLIM_SOURCE_NAMES = frozenset(
 )
 
 
-def _slim_match_values(code_fields):
+def _slim_match_values(code_fields: Mapping[str, tuple[str, Callable]]) -> frozenset[str]:
     """Codes and names that bound the SLiM query, from the resolved routing.
 
     Without a bound the criteria walk every Measurement a person owns, which on
@@ -553,7 +560,9 @@ def _slim_match_values(code_fields):
     ) | _SLIM_SOURCE_NAMES
 
 
-def resolve_lab_code_fields(measurements=None):
+def resolve_lab_code_fields(
+    measurements: Iterable | None = None,
+) -> dict[str, tuple[str, Callable]]:
     """LOINC code → (PatientRecord lab field, cast) for lab derivation.
 
     The curation tables are the authority (#1796): an approved, concept-resolved
@@ -562,7 +571,8 @@ def resolve_lab_code_fields(measurements=None):
     that mapping's concept add further codes for it. ``_LOINC_LAB_FIELDS``
     supplies a field only while it has no such mapping: a fresh install before
     Athena loads (migration 0240 seeds the rows with no concept), or a test
-    database built without migrations.
+    database built without migrations. Its ``_DEMO_ONLY_LAB_CODES`` entries
+    are kept either way.
 
     With ``measurements`` given, the tables are not queried for a person
     without a LOINC-coded numeric Measurement, so unrelated measurements do not
@@ -577,21 +587,25 @@ def resolve_lab_code_fields(measurements=None):
     ):
         return code_fields
     from omop_core.models import FieldConceptMapping, SourceCodeConceptMapping
-    approved = list(FieldConceptMapping.objects.filter(
-        field_name__in=LAB_FIELDS,
-        status='approved', vocabulary_id='LOINC', omop_table__iexact='measurement',
-        concept_id__isnull=False,
-    ).values_list('field_name', 'concept_code', 'concept_id'))
+    # A row's own concept_code column may be blank; the concept's code is the
+    # same thing and is never blank, so the field cannot silently route nothing.
+    approved = [
+        (field, code or concept_code, concept_id)
+        for field, code, concept_id, concept_code in FieldConceptMapping.objects.filter(
+            field_name__in=LAB_FIELDS,
+            status='approved', vocabulary_id='LOINC', omop_table__iexact='measurement',
+            concept_id__isnull=False,
+        ).values_list('field_name', 'concept_code', 'concept_id', 'concept__concept_code')
+    ]
     if not approved:
         return code_fields
     mapped = {field for field, _, _ in approved}
     code_fields = {code: entry for code, entry in code_fields.items()
-                   if entry[0] not in mapped}
+                   if entry[0] not in mapped or code in _DEMO_ONLY_LAB_CODES}
     field_by_target = {concept_id: field for field, _, concept_id in approved}
     # Every routed field is in LAB_FIELDS, so its cast is in the table.
     for field, code, _ in approved:
-        if code:
-            code_fields[code] = (field, _LAB_FIELD_CASTS[field])
+        code_fields[code] = (field, _LAB_FIELD_CASTS[field])
     for code, target_id in SourceCodeConceptMapping.objects.filter(
         organization_id=None, source_vocabulary_id='LOINC',
         status='approved', omop_table__iexact='measurement',
@@ -602,7 +616,7 @@ def resolve_lab_code_fields(measurements=None):
     return code_fields
 
 
-def _lab_routing(snapshot):
+def _lab_routing(snapshot: 'OmopSnapshot') -> dict[str, tuple[str, Callable]]:
     """``resolve_lab_code_fields`` for a snapshot, resolved once per refresh.
 
     Memoized on the snapshot so the lab, MM and blood-count readers of one
@@ -3802,7 +3816,9 @@ _SLIM_INVOLVED_FLC_MG_L = Decimal('100')
 _FLC_PAIR_UNSET = object()
 
 
-def _lab_field_for_measurement(measurement, code_fields):
+def _lab_field_for_measurement(
+    measurement, code_fields: Mapping[str, tuple[str, Callable]],
+) -> str | None:
     """Return the target lab field for either LOINC or display-name rows.
 
     ``code_fields`` is the resolved routing (``resolve_lab_code_fields``).
@@ -3814,7 +3830,9 @@ def _lab_field_for_measurement(measurement, code_fields):
     return field
 
 
-def _flc_field_for_measurement(measurement, code_fields):
+def _flc_field_for_measurement(
+    measurement, code_fields: Mapping[str, tuple[str, Callable]],
+) -> str | None:
     """Return kappa_flc/lambda_flc for either LOINC or display-name rows."""
     field = _lab_field_for_measurement(measurement, code_fields)
     return field if field in _FLC_FIELDS else None
@@ -3863,7 +3881,9 @@ def _flc_event_observed_at(measurement):
     return (event_date, 0, 0, 0, 0, 0)
 
 
-def _select_flc_pair_with_ratio(measurements, code_fields=None):
+def _select_flc_pair_with_ratio(
+    measurements, code_fields: Mapping[str, tuple[str, Callable]] | None = None,
+):
     """Return the newest complete kappa/lambda pair and its same-event ratio.
 
     A ratio must not combine kappa from one draw with lambda from another. The
@@ -3929,7 +3949,9 @@ def _select_flc_pair_with_ratio(measurements, code_fields=None):
     return None
 
 
-def _select_flc_pair(measurements, code_fields=None):
+def _select_flc_pair(
+    measurements, code_fields: Mapping[str, tuple[str, Callable]] | None = None,
+):
     """Return the newest complete kappa/lambda pair from one lab event."""
     selected = _select_flc_pair_with_ratio(measurements, code_fields)
     return selected[:2] if selected is not None else None
@@ -4162,7 +4184,9 @@ def _get_assessment_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     return data
 
 
-def _latest_blood_count_measurements(snapshot, code_fields=None):
+def _latest_blood_count_measurements(
+    snapshot, code_fields: Mapping[str, tuple[str, Callable]] | None = None,
+) -> dict:
     # Select ANC/ALC/AMC/platelets once across coded, source-only and
     # legacy-name facts (#640, #2282). The latest result owns the projection
     # even if its value/unit is unknown. ``code_fields`` is the refresh's

@@ -63,8 +63,10 @@ document for interactive edits, and the rules below assume it.
   `_LOINC_LAB_FIELDS` in that module is the inventory those rows are seeded
   from (migrations 0240, 0285, 0326) and decides only for a field with no such
   mapping, so adding a lab field means adding it there **and** to
-  `omop_core/data/field_curation_v1.json`; a new alias code is an approved
-  SCCM row, not a table entry. See
+  `omop_core/data/field_curation_v1.json`: a fresh install seeds the row from
+  the fixture, an existing instance derives it from the table until a curator
+  (or a later migration) approves it. A new alias code is an approved SCCM
+  row, not a table entry. See
   [field_concept_mapping_architecture.md](docs/field_concept_mapping_architecture.md#lab-derivation-reads-the-mapping-tables).
 
 ---

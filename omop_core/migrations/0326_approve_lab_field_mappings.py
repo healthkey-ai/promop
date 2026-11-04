@@ -22,6 +22,11 @@ field in the table is routed by the tables rather than by the table itself:
 A reviewed row, a rejected row, and a row a curator pointed at another code
 are left alone: the tables are the authority, and this only records what the
 extractor already did. Test databases are skipped, as in 0240.
+
+Reverse is a no-op: the rows this migration approved or created stay in
+place (status, provenance and notes are not restored, nor is a resolved
+concept cleared). ``provenance='lab-extractor-table-v1'`` identifies them
+for a manual rollback.
 """
 from django.db import migrations
 
@@ -96,11 +101,16 @@ def approve_lab_field_mappings(apps, schema_editor):
     taken_sources = set(Mapping.objects.using(db).filter(
         status='approved', omop_table__iexact='measurement',
     ).exclude(source_value='').values_list('source_value', flat=True))
+    concepts = {
+        concept.concept_code: concept
+        for concept in Concept.objects.using(db).filter(
+            vocabulary_id='LOINC',
+            concept_code__in=[code for code, _ in LAB_FIELD_CONCEPTS.values()],
+        )
+    }
 
     for field, (code, concept_id) in LAB_FIELD_CONCEPTS.items():
-        concept = Concept.objects.using(db).filter(
-            vocabulary_id='LOINC', concept_code=code,
-        ).first()
+        concept = concepts.get(code)
         mapping = existing.get(field)
         if mapping is None:
             source_value = code if code not in taken_sources else ''
@@ -147,6 +157,11 @@ def forwards(apps, schema_editor):
     approve_lab_field_mappings(apps, schema_editor)
 
 
+def reverse(apps, schema_editor):
+    # Approved and created rows are left as they are; see the module docstring.
+    pass
+
+
 class Migration(migrations.Migration):
     dependencies = [('omop_core', '0325_add_dlbcl_disease_category')]
-    operations = [migrations.RunPython(forwards, migrations.RunPython.noop)]
+    operations = [migrations.RunPython(forwards, reverse)]
