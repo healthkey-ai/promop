@@ -44,11 +44,19 @@ def _published(rows):
 
 
 def current_version(texts: Iterable) -> str | None:
-    """The version published most recently, across languages."""
-    published = _published(texts)
-    if not published:
+    """The version that was first published most recently.
+
+    A version's publication is its earliest published row in any language,
+    so adding a translation of an older version later does not make that
+    version current again.
+    """
+    first_published: dict[str, object] = {}
+    for t in _published(texts):
+        if t.version not in first_published or t.published_at < first_published[t.version]:
+            first_published[t.version] = t.published_at
+    if not first_published:
         return None
-    return max(published, key=lambda t: (t.published_at, t.id)).version
+    return max(first_published, key=lambda v: (first_published[v], v))
 
 
 def text_for(texts: Iterable, version: str | None, language: str):
@@ -102,6 +110,7 @@ class DocumentState:
     document: LegalDocument
     text: LegalDocumentVersion | None
     latest: DocumentAcceptance | None
+    versions: list = field(default_factory=list)
 
     @property
     def current_version(self) -> str | None:
@@ -113,15 +122,22 @@ class DocumentState:
 
     @property
     def needs_acceptance(self) -> bool:
-        """Never accepted, or the published version is a significant change
-        since the one accepted."""
+        """Never accepted, or a significant change has been published since
+        the version accepted (even if a minor one followed it)."""
         if self.text is None:
             return False
         if self.latest is None:
             return True
         if self.latest.version == self.text.version:
             return False
-        return self.text.requires_reacceptance
+        published = _published(self.versions)
+        accepted_at = min(
+            (v.published_at for v in published if v.version == self.latest.version), default=None,
+        )
+        return any(
+            v.requires_reacceptance and (accepted_at is None or v.published_at > accepted_at)
+            for v in published
+        )
 
 
 def record_country(person) -> str:
@@ -130,17 +146,16 @@ def record_country(person) -> str:
 
 
 def latest_events(person) -> dict[int, ConsentEvent]:
-    """The newest event per purpose for ``person``."""
-    out: dict[int, ConsentEvent] = {}
-    for event in ConsentEvent.objects.filter(person=person).order_by('recorded_at', 'id'):
-        out[event.purpose_id] = event
-    return out
+    """The newest event per purpose for ``person``, in one query."""
+    rows = (
+        ConsentEvent.objects.filter(person=person)
+        .order_by('purpose_id', '-recorded_at', '-id').distinct('purpose_id')
+    )
+    return {e.purpose_id: e for e in rows}
 
 
-def purpose_states(person, language: str = DEFAULT_LANGUAGE, *, include_inactive=False) -> list[PurposeState]:
-    purposes = ConsentPurpose.objects.prefetch_related('texts')
-    if not include_inactive:
-        purposes = purposes.filter(is_active=True)
+def purpose_states(person, language: str = DEFAULT_LANGUAGE) -> list[PurposeState]:
+    purposes = ConsentPurpose.objects.filter(is_active=True).prefetch_related('texts')
     country = record_country(person)
     latest = latest_events(person)
     return [
@@ -153,11 +168,16 @@ def purpose_states(person, language: str = DEFAULT_LANGUAGE, *, include_inactive
 
 
 def document_states(person, language: str = DEFAULT_LANGUAGE) -> list[DocumentState]:
-    latest: dict[int, DocumentAcceptance] = {}
-    for a in DocumentAcceptance.objects.filter(person=person).order_by('accepted_at', 'id'):
-        latest[a.document_id] = a
+    rows = (
+        DocumentAcceptance.objects.filter(person=person)
+        .order_by('document_id', '-accepted_at', '-id').distinct('document_id')
+    )
+    latest = {a.document_id: a for a in rows}
     return [
-        DocumentState(document=d, text=current_text(d.versions.all(), language), latest=latest.get(d.id))
+        DocumentState(
+            document=d, text=current_text(d.versions.all(), language), latest=latest.get(d.id),
+            versions=list(d.versions.all()),
+        )
         for d in LegalDocument.objects.filter(is_active=True).prefetch_related('versions')
     ]
 
@@ -190,8 +210,15 @@ def pending_documents(person, language: str = DEFAULT_LANGUAGE) -> list[Document
 
 
 def member_email(person) -> str:
-    link = PatientUser.objects.filter(person=person).select_related('identity').first()
+    link = PatientUser.objects.filter(person=person, is_active=True).select_related('identity').first()
     return (link.identity.email or '') if link else ''
+
+
+def _ledger_email(person, email, what: str) -> str:
+    addr = email if email is not None else member_email(person)
+    if not addr:
+        raise ValidationError(f'{what}: no email address for the consent ledger; pass email=.')
+    return addr
 
 
 class StaleVersion(ValidationError):
@@ -205,13 +232,16 @@ def record_consent(
 ) -> ConsentEvent:
     """Append one answer and its ledger entry, in one transaction.
 
-    ``version`` must be the purpose's current published version: a client
-    that shows older wording gets ``StaleVersion`` and must refresh. A
-    ``migration`` or ``staff`` source may pass any version the purpose has,
-    so a decision carried over from an earlier form keeps its own version.
+    A member must name the ``version`` they saw, and it must be the purpose's
+    current published version: older wording gets ``StaleVersion`` and the
+    client refreshes. A ``migration``, ``staff`` or ``system`` source may pass
+    any version the purpose has, so a decision carried over from an earlier
+    form keeps its own version, or none to mean the current one.
     """
     if isinstance(purpose, str):
         purpose = ConsentPurpose.objects.get(key=purpose)
+    if source == ConsentEvent.MEMBER and not purpose.is_active:
+        raise ValidationError(f'{purpose.key} is not active.')
     if decision not in purpose.allowed_decisions():
         raise ValidationError(f'{purpose.key} does not take the answer {decision!r}.')
     texts = list(purpose.texts.all())
@@ -219,6 +249,8 @@ def record_consent(
     if current is None:
         raise ValidationError(f'{purpose.key} has no published text.')
     if version is None:
+        if source == ConsentEvent.MEMBER:
+            raise ValidationError(f'{purpose.key}: version is required.')
         version = current
     if version != current and source == ConsentEvent.MEMBER:
         raise StaleVersion(f'{purpose.key} is now version {current}, not {version}.')
@@ -233,13 +265,14 @@ def record_consent(
         frequency = ''
 
     when = recorded_at or timezone.now()
+    addr = _ledger_email(person, email, purpose.key)
     with transaction.atomic():
         event = ConsentEvent.objects.create(
             person=person, purpose=purpose, text=text, version=version, language=text.language,
             decision=decision, frequency=frequency, source=source, recorded_by=recorded_by, recorded_at=when,
         )
         ConsentLedgerEntry.objects.create(
-            email=email if email is not None else member_email(person), kind=ConsentLedgerEntry.CONSENT,
+            email=addr, kind=ConsentLedgerEntry.CONSENT,
             key=purpose.key, version=version, language=text.language, decision=decision,
             frequency=frequency, recorded_at=when,
         )
@@ -250,7 +283,8 @@ def accept_document(
     person, document: LegalDocument | str, *, version: str | None = None,
     language: str = DEFAULT_LANGUAGE, recorded_by=None, recorded_at=None, email: str | None = None,
 ) -> DocumentAcceptance:
-    """Append the member's acceptance of a document's current version."""
+    """Append the member's acceptance of a document's current version, which
+    the caller names so that stale wording is never accepted."""
     if isinstance(document, str):
         document = LegalDocument.objects.get(key=document)
     versions = list(document.versions.all())
@@ -258,19 +292,20 @@ def accept_document(
     if current is None:
         raise ValidationError(f'{document.key} has no published version.')
     if version is None:
-        version = current
+        raise ValidationError(f'{document.key}: version is required.')
     if version != current:
         raise StaleVersion(f'{document.key} is now version {current}, not {version}.')
     text = text_for(versions, version, language)
 
     when = recorded_at or timezone.now()
+    addr = _ledger_email(person, email, document.key)
     with transaction.atomic():
         acceptance = DocumentAcceptance.objects.create(
-            person=person, document=document, version=version, language=text.language,
+            person=person, document=document, text=text, version=version, language=text.language,
             recorded_by=recorded_by, accepted_at=when,
         )
         ConsentLedgerEntry.objects.create(
-            email=email if email is not None else member_email(person), kind=ConsentLedgerEntry.DOCUMENT,
+            email=addr, kind=ConsentLedgerEntry.DOCUMENT,
             key=document.key, version=version, language=text.language, decision=ACCEPTED, recorded_at=when,
         )
     return acceptance

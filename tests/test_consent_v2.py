@@ -82,13 +82,20 @@ def test_current_text_is_the_latest_published_version_with_language_fallback(pur
     assert svc.text_for(p.texts.all(), '1.0', 'es').language == 'es'
 
 
+def test_a_late_translation_of_an_older_version_does_not_make_it_current(purposes):
+    p = purposes['research']  # English 1.0 published EARLIER
+    text(p, '2.0', published_at=NOW - timedelta(days=5))
+    text(p, '1.0', language='es', published_at=NOW - timedelta(days=1))
+    assert svc.current_version(p.texts.all()) == '2.0'
+
+
 # ------------------------------------------------------------ recording
 
 
 def test_each_answer_is_appended_with_its_version_and_mirrored_to_the_ledger(member, purposes):
     person = member['person']
-    svc.record_consent(person, 'my_record', ConsentEvent.GRANTED)
-    svc.record_consent(person, 'my_record', ConsentEvent.WITHDRAWN)
+    svc.record_consent(person, 'my_record', ConsentEvent.GRANTED, version='1.0')
+    svc.record_consent(person, 'my_record', ConsentEvent.WITHDRAWN, version='1.0')
     events = list(ConsentEvent.objects.filter(person=person).order_by('id'))
     assert [e.decision for e in events] == ['granted', 'withdrawn']
     assert {e.version for e in events} == {'1.0'}
@@ -102,9 +109,18 @@ def test_each_answer_is_appended_with_its_version_and_mirrored_to_the_ledger(mem
     assert not any(f.is_relation for f in ConsentLedgerEntry._meta.fields), 'the ledger must not point at the account'
 
 
+def test_an_answer_with_no_email_for_the_ledger_is_refused(purposes):
+    unlinked = PatientRecordFactory(country='GB')
+    with pytest.raises(ValidationError):
+        svc.record_consent(unlinked.person, 'my_record', ConsentEvent.GRANTED, source=ConsentEvent.STAFF)
+    e = svc.record_consent(unlinked.person, 'my_record', ConsentEvent.GRANTED, source=ConsentEvent.MIGRATION,
+                           email='old@example.test')
+    assert ConsentLedgerEntry.objects.get().email == 'old@example.test' and e.version == '1.0'
+
+
 def test_the_ledger_survives_deleting_the_account_and_the_person(member, purposes):
     person = member['person']
-    svc.record_consent(person, 'my_record', ConsentEvent.GRANTED)
+    svc.record_consent(person, 'my_record', ConsentEvent.GRANTED, version='1.0')
     PatientUser.objects.filter(person=person).delete()
     member['record'].delete()
     person.delete()
@@ -113,7 +129,7 @@ def test_the_ledger_survives_deleting_the_account_and_the_person(member, purpose
 
 
 def test_history_rows_cannot_be_changed_or_deleted(member, purposes):
-    e = svc.record_consent(member['person'], 'my_record', ConsentEvent.GRANTED)
+    e = svc.record_consent(member['person'], 'my_record', ConsentEvent.GRANTED, version='1.0')
     e.decision = ConsentEvent.WITHDRAWN
     with pytest.raises(ValidationError):
         e.save()
@@ -123,6 +139,13 @@ def test_history_rows_cannot_be_changed_or_deleted(member, purposes):
         ConsentEvent.objects.filter(pk=e.pk).update(decision=ConsentEvent.WITHDRAWN)
     with pytest.raises(ValidationError):
         ConsentLedgerEntry.objects.all().delete()
+    with pytest.raises(ValidationError):
+        ConsentEvent.objects.bulk_update([e], ['decision'])
+    # A fresh instance carrying an existing pk inserts (and collides), never updates.
+    from django.db import IntegrityError, transaction
+    with pytest.raises(IntegrityError), transaction.atomic():
+        ConsentEvent(pk=e.pk, person=e.person, purpose=e.purpose, version='1.0',
+                     decision=ConsentEvent.WITHDRAWN).save()
     assert ConsentEvent.objects.get(pk=e.pk).decision == ConsentEvent.GRANTED
 
 
@@ -141,19 +164,23 @@ def test_a_member_cannot_answer_a_version_that_is_no_longer_current(member, purp
 def test_answer_sets_and_frequency_are_enforced_per_purpose(member, purposes):
     person = member['person']
     with pytest.raises(ValidationError):
-        svc.record_consent(person, 'my_record', ConsentEvent.ASK_LATER)
-    assert svc.record_consent(person, 'research', ConsentEvent.ASK_LATER).decision == 'ask_later'
+        svc.record_consent(person, 'my_record', ConsentEvent.ASK_LATER, version='1.0')
+    assert svc.record_consent(person, 'research', ConsentEvent.ASK_LATER, version='1.0').decision == 'ask_later'
     with pytest.raises(ValidationError):
-        svc.record_consent(person, 'updates', ConsentEvent.GRANTED, frequency='daily')
-    granted = svc.record_consent(person, 'updates', ConsentEvent.GRANTED, frequency='weekly')
+        svc.record_consent(person, 'updates', ConsentEvent.GRANTED, version='1.0', frequency='daily')
+    granted = svc.record_consent(person, 'updates', ConsentEvent.GRANTED, version='1.0', frequency='weekly')
     assert granted.frequency == 'weekly'
-    declined = svc.record_consent(person, 'updates', ConsentEvent.DECLINED, frequency='weekly')
+    declined = svc.record_consent(person, 'updates', ConsentEvent.DECLINED, version='1.0', frequency='weekly')
     assert declined.frequency == ''
+    # A member names the version they saw; staff tooling may leave it to the current one.
+    with pytest.raises(ValidationError):
+        svc.record_consent(person, 'my_record', ConsentEvent.GRANTED)
+    assert svc.record_consent(person, 'my_record', ConsentEvent.GRANTED, source=ConsentEvent.STAFF).version == '1.0'
 
 
 def test_a_country_gated_purpose_grants_nothing_outside_its_countries(member, purposes):
     person = member['person']
-    svc.record_consent(person, 'research', ConsentEvent.GRANTED)
+    svc.record_consent(person, 'research', ConsentEvent.GRANTED, version='1.0')
     assert svc.has_consent(person, 'research') is True
     record = member['record']
     record.country = 'US'
@@ -165,6 +192,8 @@ def test_a_country_gated_purpose_grants_nothing_outside_its_countries(member, pu
     purposes['research'].is_active = False
     purposes['research'].save()
     assert svc.has_consent(person, 'research') is False
+    with pytest.raises(ValidationError):
+        svc.record_consent(person, 'research', ConsentEvent.GRANTED, version='1.0')
 
 
 def test_has_consent_is_false_without_an_answer_or_a_purpose(member, purposes):
@@ -191,9 +220,30 @@ def test_a_significant_new_version_needs_confirming_and_a_minor_one_does_not(mem
     assert [s.current_version for s in svc.pending_documents(person)] == ['0.5']
     with pytest.raises(svc.StaleVersion):
         svc.accept_document(person, 'terms', version='0.4')
+    with pytest.raises(ValidationError):
+        svc.accept_document(person, 'terms')
     svc.accept_document(person, 'terms', version='0.5')
     assert svc.pending_documents(person) == []
-    assert DocumentAcceptance.objects.filter(person=person).count() == 2
+    latest = DocumentAcceptance.objects.filter(person=person).first()
+    assert latest.text.version == '0.5' and DocumentAcceptance.objects.filter(person=person).count() == 2
+    # The accepted wording cannot be deleted.
+    from django.db.models import ProtectedError
+    with pytest.raises(ProtectedError):
+        LegalDocumentVersion.objects.filter(version='0.5').delete()
+
+
+def test_a_significant_change_is_confirmed_even_when_a_minor_one_followed_it(member):
+    person = member['person']
+    terms = document('terms', '0.4', published_at=NOW - timedelta(days=10))
+    svc.accept_document(person, 'terms', version='0.4')
+    LegalDocumentVersion.objects.create(document=terms, version='0.5', language='en', title='t', body='b',
+                                        published_at=NOW - timedelta(days=2), requires_reacceptance=True)
+    LegalDocumentVersion.objects.create(document=terms, version='0.5.1', language='en', title='t', body='b',
+                                        published_at=NOW - timedelta(days=1), requires_reacceptance=False)
+    (state,) = svc.pending_documents(person)
+    assert state.current_version == '0.5.1'
+    svc.accept_document(person, 'terms', version='0.5.1')
+    assert svc.pending_documents(person) == []
 
 
 # ------------------------------------------------------------ the API
@@ -201,7 +251,7 @@ def test_a_significant_new_version_needs_confirming_and_a_minor_one_does_not(mem
 
 def test_get_lists_purposes_and_documents_in_the_members_language(member, purposes):
     document('privacy', '0.3')
-    svc.record_consent(member['person'], 'updates', ConsentEvent.GRANTED, frequency='monthly')
+    svc.record_consent(member['person'], 'updates', ConsentEvent.GRANTED, version='1.0', frequency='monthly')
     r = member['client'].get('/api/v1/phr/consent/?lang=es')
     assert r.status_code == 200
     by_key = {p['key']: p for p in r.data['purposes']}
@@ -272,6 +322,30 @@ def test_post_refuses_stale_wording_and_unknown_purposes(member, purposes):
     assert ConsentEvent.objects.count() == 0
 
 
+def test_malformed_bodies_are_refused_not_crashed(member, purposes):
+    client = member['client']
+    url = '/api/v1/phr/consent/'
+    for body in (
+        [], 'x', 5,
+        {'decisions': [{'purpose': ['my_record'], 'decision': 'granted', 'version': '1.0'}]},
+        {'decisions': [{'purpose': 'my_record', 'decision': 'granted'}]},  # no version
+        {'decisions': [{'purpose': 'my_record', 'decision': None, 'version': '1.0'}]},
+        {'decisions': [{'purpose': 'my_record', 'decision': 'granted', 'version': 1}]},
+        {'decisions': ['my_record']},
+        {'decisions': [{'purpose': 'updates', 'decision': 'granted', 'version': '1.0', 'frequency': ['weekly']}]},
+    ):
+        r = client.post(url, body, format='json')
+        assert r.status_code == 400, body
+    assert client.get(url, {'lang': ['es', 'en']}).status_code == 200
+    assert client.post(url, {'lang': 5, 'decisions': [{'purpose': 'my_record', 'decision': 'granted', 'version': '1.0'}]},
+                       format='json').status_code == 200
+    assert ConsentEvent.objects.count() == 1
+    docs = '/api/v1/phr/consent/documents/'
+    assert client.get(docs).status_code == 405
+    for body in ([], {'document': ['terms'], 'version': '1'}, {'document': 'terms'}):
+        assert client.post(docs, body, format='json').status_code == 400, body
+
+
 def test_confirming_the_new_terms(member):
     client, person = member['client'], member['person']
     document('terms', '0.4')
@@ -282,6 +356,8 @@ def test_confirming_the_new_terms(member):
     r = client.post('/api/v1/phr/consent/documents/', {'document': 'terms', 'version': '0.3'}, format='json')
     assert r.status_code == 409
     r = client.post('/api/v1/phr/consent/documents/', {'document': 'nope', 'version': '1'}, format='json')
+    assert r.status_code == 400
+    r = client.post('/api/v1/phr/consent/documents/', {'document': 'terms'}, format='json')
     assert r.status_code == 400
     h = client.get('/api/v1/phr/consent/history/').data['history']
     assert [(x['kind'], x['key'], x['decision']) for x in h] == [('document', 'terms', 'accepted')]
@@ -298,7 +374,8 @@ def test_only_a_member_with_a_record_reads_consent(member, purposes):
 
 def test_a_member_sees_only_their_own_answers(member, purposes):
     other = PatientRecordFactory(country='GB')
-    svc.record_consent(other.person, 'my_record', ConsentEvent.GRANTED)
+    signed_in(other)
+    svc.record_consent(other.person, 'my_record', ConsentEvent.GRANTED, version='1.0')
     r = member['client'].get('/api/v1/phr/consent/')
     assert {p['key']: p['decision'] for p in r.data['purposes']}['my_record'] is None
     assert member['client'].get('/api/v1/phr/consent/history/').data['history'] == []

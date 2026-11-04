@@ -25,13 +25,27 @@ from patient_portal.models import ConsentEvent, ConsentPurpose, DocumentAcceptan
 from .views import PhrView
 
 
+def body_of(request) -> dict:
+    """The JSON object posted, or an empty one when the body is not an object."""
+    data = getattr(request, 'data', None)
+    return data if isinstance(data, dict) else {}
+
+
 def language_of(request) -> str:
-    lang = request.query_params.get('lang') or request.data.get('lang') if hasattr(request, 'data') else None
+    lang = request.query_params.get('lang') or body_of(request).get('lang')
+    if not isinstance(lang, str):
+        lang = ''
     if not lang:
         header = request.headers.get('Accept-Language', '')
         lang = header.split(',')[0].split(';')[0].strip() if header else ''
     lang = (lang or svc.DEFAULT_LANGUAGE).lower()
     return lang.split('-')[0] or svc.DEFAULT_LANGUAGE
+
+
+def _string(value, name: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValidationError(f'{name} is required and must be a string.')
+    return value
 
 
 def _text(t):
@@ -91,22 +105,26 @@ class ConsentView(PhrView):
         if error:
             return error
         language = language_of(request)
-        decisions = request.data.get('decisions')
+        decisions = body_of(request).get('decisions')
         if not isinstance(decisions, list) or not decisions:
             return Response({'detail': 'decisions must be a non-empty list.'}, status=400)
         purposes = {p.key: p for p in ConsentPurpose.objects.filter(is_active=True).prefetch_related('texts')}
         try:
+            email = svc.member_email(person)
             with transaction.atomic():
                 for item in decisions:
                     if not isinstance(item, dict):
                         raise ValidationError('Each decision is an object.')
-                    purpose = purposes.get(item.get('purpose'))
+                    key = _string(item.get('purpose'), 'purpose')
+                    purpose = purposes.get(key)
                     if purpose is None:
-                        raise ValidationError(f'Unknown purpose {item.get("purpose")!r}.')
+                        raise ValidationError(f'Unknown purpose {key!r}.')
+                    frequency = item.get('frequency') or ''
                     svc.record_consent(
-                        person, purpose, item.get('decision'), version=item.get('version'),
-                        language=language, frequency=item.get('frequency') or '',
-                        recorded_by=request.user, source=ConsentEvent.MEMBER,
+                        person, purpose, _string(item.get('decision'), 'decision'),
+                        version=_string(item.get('version'), 'version'), language=language,
+                        frequency=frequency if isinstance(frequency, str) else '',
+                        recorded_by=request.user, source=ConsentEvent.MEMBER, email=email,
                     )
         except svc.StaleVersion as e:
             return Response({'detail': e.messages[0]}, status=409)
@@ -116,17 +134,22 @@ class ConsentView(PhrView):
 
 
 class ConsentDocumentsView(PhrView):
+    http_method_names = ['post', 'head', 'options']
+
     def post(self, request):
         person, record, error = self.resolve(request)
         if error:
             return error
         language = language_of(request)
-        document = LegalDocument.objects.filter(key=request.data.get('document'), is_active=True).first()
-        if document is None:
-            return Response({'detail': f'Unknown document {request.data.get("document")!r}.'}, status=400)
+        body = body_of(request)
         try:
+            key = _string(body.get('document'), 'document')
+            document = LegalDocument.objects.filter(key=key, is_active=True).first()
+            if document is None:
+                raise ValidationError(f'Unknown document {key!r}.')
             svc.accept_document(
-                person, document, version=request.data.get('version'), language=language, recorded_by=request.user,
+                person, document, version=_string(body.get('version'), 'version'), language=language,
+                recorded_by=request.user,
             )
         except svc.StaleVersion as e:
             return Response({'detail': e.messages[0]}, status=409)

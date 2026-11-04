@@ -193,13 +193,16 @@ class LabMarkerAdmin(admin.ModelAdmin):
 # ---------------------------------------------------------------------------
 
 class _VersionedTextInline(admin.TabularInline):
+    """Lists a purpose's or document's versions. Rows are edited on their own
+    page, where a published one is read-only; here they are only listed and
+    added, never changed or deleted."""
     extra = 0
     fields = ['version', 'language', 'title', 'published_at']
     show_change_link = True
+    can_delete = False
 
-    def get_readonly_fields(self, request, obj=None):
-        # A published version is never edited: a wording change is a new version.
-        return []
+    def has_change_permission(self, request, obj=None):
+        return False
 
 
 class ConsentTextInline(_VersionedTextInline):
@@ -211,8 +214,15 @@ class LegalDocumentVersionInline(_VersionedTextInline):
     fields = ['version', 'language', 'title', 'requires_reacceptance', 'published_at']
 
 
+class _KeyedAdmin(admin.ModelAdmin):
+    """The key is what events, ledger rows and code refer to, so it is set once."""
+
+    def get_readonly_fields(self, request, obj=None):
+        return ['key', 'created_at'] if obj is not None else ['created_at']
+
+
 @admin.register(ConsentPurpose)
-class ConsentPurposeAdmin(admin.ModelAdmin):
+class ConsentPurposeAdmin(_KeyedAdmin):
     list_display = ['key', 'kind', 'answers', 'asks_frequency', 'stage', 'gated_by_country', 'sort_order', 'is_active']
     list_filter = ['kind', 'is_active', 'gated_by_country']
     search_fields = ['key']
@@ -220,13 +230,20 @@ class ConsentPurposeAdmin(admin.ModelAdmin):
 
 
 class _VersionedTextAdmin(admin.ModelAdmin):
+    """A published version is what members agreed to: it is read-only and
+    cannot be deleted. Publishing is one-way; a wording change is a new version."""
     list_filter = ['language']
     search_fields = ['version', 'title']
 
     def get_readonly_fields(self, request, obj=None):
         if obj is not None and obj.is_published:
-            return [f.name for f in obj._meta.fields if f.name != 'published_at']
+            return [f.name for f in obj._meta.fields]
         return ['created_at']
+
+    def has_delete_permission(self, request, obj=None):
+        if obj is not None and obj.is_published:
+            return False
+        return super().has_delete_permission(request, obj)
 
 
 @admin.register(ConsentText)
@@ -236,7 +253,7 @@ class ConsentTextAdmin(_VersionedTextAdmin):
 
 
 @admin.register(LegalDocument)
-class LegalDocumentAdmin(admin.ModelAdmin):
+class LegalDocumentAdmin(_KeyedAdmin):
     list_display = ['key', 'name', 'sort_order', 'is_active']
     search_fields = ['key', 'name']
     inlines = [LegalDocumentVersionInline]

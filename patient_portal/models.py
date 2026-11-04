@@ -876,13 +876,23 @@ class AppendOnlyQuerySet(models.QuerySet):
     def update(self, **kwargs):
         raise ValidationError('This history is append-only.')
 
+    def bulk_update(self, *args, **kwargs):
+        raise ValidationError('This history is append-only.')
+
     def delete(self):
         raise ValidationError('This history is append-only.')
 
 
 class AppendOnlyModel(models.Model):
-    """Rows are written once. Updates and deletes through the ORM are refused;
-    only a cascade from the owning account removes them."""
+    """Rows are written once. ``save()`` always inserts, and updates and
+    deletes through the model's manager are refused.
+
+    Django's deletion collector works through the base manager, not this
+    queryset, so a cascade from the owning person (or SET_NULL from a deleted
+    identity) still goes through: that is how closing an account removes its
+    events. A database role that can only insert into these tables is the
+    guard below this one.
+    """
     objects = AppendOnlyQuerySet.as_manager()
 
     class Meta:
@@ -891,6 +901,7 @@ class AppendOnlyModel(models.Model):
     def save(self, *args, **kwargs):
         if not self._state.adding:
             raise ValidationError('This history is append-only.')
+        kwargs['force_insert'] = True
         super().save(*args, **kwargs)
 
     def delete(self, *args, **kwargs):
@@ -933,6 +944,9 @@ class DocumentAcceptance(AppendOnlyModel):
     """Which version of a legal document a member accepted, and when."""
     person = models.ForeignKey('omop_core.Person', on_delete=models.CASCADE, related_name='document_acceptances')
     document = models.ForeignKey(LegalDocument, on_delete=models.PROTECT, related_name='acceptances')
+    text = models.ForeignKey(
+        LegalDocumentVersion, on_delete=models.PROTECT, null=True, blank=True, related_name='acceptances',
+    )
     version = models.CharField(max_length=20)
     language = models.CharField(max_length=10, default='en')
     recorded_by = models.ForeignKey(Identity, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')

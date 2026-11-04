@@ -13,17 +13,23 @@ consent work uses this model.
 | Model | Table | Holds |
 |---|---|---|
 | `ConsentPurpose` | `consent_purpose` | One thing a member answers: a **permission**, a **contact preference** or a **declaration**. Its `answers` set is yes/no or yes/no/ask-me-later; `asks_frequency` with `frequency_options` for a preference that carries a cadence; `stage` tells the app when to ask it; `gated_by_country` with `enabled_countries` keeps it unavailable elsewhere. |
-| `ConsentText` | `consent_text` | The wording of a purpose, one row per **version and language**. A published version is never edited: a wording change is a new version. The current version is the one published most recently. |
+| `ConsentText` | `consent_text` | The wording of a purpose, one row per **version and language**. A published version is never edited or deleted: a wording change is a new version. The current version is the one whose first publication (in any language) is most recent, so a late translation of an older version does not make it current again. |
 | `LegalDocument`, `LegalDocumentVersion` | `legal_document`, `legal_document_version` | Terms of service, privacy policy, and the like, versioned the same way. `requires_reacceptance` marks a significant change. |
 | `ConsentEvent` | `consent_event` | **Append-only.** One answer: person, purpose, the text version seen, decision (`granted`, `declined`, `ask_later`, `withdrawn`), frequency, who recorded it and from where (`member`, `staff`, `migration`, `system`). The member's position on a purpose is their latest event for it. |
-| `DocumentAcceptance` | `document_acceptance` | **Append-only.** Which version of a document the member accepted, and when. |
+| `DocumentAcceptance` | `document_acceptance` | **Append-only.** Which version of a document the member accepted, and when, with a protected link to the text seen. A member must confirm again when a version marked a significant change has been published since the one they accepted, even if a minor one followed it. |
 | `ConsentLedgerEntry` | `consent_ledger_entry` | **Append-only, no foreign keys.** The member's email address, the purpose or document key, version, decision and time, and nothing else. Written in the same transaction as every event and acceptance. Deleting the account, record or person leaves it in place. |
 
 Append-only means the ORM refuses `save()` on an existing row, `delete()`,
-and queryset `update()`/`delete()`. Only a cascade from the person removes
-events and acceptances; nothing removes ledger entries. The Django admin shows
-the three histories read-only. (This guards the application; a database role
-that can only insert into these tables is a deployment matter.)
+and queryset `update()`, `bulk_update()` and `delete()`. Only a cascade from
+the person removes events and acceptances; nothing removes ledger entries. The
+Django admin shows the three histories read-only, keeps a purpose's or
+document's key fixed once created, and makes a published version read-only
+and undeletable. (This guards the application; a database role that can only
+insert into these tables is a deployment matter.)
+
+The ledger is keyed on the email address at the time of each entry. A member
+who changes their address has entries under both; joining them is a question
+for the deletion and retention work, not solved here.
 
 ## Texts as data
 
@@ -57,7 +63,7 @@ All under `/api/v1/phr/`, for the signed-in member and their own record only.
 | | |
 |---|---|
 | `GET consent/` | Every active purpose with its current text, the member's answer (`decision`, `granted`, `frequency`, `decided_version`, `decided_at`, `outdated`), and every document with `needs_acceptance`. |
-| `POST consent/` | `{"decisions": [{"purpose", "decision", "version", "frequency"?}, ...]}`. All are recorded or none. `version` must be the current one, else **409** and the app refreshes: stale wording is never agreed to. Returns the same as `GET`. |
+| `POST consent/` | `{"decisions": [{"purpose", "decision", "version", "frequency"?}, ...]}`. All are recorded or none. `version` is required (**400** without it) and must be the current one, else **409** and the app refreshes: stale wording is never agreed to. Returns the same as `GET`. |
 | `POST consent/documents/` | `{"document", "version"}` accepts the current version of a document; **409** when it is not current. |
 | `GET consent/history/` | Every answer and acceptance, newest first. |
 
