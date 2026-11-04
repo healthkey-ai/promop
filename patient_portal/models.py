@@ -974,7 +974,7 @@ class ConsentLedgerEntry(AppendOnlyModel):
 
     email = models.EmailField(db_index=True)
     kind = models.CharField(max_length=10, choices=KINDS)
-    key = models.CharField(max_length=50, help_text='The purpose or document key.')
+    key = models.CharField(max_length=50, help_text='Key of the purpose or document this entry is about.')
     version = models.CharField(max_length=20)
     language = models.CharField(max_length=10, default='en')
     decision = models.CharField(max_length=10, help_text='A ConsentEvent decision, or "accepted" for a document.')
