@@ -89,7 +89,9 @@ an absent source unit may use a UCUM unit concept. An explicit unsupported unit
 does not silently fall back to a different scale.
 
 The newest non-erroneous matching result is selected across LOINC, source-code,
-supported source-display and historic concept-name paths. A newer empty result
+supported source-display and historic concept-name paths, including LOINCs a
+curator routed to the field through an approved field mapping or source-code
+alias. A newer empty result
 or one with an unknown unit suppresses older results. Approved scalar mapping
 readback also converts source units. Pending user edits remain preserved.
 

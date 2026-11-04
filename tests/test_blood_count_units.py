@@ -307,3 +307,47 @@ def test_latest_unknown_alc_amc_leaves_field_empty_and_blocks_older(code, field,
     assert getattr(record, field) is None
     if field == 'alc_thousand_per_ul':
         assert record.absolute_lymphocyte_count is None
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize('via', ['field-mapping', 'source-code-alias'])
+def test_curator_added_loinc_for_a_count_field_converts_by_unit(via):
+    """A LOINC a curator routes to a count field joins the unit-converting selection.
+
+    Before this, a row under a code outside the four checked-in LOINCs fell
+    through to the plain float cast and landed in the lab's own scale.
+    """
+    from omop_core.models import SourceCodeConceptMapping
+    person = PersonFactory()
+    canonical = ConceptFactory(vocabulary__vocabulary_id='LOINC', concept_code='731-0')
+    alias = ConceptFactory(vocabulary__vocabulary_id='LOINC', concept_code='26474-7')
+    if via == 'field-mapping':
+        FieldConceptMapping.objects.create(
+            field_name='alc_thousand_per_ul', concept=alias, vocabulary_id='LOINC', concept_code='26474-7',
+            status='approved', omop_table='measurement', source_value='26474-7', value_kind='number',
+        )
+    else:
+        FieldConceptMapping.objects.create(
+            field_name='alc_thousand_per_ul', concept=canonical, vocabulary_id='LOINC', concept_code='731-0',
+            status='approved', omop_table='measurement', source_value='731-0', value_kind='number',
+        )
+        SourceCodeConceptMapping.objects.create(
+            domain_id='Measurement', source_vocabulary_id='LOINC', source_code='26474-7',
+            target_concept=canonical, destination_vocabulary_id='LOINC', omop_table='measurement',
+            status='approved', origin='curator',
+        )
+    MeasurementFactory(
+        person=person, measurement_concept=alias, measurement_source_value='26474-7',
+        measurement_date=date(2024, 1, 2), value_as_number=1500, unit_source_value='cells/uL',
+    )
+    record = refresh_patient_record(person)
+    assert record.alc_thousand_per_ul == Decimal('1.5')
+    assert record.absolute_lymphocyte_count == 1500
+    # The newest row under the curator's code owns the field, unknown unit included.
+    MeasurementFactory(
+        person=person, measurement_concept=alias, measurement_source_value='26474-7',
+        measurement_date=date(2024, 1, 3), value_as_number=900, unit_source_value='/MM3',
+    )
+    record = refresh_patient_record(person)
+    assert record.alc_thousand_per_ul is None
+    assert record.absolute_lymphocyte_count is None

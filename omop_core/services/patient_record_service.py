@@ -4069,15 +4069,23 @@ def _get_assessment_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     return data
 
 
-def _latest_blood_count_measurements(snapshot):
+def _latest_blood_count_measurements(snapshot, code_fields=None):
     # Select ANC/ALC/AMC/platelets once across coded, source-only and
     # legacy-name facts (#640, #2282). The latest result owns the projection
-    # even if its value/unit is unknown.
-    count_fields = BLOOD_COUNT_LOINC
+    # even if its value/unit is unknown. ``code_fields`` is the refresh's
+    # resolved code -> (field, cast) map (approved FieldConceptMapping
+    # destinations and SCCM aliases over the checked-in defaults), so a LOINC
+    # a curator routed to a count field joins this selection instead of
+    # falling through to the unconverted cast in the generic lab loop.
+    if code_fields is None:
+        count_codes = BLOOD_COUNT_LOINC
+    else:
+        count_codes = {code: field for code, (field, _) in code_fields.items()
+                       if field in BLOOD_COUNT_FIELDS}
     selected_counts = {}
     for measurement in snapshot.measurements:
         code = _measurement_code(measurement)
-        field = count_fields.get(code)
+        field = count_codes.get(code)
         if field is None:
             field = _SOURCE_VALUE_LAB_FIELDS.get(measurement.measurement_source_value)
         if field not in BLOOD_COUNT_FIELDS:
@@ -4133,7 +4141,7 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
             ).values_list('source_code', 'target_concept_id'):
                 field = field_by_target[target_id]
                 code_fields[code] = (field, field_casts[field])
-    for field, measurement in _latest_blood_count_measurements(snapshot).items():
+    for field, measurement in _latest_blood_count_measurements(snapshot, code_fields).items():
         data.update(blood_count_projection(field, measurement))
 
     # --- Legacy fields via exact historic concept-name matching ---
@@ -4211,6 +4219,10 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
         field, cast = code_fields[code]
         if field in _FLC_FIELDS:
             continue
+        if field in BLOOD_COUNT_FIELDS:
+            # Owned by the blood count projection above, which reads the
+            # unit; the raw cast here would land the lab's own scale.
+            continue
         canonical_value = None
         if code == '6690-2':
             if wbc_projection_blocked:
@@ -4241,7 +4253,7 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
                 continue
             if field == 'wbc_count_thousand_per_ul' and wbc_projection_blocked:
                 continue
-            if field in data or field in _FLC_FIELDS:
+            if field in data or field in _FLC_FIELDS or field in BLOOD_COUNT_FIELDS:
                 continue
             for m in snapshot.meas_by_source.get(source_value, ()):
                 if m.value_as_number is not None:
