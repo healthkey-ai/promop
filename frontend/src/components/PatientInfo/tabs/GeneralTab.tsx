@@ -57,7 +57,6 @@ export default function GeneralTab({
   const { source: ecogSource }        = useVocabulary('ecog-status', 'code');
   const { source: karnofskySource }   = useVocabulary('karnofsky-score', 'code');
   const { source: ethnicitySource }   = useVocabulary('ethnicity', 'title');
-  const { source: diseaseSource }     = useVocabulary('disease', 'title');
   const { categories }               = useCategoryObjects();
   const { categoryForDisease, diseasesByCategory } = useAllDiseaseMappings();
 
@@ -200,12 +199,9 @@ export default function GeneralTab({
             />
           </div>
 
-          <div className="sm:col-span-1">
-            {field('Disease', 'disease', 'select', {
-              options: categoryDiseaseOptions.length > 0 ? categoryDiseaseOptions : undefined,
-              vocabSource: diseaseSource,
-            })}
-          </div>
+          {field('Disease', 'disease', 'select', {
+            options: categoryDiseaseOptions,
+          })}
 
           <div className="sm:col-span-2">
             <TreatingInstitutionField key={personId} value={String(formData?.facility_name || '')}
