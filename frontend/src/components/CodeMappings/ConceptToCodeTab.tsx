@@ -435,6 +435,14 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
   // Candidates from previous finished runs, keyed by source key for dedup.
   // A new run's results overlay these; approvals and patches apply to both.
   const [previousCandidates, setPreviousCandidates] = useState<Source[]>(cached?.previousCandidates ?? []);
+  // All candidates ever seen across runs, for building exclude_keys.
+  // Updated synchronously in start() and the polling callback so it is
+  // always current — an effect would lag behind the click that reads it,
+  // and an inline run (no polling) would never trigger the polling path
+  // at all, leaving exclude_keys empty on the second Suggest (#2274).
+  const seenRef = useRef<Map<string, Source>>(
+    new Map((cached?.previousCandidates ?? []).map(row => [sourceKey(row), row])),
+  );
   // Rows saved or approved while a run is still streaming, by source key. The
   // poll replaces the run wholesale, so edits live beside it and are laid over
   // its candidates on every render (#2028).
@@ -519,6 +527,13 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
     // A finished run recorded declines, which the estimate now skips.
   }, [concept.concept_id, strategyKey, seenOnly, retryDeclined, revision, finishedRun]);
 
+  // Poll a queued/running run until it finishes.  When a terminal state is
+  // detected, absorb candidates into seenRef and previousCandidates so the
+  // next run's exclude_keys skips them.  This happens here (inside the
+  // async polling callback, not in a synchronous effect body) so the lint
+  // rule set-state-in-effect is satisfied, and it handles Celery runs.
+  // Inline runs skip polling entirely; their candidates are absorbed in
+  // start() before the next POST fires — see the comment there (#2274).
   useEffect(() => {
     if (!run || !['queued', 'running'].includes(run.state)) return;
     let current = true;
@@ -528,15 +543,11 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
         if (current) {
           setRun(next);
           if (next.state === 'success' || next.state === 'failure') {
-            // Move the finished run's candidates into previousCandidates so the
-            // next run's exclude_keys reliably skips them (#2262).
             const finished = (next.activity.find(e => e.concept.concept_id === concept.concept_id)?.candidates ?? [])
               .filter((item: Source) => !item.declined);
+            for (const item of finished) seenRef.current.set(sourceKey(item), item);
             if (finished.length) {
-              setPreviousCandidates(accumulated => {
-                const seen = new Set(finished.map(sourceKey));
-                return [...accumulated.filter((row: Source) => !seen.has(sourceKey(row))), ...finished];
-              });
+              setPreviousCandidates([...seenRef.current.values()]);
             }
             // Auto-proposed mappings land in the Existing Mappings groups; bump
             // revision so those groups reload once the run finishes (#2269).
@@ -548,7 +559,7 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
       }
     }, 1500);
     return () => { current = false; window.clearTimeout(timer); };
-  }, [run]);
+  }, [run, concept.concept_id]);
 
   const changeMode = (next: typeof mode) => { setMode(next); setSearch(''); resetView(); setError(''); };
   const toggleGroup = (status: Status) => {
@@ -559,33 +570,26 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
     setSelected(new Set());
   };
   const start = async () => {
-    // Accumulate the current run's candidates before starting a new one so
-    // previous results stay visible while the next batch streams in.
-    // Read `run` directly (stable in this click handler) rather than nesting
-    // setPreviousCandidates inside a setRun updater, which would be impure.
+    // Absorb the outgoing run's candidates into seenRef so exclude_keys
+    // always reflects every candidate the frontend has shown, regardless of
+    // whether the run completed via polling (Celery) or inline (the POST
+    // already returned state='success').  seenRef is a plain Map mutated
+    // synchronously, so it is current when we build excludeKeys below —
+    // unlike previousCandidates state, which would lag behind by one render
+    // and produce an empty exclude_keys on the second inline click (#2274).
     if (run?.activity.length) {
       const raw = run.activity.find(event => event.concept.concept_id === concept.concept_id)?.candidates ?? [];
-      // Apply the patched overlay so approvals made during the run survive the
-      // snapshot, and exclude rows the ranker declined (they re-surface only
-      // when the curator explicitly checks "Retry declined").
       const finished = raw
         .map(item => { const edit = patched[sourceKey(item)]; return edit ? { ...item, ...edit } as Source : item; })
         .filter(item => !item.declined);
-      if (finished.length) {
-        setPreviousCandidates(accumulated => {
-          const seen = new Set(finished.map(sourceKey));
-          // Latest run wins: drop old duplicates, then append the finished run's rows.
-          return [...accumulated.filter(row => !seen.has(sourceKey(row))), ...finished];
-        });
-      }
+      for (const item of finished) seenRef.current.set(sourceKey(item), item);
+      if (finished.length) setPreviousCandidates([...seenRef.current.values()]);
     }
-    // Collect all source keys the frontend already has so the backend skips them (#2262).
-    const allPrevious = [...previousCandidates];
-    if (run?.activity.length) {
-      const raw = run.activity.find(event => event.concept.concept_id === concept.concept_id)?.candidates ?? [];
-      for (const item of raw) if (!item.declined) allPrevious.push(item);
-    }
-    const excludeKeys = [...new Set(allPrevious.map(row => JSON.stringify([row.source_vocabulary_id, row.source_code])))].map(key => JSON.parse(key) as [string, string]);
+    // Build exclude_keys from the ref (always current) so the backend skips
+    // every source the frontend has already shown (#2262).
+    const excludeKeys = [...seenRef.current.values()].map(
+      row => [row.source_vocabulary_id, row.source_code] as [string, string],
+    );
     setRun(null); setStarting(true); setError(''); setProgress(''); setSelected(new Set()); setPatched({}); setMode('candidates');
     try {
       const threshold = autoPropose && ranker !== 'none' ? proposeThreshold / 100 : null;

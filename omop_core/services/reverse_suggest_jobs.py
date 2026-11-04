@@ -30,17 +30,43 @@ def _may_write_variants(mapping, user):
 
 
 def _auto_propose_candidate(candidate, concept, user):
-    """Create a proposed SCCM row for a high-confidence candidate (#2269).
+    """Set the destination on a high-confidence candidate (#2269).
 
-    Returns the updated candidate dict with ``mapping_id`` and ``auto_proposed``
-    set, or the original candidate unchanged if the source already has a mapping
-    or the catalog entry is stale.
+    For existing SCCM rows (``mapping_id`` set) that have no destination yet,
+    update the row to map to ``concept``.  For catalog-only candidates (no
+    ``mapping_id``), create a new proposed SCCM row.
+
+    Returns the updated candidate dict with ``auto_proposed`` set, or the
+    original candidate unchanged when the source is declined, already has a
+    destination, or the catalog entry is stale.
     """
     from omop_core.mapping.reverse_catalog import refresh_catalog_candidate
     from patient_portal.api.views import _upsert_source_code_mapping
 
-    if candidate.get('mapping_id') is not None or candidate.get('declined'):
+    if candidate.get('declined'):
         return candidate
+
+    # ---- Existing mapping with no destination: set it to this concept ----
+    if candidate.get('mapping_id') is not None:
+        if candidate.get('destination_concept_id') is not None:
+            return candidate  # already has a destination
+        row = SourceCodeConceptMapping.objects.filter(
+            pk=candidate['mapping_id'], target_concept__isnull=True,
+        ).first()
+        if row is None:
+            return candidate  # row gone or already has a destination (race)
+        fields = ['target_concept_id']
+        row.target_concept_id = concept.pk
+        if candidate.get('confidence') is not None:
+            row.suggestion_confidence = candidate['confidence']
+            fields.append('suggestion_confidence')
+        row.origin_system = 'suggest-auto'
+        fields.append('origin_system')
+        row.save(update_fields=fields)
+        return {**candidate, 'destination_concept_id': concept.pk,
+                'destination_concept_name': concept.concept_name, 'auto_proposed': True}
+
+    # ---- Catalog-only candidate: create a new proposed SCCM row ----
     fresh = refresh_catalog_candidate(candidate, concept)
     if fresh is None:
         return candidate
