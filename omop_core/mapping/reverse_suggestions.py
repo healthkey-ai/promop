@@ -16,6 +16,7 @@ from django.db.models.functions import Upper
 
 from omop_core.models import ConceptSynonym, ReverseSuggestDecline, SourceCodeConceptMapping, UmlsSourceCode
 from omop_core.services.concept_to_code import concept_payload, eligible_sources, source_payload
+from omop_core.services.mapping_samples import attach_source_samples
 from omop_core.services.source_vocabularies import VOCAB_TO_UMLS_ROOT, VOCABULARY_OID_ALIASES
 from omop_core.mapping.reverse_catalog import catalog_candidates, catalog_keys
 
@@ -230,7 +231,11 @@ def _retrieve(concept, *, strategies, limit, include_zero_seen, evaluate, includ
     skip = skip | set(exclude_keys)
 
     def collect(matches, strategy):
-        for row in evaluate(matches):
+        found = evaluate(matches)
+        # The patients' samples (units, basedOn) travel with the payload, as
+        # they do on the Mapped Codes list (#2295).
+        attach_source_samples([row for row in found if row.pk not in pool])
+        for row in found:
             candidate = pool.setdefault(row.pk, {**source_payload(row), 'evidence': []})
             if strategy not in candidate['evidence']:
                 candidate['evidence'].append(strategy)
