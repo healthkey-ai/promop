@@ -29,6 +29,10 @@ class Command(BaseCommand):
         local.add_argument('--path', help='Directory containing approved Athena TSV files')
 
     def handle(self, *args, **options):
+        if (options.get('lfs') or options.get('gdrive')) and (
+            options.get('archive') or options.get('path')
+        ):
+            raise CommandError('--lfs/--gdrive cannot be combined with --archive or --path')
         applied = (APP, DEPENDENT_MIGRATION) in MigrationRecorder(
             connection
         ).applied_migrations()
@@ -54,10 +58,6 @@ class Command(BaseCommand):
                 name: options.get(name) for name in ('lfs', 'gdrive', 'archive', 'path')
                 if options.get(name)
             }
-            if (source.get('lfs') or source.get('gdrive')) and (
-                source.get('archive') or source.get('path')
-            ):
-                raise CommandError('--lfs/--gdrive cannot be combined with --archive or --path')
             if not source:
                 raise CommandError(
                     'Migration 0201 requires missing LOINC concepts; provide '

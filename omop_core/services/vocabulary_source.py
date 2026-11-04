@@ -25,7 +25,7 @@ import os
 import re
 import shutil
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import requests
 
@@ -76,10 +76,6 @@ def is_lfs_url(url):
     return True
 
 
-def is_gdrive_url(url):
-    return 'drive.google.com' in str(url)
-
-
 def manifest_url(url):
     owner, repo, ref = parse_lfs_url(url)
     return f'https://raw.githubusercontent.com/{owner}/{repo}/{ref}/{MANIFEST_NAME}'
@@ -88,7 +84,11 @@ def manifest_url(url):
 def media_url(url, filename):
     """The URL that serves an LFS object's content rather than its pointer."""
     owner, repo, ref = parse_lfs_url(url)
-    return f'https://media.githubusercontent.com/media/{owner}/{repo}/{ref}/{filename}'
+    # The Athena bundle's name carries braces; a release could carry a space.
+    return (
+        f'https://media.githubusercontent.com/media/{owner}/{repo}/{ref}/'
+        f'{quote(filename, safe="")}'
+    )
 
 
 # --- configuration --------------------------------------------------------
@@ -179,7 +179,9 @@ def download_lfs_file(url, dest, sha256=None, log=lambda _msg: None):
                     if chunk:
                         out.write(chunk)
                         digest.update(chunk)
-    except requests.RequestException as exc:
+    except (requests.RequestException, OSError) as exc:
+        # OSError: the scratch disk, not GitHub -- but the caller's fallback
+        # decision is the same, and the receipt should say which file failed.
         partial.unlink(missing_ok=True)
         raise LfsSourceError(f'LFS download failed for {url}: {exc}') from exc
     actual = digest.hexdigest()
@@ -310,11 +312,10 @@ def build_manifest(directory, athena=None, loinc=None, released=None):
         raise CommandError(f'No Athena vocabulary ZIP in {directory}')
 
     def entry(path):
-        digest = hashlib.sha256()
-        with open(path, 'rb') as source:
-            for chunk in iter(lambda: source.read(_CHUNK), b''):
-                digest.update(chunk)
-        return {'file': path.name, 'sha256': digest.hexdigest(), 'size': path.stat().st_size}
+        return {
+            'file': path.name, 'sha256': _gdrive()._sha256_file(path),
+            'size': path.stat().st_size,
+        }
 
     manifest = {'athena': entry(athena)}
     if loinc is not None:

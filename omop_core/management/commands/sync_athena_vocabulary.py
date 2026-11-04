@@ -16,6 +16,7 @@ from django.utils import timezone
 from omop_core.management.commands.load_athena_vocabularies import (
     DEFAULT_GDRIVE_URL,
     _sha256_file,
+    load_loinc_axes_from_archive,
 )
 from omop_core.models import AthenaVocabularySync, VocabularyRelease
 from omop_core.services import vocabulary_source
@@ -112,13 +113,7 @@ class Command(BaseCommand):
                         lfs=lfs, gdrive=gdrive, log=self.stdout.write,
                     )
                     identity = selection['identity']
-                    # An LFS manifest names the archive's SHA-256, so a release
-                    # already installed from Drive is recognised before any
-                    # download: switching sources never costs a reload.
-                    manifest_sha = selection.get('sha256') or ''
-                    if self._identity_is_current(identity) or (
-                        manifest_sha and self._sha_is_current(manifest_sha)
-                    ):
+                    if self._identity_is_current(identity):
                         self._receipt(
                             source_url, identity, '', previous, previous, {},
                             'current', started_at,
@@ -129,12 +124,31 @@ class Command(BaseCommand):
                             )
                         )
                         return
+                    # An LFS manifest names the archive's SHA-256, so a release
+                    # already installed from Drive is recognised before any
+                    # download: switching sources never costs a reload. The
+                    # identity also carries the LOINC release, which may be the
+                    # only thing that moved; then only the LOINC axes are loaded.
+                    manifest_sha = selection.get('sha256') or ''
+                    if manifest_sha and self._sha_is_current(manifest_sha):
+                        sha256 = manifest_sha
+                        self._refresh_loinc_axes(selection, Path(directory))
+                        self._receipt(
+                            source_url, identity, sha256, previous, previous, {},
+                            'current', started_at,
+                        )
+                        self.stdout.write(self.style.SUCCESS(
+                            f'Athena vocabulary content is current (sha256:{sha256}); no archive download.'
+                        ))
+                        return
                     archive = vocabulary_source.download_vocabulary_archive(
                         selection, Path(directory), self.stdout.write,
                     )
                     # The download may have fallen back to Drive, which
-                    # rewrites the selection; the identity must follow it.
+                    # rewrites the selection; the identity and the recorded
+                    # source must follow it.
                     identity = selection['identity']
+                    source_url = selection.get('source_url') or source_url
                     loinc_archive = vocabulary_source.download_loinc_archive(
                         selection, Path(directory), self.stdout.write,
                     )
@@ -147,6 +161,11 @@ class Command(BaseCommand):
                 identity = identity or f'sha256:{sha256}'
 
                 if self._sha_is_current(sha256):
+                    # Same Athena content under a new identity: the LOINC
+                    # release is the only thing that can have moved.
+                    if loinc_archive and not self._loinc_is_current(identity):
+                        self.stdout.write('  Athena content unchanged; loading the new LOINC release only.')
+                        load_loinc_axes_from_archive(loinc_archive, self.stdout.write)
                     self._receipt(
                         source_url, identity, sha256, previous, previous, {}, 'current', started_at,
                     )
@@ -190,6 +209,30 @@ class Command(BaseCommand):
                     started_at, str(exc),
                 )
             raise
+
+    def _refresh_loinc_axes(self, selection, directory):
+        """Load the LOINC release a current-Athena identity newly names."""
+        if not selection.get('loinc_archive_id') or self._loinc_is_current(selection['identity']):
+            return
+        self.stdout.write('  Athena content unchanged; loading the new LOINC release only.')
+        loinc_archive = vocabulary_source.download_loinc_archive(
+            selection, directory, self.stdout.write,
+        )
+        if loinc_archive:
+            load_loinc_axes_from_archive(loinc_archive, self.stdout.write)
+
+    @staticmethod
+    def _loinc_is_current(identity):
+        """Whether a successful sync already recorded this identity's LOINC release."""
+        _, sep, loinc = identity.partition('+loinc:')
+        if not sep:
+            return True
+        return AthenaVocabularySync.objects.filter(
+            source_artifact_identity__endswith=sep + loinc,
+            outcome__in=('current', 'applied'),
+        ).exists() or VocabularyRelease.objects.filter(
+            status='published', source_artifact_identity__endswith=sep + loinc,
+        ).exists()
 
     @staticmethod
     def _remote_sources(options):

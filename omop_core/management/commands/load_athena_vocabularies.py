@@ -630,7 +630,12 @@ class Command(EmbeddingLoadCommand):
             archive = vocabulary_source.download_vocabulary_archive(
                 selection, download_dir, self._log,
             )
-            if self._loinc_archive_path is None and selection.get('loinc_archive_id'):
+            # The published LOINC release rides along unless --loinc-archive
+            # named one. Not on a dry run or the migration bootstrap, which
+            # return before the axes load: the web boot would download 93 MB
+            # to discard it.
+            wants_loinc = not dry_run and not migration_bootstrap
+            if wants_loinc and self._loinc_archive_path is None and selection.get('loinc_archive_id'):
                 self._loinc_archive_path = vocabulary_source.download_loinc_archive(
                     selection, download_dir, self._log,
                 )
