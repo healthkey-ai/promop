@@ -7,11 +7,13 @@ from django.utils import timezone
 
 from omop_core.management.commands import sync_athena_vocabulary as sync
 from omop_core.models import AthenaVocabularySync, Relationship, VocabularyRelease
-from omop_core.services import athena_vocabulary_jobs
+from omop_core.services import athena_vocabulary_jobs, vocabulary_source
 
 
 def _options(**overrides):
     return {
+        'lfs': None,
+        'source': None,
         'gdrive': 'https://drive.google.com/drive/folders/test',
         'archive': None,
         'path': None,
@@ -25,15 +27,15 @@ def test_current_drive_identity_skips_archive_download_and_table_work(monkeypatc
     command = sync.Command(stdout=StringIO())
     monkeypatch.setattr(command, '_latest_release', lambda: None)
     monkeypatch.setattr(
-        sync, '_resolve_gdrive_vocabulary',
-        lambda *_args: {'id': 'current-file', 'name': 'athena.zip',
+        vocabulary_source, 'resolve_gdrive_vocabulary',
+        lambda *_args: {'kind': 'gdrive', 'id': 'current-file', 'name': 'athena.zip',
                         'identity': 'gdrive-file:current-file'},
     )
     monkeypatch.setattr(command, '_identity_is_current', lambda identity: True)
     receipt = Mock()
     monkeypatch.setattr(command, '_receipt', receipt)
     download = Mock(side_effect=AssertionError('current artifacts must not download'))
-    monkeypatch.setattr(sync, '_download_gdrive_vocabulary', download)
+    monkeypatch.setattr(vocabulary_source, 'download_vocabulary_archive', download)
 
     command.handle(**_options())
 
@@ -49,11 +51,11 @@ def test_changed_artifact_requires_explicit_dry_run_or_apply(tmp_path, monkeypat
     receipt = Mock()
     monkeypatch.setattr(command, '_latest_release', lambda: None)
     monkeypatch.setattr(
-        sync, '_resolve_gdrive_vocabulary',
-        lambda *_args: {'id': 'changed-file', 'name': 'athena.zip',
+        vocabulary_source, 'resolve_gdrive_vocabulary',
+        lambda *_args: {'kind': 'gdrive', 'id': 'changed-file', 'name': 'athena.zip',
                         'identity': 'gdrive-file:changed-file'},
     )
-    monkeypatch.setattr(sync, '_download_gdrive_vocabulary', lambda *_args, **_kwargs: archive)
+    monkeypatch.setattr(vocabulary_source, 'download_vocabulary_archive', lambda *_args, **_kwargs: archive)
     monkeypatch.setattr(command, '_identity_is_current', lambda identity: False)
     monkeypatch.setattr(command, '_sha_is_current', lambda digest: False)
     monkeypatch.setattr(command, '_receipt', receipt)
@@ -72,11 +74,11 @@ def test_apply_records_the_measured_missing_row_delta(tmp_path, monkeypatch):
     installed = object()
     monkeypatch.setattr(command, '_latest_release', lambda: None)
     monkeypatch.setattr(
-        sync, '_resolve_gdrive_vocabulary',
-        lambda *_args: {'id': 'changed-file', 'name': 'athena.zip',
+        vocabulary_source, 'resolve_gdrive_vocabulary',
+        lambda *_args: {'kind': 'gdrive', 'id': 'changed-file', 'name': 'athena.zip',
                         'identity': 'gdrive-file:changed-file'},
     )
-    monkeypatch.setattr(sync, '_download_gdrive_vocabulary', lambda *_args, **_kwargs: archive)
+    monkeypatch.setattr(vocabulary_source, 'download_vocabulary_archive', lambda *_args, **_kwargs: archive)
     monkeypatch.setattr(command, '_identity_is_current', lambda identity: False)
     monkeypatch.setattr(command, '_sha_is_current', lambda digest: False)
     monkeypatch.setattr(
@@ -99,11 +101,11 @@ def test_failed_delta_gets_a_durable_failure_receipt(tmp_path, monkeypatch):
     receipt = Mock()
     monkeypatch.setattr(command, '_latest_release', lambda: None)
     monkeypatch.setattr(
-        sync, '_resolve_gdrive_vocabulary',
-        lambda *_args: {'id': 'changed-file', 'name': 'athena.zip',
+        vocabulary_source, 'resolve_gdrive_vocabulary',
+        lambda *_args: {'kind': 'gdrive', 'id': 'changed-file', 'name': 'athena.zip',
                         'identity': 'gdrive-file:changed-file'},
     )
-    monkeypatch.setattr(sync, '_download_gdrive_vocabulary', lambda *_args, **_kwargs: archive)
+    monkeypatch.setattr(vocabulary_source, 'download_vocabulary_archive', lambda *_args, **_kwargs: archive)
     monkeypatch.setattr(command, '_identity_is_current', lambda identity: False)
     monkeypatch.setattr(command, '_sha_is_current', lambda digest: False)
     monkeypatch.setattr(

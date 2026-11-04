@@ -107,8 +107,9 @@ release PR description or release notes.
   vocabulary data. In particular, verify `0201` cannot create null-target or
   duplicate mappings when LOINC is present.
 - [ ] Review `start.sh` and the candidate's deploy gate against the migration
-  invariant above. Confirm production has `ATHENA_VOCABULARY_GDRIVE_URL` (or
-  the supported equivalent) pointing to the complete approved Athena export.
+  invariant above. Confirm production has `ATHENA_VOCABULARY_LFS_URL` (and
+  `ATHENA_VOCABULARY_GDRIVE_URL` as the fallback) pointing to the complete
+  approved Athena export.
 - [ ] Review configuration/dependency changes and frontend API contracts.
 - [ ] Obtain review/sign-off for migration safety and deployment configuration.
 

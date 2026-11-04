@@ -145,7 +145,7 @@ def test_archive_source_streams_nested_vocabulary_zip(tmp_path):
 def test_loader_requires_exactly_one_source():
     cmd = Command(stdout=StringIO())
 
-    with pytest.raises(CommandError, match='exactly one of --path, --archive, --bucket, or --gdrive'):
+    with pytest.raises(CommandError, match='exactly one of --path, --archive, --bucket, or --gdrive/--lfs'):
         cmd.handle(
             path='/tmp/vocab',
             archive=None,

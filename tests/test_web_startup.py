@@ -32,6 +32,7 @@ def test_web_startup_commands_and_failure_gates(tmp_path, failed_command):
             "PATH": f"{tmp_path}:{os.environ['PATH']}",
             "STARTUP_LOG": str(log),
             "FAIL_COMMAND": failed_command or "",
+            "ATHENA_VOCABULARY_LFS_URL": "https://github.com/example/vocab",
             "ATHENA_VOCABULARY_GDRIVE_URL": "https://example.test/athena",
         },
         capture_output=True,
@@ -44,8 +45,9 @@ def test_web_startup_commands_and_failure_gates(tmp_path, failed_command):
             assert command.split()[1] in get_commands(), command
     expected = [
         "manage.py check --deploy --fail-level ERROR",
-        "manage.py prepare_production_database --gdrive https://example.test/athena",
-        "manage.py queue_athena_vocabulary_sync --gdrive https://example.test/athena",
+        # LFS first, the Drive folder as fallback (#2288); both flags travel.
+        "manage.py prepare_production_database --lfs https://github.com/example/vocab --gdrive https://example.test/athena",
+        "manage.py queue_athena_vocabulary_sync --lfs https://github.com/example/vocab --gdrive https://example.test/athena",
         "manage.py setup_admin",
         # Last of the preparation steps, and deliberately unable to stop the
         # boot: it dispatches a LOINC load when the release has moved, and a
