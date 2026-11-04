@@ -1239,8 +1239,8 @@ OMOP table save / delete
 ```
 1. LOINC concept code (primary)
       Measurement JOIN Concept
-      WHERE concept_code IN _LOINC_LAB_FIELDS
-        AND vocabulary_id = 'LOINC'
+      WHERE concept_code IN resolve_lab_code_fields()   -- approved FieldConceptMapping codes
+        AND vocabulary_id = 'LOINC'                     -- and their approved SCCM aliases
       → populates hemoglobin_g_dl, wbc_count_thousand_per_ul, serum_creatinine_mg_dl, etc.
 
 2. measurement_source_value fallback (when LOINC Concepts are not loaded in Concept table)

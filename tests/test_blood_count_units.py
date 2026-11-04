@@ -307,3 +307,24 @@ def test_latest_unknown_alc_amc_leaves_field_empty_and_blocks_older(code, field,
     assert getattr(record, field) is None
     if field == 'alc_thousand_per_ul':
         assert record.absolute_lymphocyte_count is None
+
+
+@pytest.mark.django_db
+def test_curator_alias_code_is_converted_like_the_canonical_code(lab_field_mappings):
+    """26474-7 approved as an alias of alc_thousand_per_ul: a 1500 cells/uL row
+    goes through the blood-count selection and derives 1.5 (10^3/uL)."""
+    from omop_core.models import SourceCodeConceptMapping
+    person = PersonFactory()
+    SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id='LOINC', source_code='26474-7', status='approved',
+        omop_table='measurement', origin='curator',
+        target_concept_id=FieldConceptMapping.objects.get(field_name='alc_thousand_per_ul').concept_id,
+    )
+    MeasurementFactory(
+        person=person, measurement_concept=ConceptFactory(concept_code='26474-7'),
+        measurement_source_value='26474-7', value_as_number=1500, unit_source_value='cells/uL',
+    )
+    record = refresh_patient_record(person)
+    record.refresh_from_db()
+    assert record.alc_thousand_per_ul == Decimal('1.5')
+    assert record.absolute_lymphocyte_count == Decimal('1500')

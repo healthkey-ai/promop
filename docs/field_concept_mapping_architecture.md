@@ -60,6 +60,7 @@ a mapping cannot grant permission to edit a record.
 | Direct scalar with no usable projection | Saved to PatientRecord with pending-edit protection; no fabricated concept or fact |
 | Profile fields, including birth, contact and address values | PatientRecord PATCH and the backend Person/Location projection; `patient_name` is a virtual input |
 | Alias, such as `absolute_neutrophile_count` → `anc_thousand_per_ul` | Canonical field is the editor; the alias has no independent write recipe |
+| Lab field derived from Measurement, such as `hemoglobin_g_dl` | Routed by its approved `FieldConceptMapping` and that concept's approved `SourceCodeConceptMapping` LOINC aliases (`resolve_lab_code_fields`); `_LOINC_LAB_FIELDS` seeds those rows and decides only for a field with no concept-resolved mapping |
 | Computed values, such as BMI and wearable aggregates | Derived from inputs or source events; no independent scalar assertion |
 | Entered treatment courses and supportive therapy | Dedicated clinical resource writers; Episode/Event and drug facts supply summaries |
 | `genetic_mutations` and priority Genomics findings | Canonical Genomics writer and approved parent/component mappings |
@@ -70,6 +71,27 @@ a mapping cannot grant permission to edit a record.
 The descriptor includes structured Genomics cases as well as ordinary direct
 fields. Do not infer that every writable field uses the generic scalar writer,
 or that the presence of an enum supplies a coded-answer projection.
+
+### Lab derivation reads the mapping tables
+
+Every reader that turns a LOINC code into a lab field at derivation time (the
+lab extractor, the FLC pairing, the SLiM scan, the ANC/ALC/AMC/platelet
+selection, the provenance registry and the demo-profile recovery) takes its
+routing from `resolve_lab_code_fields` in the
+[PatientRecord service](../omop_core/services/patient_record_service.py),
+resolved once per refresh. An approved `FieldConceptMapping` with a loaded
+concept names each lab field's canonical code; approved global
+`SourceCodeConceptMapping` rows whose target is that concept add alias codes,
+so a curator's alias selects, converts and attributes a result exactly as the
+canonical code does. `_LOINC_LAB_FIELDS` in the same module is the checked-in
+inventory of the lab fields and their codes: migration 0240 seeds the mapping
+rows from `field_curation_v1.json`, 0285 approves the alias codes and 0326
+approves what the seed left proposed. The table decides a field's codes only
+while that field has no approved, concept-resolved mapping -- on a fresh
+install before `load_athena_vocabularies`, the seeded rows carry no concept --
+and a test database built without migrations; `tests/conftest.py`'s
+`lab_field_mappings` fixture seeds the rows for a test that must derive through
+the tables.
 
 ## Scalar save, projection and refresh
 

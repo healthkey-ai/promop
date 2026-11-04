@@ -54,6 +54,18 @@ document for interactive edits, and the rules below assume it.
 - **Ingest goes the other way.** The ETL, FHIR sync and bulk OMOP endpoints
   write OMOP facts and derive the record from them. See
   [FHIR Upload Architecture](#fhir-upload-architecture) below.
+- **Lab derivation routes through the mapping tables.** Which LOINC code feeds
+  which `PatientRecord` lab field is read from the approved, concept-resolved
+  `FieldConceptMapping` per field plus its approved `SourceCodeConceptMapping`
+  LOINC aliases (`resolve_lab_code_fields` in `patient_record_service.py`),
+  once per refresh, by every lab reader: the extractor, the FLC pairing, the
+  SLiM scan, the blood-count selection and the provenance registry.
+  `_LOINC_LAB_FIELDS` in that module is the inventory those rows are seeded
+  from (migrations 0240, 0285, 0326) and decides only for a field with no such
+  mapping, so adding a lab field means adding it there **and** to
+  `omop_core/data/field_curation_v1.json`; a new alias code is an approved
+  SCCM row, not a table entry. See
+  [field_concept_mapping_architecture.md](docs/field_concept_mapping_architecture.md#lab-derivation-reads-the-mapping-tables).
 
 ---
 

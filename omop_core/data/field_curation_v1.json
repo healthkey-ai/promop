@@ -804,9 +804,9 @@
       "type_concept_id": null,
       "value_vocabulary": "",
       "multiple": false,
-      "status": "proposed",
+      "status": "approved",
       "reviewed_at": null,
-      "notes": "Auto-proposed from field suggestion."
+      "notes": "Auto-proposed from field suggestion. Approved from the extractor table (_LOINC_LAB_FIELDS), which has always derived this field from LOINC 2164-2; lab derivation routes through FieldConceptMapping (#2286)."
     },
     {
       "field_name": "cytogenetic_markers",

@@ -263,7 +263,8 @@ _CONCEPTS = [
     _c(36305408, 'Response to cancer treatment',   'Observation',  'LOINC', 'Clinical Observation', 'S', '88040-1'),
 
     # ------------------------------------------------------------------
-    # CBC — enables CBC fields in PatientRecord via _LOINC_LAB_FIELDS
+    # CBC — enables CBC fields in PatientRecord via the lab routing (FieldConceptMapping,
+    # seeded from _LOINC_LAB_FIELDS)
     # ------------------------------------------------------------------
     _c(3023314, 'Hematocrit [Volume Fraction] of Blood by Automated count', 'Measurement', 'LOINC', 'Lab Test', 'S', '4544-3'),
     _c(3000905, 'Leukocytes [#/volume] in Blood by Automated count',        'Measurement', 'LOINC', 'Lab Test', 'S', '6690-2'),
