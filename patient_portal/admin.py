@@ -266,6 +266,10 @@ class LegalDocumentVersionAdmin(_VersionedTextAdmin):
 
 
 class _AppendOnlyAdmin(admin.ModelAdmin):
+    """Read-only. Rows are never added, changed or deleted on their own
+    pages; they go only when the person they belong to is deleted, which
+    the person's own delete page is allowed to cascade."""
+
     def get_readonly_fields(self, request, obj=None):
         return [f.name for f in self.model._meta.fields]
 
@@ -276,7 +280,12 @@ class _AppendOnlyAdmin(admin.ModelAdmin):
         return False
 
     def has_delete_permission(self, request, obj=None):
-        return False
+        match = getattr(request, 'resolver_match', None)
+        url_name = getattr(match, 'url_name', '') or ''
+        own = f'{self.opts.app_label}_{self.opts.model_name}_'
+        if not url_name or url_name.startswith(own):
+            return False
+        return super().has_delete_permission(request, obj)
 
 
 @admin.register(ConsentEvent)

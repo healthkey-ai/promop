@@ -108,9 +108,14 @@ class ConsentView(PhrView):
         decisions = body_of(request).get('decisions')
         if not isinstance(decisions, list) or not decisions:
             return Response({'detail': 'decisions must be a non-empty list.'}, status=400)
+        keys = [d.get('purpose') for d in decisions if isinstance(d, dict) and isinstance(d.get('purpose'), str)]
+        if len(set(keys)) != len(keys):
+            return Response({'detail': 'A batch names each purpose once.'}, status=400)
+        email = svc.member_email(person)
+        if not email:
+            return Response({'detail': svc.NO_EMAIL}, status=400)
         purposes = {p.key: p for p in ConsentPurpose.objects.filter(is_active=True).prefetch_related('texts')}
         try:
-            email = svc.member_email(person)
             with transaction.atomic():
                 for item in decisions:
                     if not isinstance(item, dict):
@@ -142,6 +147,9 @@ class ConsentDocumentsView(PhrView):
             return error
         language = language_of(request)
         body = body_of(request)
+        email = svc.member_email(person)
+        if not email:
+            return Response({'detail': svc.NO_EMAIL}, status=400)
         try:
             key = _string(body.get('document'), 'document')
             document = LegalDocument.objects.filter(key=key, is_active=True).first()
@@ -149,7 +157,7 @@ class ConsentDocumentsView(PhrView):
                 raise ValidationError(f'Unknown document {key!r}.')
             svc.accept_document(
                 person, document, version=_string(body.get('version'), 'version'), language=language,
-                recorded_by=request.user,
+                recorded_by=request.user, source=ConsentEvent.MEMBER, email=email,
             )
         except svc.StaleVersion as e:
             return Response({'detail': e.messages[0]}, status=409)
@@ -170,7 +178,7 @@ class ConsentHistoryView(PhrView):
         acceptances = [
             {
                 'kind': 'document', 'key': a.document.key, 'decision': svc.ACCEPTED, 'version': a.version,
-                'language': a.language, 'frequency': '', 'source': ConsentEvent.MEMBER, 'recorded_at': a.accepted_at,
+                'language': a.language, 'frequency': '', 'source': a.source, 'recorded_at': a.accepted_at,
             }
             for a in DocumentAcceptance.objects.filter(person=person).select_related('document')
         ]

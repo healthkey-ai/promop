@@ -27,6 +27,7 @@ SYSTEM: frozenset[str] = frozenset({
     # Tied to a login account, which is system data.
     'patient_portal.PatientConsent', 'patient_portal.PatientInvitation',
     # Consent model v2: what this deployment asks, and what its members answered.
+    # Consent is given to a deployment, so copy_patient does not carry it.
     'patient_portal.ConsentPurpose', 'patient_portal.ConsentText',
     'patient_portal.LegalDocument', 'patient_portal.LegalDocumentVersion',
     'patient_portal.ConsentEvent', 'patient_portal.DocumentAcceptance',

@@ -793,6 +793,14 @@ class ConsentPurpose(models.Model):
             allowed.append(ConsentEvent.ASK_LATER)
         return allowed
 
+    def clean(self):
+        for name, limit in (('frequency_options', 30), ('enabled_countries', 10)):
+            value = getattr(self, name)
+            if not isinstance(value, list) or not all(isinstance(v, str) and 0 < len(v) <= limit for v in value):
+                raise ValidationError({name: f'Must be a list of strings of at most {limit} characters.'})
+        if self.asks_frequency and not self.frequency_options:
+            raise ValidationError({'frequency_options': 'A purpose that asks a frequency needs options.'})
+
     def available_in(self, country) -> bool:
         if not self.gated_by_country:
             return True
@@ -826,7 +834,7 @@ class ConsentText(VersionedText):
 
     class Meta:
         db_table = 'consent_text'
-        ordering = ['purpose', '-published_at', 'language']
+        ordering = ['purpose_id', '-published_at', 'language']
         constraints = [
             models.UniqueConstraint(fields=['purpose', 'version', 'language'], name='uq_consent_text_version_lang'),
         ]
@@ -861,7 +869,7 @@ class LegalDocumentVersion(VersionedText):
 
     class Meta:
         db_table = 'legal_document_version'
-        ordering = ['document', '-published_at', 'language']
+        ordering = ['document_id', '-published_at', 'language']
         constraints = [
             models.UniqueConstraint(
                 fields=['document', 'version', 'language'], name='uq_legal_document_version_lang',
@@ -949,6 +957,7 @@ class DocumentAcceptance(AppendOnlyModel):
     )
     version = models.CharField(max_length=20)
     language = models.CharField(max_length=10, default='en')
+    source = models.CharField(max_length=10, choices=ConsentEvent.SOURCES, default=ConsentEvent.MEMBER)
     recorded_by = models.ForeignKey(Identity, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
     accepted_at = models.DateTimeField(default=timezone.now)
 

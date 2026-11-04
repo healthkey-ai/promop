@@ -30,6 +30,7 @@ of its own, at the time of the load.
 """
 import json
 
+from django.core.exceptions import ValidationError
 from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 from django.utils import timezone
@@ -51,8 +52,21 @@ def _published_at(item, publish_now):
         when = parse_datetime(raw)
         if when is None:
             raise CommandError(f'Bad published_at {raw!r}')
+        if timezone.is_naive(when):
+            raise CommandError(f'published_at {raw!r} must carry a timezone offset, e.g. 2026-11-01T00:00:00Z')
         return when
     return timezone.now() if publish_now else None
+
+
+def _required(spec, name):
+    try:
+        return spec[name]
+    except KeyError:
+        raise CommandError(f'Missing {name!r} in {json.dumps(spec)[:120]}') from None
+
+
+def _settings(spec, names):
+    return {k: spec[k] for k in names if k in spec}
 
 
 class Command(BaseCommand):
@@ -66,28 +80,43 @@ class Command(BaseCommand):
         with open(path, encoding='utf-8') as f:
             data = json.load(f)
         added = kept = 0
+        now = timezone.now()
         with transaction.atomic():
             for spec in data.get('purposes', []):
                 purpose, _ = ConsentPurpose.objects.update_or_create(
-                    key=spec['key'], defaults={k: spec[k] for k in PURPOSE_SETTINGS if k in spec},
+                    key=_required(spec, 'key'), defaults=_settings(spec, PURPOSE_SETTINGS),
                 )
+                try:
+                    purpose.full_clean()
+                except ValidationError as e:
+                    detail = '; '.join(f'{f}: {m[0]}' for f, m in e.message_dict.items())
+                    raise CommandError(f'Purpose {purpose.key}: {detail}') from None
                 for text in spec.get('texts', []):
                     _, created = ConsentText.objects.get_or_create(
-                        purpose=purpose, version=text['version'], language=text.get('language', 'en'),
+                        purpose=purpose, version=_required(text, 'version'), language=text.get('language', 'en'),
                         defaults={**{k: text.get(k, '') for k in TEXT_FIELDS},
                                   'published_at': _published_at(text, publish)},
                     )
                     added, kept = added + created, kept + (not created)
             for spec in data.get('documents', []):
                 document, _ = LegalDocument.objects.update_or_create(
-                    key=spec['key'], defaults={k: spec[k] for k in DOCUMENT_SETTINGS if k in spec},
+                    key=_required(spec, 'key'), defaults=_settings(spec, DOCUMENT_SETTINGS),
                 )
                 for text in spec.get('versions', []):
                     _, created = LegalDocumentVersion.objects.get_or_create(
-                        document=document, version=text['version'], language=text.get('language', 'en'),
+                        document=document, version=_required(text, 'version'), language=text.get('language', 'en'),
                         defaults={**{k: text.get(k, '') for k in TEXT_FIELDS},
                                   'requires_reacceptance': text.get('requires_reacceptance', True),
                                   'published_at': _published_at(text, publish)},
                     )
                     added, kept = added + created, kept + (not created)
         self.stdout.write(f'{added} text version(s) added, {kept} already present and left unchanged.')
+        unpublished = [
+            f'purpose {p.key}' for p in ConsentPurpose.objects.filter(is_active=True)
+            if not p.texts.filter(published_at__lte=now).exists()
+        ] + [
+            f'document {d.key}' for d in LegalDocument.objects.filter(is_active=True)
+            if not d.versions.filter(published_at__lte=now).exists()
+        ]
+        for item in unpublished:
+            self.stderr.write(f'Warning: {item} is active but has no published version, so members cannot answer it.')

@@ -7,8 +7,9 @@ a purpose is the latest event for it. Every answer is also written to the
 ``ConsentLedgerEntry`` store, which holds the email address and the decision
 and nothing that ties it to the account, so it outlives account deletion.
 
-Enforcement points call ``has_consent(person, key)``. Everything else here
-serves the member's own consent screens through ``api/phr/consent.py``.
+Enforcement points call ``has_consent(person, key)`` for one member and
+``persons_granting(key)`` for a cohort. Everything else here serves the
+member's own consent screens through ``api/phr/consent.py``.
 """
 from __future__ import annotations
 
@@ -43,12 +44,18 @@ def _published(rows):
     return [r for r in rows if r.published_at is not None and r.published_at <= now]
 
 
+def version_key(version: str) -> tuple:
+    """Orders versions numerically where they are numbers: 10.0 after 9.0."""
+    return tuple((0, int(part)) if part.isdigit() else (1, part) for part in version.split('.'))
+
+
 def current_version(texts: Iterable) -> str | None:
     """The version that was first published most recently.
 
     A version's publication is its earliest published row in any language,
     so adding a translation of an older version later does not make that
-    version current again.
+    version current again. Two versions published at the same instant are
+    ordered by version number.
     """
     first_published: dict[str, object] = {}
     for t in _published(texts):
@@ -56,7 +63,7 @@ def current_version(texts: Iterable) -> str | None:
             first_published[t.version] = t.published_at
     if not first_published:
         return None
-    return max(first_published, key=lambda v: (first_published[v], v))
+    return max(first_published, key=lambda v: (first_published[v], version_key(v)))
 
 
 def text_for(texts: Iterable, version: str | None, language: str):
@@ -82,6 +89,8 @@ def current_text(texts: Iterable, language: str):
 
 @dataclass
 class PurposeState:
+    """``available`` is whether this member can answer the purpose now: it
+    has a published text and is not gated to other countries."""
     purpose: ConsentPurpose
     available: bool
     text: ConsentText | None
@@ -141,8 +150,14 @@ class DocumentState:
 
 
 def record_country(person) -> str:
+    """The member's country as the record holds it (see docs/consent-v2.md
+    for where that comes from). Empty when the record has none."""
     record = PatientRecord.objects.filter(person=person).only('country').first()
     return (record.country or '') if record else ''
+
+
+def _available(purpose: ConsentPurpose, text, country: str) -> bool:
+    return text is not None and purpose.available_in(country)
 
 
 def latest_events(person) -> dict[int, ConsentEvent]:
@@ -158,13 +173,11 @@ def purpose_states(person, language: str = DEFAULT_LANGUAGE) -> list[PurposeStat
     purposes = ConsentPurpose.objects.filter(is_active=True).prefetch_related('texts')
     country = record_country(person)
     latest = latest_events(person)
-    return [
-        PurposeState(
-            purpose=p, available=p.available_in(country),
-            text=current_text(p.texts.all(), language), latest=latest.get(p.id),
-        )
-        for p in purposes
-    ]
+    states = []
+    for p in purposes:
+        text = current_text(p.texts.all(), language)
+        states.append(PurposeState(purpose=p, available=_available(p, text, country), text=text, latest=latest.get(p.id)))
+    return states
 
 
 def document_states(person, language: str = DEFAULT_LANGUAGE) -> list[DocumentState]:
@@ -192,13 +205,31 @@ def has_consent(person, key: str) -> bool:
     purpose = ConsentPurpose.objects.filter(key=key, is_active=True).first()
     if purpose is None:
         return False
-    latest = (
-        ConsentEvent.objects.filter(person=person, purpose=purpose)
-        .order_by('-recorded_at', '-id').first()
-    )
+    latest = latest_events(person).get(purpose.id)
     if latest is None or latest.decision != ConsentEvent.GRANTED:
         return False
     return purpose.available_in(record_country(person))
+
+
+def persons_granting(key: str) -> set[int]:
+    """The ids of every person whose latest answer to the active purpose
+    ``key`` is a grant, in two queries, for enforcement over a cohort (a
+    mailing, a research export). The country gate is applied per person
+    from the record, as ``has_consent`` does."""
+    purpose = ConsentPurpose.objects.filter(key=key, is_active=True).first()
+    if purpose is None:
+        return set()
+    latest = (
+        ConsentEvent.objects.filter(purpose=purpose)
+        .order_by('person_id', '-recorded_at', '-id').distinct('person_id')
+    )
+    granted = {e.person_id for e in latest if e.decision == ConsentEvent.GRANTED}
+    if not granted or not purpose.gated_by_country:
+        return granted
+    countries = dict(
+        PatientRecord.objects.filter(person_id__in=granted).values_list('person_id', 'country'),
+    )
+    return {pid for pid in granted if purpose.available_in(countries.get(pid))}
 
 
 def pending_documents(person, language: str = DEFAULT_LANGUAGE) -> list[DocumentState]:
@@ -214,10 +245,13 @@ def member_email(person) -> str:
     return (link.identity.email or '') if link else ''
 
 
+NO_EMAIL = 'An email address on the account is needed to record consent.'
+
+
 def _ledger_email(person, email, what: str) -> str:
     addr = email if email is not None else member_email(person)
     if not addr:
-        raise ValidationError(f'{what}: no email address for the consent ledger; pass email=.')
+        raise ValidationError(f'{what}: {NO_EMAIL}')
     return addr
 
 
@@ -234,16 +268,25 @@ def record_consent(
 
     A member must name the ``version`` they saw, and it must be the purpose's
     current published version: older wording gets ``StaleVersion`` and the
-    client refreshes. A ``migration``, ``staff`` or ``system`` source may pass
-    any version the purpose has, so a decision carried over from an earlier
-    form keeps its own version, or none to mean the current one.
+    client refreshes. A member can only answer a purpose available to them
+    (active, and not gated to other countries), and can only withdraw a
+    grant that stands. A ``migration``, ``staff`` or ``system`` source may
+    pass any version the purpose has, so a decision carried over from an
+    earlier form keeps its own version, or none to mean the current one.
     """
     if isinstance(purpose, str):
         purpose = ConsentPurpose.objects.get(key=purpose)
-    if source == ConsentEvent.MEMBER and not purpose.is_active:
-        raise ValidationError(f'{purpose.key} is not active.')
+    if source == ConsentEvent.MEMBER:
+        if not purpose.is_active:
+            raise ValidationError(f'{purpose.key} is not active.')
+        if not purpose.available_in(record_country(person)):
+            raise ValidationError(f'{purpose.key} is not available in your country.')
     if decision not in purpose.allowed_decisions():
         raise ValidationError(f'{purpose.key} does not take the answer {decision!r}.')
+    if decision == ConsentEvent.WITHDRAWN and source == ConsentEvent.MEMBER:
+        latest = latest_events(person).get(purpose.id)
+        if latest is None or latest.decision != ConsentEvent.GRANTED:
+            raise ValidationError(f'{purpose.key} is not granted, so there is nothing to withdraw.')
     texts = list(purpose.texts.all())
     current = current_version(texts)
     if current is None:
@@ -281,10 +324,15 @@ def record_consent(
 
 def accept_document(
     person, document: LegalDocument | str, *, version: str | None = None,
-    language: str = DEFAULT_LANGUAGE, recorded_by=None, recorded_at=None, email: str | None = None,
+    language: str = DEFAULT_LANGUAGE, recorded_by=None, source: str = ConsentEvent.MEMBER,
+    recorded_at=None, email: str | None = None,
 ) -> DocumentAcceptance:
     """Append the member's acceptance of a document's current version, which
-    the caller names so that stale wording is never accepted."""
+    the caller names so that stale wording is never accepted.
+
+    Accepting a version already accepted is a no-op that returns the
+    existing row, so a client retry does not duplicate the history.
+    """
     if isinstance(document, str):
         document = LegalDocument.objects.get(key=document)
     versions = list(document.versions.all())
@@ -296,13 +344,19 @@ def accept_document(
     if version != current:
         raise StaleVersion(f'{document.key} is now version {current}, not {version}.')
     text = text_for(versions, version, language)
+    existing = (
+        DocumentAcceptance.objects.filter(person=person, document=document)
+        .order_by('-accepted_at', '-id').first()
+    )
+    if existing is not None and existing.version == version:
+        return existing
 
     when = recorded_at or timezone.now()
     addr = _ledger_email(person, email, document.key)
     with transaction.atomic():
         acceptance = DocumentAcceptance.objects.create(
             person=person, document=document, text=text, version=version, language=text.language,
-            recorded_by=recorded_by, accepted_at=when,
+            source=source, recorded_by=recorded_by, accepted_at=when,
         )
         ConsentLedgerEntry.objects.create(
             email=addr, kind=ConsentLedgerEntry.DOCUMENT,

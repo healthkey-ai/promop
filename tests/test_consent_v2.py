@@ -410,3 +410,130 @@ def test_load_consent_texts_adds_versions_and_never_rewrites_one(tmp_path, membe
     assert draft.published_at is None and draft.body == 'new wording'
     assert ConsentPurpose.objects.get(key='my_record').stage == 'sign_up'
     assert svc.current_version(ConsentText.objects.filter(purpose__key='my_record')) == '1.0'
+
+
+# ------------------------------------------------------------ second review round
+
+
+def test_a_member_cannot_grant_a_purpose_gated_to_another_country(member, purposes):
+    client, record = member['client'], member['record']
+    record.country = 'US'
+    record.save(update_fields=['country'])
+    r = client.post('/api/v1/phr/consent/', {'decisions': [{'purpose': 'research', 'decision': 'granted', 'version': '1.0'}]}, format='json')
+    assert r.status_code == 400 and 'country' in r.data['detail']
+    assert ConsentEvent.objects.count() == 0 and ConsentLedgerEntry.objects.count() == 0
+    # Staff tooling may still carry a decision over.
+    svc.record_consent(record.person, 'research', ConsentEvent.GRANTED, source=ConsentEvent.MIGRATION)
+    assert svc.has_consent(record.person, 'research') is False
+
+
+def test_withdrawing_needs_a_standing_grant(member, purposes):
+    person = member['person']
+    with pytest.raises(ValidationError, match='nothing to withdraw'):
+        svc.record_consent(person, 'my_record', ConsentEvent.WITHDRAWN, version='1.0')
+    svc.record_consent(person, 'my_record', ConsentEvent.DECLINED, version='1.0')
+    with pytest.raises(ValidationError, match='nothing to withdraw'):
+        svc.record_consent(person, 'my_record', ConsentEvent.WITHDRAWN, version='1.0')
+    svc.record_consent(person, 'my_record', ConsentEvent.GRANTED, version='1.0')
+    assert svc.record_consent(person, 'my_record', ConsentEvent.WITHDRAWN, version='1.0').decision == 'withdrawn'
+
+
+def test_re_accepting_the_current_terms_writes_nothing_new(member):
+    client, person = member['client'], member['person']
+    document('terms', '0.4')
+    for _ in range(2):
+        assert client.post('/api/v1/phr/consent/documents/', {'document': 'terms', 'version': '0.4'}, format='json').status_code == 200
+    assert DocumentAcceptance.objects.filter(person=person).count() == 1
+    assert ConsentLedgerEntry.objects.count() == 1
+    document('terms', '0.5', published_at=NOW - timedelta(days=1))
+    assert client.post('/api/v1/phr/consent/documents/', {'document': 'terms', 'version': '0.5'}, format='json').status_code == 200
+    assert DocumentAcceptance.objects.filter(person=person).count() == 2
+
+
+def test_a_staff_recorded_acceptance_shows_its_source(member):
+    person = member['person']
+    document('privacy', '1.0')
+    svc.accept_document(person, 'privacy', version='1.0', source=ConsentEvent.STAFF)
+    h = member['client'].get('/api/v1/phr/consent/history/').data['history']
+    assert [(x['key'], x['source']) for x in h] == [('privacy', 'staff')]
+
+
+def test_a_purpose_with_no_published_text_is_not_available(member, purposes):
+    client = member['client']
+    silent = purpose('silent', kind='declaration', stage='sign_up')
+    text(silent, '1.0', published_at=None)
+    states = {p['key']: p for p in client.get('/api/v1/phr/consent/').data['purposes']}
+    assert states['silent']['available'] is False and states['silent']['text'] is None
+    r = client.post('/api/v1/phr/consent/', {'decisions': [{'purpose': 'silent', 'decision': 'granted', 'version': '1.0'}]}, format='json')
+    assert r.status_code == 400
+
+
+def test_one_batch_names_each_purpose_once(member, purposes):
+    r = member['client'].post('/api/v1/phr/consent/', {'decisions': [
+        {'purpose': 'my_record', 'decision': 'granted', 'version': '1.0'},
+        {'purpose': 'my_record', 'decision': 'granted', 'version': '1.0'},
+    ]}, format='json')
+    assert r.status_code == 400 and ConsentEvent.objects.count() == 0
+
+
+def test_a_member_without_an_email_gets_a_readable_refusal(member, purposes):
+    from patient_portal.models import Identity
+    Identity.objects.filter(patient_user__person=member["person"]).update(email="")
+    r = member['client'].post('/api/v1/phr/consent/', {'decisions': [{'purpose': 'my_record', 'decision': 'granted', 'version': '1.0'}]}, format='json')
+    assert r.status_code == 400 and r.data['detail'] == svc.NO_EMAIL
+    document('terms', '0.4')
+    r = member['client'].post('/api/v1/phr/consent/documents/', {'document': 'terms', 'version': '0.4'}, format='json')
+    assert r.status_code == 400 and r.data['detail'] == svc.NO_EMAIL
+
+
+def test_versions_published_together_order_numerically(purposes):
+    p = purposes['my_record']
+    same_instant = NOW - timedelta(days=2)
+    text(p, '9.0', published_at=same_instant)
+    text(p, '10.0', published_at=same_instant)
+    assert svc.current_version(p.texts.all()) == '10.0'
+
+
+def test_persons_granting_applies_the_latest_answer_and_the_country_gate(member, purposes):
+    person = member['person']
+    other = PatientRecordFactory(country='US')
+    signed_in(other)
+    svc.record_consent(person, 'research', ConsentEvent.GRANTED, version='1.0')
+    svc.record_consent(other.person, 'research', ConsentEvent.GRANTED, source=ConsentEvent.MIGRATION)
+    assert svc.persons_granting('research') == {person.person_id}
+    svc.record_consent(person, 'research', ConsentEvent.WITHDRAWN, version='1.0')
+    assert svc.persons_granting('research') == set()
+    assert svc.persons_granting('no_such_purpose') == set()
+
+
+def test_an_operator_can_delete_a_person_with_consent_history_from_the_admin(member, purposes):
+    from django.test import Client
+    from patient_portal.models import Identity
+    person = member['person']
+    svc.record_consent(person, 'my_record', ConsentEvent.GRANTED, version='1.0')
+    admin = Identity.objects.create_superuser(email='ops@example.test', password='x')
+    web = Client()
+    web.force_login(admin)
+    url = f'/admin/omop_core/person/{person.pk}/delete/'
+    page = web.get(url)
+    assert page.status_code == 200 and b"doesn't have permission" not in page.content
+    assert web.post(url, {'post': 'yes'}).status_code == 302
+    assert ConsentEvent.objects.count() == 0 and ConsentLedgerEntry.objects.count() == 1
+    # The history's own pages still offer no delete.
+    assert web.get(f'/admin/patient_portal/consentledgerentry/{ConsentLedgerEntry.objects.get().pk}/delete/').status_code == 403
+
+
+def test_the_loader_refuses_a_naive_published_at_and_bad_settings(tmp_path):
+    from django.core.management.base import CommandError
+    path = tmp_path / 'consent.json'
+    path.write_text(json.dumps({'purposes': [{'key': 'x', 'texts': [
+        {'version': '1.0', 'title': 't', 'body': 'b', 'published_at': '2026-11-01T00:00:00'}]}]}))
+    with pytest.raises(CommandError, match='timezone offset'):
+        call_command('load_consent_texts', str(path))
+    path.write_text(json.dumps({'purposes': [{'key': 'x', 'asks_frequency': True, 'frequency_options': 'weekly'}]}))
+    with pytest.raises(CommandError, match='frequency_options'):
+        call_command('load_consent_texts', str(path))
+    path.write_text(json.dumps({'purposes': [{'kind': 'permission'}]}))
+    with pytest.raises(CommandError, match="Missing 'key'"):
+        call_command('load_consent_texts', str(path))
+    assert ConsentPurpose.objects.count() == 0
