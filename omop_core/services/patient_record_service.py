@@ -33,7 +33,7 @@ from omop_core.services.mappings import (
 )
 from omop_core.services.clinical_units import (
     canonical_wbc_unit, flc_to_canonical, wbc_to_canonical, blood_count_projection,
-    count_in_cells_per_ul,
+    count_in_cells_per_ul, measurement_count_unit,
 )
 from omop_core.services.lot_regimens import (
     get_regimen_concept_id,
@@ -67,7 +67,7 @@ def _usable_concept_name(concept) -> str | None:
 
 # Bump this whenever aggregation or computation logic changes in any section
 # extractor or in _compute_derived_fields.  See DERIVATION_CHANGELOG.md.
-DERIVATION_VERSION = 22
+DERIVATION_VERSION = 23
 
 # These PatientRecord columns are projections of PersonLanguageSkill, never
 # independent edits. Older PATCH requests could mark them as user-edited and
@@ -4211,14 +4211,15 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
         if code == '6690-2':
             if wbc_projection_blocked:
                 continue
-            canonical_value = wbc_to_canonical(m.value_as_number, m.unit_source_value)
+            unit = measurement_count_unit(m)
+            canonical_value = wbc_to_canonical(m.value_as_number, unit)
             if canonical_value is None:
                 # This is the latest WBC row due to the query ordering. Do not
                 # silently substitute an older result with a known unit.
                 wbc_projection_blocked = True
                 logger.warning(
                     'WBC projections skipped for person_id=%s: unsupported or absent '
-                    'unit_source_value=%r', person.person_id, m.unit_source_value,
+                    'unit=%r', person.person_id, unit,
                 )
                 continue
         if field not in data:

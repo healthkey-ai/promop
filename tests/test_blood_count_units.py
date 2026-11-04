@@ -7,7 +7,7 @@ import pytest
 from rest_framework.test import APIClient
 
 from omop_core.models import FieldConceptMapping, Measurement, PatientRecord
-from omop_core.services.clinical_units import blood_count_to_canonical
+from omop_core.services.clinical_units import blood_count_to_canonical, count_unit
 from omop_core.services.patient_record_service import refresh_patient_record
 from tests.factories import ConceptFactory, MeasurementFactory, PatientRecordFactory, PersonFactory
 
@@ -98,16 +98,54 @@ def test_latest_unknown_blocks_older_code_and_display_fallbacks(code, field, ali
     assert getattr(record, alias + '_units') is None
 
 
+@pytest.mark.parametrize('text,ucum,expected', [
+    ('x10E3/uL', '10*3/uL', '10*3/uL'),     # the ETL names what the lab spelling means
+    ('K/cu mm', None, 'K/cu mm'),            # no concept: unreadable, as before
+    ('', '/uL', '/uL'), (None, '/uL', '/uL'), (None, None, None),
+    ('K/uL', '/L', 'K/uL'),                  # readable text wins over a converted concept
+    ('mg/dL', '10*3/uL', 'mg/dL'),           # readable, just not a count
+])
+def test_count_unit_reads_the_ucum_concept_only_when_the_text_is_unreadable(text, ucum, expected):
+    assert count_unit(text, ucum) == expected
+
+
 @pytest.mark.django_db
-def test_ucum_unit_concept_is_used_only_when_source_unit_absent():
+def test_ucum_unit_concept_stands_in_for_unreadable_or_absent_text():
     person = PersonFactory()
     measurement = MeasurementFactory(
         person=person, measurement_source_value='751-8', value_as_number=1500,
         unit_concept=ConceptFactory(vocabulary__vocabulary_id='UCUM', concept_code='/uL'),
     )
     assert refresh_patient_record(person).anc_thousand_per_ul == Decimal('1.5')
-    Measurement.objects.filter(pk=measurement.pk).update(unit_source_value='unknown')
+    Measurement.objects.filter(pk=measurement.pk).update(unit_source_value='/MM3')
+    assert refresh_patient_record(person).anc_thousand_per_ul == Decimal('1.5')
+    # Readable text with a different concept is #2249's unproven conversion.
+    Measurement.objects.filter(pk=measurement.pk).update(unit_source_value='10*3/uL')
     assert refresh_patient_record(person).anc_thousand_per_ul is None
+    Measurement.objects.filter(pk=measurement.pk).update(unit_source_value='x1000', unit_concept=None)
+    assert refresh_patient_record(person).anc_thousand_per_ul is None
+
+
+@pytest.mark.django_db
+def test_lab_spellings_with_a_ucum_concept_fill_wbc_anc_and_platelets():
+    """The issue's repro: x10E3/uL and friends, with the unit the ETL read them as."""
+    person = PersonFactory()
+    ucum = {code: ConceptFactory(vocabulary__vocabulary_id='UCUM', concept_code=code)
+            for code in ('10*3/uL', '10*9/L')}
+    for code, value, text, unit in [
+        ('6690-2', 5.2, 'x10E3/uL', '10*3/uL'),
+        ('751-8', 2.4, 'x10(9)/L', '10*9/L'),
+        ('777-3', 213, 'K/cu mm', '10*3/uL'),
+    ]:
+        MeasurementFactory(
+            person=person, measurement_concept=ConceptFactory(concept_code=code), measurement_source_value=code,
+            value_as_number=value, unit_source_value=text, unit_concept=ucum[unit],
+        )
+    record = refresh_patient_record(person)
+    record.refresh_from_db()
+    assert record.wbc_count_thousand_per_ul == Decimal('5.2')
+    assert record.anc_thousand_per_ul == Decimal('2.4')
+    assert record.platelet_count_thousand_per_ul == Decimal('213')
 
 
 @pytest.mark.django_db
@@ -135,7 +173,8 @@ def test_raw_eligibility_benchmark_uses_canonical_counts():
     from omop_core.management.commands.benchmark_trial_eligibility import _fetch_omop_trial_row
     person = PersonFactory()
     MeasurementFactory(person=person, measurement_source_value='751-8', value_as_number=1500, unit_source_value='cells/uL')
-    MeasurementFactory(person=person, measurement_source_value='777-3', value_as_number=150500, unit_source_value='cells/uL')
+    MeasurementFactory(person=person, measurement_source_value='777-3', value_as_number=150.5, unit_source_value='THOU/uL',
+                       unit_concept=ConceptFactory(vocabulary__vocabulary_id='UCUM', concept_code='10*3/uL'))
     result = _fetch_omop_trial_row(person.pk)
     assert result['anc_thousand_per_ul'] == Decimal('1.5')
     assert result['platelet_count_thousand_per_ul'] == Decimal('150.5')

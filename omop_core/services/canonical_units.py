@@ -53,6 +53,7 @@ UNIT_ALIASES = {'cells/uL': '/uL', 'cell/uL': '/uL', '{cells}/uL': '/uL', '#/uL'
                 'cells/L': '/L', 'cell/L': '/L', '{cells}/L': '/L', '#/L': '/L',
                 '10^3/uL': '10*3/uL', '10^9/L': '10*9/L', '10^6/uL': '10*6/uL',
                 '10^12/L': '10*12/L', 'K/uL': '10*3/uL', 'G/L': '10*9/L'}
+_KNOWN_UNITS = frozenset(unit for units in UNIT_GROUPS.values() for unit in units) | frozenset(UNIT_ALIASES.values())
 
 
 @dataclass(frozen=True)
@@ -159,9 +160,8 @@ def _spelling_index():
     A spelling two units share is left out rather than guessed: ``g/l`` is
     gram per litre, but ``G/L`` (giga per litre) is an alias of ``10*9/L``.
     """
-    known = {unit for units in UNIT_GROUPS.values() for unit in units} | set(UNIT_ALIASES.values())
     index = {}
-    for unit in known:
+    for unit in _KNOWN_UNITS:
         for spelling in {unit.casefold(), unit.casefold().replace('/', '')}:
             index.setdefault(spelling, set()).add(unit)
     for alias in UNIT_ALIASES:
@@ -192,6 +192,11 @@ def unit_code(unit):
     spelled = _UNIT_WORD.sub(lambda word: _UNIT_WORDS.get(word.group(), word.group()).casefold(), folded)
     spelled = re.sub(r'\s+', '', spelled)
     return _SPELLINGS.get(spelled, unit)
+
+
+def is_known_unit(unit):
+    """Whether ``unit_code`` reads this source unit as a unit promop knows."""
+    return unit_code(unit) in _KNOWN_UNITS
 
 
 def property_for(concept, metadata=None, axes=None):
