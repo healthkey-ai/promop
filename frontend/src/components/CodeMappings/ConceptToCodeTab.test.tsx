@@ -23,7 +23,7 @@ const source = {
 };
 const page = <T,>(results: T[]) => ({ results, total: results.length, page: 1, page_size: 50, zero_seen: 3 });
 const run = (state = 'success') => ({
-  run_id: 'run-1', state, error: '', total: 1, done: state === 'success' ? 1 : 0,
+  run_id: 'run-1', state, error: '', total: 1, done: state === 'success' ? 1 : 0, destinations: 0,
   selection: { limit: 25, include_zero_seen: false },
   activity: [{ concept: { concept_id: 123 }, candidates: [{ ...source, evidence: ['umls'], verdict: 'review' }] }],
 });
@@ -297,7 +297,7 @@ describe('concept-first curation', () => {
     await screen.findByText('1 candidates retrieved (limit 25).');
     expect(post).toHaveBeenCalledTimes(1);
     expect(post).toHaveBeenCalledWith('/v1/concept-to-code/suggest/', {
-      concept_ids: [123], strategies: ['umls', 'lexical'], limit: 25, include_zero_seen: false, ranking_model: 'jev', include_declined: false, exclude_keys: [],
+      concept_ids: [123], strategies: ['umls', 'lexical'], limit: 25, include_zero_seen: false, ranking_model: 'jev', include_declined: false, exclude_keys: [], auto_propose_threshold: 0.8,
     });
     expect(screen.getByRole('button', { name: 'Approve selected (0)' })).toBeDisabled();
   });

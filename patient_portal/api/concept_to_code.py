@@ -302,6 +302,11 @@ def concept_to_code_suggest(request):
     ):
         raise ValidationError({'exclude_keys': 'Supply a list of [vocabulary_id, code] pairs.'})
     exclude_keys = [tuple(pair) for pair in exclude_keys]
+    auto_propose_threshold = data.get('auto_propose_threshold', None)
+    if auto_propose_threshold is not None:
+        if not isinstance(auto_propose_threshold, (int, float)) or not 0 <= auto_propose_threshold <= 1:
+            raise ValidationError({'auto_propose_threshold': 'Supply a number between 0 and 1, or null to disable.'})
+        auto_propose_threshold = float(auto_propose_threshold)
     limit = data.get('limit', 10)
     if type(limit) is not int or not 1 <= limit <= 100:
         raise ValidationError({'limit': 'Choose a whole number from 1 to 100.'})
@@ -310,7 +315,8 @@ def concept_to_code_suggest(request):
     limit = min(limit, max(1, ceiling // len(ids)))
     params = dict(direction='reverse', concept_ids=ids, strategies=strategies, limit=limit,
                   include_zero_seen=include_zero, include_declined=include_declined, ranking_model=ranking_model,
-                  exclude_keys=exclude_keys, retrieval_timeout_ms=8000 if inline else 30000)
+                  exclude_keys=exclude_keys, auto_propose_threshold=auto_propose_threshold,
+                  retrieval_timeout_ms=8000 if inline else 30000)
     with transaction.atomic():
         run = SuggestRun.objects.create(
             direction='reverse', total=len(ids), created_by=request.user,
@@ -323,8 +329,8 @@ def concept_to_code_suggest(request):
 
 def _run_payload(run):
     return {'run_id': str(run.pk), 'state': run.state, 'total': run.total,
-            'done': run.done, 'error': run.error, 'selection': run.selection,
-            'activity': run.activity or []}
+            'done': run.done, 'destinations': run.destinations, 'error': run.error,
+            'selection': run.selection, 'activity': run.activity or []}
 
 
 @api_view(['GET'])
