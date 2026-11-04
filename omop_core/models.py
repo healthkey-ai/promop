@@ -4586,6 +4586,20 @@ class FieldFormula(models.Model):
 
     class Meta:
         db_table = 'field_formula'
+        constraints = [
+            # #5666: these two fields are explicit answers. A formula may be
+            # seeded or re-activated only by mistake; the database refuses an
+            # active row rather than letting the next refresh overwrite an
+            # attestation.
+            models.CheckConstraint(
+                condition=(
+                    ~Q(field_name__in=('no_active_infection_status',
+                                       'no_other_active_malignancies'))
+                    | Q(is_active=False)
+                ),
+                name='field_formula_explicit_answer_inactive',
+            ),
+        ]
 
     def __str__(self):
         return f"{self.field_name}: {self.formula[:50]}"

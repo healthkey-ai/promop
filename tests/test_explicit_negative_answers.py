@@ -6,7 +6,9 @@ import pytest
 from django.core.management import call_command
 from rest_framework.test import APIClient
 
-from omop_core.models import ExplicitNegativeAnswer, GroupAccess
+from django.db import IntegrityError
+
+from omop_core.models import ExplicitNegativeAnswer, FieldFormula, GroupAccess
 from omop_core.services.patient_record_service import _compute_derived_fields
 from omop_core.services.write_descriptor import build_writable_field_descriptor
 from patient_portal.models import Identity, PatientUser
@@ -212,3 +214,31 @@ def test_shipped_formulas_are_inactive():
     shipped = {row['field_name']: row['is_active'] for row in data['formulas']}
     assert shipped[INFECTION] is False
     assert shipped[MALIGNANCIES] is False
+
+
+def test_malformed_post_is_a_400_not_a_500(editor):
+    record, client = editor
+    url = f'/api/v1/patient-records/{record.person_id}/negative-answer/'
+    for body in ({'field': [], 'action': 'confirm_negative'}, []):
+        response = client.post(url, body, format='json')
+        assert response.status_code == 400, (body, response.status_code)
+    assert not ExplicitNegativeAnswer.objects.exists()
+
+
+def test_full_recompute_preserves_the_attestation(editor):
+    record, _ = editor
+    assert answer(editor, INFECTION, 'confirm_negative').status_code == 200
+    record.active_infection_status = True
+    record.save(update_fields=['active_infection_status'])
+    from omop_core.services.patient_record_service import recompute_patient_record_fields
+    record = recompute_patient_record_fields(record)
+    assert record.no_active_infection_status is True
+
+
+def test_an_explicit_answer_formula_cannot_be_active():
+    row = FieldFormula.objects.create(
+        field_name=INFECTION, formula='@not(active_infection_status)', is_active=False,
+    )
+    row.is_active = True
+    with pytest.raises(IntegrityError):
+        row.save()

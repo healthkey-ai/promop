@@ -5740,11 +5740,10 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
         if error is not None:
             return error
         from omop_core.api.negative_answers import FIELDS, source_value, write_answer
-        field = (request.query_params.get('field') if request.method == 'GET'
-                 else (request.data or {}).get('field'))
-        if field not in FIELDS:
-            return Response({'detail': 'Choose a supported negative answer.'}, status=400)
         if request.method == 'GET':
+            field = request.query_params.get('field')
+            if field not in FIELDS:
+                return Response({'detail': 'Choose a supported negative answer.'}, status=400)
             from omop_core.models import ExplicitNegativeAnswer
             attested = ExplicitNegativeAnswer.objects.filter(
                 person_id=person.pk, field=field, answer=True,

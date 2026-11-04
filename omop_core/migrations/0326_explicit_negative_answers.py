@@ -55,4 +55,14 @@ class Migration(migrations.Migration):
             },
         ),
         migrations.RunPython(deactivate_formulas, migrations.RunPython.noop),
+        migrations.AddConstraint(
+            model_name='fieldformula',
+            constraint=models.CheckConstraint(
+                condition=(
+                    ~models.Q(field_name__in=FIELDS)
+                    | models.Q(is_active=False)
+                ),
+                name='field_formula_explicit_answer_inactive',
+            ),
+        ),
     ]
