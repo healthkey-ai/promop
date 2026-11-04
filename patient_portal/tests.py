@@ -16146,16 +16146,24 @@ class SelfSignupEmailTrustTest(TestCase):
         self.assertIn(
             APIClient().post('/api/v1/auth/verify-email/resend/').status_code, (401, 403),
         )
-        client, _ = self._signup('user@example.com')
+        _, _ = self._signup('user@example.com')
+        identity = Identity.objects.get(email='user@example.com')
+        client = APIClient()
+        client.force_authenticate(identity)
         sent_before = len(mail.outbox)
         self.assertEqual(client.post('/api/v1/auth/verify-email/resend/').status_code, 200)
         self.assertEqual(len(mail.outbox), sent_before + 1)
         APIClient().post('/api/v1/auth/verify-email/', {'token': self._token_from_last_email()})
+        identity.refresh_from_db()
+        client.force_authenticate(identity)
         self.assertEqual(client.post('/api/v1/auth/verify-email/resend/').status_code, 200)
         self.assertEqual(len(mail.outbox), sent_before + 1)
 
     def test_normal_api_traffic_does_not_consume_the_resend_limit(self):
-        client, _ = self._signup('resend@example.com')
+        _, _ = self._signup('resend@example.com')
+        identity = Identity.objects.get(email='resend@example.com')
+        client = APIClient()
+        client.force_authenticate(identity)
         for _ in range(4):
             self.assertEqual(client.get('/api/v1/user/').status_code, 200)
         for _ in range(3):
