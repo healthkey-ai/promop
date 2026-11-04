@@ -39,8 +39,25 @@ def wbc_to_canonical(
     return None
 
 
+# Absolute cell counts that share one unit rule: the LOINC code each
+# PatientRecord field is derived from, and the legacy cells/µL alias columns
+# that mirror a canonical thousands/µL field (#640, #1567, #2282).
+BLOOD_COUNT_LOINC = {
+    '751-8': 'anc_thousand_per_ul',
+    '777-3': 'platelet_count_thousand_per_ul',
+    '731-0': 'alc_thousand_per_ul',
+    '742-7': 'amc_thousand_per_ul',
+}
+BLOOD_COUNT_FIELDS = frozenset(BLOOD_COUNT_LOINC.values())
+LEGACY_COUNT_ALIASES = {
+    'absolute_neutrophile_count': 'anc_thousand_per_ul',
+    'platelet_count': 'platelet_count_thousand_per_ul',
+    'absolute_lymphocyte_count': 'alc_thousand_per_ul',
+}
+
+
 def blood_count_to_canonical(value, source_unit):
-    """ANC/platelets in 10^3/uL. Unknown scale or invalid counts stay unknown.
+    """ANC/ALC/AMC/platelets in 10^3/uL. Unknown scale or invalid counts stay unknown.
 
     Keep Decimal precision until the destination field applies its declared
     precision. Uppercase G/L is a legacy giga-count spelling; lowercase g/L
@@ -107,6 +124,11 @@ def blood_count_projection(field, row):
             'absolute_neutrophile_count': count_in_cells_per_ul(value),
             'absolute_neutrophile_count_units': 'CELLS/UL' if value is not None else None,
         }
+    if field == 'alc_thousand_per_ul':
+        # The legacy ALC column carries cells/µL and has no units column (#1567).
+        return {field: value, 'absolute_lymphocyte_count': count_in_cells_per_ul(value)}
+    if field == 'amc_thousand_per_ul':
+        return {field: value}
     # The legacy platelet column is integer-valued. Reporting cells/uL retains
     # fractional thousands and matches the downstream compatibility contract.
     cells = value * 1000 if value is not None else None
