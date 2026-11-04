@@ -44,8 +44,8 @@ type Source = {
 type ConfidenceOrder = '' | '-confidence' | 'confidence';
 type Page<T> = { results: T[]; page: number; page_size: number; total: number };
 type Run = {
-  run_id: string; state: string; error: string; done: number; total: number;
-  selection: { limit: number; include_zero_seen: boolean; include_declined?: boolean; ranking_model?: string };
+  run_id: string; state: string; error: string; done: number; total: number; destinations: number;
+  selection: { limit: number; include_zero_seen: boolean; include_declined?: boolean; ranking_model?: string; auto_propose_threshold?: number | null };
   activity: { concept: { concept_id: number }; candidates: Source[] }[];
 };
 /** How many concepts a page may show: more per page lets a curator drag a
@@ -442,6 +442,9 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
   const [starting, setStarting] = useState(false);
   const [ranker, setRanker] = useState('jev');
   const [limit, setLimit] = useState(25);
+  // Auto-propose candidates above this confidence threshold (#2269).
+  const [autoPropose, setAutoPropose] = useState(true);
+  const [proposeThreshold, setProposeThreshold] = useState(80);
   // Retry the sources a ranker declined in earlier runs, instead of skipping them (#2034).
   const [retryDeclined, setRetryDeclined] = useState(false);
   const [strategies, setStrategies] = useState({ umls: true, lexical: true });
@@ -568,10 +571,11 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
     const excludeKeys = [...new Set(allPrevious.map(row => JSON.stringify([row.source_vocabulary_id, row.source_code])))].map(key => JSON.parse(key) as [string, string]);
     setRun(null); setStarting(true); setError(''); setProgress(''); setSelected(new Set()); setPatched({}); setMode('candidates');
     try {
+      const threshold = autoPropose && ranker !== 'none' ? proposeThreshold / 100 : null;
       const { data: next } = await api.post<Run>('/v1/concept-to-code/suggest/', {
         concept_ids: [concept.concept_id], strategies: Object.keys(strategies).filter(key => strategies[key as keyof typeof strategies]),
         limit, include_zero_seen: !seenOnly, ranking_model: ranker, include_declined: retryDeclined,
-        exclude_keys: excludeKeys,
+        exclude_keys: excludeKeys, auto_propose_threshold: threshold,
       });
       if (active.current) setRun(next);
     } catch (failure) { if (active.current) setError(destinationError(failure)); }
@@ -843,6 +847,13 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
         <label className="flex items-center gap-1 text-sm" title="Search the sources a ranker declined in earlier runs again, instead of skipping them">
           <input type="checkbox" checked={retryDeclined} disabled={busy} onChange={event => setRetryDeclined(event.target.checked)} />
           Retry declined</label>
+        <label className="flex items-center gap-1 text-sm" title="Automatically propose source codes with confidence at or above this threshold">
+          <input type="checkbox" checked={autoPropose} disabled={busy || ranker === 'none'} onChange={event => setAutoPropose(event.target.checked)} />
+          Auto-propose &ge;</label>
+        <input type="number" aria-label="Auto-propose confidence threshold" className={`${input} w-16`}
+          value={proposeThreshold} min={1} max={100} disabled={busy || !autoPropose || ranker === 'none'}
+          onChange={event => setProposeThreshold(Number(event.target.value))} />
+        <span className="text-sm text-slate-500">%</span>
         <span className="flex flex-nowrap items-center gap-3">
           <select aria-label="Source suggestion ranker" className={input} value={ranker} disabled={busy} onChange={event => setRanker(event.target.value)}>
             <option value="jev">Jev assistance</option><option value="anthropic">Anthropic assistance</option>
@@ -858,7 +869,7 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
     <p className="text-xs text-slate-500">Review clinical meaning before selecting codes. Suggestions do not change mappings; approval updates the mapping and matching stored clinical rows.
       {' '}New vocabulary codes have Seen = 0; approving one proposes it from this preview first.</p>
     {run && mode === 'candidates' && <p role="status" className="text-sm text-slate-600">
-      {running ? 'Searching local vocabulary evidence…' : `${currentRunCandidates.length} candidates retrieved (limit ${run.selection.limit})${previousCandidates.length ? `, ${candidates.length} total across runs` : ''}.`}
+      {running ? 'Searching local vocabulary evidence…' : `${currentRunCandidates.length} candidates retrieved (limit ${run.selection.limit})${previousCandidates.length ? `, ${candidates.length} total across runs` : ''}${run.destinations ? `, ${run.destinations} auto-proposed` : ''}.`}
       {!running && declinedHidden > 0 && ` ${declinedHidden} declined by the ranker and hidden${run.selection.include_declined ? '' : '; the next run moves on to other codes'}.`}
       {!running && unrankedHidden > 0 && ` ${unrankedHidden} could not be ranked (the ranker was unavailable) and ${unrankedHidden === 1 ? 'is' : 'are'} hidden.`}
       {run.error && ` ${run.error}`}
