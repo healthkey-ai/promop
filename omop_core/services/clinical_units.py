@@ -75,14 +75,24 @@ def count_in_cells_per_ul(value):
     return Decimal(str(value)) * 1000 if value is not None else None
 
 
+def count_unit(text, ucum_code):
+    """The source unit text when promop can read it, else the UCUM unit code.
+
+    The ETL sends lab spellings (x10E3/uL, K/cu mm) as received and names the
+    unit they mean in unit_concept (#2248). Text promop reads wins, so a row
+    whose unit_concept promop rewrote on conversion reads as before.
+    """
+    from omop_core.services.canonical_units import is_known_unit
+    stripped = (text or '').strip()
+    if stripped and (is_known_unit(stripped) or blood_count_to_canonical(1, stripped) is not None):
+        return text
+    return ucum_code or text or None
+
+
 def measurement_count_unit(row):
-    """Prefer explicit source units; use a UCUM concept only when text is absent."""
-    if row.unit_source_value and row.unit_source_value.strip():
-        return row.unit_source_value
-    unit = row.unit_concept
-    if unit is not None and unit.vocabulary_id == 'UCUM':
-        return unit.concept_code
-    return None
+    """``count_unit`` for a measurement row."""
+    unit = row.unit_concept if row.unit_concept_id else None
+    return count_unit(row.unit_source_value, unit.concept_code if unit and unit.vocabulary_id == 'UCUM' else None)
 
 
 def blood_count_projection(field, row):
