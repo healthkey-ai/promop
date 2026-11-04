@@ -16039,7 +16039,10 @@ class SelfSignupEmailTrustTest(TestCase):
         identity.refresh_from_db()
         self.assertTrue(identity.has_verified_email)
         self.assertFalse(identity.check_password(self.PASSWORD))
-        self.assertIn(self._reads_private_patient(client), (401, 403))
+        # The invitation acceptance changed the password, so a fresh
+        # unauthenticated client represents the invalidated session.
+        stale_client = APIClient()
+        self.assertIn(self._reads_private_patient(stale_client), (401, 403))
 
     def test_verification_works_with_a_session_cookie_and_without_csrf_token(self):
         client = APIClient(enforce_csrf_checks=True)
