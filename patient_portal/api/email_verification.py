@@ -123,6 +123,12 @@ def verify_email(request):
                 return invalid
             identity.mark_email_verified()
             promote_trusted_domain_grants(identity)
+            # Clear the verification gate on any remaining grants (public-org
+            # signups that promote_trusted_domain_grants does not cover).
+            from omop_core.models import GroupAccess
+            GroupAccess.objects.filter(
+                identity=identity, pending_email_verification=True,
+            ).update(pending_email_verification=False)
             # The address is proof only now, so this is where an imported
             # patient's record may be joined to their account (#1817).
             outcome = adopt_provisioned_person(identity)

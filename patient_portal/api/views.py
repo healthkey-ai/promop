@@ -5408,6 +5408,23 @@ def login_view(request):
                 user = authenticate(request, username=identity.uid, password=password)
 
         if user is not None:
+            # Block login for self-signup accounts that have not verified their
+            # email. Only self-signup sets pending_email_verification on the grant;
+            # admin-created, ETL-provisioned and invited accounts are unaffected.
+            from omop_core.models import GroupAccess
+            if (user.has_usable_password()
+                    and not user.has_verified_email
+                    and GroupAccess.objects.filter(
+                        identity=user, pending_email_verification=True,
+                    ).exists()):
+                from patient_portal.api.email_verification import send_verification_email
+                send_verification_email(user)
+                return Response({
+                    'error': 'Please verify your email address before signing in. '
+                             'We have sent a new verification link to your email.',
+                    'code': 'email_not_verified',
+                }, status=status.HTTP_403_FORBIDDEN)
+
             login(request, user)
             user_serializer = UserSerializer(user)
             return Response({
