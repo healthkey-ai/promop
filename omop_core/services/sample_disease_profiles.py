@@ -174,16 +174,19 @@ def profile_fhir_observation(patient_id, field, value, assessment_date):
     return resource
 
 
-def recover_sample_source_fields(record, rows, disease):
+def recover_sample_source_fields(record, rows, disease, lab_code_fields=None):
     """Repair known legacy generator encodings only inside explicit demo cohorts.
 
     Several historical generators used nonexistent/mismatched LOINC codes.
     Those source keys are compatibility inputs here, never standard mappings.
+    ``lab_code_fields`` is the resolved LOINC routing; a caller looping over
+    records resolves it once and passes it in.
     """
     from omop_core.services.patient_record_service import resolve_lab_code_fields
     from omop_core.services.cytogenetics import normalise_cytogenetic_markers
     result = read_profile_rows(rows)
-    lab_code_fields = resolve_lab_code_fields()
+    if lab_code_fields is None:
+        lab_code_fields = resolve_lab_code_fields()
     legacy = {
         'FL': {'44648-4': 'tumor_grade', '21912-1': 'number_of_nodal_sites'},
         'MM': {'57905-2': 'myeloma_type', '69548-6': 'cytogenetic_markers',

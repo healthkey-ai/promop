@@ -234,3 +234,17 @@ def test_migration_keys_a_new_row_on_its_code_only_when_free():
     _migrate()
     hgb = FieldConceptMapping.objects.get(field_name='hemoglobin_g_dl')
     assert (hgb.status, hgb.concept_code, hgb.source_value) == ('approved', '718-7', '')
+
+
+def test_migration_drops_a_colliding_source_value_when_approving():
+    FieldConceptMapping.objects.create(
+        field_name='some_other_field', status='approved', vocabulary_id='LOINC',
+        concept_code='2164-2', omop_table='measurement', source_value='2164-2',
+    )
+    FieldConceptMapping.objects.create(
+        field_name='creatinine_clearance_ml_min', status='proposed', vocabulary_id='LOINC',
+        concept_code='2164-2', omop_table='measurement', source_value='2164-2',
+    )
+    _migrate()
+    crcl = FieldConceptMapping.objects.get(field_name='creatinine_clearance_ml_min')
+    assert (crcl.status, crcl.source_value) == ('approved', '')

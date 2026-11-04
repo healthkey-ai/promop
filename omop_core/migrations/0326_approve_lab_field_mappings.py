@@ -124,6 +124,12 @@ def approve_lab_field_mappings(apps, schema_editor):
         if mapping.status == 'proposed' and mapping.reviewer_id is None:
             update.update(status='approved', provenance=PROVENANCE,
                           notes=(mapping.notes + ' ' if mapping.notes else '') + NOTE)
+            if mapping.source_value and mapping.source_value in taken_sources:
+                # Approving it would collide with the row that already keys
+                # this source value; the code still routes without one.
+                update['source_value'] = ''
+            elif mapping.source_value:
+                taken_sources.add(mapping.source_value)
         if mapping.concept_id is None and concept is not None:
             update['concept'] = concept
         if update:
@@ -133,10 +139,10 @@ def approve_lab_field_mappings(apps, schema_editor):
 
 
 def forwards(apps, schema_editor):
-    from django.db import connection
     # Skip in test databases, as 0240 does: tests seed what they need, and
     # creating every lab mapping here would collide with the rows they create.
-    if str(connection.settings_dict.get('NAME', '')).startswith('test_'):
+    name = str(schema_editor.connection.settings_dict.get('NAME', ''))
+    if name.startswith('test_'):
         return
     approve_lab_field_mappings(apps, schema_editor)
 

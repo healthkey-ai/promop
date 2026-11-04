@@ -309,7 +309,7 @@ PATIENT_RECORD_OMOP_MAPPED_FIELDS = frozenset(_OMOP_DERIVED_FIELDS) | frozenset(
 # (``resolve_lab_code_fields``); this table decides a field's codes only while
 # the field has no approved, concept-resolved mapping -- a fresh install before
 # Athena loads, or a test database built without migrations. The cast per
-# field lives here too (``_LAB_FIELD_CASTS``).
+# field lives only here (``_LAB_FIELD_CASTS``).
 _LOINC_LAB_FIELDS = {
     # CBC
     '718-7':   ('hemoglobin_g_dl',               float),
@@ -553,17 +553,6 @@ def _slim_match_values(code_fields):
     ) | _SLIM_SOURCE_NAMES
 
 
-def _lab_field_cast(field):
-    """How a derived lab value is cast: the table's choice, else the model type."""
-    cast = _LAB_FIELD_CASTS.get(field)
-    if cast is not None:
-        return cast
-    kind = PatientRecord._meta.get_field(field).get_internal_type()
-    if kind in ('IntegerField', 'BigIntegerField', 'SmallIntegerField', 'PositiveIntegerField'):
-        return int
-    return Decimal if kind == 'DecimalField' else float
-
-
 def resolve_lab_code_fields(measurements=None):
     """LOINC code → (PatientRecord lab field, cast) for lab derivation.
 
@@ -599,16 +588,17 @@ def resolve_lab_code_fields(measurements=None):
     code_fields = {code: entry for code, entry in code_fields.items()
                    if entry[0] not in mapped}
     field_by_target = {concept_id: field for field, _, concept_id in approved}
+    # Every routed field is in LAB_FIELDS, so its cast is in the table.
     for field, code, _ in approved:
         if code:
-            code_fields[code] = (field, _lab_field_cast(field))
+            code_fields[code] = (field, _LAB_FIELD_CASTS[field])
     for code, target_id in SourceCodeConceptMapping.objects.filter(
         organization_id=None, source_vocabulary_id='LOINC',
         status='approved', omop_table__iexact='measurement',
         target_concept_id__in=field_by_target,
     ).values_list('source_code', 'target_concept_id'):
         field = field_by_target[target_id]
-        code_fields[code] = (field, _lab_field_cast(field))
+        code_fields[code] = (field, _LAB_FIELD_CASTS[field])
     return code_fields
 
 
