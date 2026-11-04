@@ -8,6 +8,16 @@ All notable changes to PRomop are documented here.
 
 ### Added
 
+- **Consent model v2** — purposes (permissions, contact preferences,
+  declarations) and legal documents are data with versioned texts per
+  language, loaded by `load_consent_texts` or edited in the admin, so legal
+  rewording is a new version and not a code change. Every answer is an
+  append-only `ConsentEvent` carrying the version seen; withdrawal keeps the
+  grant in the history. A `ConsentLedgerEntry` store with no link to the
+  account holds the email address and permission history and outlives
+  deletion. `/api/v1/phr/consent/` serves sign-up, settings and "confirm the
+  new Terms"; `has_consent(person, key)` is the enforcement point, with a
+  per-country gate. See [consent model v2](docs/consent-v2.md).
 - **Versioned clinical source-input SDK on dev** — opt-in, per-field approved
   source writes for laboratory ULN ratios, explicit swallowing answers and SCT
   dates append corrections/clear tombstones and verify refreshed readback.

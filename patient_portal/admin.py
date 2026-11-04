@@ -1,6 +1,10 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
-from .models import Identity, PatientMessage, PatientConsent, PatientInvitation, AuditEvent, BreakGlassGrant
+from .models import (
+    Identity, PatientMessage, PatientConsent, PatientInvitation, AuditEvent, BreakGlassGrant,
+    ConsentPurpose, ConsentText, LegalDocument, LegalDocumentVersion, ConsentEvent,
+    DocumentAcceptance, ConsentLedgerEntry,
+)
 
 
 @admin.register(Identity)
@@ -181,3 +185,99 @@ class LabMarkerAdmin(admin.ModelAdmin):
     list_editable = ('rank',)
     search_fields = ('loinc_code', 'label')
     ordering = ('rank',)
+
+
+# ---------------------------------------------------------------------------
+# Consent model v2 — purposes and documents are edited here as data; the
+# histories are read-only.
+# ---------------------------------------------------------------------------
+
+class _VersionedTextInline(admin.TabularInline):
+    extra = 0
+    fields = ['version', 'language', 'title', 'published_at']
+    show_change_link = True
+
+    def get_readonly_fields(self, request, obj=None):
+        # A published version is never edited: a wording change is a new version.
+        return []
+
+
+class ConsentTextInline(_VersionedTextInline):
+    model = ConsentText
+
+
+class LegalDocumentVersionInline(_VersionedTextInline):
+    model = LegalDocumentVersion
+    fields = ['version', 'language', 'title', 'requires_reacceptance', 'published_at']
+
+
+@admin.register(ConsentPurpose)
+class ConsentPurposeAdmin(admin.ModelAdmin):
+    list_display = ['key', 'kind', 'answers', 'asks_frequency', 'stage', 'gated_by_country', 'sort_order', 'is_active']
+    list_filter = ['kind', 'is_active', 'gated_by_country']
+    search_fields = ['key']
+    inlines = [ConsentTextInline]
+
+
+class _VersionedTextAdmin(admin.ModelAdmin):
+    list_filter = ['language']
+    search_fields = ['version', 'title']
+
+    def get_readonly_fields(self, request, obj=None):
+        if obj is not None and obj.is_published:
+            return [f.name for f in obj._meta.fields if f.name != 'published_at']
+        return ['created_at']
+
+
+@admin.register(ConsentText)
+class ConsentTextAdmin(_VersionedTextAdmin):
+    list_display = ['purpose', 'version', 'language', 'title', 'published_at']
+    list_filter = ['purpose', 'language']
+
+
+@admin.register(LegalDocument)
+class LegalDocumentAdmin(admin.ModelAdmin):
+    list_display = ['key', 'name', 'sort_order', 'is_active']
+    search_fields = ['key', 'name']
+    inlines = [LegalDocumentVersionInline]
+
+
+@admin.register(LegalDocumentVersion)
+class LegalDocumentVersionAdmin(_VersionedTextAdmin):
+    list_display = ['document', 'version', 'language', 'title', 'requires_reacceptance', 'published_at']
+    list_filter = ['document', 'language']
+
+
+class _AppendOnlyAdmin(admin.ModelAdmin):
+    def get_readonly_fields(self, request, obj=None):
+        return [f.name for f in self.model._meta.fields]
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(ConsentEvent)
+class ConsentEventAdmin(_AppendOnlyAdmin):
+    list_display = ['recorded_at', 'person', 'purpose', 'decision', 'version', 'language', 'frequency', 'source']
+    list_filter = ['purpose', 'decision', 'source']
+    search_fields = ['person__person_id']
+
+
+@admin.register(DocumentAcceptance)
+class DocumentAcceptanceAdmin(_AppendOnlyAdmin):
+    list_display = ['accepted_at', 'person', 'document', 'version', 'language']
+    list_filter = ['document']
+    search_fields = ['person__person_id']
+
+
+@admin.register(ConsentLedgerEntry)
+class ConsentLedgerEntryAdmin(_AppendOnlyAdmin):
+    list_display = ['recorded_at', 'email', 'kind', 'key', 'decision', 'version', 'frequency']
+    list_filter = ['kind', 'key', 'decision']
+    search_fields = ['email', 'key']

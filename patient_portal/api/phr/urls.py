@@ -1,5 +1,6 @@
 from django.urls import path
 
+from .consent import ConsentDocumentsView, ConsentHistoryView, ConsentView
 from .entries import (
     ConditionEntryView,
     MedicationNoteView,
@@ -68,6 +69,10 @@ urlpatterns = [
     path('whats-new/', WhatsNewView.as_view(), name='phr-whats-new'),
     path('imaging/', ImagingView.as_view(), name='phr-imaging'),
     path('outcomes/', OutcomesView.as_view(), name='phr-outcomes'),
+    # Consent model v2: the member's permissions, preferences and documents.
+    path('consent/', ConsentView.as_view(), name='phr-consent'),
+    path('consent/documents/', ConsentDocumentsView.as_view(), name='phr-consent-documents'),
+    path('consent/history/', ConsentHistoryView.as_view(), name='phr-consent-history'),
     # The patient's shares.
     path('shares/', SharesView.as_view(), name='phr-shares'),
     path('shares/options/', ShareOptionsView.as_view(), name='phr-share-options'),
