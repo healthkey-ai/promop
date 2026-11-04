@@ -15522,7 +15522,10 @@ class OrgPatientSignupTest(TestCase):
         self.assertFalse(identity.is_superuser)
         self.assertTrue(PatientUser.objects.filter(identity=identity).exists())
         self.assertTrue(
-            GroupAccess.objects.filter(identity=identity, org=self.org, role='analyst').exists()
+            GroupAccess.objects.filter(
+                identity=identity, org=self.org, role='analyst',
+                pending_email_verification=True,
+            ).exists()
         )
 
     def _private_org_with_patients(self):
@@ -15754,28 +15757,31 @@ class EmailVerificationLoginGateTest(TestCase):
             name='Gate Org', slug='gate-org', allows_patient_signup=True,
         )
 
-    def test_new_unverified_local_account_cannot_login(self):
-        """A new signup (last_login=None) that has not verified its email gets 403."""
-        Identity.objects.create_user(
-            email='unverified@test.com', password='Str0ng!Pass99',
-        )
-        resp = APIClient().post('/api/auth/login/', {
+    def test_self_signup_unverified_cannot_login(self):
+        """A self-signup account with pending_email_verification gets 403."""
+        client = APIClient()
+        resp = client.post('/api/v1/orgs/gate-org/patient-signup/', {
+            'email': 'unverified@test.com',
+            'password': 'Str0ng!Pass99',
+            'given_name': 'Test',
+            'family_name': 'User',
+        })
+        self.assertEqual(resp.status_code, 201)
+        resp = client.post('/api/auth/login/', {
             'username': 'unverified@test.com',
             'password': 'Str0ng!Pass99',
         })
         self.assertEqual(resp.status_code, 403)
         self.assertEqual(resp.data['code'], 'email_not_verified')
 
-    def test_existing_unverified_account_can_still_login(self):
-        """An existing account (last_login set) is not blocked even without
-        email verification — only new signups are gated."""
-        identity = Identity.objects.create_user(
-            email='existing@test.com', password='Str0ng!Pass99',
+    def test_admin_created_account_can_login_without_verification(self):
+        """An admin-created account (no pending_email_verification grant) is
+        not blocked — only self-signups are gated."""
+        Identity.objects.create_user(
+            email='admin-created@test.com', password='Str0ng!Pass99',
         )
-        # Simulate a prior login by setting last_login.
-        Identity.objects.filter(pk=identity.pk).update(last_login=timezone.now())
         resp = APIClient().post('/api/auth/login/', {
-            'username': 'existing@test.com',
+            'username': 'admin-created@test.com',
             'password': 'Str0ng!Pass99',
         })
         self.assertEqual(resp.status_code, 200)
@@ -15797,10 +15803,15 @@ class EmailVerificationLoginGateTest(TestCase):
     def test_login_gate_resends_verification_email(self):
         """Blocked login resends the verification email."""
         from django.core import mail
-        identity = Identity.objects.create_user(
-            email='resend@test.com', password='Str0ng!Pass99',
-        )
-        resp = APIClient().post('/api/auth/login/', {
+        client = APIClient()
+        client.post('/api/v1/orgs/gate-org/patient-signup/', {
+            'email': 'resend@test.com',
+            'password': 'Str0ng!Pass99',
+            'given_name': 'Resend',
+            'family_name': 'Test',
+        })
+        mail.outbox.clear()  # Clear the signup verification email.
+        resp = client.post('/api/auth/login/', {
             'username': 'resend@test.com',
             'password': 'Str0ng!Pass99',
         })

@@ -5371,14 +5371,15 @@ def login_view(request):
                 user = authenticate(request, username=identity.uid, password=password)
 
         if user is not None:
-            # Block login for NEW local accounts that have not verified their email.
-            # last_login is None for accounts that have never logged in (new signups).
-            # Existing accounts (last_login is set) are not affected — they were
-            # created before email verification was enforced at signup.
-            # OAuth/SSO accounts (no usable_password) are verified by the provider.
+            # Block login for self-signup accounts that have not verified their
+            # email. Only self-signup sets pending_email_verification on the grant;
+            # admin-created, ETL-provisioned and invited accounts are unaffected.
+            from omop_core.models import GroupAccess
             if (user.has_usable_password()
                     and not user.has_verified_email
-                    and user.last_login is None):
+                    and GroupAccess.objects.filter(
+                        identity=user, pending_email_verification=True,
+                    ).exists()):
                 from patient_portal.api.email_verification import send_verification_email
                 send_verification_email(user)
                 return Response({

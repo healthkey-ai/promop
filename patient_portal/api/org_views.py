@@ -959,7 +959,7 @@ class OrgPatientSignupView(APIView):
                     org=org,
                     defaults={
                         'role': signup_role,
-                        'pending_email_verification': has_domain_trust and not org.allows_patient_signup,
+                        'pending_email_verification': True,
                     },
                 )
         except Exception:
