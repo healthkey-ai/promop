@@ -242,3 +242,13 @@ def test_an_explicit_answer_formula_cannot_be_active():
     row.is_active = True
     with pytest.raises(IntegrityError):
         row.save()
+
+
+def test_formula_api_refuses_an_explicit_answer_field():
+    from patient_portal.api.serializers import FieldFormulaSerializer
+    serializer = FieldFormulaSerializer(data={
+        'field_name': INFECTION,
+        'formula': '@not(active_infection_status)',
+        'is_active': False,
+    })
+    assert not serializer.is_valid()

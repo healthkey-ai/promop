@@ -1891,6 +1891,11 @@ class FieldFormulaSerializer(serializers.ModelSerializer):
 
     @staticmethod
     def _assert_computable(field_name):
+        from omop_core.models import ExplicitNegativeAnswer
+        if field_name in ExplicitNegativeAnswer.ANSWER_FIELDS:
+            raise serializers.ValidationError({
+                'field_name': 'This field is an explicit answer; a formula cannot be active.',
+            })
         from omop_core.services.field_descriptor import _COMPUTED_FIELDS
         if field_name not in _COMPUTED_FIELDS and not CustomPatientField.objects.filter(
             field_name=field_name, mode='computed',
