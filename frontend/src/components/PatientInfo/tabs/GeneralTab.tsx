@@ -199,9 +199,17 @@ export default function GeneralTab({
             />
           </div>
 
-          {field('Disease', 'disease', 'select', {
-            options: categoryDiseaseOptions,
-          })}
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium text-portal-text-primary">Disease</label>
+            <SelectControl
+              value={(formData?.disease as string) ?? ''}
+              options={categoryDiseaseOptions.map((d) => ({ value: d, label: d }))}
+              disabled={!selectedCategory}
+              placeholder={selectedCategory ? 'Select…' : 'Select a category first'}
+              allowClear
+              onChange={(v: unknown) => onChange('disease', (v as string) || null)}
+            />
+          </div>
 
           <div className="sm:col-span-2">
             <TreatingInstitutionField key={personId} value={String(formData?.facility_name || '')}
