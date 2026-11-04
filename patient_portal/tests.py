@@ -15926,8 +15926,12 @@ class SelfSignupEmailTrustTest(TestCase):
         """The attack: sign up at a public org, claiming a trusted domain."""
         from omop_core.models import OrgTrust
         OrgTrust.objects.create(granting_org=self.private, trusted_domain='trusted.org')
-        client, resp = self._signup('attacker@trusted.org')
+        _, resp = self._signup('attacker@trusted.org')
         self.assertEqual(resp.status_code, 201)
+        # Signup no longer auto-logs in; authenticate to test authorization.
+        identity = Identity.objects.get(email='attacker@trusted.org')
+        client = APIClient()
+        client.force_authenticate(identity)
         self.assertEqual(self._reads_private_patient(client), 404)
         user = client.get('/api/v1/user/').data['user']
         self.assertFalse(user['email_verified'])
@@ -15937,10 +15941,16 @@ class SelfSignupEmailTrustTest(TestCase):
         """The legitimate user is not locked out: the link restores the trust."""
         from omop_core.models import OrgTrust
         OrgTrust.objects.create(granting_org=self.private, trusted_domain='trusted.org')
-        client, _ = self._signup('real@trusted.org')
+        _, _ = self._signup('real@trusted.org')
+        identity = Identity.objects.get(email='real@trusted.org')
+        client = APIClient()
+        client.force_authenticate(identity)
         self.assertEqual(self._reads_private_patient(client), 404)
         resp = APIClient().post('/api/v1/auth/verify-email/', {'token': self._token_from_last_email()})
         self.assertEqual(resp.status_code, 200)
+        # Refresh identity after verification changed the DB.
+        identity.refresh_from_db()
+        client.force_authenticate(identity)
         self.assertEqual(self._reads_private_patient(client), 200)
 
     def test_invitation_acceptance_and_federated_logins_count_as_verified(self):
@@ -16001,8 +16011,12 @@ class SelfSignupEmailTrustTest(TestCase):
     # -- the link itself -------------------------------------------------------
 
     def test_inviting_an_existing_unverified_login_waits_for_mailbox_proof(self):
-        client, _ = self._signup('doctor@elsewhere.com')
+        _, _ = self._signup('doctor@elsewhere.com')
         identity = Identity.objects.get(email='doctor@elsewhere.com')
+        # Signup no longer auto-logs in; authenticate explicitly for the
+        # authorization checks below.
+        client = APIClient()
+        client.force_authenticate(identity)
         admin = Identity.objects.create_user(email='operator@example.com', is_staff=True)
         inviter = APIClient()
         inviter.force_authenticate(admin)
