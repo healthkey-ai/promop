@@ -196,9 +196,10 @@ as covering more than it does:
   omop_genomics`, which is Python packages only. Neither tool says anything
   about these files beyond the committed-secret case.
 
-**Approval.** #1496 changes `.github/**` and `CODEOWNERS`, so it required
-the designated security reviewer's approval under the control it modifies. Record the approving review
-and the merge commit alongside the evidence capture for the period.
+**Approval.** #1496 changes `.github/**`, `CODEOWNERS` and the pinning tests,
+so it requires the designated security reviewer's approval under the control it
+modifies. This record is finalized with the approving review and merge commit
+when #1496 lands.
 
 ## Deployment authorization
 
