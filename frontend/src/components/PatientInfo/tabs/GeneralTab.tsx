@@ -178,7 +178,7 @@ export default function GeneralTab({
           {field('Email', 'email', 'email')}
           {field('Phone Number', 'phone_number', 'text')}
 
-          <div className="space-y-1.5">
+          <div className="space-y-1.5 sm:col-start-1">
             <label className="text-sm font-medium text-portal-text-primary">Disease Category</label>
             <SelectControl
               value={selectedCategory ?? ''}
