@@ -413,6 +413,33 @@ describe('concept-first curation', () => {
   });
 });
 
+describe('suggest accumulation (#2274)', () => {
+  it('sends exclude_keys from a completed inline run on the second Suggest click', async () => {
+    const first = { ...source, mapping_id: null, source_code: 'A1', source_vocabulary_id: 'V1',
+      evidence: ['lexical'], verdict: 'review', confidence: 0.9, declined: false };
+    const firstRun = { ...run(), activity: [{ concept: { concept_id: 123 }, candidates: [first] }] };
+    post.mockResolvedValueOnce({ data: firstRun });
+    await selectConcept();
+    fireEvent.click(screen.getByRole('button', { name: 'Suggest source codes' }));
+    await screen.findByText('1 candidates retrieved (limit 25).');
+    // The first run's exclude_keys should be empty.
+    expect(post).toHaveBeenCalledWith('/v1/concept-to-code/suggest/',
+      expect.objectContaining({ exclude_keys: [] }));
+
+    // Now click Suggest again — the second run should exclude the first run's candidate.
+    const second = { ...source, mapping_id: null, source_code: 'B1', source_vocabulary_id: 'V2',
+      evidence: ['lexical'], verdict: 'review', confidence: 0.8, declined: false };
+    const secondRun = { ...run(), run_id: 'run-2',
+      activity: [{ concept: { concept_id: 123 }, candidates: [second] }] };
+    post.mockResolvedValueOnce({ data: secondRun });
+    fireEvent.click(screen.getByRole('button', { name: 'Suggest source codes' }));
+    // Second run retrieves 1 new candidate, 2 total across runs.
+    await screen.findByText(/1 candidates retrieved \(limit 25\), 2 total across runs/);
+    expect(post).toHaveBeenLastCalledWith('/v1/concept-to-code/suggest/',
+      expect.objectContaining({ exclude_keys: [['V1', 'A1']] }));
+  });
+});
+
 describe('axis variants on a source code (#2012)', () => {
   const glucose = { concept_id: 3020491, concept_name: 'Glucose [Moles/volume] in Serum or Plasma', concept_code: '14749-6', vocabulary_id: 'LOINC' };
   const variants = [
