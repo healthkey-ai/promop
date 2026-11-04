@@ -14,10 +14,10 @@ from omop_core.services.source_vocabularies import DOMAIN_TO_TABLE, VOCABULARY_O
 logger = logging.getLogger(__name__)
 
 
-def _may_write_variants(mapping, user):
-    """The same rule the variant endpoint applies to its caller: the run's
-    creator must administer the mapping's organization and nobody else may
-    hold its edit lock. Other hospitals' codes are listed, never written."""
+def _may_write(mapping, user):
+    """The same rule the variant and Apply endpoints apply to their caller: the
+    run's creator must administer the mapping's organization and nobody else
+    may hold its edit lock. Other hospitals' codes are listed, never written."""
     from patient_portal.api import views
 
     if user is None or not views._can_administer_code_mapping(user, mapping):
@@ -30,43 +30,28 @@ def _may_write_variants(mapping, user):
 
 
 def _auto_propose_candidate(candidate, concept, user):
-    """Set the destination on a high-confidence candidate (#2269).
+    """Propose a high-confidence candidate for *concept* (#2269).
 
-    For existing SCCM rows (``mapping_id`` set) that have no destination yet,
-    update the row to map to ``concept``.  For catalog-only candidates (no
-    ``mapping_id``), create a new proposed SCCM row.
+    A candidate is either a vocabulary entry with no mapping row yet, which gets
+    a new proposed row, or a stored proposal (a queue row with no destination,
+    or one an earlier run pointed elsewhere), which is re-pointed at this
+    concept the way the Apply endpoint does (#2272). A stored proposal that
+    already carries a destination is only replaced by a stronger score.
 
-    Returns the updated candidate dict with ``auto_proposed`` set, or the
-    original candidate unchanged when the source is declined, already has a
-    destination, or the catalog entry is stale.
+    Returns the candidate with ``mapping_id`` and ``auto_proposed`` set, or
+    the candidate unchanged when nothing was written.
     """
+    if candidate.get('declined'):
+        return candidate
+    if candidate.get('mapping_id') is not None:
+        return _repoint_proposed_row(candidate, concept, user)
+    return _propose_new_row(candidate, concept, user)
+
+
+def _propose_new_row(candidate, concept, user):
     from omop_core.mapping.reverse_catalog import refresh_catalog_candidate
     from patient_portal.api.views import _upsert_source_code_mapping
 
-    if candidate.get('declined'):
-        return candidate
-
-    # ---- Existing mapping with no destination: set it to this concept ----
-    if candidate.get('mapping_id') is not None:
-        if candidate.get('destination_concept_id') is not None:
-            return candidate  # already has a destination
-        row = SourceCodeConceptMapping.objects.filter(
-            pk=candidate['mapping_id'], target_concept__isnull=True,
-        ).first()
-        if row is None:
-            return candidate  # row gone or already has a destination (race)
-        fields = ['target_concept_id']
-        row.target_concept_id = concept.pk
-        if candidate.get('confidence') is not None:
-            row.suggestion_confidence = candidate['confidence']
-            fields.append('suggestion_confidence')
-        row.origin_system = 'suggest-auto'
-        fields.append('origin_system')
-        row.save(update_fields=fields)
-        return {**candidate, 'destination_concept_id': concept.pk,
-                'destination_concept_name': concept.concept_name, 'auto_proposed': True}
-
-    # ---- Catalog-only candidate: create a new proposed SCCM row ----
     fresh = refresh_catalog_candidate(candidate, concept)
     if fresh is None:
         return candidate
@@ -86,10 +71,39 @@ def _auto_propose_candidate(candidate, concept, user):
             'domain_id': concept.domain_id, 'omop_table': DOMAIN_TO_TABLE[concept.domain_id],
             'status': 'proposed',
         }, user)
-        if candidate.get('confidence') is not None:
-            row.suggestion_confidence = candidate['confidence']
-            row.save(update_fields=['suggestion_confidence'])
+        _store_confidence(row, candidate)
     return {**candidate, 'mapping_id': row.pk, 'auto_proposed': True}
+
+
+def _repoint_proposed_row(candidate, concept, user):
+    """Point a stored proposal at *concept*, under the Apply endpoint's rules."""
+    from patient_portal.api.views import _upsert_source_code_mapping
+
+    table = DOMAIN_TO_TABLE[concept.domain_id]
+    with transaction.atomic():
+        row = SourceCodeConceptMapping.objects.select_for_update().filter(pk=candidate['mapping_id']).first()
+        if (row is None or row.status != 'proposed' or row.origin_system == 'athena'
+                or row.target_concept_id == concept.pk
+                or (row.domain_id and row.domain_id != concept.domain_id)
+                or (row.omop_table and row.omop_table != table)
+                or not _may_write(row, user)):
+            return candidate
+        confidence = candidate.get('confidence')
+        if (row.target_concept_id is not None and row.suggestion_confidence is not None
+                and (confidence is None or confidence < row.suggestion_confidence)):
+            return candidate
+        row, _ = _upsert_source_code_mapping(concept, {
+            'status': 'proposed', 'domain_id': concept.domain_id, 'omop_table': table,
+            'destination_vocabulary_id': concept.vocabulary_id,
+        }, user, mapping=row)
+        _store_confidence(row, candidate)
+    return {**candidate, 'mapping_id': row.pk, 'auto_proposed': True}
+
+
+def _store_confidence(row, candidate):
+    if candidate.get('confidence') is not None:
+        row.suggestion_confidence = candidate['confidence']
+        row.save(update_fields=['suggestion_confidence'])
 
 
 def _with_variant_suggestions(candidate, params, run, budget):
@@ -113,7 +127,7 @@ def _with_variant_suggestions(candidate, params, run, budget):
     mapping = SourceCodeConceptMapping.objects.filter(pk=candidate['mapping_id']).first()
     if mapping is None:
         return candidate
-    if params['ranking_model'] != 'none' and budget['left'] > 0 and _may_write_variants(mapping, run.created_by):
+    if params['ranking_model'] != 'none' and budget['left'] > 0 and _may_write(mapping, run.created_by):
         try:
             results = axis_variants.suggest_destinations(
                 mapping, strategies=params['strategies'], ranking_model=params['ranking_model'],
