@@ -167,6 +167,21 @@ def test_lexical_uses_synonyms_and_seen_priority_without_writing(concept):
     assert not SourceCodeConceptMapping.objects.exclude(target_concept=None).exists()
 
 
+def test_suggested_sources_carry_the_patients_units_and_based_on(concept):
+    """The Suggested Codes payload samples the patients' rows as Mapped Codes does (#2295)."""
+    from omop_core.models import PatientSourceCode
+    from tests.factories import PersonFactory
+    row = source('SEEN', occurrence_count=10)
+    PatientSourceCode.objects.create(
+        person=PersonFactory(), source_value='SEEN', source_vocabulary_id='SNOMED', omop_table='measurement',
+        source_unit='g/dL', source_metadata={'fhir': {'resourceType': 'Observation', 'basedOn': [
+            {'display': 'Complete blood count', 'reference': 'ServiceRequest/1'}]}})
+    candidates = reverse_retrieval_pool(concept, strategies=['lexical'], limit=10)
+    assert [c['source_code'] for c in candidates] == ['SEEN']
+    assert candidates[0]['based_on'] == ['Complete blood count']
+    assert candidates[0]['mapping_id'] == row.pk
+
+
 def test_umls_matches_vocabulary_and_code_including_aliases(concept):
     release = UmlsRelease.objects.create(release_version='test')
     cui = UmlsConcept.objects.create(cui='C0000001', release=release)
