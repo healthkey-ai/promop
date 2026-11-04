@@ -24,10 +24,16 @@ def reverse_retrieval_pool(concept, *, strategies, limit, include_zero_seen=Fals
                            exclude_keys=(), timeout_ms=30000):
     """The best ``limit`` sources for ``concept``, skipping what a ranker already
     declined unless ``include_declined`` (#2034) and any ``exclude_keys``
-    ``(source_vocabulary_id, source_code)`` the caller already has."""
+    ``(source_vocabulary_id, source_code)`` the caller already has.
+
+    A queued run's params reach the worker through the broker as JSON, so each
+    key arrives as a two-element list rather than a tuple. Both are accepted
+    here; a list is not hashable, and the inline path never showed it (#2274).
+    """
+    keys = {tuple(key) for key in exclude_keys}
     return _bounded(timeout_ms, lambda evaluate: _retrieve(
         concept, strategies=strategies, limit=limit, include_zero_seen=include_zero_seen,
-        include_declined=include_declined, exclude_keys=set(exclude_keys), evaluate=evaluate))
+        include_declined=include_declined, exclude_keys=keys, evaluate=evaluate))
 
 
 def estimate_reverse_pool(concept, *, strategies, include_zero_seen=False, include_declined=False, timeout_ms=8000):
