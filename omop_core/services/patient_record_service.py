@@ -4989,13 +4989,20 @@ def attested_negative_fields(patient_info):
     The endpoint refuses to create one against a contradiction; a later source
     change is reported by `audit_explicit_negative_answers`, not overwritten.
     """
+    cached = getattr(patient_info, '_attested_negative_fields', None)
+    if cached is not None:
+        return cached
     person_id = getattr(patient_info, 'person_id', None)
     if not person_id:
-        return set()
+        patient_info._attested_negative_fields = set()
+        return patient_info._attested_negative_fields
     from omop_core.models import ExplicitNegativeAnswer
-    return set(ExplicitNegativeAnswer.objects.filter(
-        person_id=person_id, answer=True,
-    ).values_list('field', flat=True))
+    patient_info._attested_negative_fields = set(
+        ExplicitNegativeAnswer.objects.filter(
+            person_id=person_id, answer=True,
+        ).values_list('field', flat=True)
+    )
+    return patient_info._attested_negative_fields
 
 
 def _compute_derived_fields(patient_info: PatientRecord, *, apply_formulas=True) -> None:

@@ -5003,8 +5003,9 @@ class RefreshQueryCountTest(TestCase):
     """
 
     #: 21 for the derivation itself plus the #1924 therapy-history
-    #: attestation existence check.
-    QUERY_BUDGET = 22
+    #: attestation existence check and the #5666 explicit-negative
+    #: attestation existence check (cached for the refresh).
+    QUERY_BUDGET = 23
 
     @classmethod
     def setUpTestData(cls):
