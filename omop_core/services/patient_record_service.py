@@ -69,7 +69,7 @@ def _usable_concept_name(concept) -> str | None:
 
 # Bump this whenever aggregation or computation logic changes in any section
 # extractor or in _compute_derived_fields.  See DERIVATION_CHANGELOG.md.
-DERIVATION_VERSION = 25
+DERIVATION_VERSION = 26
 
 # These PatientRecord columns are projections of PersonLanguageSkill, never
 # independent edits. Older PATCH requests could mark them as user-edited and
@@ -1204,7 +1204,9 @@ def refresh_patient_record(person: Person) -> PatientRecord:
             # The lab extractor has already selected the latest code across
             # canonical and approved-alias results (including unit handling).
             # An older exact FCM row must not overwrite that latest result.
-            if field not in lab_derived_fields:
+            if field in _ANSWER_LINE_FIELDS and value is not None:
+                value = _answer_line(field, value)
+            if field not in lab_derived_fields and _fits_column(patient_info, field, value):
                 setattr(patient_info, field, value)
 
         for field, value in linked_cancer_values.items():
@@ -1344,6 +1346,23 @@ def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fiel
         updates['updated_at'] = timezone.now()
         PatientRecord.objects.filter(pk=patient_info.pk).update(**updates)
     return patient_info
+
+
+def _fits_column(patient_info: PatientRecord, field: str, value) -> bool:
+    """Whether a mapped text value fits its column (#2290).
+
+    One that doesn't is not written, and not cut either: cutting could change
+    what it says. The field keeps what the extractors derived in this refresh,
+    and the rest of the record still saves.
+    """
+    width = getattr(PatientRecord._meta.get_field(field), 'max_length', None)
+    if not (width and isinstance(value, str) and len(value) > width):
+        return True
+    logger.warning(
+        'Skipping overlong mapped value for person_id=%s field=%s (%s chars, max_length=%s)',
+        patient_info.person_id, field, len(value), width,
+    )
+    return False
 
 
 def _clear_overflowing_decimal_fields(patient_info: PatientRecord) -> None:
@@ -3309,7 +3328,7 @@ def _get_genomics_pathology_data(person: Person, snapshot: OmopSnapshot = None) 
     if specimen:
         value = _coded_value(specimen)
         if value:
-            data['test_specimen_type'] = value[:50]
+            data['test_specimen_type'] = _answer_line('test_specimen_type', value)
 
     interpretation = latest('69548-6')
     if interpretation:
@@ -3655,16 +3674,17 @@ def _assertion_value(row, value_kind):
     return not parsed if value_kind == 'inverse_boolean' else parsed
 
 
-def _pregnancy_test_answer(value):
-    """The answer line of a pregnancy test result, without the lab's comment (#2250).
+# Labs append comments to these answers, such as "NEG\nSamples with Specific
+# Gravity <1.010 ..." (#2250) or "Passed Stone\nMAYO MEDICAL LABORATORIES, ..."
+# (#2290). The first line is the answer.
+_ANSWER_LINE_FIELDS = frozenset({'pregnancy_test_result_value', 'test_specimen_type'})
 
-    Labs append notes such as "NEG\\nSamples with Specific Gravity <1.010 ...",
-    which do not fit the column and are not the answer.
-    """
-    lines = value.strip().splitlines()
+
+def _answer_line(field, value):
+    """The first line of a text answer, trimmed and cut to the field's width."""
+    lines = str(value).strip().splitlines()
     answer = lines[0].strip() if lines else ''
-    max_length = PatientRecord._meta.get_field('pregnancy_test_result_value').max_length
-    return answer[:max_length] or None
+    return answer[:PatientRecord._meta.get_field(field).max_length] or None
 
 
 def _assertion_detail(row):
@@ -3732,7 +3752,7 @@ def _get_assertion_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
         value_kind = _ASSERTION_FIELDS[code][1]
         value = _assertion_value(row, value_kind)
         if field == 'pregnancy_test_result_value' and value is not None:
-            value = _pregnancy_test_answer(value)
+            value = _answer_line(field, value)
         if value is None:
             continue
         data[field] = value
