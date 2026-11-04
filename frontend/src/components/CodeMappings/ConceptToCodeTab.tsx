@@ -1020,8 +1020,10 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
         <td className="p-2 text-xs">{row.destination_concept_name || 'None'}{row.destination_concept_id && <div className="mt-1 text-slate-500">
           OMOP {row.destination_concept_id} · {row.destination_standard_concept === 'S' ? 'Standard' : 'Nonstandard'}</div>}</td>
         <td className="p-2 text-xs"><span className={row.status === 'approved' ? 'font-medium text-green-800' : 'text-slate-700'}>{row.status === 'unmapped' ? 'Not yet mapped' : row.status}</span>
-          {row.confidence != null && <div className="mt-1 text-slate-700">
-            Confidence: <span className="font-medium tabular-nums">{percent(row.confidence)}</span></div>}
+          <div className="mt-1 text-slate-700">
+            {row.confidence != null
+              ? <>Confidence: <span className="font-medium tabular-nums">{percent(row.confidence)}</span></>
+              : <span className="text-slate-500">not scored</span>}</div>
           {row.edited && <div className="mt-1 text-slate-700">Saved in the editor</div>}</td>
       </tr>)}
     </React.Fragment>;
@@ -1043,13 +1045,20 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
           disabled={locked} aria-haspopup="dialog" title={`Open ${row.source_code} in Edit Mapping`}
           onClick={() => void openEditor(row)}>{row.source_vocabulary_id || 'Uncoded'}:{row.source_code}</button><AxisVariantFlag count={row.axis_variant_count} />
           <AxisVariantList variants={row.axis_variants} canApprove={canApprove} busy={locked} onApprove={variant => void approveVariant(row, variant)} /></td>
-        <td className="p-2">{row.source_code_description || '—'}</td><td className="p-2 text-right tabular-nums">{row.occurrence_count}</td>
+        <td className="p-2">{row.source_code_description || '—'}
+          {(row.units?.length || row.based_on?.length) ? <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-xs">
+            {row.units?.length ? <span title="Units observed"><span className="font-medium text-slate-600">Units:</span> {row.units.join(', ')}</span> : null}
+            {row.based_on?.length ? <span title="FHIR basedOn (order context)"><span className="font-medium text-slate-600">BasedOn:</span> {row.based_on.join(', ')}</span> : null}
+          </div> : null}
+        </td><td className="p-2 text-right tabular-nums">{row.occurrence_count}</td>
         <td className="p-2 text-xs">{row.destination_concept_name || 'None'}{row.destination_concept_id && <div className="mt-1 text-slate-500">
           OMOP {row.destination_concept_id} · {row.destination_standard_concept === 'S' ? 'Standard' : 'Nonstandard'}</div>}</td>
         <td className="p-2 text-xs"><span className={row.status === 'approved' ? 'font-medium text-green-800' : 'text-slate-700'}>{row.status === 'unmapped' ? 'Not yet mapped' : row.status}</span>
           {!!row.evidence?.length && <div className="mt-1 text-slate-500">{row.evidence.join(' + ')}</div>}
-          {row.confidence != null && <div className="mt-1 text-slate-700">
-            Confidence: <span className="font-medium tabular-nums">{percent(row.confidence)}</span></div>}
+          <div className="mt-1 text-slate-700">
+            {row.confidence != null
+              ? <>Confidence: <span className="font-medium tabular-nums">{percent(row.confidence)}</span></>
+              : <span className="text-slate-500">not scored</span>}</div>
           {row.verdict === 'supported' && <div className="mt-1 text-sky-800">Model-supported; curator review required</div>}
           {row.note && <p className="mt-1 max-w-xs text-slate-500">{row.note}</p>}
           {row.edited && <div className="mt-1 text-slate-700">Saved in the editor</div>}</td>
