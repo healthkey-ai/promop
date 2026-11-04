@@ -5732,6 +5732,40 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
         return write_answer(request, record, source=source,
                             revision_writer=_write_record_revisions)
 
+    @action(detail=True, methods=['get', 'post'], url_path='negative-answer',
+            permission_classes=[PatientCrudPermission, PatientSelfScopePermission])
+    def negative_answer(self, request, pk=None):
+        """Explicit confirmation of no active infection / no other malignancy (#5666)."""
+        person, record, error = self._resolve_patient_with_auth(request, pk)
+        if error is not None:
+            return error
+        from omop_core.api.negative_answers import FIELDS, source_value, write_answer
+        field = (request.query_params.get('field') if request.method == 'GET'
+                 else (request.data or {}).get('field'))
+        if field not in FIELDS:
+            return Response({'detail': 'Choose a supported negative answer.'}, status=400)
+        if request.method == 'GET':
+            from omop_core.models import ExplicitNegativeAnswer
+            attested = ExplicitNegativeAnswer.objects.filter(
+                person_id=person.pk, field=field, answer=True,
+            ).exists()
+            return Response({
+                'field': field,
+                'value': getattr(record, field),
+                'confirmed': attested,
+                'source': source_value(record, field),
+            })
+        if not _caller_may_write_patient(request, person.person_id):
+            return Response({'detail': 'You have read-only access to this patient.'}, status=403)
+        if not is_machine_request(request) and not getattr(request.user, 'is_staff', False):
+            from omop_core.authorization import can_write_patient
+            if not can_write_patient(request.user, person.person_id):
+                return Response({'detail': 'You have read-only access to this patient.'}, status=403)
+        source = ('host-explicit' if is_machine_request(request)
+                  else f'{_attestation_source(request, person)}-explicit')
+        return write_answer(request, record, source=source,
+                            revision_writer=_write_record_revisions)
+
     @action(detail=False, methods=['get'], url_path='writable-fields')
     def writable_fields(self, request: Request) -> Response:
         """Which PatientRecord fields a client may edit and their OMOP projection.

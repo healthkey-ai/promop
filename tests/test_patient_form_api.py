@@ -229,13 +229,21 @@ def test_legacy_descriptor_is_not_narrowed_by_shared_form_restrictions():
         'metastatic_status': ['distant_metastasis_stage'],
         'renal_adequacy_status': ['date_of_birth', 'gender', 'serum_creatinine_mg_dl',
                                   'creatinine_clearance_ml_min'],
-        'no_other_active_malignancies': ['active_malignancies'],
         'patient_age': ['date_of_birth'],
     }
     for name, inputs in expected_inputs.items():
         assert legacy[name]['kind'] == 'computed', name
         assert legacy[name]['writable'] is False, name
         assert shared[name]['inputs'] == inputs, name
+    # #5666: the two derived negatives are explicit answers, not computed
+    # columns, and keep their source input list for the editor.
+    for name, inputs in (
+        ('no_active_infection_status', ['active_infection_status']),
+        ('no_other_active_malignancies', ['active_malignancies']),
+    ):
+        assert legacy[name]['kind'] == 'explicit-answer', name
+        assert legacy[name]['writable'] is False, name
+        assert legacy[name]['inputs'] == inputs, name
 
 
 def test_noncanonical_body_units_are_not_silently_relabelled_or_written():

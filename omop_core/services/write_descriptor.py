@@ -1345,6 +1345,38 @@ def build_writable_field_descriptor():
         ),
     }
 
+    # #5666: the two derived negatives are answers too. The formula is
+    # deactivated; while an attestation exists it wins, and withdrawing it
+    # hands the value back to the source facts. Only the negative is
+    # confirmed here — a recorded active infection or a second active
+    # malignancy is the fact to correct, not a value to overwrite.
+    for field_name, label, confirm_label in (
+        ('no_active_infection_status', 'No Active Infection',
+         'Confirm no active infection'),
+        ('no_other_active_malignancies', 'No Other Active Malignancies',
+         'Confirm no other active malignancies'),
+    ):
+        descriptor[field_name] = {
+            'kind': KIND_EXPLICIT_ANSWER,
+            'writable': False,
+            'target': 'patient_record',
+            'endpoint': 'negative-answer',
+            'actions': ['confirm_negative', 'withdraw'],
+            'action_labels': {
+                'confirm_negative': confirm_label,
+                'withdraw': 'Withdraw confirmation',
+            },
+            'value_kind': 'boolean',
+            'answerable': True,
+            'inputs': list(_COMPUTED_INPUTS[field_name]),
+            'reason': (
+                f'Answered explicitly through the patient-record negative-answer '
+                f'endpoint as an attestation with a snapshot. While confirmed, '
+                f'the answer wins over the {label.lower()} source fact; '
+                f'withdraw it to return to the derived value.'
+            ),
+        }
+
     # A clinician's Lugano assessment has no PET/CT or bone-marrow result in
     # the record to derive it from, so it is an input the reader supplies.
     # The row was read-only with no door at all (#5667 follow-up).

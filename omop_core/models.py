@@ -3280,6 +3280,46 @@ class PreexistingConditionsAttestation(models.Model):
                 f'{self.confirmed_at:%Y-%m-%d}')
 
 
+class ExplicitNegativeAnswer(models.Model):
+    """A person's explicit confirmation of a derived negative state (#5666).
+
+    ``no_active_infection_status`` and ``no_other_active_malignancies`` are
+    formulas over recorded facts, so a generic PATCH is undone by the next
+    derivation. The confirmation is an attestation: it is answered through its
+    own endpoint with a snapshot, wins over the formula while it exists, and can
+    be withdrawn. Absence of the row means "not answered" -- the derived value
+    stays in charge.
+
+    Only a confirmation of the negative is accepted here. A recorded active
+    infection or more than one active malignancy is the source fact; the
+    endpoint refuses to confirm against it instead of silently overwriting it.
+    """
+    ANSWER_FIELDS = ('no_active_infection_status', 'no_other_active_malignancies')
+
+    person = models.ForeignKey(
+        Person, on_delete=models.CASCADE,
+        related_name='explicit_negative_answers',
+    )
+    field = models.CharField(max_length=64)
+    answer = models.BooleanField(default=True)
+    confirmed_at = models.DateTimeField()
+    # Where the statement came from ('patient', 'clinician', 'host'); provenance
+    # only, never a clinical decision.
+    source = models.CharField(max_length=20, default='patient')
+
+    class Meta:
+        db_table = 'explicit_negative_answer'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['person', 'field'],
+                name='uq_explicit_negative_answer_person_field',
+            ),
+        ]
+
+    def __str__(self):
+        return f'Person {self.person_id} {self.field}={self.answer}'
+
+
 class PatientRecord(models.Model):
     """
     Comprehensive patient information model — OMOP CDM–aligned PatientRecord projection.

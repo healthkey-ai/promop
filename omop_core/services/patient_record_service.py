@@ -1219,6 +1219,7 @@ def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fiel
     patient_info.user_edited_fields = sorted(pending_aliases)
     # Full refresh clears these before extraction. Direct edits need to clear
     # dependent results when an input is removed, without clearing other data.
+    attested = attested_negative_fields(patient_info)
     for result, inputs in {
         'hr_status': {'estrogen_receptor_status', 'progesterone_receptor_status'},
         'metastatic_status': {'distant_metastasis_stage'},
@@ -1227,7 +1228,9 @@ def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fiel
         'no_other_active_malignancies': {'active_malignancies'},
     }.items():
         if inputs.intersection(changed_fields):
-            setattr(patient_info, result, None)
+            # An explicit confirmation survives a source edit; the audit
+            # reports a resulting contradiction for review.
+            setattr(patient_info, result, True if result in attested else None)
     from omop_core.services.flipi import calculate_flipi
     if (patient_info.flipi_score_options is not None
             or 'flipi_score_options' in changed_fields):
@@ -4979,11 +4982,36 @@ def tp53_disruption_from_findings(findings):
     return None
 
 
+def attested_negative_fields(patient_info):
+    """The negative fields the person explicitly confirmed (#5666).
+
+    While a row exists the attestation wins over the source-fact derivation.
+    The endpoint refuses to create one against a contradiction; a later source
+    change is reported by `audit_explicit_negative_answers`, not overwritten.
+    """
+    person_id = getattr(patient_info, 'person_id', None)
+    if not person_id:
+        return set()
+    from omop_core.models import ExplicitNegativeAnswer
+    return set(ExplicitNegativeAnswer.objects.filter(
+        person_id=person_id, answer=True,
+    ).values_list('field', flat=True))
+
+
 def _compute_derived_fields(patient_info: PatientRecord, *, apply_formulas=True) -> None:
     """Compute fields that depend on other PatientRecord fields being set."""
-    if patient_info.active_infection_status is not None:
+    # #5666: an explicit confirmation is an attestation, not a formula output.
+    # While it exists it wins; withdrawing it removes the row and the source
+    # facts below take over again. A later contradicting source fact is
+    # reported by audit_explicit_negative_answers, never silently overwritten.
+    attested = attested_negative_fields(patient_info)
+    if 'no_active_infection_status' in attested:
+        patient_info.no_active_infection_status = True
+    elif patient_info.active_infection_status is not None:
         patient_info.no_active_infection_status = not patient_info.active_infection_status
-    if patient_info.active_malignancies is not None:
+    if 'no_other_active_malignancies' in attested:
+        patient_info.no_other_active_malignancies = True
+    elif patient_info.active_malignancies is not None:
         # The active-malignancies list includes the primary cancer when present;
         # one entry therefore means there is no *other* active malignancy.
         patient_info.no_other_active_malignancies = len(patient_info.active_malignancies) <= 1
