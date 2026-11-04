@@ -37,9 +37,9 @@ def test_preparation_never_invokes_an_unconditional_full_loader():
     # commands below load whole vocabularies and must not run on a web boot.
     assert 'python manage.py seed_omop_concepts' not in script
     assert 'python manage.py load_athena_vocabularies' not in script
-    assert 'python manage.py prepare_production_database --gdrive' in script
-    assert 'python manage.py queue_athena_vocabulary_sync --gdrive' in script
-    assert 'python manage.py sync_athena_vocabulary --gdrive' not in script
+    assert 'python manage.py prepare_production_database "${ATHENA_SOURCE_ARGS[@]}"' in script
+    assert 'python manage.py queue_athena_vocabulary_sync "${ATHENA_SOURCE_ARGS[@]}"' in script
+    assert 'python manage.py sync_athena_vocabulary' not in script
 
 
 def test_preparation_checks_the_environment_before_touching_the_database():
@@ -56,9 +56,14 @@ def test_preparation_checks_the_environment_before_touching_the_database():
 def test_preparation_aborts_without_an_athena_source():
     script = commands(PREPARE)
 
-    # ':?' expansion, not a default: a deployment with no vocabulary source is a
-    # broken deployment, and every target pointed at this script must set it.
-    assert ':"${ATHENA_VOCABULARY_GDRIVE_URL:?' in script.replace(': "', ':"')
+    # An explicit exit, not a default: a deployment with no vocabulary source is
+    # a broken deployment, and every target pointed at this script must set one.
+    # Either source will do (#2288): the LFS repository is tried first and the
+    # Drive folder is the fallback, so each is passed only when set.
+    assert '--lfs "$ATHENA_VOCABULARY_LFS_URL"' in script
+    assert '--gdrive "$ATHENA_VOCABULARY_GDRIVE_URL"' in script
+    assert 'if [ "${#ATHENA_SOURCE_ARGS[@]}" -eq 0 ]; then' in script
+    assert script.index('-eq 0 ]; then') < script.index('prepare_production_database')
 
 
 def test_preparation_does_not_start_a_server():
@@ -234,3 +239,7 @@ def test_render_requires_the_athena_source_for_the_web_service():
 
     web_service = blueprint.split('  - type: worker', 1)[0]
     assert '- key: ATHENA_VOCABULARY_GDRIVE_URL' in web_service
+    # The LFS repository is public and the same for every deployment, so the
+    # blueprint carries its value; the Drive fallback stays dashboard-managed.
+    assert '- key: ATHENA_VOCABULARY_LFS_URL' in web_service
+    assert 'value: https://github.com/healthkey-ai/omop-vocabularies' in web_service

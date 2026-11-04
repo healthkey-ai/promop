@@ -276,7 +276,7 @@ def sync_athena_vocabulary_task(self, sync_id: int) -> dict[str, Any]:
     )
     try:
         call_command(
-            'sync_athena_vocabulary', gdrive=sync.source_url, apply=True,
+            'sync_athena_vocabulary', source=sync.source_url, apply=True,
             sync_id=sync_id,
         )
     except Exception as exc:

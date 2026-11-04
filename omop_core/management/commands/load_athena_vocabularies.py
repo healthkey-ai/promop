@@ -23,6 +23,8 @@ import requests
 
 import logging
 
+from omop_core.services import vocabulary_source
+from omop_core.services.vocabulary_source import DEFAULT_LFS_URL
 from omop_core.models import (
     Vocabulary, Domain, ConceptClass, Concept,
     Relationship, ConceptRelationship, ConceptAncestor, CdmSource,
@@ -531,7 +533,14 @@ class Command(EmbeddingLoadCommand):
         parser.add_argument('--gdrive', nargs='?', const=DEFAULT_GDRIVE_URL,
                             help=(
                                 'Google Drive folder or file URL containing a zipped '
-                                f'Athena vocabulary export. Defaults to {DEFAULT_GDRIVE_URL}.'
+                                f'Athena vocabulary export. Defaults to {DEFAULT_GDRIVE_URL}. '
+                                'With --lfs it is the fallback source.'
+                            ))
+        parser.add_argument('--lfs', nargs='?', const=DEFAULT_LFS_URL,
+                            help=(
+                                'GitHub repository publishing the Athena and LOINC ZIPs as '
+                                'Git LFS objects with a manifest.json. Tried before --gdrive. '
+                                f'Defaults to {DEFAULT_LFS_URL}.'
                             ))
         parser.add_argument('--replace', action='store_true', help=(
             'Remove Athena concepts absent from the incoming release after loading. '
@@ -585,6 +594,7 @@ class Command(EmbeddingLoadCommand):
         archive = options['archive']
         bucket_name = options['bucket']
         gdrive_url = options['gdrive']
+        lfs_url = options.get('lfs')
         replace = options['replace']
         dry_run = options['dry_run']
         loinc_archive = options.get('loinc_archive')
@@ -600,9 +610,12 @@ class Command(EmbeddingLoadCommand):
             options['concepts_only'] = True
             options['skip_umls_cache'] = True
 
-        sources = [bool(base), bool(archive), bool(bucket_name), bool(gdrive_url)]
+        # --lfs and --gdrive may be given together: LFS first, Drive as the
+        # fallback (#2288). Every other source stands alone.
+        remote = bool(lfs_url or gdrive_url)
+        sources = [bool(base), bool(archive), bool(bucket_name), remote]
         if sum(sources) != 1:
-            raise CommandError('Provide exactly one of --path, --archive, --bucket, or --gdrive')
+            raise CommandError('Provide exactly one of --path, --archive, --bucket, or --gdrive/--lfs')
 
         self._gcs_bucket = None
         self._archive = None
@@ -610,8 +623,17 @@ class Command(EmbeddingLoadCommand):
             from google.cloud import storage as gcs
             self._gcs_bucket = gcs.Client().bucket(bucket_name)
             self._log(f'Loading from gs://{bucket_name}/ (download-one-process-delete)')
-        if gdrive_url:
-            archive = _download_gdrive_vocabulary(gdrive_url, download_dir, self._log)
+        if remote:
+            selection = vocabulary_source.resolve_vocabulary_source(
+                lfs=lfs_url, gdrive=gdrive_url, log=self._log,
+            )
+            archive = vocabulary_source.download_vocabulary_archive(
+                selection, download_dir, self._log,
+            )
+            if self._loinc_archive_path is None and selection.get('loinc_archive_id'):
+                self._loinc_archive_path = vocabulary_source.download_loinc_archive(
+                    selection, download_dir, self._log,
+                )
         if archive:
             self._archive = _VocabularyArchive(archive, self._log)
 
