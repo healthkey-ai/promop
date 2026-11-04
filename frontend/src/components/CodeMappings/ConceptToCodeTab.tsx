@@ -527,9 +527,21 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
         const { data: next } = await api.get<Run>(`/v1/concept-to-code/suggest-runs/${run.run_id}/`);
         if (current) {
           setRun(next);
-          // Auto-proposed mappings land in the Existing Mappings groups; bump
-          // revision so those groups reload once the run finishes (#2269).
-          if (next.state === 'success' && next.destinations) setRevision(v => v + 1);
+          if (next.state === 'success' || next.state === 'failure') {
+            // Move the finished run's candidates into previousCandidates so the
+            // next run's exclude_keys reliably skips them (#2262).
+            const finished = (next.activity.find(e => e.concept.concept_id === concept.concept_id)?.candidates ?? [])
+              .filter((item: Source) => !item.declined);
+            if (finished.length) {
+              setPreviousCandidates(accumulated => {
+                const seen = new Set(finished.map(sourceKey));
+                return [...accumulated.filter((row: Source) => !seen.has(sourceKey(row))), ...finished];
+              });
+            }
+            // Auto-proposed mappings land in the Existing Mappings groups; bump
+            // revision so those groups reload once the run finishes (#2269).
+            if (next.destinations) setRevision(v => v + 1);
+          }
         }
       } catch {
         if (current) { setError('Could not read search progress. Run the search again to retry.'); setRun(previous => previous ? { ...previous, state: 'failure' } : null); }
@@ -836,7 +848,7 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
   const retry = () => { resetView(); setError(''); setRevision(value => value + 1); };
   return <section aria-label={`Source codes for ${concept.concept_name}`} className="space-y-4">
     <div role="group" aria-label="Source code views" className="flex flex-wrap gap-2">
-      {([['linked', 'Existing mappings'], ['candidates', 'Suggested source codes']] as const).map(([key, label]) =>
+      {([['candidates', 'Suggested source codes'], ['linked', 'Existing mappings']] as const).map(([key, label]) =>
         <button key={key} className={`${button} ${mode === key ? 'bg-slate-100 font-semibold' : ''}`} disabled={writing} aria-pressed={mode === key}
           onClick={() => changeMode(key)}>{label}</button>)}
     </div>
