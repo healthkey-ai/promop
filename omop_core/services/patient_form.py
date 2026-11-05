@@ -443,6 +443,7 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
     # descriptor now offers `hemoglobin_level` and its unit rather than the
     # canonical g/dL column.
     pair_derived = set()
+    pair_pending = set()
     if HEMOGLOBIN_PAIR in changes or HEMOGLOBIN_UNIT in changes:
         # Permission comes from the filtered descriptor, before any value is
         # added: a host that withheld the source pair must not have its
@@ -505,9 +506,14 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
                 changes.pop(HEMOGLOBIN_PAIR, None)
                 changes.pop(HEMOGLOBIN_UNIT, None)
             else:
-                if not unit_forbidden:
+                if unit_forbidden:
                     # A read-only unit is left untouched; the pair's value is
-                    # normalised in the unit the record already has.
+                    # normalised in the unit the record already has. The
+                    # companion marker still has to be pending, or the next
+                    # refresh clears the unit and reads the number as g/dL.
+                    changes.pop(HEMOGLOBIN_UNIT, None)
+                    pair_pending.add(HEMOGLOBIN_UNIT)
+                else:
                     changes[HEMOGLOBIN_UNIT] = code
                 if canonical_allowed:
                     # A host that withheld the canonical still gets the pair;
@@ -823,7 +829,7 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
                 unit_fields.add(f'{field}_units')
         clinical_direct = set(direct) - set(profile_changes)
         record.user_edited_fields = sorted(
-            set(record.user_edited_fields or []) | clinical_direct)
+            set(record.user_edited_fields or []) | clinical_direct | pair_pending)
         record.save(update_fields=sorted(set(direct) | unit_fields)
                     + ['user_edited_fields'])
         from omop_core.services.patient_record_revisions import write_record_revisions

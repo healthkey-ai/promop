@@ -582,30 +582,66 @@ def test_a_caller_read_only_unit_cannot_be_initialised(api):
     assert saved.hemoglobin_g_dl is None
 
 
+def _read_only_unit_descriptor(api):
+    from omop_core.services.write_descriptor import build_writable_field_descriptor
+
+    descriptor = build_writable_field_descriptor()
+    descriptor['hemoglobin_level_units'].update(
+        writable=True, read_only_for_caller=True,
+    )
+    return descriptor
+
+
 def test_a_caller_read_only_unit_can_be_used_as_stored(api):
     from omop_core.services.patient_form import apply_patient_form_patch
-    from omop_core.services.write_descriptor import build_writable_field_descriptor
 
     record = _record()
     record.hemoglobin_level = 120
     record.hemoglobin_level_units = 'G/L'
     record.hemoglobin_g_dl = 12
-    record.user_edited_fields = ['hemoglobin_level', 'hemoglobin_level_units']
+    record.user_edited_fields = []
     record.save()
-    descriptor = build_writable_field_descriptor()
-    descriptor['hemoglobin_level_units'].update(
-        writable=True, read_only_for_caller=True,
-    )
 
     saved, result = apply_patient_form_patch(
-        record.person, {'hemoglobin_level': 130}, descriptor=descriptor,
+        record.person, {'hemoglobin_level': 130},
+        descriptor=_read_only_unit_descriptor(api),
     )
 
     # The value may change in the unit the record already uses; the unit
-    # itself is not rewritten or newly marked as edited.
+    # itself is not rewritten, but it has to stay protected with its value.
     assert 'hemoglobin_level' in result.applied
     assert 'hemoglobin_level_units' not in result.applied
     saved.refresh_from_db()
     assert float(saved.hemoglobin_level) == 130
+    assert saved.hemoglobin_level_units == 'G/L'
+    assert float(saved.hemoglobin_g_dl) == 13.0
+
+    refreshed = refresh_patient_record(saved.person)
+    assert float(refreshed.hemoglobin_level) == 130
+    assert refreshed.hemoglobin_level_units == 'G/L'
+    assert float(refreshed.hemoglobin_g_dl) == 13.0
+
+
+def test_a_caller_read_only_unit_is_not_rewritten_when_echoed(api):
+    from omop_core.services.patient_form import apply_patient_form_patch
+
+    record = _record()
+    record.hemoglobin_level = 120
+    record.hemoglobin_level_units = 'G/L'
+    record.hemoglobin_g_dl = 12
+    record.user_edited_fields = []
+    record.save()
+
+    saved, result = apply_patient_form_patch(
+        record.person,
+        {'hemoglobin_level': 130, 'hemoglobin_level_units': 'g/L'},
+        descriptor=_read_only_unit_descriptor(api),
+    )
+
+    assert 'hemoglobin_level' in result.applied
+    assert 'hemoglobin_level_units' not in result.applied
+    saved.refresh_from_db()
+    # The stored code stays the code, not the echoed display label, and the
+    # value is normalised in the stored unit.
     assert saved.hemoglobin_level_units == 'G/L'
     assert float(saved.hemoglobin_g_dl) == 13.0
