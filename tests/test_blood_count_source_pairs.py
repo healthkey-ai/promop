@@ -359,3 +359,20 @@ def test_the_precision_rollback_guard_blocks_concurrent_writes():
                     'WHERE person_id = %s',
                     [record.person_id],
                 )
+
+
+def test_a_pending_canonical_clear_wins_over_a_stale_count_pair():
+    """The same precedence holds for the cell-count source pairs."""
+    from omop_core.services.patient_record_service import recompute_patient_record_fields
+
+    record = _record()
+    record.absolute_neutrophile_count = 1550
+    record.absolute_neutrophile_count_units = 'CELLS/UL'
+    record.anc_thousand_per_ul = None
+    record.user_edited_fields = ['anc_thousand_per_ul']
+    record.save()
+
+    recompute_patient_record_fields(record)
+
+    record.refresh_from_db()
+    assert record.anc_thousand_per_ul is None

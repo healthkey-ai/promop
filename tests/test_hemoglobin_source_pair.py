@@ -751,3 +751,26 @@ def test_recompute_does_not_derive_an_unstorable_canonical():
     assert record.hemoglobin_level_units == 'G/L'
     assert {'hemoglobin_level', 'hemoglobin_level_units'} <= set(
         record.user_edited_fields or [])
+
+
+def test_a_pending_canonical_clear_wins_over_a_stale_source_pair():
+    """An explicit canonical clear must not be undone by an old source value.
+
+    A legacy clear writes `hemoglobin_g_dl=None` and marks it pending while the
+    previously derived `hemoglobin_level` can still hold the old number. The pair
+    is not pending, so it must not re-derive the canonical from that stale source.
+    """
+    from omop_core.services.patient_record_service import recompute_patient_record_fields
+
+    record = _record()
+    record.hemoglobin_level = 12.5
+    record.hemoglobin_level_units = 'G/DL'
+    record.hemoglobin_g_dl = None
+    record.user_edited_fields = ['hemoglobin_g_dl']
+    record.save()
+
+    recompute_patient_record_fields(record)
+
+    record.refresh_from_db()
+    assert record.hemoglobin_g_dl is None
+    assert record.hemoglobin_level is None
