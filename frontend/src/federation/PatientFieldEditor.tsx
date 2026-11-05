@@ -124,13 +124,19 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
     const canWrite = !readOnly && state.writable && source?.writable === true
       && source.target === 'patient_record';
     const answer = raw === true ? 'No' : raw === false ? 'Yes' : 'Unknown';
+    // A host that withholds the positive column says why on that field; keep
+    // that reason next to the inversion, or the row explains the mapping but
+    // not why it cannot be answered here.
+    const blocked = source && source.writable !== true ? source.reason : undefined;
+    const readOnlyReason = [blocked, field.reason].filter(Boolean).join(' ')
+      || 'Inverted view of the positive status.';
     return <div className="space-y-1" data-field={canonical}>
       {canWrite ? <Field label={compact ? '' : label} name={canonical} type="boolean"
           value={inverted} triState={source.tri_state === true}
           onChange={(_name, next) => store.enqueue(negatedSource,
             next === true ? false : next === false ? true : next)} />
         : <><div>{!compact && <span className="text-sm font-medium">{label}: </span>}{answer}</div>
-          <p className="text-xs text-muted-foreground">{field.reason ?? 'Inverted view of the positive status.'}
+          <p className="text-xs text-muted-foreground">{readOnlyReason}
             {' '}{infoHref && <a href={infoHref}>Open Your Info</a>}</p></>}
       {negatedSource in state.pending && <span role="status" className="text-xs">Saving…</span>}
       {state.errors[negatedSource] && <p role="alert" className="text-xs text-red-600">{state.errors[negatedSource]}</p>}
