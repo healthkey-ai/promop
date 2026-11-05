@@ -93,6 +93,31 @@ and a test database built without migrations; `tests/conftest.py`'s
 `lab_field_mappings` fixture seeds the rows for a test that must derive through
 the tables.
 
+A seeded row resolves its concept when the vocabulary arrives. On a fresh
+instance the migrations run before any vocabulary is loaded, so 0240 saves
+every row with `concept = NULL` and only its `(vocabulary_id, concept_code)`
+text (`FieldConceptMapping.concept` is a db-constrained FK, so nothing else
+is possible); `resolve_lab_code_fields` requires a resolved concept, so the
+instance would stay on the extractor table, the alias join would find
+nothing, and the editor and `copy_reference_data` would see every seeded row
+unresolved. `load_athena_vocabularies` therefore ends every successful
+non-dry-run load, `--concepts-only` included, by running
+`resolve_field_concept_mappings` in the
+[field concept resolution service](../omop_core/services/field_concept_resolution.py):
+every mapping with no concept but a vocabulary and a code is pointed at the
+Concept that pair names, in batches, and the load log reports how many rows
+resolved and which are still unresolved (a code outside the load scope, or a
+HealthKey-minted concept). Only the FK is filled in: text, status, provenance
+and `updated_at` are untouched, a row that already points at a concept is
+never a candidate, and a second run changes nothing. The migration bootstrap
+(`prepare_production_database`) loads at the 0200 schema baseline, before the
+curation tables are seeded, and does not run it. An instance that loaded its
+vocabulary before this hook existed, or seeded or copied mappings after the
+load, runs `manage.py resolve_field_concept_mappings` once (`--dry-run`
+reports and rolls back). `SourceCodeConceptMapping` needs no such pass: its
+concept FKs are unconstrained, so the seed stores the id before the Concept
+exists.
+
 ## Scalar save, projection and refresh
 
 Clinical and profile editors PATCH

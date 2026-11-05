@@ -728,6 +728,7 @@ class Command(EmbeddingLoadCommand):
                 self._load_code_mappings(options['verbosity'])
             self._load_loinc_axes()
             self._publish_release(counts)
+            self._resolve_field_concept_mappings()
         elapsed = time.monotonic() - t0
         verb = 'would load' if dry_run else 'loaded'
         total = sum(counts.values())
@@ -750,6 +751,27 @@ class Command(EmbeddingLoadCommand):
     def _log(self, msg):
         self.stdout.write(msg)
         self.stdout.flush()
+
+    def _resolve_field_concept_mappings(self):
+        """Point the seeded field mappings at the Concepts this load brought.
+
+        On a fresh instance migration 0240 runs before any vocabulary is
+        loaded, so every FieldConceptMapping it seeds has its concept named
+        only by (vocabulary_id, concept_code) and a NULL FK; lab derivation
+        then falls back to the extractor table and the editor shows every row
+        unresolved. Runs after the concept rows are committed (each table
+        loads in its own transaction), on every successful non-dry-run load
+        including --concepts-only, and not on the migration bootstrap, which
+        loads at the 0200 schema baseline before the curation tables are
+        seeded. An instance that loaded Athena before this hook existed runs
+        ``manage.py resolve_field_concept_mappings`` once.
+        """
+        from omop_core.services.field_concept_resolution import (
+            resolve_field_concept_mappings,
+        )
+
+        result = resolve_field_concept_mappings()
+        self._log(f'  {result.summary()}')
 
     def _load_loinc_axes(self):
         """Load LOINC axes from a LOINC release archive when available.
