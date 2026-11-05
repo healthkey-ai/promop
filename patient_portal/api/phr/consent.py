@@ -12,15 +12,24 @@ GET  consent/history/    every answer the member has given, newest first
 English. A decision names the version the member saw, and is refused with
 409 when that is no longer the published version, so stale wording is never
 agreed to.
+
+Withdrawing the record permission (``CONSENT_RECORD_PURPOSE_KEY``) closes the
+account: the withdrawal and its ledger entry are written, then the account,
+record and data are deleted in the same transaction, and the response says
+``account_deleted`` instead of the consent state (docs/account-deletion.md).
 """
 from __future__ import annotations
 
+from django.contrib.auth import logout
 from django.core.exceptions import ValidationError
 from django.db import transaction
 from rest_framework.response import Response
 
 from patient_portal import consent as svc
-from patient_portal.models import ConsentEvent, ConsentPurpose, DocumentAcceptance, LegalDocument
+from patient_portal.account_deletion import delete_member
+from patient_portal.models import (
+    ConsentEvent, ConsentPurpose, DeletionLogEntry, DocumentAcceptance, LegalDocument,
+)
 
 from .views import PhrView
 
@@ -115,6 +124,7 @@ class ConsentView(PhrView):
         if not email:
             return Response({'detail': svc.NO_EMAIL}, status=400)
         purposes = {p.key: p for p in ConsentPurpose.objects.filter(is_active=True).prefetch_related('texts')}
+        closes_account = False
         try:
             with transaction.atomic():
                 for item in decisions:
@@ -124,17 +134,32 @@ class ConsentView(PhrView):
                     purpose = purposes.get(key)
                     if purpose is None:
                         raise ValidationError(f'Unknown purpose {key!r}.')
+                    decision = _string(item.get('decision'), 'decision')
                     frequency = item.get('frequency') or ''
                     svc.record_consent(
-                        person, purpose, _string(item.get('decision'), 'decision'),
+                        person, purpose, decision,
                         version=_string(item.get('version'), 'version'), language=language,
                         frequency=frequency if isinstance(frequency, str) else '',
                         recorded_by=request.user, source=ConsentEvent.MEMBER, email=email,
+                    )
+                    closes_account = closes_account or svc.withdrawal_closes_account(key, decision)
+                if closes_account:
+                    # After every decision is recorded: the person must still
+                    # exist for the events, and the ledger keeps them all.
+                    entry = delete_member(
+                        person, reason=DeletionLogEntry.PERMISSION_WITHDRAWN, identity=request.user,
                     )
         except svc.StaleVersion as e:
             return Response({'detail': e.messages[0]}, status=409)
         except ValidationError as e:
             return Response({'detail': e.messages[0]}, status=400)
+        if closes_account:
+            logout(request)
+            return Response({
+                'account_deleted': True,
+                'detail': 'Your record permission was withdrawn, so your account and all of its data have been deleted.',
+                'deleted_at': entry.deleted_at,
+            })
         return Response(self.build(person, record, language))
 
 

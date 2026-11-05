@@ -808,6 +808,11 @@ PROLOG_PROFILE = 'integrated'
 # The participant a response is bound to (PROlog DEP-2).
 PROLOG_PARTICIPANT_MODEL = 'omop_core.Person'
 
+# Consent model v2: the permission whose withdrawal closes the account. A
+# member recording "withdrawn" on this purpose has their account, record and
+# data deleted in the same transaction (docs/account-deletion.md).
+CONSENT_RECORD_PURPOSE_KEY = os.environ.get('CONSENT_RECORD_PURPOSE_KEY', 'my_record')
+
 # Resolves the signed-in participant; returns None for anyone who is not a
 # patient, so their response is bound to a fresh unidentified person instead.
 PROLOG_PARTICIPANT_RESOLVER = 'patient_portal.services.prolog_participant_id'

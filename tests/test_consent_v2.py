@@ -300,13 +300,15 @@ def test_post_records_several_answers_at_once_or_none(member, purposes):
 
 
 def test_withdrawing_from_settings_keeps_the_grant_in_the_history(member, purposes):
+    # Withdrawing ``my_record`` closes the account (tests/test_phr_account_deletion.py),
+    # so the history is checked on a purpose that does not.
     client, person = member['client'], member['person']
-    client.post('/api/v1/phr/consent/', {'decisions': [{'purpose': 'my_record', 'decision': 'granted', 'version': '1.0'}]}, format='json')
-    r = client.post('/api/v1/phr/consent/', {'decisions': [{'purpose': 'my_record', 'decision': 'withdrawn', 'version': '1.0'}]}, format='json')
+    client.post('/api/v1/phr/consent/', {'decisions': [{'purpose': 'research', 'decision': 'granted', 'version': '1.0'}]}, format='json')
+    r = client.post('/api/v1/phr/consent/', {'decisions': [{'purpose': 'research', 'decision': 'withdrawn', 'version': '1.0'}]}, format='json')
     assert r.status_code == 200
-    assert svc.has_consent(person, 'my_record') is False
+    assert svc.has_consent(person, 'research') is False
     h = client.get('/api/v1/phr/consent/history/').data['history']
-    assert [(x['key'], x['decision']) for x in h] == [('my_record', 'withdrawn'), ('my_record', 'granted')]
+    assert [(x['key'], x['decision']) for x in h] == [('research', 'withdrawn'), ('research', 'granted')]
 
 
 def test_post_refuses_stale_wording_and_unknown_purposes(member, purposes):

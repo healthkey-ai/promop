@@ -8,6 +8,16 @@ All notable changes to PRomop are documented here.
 
 ### Added
 
+- **Account deletion** — `DELETE /api/v1/phr/account/` closes the signed-in
+  member's account: the login, the record, the clinical rows and the PROlog
+  responses go in one transaction, and so does withdrawing the record
+  permission (`CONSENT_RECORD_PURPOSE_KEY`, `my_record`) through
+  `/api/v1/phr/consent/`. The legacy `/api/patient-info/me/` DELETE and the
+  administrator's `admin-delete` share the same service. Every deletion writes
+  an append-only, hash-chained `DeletionLogEntry` holding ids and a time, no
+  content; `manage.py replay_deletion_log` verifies the chain and deletes
+  again whatever a backup restore brought back. The consent ledger stays. See
+  [account deletion](docs/account-deletion.md). (#2307)
 - **Consent model v2** — purposes (permissions, contact preferences,
   declarations) and legal documents are data with versioned texts per
   language, loaded by `load_consent_texts` or edited in the admin, so legal
