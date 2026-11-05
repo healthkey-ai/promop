@@ -530,7 +530,7 @@ by `measurement_concept.concept_code` (LOINC), then by
 | PatientRecord field | LOINC | Description |
 |---------------------|-------|-------------|
 | `monoclonal_protein_serum` | 51435-6 | Serum M-spike (M-protein) |
-| `monoclonal_protein_urine` | 32730-5 | Urine M-spike 24 h |
+| `monoclonal_protein_urine` | 42482-0 | Urine M-spike 24 h |
 | `kappa_flc` | 36916-5 | Kappa free light chains |
 | `lambda_flc` | 33944-0 | Lambda free light chains |
 | `clonal_plasma_cells` | 26098-4 | Plasma cells % in bone marrow |
@@ -545,7 +545,7 @@ categorical fields, `value_as_number` for numeric.
 | `smoking_status` | 72166-2 | str |
 | `pack_years` | 63640-7 | float |
 | `alcohol_use` | 74013-4 | str |
-| `drinks_per_week` | 11286-7 | int |
+| `drinks_per_week` | 44940-5 | int |
 | `exercise_frequency` | 68516-4 | str |
 | `exercise_minutes_per_week` | 89555-7 | int |
 | `diet_type` | 88365-2 | str |
@@ -557,7 +557,7 @@ categorical fields, `value_as_number` for numeric.
 | `marital_status` | 45404-1 | str |
 | `insurance_type` | 76513-1 | str |
 | `number_of_dependents` | 63512-8 | int |
-| `annual_household_income` | 77243-3 | int |
+| `annual_household_income` | 63586-2 | int |
 
 ### Performance status — `_get_performance_data`
 
@@ -576,7 +576,7 @@ categorical fields, `value_as_number` for numeric.
 
 | PatientRecord field | OMOP table | LOINC codes |
 |---------------------|------------|------------|
-| `genetic_mutations` | `measurement` | 21636-6 (BRCA1), 21637-4 (BRCA2), 21667-1 (TP53), 12375-4 (KRAS), 81704-2 (EGFR), 62318-1 (PIK3CA) |
+| `genetic_mutations` | `measurement` | 21636-6 (BRCA1), 79208-5 (BRCA2), 103680-5 (TP53), 12375-4 (KRAS), 81704-2 (EGFR), 62318-1 (PIK3CA) |
 
 Result is a JSON array: `[{gene, origin, interpretation}, …]`
 
@@ -620,9 +620,9 @@ Metrics require ≥ 7 valid days (`WEARABLE_MIN_VALID_DAYS`) to be emitted.
 
 | PatientRecord field | OMOP table | LOINC |
 |---------------------|------------|-------|
-| `plasma_cell_leukemia` | `measurement` | 47082-2 |
-| `bone_lesions` | `measurement` | 24646-7 |
-| `meets_crab` | `measurement` | 89599-5 |
+| `plasma_cell_leukemia` | `measurement` / `observation` | SNOMED 95210003 |
+| `bone_lesions` | `measurement` / `observation` | HK-Observation `hko:bone-lesions` |
+| `meets_crab` | `measurement` / `observation` | HK-Observation `hko:meets-crab-criteria` |
 | `meets_slim` | — | derived from `kappa_flc`, `lambda_flc`, `clonal_plasma_cells` |
 
 ### CLL-specific — `_get_cll_data`

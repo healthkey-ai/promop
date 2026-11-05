@@ -72,7 +72,9 @@ from omop_core.services.patient_cleanup import delete_omop_clinical_rows
 from omop_core.services.prolog_cleanup import delete_prolog_data_for_persons
 from omop_core.services.lot_inference_service import infer_lot_for_person
 from omop_core.services.episode_service import upsert_therapy_line_episode
-from omop_core.services.mappings import CONCEPT_GENERIC_LAB, CONCEPT_PATIENT_REPORTED_TYPE, get_gender_concept
+from omop_core.services.mappings import (
+    CONCEPT_GENERIC_LAB, CONCEPT_PATIENT_REPORTED_TYPE, HK_OBSERVATION_SYSTEM, get_gender_concept,
+)
 from omop_core.services.demographics import resolve_concept as resolve_demographic_concept
 from omop_core.services.pk import next_pk, next_pk_batch
 from omop_core.services.provenance_attribution import (
@@ -3086,13 +3088,20 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         value_number = observation.get('valueQuantity', {}).get('value') if observation.get('valueQuantity') else None
                         value_codeable = observation.get('valueCodeableConcept', {}).get('text') if observation.get('valueCodeableConcept') else None
                         
-                        # Get LOINC code for lab mapping
+                        # Get LOINC code for lab mapping. A SNOMED or HealthKey
+                        # (hko:) code stands in where the field's reviewed code is
+                        # one of those; a made-up code under loinc.org never does.
                         loinc_code = None
                         if obs_code.get('coding'):
                             for coding in obs_code['coding']:
                                 if coding.get('system') == 'http://loinc.org':
                                     loinc_code = coding.get('code')
                                     break
+                            if loinc_code is None:
+                                for coding in obs_code['coding']:
+                                    if coding.get('system') in ('http://snomed.info/sct', HK_OBSERVATION_SYSTEM):
+                                        loinc_code = coding.get('code')
+                                        break
                         
                         # Map LOINC codes to blood count fields
                         if loinc_code == '718-7':  # Hemoglobin
@@ -3146,7 +3155,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         elif loinc_code == '2885-2':  # Total Protein
                             total_protein = value_number
                         # Other markers
-                        elif loinc_code == '1754-1' or loinc_code == '48346-3':  # Beta-2 Microglobulin
+                        elif loinc_code == '1952-1':  # Beta-2 Microglobulin (1754-1 is urine albumin; 48346-3 is not a LOINC code)
                             beta2_microglobulin = value_number
                         elif loinc_code == '1988-5':  # C-Reactive Protein
                             c_reactive_protein = value_number
@@ -3186,7 +3195,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             pack_years = value_number
                         elif loinc_code == '74013-4':  # Alcohol Use
                             alcohol_use = value_codeable[:50] if value_codeable else value_codeable
-                        elif loinc_code == '11286-7':  # Drinks per Week
+                        elif loinc_code == '44940-5':  # Drinks per Week
                             drinks_per_week = value_number
                         elif loinc_code == '68516-4':  # Exercise Frequency
                             exercise_frequency = value_codeable[:50] if value_codeable else value_codeable
@@ -3214,7 +3223,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             insurance_type = value_codeable
                         elif loinc_code == '63512-8':  # Number of Dependents
                             number_of_dependents = value_number
-                        elif loinc_code == '77243-3':  # Annual Household Income
+                        elif loinc_code == '63586-2':  # Total family income in last year
                             annual_household_income = value_number
                         # Cancer Assessment Fields
                         elif loinc_code == '89247-1':  # ECOG Performance Status
@@ -3249,12 +3258,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             if observation.get('valueCodeableConcept'):
                                 value_concept = observation['valueCodeableConcept']
                                 her2_status = value_concept.get('text') or (value_concept.get('coding') or [{}])[0].get('display')
-                        elif loinc_code == '42804-5':  # Therapy Intent
+                        elif loinc_code == '104803-2':  # Therapeutic intent
                             obs_date = observation.get('effectiveDateTime', '')[:10] if observation.get('effectiveDateTime') else None
                             therapy_intent_observations.append({'date': obs_date, 'value': value_codeable})
                             if not therapy_intent:  # Keep first for backwards compatibility
                                 therapy_intent = value_codeable[:50] if value_codeable else value_codeable
-                        elif loinc_code == '91379-3':  # Reason for Discontinuation
+                        elif loinc_code == '64882-4':  # Reason stopped (discontinuation)
                             obs_date = observation.get('effectiveDateTime', '')[:10] if observation.get('effectiveDateTime') else None
                             discontinuation_observations.append({'date': obs_date, 'value': value_codeable})
                             if not reason_for_discontinuation:  # Keep first for backwards compatibility
@@ -3273,17 +3282,17 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             pregnancy_test_result_value = value_codeable[:50] if value_codeable else value_codeable
                             if observation.get('effectiveDateTime'):
                                 pregnancy_test_date = observation['effectiveDateTime'][:10]
-                        elif loinc_code == '8659-8':  # Contraceptive Use
+                        elif loinc_code == '13197004':  # Uses contraception (SNOMED)
                             contraceptive_use = value_codeable and value_codeable.lower() in ['yes', 'true']
                         # Consent and Support
-                        elif loinc_code == '75985-6':  # Ability to Consent
+                        elif loinc_code == 'hko:consent-capability':  # Capacity to consent
                             consent_capability = value_codeable and value_codeable.lower() in ['yes', 'true']
                         elif loinc_code == '74014-2':  # Caregiver Availability
                             caregiver_availability_status = value_codeable and value_codeable.lower() in ['yes', 'true']
                         # Mental Health and Substance Use
-                        elif loinc_code == '75618-3':  # Mental Health Disorders
+                        elif loinc_code == '45420-7':  # Mental health history
                             no_mental_health_disorder_status = value_codeable and value_codeable.lower() in ['no', 'false']
-                        elif loinc_code == '74204-0':  # Non-prescription Drug Use
+                        elif loinc_code == '74204-9':  # Drug use
                             no_substance_use_status = value_codeable and value_codeable.lower() in ['no', 'false']
                             if observation.get('note'):
                                 substance_use_details = observation['note'][0].get('text')
@@ -3339,7 +3348,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             val = observation.get('valueBoolean')
                             if val is not None:
                                 bone_only_metastasis_status = val
-                        elif 'clonal bone marrow b lymphocyte' in obs_text or loinc_code == '85319-5':
+                        elif 'clonal bone marrow b lymphocyte' in obs_text or loinc_code == '32525-8':
                             if observation.get('valueQuantity'):
                                 clonal_bone_marrow_b_lymphocytes = observation['valueQuantity'].get('value')
                         
@@ -3526,6 +3535,18 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             if _c.get('system') == 'http://loinc.org':
                                 obs_loinc = _c.get('code')
                                 break
+                        # A SNOMED or HealthKey (hko:) coded observation keeps its
+                        # code as the source value too, so derivation can read it;
+                        # the display name is the fallback, never a made-up code.
+                        obs_alt_vocab = obs_alt_code = None
+                        if obs_loinc is None:
+                            for _c in obs_code.get('coding', []):
+                                if _c.get('system') == 'http://snomed.info/sct' and _c.get('code'):
+                                    obs_alt_vocab, obs_alt_code = 'SNOMED', _c.get('code')
+                                    break
+                                if _c.get('system') == HK_OBSERVATION_SYSTEM and _c.get('code'):
+                                    obs_alt_vocab, obs_alt_code = 'HK-Observation', _c.get('code')
+                                    break
 
                         demo_code = next((c.get('code') for c in obs_code.get('coding', [])
                                           if c.get('system') == demo_system
@@ -3576,6 +3597,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
                         if obs_loinc:
                             measurement_concept = _cc_by_loinc(obs_loinc)
+                        if not measurement_concept and obs_alt_code:
+                            measurement_concept = _cc_by_vocab(obs_alt_vocab, obs_alt_code)
                         if not measurement_concept and obs_name:
                             measurement_concept = _cc_by_name(obs_name[:50])
                         if demo_code:
@@ -3591,7 +3614,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
                             # Use LOINC code as source_value when available — it's short,
                             # unique, and avoids collisions from truncating long display names.
-                            source_value = demo_code or obs_loinc or obs_name[:50]
+                            source_value = demo_code or obs_loinc or obs_alt_code or obs_name[:50]
                             # LOINC 21889-1 is officially Size Tumor.  A
                             # legacy lymph-node feed may reuse that code, but
                             # only its explicit text/context can authorize the

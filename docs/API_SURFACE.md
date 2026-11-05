@@ -1134,7 +1134,7 @@ heartrate                          8867-4     /min            Heart rate
 # single LOINC for the free light chains, and both must project.
 monoclonal_protein_serum           51435-6    g/dL            M-protein band 1 [Mass/volume] in Serum by Electrophoresis
 monoclonal_protein_serum           33358-3    g/dL            Protein.monoclonal [Mass/volume] in Serum by Electrophoresis
-monoclonal_protein_urine           32730-5    mg/24h          Protein.monoclonal [Mass/time] in 24 hour Urine
+monoclonal_protein_urine           42482-0    mg/24h          Protein.monoclonal [Mass/time] in 24 hour Urine
 kappa_flc                          36916-5    mg/dL           Kappa light chains.free [Mass/volume] in Serum
 kappa_flc                          80515-0    mg/dL           Kappa light chains.free [Mass/volume] in Serum by nephelometry
 lambda_flc                         33944-0    mg/dL           Lambda light chains.free [Mass/volume] in Serum
@@ -1225,7 +1225,7 @@ OMOP table save / delete
                     _get_assessment_data     ← Observation (RECIST)
                     _get_laboratory_data     ← Measurement (see below)
                     _get_performance_data    ← Observation (ECOG, Karnofsky)
-                    _get_genetic_mutations   ← Measurement, LOINC 21636-6/21637-4/21667-1/…
+                    _get_genetic_mutations   ← Measurement, LOINC 21636-6/79208-5/103680-5/…
                     _get_cll_data            ← Measurement + Observation + ConditionOccurrence
                     _get_lymphoma_data       ← Observation + Measurement
                     _get_prior_procedures    ← ProcedureOccurrence

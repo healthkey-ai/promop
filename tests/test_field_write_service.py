@@ -269,13 +269,13 @@ def test_non_numeric_value_for_a_number_field_fails_closed():
 
 
 def test_assertion_boolean_field_writes_and_rederives_true_and_false():
-    # A direct-boolean assertion field (contraceptive_use; LOINC 8659-8) made writable via its EXISTING
+    # A direct-boolean assertion field (contraceptive_use; SNOMED 13197004) made writable via its EXISTING
     # assertion code must round-trip through _get_assertion_data (which reads the same concept) — both
     # True and False, guarding the bool('False')==True trap. Same concept as the reader → no clobber.
     person = PersonFactory()
     PatientRecordFactory(person=person)
     _seed_patient_reported_type()
-    ConceptFactory(concept_code='8659-8', concept_name='Contraceptive use')  # LOINC + Measurement by factory default
+    ConceptFactory(concept_code='13197004', vocabulary=VocabularyFactory(vocabulary_id='SNOMED'), concept_name='Uses contraception')
 
     r = apply_field_writes(person, {'contraceptive_use': True}, today=date(2026, 8, 25))
     assert 'contraceptive_use' in r.applied and not r.rejected
@@ -290,12 +290,12 @@ def test_inverse_assertion_field_writes_the_source_answer_not_the_field_polarity
     person = PersonFactory()
     PatientRecordFactory(person=person)
     _seed_patient_reported_type()
-    concept = ConceptFactory(concept_code='75618-3', concept_name='Mental health disorders')
+    concept = ConceptFactory(concept_code='45420-7', concept_name='Mental health history')
     FieldConceptMapping.objects.create(
         field_name='no_mental_health_disorder_status',
         concept=concept,
         omop_table='observation',
-        source_value='75618-3',
+        source_value='45420-7',
         value_kind='boolean',
         status='approved',
     )
@@ -318,12 +318,12 @@ def test_inverse_assertion_field_projects_through_the_patient_patch_path():
     person = PersonFactory()
     PatientRecordFactory(person=person)
     _seed_patient_reported_type()
-    concept = ConceptFactory(concept_code='75618-3', concept_name='Mental health disorders')
+    concept = ConceptFactory(concept_code='45420-7', concept_name='Mental health history')
     projection = {
         'omop_table': 'observation',
         'concept_id': concept.concept_id,
         'type_concept_id': 32865,
-        'source_value': '75618-3',
+        'source_value': '45420-7',
         'value_kind': 'boolean',
     }
 
@@ -376,7 +376,7 @@ def test_canonical_inverse_concept_with_custom_source_still_roundtrips():
     person = PersonFactory()
     PatientRecordFactory(person=person)
     _seed_patient_reported_type()
-    concept = ConceptFactory(concept_code='75618-3', concept_name='Mental health disorders')
+    concept = ConceptFactory(concept_code='45420-7', concept_name='Mental health history')
     FieldConceptMapping.objects.create(
         field_name='no_mental_health_disorder_status',
         concept=concept,
@@ -623,7 +623,7 @@ def test_genetic_mutation_reconcile_ignores_same_code_in_other_vocabulary():
     from tests.factories import MeasurementFactory
     from omop_core.models import Concept
     person = _person_with_genetic_vocab()
-    other_vocab = VocabularyFactory(vocabulary_id='SNOMED', vocabulary_name='SNOMED')
+    other_vocab = VocabularyFactory(vocabulary=VocabularyFactory(vocabulary_id='SNOMED'), vocabulary_name='SNOMED')
     decoy = ConceptFactory(concept_code=_GENE_CODE['BRCA1'], concept_name='not a gene', vocabulary=other_vocab)
     tc = Concept.objects.get(concept_id=32865)
     decoy_row = MeasurementFactory(

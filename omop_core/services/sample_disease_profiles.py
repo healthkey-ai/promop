@@ -189,7 +189,7 @@ def recover_sample_source_fields(record, rows, disease, lab_code_fields=None):
         lab_code_fields = resolve_lab_code_fields()
     legacy = {
         'FL': {'44648-4': 'tumor_grade', '21912-1': 'number_of_nodal_sites'},
-        'MM': {'57905-2': 'myeloma_type', '69548-6': 'cytogenetic_markers',
+        'MM': {'415109007': 'myeloma_type', '69548-6': 'cytogenetic_markers',
                'mm-cytogenetic-markers': 'cytogenetic_markers', 'mm-sct-date': 'sct_date',
                'mm-sct-history': 'stem_cell_transplant_history', 'mm-sct-eligibility': 'sct_eligibility'},
         'BC': {},
@@ -201,7 +201,7 @@ def recover_sample_source_fields(record, rows, disease, lab_code_fields=None):
             candidate = lab_code_fields[source][0]
             if candidate in COMMON_FIELDS: field = candidate
         if source == '21908-9': field = 'stage'
-        if source == '21908-9-riss' and disease == 'MM': field = 'stage'
+        if source == 'hko:r-iss-stage' and disease == 'MM': field = 'stage'
         if not field or field in result: continue
         value = row.value_as_number if row.value_as_number is not None else row.value_as_string
         if value is None: continue
@@ -225,7 +225,7 @@ def recover_sample_source_fields(record, rows, disease, lab_code_fields=None):
             continue
     # Prefer the specific R-ISS assertion over a coexisting ISS result.
     if disease == 'MM':
-        riss = next((r.value_as_string for r in rows if getattr(r, 'measurement_source_value', None) == '21908-9-riss' or getattr(r, 'observation_source_value', None) == '21908-9-riss'), None)
+        riss = next((r.value_as_string for r in rows if getattr(r, 'measurement_source_value', None) == 'hko:r-iss-stage' or getattr(r, 'observation_source_value', None) == 'hko:r-iss-stage'), None)
         if riss: result['stage'] = riss
     return result
 
@@ -250,7 +250,7 @@ def complete_demo_fhir_bundle(bundle, disease):
             )
     code_fields = {code: field for code, (field, _) in _LOINC_LAB_FIELDS.items()}
     code_fields.update({'16112-5': 'estrogen_receptor_status', '16113-3': 'progesterone_receptor_status',
-                        '48676-1': 'her2_status', '21908-9': 'stage', '21908-9-riss': 'stage',
+                        '48676-1': 'her2_status', '21908-9': 'stage', 'hko:r-iss-stage': 'stage',
                         '21901-4': 'distant_metastasis_stage', '21906-3': 'nodes_stage'})
     for resource in resources:
         reference = (resource.get('subject') or {}).get('reference', '').split('/')[-1]

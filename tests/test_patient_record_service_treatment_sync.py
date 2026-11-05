@@ -59,11 +59,11 @@ def test_treatment_assertions_derive_from_dated_omop_facts():
     )
     MeasurementFactory(
         person=person, measurement_date=date(2024, 2, 2),
-        measurement_source_value='42804-5', value_as_string='Salvage',
+        measurement_source_value='104803-2', value_as_string='Salvage',
     )
     MeasurementFactory(
         person=person, measurement_date=date(2024, 2, 21),
-        measurement_source_value='91379-3', value_as_string='Progression',
+        measurement_source_value='64882-4', value_as_string='Progression',
     )
 
     data = _get_treatment_data(person)
@@ -84,7 +84,7 @@ def test_treatment_assertion_does_not_cross_overlapping_episode_lines():
     _therapy_episode(person, 912, 2, date(2024, 1, 15), date(2024, 2, 15))
     MeasurementFactory(
         person=person, measurement_date=date(2024, 1, 20),
-        measurement_source_value='42804-5', value_as_string='Ambiguous',
+        measurement_source_value='104803-2', value_as_string='Ambiguous',
     )
 
     data = _get_treatment_data(person)

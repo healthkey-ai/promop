@@ -49,6 +49,8 @@ from pathlib import Path
 
 from django.core.management.base import BaseCommand, CommandError
 
+from omop_core.services.mappings import HK_OBSERVATION_SYSTEM, LOINC_SYSTEM, SNOMED_SYSTEM
+
 # ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
@@ -267,7 +269,7 @@ _BC_LABS = [
     ('17861-6', 'Calcium [Mass/volume] in Serum or Plasma', 'mg/dL'),
     ('2951-2', 'Sodium [Moles/volume] in Serum or Plasma', 'mEq/L'),
     ('2823-3', 'Potassium [Moles/volume] in Serum or Plasma', 'mEq/L'),
-    ('2601-3', 'Magnesium [Mass/volume] in Serum or Plasma', 'mg/dL'),
+    ('19123-9', 'Magnesium [Mass/volume] in Serum or Plasma', 'mg/dL'),  # 2601-3 is the Moles/volume test
     ('2777-1', 'Phosphate [Mass/volume] in Serum or Plasma', 'mg/dL'),
     ('1751-7', 'Albumin [Mass/volume] in Serum or Plasma', 'g/dL'),
     ('1975-2', 'Bilirubin.total [Mass/volume] in Serum or Plasma', 'mg/dL'),
@@ -282,7 +284,7 @@ _BC_LABS = [
     ('2532-0', 'Lactate dehydrogenase [Enzymatic activity/volume] in Serum or Plasma', 'U/L'),
     ('1952-1', 'Beta-2 microglobulin [Mass/volume] in Serum or Plasma', 'mg/L'),
     ('2532-0', 'Lactate dehydrogenase [Enzymatic activity/volume] in Serum or Plasma', 'U/L'),
-    ('55454-3', 'Carcinoembryonic Ag [Mass/volume] in Serum or Plasma', 'ng/mL'),
+    ('2039-6', 'Carcinoembryonic Ag [Mass/volume] in Serum or Plasma', 'ng/mL'),  # 55454-3 is a deprecated HbA1c
     ('1988-5', 'C reactive protein [Mass/volume] in Serum or Plasma', 'mg/L'),
     ('30341-2', 'Erythrocyte sedimentation rate', 'mm/h'),
     ('6301-6', 'INR in Platelet poor plasma', '{INR}'),
@@ -299,10 +301,13 @@ _BC_BIOMARKERS = [
     ('16113-3', 'Progesterone receptor [Interpretation] in Tissue', 'positive'),
     ('48676-1', 'HER2 [Interpretation] in Tissue', 'negative'),
     ('29593-1', 'Cells.Ki-67 nuclear Ag/cells in Tissue by Immune stain', None),
-    ('85336-6', 'PD-L1 immune cells [#/area] in Tissue by Immune stain', None),
-    ('96893-3', 'PD-L1 combined positive score', None),
+    # 85336-6 is DCIS intraductal extension and 96893-3 ERBB2 duplication;
+    # 76690-7 is sexual orientation. Menopausal status has no LOINC or SNOMED
+    # observable, so it is a HealthKey concept (migration 0329).
+    ('105305-7', 'PD-L1 expressing immune cells/Total tumor area [Area Fraction] in Tissue', None),
+    ('105303-2', 'PD-L1 combined positive score [Ratio] in Tissue', None),
     ('44648-4', 'Biopsy grade', None),
-    ('76690-7', 'Menopausal status', None),
+    ('hko:menopausal-status', 'Menopausal status', None),
     ('44667-4', 'Bone-only metastasis status', None),
 ]
 
@@ -326,7 +331,7 @@ _BC_BEHAVIOR_LABS = [
     ('72166-2', 'Smoking Status'),
     ('63640-7', 'Pack Years'),
     ('74013-4', 'Alcohol Use'),
-    ('11286-7', 'Drinks per Week'),
+    ('44940-5', 'Alcoholic drinks per week - Reported'),
     ('68516-4', 'Exercise Frequency'),
     ('89555-7', 'Exercise Minutes per Week'),
     ('88365-2', 'Diet Type'),
@@ -338,21 +343,26 @@ _BC_BEHAVIOR_LABS = [
     ('45404-1', 'Marital Status'),
     ('76513-1', 'Insurance Type'),
     ('63512-8', 'Number of Dependents'),
-    ('77243-3', 'Annual Household Income'),
-    ('75985-6', 'Ability to Consent'),
+    ('63586-2', 'Total family income in last year'),
+    # consent capability is a HealthKey concept; contraceptive_use follows its
+    # approved mapping, SNOMED 13197004 "Uses contraception" (migration 0329).
+    ('hko:consent-capability', 'Capacity to consent to treatment'),
     ('74014-2', 'Caregiver Availability'),
-    ('8659-8', 'Contraceptive Use'),
+    ('13197004', 'Uses contraception'),
     ('2106-3', 'Pregnancy Test'),
-    ('75618-3', 'Mental Health Disorders'),
-    ('74204-0', 'Non-prescription Drug Use'),
+    ('45420-7', 'Mental health history'),
+    ('74204-9', 'Drug use'),
     ('82593-5', 'Geographic/Environmental Exposure Risk'),
 ]
 
+# Gene-specific LOINC tests. 21637-4 is the BRCA1 c.185delAG test, 21667-1
+# the F5 gene and 62318-1 a Niemann-Pick newborn screen; migration 0329
+# recoded the rows written under them.
 _BC_MUTATION_LOINCS = [
     ('21636-6', 'BRCA1'),
-    ('21637-4', 'BRCA2'),
-    ('21667-1', 'TP53'),
-    ('62318-1', 'PIK3CA'),
+    ('79208-5', 'BRCA2'),
+    ('103680-5', 'TP53'),
+    ('60034-6', 'PIK3CA'),
 ]
 
 _BC_RESPONSE_CODES = [
@@ -575,6 +585,16 @@ def _make_therapy_medication_statement(
     return resources
 
 
+def _code_system(code: str) -> str:
+    """FHIR system for a code the generator emits: HealthKey ``hko:`` mints,
+    all-digit SNOMED identifiers, else LOINC."""
+    if code.startswith('hko:'):
+        return HK_OBSERVATION_SYSTEM
+    if code.isdigit():
+        return SNOMED_SYSTEM
+    return LOINC_SYSTEM
+
+
 def _make_lab_observation(patient_ref: str, onset: datetime, code: str, display: str,
                           value, unit: str | None = None) -> dict:
     obs = {
@@ -583,7 +603,7 @@ def _make_lab_observation(patient_ref: str, onset: datetime, code: str, display:
         'status': 'final',
         'code': {
             'coding': [{
-                'system': 'http://loinc.org',
+                'system': _code_system(code),
                 'code': code,
                 'display': display,
             }],
@@ -780,10 +800,10 @@ def _enrich_patient_bundle(bundle: dict, index: int) -> None:
 
     biomarker_values = {
         '29593-1': (rng.randint(5, 75), '%'),
-        '85336-6': (rng.randint(1, 30), '%'),
-        '96893-3': (rng.randint(1, 50), None),
+        '105305-7': (rng.randint(1, 30), '%'),
+        '105303-2': (rng.randint(1, 50), None),
         '44648-4': (rng.choice([1, 2, 3]), None),
-        '76690-7': (rng.choice(['Premenopausal', 'Perimenopausal', 'Postmenopausal']), None),
+        'hko:menopausal-status': (rng.choice(['Premenopausal', 'Perimenopausal', 'Postmenopausal']), None),
         '44667-4': (rng.choice([True, False]), None),
     }
     existing_biomarker_codes = {
@@ -803,7 +823,7 @@ def _enrich_patient_bundle(bundle: dict, index: int) -> None:
         '72166-2': rng.choice(['Never smoked tobacco', 'Ex-smoker', 'Current smoker']),
         '63640-7': rng.randint(0, 40),
         '74013-4': rng.choice(['No alcohol use', 'Occasional alcohol use', 'Heavy alcohol use']),
-        '11286-7': rng.randint(0, 21),
+        '44940-5': rng.randint(0, 21),
         '68516-4': rng.choice(['Never', 'Sometimes', 'Weekly', 'Daily']),
         '89555-7': rng.randint(0, 300),
         '88365-2': rng.choice(['Balanced diet', 'Low carb', 'Mediterranean', 'Standard']),
@@ -815,13 +835,13 @@ def _enrich_patient_bundle(bundle: dict, index: int) -> None:
         '45404-1': rng.choice(['Single', 'Married', 'Divorced', 'Widowed']),
         '76513-1': rng.choice(['Commercial', 'Medicaid', 'Medicare', 'Self-pay']),
         '63512-8': rng.randint(0, 6),
-        '77243-3': rng.randint(25000, 220000),
-        '75985-6': rng.choice(['Yes', 'No']),
+        '63586-2': rng.randint(25000, 220000),
+        'hko:consent-capability': rng.choice(['Yes', 'No']),
         '74014-2': rng.choice(['Yes', 'No']),
-        '8659-8': rng.choice(['Yes', 'No']),
+        '13197004': rng.choice(['Yes', 'No']),
         '2106-3': rng.choice(['Negative', 'Positive', 'Not applicable']),
-        '75618-3': rng.choice(['No', 'Yes']),
-        '74204-0': rng.choice(['No', 'Yes']),
+        '45420-7': rng.choice(['No', 'Yes']),
+        '74204-9': rng.choice(['No', 'Yes']),
         '82593-5': rng.choice(['No', 'Yes']),
     }
     for code, display in _BC_BEHAVIOR_LABS:
@@ -966,7 +986,7 @@ def _enrich_patient_bundle(bundle: dict, index: int) -> None:
         '3094-0': round(rng.uniform(7, 25), 0),
         '2532-0': round(rng.uniform(120, 350), 0),
         '1952-1': round(rng.uniform(1.3, 4.0), 1),
-        '55454-3': round(rng.uniform(0.2, 8.0), 1),
+        '2039-6': round(rng.uniform(0.2, 8.0), 1),
         '1988-5': round(rng.uniform(1, 30), 1),
         '30341-2': round(rng.uniform(1, 40), 1),
         '6301-6': round(rng.uniform(0.8, 1.8), 1),

@@ -452,6 +452,16 @@ def get_gender_concept(gender_str):
 #                      per class and map it; the SNOMED entries below remain the
 #                      read path for records written before that.
 #
+# FHIR code-system URIs the demo generators and the bulk importer agree on.
+LOINC_SYSTEM = 'http://loinc.org'
+SNOMED_SYSTEM = 'http://snomed.info/sct'
+# HealthKey-minted observation concepts (vocabulary HK-Observation, codes
+# ``hko:...``). Migrations 0180 and 0329 mint them; no standard vocabulary
+# says these things, so a generator may emit them and the importer resolves
+# them against the HK-Observation vocabulary.
+HK_OBSERVATION_SYSTEM = 'https://healthkey.ai/fhir/CodeSystem/hk-observation'
+HK_OBSERVATION_VOCABULARY = 'HK-Observation'
+
 # field → (concept_code, vocabulary_id, attributed_from_extractor)
 DERIVED_FIELD_TO_CODE = {
     # Biomarkers — _get_biomarker_data
@@ -496,8 +506,11 @@ DERIVED_FIELD_TO_CODE = {
     # existing reader with no second path to clobber it, and the patient's dated edit supersedes an
     # older FHIR assertion of the same concept. Only the two DIRECT booleans here; the inverse_boolean
     # no_* fields need write-side inversion, deferred to healthkey-ai/promop#699.
-    'contraceptive_use':             ('8659-8',    'LOINC',  '_get_assertion_data'),
-    'consent_capability':            ('75985-6',   'LOINC',  '_get_assertion_data'),
+    # 8659-8 and 75985-6, the codes read here before, are in no LOINC release
+    # (migration 0329). contraceptive_use follows its approved mapping; consent
+    # capability has no standard observable and is a HealthKey mint.
+    'contraceptive_use':             ('13197004',  'SNOMED', '_get_assertion_data'),
+    'consent_capability':            ('hko:consent-capability', HK_OBSERVATION_VOCABULARY, '_get_assertion_data'),
 }
 
 # Curator-oriented concept suggestions for fields NOT in DERIVED_FIELD_TO_CODE
@@ -508,21 +521,23 @@ DERIVED_FIELD_TO_CODE = {
 # field → (concept_code, vocabulary_id)
 SUGGESTED_FIELD_CODES: dict[str, tuple[str, str]] = {
     # Myeloma labs / markers
-    'monoclonal_protein_serum':      ('51435-3',   'LOINC'),
-    'monoclonal_protein_urine':      ('51436-1',   'LOINC'),
+    # 51435-3, 51436-1 and 24133-4 were not LOINC codes and 11052-8 is
+    # ketamine in urine; the real tests are the extractor's codes (#0329).
+    'monoclonal_protein_serum':      ('51435-6',   'LOINC'),
+    'monoclonal_protein_urine':      ('42482-0',   'LOINC'),
     'kappa_flc':                     ('11050-2',   'LOINC'),
     'lambda_flc':                    ('11051-0',   'LOINC'),
-    'kappa_lambda_ratio':            ('11052-8',   'LOINC'),
-    'clonal_plasma_cells':           ('24133-4',   'LOINC'),
+    'kappa_lambda_ratio':            ('48378-4',   'LOINC'),
+    'clonal_plasma_cells':           ('11118-7',   'LOINC'),
     'myeloma_type':                  ('64197005',  'SNOMED'),
-    'r_iss_stage':                   ('21908-9',   'LOINC'),
+    'r_iss_stage':                   ('hko:r-iss-stage', HK_OBSERVATION_VOCABULARY),
     'mrd_status':                    ('98847-0',   'LOINC'),
     'progression':                   ('246450006', 'SNOMED'),
     # Myeloma CRAB criteria
     'hypercalcemia':                 ('66931009',  'SNOMED'),
     'renal_impairment':              ('723188008', 'SNOMED'),
     'anemia':                        ('271737000', 'SNOMED'),
-    'bone_lesions':                  ('363817008', 'SNOMED'),
+    'bone_lesions':                  ('hko:bone-lesions', HK_OBSERVATION_VOCABULARY),
     # SCT
     'stem_cell_transplant_history':  ('77465005',  'SNOMED'),
     'sct_eligibility':               ('183851006', 'SNOMED'),
@@ -530,7 +545,7 @@ SUGGESTED_FIELD_CODES: dict[str, tuple[str, str]] = {
     'tnbc_status':                   ('706886006', 'SNOMED'),
     'hr_status':                     ('416053008', 'SNOMED'),
     # Oncotype invasive/DCIS score selection requires reviewed event context (#1227).
-    'menopausal_status':             ('276498001', 'SNOMED'),
+    'menopausal_status':             ('hko:menopausal-status', HK_OBSERVATION_VOCABULARY),
     # Lymphoma
     'flipi_score':                   ('444723004', 'SNOMED'),
     'gelf_criteria_status':          ('109964006', 'SNOMED'),
@@ -597,7 +612,6 @@ SUGGESTED_FIELD_CODES: dict[str, tuple[str, str]] = {
     'serum_calcium_level':           ('17861-6',   'LOINC'),   # Calcium [Mass/volume] in Serum
     'serum_creatinine_level':        ('2160-0',    'LOINC'),   # Creatinine [Mass/volume] in Serum
     'serum_beta2_microglobulin_level': ('32731-2', 'LOINC'),   # Beta-2-Microglobulin [Mass/volume]
-    'bone_imaging_result':           ('24646-7',   'LOINC'),   # Bone XR study
     'pulmonary_function_test_result': ('19858-0',  'LOINC'),   # Spirometry panel
     'metastatic_status':             ('399584008', 'SNOMED'),  # Metastasis status
     'renal_adequacy_status':         ('723188008', 'SNOMED'),  # Renal impairment
@@ -632,18 +646,18 @@ SUGGESTED_FIELD_CODES: dict[str, tuple[str, str]] = {
     'pd_l1_combined_positive_score': ('96267-2',   'LOINC'),   # PD-L1 Combined Positive Score
 
     # CLL / lymphoma
-    'clonal_b_lymphocyte_count':     ('30374-0',   'LOINC'),   # B cell count
-    'clonal_bone_marrow_b_lymphocytes': ('30374-0', 'LOINC'),  # B cell count
+    'clonal_b_lymphocyte_count':     ('8116-6',    'LOINC'),   # CD19 cells [#/volume] in Blood
+    'clonal_bone_marrow_b_lymphocytes': ('32525-8', 'LOINC'),  # CD19 cells/cells in Bone marrow
     'lymphocyte_doubling_time':      ('26474-7',   'LOINC'),   # Lymphocytes [#/volume]
     'autoimmune_cytopenias_refractory_to_steroids': ('439478003', 'SNOMED'),  # Autoimmune cytopenia
     'btk_inhibitor_refractory':      ('182854000', 'SNOMED'),  # Treatment refractory
     'bcl2_inhibitor_refractory':     ('182854000', 'SNOMED'),  # Treatment refractory
     'measurable_disease_iwcll':      ('711259004', 'SNOMED'),  # Measurable disease
-    'measurable_disease_imwg':       ('711259004', 'SNOMED'),  # Measurable disease
+    'measurable_disease_imwg':       ('hko:measurable-disease-imwg', HK_OBSERVATION_VOCABULARY),
     'post_transformation_outcome':   ('91860004',  'SNOMED'),  # Richter / transformation
     'dlbcl_transformation_date':     ('91860004',  'SNOMED'),  # Richter / transformation
     'transformed_to_dlbcl':          ('91860004',  'SNOMED'),  # Richter / transformation
-    'plasma_cell_leukemia':          ('47082-2',   'LOINC'),   # Plasma cells in bone marrow
+    'plasma_cell_leukemia':          ('95210003',  'SNOMED'),  # Plasma cell leukemia
     'spleen_size':                   ('16294009',  'SNOMED'),  # Splenomegaly
     'flipi_score_options':           ('444723004', 'SNOMED'),  # FLIPI
 

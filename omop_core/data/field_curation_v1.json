@@ -203,21 +203,21 @@
     {
       "field_name": "annual_household_income",
       "concept_vocabulary_id": "LOINC",
-      "concept_code_resolved": "77243-3",
-      "concept_id": 1872307076,
+      "concept_code_resolved": "63586-2",
+      "concept_id": 40766311,
       "provenance": "system_generated",
       "vocabulary_id": "LOINC",
-      "concept_code": "77243-3",
+      "concept_code": "63586-2",
       "unit": "",
       "omop_table": "measurement",
-      "source_value": "77243-3",
+      "source_value": "63586-2",
       "value_kind": "number",
       "type_concept_id": 32856,
       "value_vocabulary": "",
       "multiple": false,
       "status": "approved",
       "reviewed_at": null,
-      "notes": "Seeded by migration 0160. patient_record_service already reads this field from LOINC 77243-3; the mapping lets the editor write the same fact."
+      "notes": "Seeded by migration 0160. patient_record_service already reads this field from LOINC 77243-3; the mapping lets the editor write the same fact. LOINC 63586-2 \"total income of all family members ... in last year [PhenX]\" (Athena 40766311). 77243-3 is not a LOINC code; migration 0329."
     },
     {
       "field_name": "ast_u_l",
@@ -392,12 +392,12 @@
     },
     {
       "field_name": "bone_imaging_result",
-      "concept_vocabulary_id": "LOINC",
-      "concept_code_resolved": "24646-7",
-      "concept_id": 2100000012,
+      "concept_vocabulary_id": "",
+      "concept_code_resolved": "",
+      "concept_id": null,
       "provenance": "system_generated",
-      "vocabulary_id": "LOINC",
-      "concept_code": "24646-7",
+      "vocabulary_id": "",
+      "concept_code": "",
       "unit": "",
       "omop_table": "Observation",
       "source_value": "",
@@ -407,16 +407,16 @@
       "multiple": false,
       "status": "proposed",
       "reviewed_at": null,
-      "notes": "Auto-proposed from field suggestion."
+      "notes": "Auto-proposed from field suggestion. Concept cleared by migration 0329: 24646-7 is not a LOINC code and no vocabulary has a bone-lesion imaging result observable."
     },
     {
       "field_name": "bone_lesions",
-      "concept_vocabulary_id": "LOINC",
-      "concept_code_resolved": "24646-7",
-      "concept_id": 2100000012,
+      "concept_vocabulary_id": "HK-Observation",
+      "concept_code_resolved": "hko:bone-lesions",
+      "concept_id": 2100007870,
       "provenance": "system_generated",
-      "vocabulary_id": "LOINC",
-      "concept_code": "24646-7",
+      "vocabulary_id": "HK-Observation",
+      "concept_code": "hko:bone-lesions",
       "unit": "",
       "omop_table": "Measurement,Observation",
       "source_value": "",
@@ -426,7 +426,7 @@
       "multiple": false,
       "status": "proposed",
       "reviewed_at": null,
-      "notes": "Auto-proposed from field suggestion."
+      "notes": "Auto-proposed from field suggestion. HealthKey hko:bone-lesions: LOINC has no lytic-bone-lesion observable and 24646-7 is not a LOINC code; migration 0329."
     },
     {
       "field_name": "bone_marrow_involvement",
@@ -583,11 +583,11 @@
     {
       "field_name": "clonal_bone_marrow_b_lymphocytes",
       "concept_vocabulary_id": "LOINC",
-      "concept_code_resolved": "42759-1",
-      "concept_id": 3031240,
+      "concept_code_resolved": "32525-8",
+      "concept_id": 3035081,
       "provenance": "system_generated",
       "vocabulary_id": "LOINC",
-      "concept_code": "42759-1",
+      "concept_code": "32525-8",
       "unit": "%",
       "omop_table": "measurement",
       "source_value": "",
@@ -597,7 +597,7 @@
       "multiple": false,
       "status": "proposed",
       "reviewed_at": null,
-      "notes": "SUGGESTED, NOT REVIEWED BY A CLINICIAN. Chosen for meaning rather than spelling: \"B lymphocytes [#/volume] in Bone marrow\" matches both the analyte and the specimen. It does not carry \"clonal\", so a reviewer should confirm the distinction does not matter here. Set source_value before approving; derivation matches on it."
+      "notes": "SUGGESTED, NOT REVIEWED BY A CLINICIAN. Chosen for meaning rather than spelling: \"B lymphocytes [#/volume] in Bone marrow\" matches both the analyte and the specimen. It does not carry \"clonal\", so a reviewer should confirm the distinction does not matter here. Set source_value before approving; derivation matches on it. LOINC 32525-8 \"CD19 cells/cells in Bone marrow\" (Athena 3035081): the field is a percentage, 42759-1 is a count; migration 0329."
     },
     {
       "field_name": "clonal_plasma_cells",
@@ -734,12 +734,12 @@
     },
     {
       "field_name": "consent_capability",
-      "concept_vocabulary_id": "SNOMED",
-      "concept_code_resolved": "405193005",
-      "concept_id": 4226675,
+      "concept_vocabulary_id": "HK-Observation",
+      "concept_code_resolved": "hko:consent-capability",
+      "concept_id": 2100007876,
       "provenance": "system_generated",
-      "vocabulary_id": "SNOMED",
-      "concept_code": "405193005",
+      "vocabulary_id": "HK-Observation",
+      "concept_code": "hko:consent-capability",
       "unit": "",
       "omop_table": "Observation",
       "source_value": "",
@@ -749,7 +749,7 @@
       "multiple": false,
       "status": "proposed",
       "reviewed_at": null,
-      "notes": "Auto-proposed from field suggestion."
+      "notes": "Auto-proposed from field suggestion. HealthKey hko:consent-capability: SNOMED 405193005 is \"Caregiver wellbeing status\" and 75985-6 is not a LOINC code; migration 0329."
     },
     {
       "field_name": "contraceptive_use",
@@ -1001,21 +1001,21 @@
     {
       "field_name": "drinks_per_week",
       "concept_vocabulary_id": "LOINC",
-      "concept_code_resolved": "11286-7",
-      "concept_id": 2029606278,
+      "concept_code_resolved": "44940-5",
+      "concept_id": 3043872,
       "provenance": "system_generated",
       "vocabulary_id": "LOINC",
-      "concept_code": "11286-7",
+      "concept_code": "44940-5",
       "unit": "",
       "omop_table": "measurement",
-      "source_value": "11286-7",
+      "source_value": "44940-5",
       "value_kind": "number",
       "type_concept_id": 32856,
       "value_vocabulary": "",
       "multiple": false,
       "status": "approved",
       "reviewed_at": null,
-      "notes": "Seeded by migration 0160. patient_record_service already reads this field from LOINC 11286-7; the mapping lets the editor write the same fact."
+      "notes": "Seeded by migration 0160. patient_record_service already reads this field from LOINC 11286-7; the mapping lets the editor write the same fact. LOINC 44940-5 \"Alcoholic drinks per week - Reported\" (Athena 3043872). 11286-7 is not a LOINC code; migration 0329."
     },
     {
       "field_name": "ecog_assessment_date",
@@ -3831,12 +3831,12 @@
     },
     {
       "field_name": "measurable_disease_imwg",
-      "concept_vocabulary_id": "SNOMED",
-      "concept_code_resolved": "711259004",
-      "concept_id": 2100000005,
+      "concept_vocabulary_id": "HK-Observation",
+      "concept_code_resolved": "hko:measurable-disease-imwg",
+      "concept_id": 2100007872,
       "provenance": "system_generated",
-      "vocabulary_id": "SNOMED",
-      "concept_code": "711259004",
+      "vocabulary_id": "HK-Observation",
+      "concept_code": "hko:measurable-disease-imwg",
       "unit": "",
       "omop_table": "Measurement",
       "source_value": "",
@@ -3846,7 +3846,7 @@
       "multiple": false,
       "status": "proposed",
       "reviewed_at": null,
-      "notes": "Auto-proposed from field suggestion."
+      "notes": "Auto-proposed from field suggestion. HealthKey hko:measurable-disease-imwg: SNOMED 711259004 is absent from Athena and the generator code 85598-2 was not LOINC; migration 0329."
     },
     {
       "field_name": "measurable_disease_iwcll",

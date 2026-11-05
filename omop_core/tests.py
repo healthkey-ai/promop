@@ -2774,6 +2774,34 @@ class WearableConceptMappingTest(TestCase):
             self.assertEqual(seeded['domain_id'], 'Observation')
             self.assertEqual(seeded['source'], 'HealthKey')
 
+    def test_generator_source_concepts_match_seed_definitions(self):
+        """Migration 0329 duplicates its HK-Observation mints into the fixture.
+
+        Same trade as 0180: the migration hard-codes definitions so it stays
+        frozen against the code as written, and this test is what stops the two
+        copies diverging.
+        """
+        from importlib import import_module
+
+        mig = import_module(
+            'omop_core.migrations.0329_retire_invented_generator_codes')
+        seed_by_key = {
+            (r['vocabulary_id'], r['concept_code']): r for r in self._seed_rows()
+        }
+
+        for concept_id, concept_code, concept_name in mig._CONCEPTS:
+            key = ('HK-Observation', concept_code)
+            self.assertIn(
+                key, seed_by_key,
+                f'migration 0329 seeds {key}, which the fixture does not')
+            seeded = seed_by_key[key]
+            self.assertEqual(seeded['concept_id'], concept_id,
+                             f'{concept_code} concept_id differs')
+            self.assertEqual(seeded['concept_name'], concept_name,
+                             f'{concept_code} concept_name differs')
+            self.assertEqual(seeded['domain_id'], 'Observation')
+            self.assertEqual(seeded['source'], 'HealthKey')
+
     def test_language_capability_concepts_match_seed_definitions(self):
         """Migration 0187 duplicates its rows into the fixture; no drift (#827).
 

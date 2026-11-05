@@ -32,6 +32,8 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db import close_old_connections, connection, connections, transaction
 from django.utils import timezone
 
+from omop_core.services.mappings import HK_OBSERVATION_SYSTEM, HK_OBSERVATION_VOCABULARY
+
 logger = logging.getLogger(__name__)
 
 # Socket timeout for remote DB connections
@@ -187,6 +189,7 @@ class Command(BaseCommand):
         # Always include vital LOINCs needed for Patient extension → Measurement rows
         loinc_codes = {'29463-7', '8302-2', '8480-6', '8462-4', '8867-4'}
         snomed_codes = set()
+        hk_observation_codes = set()
         rxnorm_codes = set()
         hemonc_codes = set()
         visit_class_codes = set()
@@ -217,6 +220,8 @@ class Command(BaseCommand):
                         loinc_codes.add(code)
                     elif 'snomed' in system:
                         snomed_codes.add(code)
+                    elif system == HK_OBSERVATION_SYSTEM:
+                        hk_observation_codes.add(code)
                     elif 'rxnorm' in system:
                         rxnorm_codes.add(code)
                     elif 'HemOnc' in system or 'hemonc' in system:
@@ -239,6 +244,7 @@ class Command(BaseCommand):
 
         _load_vocab('LOINC', loinc_codes)
         _load_vocab('SNOMED', snomed_codes)
+        _load_vocab(HK_OBSERVATION_VOCABULARY, hk_observation_codes)
         _load_vocab('RxNorm', rxnorm_codes)
         _load_vocab('HemOnc', hemonc_codes)
         _load_vocab('RxNorm Extension', rxnorm_codes)  # some drugs only in extension
@@ -362,17 +368,18 @@ class Command(BaseCommand):
             '26499-4', '17861-6', '2000-8', '2160-0', '2164-2', '33914-3', '69405-9',
             '3094-0', '2951-2', '2823-3', '19123-9', '2601-3', '2777-1',
             '1975-2', '1968-7', '1742-6', '1920-8', '6768-6', '1751-7', '2885-2',
-            '1754-1', '48346-3', '1952-1', '1988-5', '4537-7', '30341-2',
+            '1754-1', '1952-1', '1988-5', '4537-7', '30341-2',  # 48346-3 was not a LOINC code
             '10839-9', '6598-7', '42637-9', '2345-7', '4548-4', '2532-0', '14804-9',
             '6301-6', '5902-2', '3173-2', '2039-6', '25390-6', '2857-1',
             '8806-2',  # EF
-            '51435-6', '33358-3', '32730-5',  # MM disease burden
+            '51435-6', '33358-3', '42482-0',  # MM disease burden (32730-5 retired by 0329)
             '36916-5', '80515-0', '33944-0', '80516-8',  # free light chains
             '48378-4', '80517-6', '104546-7',  # free light chain ratio
             '11118-7',  # marrow plasma cell %
+            '32525-8',  # CD19 cells/cells in Bone marrow (FL clonal B lymphocytes %)
             '8480-6', '8462-4',  # BP components
             '63640-7',  # pack years
-            '11286-7',  # drinks/week
+            '44940-5',  # drinks/week
             '89555-7',  # exercise minutes
             '63512-8',  # dependents
             # Behavioral / lifestyle (must be in Measurement for _get_behavior_data)
@@ -387,7 +394,7 @@ class Command(BaseCommand):
             '82589-3',  # education level
             '45404-1',  # marital status
             '76513-1',  # insurance type
-            '77243-3',  # annual household income
+            '63586-2',  # total family income, last year
             # Wearable metrics
             '55423-8', '55411-3', '40443-4', '80404-7', '59408-5', '9279-1', '93832-4',
         }
@@ -568,14 +575,17 @@ class Command(BaseCommand):
                 obs_codings = obs.get('code', {}).get('coding', [])
                 obs_loinc = None
                 obs_snomed = None
+                obs_hk = None
                 for coding in obs_codings:
                     sys = coding.get('system', '')
                     if 'loinc' in sys:
                         obs_loinc = coding.get('code')
                     elif 'snomed' in sys:
                         obs_snomed = coding.get('code')
+                    elif sys == HK_OBSERVATION_SYSTEM:
+                        obs_hk = coding.get('code')
 
-                obs_code = obs_loinc or obs_snomed or ''
+                obs_code = obs_loinc or obs_snomed or obs_hk or ''
                 obs_text = obs.get('code', {}).get('text', '') or ''
 
                 # OMOP requires measurement_date / observation_date.  Do not
@@ -621,6 +631,8 @@ class Command(BaseCommand):
                         o_concept = self._get_concept(cache, 'LOINC', obs_loinc)
                     elif obs_snomed:
                         o_concept = self._get_concept(cache, 'SNOMED', obs_snomed)
+                    elif obs_hk:
+                        o_concept = self._get_concept(cache, HK_OBSERVATION_VOCABULARY, obs_hk)
                     else:
                         o_concept = concept_0
                     if o_concept is None:

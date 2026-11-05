@@ -38,4 +38,7 @@ def lab_field_mappings(db):
         )
     apply_payload({'mappings': rows}, tables=('mappings',))
     run_data_migration('0285_approve_lab_extractor_aliases', 'approve_aliases')
+    # 0285 also approved an alias for 32730-5, a code no LOINC release has;
+    # 0329 retires it, as it does on a deployed instance.
+    run_data_migration('0329_retire_invented_generator_codes', 'forwards')
     return resolve_lab_code_fields()

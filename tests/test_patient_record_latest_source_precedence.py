@@ -604,9 +604,9 @@ def test_lymphoma_newer_empty_flipi_does_not_erase_older():
 @pytest.mark.parametrize(
     ('source_value', 'field', 'expected'),
     [
-        ('47082-2', 'plasma_cell_leukemia', False),
-        ('89599-5', 'meets_crab', False),
-        ('24646-7', 'bone_lesions', 'Absent'),
+        ('95210003', 'plasma_cell_leukemia', False),
+        ('hko:meets-crab-criteria', 'meets_crab', False),
+        ('hko:bone-lesions', 'bone_lesions', 'Absent'),
     ],
 )
 def test_mm_latest_within_each_table(source_value, field, expected):
@@ -630,9 +630,9 @@ def test_mm_latest_within_each_table(source_value, field, expected):
 @pytest.mark.parametrize(
     ('source_value', 'field', 'expected'),
     [
-        ('47082-2', 'plasma_cell_leukemia', False),
-        ('89599-5', 'meets_crab', False),
-        ('24646-7', 'bone_lesions', 'Absent'),
+        ('95210003', 'plasma_cell_leukemia', False),
+        ('hko:meets-crab-criteria', 'meets_crab', False),
+        ('hko:bone-lesions', 'bone_lesions', 'Absent'),
     ],
 )
 @pytest.mark.parametrize('older_table', ['measurement', 'observation'])
@@ -666,11 +666,11 @@ def test_mm_unrecognized_newer_string_keeps_older_answer():
     with suppress_patient_record_refresh():
         PatientRecordFactory(person=person)
         MeasurementFactory(
-            person=person, measurement_source_value='24646-7',
+            person=person, measurement_source_value='hko:bone-lesions',
             measurement_date=OLD, value_as_string='true',
         )
         MeasurementFactory(
-            person=person, measurement_source_value='24646-7',
+            person=person, measurement_source_value='hko:bone-lesions',
             measurement_date=NEW, value_as_string='unknown',
         )
 

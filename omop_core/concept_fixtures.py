@@ -104,6 +104,7 @@ _DOMAINS = [
     dict(domain_id='Observation',  domain_name='Observation',    domain_concept_id=0),
     dict(domain_id='Metadata',     domain_name='Metadata',       domain_concept_id=0),
     dict(domain_id='Gender',       domain_name='Gender',          domain_concept_id=0),
+    dict(domain_id='Procedure',    domain_name='Procedure',       domain_concept_id=0),
 ]
 
 _CONCEPT_CLASSES = [
@@ -122,6 +123,8 @@ _CONCEPT_CLASSES = [
     dict(concept_class_id='Context-dependent',   concept_class_name='Context-dependent',    concept_class_concept_id=0),
     dict(concept_class_id='Answer',              concept_class_name='Answer',               concept_class_concept_id=0),
     dict(concept_class_id='Observable Entity',   concept_class_name='Observable Entity',    concept_class_concept_id=0),
+    dict(concept_class_id='Procedure',           concept_class_name='Procedure',            concept_class_concept_id=0),
+    dict(concept_class_id='Morph Abnormality',   concept_class_name='Morph Abnormality',    concept_class_concept_id=0),
 ]
 
 
@@ -333,41 +336,87 @@ _CONCEPTS = [
     # ------------------------------------------------------------------
     # CBC — hemoglobin (missing from original seeder; required for CRAB)
     # ------------------------------------------------------------------
-    _c(9001001, 'Hemoglobin [Mass/volume] in Blood',      'Measurement', 'LOINC', 'Lab Test', 'S', '718-7'),
+    _c(3000963, 'Hemoglobin [Mass/volume] in Blood',      'Measurement', 'LOINC', 'Lab Test', 'S', '718-7'),
 
     # ------------------------------------------------------------------
     # MM-specific disease burden labs
     # Required for monoclonal_protein_serum, kappa_flc, lambda_flc,
     # clonal_plasma_cells to be populated by refresh_patient_record.
+    #
+    # Every row below mirrors a genuine Athena concept: id, name and code are
+    # the vocabulary's own. These rows used to sit under promop ids 9001001-
+    # 9001020, which is how a real LOINC code came to carry an id Athena does
+    # not know (and 32730-5, "Protein [electrophoresis] in Urine", was not a
+    # LOINC code at all: the urine M-spike is 42482-0). Kappa and lambda FLC
+    # (36916-5 / 33944-0) are loaded from Athena; the invented 33944-8 /
+    # 33945-5 were retired by migration 0328, the rest by 0329. Never seed a
+    # concept under a code that is not in its vocabulary, and never under an
+    # id the vocabulary does not use for it: a HealthKey-minted concept is the
+    # way to say something a vocabulary does not.
     # ------------------------------------------------------------------
-    _c(9001002, 'Protein [electrophoresis] in Serum',             'Measurement', 'LOINC', 'Lab Test', 'S', '51435-6'),  # M-spike serum
-    _c(9001003, 'Protein [electrophoresis] in Urine',             'Measurement', 'LOINC', 'Lab Test', 'S', '32730-5'),  # M-spike urine
-    # Kappa and lambda FLC are the real LOINC codes 36916-5 and 33944-0 (loaded
-    # from Athena); the invented 33944-8 / 33945-5 concepts were retired by
-    # migration 0328. Never seed a concept under a code that is not in its
-    # vocabulary: an invented code in the LOINC range cannot be told from a
-    # typo of a real one, and a HealthKey-minted concept is the way to say
-    # something LOINC does not.
+    _c(3029713, 'Protein.monoclonal band 1 [Mass/volume] in Serum or Plasma by Electrophoresis', 'Measurement', 'LOINC', 'Lab Test', 'S', '51435-6'),  # M-spike serum
+    _c(3034655, 'Protein.monoclonal [Mass/time] in 24 hour Urine by Electrophoresis',           'Measurement', 'LOINC', 'Lab Test', 'S', '42482-0'),  # M-spike urine
     # 26098-4 is 'XR Ankle - left Views' in LOINC, 11118-7 is the marrow code.
-    _c(9001006, 'Plasma cells/100 cells in Bone marrow by Manual count', 'Measurement', 'LOINC', 'Lab Test', 'S', '11118-7'),
-    # 9001019 is skipped, a test uses it to stand in for a retired mint.
-    _c(9001020, 'Kappa light chains.free/Lambda light chains.free [Mass Ratio] in Serum', 'Measurement', 'LOINC', 'Lab Test', 'S', '48378-4'),
+    _c(3003879, 'Plasma cells/cells in Bone marrow by Manual count', 'Measurement', 'LOINC', 'Lab Test', 'S', '11118-7'),
+    _c(3053209, 'Kappa light chains.free/Lambda light chains.free [Mass Ratio] in Serum', 'Measurement', 'LOINC', 'Lab Test', 'S', '48378-4'),
 
     # ------------------------------------------------------------------
-    # Beta-2 microglobulin and other MM markers
+    # Beta-2 microglobulin and other MM markers (Athena ids and names)
     # ------------------------------------------------------------------
-    _c(9001007, 'Beta-2 microglobulin [Mass/volume] in Serum',    'Measurement', 'LOINC', 'Lab Test', 'S', '1952-1'),
-    _c(9001008, 'C reactive protein [Mass/volume] in Serum',      'Measurement', 'LOINC', 'Lab Test', 'S', '1988-5'),
-    _c(9001009, 'Erythrocyte sedimentation rate',                 'Measurement', 'LOINC', 'Lab Test', 'S', '30341-2'),
-    _c(9001010, 'Creatinine renal clearance',                     'Measurement', 'LOINC', 'Lab Test', 'S', '2164-2'),
-    _c(9001011, 'Troponin T [Mass/volume] in Serum or Plasma',    'Measurement', 'LOINC', 'Lab Test', 'S', '10839-9'),
-    _c(9001012, 'Natriuretic peptide B [Mass/volume] in Serum',   'Measurement', 'LOINC', 'Lab Test', 'S', '42637-9'),
-    _c(9001013, 'Glucose [Mass/volume] in Serum or Plasma',       'Measurement', 'LOINC', 'Lab Test', 'S', '2345-7'),
-    _c(9001014, 'Magnesium [Mass/volume] in Blood',               'Measurement', 'LOINC', 'Lab Test', 'S', '2601-3'),
-    _c(9001015, 'Sodium [Moles/volume] in Serum or Plasma',       'Measurement', 'LOINC', 'Lab Test', 'S', '2951-2'),
-    _c(9001016, 'Potassium [Moles/volume] in Serum or Plasma',    'Measurement', 'LOINC', 'Lab Test', 'S', '2823-3'),
-    _c(9001017, 'Urea nitrogen [Mass/volume] in Serum or Plasma', 'Measurement', 'LOINC', 'Lab Test', 'S', '3094-0'),
-    _c(9001018, 'Glomerular filtration rate by CKD-EPI',          'Measurement', 'LOINC', 'Lab Test', 'S', '62238-1'),
+    _c(3013201,  'Beta-2-Microglobulin [Mass/volume] in Serum or Plasma',     'Measurement', 'LOINC', 'Lab Test', 'S', '1952-1'),
+    _c(3020460,  'C reactive protein [Mass/volume] in Serum or Plasma',       'Measurement', 'LOINC', 'Lab Test', 'S', '1988-5'),
+    _c(3015183,  'Erythrocyte sedimentation rate [Velocity] in Red Blood Cells', 'Measurement', 'LOINC', 'Lab Test', 'S', '30341-2'),
+    _c(3005770,  'Creatinine renal clearance in 24 hour Urine and Serum or Plasma', 'Measurement', 'LOINC', 'Lab Test', 'S', '2164-2'),
+    _c(3021337,  'Troponin I.cardiac [Mass/volume] in Serum or Plasma',       'Measurement', 'LOINC', 'Lab Test', 'S', '10839-9'),  # not troponin T
+    _c(3031569,  'Natriuretic peptide B [Mass/volume] in Blood',              'Measurement', 'LOINC', 'Lab Test', 'S', '42637-9'),
+    _c(3004501,  'Glucose [Mass/volume] in Serum or Plasma',                  'Measurement', 'LOINC', 'Lab Test', 'S', '2345-7'),
+    _c(3012095,  'Magnesium [Moles/volume] in Serum or Plasma',               'Measurement', 'LOINC', 'Lab Test', 'S', '2601-3'),  # Moles, not Mass
+    _c(3019550,  'Sodium [Moles/volume] in Serum or Plasma',                  'Measurement', 'LOINC', 'Lab Test', 'S', '2951-2'),
+    _c(3023103,  'Potassium [Moles/volume] in Serum or Plasma',               'Measurement', 'LOINC', 'Lab Test', 'S', '2823-3'),
+    _c(3013682,  'Urea nitrogen [Mass/volume] in Serum or Plasma',            'Measurement', 'LOINC', 'Lab Test', 'S', '3094-0'),
+    _c(40764999, 'Glomerular filtration rate [Volume Rate/Area] in Serum, Plasma or Blood by Creatinine-based formula (CKD-EPI)/1.73 sq M', 'Measurement', 'LOINC', 'Lab Test', 'S', '62238-1'),
+    _c(3001420,  'Magnesium [Mass/volume] in Serum or Plasma',                'Measurement', 'LOINC', 'Lab Test', 'S', '19123-9'),
+    _c(3003785,  'Carcinoembryonic Ag [Mass/volume] in Serum or Plasma',      'Measurement', 'LOINC', 'Lab Test', 'S', '2039-6'),
+
+    # ------------------------------------------------------------------
+    # Codes the demo generators emit after the #0329 audit, so a test database
+    # resolves what the generators write. Athena ids, names and domains.
+    # ------------------------------------------------------------------
+    _c(46235473, 'Peripheral sensory neuropathy grade NCICTC',                 'Observation', 'LOINC', 'Clinical Observation', 'S', '75691-6'),
+    _c(3043872,  'Alcoholic drinks per week - Reported',                        'Observation', 'LOINC', 'Clinical Observation', 'S', '44940-5'),
+    _c(40766311, 'What was your best estimate of the total income of all family members from all sources, before taxes, in last year [PhenX]', 'Observation', 'LOINC', 'Clinical Observation', 'S', '63586-2'),
+    _c(3046968,  'Mental health history [Minimum Data Set]',                    'Observation', 'LOINC', 'Clinical Observation', 'S', '45420-7'),
+    _c(44786860, 'Drug use [NTDS]',                                             'Observation', 'LOINC', 'Clinical Observation', 'S', '74204-9'),
+    _c(40767583, 'Reason stopped [PhenX]',                                      'Observation', 'LOINC', 'Clinical Observation', 'S', '64882-4'),
+    _c(1091384,  'Therapeutic intent [Interpretation] Narrative',               'Observation', 'LOINC', 'Clinical Observation', 'S', '104803-2'),
+    _c(3035081,  'CD19 cells/cells in Bone marrow',                             'Measurement', 'LOINC', 'Lab Test', 'S', '32525-8'),
+    _c(21494128, 'Chromosome region 17p13.1 deletion in Blood or Tissue by FISH', 'Measurement', 'LOINC', 'Lab Test', 'S', '81746-0'),
+    _c(43055560, 't(4;14)(p16;q32)(FGFR3,IGH) fusion transcript [Identifier] in Blood or Tissue by FISH Nominal', 'Measurement', 'LOINC', 'Lab Test', 'S', '72726-3'),
+    _c(46236743, 't(14;16)(q32;q23)(IGH,MAF) fusion transcript in Blood or Tissue by FISH', 'Measurement', 'LOINC', 'Lab Test', 'S', '77033-9'),
+    _c(21494134, 'Chromosome region 1q21 duplication in Bone marrow by FISH',  'Measurement', 'LOINC', 'Lab Test', 'S', '81752-8'),
+    _c(3003168,  'Hyperdiploid cells/cells in Specimen by Flow cytometry (FC)', 'Measurement', 'LOINC', 'Lab Test', 'S', '30914-6'),
+    _c(21494131, 'Chromosome region 13q14 deletion in Bone marrow by FISH',    'Measurement', 'LOINC', 'Lab Test', 'S', '81749-4'),
+    _c(3020720,  'BRCA1 gene mutations found [Identifier] in Blood or Tissue by Molecular genetics method Nominal', 'Measurement', 'LOINC', 'Lab Test', 'S', '21636-6'),
+    _c(21492351, 'BRCA2 gene mutation analysis limited to known familial mutations in Blood or Tissue by Molecular genetics method', 'Measurement', 'LOINC', 'Lab Test', 'S', '79208-5'),
+    _c(1259990,  'TP53 gene full mutation analysis in Blood or Tissue by Molecular genetics method', 'Measurement', 'LOINC', 'Lab Test', 'S', '103680-5'),
+    _c(40763093, 'PIK3CA gene targeted mutation analysis in Blood or Tissue by Molecular genetics method', 'Measurement', 'LOINC', 'Lab Test', 'S', '60034-6'),
+    _c(1092026,  'Tumor area infiltrated with PD-L1 expressing immune cells/Total tumor area [Area Fraction] in Tissue by Immune stain', 'Measurement', 'LOINC', 'Lab Test', 'S', '105305-7'),
+    _c(1091860,  'Tumor cells+Macrophages+Lymphocytes.Programmed cell death ligand 1/Viable tumor cells [Ratio] in Tissue by Immune stain', 'Measurement', 'LOINC', 'Lab Test', 'S', '105303-2'),
+    _c(133154,   'Plasma cell leukemia',                    'Condition',   'SNOMED', 'Disorder',          'S',  '95210003'),
+    _c(4077864,  'Progression',                             'Observation', 'SNOMED', 'Qualifier Value',   None, '246450006'),
+    # Non-standard and retired ('U') in SNOMED, but it is the approved
+    # myeloma_type mapping on staging, so the generator emits it.
+    {**_c(4190641, 'Plasma cell myeloma - category',       'Observation', 'SNOMED', 'Morph Abnormality', None, '415109007'), 'invalid_reason': 'U'},
+    _c(4027509,  'Uses contraception',                      'Observation', 'SNOMED', 'Clinical Finding',  'S',  '13197004'),
+    _c(437233,   'Multiple myeloma',                        'Condition',   'SNOMED', 'Disorder',          'S',  '109989006'),
+    _c(4147411,  'Follicular lymphoma',                     'Condition',   'SNOMED', 'Disorder',          'S',  '308121000'),
+    _c(4144157,  'Autologous peripheral blood stem cell transplant', 'Procedure', 'SNOMED', 'Procedure', 'S', '425983008'),
+    _c(1242725,  'Radiotherapy',                            'Procedure',   'SNOMED', 'Procedure',         'S',  '1287742003'),
+    _c(4141448,  'External beam radiation therapy procedure', 'Procedure', 'SNOMED', 'Procedure',         'S',  '33195004'),
+    _c(4047494,  'Biopsy of breast',                        'Procedure',   'SNOMED', 'Procedure',         'S',  '122548005'),
+    _c(4263386,  'Sentinel lymph node biopsy',              'Procedure',   'SNOMED', 'Procedure',         'S',  '396487001'),
+    _c(4213045,  'Lumpectomy of breast',                    'Procedure',   'SNOMED', 'Procedure',         'S',  '392021009'),
+    _c(4066543,  'Simple mastectomy',                       'Procedure',   'SNOMED', 'Procedure',         'S',  '172043006'),
 
     # ------------------------------------------------------------------
     # Wearable / remote-monitoring concepts.
@@ -455,6 +504,27 @@ _CONCEPTS = [
     _c(2_100_007_852, 'BTK inhibitor refractory disease status', 'Observation',
        'HK-Observation', 'Clinical Observation', None, 'hko:btk-inhibitor-refractory',
        source='HealthKey'),
+    # Migration 0329 mints these for the demo generators and derivation: no
+    # vocabulary has an observable for a CRAB boolean, an R-ISS stage, the
+    # drug classes a myeloma is refractory to, capacity to consent or
+    # menopausal status. Same trade as 0180: the migration is frozen and
+    # omop_core/tests.py asserts the two copies agree.
+    _c(2_100_007_870, 'Lytic bone lesions present (myeloma CRAB criterion)', 'Observation',
+       'HK-Observation', 'Clinical Observation', None, 'hko:bone-lesions', source='HealthKey'),
+    _c(2_100_007_871, 'Meets CRAB criteria (myeloma-defining event)', 'Observation',
+       'HK-Observation', 'Clinical Observation', None, 'hko:meets-crab-criteria', source='HealthKey'),
+    _c(2_100_007_872, 'Measurable disease by IMWG criteria', 'Observation',
+       'HK-Observation', 'Clinical Observation', None, 'hko:measurable-disease-imwg', source='HealthKey'),
+    _c(2_100_007_873, 'Drug classes the disease is refractory to', 'Observation',
+       'HK-Observation', 'Clinical Observation', None, 'hko:refractory-drug-classes', source='HealthKey'),
+    _c(2_100_007_874, 'Revised International Staging System (R-ISS) stage', 'Observation',
+       'HK-Observation', 'Clinical Observation', None, 'hko:r-iss-stage', source='HealthKey'),
+    _c(2_100_007_875, 'Number of prior lines of therapy', 'Observation',
+       'HK-Observation', 'Clinical Observation', None, 'hko:prior-lines-of-therapy', source='HealthKey'),
+    _c(2_100_007_876, 'Capacity to consent to treatment', 'Observation',
+       'HK-Observation', 'Clinical Observation', None, 'hko:consent-capability', source='HealthKey'),
+    _c(2_100_007_877, 'Menopausal status', 'Observation',
+       'HK-Observation', 'Clinical Observation', None, 'hko:menopausal-status', source='HealthKey'),
 
     # Language capabilities (#827). Domain is 'Meas Value' because these are
     # answers, not attributes: they are what a person's skill in a language IS,

@@ -15,23 +15,21 @@ only ever inserts; it never edits an existing measurement. Re-running it is a
 no-op for anyone already covered, which is what makes it safe to run before each
 demo refresh.
 
-Deliberately NOT covered, because the codes the derivation searches for do not
-mean what the derivation thinks they mean (verified against the loaded Athena
-vocabulary):
+Deliberately NOT covered: the PD-L1 fields. The codes the derivation searches
+for do not mean what it thinks they mean (verified against the loaded Athena
+vocabulary): pd_l1_tumor_cells reads 85337-4, which is 'Estrogen receptor Ag
+... by Immune stain', and 85337-4 already sits in the ER biomarker set, so a
+"PD-L1" row under it would be read back as estrogen receptor data. The mapping
+constants in patient_record_service need correcting first; this is the same
+defect class as the LOINC 10839-9 Troponin I/T mismatch called out in
+remap_local_drug_concepts.
 
-    pd_l1_tumor_cells    85337-4  is 'Estrogen receptor Ag ... by Immune stain'
-    pd_l1_ic_percentage  85336-6  is 'DCIS intraductal extension'
-    pd_l1_combined_...   96893-3  is 'ERBB2 gene duplication in Tumor by FISH'
-    menopausal_status    76690-7  is 'Sexual orientation'
-    genetic_mutations    21667-1  is F5, not TP53;  62318-1 is a Niemann-Pick
-                                  newborn screen, not PIK3CA;  21637-4 is
-                                  BRCA1 c.185delAG, not BRCA2
-
-Filling those would write clinically false rows — and 85337-4 already sits in
-the ER biomarker set, so a "PD-L1" row under it would be read back as estrogen
-receptor data. The mapping constants in patient_record_service need correcting
-first; this is the same defect class as the LOINC 10839-9 Troponin I/T mismatch
-called out in remap_local_drug_concepts.
+The breast-cancer generators used to write the same kind of wrong code
+(85336-6 'DCIS intraductal extension' for PD-L1 immune cells, 96893-3 'ERBB2
+gene duplication' for the CPS, 76690-7 'Sexual orientation' for menopausal
+status, 21667-1 F5 for TP53, 62318-1 a Niemann-Pick screen for PIK3CA,
+21637-4 BRCA1 c.185delAG for BRCA2); migration 0329 retired those and the
+generators now emit the real LOINC tests or a HealthKey concept.
 
 Values are drawn per person from a seed derived from person_id, so a given
 patient gets the same measurements on every run and demos stay reproducible.
