@@ -84,7 +84,7 @@ def test_overflowing_measurement_does_not_abort_other_derived_values(caplog):
 
 
 def test_decimal_rounding_that_carries_into_overflow_is_skipped():
-    record = PatientRecordFactory.build(platelet_count_thousand_per_ul=99_999.95)
+    record = PatientRecordFactory.build(platelet_count_thousand_per_ul=99_999.9995)
 
     _clear_overflowing_decimal_fields(record)
 

@@ -22,6 +22,12 @@ from omop_core.services.hemoglobin_units import (
     CANONICAL_FIELD, DEFAULT_UNIT, PAIR_FIELD, UNIT_FIELD,
     canonical_from_pair, canonical_in_range, normalize_unit,
 )
+from omop_core.services.blood_count_source_pairs import (
+    PAIRS as COUNT_SOURCE_PAIRS,
+    canonical_from_source as count_canonical_from_source,
+    normalize_unit as normalize_count_unit,
+    source_fields as count_source_fields,
+)
 from omop_core.services.write_descriptor import get_serializer_read_only_fields
 
 #: Columns that Measurement and Observation validate as one value.
@@ -518,6 +524,37 @@ class PatientRecordSerializer(serializers.ModelSerializer):
                     unit_field: 'Choose one of: g/dL, g/L.',
                 })
             data[unit_field] = code
+
+        # The count source pairs use the same pattern: the client writes the
+        # legacy cells/µL field and the canonical thousands/µL value follows.
+        count_units = {}
+        for source, spec in COUNT_SOURCE_PAIRS.items():
+            source_unit = spec.get('unit_field')
+            if source_unit and source_unit in data and source not in data:
+                raise serializers.ValidationError({
+                    source_unit: 'Send the unit together with its value.',
+                })
+            if source not in data:
+                continue
+            if source_unit and source_unit in data:
+                unit_code = normalize_count_unit(data[source_unit])
+                if unit_code is None:
+                    raise serializers.ValidationError({
+                        source_unit: 'Choose a supported count unit.',
+                    })
+            else:
+                stored = (getattr(self.instance, source_unit, None)
+                          if (self.instance and source_unit) else None)
+                unit_code = normalize_count_unit(stored)
+                if unit_code is None:
+                    if stored not in (None, ''):
+                        raise serializers.ValidationError({
+                            source_unit or source: 'Choose a supported count unit.',
+                        })
+                    unit_code = spec['unit']
+            if source_unit:
+                data[source_unit] = unit_code
+            count_units[source] = unit_code
         # Keep the schema-only gate even if this package's SDK is unavailable.
         source_fields = {
             'prothrombin_time_uln', 'activated_partial_thromboplastin_time_uln',
@@ -621,6 +658,24 @@ class PatientRecordSerializer(serializers.ModelSerializer):
             # source is what the reader owns.
             self._source_pairs = {pair, unit_field}
             self._derived_from_pair = {CANONICAL_FIELD}
+
+        for source, spec in COUNT_SOURCE_PAIRS.items():
+            if source not in validated:
+                continue
+            unit_code = count_units.get(source) or spec['unit']
+            recognised, canonical = count_canonical_from_source(
+                source, validated[source], unit_code,
+            )
+            if not recognised:
+                raise serializers.ValidationError({
+                    source: 'Enter a valid count in the chosen unit.',
+                })
+            validated[spec['canonical']] = canonical
+            self._source_pairs.add(source)
+            if spec.get('unit_field'):
+                validated[spec['unit_field']] = unit_code
+                self._source_pairs.add(spec['unit_field'])
+            self._derived_from_pair.add(spec['canonical'])
         return validated
 
     def get_supportive_therapy_courses(self, obj):
@@ -733,7 +788,7 @@ class PatientRecordSerializer(serializers.ModelSerializer):
         # Hemoglobin's source pair is an exception the descriptor states
         # (#2318): `hemoglobin_level` is the write target and its unit rides
         # beside it. The pair validator below rejects a unit on its own.
-        unit_pair = {PAIR_FIELD, UNIT_FIELD}
+        unit_pair = {PAIR_FIELD, UNIT_FIELD} | count_source_fields()
         for name in get_serializer_read_only_fields():
             if name in fields and name not in unit_pair:
                 fields[name].read_only = True

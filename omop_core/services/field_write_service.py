@@ -25,6 +25,7 @@ from django.db import transaction
 from omop_core.models import Concept, Location, Measurement, Observation, PatientRecord, Person
 from omop_core.services.patient_record_service import _ASSERTION_FIELDS, refresh_patient_record
 from omop_core.services.hemoglobin_units import SOURCE_PAIRS
+from omop_core.services.blood_count_source_pairs import PAIRS as COUNT_SOURCE_PAIRS
 from omop_core.services.genomic_concepts import (
     MUTATION_INTERPRETATION_CONCEPTS,
     MUTATION_ORIGIN_CONCEPTS,
@@ -275,6 +276,11 @@ def _retire_source_pairs(person, applied):
         if canonical in applied
         for field in fields
     }
+    for source, spec in COUNT_SOURCE_PAIRS.items():
+        if spec['canonical'] in applied:
+            retired.add(source)
+            if spec.get('unit_field'):
+                retired.add(spec['unit_field'])
     if not retired:
         return
     record = PatientRecord.objects.filter(person=person).first()

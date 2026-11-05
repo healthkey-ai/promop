@@ -8,6 +8,7 @@ same list on the field a write lands in and on the `*_units` entry beside it.
 """
 import pytest
 
+from omop_core.services.blood_count_source_pairs import UNIT_OPTIONS
 from omop_core.services.mappings import FIELD_COMMON_UNITS
 from omop_core.services.write_descriptor import (
     KIND_SELECTABLE,
@@ -44,6 +45,9 @@ EXPECTED['hemoglobin_level_units'] = [
     {'value': 'G/DL', 'label': 'g/dL'},
     {'value': 'G/L', 'label': 'g/L'},
 ]
+# The count source pairs offer the cells/µL and thousands/µL scales (#5700).
+EXPECTED['absolute_neutrophile_count_units'] = UNIT_OPTIONS
+EXPECTED['platelet_count_units'] = UNIT_OPTIONS
 
 
 def test_the_descriptor_still_has_twelve_selectable_unit_fields():

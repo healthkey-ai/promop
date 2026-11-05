@@ -32,6 +32,10 @@ from omop_core.services.patient_record_service import (
     PATIENT_RECORD_OMOP_MAPPED_FIELDS,
     _LAB_FIELD_ALIASES,
 )
+from omop_core.services.blood_count_source_pairs import (
+    PAIRS as COUNT_SOURCE_PAIRS,
+    UNIT_OPTIONS as COUNT_UNIT_OPTIONS,
+)
 
 # Every field resolves to exactly one kind. A binary writable/not left a third of
 # the record looking broken — a field is not "unwritable" because it is a unit
@@ -1538,4 +1542,55 @@ def build_writable_field_descriptor():
         entry = descriptor.get(field)
         if entry is not None:
             entry['unit_options'] = hemoglobin_units
+
+    # Blood-count source pairs (#5700 follow-up). EXACT's rows speak cells/µL
+    # (`absolute_neutrophile_count`, ...), so the legacy column is the write
+    # target; the canonical thousands/µL column becomes the computed
+    # read-model that carries the projection. The old alias direction sent the
+    # typed 1550 straight into a thousands field and derivation read it back as
+    # 1,550,000 cells/µL.
+    for source, spec in COUNT_SOURCE_PAIRS.items():
+        canonical = spec['canonical']
+        source_entry = descriptor.get(source) or {}
+        # Without a unit column there is nowhere to store a chosen scale, so
+        # the field advertises only the cells/µL it actually reads and writes.
+        source_units = (COUNT_UNIT_OPTIONS if spec.get('unit_field')
+                        else [{'value': spec['unit'], 'label': 'cells/µL'}])
+        descriptor[source] = {
+            **{key: value for key, value in source_entry.items()
+               if key not in ('canonical', 'reason', 'unit_options')},
+            'kind': KIND_DIRECT,
+            'writable': True,
+            'target': 'patient_record',
+            'value_kind': 'number',
+            'unit': spec['unit'],
+            'unit_options': source_units,
+            **({'dated': True} if (descriptor.get(canonical) or {}).get('dated') else {}),
+        }
+        if spec.get('unit_field'):
+            descriptor[spec['unit_field']] = {
+                'kind': KIND_SELECTABLE,
+                'writable': False,
+                'qualifies': source,
+                'unit_options': COUNT_UNIT_OPTIONS,
+                'reason': (
+                    f'Unit of {source}; selected alongside that value and '
+                    f'stored with it. The canonical {spec["canonical_unit"]} '
+                    'value is derived from the pair.'
+                ),
+            }
+        canonical_entry = descriptor.get(canonical) or {}
+        descriptor[canonical] = {
+            **canonical_entry,
+            'kind': KIND_COMPUTED,
+            'writable': False,
+            'value_kind': 'number',
+            'inputs': [source],
+            'normalised_read_model': True,
+            'reason': (
+                f'Normalised from {source} in {spec["canonical_unit"]}; '
+                'edit that field and its unit instead.'
+            ),
+            'unit': spec['canonical_unit'],
+        }
     return descriptor

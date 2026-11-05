@@ -192,16 +192,24 @@ class TestKinds:
     def test_no_alias_is_offered_as_editable(self):
         """Writing an alias and its canonical collides on one LOINC row (#471)."""
         descriptor = build_writable_field_descriptor()
-        for alias in ('calcium_mg_dl', 'creatinine_mg_dl', 'blood_urea_nitrogen',
-                      'absolute_lymphocyte_count'):
+        for alias in ('calcium_mg_dl', 'creatinine_mg_dl', 'blood_urea_nitrogen'):
             assert descriptor[alias]['kind'] == 'alias'
             assert descriptor[alias]['writable'] is False
-        # Hemoglobin is the source pair now (#2318): the patient writes the
-        # number and its unit, and the canonical is derived.
+        # Hemoglobin and the cell counts are source pairs now (#2318): the
+        # patient writes the value in the unit the row shows, and the
+        # canonical read-model is derived.
         assert descriptor['hemoglobin_level']['kind'] == 'direct'
         assert descriptor['hemoglobin_level']['writable'] is True
         assert descriptor['hemoglobin_g_dl']['kind'] == 'computed'
-        assert descriptor['absolute_lymphocyte_count']['canonical'] == 'alc_thousand_per_ul'
+        for source, canonical in (
+            ('absolute_neutrophile_count', 'anc_thousand_per_ul'),
+            ('absolute_lymphocyte_count', 'alc_thousand_per_ul'),
+            ('platelet_count', 'platelet_count_thousand_per_ul'),
+        ):
+            assert descriptor[source]['kind'] == 'direct'
+            assert descriptor[source]['writable'] is True
+            assert descriptor[canonical]['kind'] == 'computed'
+            assert descriptor[canonical]['normalised_read_model'] is True
 
     def test_a_computed_field_names_its_inputs(self):
         entry = build_writable_field_descriptor()['bmi']
