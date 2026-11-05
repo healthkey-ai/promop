@@ -3,6 +3,7 @@ from typing import Any
 from rest_framework import serializers
 from patient_portal.models import Identity, PatientConsent, PatientMessage
 from omop_core.models import (
+    UNPLACED_TAB,
     PatientRecord, Concept, FieldConceptMapping, FieldSynonym, Person,
     ConditionOccurrence, DrugExposure, Measurement, Observation, ProcedureOccurrence,
     PatientDocument, PatientTrialEnrollment, TrialSearchPreferences, ProvenanceRecord,
@@ -1501,6 +1502,9 @@ class FieldConceptMappingSerializer(serializers.ModelSerializer):
             # the mapping stays advisory however complete it otherwise looks.
             'source_value', 'value_kind', 'type_concept_id',
             'value_vocabulary', 'multiple', 'makes_field_writable',
+            # Which patient tab the field renders on, last and on its own row
+            # (#2328). Blank keeps the code's placement; "omop" is unplaced.
+            'tab',
         ]
         read_only_fields = ['provenance', 'id', 'reviewer', 'reviewed_at', 'created_at', 'updated_at']
 
@@ -1633,7 +1637,8 @@ class CustomPatientFieldCreateSerializer(serializers.Serializer):
     confirm_patient_record = serializers.BooleanField()
     field_name = serializers.CharField(max_length=100)
     display_name = serializers.CharField(max_length=200)
-    tab = serializers.ChoiceField(choices=CustomPatientField.TAB_CHOICES)
+    # Omitted means unplaced: the field exists and derives, but no tab shows it (#2328).
+    tab = serializers.ChoiceField(choices=CustomPatientField.TAB_CHOICES, default=UNPLACED_TAB)
     field_type = serializers.ChoiceField(choices=CustomPatientField.FIELD_TYPE_CHOICES)
     mode = serializers.ChoiceField(choices=CustomPatientField.MODE_CHOICES, default='editable')
     concept = serializers.PrimaryKeyRelatedField(queryset=Concept.objects.all())
@@ -1706,6 +1711,7 @@ class CustomPatientFieldCreateSerializer(serializers.Serializer):
                 unit=validated_data.pop('unit'),
                 notes=validated_data.pop('notes'),
                 source_value=f"custom:{validated_data['field_name']}",
+                tab=validated_data['tab'],
                 value_kind=(
                     'number' if validated_data['field_type'] == 'number'
                     else 'boolean' if validated_data['field_type'] == 'boolean'

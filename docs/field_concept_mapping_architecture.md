@@ -72,6 +72,22 @@ The descriptor includes structured Genomics cases as well as ordinary direct
 fields. Do not infer that every writable field uses the generic scalar writer,
 or that the presence of an enum supplies a coded-answer projection.
 
+### Where a field renders: `FieldConceptMapping.tab`
+
+A field's placement is one value, the patient tab it renders on
+(`FieldConceptMapping.tab`, #2328; `FIELD_TAB_CHOICES` is the one list the
+mapping row, `CustomPatientField` and the Field Mappings page share). It is
+not a layout: a placed field renders last on its tab, on its own row.
+`field_descriptor.resolve_tab` reads the mapping's tab, then a custom field's
+own, then the tab the code gives a built-in field (`_classify_tab`), and the
+descriptor emits the result as `tab`. A field nothing places is `omop`,
+unplaced: it keeps its mapping and derivation, no tab renders a control for
+it, and it is listed on the mapping page's OMOP (unplaced) tab so it is seen
+rather than lost. The column travels with the mapping through
+`copy_reference_data` and the curation fixture, and a payload written before
+it existed reads as blank. Rendering placed fields on the patient tabs and the
+curation control are #2330 and #2329.
+
 ### Lab derivation reads the mapping tables
 
 Every reader that turns a LOINC code into a lab field at derivation time (the
