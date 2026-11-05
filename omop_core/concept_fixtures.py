@@ -408,6 +408,7 @@ _CONCEPTS = [
     # myeloma_type mapping on staging, so the generator emits it.
     {**_c(4190641, 'Plasma cell myeloma - category',       'Observation', 'SNOMED', 'Morph Abnormality', None, '415109007'), 'invalid_reason': 'U'},
     _c(4027509,  'Uses contraception',                      'Observation', 'SNOMED', 'Clinical Finding',  'S',  '13197004'),
+    _c(4172857,  'Menopause finding',                       'Observation', 'SNOMED', 'Clinical Finding',  'S',  '276477006'),
     _c(437233,   'Multiple myeloma',                        'Condition',   'SNOMED', 'Disorder',          'S',  '109989006'),
     _c(4147411,  'Follicular lymphoma',                     'Condition',   'SNOMED', 'Disorder',          'S',  '308121000'),
     _c(4144157,  'Autologous peripheral blood stem cell transplant', 'Procedure', 'SNOMED', 'Procedure', 'S', '425983008'),
@@ -506,8 +507,8 @@ _CONCEPTS = [
        source='HealthKey'),
     # Migration 0329 mints these for the demo generators and derivation: no
     # vocabulary has an observable for a CRAB boolean, an R-ISS stage, the
-    # drug classes a myeloma is refractory to, capacity to consent or
-    # menopausal status. Same trade as 0180: the migration is frozen and
+    # drug classes a myeloma is refractory to, capacity to consent or the FL
+    # generator's transformation flag. Same trade as 0180: the migration is frozen and
     # omop_core/tests.py asserts the two copies agree.
     _c(2_100_007_870, 'Lytic bone lesions present (myeloma CRAB criterion)', 'Observation',
        'HK-Observation', 'Clinical Observation', None, 'hko:bone-lesions', source='HealthKey'),
@@ -523,8 +524,8 @@ _CONCEPTS = [
        'HK-Observation', 'Clinical Observation', None, 'hko:prior-lines-of-therapy', source='HealthKey'),
     _c(2_100_007_876, 'Capacity to consent to treatment', 'Observation',
        'HK-Observation', 'Clinical Observation', None, 'hko:consent-capability', source='HealthKey'),
-    _c(2_100_007_877, 'Menopausal status', 'Observation',
-       'HK-Observation', 'Clinical Observation', None, 'hko:menopausal-status', source='HealthKey'),
+    _c(2_100_007_877, 'Histologic transformation to DLBCL', 'Observation',
+       'HK-Observation', 'Clinical Observation', None, 'hko:fl-transformed-dlbcl', source='HealthKey'),
 
     # Language capabilities (#827). Domain is 'Meas Value' because these are
     # answers, not attributes: they are what a person's skill in a language IS,

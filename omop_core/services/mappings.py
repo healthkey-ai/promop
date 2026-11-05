@@ -545,7 +545,7 @@ SUGGESTED_FIELD_CODES: dict[str, tuple[str, str]] = {
     'tnbc_status':                   ('706886006', 'SNOMED'),
     'hr_status':                     ('416053008', 'SNOMED'),
     # Oncotype invasive/DCIS score selection requires reviewed event context (#1227).
-    'menopausal_status':             ('hko:menopausal-status', HK_OBSERVATION_VOCABULARY),
+    'menopausal_status':             ('276477006', 'SNOMED'),  # Menopause finding, the approved mapping
     # Lymphoma
     'flipi_score':                   ('444723004', 'SNOMED'),
     'gelf_criteria_status':          ('109964006', 'SNOMED'),

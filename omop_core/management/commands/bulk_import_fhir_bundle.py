@@ -373,6 +373,9 @@ class Command(BaseCommand):
             '6301-6', '5902-2', '3173-2', '2039-6', '25390-6', '2857-1',
             '8806-2',  # EF
             '104803-2', '64882-4',  # therapy intent / reason stopped: the line reader reads Measurement
+            # Breast-cancer gene tests and PD-L1 scores the generators emit; the
+            # genetic-mutation and biomarker readers read Measurement
+            '21636-6', '79208-5', '103680-5', '60034-6', '105305-7', '105303-2',
             '51435-6', '33358-3', '42482-0',  # MM disease burden (32730-5 retired by 0329)
             '36916-5', '80515-0', '33944-0', '80516-8',  # free light chains
             '48378-4', '80517-6', '104546-7',  # free light chain ratio

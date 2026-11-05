@@ -623,7 +623,7 @@ def test_genetic_mutation_reconcile_ignores_same_code_in_other_vocabulary():
     from tests.factories import MeasurementFactory
     from omop_core.models import Concept
     person = _person_with_genetic_vocab()
-    other_vocab = VocabularyFactory(vocabulary=VocabularyFactory(vocabulary_id='SNOMED'), vocabulary_name='SNOMED')
+    other_vocab = VocabularyFactory(vocabulary_id='SNOMED', vocabulary_name='SNOMED')
     decoy = ConceptFactory(concept_code=_GENE_CODE['BRCA1'], concept_name='not a gene', vocabulary=other_vocab)
     tc = Concept.objects.get(concept_id=32865)
     decoy_row = MeasurementFactory(

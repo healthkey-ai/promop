@@ -3035,11 +3035,14 @@ _GENETIC_MUTATION_LOINCS = {
     '81252-9': None,  # Discrete genetic variant, with linked components.
     '21636-6': 'BRCA1',
     '21640-8': 'BRCA2',   # BRCA2 gene c.6174delT [Presence] in Blood or Tissue
+    '79208-5': 'BRCA2',   # BRCA2 gene mutation analysis limited to known familial mutations (demo generators)
     '21739-8': 'TP53',    # TP53 gene mutations found [Identifier] in Blood or Tissue
     '96970-9': 'TP53',    # TP53 gene deletion and duplication mutation analysis [Identifier] in Blood or Tissue
+    '103680-5': 'TP53',   # TP53 gene full mutation analysis (demo generators)
     '48013-7': 'KRAS',
     '62862-8': 'EGFR',
     '60033-8': 'PIK3CA',  # PIK3CA gene mutations found [Identifier] in Blood or Tissue
+    '60034-6': 'PIK3CA',  # PIK3CA gene targeted mutation analysis (demo generators)
 }
 
 # Pathology report fields which have an unambiguous LOINC representation in
@@ -3172,13 +3175,15 @@ def _get_biomarker_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     if ki67_m and ki67_m.value_as_number is not None:
         data['ki67_proliferation_index'] = int(ki67_m.value_as_number)
 
-    # PD-L1 immune cell percentage — LOINC 83055-4
-    pdl1_ic_m = _first_m('83055-4')
+    # PD-L1 immune cell percentage — LOINC 83055-4, or 105305-7 (area fraction
+    # of PD-L1 expressing immune cells), which the demo generators write
+    pdl1_ic_m = _first_m('83055-4') or _first_m('105305-7')
     if pdl1_ic_m and pdl1_ic_m.value_as_number is not None:
         data['pd_l1_ic_percentage'] = int(pdl1_ic_m.value_as_number)
 
-    # PD-L1 combined positive score — LOINC 83054-7
-    pdl1_cps_m = _first_m('83054-7')
+    # PD-L1 combined positive score — LOINC 83054-7, or 105303-2 (the CPS
+    # ratio), which the demo generators write
+    pdl1_cps_m = _first_m('83054-7') or _first_m('105303-2')
     if pdl1_cps_m and pdl1_cps_m.value_as_number is not None:
         data['pd_l1_combined_positive_score'] = int(pdl1_cps_m.value_as_number)
 
@@ -3187,13 +3192,13 @@ def _get_biomarker_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     if biopsy_m and biopsy_m.value_as_number is not None:
         data['biopsy_grade'] = int(biopsy_m.value_as_number)
 
-    # Menopausal status — no LOINC or SNOMED observable exists (76690-7, once
-    # used, is "Sexual orientation"). The demo generators write the HealthKey
-    # concept hko:menopausal-status (migration 0329); otherwise read from
-    # Observation matched by a concept name containing 'menopaus'.
+    # Menopausal status — SNOMED 276477006 "Menopause finding", the approved
+    # mapping, which the demo generators write too (76690-7, once used, is
+    # "Sexual orientation"); otherwise read from Observation matched by a
+    # concept name containing 'menopaus'.
     menopause_obs = next(
         (obs for obs in snapshot.observations
-         if obs.observation_source_value == 'hko:menopausal-status'
+         if obs.observation_source_value == '276477006'
          or (obs.observation_concept
              and obs.observation_concept.concept_name
              and 'menopaus' in obs.observation_concept.concept_name.lower())),

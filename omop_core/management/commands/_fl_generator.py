@@ -641,11 +641,11 @@ class FLBundleGenerator:
             self._q_obs(pid, 'bm-b-cells', _L['bm_b_cells'],
                         'Clonal B lymphocytes in bone marrow biopsy (%)', p['bm_b_cells_pct'], '%', dt),
             # 21861-0 ("Dx confirmed by Cancer") said nothing about prior lines; the
-            # count is a HealthKey concept. The transformation flag is a local code
-            # and travels under the HealthKey system, not loinc.org.
+            # count and the transformation flag are HealthKey concepts (the flag
+            # used to travel as 'fl-transformed-dlbcl' under loinc.org).
             self._obs(pid, f"obs-{pid}-prior-lines", 'hko:prior-lines-of-therapy', 'Number of prior lines of therapy',
                       'laboratory', dt, 'integer', p['prior_lines'], system=HK_OBSERVATION_SYSTEM),
-            self._obs(pid, f"obs-{pid}-fl-transformed", 'fl-transformed-dlbcl', 'Histologic transformation to DLBCL',
+            self._obs(pid, f"obs-{pid}-fl-transformed", 'hko:fl-transformed-dlbcl', 'Histologic transformation to DLBCL',
                       'laboratory', tx_dt, 'boolean', p['transformed'], system=HK_OBSERVATION_SYSTEM),
         ]
 

@@ -19,8 +19,10 @@ Athena vocabularies found two kinds of defect:
 
 Where the release has the real test it is used; where no vocabulary says the
 thing (a CRAB boolean, an R-ISS stage, the drug classes a myeloma is
-refractory to, capacity to consent, menopausal status) a HealthKey concept
-is minted in the ``HK-Observation`` vocabulary in OHDSI's local range.
+refractory to, capacity to consent, the FL generator's transformation flag)
+a HealthKey concept is minted in the ``HK-Observation`` vocabulary in
+OHDSI's local range. Menopausal status follows its approved mapping, SNOMED
+276477006.
 
 For each retired code this migration:
 
@@ -77,7 +79,7 @@ _CONCEPTS = (
     (2_100_007_874, 'hko:r-iss-stage', 'Revised International Staging System (R-ISS) stage'),
     (2_100_007_875, 'hko:prior-lines-of-therapy', 'Number of prior lines of therapy'),
     (2_100_007_876, 'hko:consent-capability', 'Capacity to consent to treatment'),
-    (2_100_007_877, 'hko:menopausal-status', 'Menopausal status'),
+    (2_100_007_877, 'hko:fl-transformed-dlbcl', 'Histologic transformation to DLBCL'),
 )
 
 LOCAL_CONCEPT_ID_MIN = 2_000_000_000
@@ -85,7 +87,6 @@ LOCAL_CONCEPT_ID_MIN = 2_000_000_000
 # Value-shape guards for rows stored under a mis-identified *real* code.
 BOOLEAN = 'boolean'          # value_as_number in (0, 1), no string
 SMALL_INTEGER = 'integer'    # value_as_number 0..20, no string
-PERCENT = 'percent'          # value_as_number 0..100, no string
 ISOTYPE = 'isotype'          # the generator's myeloma isotype labels
 PREFIX = 'prefix:'           # value_as_string starts with the text after the colon
 VALUES = 'values:'           # value_as_string is one of the '|'-separated texts after the colon
@@ -96,6 +97,12 @@ MYELOMA_ISOTYPES = ('IgG', 'IgA', 'IgM', 'IgD', 'IgE', 'light_chain_only', 'non_
 THERAPY_INTENTS = ('DEFINITIVE_LOCAL', 'ADJUVANT', 'NEOADJUVANT', 'INDUCTION', 'CONSOLIDATION',
                    'MAINTENANCE', 'METASTATIC_DISEASE_CONTROL', 'PALLIATIVE_SYMPTOM', 'SALVAGE')
 MENOPAUSAL_STATES = ('Premenopausal', 'Perimenopausal', 'Postmenopausal')
+# Not recoded: 85336-6 (DCIS intraductal extension) and 96893-3 (ERBB2 gene
+# duplication), which the breast-cancer generators used for PD-L1. A genuine
+# result under either is a small number too, so no value shape tells them
+# apart; the generators only ever wrote demo databases, staging has no rows
+# under either, and a demo database is regenerated. The generators now emit
+# 105305-7 / 105303-2.
 
 # retired code -> (replacement vocabulary, replacement code, guard or None).
 # A guard of None means the old code is invented: every row under it is the
@@ -139,9 +146,9 @@ RECODE = {
     '21637-4': ('LOINC', '79208-5', PREFIX + 'BRCA2'),          # was BRCA1 c.185delAG
     '21667-1': ('LOINC', '103680-5', PREFIX + 'TP53'),          # was F5 gene mutations
     '62318-1': ('LOINC', '60034-6', PREFIX + 'PIK3CA'),         # was Niemann-Pick newborn screen
-    '76690-7': (HK_VOCABULARY, 'hko:menopausal-status', VALUES + '|'.join(MENOPAUSAL_STATES)),  # was Sexual orientation
-    '85336-6': ('LOINC', '105305-7', PERCENT),                  # PD-L1 immune cells; was DCIS extension
-    '96893-3': ('LOINC', '105303-2', PERCENT),                  # PD-L1 CPS; was ERBB2 duplication
+    '76690-7': ('SNOMED', '276477006', VALUES + '|'.join(MENOPAUSAL_STATES)),  # approved mapping; was Sexual orientation
+    # Follicular lymphoma: a local flag that travelled under loinc.org
+    'fl-transformed-dlbcl': (HK_VOCABULARY, 'hko:fl-transformed-dlbcl', None),
 }
 
 # Invented codes that had Concept rows minted under vocabulary_id='LOINC'.
@@ -227,8 +234,6 @@ def _matches(guard, number, string):
         return string is None and number is not None and number in (0, 1)
     if guard == SMALL_INTEGER:
         return string is None and number is not None and 0 <= number <= 20
-    if guard == PERCENT:
-        return string is None and number is not None and 0 <= number <= 100
     if guard == ISOTYPE:
         return string in MYELOMA_ISOTYPES
     if guard.startswith(VALUES):

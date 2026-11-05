@@ -231,7 +231,7 @@ All notable changes to PRomop are documented here.
   real code, the field's approved mapping, or a HealthKey `HK-Observation`
   concept where no vocabulary says the thing (bone lesions, CRAB, R-ISS
   stage, IMWG measurable disease, refractory drug classes, prior lines,
-  consent capability, menopausal status). Migration `0329` mints those,
+  consent capability, the FL transformation flag). Migration `0329` mints those,
   recodes stored rows (a row under a mis-identified real code moves only
   when it has the generator's shape), repoints the mapping rows and deletes
   the invented concepts. `concept_fixtures` seeds real LOINC codes under

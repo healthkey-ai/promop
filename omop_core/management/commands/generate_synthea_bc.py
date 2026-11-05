@@ -302,12 +302,12 @@ _BC_BIOMARKERS = [
     ('48676-1', 'HER2 [Interpretation] in Tissue', 'negative'),
     ('29593-1', 'Cells.Ki-67 nuclear Ag/cells in Tissue by Immune stain', None),
     # 85336-6 is DCIS intraductal extension and 96893-3 ERBB2 duplication;
-    # 76690-7 is sexual orientation. Menopausal status has no LOINC or SNOMED
-    # observable, so it is a HealthKey concept (migration 0329).
+    # 76690-7 is sexual orientation. Menopausal status follows its approved
+    # mapping, SNOMED 276477006 "Menopause finding" (migration 0329).
     ('105305-7', 'PD-L1 expressing immune cells/Total tumor area [Area Fraction] in Tissue', None),
     ('105303-2', 'PD-L1 combined positive score [Ratio] in Tissue', None),
     ('44648-4', 'Biopsy grade', None),
-    ('hko:menopausal-status', 'Menopausal status', None),
+    ('276477006', 'Menopause finding', None),
     ('44667-4', 'Bone-only metastasis status', None),
 ]
 
@@ -803,7 +803,7 @@ def _enrich_patient_bundle(bundle: dict, index: int) -> None:
         '105305-7': (rng.randint(1, 30), '%'),
         '105303-2': (rng.randint(1, 50), None),
         '44648-4': (rng.choice([1, 2, 3]), None),
-        'hko:menopausal-status': (rng.choice(['Premenopausal', 'Perimenopausal', 'Postmenopausal']), None),
+        '276477006': (rng.choice(['Premenopausal', 'Perimenopausal', 'Postmenopausal']), None),
         '44667-4': (rng.choice([True, False]), None),
     }
     existing_biomarker_codes = {

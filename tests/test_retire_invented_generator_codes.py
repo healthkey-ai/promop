@@ -214,7 +214,7 @@ def test_closed_value_guards_keep_a_genuine_result():
     _run()
     for row in (demo_meno, real_meno, demo_intent, real_intent):
         row.refresh_from_db()
-    assert demo_meno.observation_source_value == 'hko:menopausal-status'
+    assert demo_meno.observation_source_value == '276477006'
     assert real_meno.observation_source_value == '76690-7'
     assert demo_intent.measurement_source_value == '104803-2'
     assert real_intent.measurement_source_value == '42804-5'
@@ -350,16 +350,6 @@ def test_invented_concept_without_its_replacement_is_detached_and_deleted():
     assert row.measurement_source_value == '44940-5'
     assert row.measurement_concept_id == 0 and row.measurement_source_concept_id is None
     assert not Concept.objects.filter(pk=fake.pk).exists()
-
-
-def test_percent_guard_moves_the_generators_pd_l1_rows():
-    person = PersonFactory()
-    erbb2 = _loinc('96893-3', 'ERBB2 gene duplication in Tumor by FISH', concept_id=99_000_001)
-    row = MeasurementFactory(person=person, measurement_concept=erbb2,
-                             measurement_source_value='96893-3', value_as_number=45)
-    _run()
-    row.refresh_from_db()
-    assert row.measurement_source_value == '105303-2'
 
 
 def test_reviewed_real_code_mapping_is_not_overruled():
