@@ -12,7 +12,13 @@ import { clinicalClient, clinicalUrl } from '@/api/clinicalTransport';
  * move with vocabulary releases, so a copy in TypeScript would drift silently and
  * start writing facts against stale concepts.
  */
-export type FieldKind = 'editable' | 'selectable' | 'computed' | 'alias' | 'direct' | null;
+export type FieldKind = 'editable' | 'selectable' | 'computed' | 'alias' | 'direct'
+  /** An inverted view of a canonical boolean (`no_hiv_status` over `hiv_status`).
+   *  Not a column: the editor writes `canonical` with the opposite value. */
+  | 'negated'
+  /** Answered through its own self-only snapshot endpoint, not a field write. */
+  | 'explicit-answer'
+  | null;
 
 export interface FieldDescriptor {
   kind: FieldKind;

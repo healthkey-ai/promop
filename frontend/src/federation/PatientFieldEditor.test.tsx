@@ -324,6 +324,104 @@ describe('computed patient field input dialogs', () => {
   });
 });
 
+describe('negated trial questions (#5663)', () => {
+  const hivStatus = {
+    label: 'HIV Positive', writable: true, target: 'patient_record',
+    control: 'boolean', value_kind: 'boolean' as const,
+  };
+  const noHiv = {
+    label: 'No HIV', kind: 'negated' as const, writable: false,
+    canonical: 'hiv_status', inverted: true, value_kind: 'boolean' as const,
+    reason: 'Inverted view of hiv_status: the record stores the positive status.',
+  };
+
+  it('shows the negated question and writes the positive column inverted', async () => {
+    const user = userEvent.setup();
+    const { store, patch } = await setup({ hiv_status: hivStatus, no_hiv_status: noHiv },
+      { hiv_status: false });
+    render(<PatientFieldEditor store={store} name="no_hiv_status" label="No HIV" />);
+
+    // `hiv_status: false` answers "No HIV" with Yes.
+    expect(screen.getByRole('combobox')).toHaveTextContent('Yes');
+
+    await user.click(screen.getByRole('combobox'));
+    await user.click(screen.getByRole('option', { name: 'No' }));
+    await act(async () => { await store.flush(); });
+
+    // A write to `no_hiv_status` would invent a column; the answer lands on the
+    // positive field, inverted.
+    expect(patch.mock.calls.at(-1)?.[1]).toEqual({ hiv_status: true });
+  });
+
+  it('writes the opposite answer too', async () => {
+    const user = userEvent.setup();
+    const { store, patch } = await setup({ hiv_status: hivStatus, no_hiv_status: noHiv },
+      { hiv_status: true });
+    render(<PatientFieldEditor store={store} name="no_hiv_status" label="No HIV" />);
+
+    // `hiv_status: true` answers "No HIV" with No.
+    expect(screen.getByRole('combobox')).toHaveTextContent('No');
+
+    await user.click(screen.getByRole('combobox'));
+    await user.click(screen.getByRole('option', { name: 'Yes' }));
+    await act(async () => { await store.flush(); });
+
+    expect(patch.mock.calls.at(-1)?.[1]).toEqual({ hiv_status: false });
+  });
+
+  it('keeps Unknown as null for a tri-state positive column', async () => {
+    const user = userEvent.setup();
+    const { store, patch } = await setup({
+      hiv_status: { ...hivStatus, tri_state: true },
+      no_hiv_status: noHiv,
+    }, { hiv_status: true });
+    render(<PatientFieldEditor store={store} name="no_hiv_status" label="No HIV" />);
+
+    expect(screen.getByRole('combobox')).toHaveTextContent('No');
+
+    await user.click(screen.getByRole('combobox'));
+    await user.click(screen.getByRole('option', { name: 'Unknown' }));
+    await act(async () => { await store.flush(); });
+
+    expect(patch.mock.calls.at(-1)?.[1]).toEqual({ hiv_status: null });
+  });
+
+  it('stays read-only when the positive column is not writable', async () => {
+    const { store } = await setup({
+      hiv_status: { ...hivStatus, writable: false, reason: 'Withheld by the host.' },
+      no_hiv_status: noHiv,
+    }, { hiv_status: false });
+    const { container } = render(
+      <PatientFieldEditor store={store} name="no_hiv_status" label="No HIV" />);
+
+    expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
+    expect(container).toHaveTextContent('No HIV: Yes');
+    // Both halves stay on screen: why it is read-only, and how the value maps.
+    expect(screen.getByText(/Withheld by the host/)).toBeVisible();
+    expect(screen.getByText(/Inverted view of hiv_status/)).toBeVisible();
+  });
+
+  it('reads an unanswered negated view as Unknown', async () => {
+    const { store } = await setup({ hiv_status: hivStatus, no_hiv_status: noHiv },
+      { hiv_status: null });
+    const { container } = render(
+      <PatientFieldEditor store={store} name="no_hiv_status" label="No HIV" readOnly />);
+
+    expect(container).toHaveTextContent('No HIV: Unknown');
+    expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
+  });
+
+  it('falls back to a read-only row when the positive column has no descriptor', async () => {
+    const { store } = await setup({ no_hiv_status: noHiv }, { hiv_status: false });
+    const { container } = render(
+      <PatientFieldEditor store={store} name="no_hiv_status" label="No HIV" />);
+
+    expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
+    expect(container).toHaveTextContent('No HIV: Unknown');
+    expect(screen.getByText(/not editable in this view/)).toBeVisible();
+  });
+});
+
 describe('current-diagnosis tri-state fields (#5521)', () => {
   it('offers Unknown as a third answer and saves it as null', async () => {
     const user = userEvent.setup();
