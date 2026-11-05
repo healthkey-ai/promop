@@ -5,7 +5,10 @@ fallback (#2288); see ``omop_core.services.vocabulary_source``.
 """
 
 import hashlib
+import logging
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 from django.core.management import call_command
@@ -25,6 +28,118 @@ from omop_core.services.vocabulary_source import DEFAULT_LFS_URL
 
 
 LOCK_ID = 1_652_202_609
+HEARTBEAT_EVERY = 30  # seconds between heartbeat writes
+logger = logging.getLogger(__name__)
+
+
+class HeartbeatOutput:
+    """The command's stdout, plus a record on the receipt that the sync is alive.
+
+    A daemon thread refreshes ``heartbeat_at`` every ``HEARTBEAT_EVERY``
+    seconds for as long as the command runs, so liveness does not depend on
+    how often the loader logs: hashing a table for the release or streaming
+    the archive are long single statements with no output. Progress lines
+    beat too, which costs nothing. A worker that was retired cannot beat from
+    any thread, which is the one case the takeover in ``enqueue_sync`` is for.
+
+    The write goes through its own autocommit connection, built from Django's
+    parameters but outside its accounting: the delta runs inside one
+    transaction on Django's connection, where a heartbeat would be invisible
+    until commit, which is exactly when it is no longer needed. One extra
+    server connection per running sync.
+    """
+
+    def __init__(self, inner, sync_id, every=HEARTBEAT_EVERY):
+        self._inner = inner
+        self._sync_id = sync_id
+        self._every = every
+        self._last = 0.0
+        self._connection = None
+        self._closed = False
+        self._warned = False
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread = None
+
+    def __getattr__(self, name):
+        if name.startswith('_'):
+            raise AttributeError(name)
+        return getattr(self._inner, name)
+
+    def write(self, *args, **kwargs):
+        self._inner.write(*args, **kwargs)
+        self.beat()
+
+    def flush(self):
+        self._inner.flush()
+
+    def start(self):
+        """Beat now, then keep beating on a thread until ``close()``."""
+        self.beat(force=True)
+        if self._thread is None:
+            self._thread = threading.Thread(
+                target=self._run, name=f'athena-sync-heartbeat-{self._sync_id}', daemon=True,
+            )
+            self._thread.start()
+        return self
+
+    def _run(self):
+        while not self._stop.wait(self._every):
+            self.beat(force=True)
+
+    @staticmethod
+    def _connect():
+        import psycopg
+
+        params = {
+            key: value for key, value in connection.get_connection_params().items()
+            if key != 'cursor_factory'
+        }
+        return psycopg.connect(**params, autocommit=True)
+
+    def beat(self, force=False):
+        with self._lock:
+            if self._closed:
+                return
+            now = time.monotonic()
+            if not force and now - self._last < self._every:
+                return
+            self._last = now
+            try:
+                if self._connection is None:
+                    self._connection = self._connect()
+                from psycopg import sql
+
+                meta = AthenaVocabularySync._meta
+                with self._connection.cursor() as cursor:
+                    cursor.execute(
+                        sql.SQL('UPDATE {table} SET heartbeat_at = NOW() WHERE {pk} = %s').format(
+                            table=sql.Identifier(meta.db_table), pk=sql.Identifier(meta.pk.column),
+                        ),
+                        [self._sync_id],
+                    )
+            except Exception as exc:  # the heartbeat must never fail the load it reports on
+                self._drop_connection()
+                if not self._warned:
+                    self._warned = True
+                    logger.warning('Athena sync %s heartbeat failed: %s', self._sync_id, exc)
+
+    def _drop_connection(self):
+        conn, self._connection = self._connection, None
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception as exc:  # a connection broken mid-statement may refuse to close
+                logger.debug('Athena sync %s heartbeat connection close failed: %s', self._sync_id, exc)
+
+    def close(self):
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+            self._thread = None
+        with self._lock:
+            self._closed = True
+            self._drop_connection()
 TABLE_MODELS = {
     'relationship': 'Relationship',
     'vocabulary': 'Vocabulary',
@@ -91,6 +206,16 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         self._sync_id = options.get('sync_id')
+        heartbeat = None
+        if self._sync_id:
+            heartbeat = self.stdout = HeartbeatOutput(self.stdout, self._sync_id).start()
+        try:
+            return self._handle(*args, **options)
+        finally:
+            if heartbeat is not None:
+                heartbeat.close()
+
+    def _handle(self, *args, **options):
         started_at = timezone.now()
         lfs, gdrive = self._remote_sources(options)
         archive = options.get('archive')
@@ -445,8 +570,20 @@ class Command(BaseCommand):
             completed_at=timezone.now(),
         )
         if self._sync_id:
-            updated = AthenaVocabularySync.objects.filter(pk=self._sync_id).update(**values)
+            # Only a receipt still marked running is ours to finish. One the
+            # web boot retired as stale meanwhile (a very long quiet stretch)
+            # keeps that record; the outcome here is logged instead.
+            updated = AthenaVocabularySync.objects.filter(
+                pk=self._sync_id, outcome='running',
+            ).update(**values)
             if not updated:
-                raise CommandError(f'Athena sync receipt {self._sync_id} does not exist.')
+                current = AthenaVocabularySync.objects.filter(pk=self._sync_id).first()
+                if current is None:
+                    raise CommandError(f'Athena sync receipt {self._sync_id} does not exist.')
+                self.stdout.write(self.style.WARNING(
+                    f'  Receipt {self._sync_id} was marked {current.outcome} while this run '
+                    f'was in progress; this run ended {outcome} and leaves that record.'
+                ))
+                return current
             return AthenaVocabularySync.objects.get(pk=self._sync_id)
         return AthenaVocabularySync.objects.create(**values)

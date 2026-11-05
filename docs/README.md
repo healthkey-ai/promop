@@ -170,7 +170,8 @@ provides the original reporting design context.
 
 Applications consume patient state through the [API surface](API_SURFACE.md).
 [FHIR export](fhir-export-architecture.md) describes patient download and integration
-exports. Consumers that need a local vocabulary mirror use the
+exports; [PHR record export](phr-record-export.md) is the member's own download of
+their record from the PHR API, as a FHIR bundle or a PDF. Consumers that need a local vocabulary mirror use the
 [vocabulary cache protocol](vocab-consumer-cache-protocol.md); [ADR 0001](adr/0001-vocabulary-source-of-truth.md)
 records vocabulary authority and distribution decisions. The
 [field/value plan](field_concept_mapping_plan.md#vocabulary-distribution-and-mapping-provenance)

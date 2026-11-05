@@ -17,9 +17,9 @@ from omop_core.services.mappings import (
     SUGGESTED_FIELD_CODES,
 )
 from omop_core.services.patient_record_service import (
+    LAB_FIELDS,
     PATIENT_RECORD_OMOP_MAPPED_FIELDS,
     _LAB_FIELD_ALIASES,
-    _LOINC_LAB_FIELDS,
 )
 from omop_core.services.provenance_registry import get_registry
 from omop_core.services.formula_evaluator import validate_formula
@@ -182,12 +182,10 @@ for aliases in _LAB_FIELD_ALIASES.values():
     _ALL_ALIASES.update(aliases)
 
 # Fields that are editable via the LOINC lab write-through: either in
-# LAB_FIELD_TO_LOINC (the write map) or as a target in _LOINC_LAB_FIELDS
-# (the derivation map, which names fields the extractor can populate via a
-# known LOINC code — those 18 recovered attributions from #596/#607).
-_LOINC_EDITABLE_FIELDS = frozenset(LAB_FIELD_TO_LOINC.keys()) | frozenset(
-    field_name for field_name, _cast in _LOINC_LAB_FIELDS.values()
-)
+# LAB_FIELD_TO_LOINC (the write map) or in LAB_FIELDS (the lab fields the
+# extractor derives, routed through the curation tables — those 18 recovered
+# attributions from #596/#607). A field inventory, not a code route.
+_LOINC_EDITABLE_FIELDS = frozenset(LAB_FIELD_TO_LOINC.keys()) | LAB_FIELDS
 
 
 def _get_field_type_label(field) -> str:

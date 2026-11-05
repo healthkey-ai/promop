@@ -9,6 +9,7 @@ from .entries import (
     OwnMedicationView,
     ProcedureEntryView,
 )
+from .export import RecordExportView
 from .explanations import ExplanationView, SharedExplanationView
 from .sharing import (
     SharedAboutView,
@@ -72,6 +73,8 @@ urlpatterns = [
     path('outcomes/', OutcomesView.as_view(), name='phr-outcomes'),
     # Closing the account (docs/account-deletion.md).
     path('account/', AccountView.as_view(), name='phr-account'),
+    # The member's own record to keep: ?format=fhir or ?format=pdf.
+    path('record/export/', RecordExportView.as_view(), name='phr-record-export'),
     # Consent model v2: the member's permissions, preferences and documents.
     path('consent/', ConsentView.as_view(), name='phr-consent'),
     path('consent/documents/', ConsentDocumentsView.as_view(), name='phr-consent-documents'),

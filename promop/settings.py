@@ -408,6 +408,12 @@ CORS_EXPOSE_HEADERS = (
     # degraded rather than broke — but the fallback documented in `state.ts`
     # was simply never reachable from a browser.
     'ETag',
+    # The FHIR export's integrity headers (#1603). The export is served to the
+    # patient's own cross-origin app, which could not read either until they
+    # were exposed; the filename is exposed for the same download.
+    'X-Content-SHA256',
+    'X-Content-Signature',
+    'Content-Disposition',
 )
 CORS_ALLOW_HEADERS = (
     *default_headers,

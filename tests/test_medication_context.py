@@ -48,10 +48,17 @@ def test_migration_repairs_domains_repeatably_and_preserves_curator(setup):
     migrate()
     mapping = FieldConceptMapping.objects.get(field_name='drug_exposure.role')
     assert (mapping.concept_id, mapping.omop_table, mapping.concept_code) == (role.pk, 'observation', '104803-2')
-    before = list(FieldConceptMapping.objects.filter(field_name__startswith='drug_exposure.').values())
+    before = list(
+        FieldConceptMapping.objects
+        .filter(field_name__startswith='drug_exposure.')
+        .order_by('field_name')
+        .values_list('field_name', 'concept_id'))
     migrate()
-    assert [(r['field_name'], r['concept_id']) for r in before] == list(
-        FieldConceptMapping.objects.filter(field_name__startswith='drug_exposure.').values_list('field_name', 'concept_id'))
+    assert before == list(
+        FieldConceptMapping.objects
+        .filter(field_name__startswith='drug_exposure.')
+        .order_by('field_name')
+        .values_list('field_name', 'concept_id'))
     FieldConceptMapping.objects.filter(pk=mapping.pk).update(concept=wrong, provenance='curator')
     before = FieldConceptMapping.objects.filter(pk=mapping.pk).values().get()
     migrate()

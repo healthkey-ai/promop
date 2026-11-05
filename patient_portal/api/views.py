@@ -1894,11 +1894,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
         ``pk`` is interpreted as ``person_id`` (consistent with ``retrieve``).
         """
-        from omop_core.services.fhir_export import serialize_signed_fhir_bundle
-        from patient_portal.api.fhir.integrity import (
-            check_fhir_version, EXPORT_DIGEST_HEADER, EXPORT_SIGNATURE_HEADER,
-        )
-        from django.http import HttpResponse
+        from patient_portal.api.fhir.integrity import check_fhir_version, signed_fhir_response
 
         # Bounded multi-version interchange (TI.5.2#01): only R4 is served.
         version_error = check_fhir_version(request)
@@ -1914,16 +1910,10 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         # this keeps DRF permission hooks in the path as a second layer.
         self.check_object_permissions(request, patient_record)
 
-        # Content integrity + non-repudiation (S.3.6#10 / PH.2.3#09): serialize
-        # the bundle to canonical bytes, then emit a SHA-256 digest and an HMAC
-        # signature over EXACTLY those bytes so the recipient can verify content
-        # integrity. We return an HttpResponse (not DRF Response) so the digest
-        # matches the body verbatim.
-        body_bytes, digest, signature = serialize_signed_fhir_bundle(person)
-        response = HttpResponse(body_bytes, content_type='application/fhir+json')
-        response[EXPORT_DIGEST_HEADER] = digest
-        response[EXPORT_SIGNATURE_HEADER] = signature
-        return response
+        # Content integrity + non-repudiation (S.3.6#10 / PH.2.3#09): a SHA-256
+        # digest and an HMAC signature over exactly the bytes returned. Shared
+        # with the PHR's own export (patient_portal/api/phr/export.py).
+        return signed_fhir_response(person)
 
     @action(detail=False, methods=['post'],
             authentication_classes=BULK_UPLOAD_AUTHENTICATION,
