@@ -10,14 +10,20 @@ from omop_core.models import AthenaVocabularySync
 
 
 ACTIVE_OUTCOMES = ('queued', 'running')
-# A running sync logs progress every few seconds and heartbeats with it; the
-# longest quiet stretch inside the loader (an index refresh) is minutes. A
-# worker retired by a rolling deploy mid-load never beats again.
+# A running sync beats every HEARTBEAT_EVERY seconds from a thread, whatever
+# the loader is doing. A worker retired by a rolling deploy mid-load never
+# beats again; thirty minutes without one is sixty missed beats.
 STALE_RUNNING = timedelta(minutes=30)
 
 
 def _stale_queued():
-    """A queued receipt whose message the broker would already have redelivered."""
+    """How long a queued receipt may wait before it is judged abandoned.
+
+    The broker keeps an unconsumed message indefinitely, so this is a
+    heuristic, not a redelivery bound: a receipt this old with no worker
+    having claimed it is replaced. If its message is consumed later the
+    task finds the receipt retired and skips it.
+    """
     return timedelta(seconds=settings.CELERY_BROKER_TRANSPORT_OPTIONS.get(
         'visibility_timeout', 25_200,
     ))
@@ -27,7 +33,7 @@ def stale_reason(sync, now=None):
     """Why an active receipt no longer describes live work, or ``None``."""
     now = now or timezone.now()
     if sync.outcome == 'running':
-        last = sync.heartbeat_at or sync.started_at
+        last = max(filter(None, (sync.heartbeat_at, sync.started_at)))
         if now - last > STALE_RUNNING:
             return (
                 f'Worker lost: no heartbeat since {last:%Y-%m-%d %H:%M:%S %Z} '
