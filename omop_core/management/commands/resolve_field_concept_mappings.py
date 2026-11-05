@@ -1,0 +1,64 @@
+"""Point seeded field mappings at their Concepts on an instance that loaded Athena.
+
+``load_athena_vocabularies`` runs this resolution itself after a successful
+load. This command is for an instance that loaded its vocabulary before the
+loader did so, or whose mappings were seeded or copied after the load: it
+finds every ``FieldConceptMapping`` that names a concept but has no
+``concept`` FK and saves the loaded Concept onto it, as a re-save in the
+editor would, so the post-save projection backfills any user edit that was
+pending on the field. Rows whose code is not loaded here (a vocabulary
+outside the load scope, a HealthKey concept this instance has not minted)
+are listed and left as they are; the command exits 0 either way, because an
+unresolved row is a fact about the instance, not a failure of the command.
+Re-running it is safe: a resolved row is never a candidate again. Rows that
+come into force take part in derivation and editing from the next refresh of
+each record; a populated instance then runs ``backfill_patient_records --all``
+(the command says so). ``--fail-on-unresolved`` exits 1 when any candidate is
+still unresolved, with or without ``--dry-run``, so a deploy check or cron can
+detect an instance whose load never resolved its mappings.
+
+Writes to ``DATABASE_URL``; name the target explicitly. ``--dry-run`` reports
+what a run would do without locking, saving or projecting anything.
+"""
+from django.core.management.base import BaseCommand, CommandError
+
+from omop_core.services.field_concept_resolution import resolve_field_concept_mappings
+
+
+class Command(BaseCommand):
+    help = ('Point every FieldConceptMapping that names a loaded concept by '
+            '(vocabulary_id, concept_code) at that Concept')
+
+    def add_arguments(self, parser):
+        parser.add_argument(
+            '--dry-run', action='store_true', dest='dry_run',
+            help='Report what would be resolved; write nothing.',
+        )
+        parser.add_argument(
+            '--fail-on-unresolved', action='store_true', dest='fail_on_unresolved',
+            help='Exit 1 when any mapping that names a concept is still unresolved.',
+        )
+
+    def handle(self, *args, **options):
+        result = resolve_field_concept_mappings(dry_run=options['dry_run'])
+
+        if result.unresolved:
+            self.stdout.write(self.style.WARNING(f'  ! {result.summary()}'))
+        else:
+            self.stdout.write(f'  {result.summary()}')
+        if options['dry_run']:
+            self.stdout.write(self.style.WARNING(
+                f'Dry run, nothing written. Would resolve {result.resolved} row(s).'
+            ))
+        else:
+            self.stdout.write(self.style.SUCCESS(
+                f'Resolved {result.resolved} field mapping concept(s); '
+                f'{result.unresolved} still unresolved.'
+            ))
+            if result.rollout_note():
+                self.stdout.write(self.style.WARNING(result.rollout_note()))
+        if options['fail_on_unresolved'] and result.unresolved:
+            raise CommandError(
+                f'{result.unresolved} field mapping(s) still unresolved; '
+                'their concept is not loaded on this instance.'
+            )
