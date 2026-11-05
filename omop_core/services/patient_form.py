@@ -203,6 +203,10 @@ FORM_INPUTS = {
     # the verdict. The values themselves are `PatientRecord` properties.
     'abnormal_kappa_lambda_ratio': ['kappa_flc', 'lambda_flc'],
     'day_since_stem_cell_transplant': ['sct_date'],
+    # Age is materialised on the record but its only input is the birth date,
+    # with the precision control the date editor already carries. A host may
+    # show the age; editing it edits the date (#5664).
+    'patient_age': ['date_of_birth'],
 }
 COMPATIBILITY_GATES = {
     'meets_slim': 'The SLiM result is not authored by this form and its full parity with Trial Details '

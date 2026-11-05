@@ -121,3 +121,15 @@ def test_the_answer_words_keep_the_question_polarity(name, true_label, false_lab
     fields = patient_form_descriptors(readable_fields={name}, writable=True)
 
     assert fields[name]['answer_labels'] == {'true': true_label, 'false': false_label}
+
+
+def test_age_navigates_to_the_birth_date_it_is_computed_from():
+    """#5664: the age is shown; the only edit is the date, with its precision."""
+    fields = patient_form_descriptors(readable_fields={'patient_age', 'date_of_birth'},
+                                     writable=True)
+
+    age = fields['patient_age']
+    assert age['kind'] == 'computed'
+    assert age['writable'] is False
+    assert age['inputs'] == ['date_of_birth']
+    assert fields['date_of_birth']['writable'] is True
