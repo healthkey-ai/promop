@@ -448,6 +448,10 @@ export const TAB_LAYOUT: TabLayout = {
         [
           "POEMS Syndrome",
           "poems_syndrome"
+        ],
+        [
+          "Plasma Cell Leukemia",
+          "plasma_cell_leukemia"
         ]
       ]
     },
@@ -1028,6 +1032,10 @@ export const TAB_LAYOUT: TabLayout = {
         [
           "Using Contraceptives",
           "contraceptive_use"
+        ],
+        [
+          "Not Pregnant or Lactating",
+          "no_pregnancy_or_lactation_status"
         ]
       ]
     },
