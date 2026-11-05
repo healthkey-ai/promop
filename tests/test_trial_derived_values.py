@@ -32,6 +32,14 @@ def _record(**values):
         (Decimal('2'), Decimal('0'), None),
         (Decimal('NaN'), Decimal('1'), None),
         (Decimal('Infinity'), Decimal('1'), None),
+        (Decimal('1'), Decimal('NaN'), None),
+        (Decimal('1'), Decimal('Infinity'), None),
+        # Invalid strings are unknown, not a crash.
+        ('not-a-number', Decimal('1'), None),
+        (Decimal('1'), '', None),
+        # Floats go through the same Decimal split.
+        (2.0, 1.0, True),
+        (-1, -2, False),  # ratio 0.5, still inside the window
     ],
 )
 def test_the_flc_window_is_inclusive_and_unknown_stays_unknown(kappa, lam, expected):
@@ -58,6 +66,14 @@ def test_a_missing_or_future_transplant_is_unknown(sct_date):
     assert _record(sct_date=sct_date).day_since_stem_cell_transplant is None
 
 
+def test_an_assigned_datetime_is_normalized_before_the_comparison():
+    from datetime import datetime
+
+    record = _record(sct_date=datetime.combine(
+        date.today() - timedelta(days=7), datetime.min.time()))
+    assert record.day_since_stem_cell_transplant == 7
+
+
 @pytest.mark.parametrize(
     ('name', 'inputs'),
     [
@@ -72,3 +88,21 @@ def test_the_form_navigates_to_the_sources_instead_of_the_verdict(name, inputs):
     assert entry['kind'] == 'computed'
     assert entry['writable'] is False
     assert entry['inputs'] == inputs
+
+
+def test_the_verdicts_are_not_writable_fields():
+    """Neither property is a column, so the fact writer must refuse both."""
+    from omop_core.services.field_write_service import apply_field_writes
+    from tests.factories import PatientRecordFactory, PersonFactory
+
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    result = apply_field_writes(person, {
+        'abnormal_kappa_lambda_ratio': True,
+        'day_since_stem_cell_transplant': 30,
+    }, today=date.today())
+
+    assert result.applied == []
+    assert set(result.rejected) == {
+        'abnormal_kappa_lambda_ratio', 'day_since_stem_cell_transplant',
+    }

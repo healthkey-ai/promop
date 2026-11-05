@@ -4201,14 +4201,20 @@ class PatientRecord(models.Model):
         A future date is not a negative day count: it is not a completed
         transplant, so the trial criterion stays unknown (CB's rule).
         """
-        from datetime import date
+        from datetime import date, datetime
 
-        if self.sct_date is None:
+        sct_date = self.sct_date
+        # `DateField` hands back a `date` once loaded, but an instance that was
+        # assigned a `datetime` before saving keeps it; comparing the two types
+        # raises, so normalize instead of relying on the caller.
+        if isinstance(sct_date, datetime):
+            sct_date = sct_date.date()
+        if sct_date is None:
             return None
         today = date.today()
-        if self.sct_date > today:
+        if sct_date > today:
             return None
-        return (today - self.sct_date).days
+        return (today - sct_date).days
 
     def save(self, *args, **kwargs):
         """Calculate BMI, age, and update therapy-related computed fields when saving"""
