@@ -40,6 +40,11 @@ class Command(BaseCommand):
         if report.broken:
             self.stdout.write(self.style.ERROR(
                 f'CHAIN BREAKS ({len(report.broken)}) before ids: {", ".join(str(p) for p in report.broken[:20])}'))
+        if report.unverifiable:
+            self.stdout.write(self.style.ERROR(
+                f'UNVERIFIABLE entries ({len(report.unverifiable)}), signed with a key that is not configured: '
+                f'{", ".join(str(p) for p in report.unverifiable[:20])}. '
+                'Add the rotated-out key to AUDIT_HMAC_PREVIOUS_KEYS (docs/signing-key-rotation.md).'))
         if report.ok:
             self.stdout.write(self.style.SUCCESS('Chain verified.'))
         if options['verify_only']:

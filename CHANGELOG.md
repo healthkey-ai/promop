@@ -19,7 +19,11 @@ All notable changes to PRomop are documented here.
   again whatever a backup restore brought back. The consent ledger stays. See
   [account deletion](docs/account-deletion.md). The PHR account delete and
   consent POST accept a session or partner login only; an OAuth2 token or
-  service credential gets 403. (#2307)
+  service credential gets 403. A partner login's subject is not provisioned
+  again for `ACCOUNT_CLOSED_BLOCK_SECONDS` after its deletion, uploaded
+  document files are deleted with their rows, and each log entry names its
+  signing key so `AUDIT_HMAC_PREVIOUS_KEYS` keeps the chain verifiable across
+  a rotation. (#2307)
 - **A member can download their own record from the PHR API** —
   `GET /api/v1/phr/record/export/?format=fhir` is the signed FHIR R4 bundle
   the person-id export serves, resolved through the member's own link so no

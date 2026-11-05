@@ -20,12 +20,16 @@ See docs/account-deletion.md.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 from dataclasses import dataclass, field
+from datetime import timedelta
 from types import SimpleNamespace
 
+from django.conf import settings
 from django.contrib.auth import logout
 from django.db import transaction
+from django.utils import timezone
 
 from omop_core.models import PatientRecord, Person, ProvenanceRecord
 from omop_core.services.patient_cleanup import delete_omop_clinical_rows, delete_provenance_for
@@ -55,6 +59,34 @@ def patient_only_identity(person) -> Identity | None:
     if has_provider_access(identity):
         return None
     return identity
+
+
+LOCAL_ISSUER = 'urn:local'
+
+
+def subject_hash_of(identity) -> str:
+    """SHA-256 over ``issuer|sub`` of a partner login; empty for a local one.
+
+    Deleting the Identity does not revoke the provider's token, and a
+    Firebase client refreshes its id token without the person signing in
+    again, so the next request would provision a fresh account for the same
+    subject. The log keeps this hash and ``PartnerAuthentication`` refuses to
+    provision the subject again within ``ACCOUNT_CLOSED_BLOCK_SECONDS``.
+    """
+    if identity is None or not identity.issuer or identity.issuer == LOCAL_ISSUER:
+        return ''
+    return hashlib.sha256(f'{identity.issuer}|{identity.sub}'.encode()).hexdigest()
+
+
+def account_closed_recently(issuer: str, sub: str) -> bool:
+    """Whether a login for this partner subject was deleted within the block window."""
+    if not issuer or issuer == LOCAL_ISSUER:
+        return False
+    window = timedelta(seconds=settings.ACCOUNT_CLOSED_BLOCK_SECONDS)
+    digest = hashlib.sha256(f'{issuer}|{sub}'.encode()).hexdigest()
+    return DeletionLogEntry.objects.filter(
+        subject_hash=digest, deleted_at__gte=timezone.now() - window,
+    ).exists()
 
 
 def _delete_person_rows(person) -> None:
@@ -87,13 +119,16 @@ def delete_member(person, *, reason: str, identity=None) -> DeletionLogEntry:
         raise ValueError(f'Unknown deletion reason {reason!r}.')
     person_id = person.person_id
     identity_id = identity.pk if identity is not None else None
+    subject_hash = subject_hash_of(identity)
     with transaction.atomic():
         if not Person.objects.select_for_update().filter(pk=person_id).exists():
             raise AlreadyDeleted(f'Person {person_id} is already deleted.')
         _delete_person_rows(person)
         if identity is not None:
             identity.delete()
-        entry = DeletionLogEntry.objects.create(person_id=person_id, identity_id=identity_id, reason=reason)
+        entry = DeletionLogEntry.objects.create(
+            person_id=person_id, identity_id=identity_id, reason=reason, subject_hash=subject_hash,
+        )
     logger.info(
         'member_deleted person_id=%s identity_id=%s reason=%s log_entry=%s',
         person_id, identity_id, reason, entry.pk,
@@ -145,14 +180,15 @@ def end_session(request, actor, person_id: int, deleted_identity) -> None:
 
 @dataclass
 class ChainReport:
-    """What ``verify_deletion_log`` found. ``ok`` when both lists are empty."""
+    """What ``verify_deletion_log`` found. ``ok`` when every list is empty."""
     scanned: int = 0
     altered: list[int] = field(default_factory=list)  # signature no longer matches the row
     broken: list[int] = field(default_factory=list)   # chain_hash does not follow its predecessor
+    unverifiable: list[int] = field(default_factory=list)  # signed with a key no longer configured
 
     @property
     def ok(self) -> bool:
-        return not self.altered and not self.broken
+        return not self.altered and not self.broken and not self.unverifiable
 
 
 def verify_deletion_log(entries=None) -> ChainReport:
@@ -166,7 +202,9 @@ def verify_deletion_log(entries=None) -> ChainReport:
     A row whose fields changed is ``altered`` (and ``broken``, since its
     signature feeds its link); a row whose ``chain_hash`` alone changed, or
     that follows a removed or inserted row, is ``broken``, as is the row
-    after it, which was linked to the hash as it stood.
+    after it, which was linked to the hash as it stood. A row signed with a
+    key that is neither ``AUDIT_HMAC_KEY`` nor in ``AUDIT_HMAC_PREVIOUS_KEYS``
+    is ``unverifiable``: supply the key, do not conclude tampering.
     """
     if entries is None:
         entries = DeletionLogEntry.objects.order_by('id').iterator(chunk_size=2000)
@@ -174,6 +212,10 @@ def verify_deletion_log(entries=None) -> ChainReport:
     prev = ''
     for entry in entries:
         report.scanned += 1
+        if not entry.key_known:
+            report.unverifiable.append(entry.pk)
+            prev = entry.chain_hash
+            continue
         if not entry.signature_valid():
             report.altered.append(entry.pk)
         if entry.chain_hash != entry.compute_chain_hash(prev):

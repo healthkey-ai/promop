@@ -1,4 +1,8 @@
+import logging
+
 from django.contrib.contenttypes.models import ContentType
+from django.core.files.storage import default_storage
+from django.db import transaction
 from django.db.models import Q
 
 from omop_core.models import (
@@ -18,6 +22,35 @@ from omop_core.models import (
 )
 from omop_core.services.prolog_cleanup import delete_prolog_data_for_persons
 from omop_oncology.models import Episode, EpisodeEvent
+
+logger = logging.getLogger(__name__)
+
+
+def delete_document_files(documents) -> None:
+    """Remove the stored files behind these ``PatientDocument`` rows once the
+    transaction commits.
+
+    Django never deletes a ``FileField``'s file with its row, so a deleted
+    account's uploads would stay in the media store with no row left to find
+    them by. After commit, because a rolled-back deletion must keep them. A
+    file the store has already lost is logged, not raised: the row is gone
+    either way. A document held only by an external ``file_url`` is not
+    promop's to delete.
+    """
+    names = [name for name in documents.exclude(file='').exclude(file__isnull=True)
+             .values_list('file', flat=True) if name]
+    if not names:
+        return
+
+    def remove():
+        for name in names:
+            try:
+                default_storage.delete(name)
+            except Exception:  # noqa: BLE001 - the store decides what can fail
+                logger.warning('document_file_not_deleted name=%s', name, exc_info=True)
+
+    transaction.on_commit(remove)
+
 
 
 def delete_provenance_for(model_cls, row_ids) -> None:
@@ -65,6 +98,7 @@ def delete_omop_clinical_rows(person):
             Q(visit_occurrence_id__in=visit_ids) | Q(measurement_id__in=measurement_ids)
         ).delete()
 
+    delete_document_files(PatientDocument.objects.filter(person=person))
     for model in (ConditionOccurrence, DrugExposure, Measurement, Observation,
                   ProcedureOccurrence, VisitOccurrence, Death, PatientDocument):
         _delete_with_provenance(model.objects.filter(person=person))
@@ -111,6 +145,7 @@ def delete_omop_clinical_rows_bulk(person_ids):
     VisitOccurrence.objects.filter(person_id__in=person_ids).delete()
     Death.objects.filter(person_id__in=person_ids).delete()
 
+    delete_document_files(PatientDocument.objects.filter(person_id__in=person_ids))
     PatientDocument.objects.filter(person_id__in=person_ids).delete()
     PatientTrialEnrollment.objects.filter(person_id__in=person_ids).delete()
     PatientGroupMembership.objects.filter(person_id__in=person_ids).delete()

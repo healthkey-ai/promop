@@ -16,6 +16,7 @@ live rows at once, in one transaction, through one service:
 | Break-glass grants, and provenance records describing any deleted row or naming the person | explicitly: a provenance row points at its row through a generic key with no cascade, and its patient id is the source system's, not the person id |
 | The `Person` and everything that cascades from it: the OMOP clinical rows, `PatientRecord`, `PatientUser`, `ConsentEvent` and `DocumentAcceptance` history, shares, messages | `person.delete()` |
 | The login `Identity` | when it is purely a patient login (see below) |
+| The stored files behind `PatientDocument` rows | after the commit (`patient_cleanup.delete_document_files`): Django deletes no file with its row. A document held only by an external `file_url` is not promop's to delete |
 
 | Kept | Why |
 |---|---|
@@ -43,9 +44,33 @@ permission that closes it, or accept a document in the member's name; they
 get 403. Reading the consent state with such a credential still works. The
 admin path keeps its own staff check.
 
+A partner login (Firebase, PHR) counts as interactive and may delete. Its
+provider token is not revoked by the deletion, and a Firebase client
+refreshes its id token without the person signing in again, so the next
+request would provision a fresh empty account for the same subject. The log
+entry therefore keeps a SHA-256 over the login's `issuer|sub`
+(`subject_hash`), and `PartnerAuthentication` refuses to provision that
+subject again for `ACCOUNT_CLOSED_BLOCK_SECONDS` (default a day): the token
+gets 401 "This account was closed." The host application still owns the
+provider account; deleting or revoking it there is what makes the closure
+permanent. A provider or staff login that kept its Identity is provisioned a
+person on its next partner request as any such login is; `patient_person_for`
+never treats it as a patient.
+
 The deletion runs under `suppress_patient_record_refresh`: the clinical
 rows' `post_delete` receivers would otherwise derive the record once per
 row, for a record that is deleted with the person.
+
+### Keys
+
+Each entry is signed with `AUDIT_HMAC_KEY` (or `SECRET_KEY` when that is
+unset) and records the first 16 hex digits of the SHA-256 of that key as
+`key_id`. After a rotation the rotated-out key goes in
+`AUDIT_HMAC_PREVIOUS_KEYS` (comma-separated), and each entry verifies
+against the key that signed it. An entry whose key is in neither place is
+reported as *unverifiable*, which is not tampering; `replay_deletion_log`
+refuses the replay until the key is supplied or `--ignore-chain` says the
+gap is understood. See [signing-key rotation](signing-key-rotation.md).
 
 ### The paths
 

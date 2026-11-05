@@ -330,6 +330,14 @@ PASSWORD_REUSE_DAYS = int(os.environ.get('PASSWORD_REUSE_DAYS', '180'))       # 
 
 # Audit tamper-evidence (TI.2.2.1) and break-glass (TI.2.3#04).
 AUDIT_HMAC_KEY = os.environ.get('AUDIT_HMAC_KEY', '')                          # falls back to SECRET_KEY when empty
+# Keys rotated out of AUDIT_HMAC_KEY, comma-separated. A DeletionLogEntry names the
+# key that signed it, so rows signed under one of these still verify after a rotation
+# (docs/signing-key-rotation.md).
+AUDIT_HMAC_PREVIOUS_KEYS = [k.strip() for k in os.environ.get('AUDIT_HMAC_PREVIOUS_KEYS', '').split(',') if k.strip()]
+# A partner-authenticated login (Firebase, PHR) whose account was deleted is not
+# provisioned again for this long: its provider token, or a refreshed one for the same
+# subject, would otherwise create a fresh empty account on the next request.
+ACCOUNT_CLOSED_BLOCK_SECONDS = int(os.environ.get('ACCOUNT_CLOSED_BLOCK_SECONDS', '86400'))
 BREAK_GLASS_TTL_SECONDS = int(os.environ.get('BREAK_GLASS_TTL_SECONDS', '3600'))  # emergency-access window (1h)
 BREAK_GLASS_ALLOW_SERVICE = os.environ.get('BREAK_GLASS_ALLOW_SERVICE', 'false').lower() in ('1', 'true', 'yes')
 # Hash-chain audit rows so row deletion/insertion is detectable (TI.2.2.1). Serializes

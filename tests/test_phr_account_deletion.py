@@ -11,9 +11,11 @@ from django.utils import timezone
 from rest_framework.test import APIClient
 
 from django.contrib.contenttypes.models import ContentType
+from django.core.files.base import ContentFile
+from django.core.files.storage import default_storage
 from omop_core.models import (
-    ConditionOccurrence, GroupAccess, PatientGroup, PatientGroupMembership, PatientRecord, Person,
-    PersonalRepresentative, ProvenanceRecord,
+    ConditionOccurrence, GroupAccess, PatientDocument, PatientGroup, PatientGroupMembership, PatientRecord,
+    Person, PersonalRepresentative, ProvenanceRecord,
 )
 from omop_core.signals import suppress_patient_record_refresh
 from patient_portal import account_deletion as svc
@@ -216,6 +218,23 @@ def test_an_oauth_token_may_read_consent_but_not_answer_it():
     assert response.status_code == 403
 
 
+def test_delete_account_removes_the_stored_document_files(settings, django_capture_on_commit_callbacks):
+    settings.STORAGES = {**settings.STORAGES, 'default': {
+        'BACKEND': 'django.core.files.storage.InMemoryStorage'}}
+    client, person, identity = member_with_data()
+    document = PatientDocument(person=person, doc_type='LAB_RESULTS', title='CBC')
+    document.file.save('cbc.pdf', ContentFile(b'%PDF-1.4 cbc'), save=True)
+    name = document.file.name
+    assert default_storage.exists(name)
+
+    with django_capture_on_commit_callbacks(execute=True):
+        response = client.delete('/api/v1/phr/account/', {'confirm': 'DELETE'}, format='json')
+
+    assert response.status_code == 200, response.data
+    assert not PatientDocument.objects.filter(pk=document.pk).exists()
+    assert not default_storage.exists(name)
+
+
 def test_an_oauth_token_cannot_close_the_account_on_the_legacy_path():
     client, person, identity = member_with_data()
     delegated = oauth_client(identity, 'patient/*.write')
@@ -405,6 +424,69 @@ def test_replay_skips_a_reused_id_held_by_a_newer_account():
     assert Person.objects.filter(person_id=person_id).exists()
     assert Identity.objects.filter(pk=identity_id).exists()
     assert PatientRecord.objects.filter(pk=newcomer.pk).exists()
+
+
+def test_a_partner_token_for_a_closed_account_is_not_provisioned_again(settings):
+    from rest_framework.exceptions import AuthenticationFailed
+    from patient_portal.api.authentication import PartnerAuthentication
+    from patient_portal.api.providers.base import TokenClaims
+
+    record = PatientRecordFactory(country='GB')
+    issuer, sub = 'https://securetoken.google.com/proj', 'uid-closed'
+    claims = TokenClaims(issuer=issuer, sub=sub, email='member@example.test', name='', raw={})
+    identity = PartnerAuthentication._get_or_create_identity(claims)  # create_user is local-only
+    PatientUser.objects.create(identity=identity, person=record.person)
+
+    svc.delete_member(record.person, reason=DeletionLogEntry.PERMISSION_WITHDRAWN, identity=identity)
+    entry = DeletionLogEntry.objects.get()
+    assert entry.subject_hash and svc.verify_deletion_log().ok
+
+    # The provider's token, or a refreshed one for the same subject, is refused
+    # rather than provisioning a fresh empty account.
+    with pytest.raises(AuthenticationFailed):
+        PartnerAuthentication._get_or_create_identity(claims)
+    assert not Identity.objects.filter(issuer=issuer, sub=sub).exists()
+
+    # Once the block window has passed the subject may sign up anew.
+    settings.ACCOUNT_CLOSED_BLOCK_SECONDS = 0
+    assert PartnerAuthentication._get_or_create_identity(claims).sub == sub
+
+    # A local login has no subject to block.
+    local = Identity.objects.create_user(email='local@example.test')
+    assert svc.subject_hash_of(local) == ''
+
+
+def test_chain_verifies_across_a_key_rotation_when_the_old_key_is_kept(settings):
+    settings.AUDIT_HMAC_KEY = 'first-key'
+    settings.AUDIT_HMAC_PREVIOUS_KEYS = []
+    svc.delete_member(PersonFactory(), reason=DeletionLogEntry.ACCOUNT_CLOSED)
+    first = DeletionLogEntry.objects.get()
+    assert first.key_id == DeletionLogEntry.key_id_of(b'first-key')
+
+    settings.AUDIT_HMAC_KEY = 'second-key'
+    report = svc.verify_deletion_log()
+    assert report.unverifiable == [first.pk] and report.altered == [] and not report.ok
+
+    settings.AUDIT_HMAC_PREVIOUS_KEYS = ['first-key']
+    svc.delete_member(PersonFactory(), reason=DeletionLogEntry.ACCOUNT_CLOSED)
+    second = DeletionLogEntry.objects.order_by('id').last()
+    assert second.key_id == DeletionLogEntry.key_id_of(b'second-key')
+    assert svc.verify_deletion_log().ok
+    # The old key verifies only the rows it signed; a row re-keyed to it is altered.
+    with connection.cursor() as cur:
+        cur.execute('UPDATE deletion_log_entry SET key_id = %s WHERE id = %s', [first.key_id, second.pk])
+    assert svc.verify_deletion_log().altered == [second.pk]
+
+
+def test_replay_command_names_an_unconfigured_key(settings, capsys):
+    settings.AUDIT_HMAC_KEY = 'first-key'
+    settings.AUDIT_HMAC_PREVIOUS_KEYS = []
+    svc.delete_member(PersonFactory(), reason=DeletionLogEntry.ACCOUNT_CLOSED)
+    settings.AUDIT_HMAC_KEY = 'second-key'
+    with pytest.raises(SystemExit) as exc:
+        call_command('replay_deletion_log', '--verify-only')
+    assert exc.value.code == 1
+    assert 'UNVERIFIABLE' in capsys.readouterr().out
 
 
 def test_replay_command_reports_and_refuses_a_broken_chain(capsys):
