@@ -46,14 +46,20 @@ from omop_core.services.hemoglobin_units import (
     UNIT_FIELD as HEMOGLOBIN_UNIT,
     SOURCE_PAIRS as _SOURCE_PAIRS,
     canonical_from_pair as hemoglobin_canonical_from_pair,
-    same_number as hemoglobin_same_number,
+    same_number,
+)
+from omop_core.services.blood_count_source_pairs import (
+    PAIRS as _COUNT_SOURCE_PAIRS,
+    canonical_from_source as count_canonical_from_source,
+    source_fields as count_source_fields,
+    source_from_canonical as count_source_from_canonical,
 )
 
 #: The columns of a declared source pair. They are one assertion, so a
 #: canonical match in the default unit must not acknowledge them independently.
 _SOURCE_PAIR_FIELDS = frozenset(
     field for fields in _SOURCE_PAIRS.values() for field in fields
-)
+) | count_source_fields()
 
 
 # ---------------------------------------------------------------------------
@@ -445,6 +451,7 @@ _LAB_FIELD_ALIASES = {
     'hemoglobin_g_dl':       ['hemoglobin_level'],
     'anc_thousand_per_ul':    ['absolute_neutrophile_count'],
     'alc_thousand_per_ul':    ['absolute_lymphocyte_count'],
+    'platelet_count_thousand_per_ul': ['platelet_count'],
     'rbc_million_per_ul':     ['red_blood_cell_count'],
     'creatinine_clearance_ml_min': ['creatinine_clearance_rate'],
     'serum_bilirubin_level_direct': ['serum_bilirubin_level'],
@@ -456,12 +463,16 @@ _LAB_FIELD_ALIASES = {
 def _lab_alias_value(canonical, value):
     if canonical in ('anc_thousand_per_ul', 'alc_thousand_per_ul'):
         return count_in_cells_per_ul(value)
+    if canonical == 'platelet_count_thousand_per_ul':
+        return count_source_from_canonical('platelet_count', value)
     return value
 
 
 def _lab_alias_units(canonical, value):
     if canonical == 'anc_thousand_per_ul':
         return {'absolute_neutrophile_count_units': 'CELLS/UL' if value is not None else None}
+    if canonical == 'platelet_count_thousand_per_ul':
+        return {'platelet_count_units': 'CELLS/UL' if value is not None else None}
     if canonical == 'hemoglobin_g_dl':
         return {'hemoglobin_level_units': 'G/DL' if value is not None else None}
     return {}
@@ -1242,21 +1253,53 @@ def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fiel
     pair_authoritative = (
         not canonical_import and pair_recognised
         and (pair_pending or canonical_now is None
-             or hemoglobin_same_number(pair_value, canonical_now))
+             or same_number(pair_value, canonical_now))
     )
     dependency_changed = set(changed_fields)
     if pair_authoritative:
-        if not hemoglobin_same_number(canonical_now, pair_value):
+        if not same_number(canonical_now, pair_value):
             setattr(patient_info, HEMOGLOBIN_CANONICAL, pair_value)
             dependency_changed.add(HEMOGLOBIN_CANONICAL)
         # The pair stays pending: the chosen unit is the patient's declaration
         # and derivation cannot reproduce it from a g/dL fact. Only an explicit
         # canonical import retires it (handled above).
+    # The same rule for the cell-count source pairs: the trial row edits
+    # cells/µL (`absolute_neutrophile_count`, ...), and the canonical
+    # thousands/µL column must follow it rather than the inverse.
+    count_pair_authoritative = set()
+    for source, spec in _COUNT_SOURCE_PAIRS.items():
+        canonical = spec['canonical']
+        source_pending = source in pending_aliases
+        canonical_import = (canonical in changed_fields
+                            and canonical not in pair_derived)
+        if canonical_import:
+            pending_aliases.discard(source)
+            if spec.get('unit_field'):
+                pending_aliases.discard(spec['unit_field'])
+        unit = (getattr(patient_info, spec['unit_field'], None)
+                if spec.get('unit_field') else spec['unit'])
+        recognised, source_value = count_canonical_from_source(
+            source, getattr(patient_info, source), unit,
+        )
+        canonical_now = getattr(patient_info, canonical)
+        authoritative = (
+            not canonical_import and recognised
+            and (source_pending or canonical_now is None
+                 or same_number(source_value, canonical_now))
+        )
+        if authoritative:
+            if not same_number(canonical_now, source_value):
+                setattr(patient_info, canonical, source_value)
+                dependency_changed.add(canonical)
+            count_pair_authoritative.add(canonical)
     for canonical, aliases in _LAB_FIELD_ALIASES.items():
         value = getattr(patient_info, canonical)
         if canonical == HEMOGLOBIN_CANONICAL and pair_authoritative:
             # The pair already supplies the canonical; copying it back would
             # replace the reader's chosen unit with g/dL.
+            continue
+        if canonical in count_pair_authoritative:
+            # The source count already supplies the canonical.
             continue
         retire_aliases = canonical in changed_fields and canonical not in pair_derived
         if retire_aliases:

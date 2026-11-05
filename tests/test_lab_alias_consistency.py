@@ -67,19 +67,26 @@ def test_clearing_canonical_clears_legacy_alias(editor, canonical, alias, unit_f
     assert getattr(refreshed, alias) is None
 
 
-@pytest.mark.parametrize('canonical,alias,value', [
-    ('anc_thousand_per_ul', 'absolute_neutrophile_count', Decimal('2500')),
-    ('alc_thousand_per_ul', 'absolute_lymphocyte_count', 2500.0),
+@pytest.mark.parametrize('source,canonical,value,canonical_value,unit_field,unit', [
+    ('absolute_neutrophile_count', 'anc_thousand_per_ul', 1500,
+     Decimal('1.5'), 'absolute_neutrophile_count_units', 'CELLS/UL'),
+    ('absolute_lymphocyte_count', 'alc_thousand_per_ul', 1500,
+     Decimal('1.5'), None, None),
+    ('platelet_count', 'platelet_count_thousand_per_ul', 150000,
+     Decimal('150.0'), 'platelet_count_units', 'CELLS/UL'),
 ])
-def test_legacy_alias_cannot_be_edited_independently(editor, canonical, alias, value):
+def test_count_source_pair_replaces_the_canonical_value(
+        editor, source, canonical, value, canonical_value, unit_field, unit):
     record, client = editor
     response = client.patch(f'/api/patient-info/{record.person_id}/', {canonical: '2.5'}, format='json')
     assert response.status_code == 200, response.data
-    response = client.patch(f'/api/patient-info/{record.person_id}/', {alias: 1}, format='json')
+    response = client.patch(f'/api/patient-info/{record.person_id}/', {source: value}, format='json')
     assert response.status_code == 200, response.data
     record.refresh_from_db()
-    assert getattr(record, alias) == value
-    assert getattr(record, canonical) == Decimal('2.5')
+    assert float(getattr(record, source)) == value
+    assert getattr(record, canonical) == canonical_value
+    if unit_field:
+        assert getattr(record, unit_field) == unit
 
 
 def test_hemoglobin_source_pair_replaces_the_canonical_value(editor):

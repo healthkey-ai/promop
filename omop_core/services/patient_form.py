@@ -9,7 +9,7 @@ import logging
 from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.utils import timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from omop_core.models import PatientRecord
 from omop_core.services.field_write_service import apply_field_writes, FieldWriteResult
@@ -26,6 +26,11 @@ from omop_core.services.hemoglobin_units import (
     UNIT_FIELD as HEMOGLOBIN_UNIT,
     canonical_from_pair as hemoglobin_canonical_from_pair,
     normalize_unit as normalize_hemoglobin_unit,
+)
+from omop_core.services.blood_count_source_pairs import (
+    PAIRS as COUNT_SOURCE_PAIRS,
+    canonical_from_source as count_canonical_from_source,
+    normalize_unit as normalize_count_unit,
 )
 
 logger = logging.getLogger(__name__)
@@ -523,6 +528,116 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
                     if HEMOGLOBIN_PAIR in fact_dates:
                         # The canonical projection is the same dated result.
                         fact_dates[HEMOGLOBIN_CANONICAL] = fact_dates[HEMOGLOBIN_PAIR]
+    # The cell-count source pairs are the same contract: the row is typed in
+    # cells/µL and the canonical thousands/µL field is derived and projected.
+    count_unit_sources = {
+        spec['unit_field']: source
+        for source, spec in COUNT_SOURCE_PAIRS.items()
+        if spec.get('unit_field')
+    }
+    for source, spec in COUNT_SOURCE_PAIRS.items():
+        unit_field = spec.get('unit_field')
+        if source not in changes and not (unit_field and unit_field in changes):
+            continue
+        source_entry = descriptor.get(source) or {}
+        source_allowed = (
+            bool(source_entry) and bool(source_entry.get('writable'))
+            and not source_entry.get('read_only_for_caller')
+        )
+        canonical_entry = descriptor.get(spec['canonical']) or {}
+        canonical_allowed = (
+            bool(canonical_entry)
+            and bool(canonical_entry.get('writable')
+                     or canonical_entry.get('normalised_read_model'))
+            and not canonical_entry.get('read_only_for_caller')
+        )
+        unit_entry = (descriptor.get(unit_field) or {}) if unit_field else {}
+        explicit_unit = bool(unit_field and unit_field in changes)
+        stored = getattr(record, unit_field, None) if unit_field else spec['unit']
+        stored_code = normalize_count_unit(stored)
+        stored_missing = stored_code is None and stored in (None, '')
+        if stored_missing and not unit_entry.get('read_only_for_caller'):
+            stored_code = spec['unit']
+        requested_code = (normalize_count_unit(changes.get(unit_field))
+                          if explicit_unit else None)
+        unit_forbidden = bool(unit_entry.get('read_only_for_caller'))
+        unit_change_forbidden = unit_forbidden and (
+            (explicit_unit and requested_code != stored_code)
+            or stored_missing
+        )
+        if not source_allowed:
+            reason = (source_entry.get('reason')
+                      or 'Editing is not available for this caller.')
+            for field in (source, unit_field):
+                if field:
+                    changes.pop(field, None)
+                    result.rejected[field] = reason
+            continue
+        if explicit_unit and requested_code is None:
+            result.rejected[unit_field] = 'Choose a supported count unit.'
+            changes.pop(source, None)
+            changes.pop(unit_field, None)
+            continue
+        if unit_change_forbidden:
+            if stored_code is None and stored not in (None, ''):
+                result.rejected[source] = 'Choose a supported count unit.'
+            else:
+                result.rejected[source] = (
+                    unit_entry.get('reason')
+                    or 'Editing is not available for this caller.'
+                )
+            for field in (source, unit_field):
+                if field:
+                    changes.pop(field, None)
+                    result.rejected[field] = result.rejected[source]
+            continue
+        if explicit_unit and source not in changes:
+            result.rejected[unit_field] = 'Send the unit together with its value.'
+            changes.pop(unit_field, None)
+            continue
+        if stored_code is None:
+            result.rejected[unit_field or source] = 'Choose a supported count unit.'
+            changes.pop(source, None)
+            if unit_field:
+                changes.pop(unit_field, None)
+            continue
+        source_value = changes.get(source)
+        if source == 'platelet_count' and source_value is not None:
+            # The legacy platelet column is an integer; the canonical may be
+            # fractional, but the typed cells value may not be. Django's
+            # IntegerField.clean() would silently truncate 150.5 to 150.
+            try:
+                numeric = Decimal(str(source_value))
+            except (InvalidOperation, TypeError, ValueError):
+                numeric = None
+            if numeric is None or numeric != numeric.to_integral_value():
+                result.rejected[source] = 'Platelet count must be a whole number of cells/µL.'
+                changes.pop(source, None)
+                if unit_field:
+                    changes.pop(unit_field, None)
+                continue
+        code = requested_code or stored_code or spec['unit']
+        recognised, canonical_value = count_canonical_from_source(
+            source, source_value, code,
+        )
+        if not recognised:
+            result.rejected[source] = 'Enter a valid count in the chosen unit.'
+            changes.pop(source, None)
+            if unit_field:
+                changes.pop(unit_field, None)
+            continue
+        if unit_forbidden:
+            if unit_field:
+                changes.pop(unit_field, None)
+                pair_pending.add(unit_field)
+        elif unit_field:
+            changes[unit_field] = code
+        if canonical_allowed:
+            changes[spec['canonical']] = canonical_value
+            pair_derived.add(spec['canonical'])
+            if source in fact_dates:
+                fact_dates[spec['canonical']] = fact_dates[source]
+
     side_effect_projections = {}
     record_profile_fields = set()
     birth_changes = {}
@@ -531,6 +646,10 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
         if name == HEMOGLOBIN_UNIT and HEMOGLOBIN_PAIR in changes:
             # Normalised with the pair above: the unit is its companion, not
             # an independently editable selectable field.
+            direct[name] = value
+            continue
+        if name in count_unit_sources and count_unit_sources[name] in changes:
+            # Normalised with the count source above.
             direct[name] = value
             continue
         entry = descriptor.get(name, {})

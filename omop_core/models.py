@@ -3637,10 +3637,13 @@ class PatientRecord(models.Model):
     hematocrit_percent = models.DecimalField(decimal_places=1, max_digits=5, blank=True, null=True, help_text="Hematocrit (%)")
     wbc_count_thousand_per_ul = models.DecimalField(decimal_places=1, max_digits=6, blank=True, null=True, help_text="White Blood Cell Count (10³/µL)")
     rbc_million_per_ul = models.DecimalField(decimal_places=2, max_digits=5, blank=True, null=True, help_text="Red Blood Cell Count (10⁶/µL)")
-    platelet_count_thousand_per_ul = models.DecimalField(decimal_places=1, max_digits=6, blank=True, null=True, help_text="Platelet Count (10³/µL)")
-    anc_thousand_per_ul = models.DecimalField(decimal_places=1, max_digits=6, blank=True, null=True, help_text="Absolute Neutrophil Count (10³/µL)")
-    alc_thousand_per_ul = models.DecimalField(decimal_places=1, max_digits=6, blank=True, null=True, help_text="Absolute Lymphocyte Count (10³/µL)")
-    amc_thousand_per_ul = models.DecimalField(decimal_places=1, max_digits=6, blank=True, null=True, help_text="Absolute Monocyte Count (10³/µL)")
+    # Three decimals keep a cells/µL source exact after the /1000 normalisation
+    # (1550 cells/µL is 1.550 thousand/µL, not 1.6). The trial row converts the
+    # canonical back to cells/µL, so one decimal used to round 1550 to 1600.
+    platelet_count_thousand_per_ul = models.DecimalField(decimal_places=3, max_digits=8, blank=True, null=True, help_text="Platelet Count (10³/µL)")
+    anc_thousand_per_ul = models.DecimalField(decimal_places=3, max_digits=8, blank=True, null=True, help_text="Absolute Neutrophil Count (10³/µL)")
+    alc_thousand_per_ul = models.DecimalField(decimal_places=3, max_digits=8, blank=True, null=True, help_text="Absolute Lymphocyte Count (10³/µL)")
+    amc_thousand_per_ul = models.DecimalField(decimal_places=3, max_digits=8, blank=True, null=True, help_text="Absolute Monocyte Count (10³/µL)")
     
     # Additional kidney and electrolyte fields (simplified names for UI)
     serum_calcium_mg_dl = models.DecimalField(decimal_places=1, max_digits=5, blank=True, null=True, help_text="Serum Calcium (mg/dL)")
