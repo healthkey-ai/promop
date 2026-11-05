@@ -436,6 +436,16 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
     from omop_core.services.therapy_line_form import THERAPY_LINE_FORM_FIELDS
     for name, value in changes.items():
         entry = descriptor.get(name, {})
+        if entry.get('normalised_read_model'):
+            # A canonical import is still accepted from a client that speaks
+            # the normalised field (#2318). It is not advertised as writable
+            # because the source pair is the editor's target, but the server
+            # honours the old shape and retires the pending pair in recompute.
+            # `direct` here restores the pre-pair path exactly: the record is
+            # written first and the projection is the same best-effort side
+            # effect, not the legacy facts applier.
+            entry = {**entry, 'kind': 'direct', 'writable': True,
+                     'target': 'patient_record'}
         if not entry.get('writable') or entry.get('target') != 'patient_record':
             result.rejected[name] = entry.get('reason') or 'No supported patient-record write path.'
             continue

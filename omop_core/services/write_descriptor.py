@@ -1249,7 +1249,8 @@ def build_writable_field_descriptor():
     # need their own winning-fact rules before an editor can correct them here.
     for field, entry in descriptor.items():
         projection = entry.get('projection') or {}
-        if (entry.get('writable') and not projection.get('best_effort')
+        if ((entry.get('writable') or entry.get('normalised_read_model'))
+                and not projection.get('best_effort')
                 and field in LAB_FIELD_TO_LOINC
                 and projection.get('omop_table') == 'measurement'
                 and entry.get('value_kind') == 'number'):
@@ -1484,19 +1485,24 @@ def build_writable_field_descriptor():
     }
     canonical_hemoglobin = descriptor.get('hemoglobin_g_dl') or {}
     descriptor['hemoglobin_g_dl'] = {
+        # Keep the canonical's diagnostics: a curated mapping, an overlong
+        # source value, the projection recipe and the date marker all still
+        # belong to this read-model.
+        **canonical_hemoglobin,
         'kind': KIND_COMPUTED,
         'writable': False,
+        'value_kind': 'number',
         'inputs': ['hemoglobin_level'],
-        'reason': (
+        # A canonical import (an approved mapping or an older client that still
+        # speaks g/dL) may write this column directly; the server then retires
+        # the pending pair. Editors are told the source pair instead, and only
+        # the server paths honour this flag.
+        'normalised_read_model': True,
+        'reason': canonical_hemoglobin.get('reason') or (
             'Normalised from hemoglobin_level in the default unit (g/dL); '
             'edit that field and its unit instead.'
         ),
-        # The projection stays here: the pair's write fills this field with the
-        # normalised value, and this is what reaches OMOP.
-        **({'projection': canonical_hemoglobin['projection']}
-           if canonical_hemoglobin.get('projection') else {}),
-        **({'unit': canonical_hemoglobin['unit']}
-           if canonical_hemoglobin.get('unit') else {'unit': 'g/dL'}),
+        'unit': canonical_hemoglobin.get('unit') or 'g/dL',
     }
 
     # The unit choices (#2318). `FIELD_COMMON_UNITS` is the curated list per

@@ -340,6 +340,11 @@ def apply_field_writes(person, changes, today=None, descriptor=None, dates=None,
         if d is None:
             result.rejected[field] = 'Unknown field; not part of the writable record.'
             continue
+        if d.get('normalised_read_model'):
+            # A canonical import is honoured for compatibility (#2318); the
+            # descriptor hides it from editors in favour of the source pair.
+            d = {**d, 'kind': 'direct', 'writable': True,
+                 'target': 'patient_record'}
         kind = d.get('kind')
         if d.get('writable') and (
                 kind == KIND_PROFILE or d.get('projection_target') in ('person', 'location')):

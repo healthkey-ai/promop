@@ -70,7 +70,6 @@ def test_clearing_canonical_clears_legacy_alias(editor, canonical, alias, unit_f
 @pytest.mark.parametrize('canonical,alias,value', [
     ('anc_thousand_per_ul', 'absolute_neutrophile_count', Decimal('2500')),
     ('alc_thousand_per_ul', 'absolute_lymphocyte_count', 2500.0),
-    ('hemoglobin_g_dl', 'hemoglobin_level', Decimal('2.5')),
 ])
 def test_legacy_alias_cannot_be_edited_independently(editor, canonical, alias, value):
     record, client = editor
@@ -81,6 +80,23 @@ def test_legacy_alias_cannot_be_edited_independently(editor, canonical, alias, v
     record.refresh_from_db()
     assert getattr(record, alias) == value
     assert getattr(record, canonical) == Decimal('2.5')
+
+
+def test_hemoglobin_source_pair_replaces_the_canonical_value(editor):
+    """Hemoglobin is no longer a legacy alias (#2318): the pair is writable and
+    the canonical g/dL value follows it."""
+    record, client = editor
+    response = client.patch(f'/api/patient-info/{record.person_id}/', {'hemoglobin_g_dl': '2.5'}, format='json')
+    assert response.status_code == 200, response.data
+    response = client.patch(
+        f'/api/patient-info/{record.person_id}/',
+        {'hemoglobin_level': 12, 'hemoglobin_level_units': 'g/L'}, format='json',
+    )
+    assert response.status_code == 200, response.data
+    record.refresh_from_db()
+    assert record.hemoglobin_level == Decimal('12')
+    assert record.hemoglobin_level_units == 'G/L'
+    assert record.hemoglobin_g_dl == Decimal('1.2')
 
 
 def test_pending_legacy_edit_survives_refresh_until_a_new_canonical_edit(editor):

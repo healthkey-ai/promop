@@ -191,16 +191,20 @@ def test_curated_source_value_must_fit_target_column(omop_table, source_column, 
     assert mapping.source_value == source_value
 
 
-def test_overlong_curated_mapping_keeps_direct_writable():
+def test_overlong_curated_mapping_keeps_the_source_pair_writable():
     VocabularyFactory(vocabulary_id='LOINC')
     ConceptFactory(concept_code='718-7', vocabulary_id='LOINC')
-    assert build_writable_field_descriptor()['hemoglobin_g_dl']['writable'] is True
+    assert build_writable_field_descriptor()['hemoglobin_level']['writable'] is True
     _mapping(field_name='hemoglobin_g_dl', source_value='x' * 51)
 
-    entry = build_writable_field_descriptor()['hemoglobin_g_dl']
+    descriptor = build_writable_field_descriptor()
+    entry = descriptor['hemoglobin_g_dl']
 
-    assert entry['writable'] is True
-    assert entry['target'] == 'patient_record'
+    # The writable target is the source pair (#2318); the canonical read-model
+    # keeps the mapping's diagnostic instead of hiding why it cannot project.
+    assert descriptor['hemoglobin_level']['writable'] is True
+    assert entry['kind'] == 'computed'
+    assert entry['writable'] is False
     assert 'projection' not in entry
     assert entry['curated'] is True
     assert 'source_value exceeds' in entry['reason']

@@ -5,11 +5,17 @@ is the derived g/dL value that matching and CRAB read. The pair is the write
 target, so an editor never has to guess the conversion and the chosen unit is
 not overwritten by the canonical copy (the old alias direction).
 """
-import pytest
+from decimal import Decimal
 
-from omop_core.models import PatientRecord, Person
+import pytest
+from rest_framework.test import APIClient
+
+from omop_core.models import Measurement, PatientRecord, Person
+from omop_core.services.patient_record_service import refresh_patient_record
 from omop_core.services.write_descriptor import build_writable_field_descriptor
 from patient_portal.api.serializers import PatientRecordSerializer
+from patient_portal.models import Identity
+from tests.factories import ConceptFactory, VocabularyFactory
 
 pytestmark = pytest.mark.django_db
 
@@ -27,6 +33,24 @@ def _patch(record, data):
     return serializer
 
 
+@pytest.fixture
+def api(settings):
+    """A staff editor, the LOINC/UCUM concepts and the patient-reported type."""
+    settings.CELERY_BROKER_URL = ''
+    ConceptFactory(concept_id=32865, concept_code='patient-report-type')
+    ConceptFactory(
+        concept_code='718-7', vocabulary=VocabularyFactory(vocabulary_id='LOINC'),
+    )
+    unit = ConceptFactory(
+        concept_code='g/dL', vocabulary=VocabularyFactory(vocabulary_id='UCUM'),
+    )
+    client = APIClient()
+    client.force_authenticate(
+        Identity.objects.create_user(email='hemoglobin-pair@example.test', is_staff=True),
+    )
+    return client, unit
+
+
 def test_the_descriptor_points_the_editor_at_the_source_pair():
     descriptor = build_writable_field_descriptor()
 
@@ -42,7 +66,11 @@ def test_the_descriptor_points_the_editor_at_the_source_pair():
     # The canonical is a read-model now, not a second place to type a number.
     assert descriptor['hemoglobin_g_dl']['kind'] == 'computed'
     assert descriptor['hemoglobin_g_dl']['writable'] is False
+    assert descriptor['hemoglobin_g_dl']['value_kind'] == 'number'
     assert descriptor['hemoglobin_g_dl']['inputs'] == ['hemoglobin_level']
+    # The server still accepts a canonical import from an older client; the
+    # flag is what keeps that path open without advertising it to editors.
+    assert descriptor['hemoglobin_g_dl']['normalised_read_model'] is True
 
 
 def test_a_pair_in_g_per_l_is_stored_and_normalised_to_g_per_dl():
@@ -155,3 +183,91 @@ def test_a_new_canonical_import_retires_the_pending_pair():
     assert float(record.hemoglobin_level) == 13
     assert record.hemoglobin_level_units == 'G/DL'
     assert float(record.hemoglobin_g_dl) == 13
+    # The retired pair must not leave its unit behind as a pending edit.
+    assert set(record.user_edited_fields or []) == set()
+
+
+def _edit(api, record, data):
+    client, _unit = api
+    response = client.patch(
+        f'/api/patient-info/{record.person.person_id}/', data, format='json',
+    )
+    assert response.status_code == 200, response.data
+    record.refresh_from_db()
+    return response
+
+
+def _projected(record):
+    return Measurement.objects.get(
+        person=record.person, measurement_source_value='718-7',
+    )
+
+
+def test_the_pair_projects_the_normalised_value_with_its_unit(api):
+    record = _record()
+    response = _edit(api, record, {
+        'hemoglobin_level': 120, 'hemoglobin_level_units': 'g/L',
+    })
+
+    # The record keeps what the reader chose; the response exposes the
+    # normalised read-model beside it.
+    assert float(record.hemoglobin_level) == 120
+    assert record.hemoglobin_level_units == 'G/L'
+    assert float(record.hemoglobin_g_dl) == 12.0
+    assert Decimal(str(response.data['hemoglobin_g_dl'])) == Decimal('12.0')
+
+    row = _projected(record)
+    assert row.value_as_number == Decimal('12.0')
+    assert row.unit_source_value == 'g/dL'
+    assert row.unit_concept_id == api[1].pk
+
+
+def test_a_g_per_dl_pair_projects_its_own_number(api):
+    record = _record()
+    _edit(api, record, {
+        'hemoglobin_level': 11, 'hemoglobin_level_units': 'g/dL',
+    })
+
+    assert float(record.hemoglobin_g_dl) == 11.0
+    assert _projected(record).value_as_number == Decimal('11.0')
+
+
+def test_two_refreshes_keep_the_pair_and_one_today_fact(api):
+    record = _record()
+    _edit(api, record, {
+        'hemoglobin_level': 120, 'hemoglobin_level_units': 'g/L',
+    })
+
+    for _ in range(2):
+        record = refresh_patient_record(record.person)
+        record.refresh_from_db()
+        assert float(record.hemoglobin_level) == 120
+        assert record.hemoglobin_level_units == 'G/L'
+        assert float(record.hemoglobin_g_dl) == 12.0
+        assert set(record.user_edited_fields or []) >= {
+            'hemoglobin_level', 'hemoglobin_level_units',
+        }
+
+    assert Measurement.objects.filter(
+        person=record.person, measurement_source_value='718-7',
+    ).count() == 1
+
+
+def test_a_second_pair_edit_reuses_todays_fact(api):
+    record = _record()
+    _edit(api, record, {
+        'hemoglobin_level': 120, 'hemoglobin_level_units': 'g/L',
+    })
+    _edit(api, record, {
+        'hemoglobin_level': 11, 'hemoglobin_level_units': 'g/dL',
+    })
+
+    assert float(record.hemoglobin_level) == 11
+    assert record.hemoglobin_level_units == 'G/DL'
+    assert float(record.hemoglobin_g_dl) == 11.0
+    rows = Measurement.objects.filter(
+        person=record.person, measurement_source_value='718-7',
+    )
+    assert rows.count() == 1
+    assert rows.get().value_as_number == Decimal('11.0')
+    assert rows.get().unit_source_value == 'g/dL'

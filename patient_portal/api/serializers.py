@@ -722,9 +722,10 @@ class PatientRecordSerializer(serializers.ModelSerializer):
         self._source_pairs = set()
         self._derived_from_pair = set()
         if pair in validated:
-            # `hemoglobin_g_dl` is a read-model (read-only to clients), so it
-            # never arrives through field validation; the normalised value is
-            # added here for the projection and the save.
+            # `hemoglobin_g_dl` is a read-model the editor never offers, but a
+            # legacy client may still write it alone. When the source pair is
+            # present it wins, and the normalised value is added here for the
+            # projection and the record save.
             value = validated[pair]
             validated[unit_field] = code or 'G/DL'
             factor = allowed[code or 'G/DL'][1]

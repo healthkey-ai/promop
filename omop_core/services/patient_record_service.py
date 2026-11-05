@@ -1201,9 +1201,13 @@ def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fiel
         value = getattr(patient_info, canonical)
         if canonical in changed_fields:
             # A new canonical edit supersedes an older pending edit to a field
-            # that is now an alias. A refresh without such an edit must not
-            # erase the old user's value before its conflict is reviewed.
+            # that is now an alias — including the alias's chosen unit, which
+            # arrives as a separate record field (#2318). A refresh without
+            # such an edit must not erase the old user's value before its
+            # conflict is reviewed.
             pending_aliases.difference_update(aliases)
+            pending_aliases.difference_update(
+                {f'{alias}_units' for alias in aliases})
         if (canonical == 'hemoglobin_g_dl' and canonical not in changed_fields
                 and value is None and patient_info.hemoglobin_level_units
                 and patient_info.hemoglobin_level_units.strip().casefold() != 'g/dl'):
