@@ -1796,19 +1796,21 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
         # One transaction: PROlog rows, Person (cascading the OMOP rows,
         # PatientRecord, PatientUser), the Identity, and the deletion log
-        # entry (docs/account-deletion.md).
-        from patient_portal.account_deletion import delete_member
+        # entry (docs/account-deletion.md). The session is logged out only
+        # after the commit; other open sessions resolve to AnonymousUser
+        # once the Identity row is gone.
+        from patient_portal.account_deletion import (
+            AlreadyDeleted, actor_snapshot, delete_member, end_session, patient_only_identity,
+        )
         from patient_portal.models import DeletionLogEntry
-        delete_member(patient_person, reason=DeletionLogEntry.ACCOUNT_CLOSED, identity=request.user)
-
-        # Log out the current session AFTER the transaction succeeds. If the
-        # transaction rolled back, the identity would still exist and we must
-        # not have flushed the session. Other open sessions resolve to
-        # AnonymousUser once the Identity row is gone (Django's session
-        # middleware loads the user by PK and falls back to AnonymousUser on
-        # DoesNotExist).
-        from django.contrib.auth import logout
-        logout(request)
+        actor = actor_snapshot(request.user)
+        person_id = patient_person.person_id  # the instance loses its pk on delete
+        identity = patient_only_identity(patient_person)
+        try:
+            delete_member(patient_person, reason=DeletionLogEntry.ACCOUNT_CLOSED, identity=identity)
+        except AlreadyDeleted:
+            return Response({'detail': 'No record.'}, status=status.HTTP_404_NOT_FOUND)
+        end_session(request, actor, person_id, identity)
 
         return Response({'detail': 'Account and all associated data have been permanently deleted.'})
 
@@ -1868,9 +1870,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         # Remove a purely-patient login alongside the record; keep an Identity that
         # also holds provider access (GroupAccess) so we don't revoke a provider.
         # One transaction with the deletion log entry (docs/account-deletion.md).
-        from patient_portal.account_deletion import delete_member, patient_only_identity
+        from patient_portal.account_deletion import AlreadyDeleted, delete_member, patient_only_identity
         from patient_portal.models import DeletionLogEntry
-        delete_member(person, reason=DeletionLogEntry.ADMIN, identity=patient_only_identity(person))
+        try:
+            delete_member(person, reason=DeletionLogEntry.ADMIN, identity=patient_only_identity(person))
+        except AlreadyDeleted:
+            return Response({'detail': 'Patient not found.'}, status=status.HTTP_404_NOT_FOUND)
 
         logger.info(
             'admin_patient_deleted person_id=%s by_identity_id=%s is_staff=%s',

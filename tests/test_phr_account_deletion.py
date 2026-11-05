@@ -9,16 +9,20 @@ from django.db import connection
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from omop_core.models import ConditionOccurrence, PatientRecord, Person
+from omop_core.models import (
+    ConditionOccurrence, GroupAccess, PatientGroup, PatientGroupMembership, PatientRecord, Person,
+    PersonalRepresentative,
+)
 from omop_core.signals import suppress_patient_record_refresh
 from patient_portal import account_deletion as svc
 from patient_portal import consent as consent_svc
 from patient_portal.models import (
-    ConsentEvent, ConsentLedgerEntry, ConsentPurpose, ConsentText, DeletionLogEntry, Identity, PatientUser,
+    AuditEvent, ConsentEvent, ConsentLedgerEntry, ConsentPurpose, ConsentText, DeletionLogEntry, Identity,
+    PatientUser,
 )
 from prolog_surveys.definitions.loader import load_definition
 from prolog_surveys.models import ResponseStatus, SurveyResponse
-from tests.factories import ConditionOccurrenceFactory, PatientRecordFactory, PersonFactory
+from tests.factories import ConditionOccurrenceFactory, OrganizationFactory, PatientRecordFactory, PersonFactory
 from tests.test_phr_read_model import signed_in
 
 pytestmark = pytest.mark.django_db
@@ -70,6 +74,13 @@ def assert_gone(person_id, identity_id):
 
 def test_delete_account_removes_everything_and_leaves_the_ledger_and_the_log():
     client, person, identity = member_with_data()
+    representative = Identity.objects.create_user(email='rep@example.test')
+    PersonalRepresentative.objects.create(
+        representative=representative, person_id=person.person_id, relationship='spouse',
+        verification_status='VERIFIED',
+    )
+    group = PatientGroup.objects.create(organization=OrganizationFactory(), name='G', slug='g')
+    PatientGroupMembership.objects.create(group=group, person_id=person.person_id)
     assert ConsentLedgerEntry.objects.count() == 1
 
     response = client.delete('/api/v1/phr/account/', {'confirm': 'DELETE'}, format='json')
@@ -77,12 +88,48 @@ def test_delete_account_removes_everything_and_leaves_the_ledger_and_the_log():
     assert response.status_code == 200, response.data
     assert 'deleted_at' in response.data
     assert_gone(person.person_id, identity.pk)
+    # Access rows keyed by a bare person_id would otherwise outlive the person.
+    assert not PersonalRepresentative.objects.filter(person_id=person.person_id).exists()
+    assert not PatientGroupMembership.objects.filter(person_id=person.person_id).exists()
     assert ConsentLedgerEntry.objects.count() == 1
     entry = DeletionLogEntry.objects.get()
     assert (entry.person_id, entry.identity_id, entry.reason) == (
         person.person_id, identity.pk, DeletionLogEntry.ACCOUNT_CLOSED,
     )
     assert svc.verify_deletion_log().ok
+    # The audit trail still names the actor and the record, although the
+    # login is gone and the session was logged out.
+    audit = AuditEvent.objects.get(path='/api/v1/phr/account/', method='DELETE')
+    assert (audit.user_id, audit.resource_id) == (str(identity.pk), str(person.person_id))
+
+
+def test_delete_account_keeps_a_login_that_holds_provider_access():
+    client, person, identity = member_with_data()
+    GroupAccess.objects.create(identity=identity, org=OrganizationFactory(), role='doctor')
+
+    response = client.delete('/api/v1/phr/account/', {'confirm': 'DELETE'}, format='json')
+
+    assert response.status_code == 200, response.data
+    assert not Person.objects.filter(person_id=person.person_id).exists()
+    assert not PatientUser.objects.filter(identity=identity).exists()
+    assert Identity.objects.filter(pk=identity.pk).exists()
+    assert GroupAccess.objects.filter(identity=identity).exists()
+    assert DeletionLogEntry.objects.get().identity_id is None
+    # Still signed in as a provider.
+    assert client.get('/api/v1/phr/account/').status_code == 405
+
+
+def test_a_second_delete_after_the_first_committed_is_a_404_and_logs_nothing_more():
+    client, person, identity = member_with_data()
+    assert client.delete('/api/v1/phr/account/', {'confirm': 'DELETE'}, format='json').status_code == 200
+    with pytest.raises(svc.AlreadyDeleted):
+        svc.delete_member(person, reason=DeletionLogEntry.ACCOUNT_CLOSED)
+    assert DeletionLogEntry.objects.count() == 1
+
+
+def test_head_is_not_served():
+    client, person, identity = member_with_data()
+    assert client.head('/api/v1/phr/account/').status_code == 405
 
 
 def test_delete_account_needs_the_confirmation():
@@ -93,7 +140,7 @@ def test_delete_account_needs_the_confirmation():
     assert not DeletionLogEntry.objects.exists()
 
 
-def test_another_member_cannot_delete_it():
+def test_delete_account_only_removes_the_callers_own_account():
     client, person, identity = member_with_data()
     other = PatientRecordFactory()
     other_client = signed_in(other)
@@ -133,6 +180,22 @@ def test_withdrawing_my_record_closes_the_account():
     ledger = list(ConsentLedgerEntry.objects.order_by('id').values_list('decision', flat=True))
     assert ledger == ['granted', 'withdrawn']
     assert DeletionLogEntry.objects.get().reason == DeletionLogEntry.PERMISSION_WITHDRAWN
+
+
+def test_withdrawing_my_record_keeps_a_provider_login():
+    client, person, identity = member_with_data()
+    GroupAccess.objects.create(identity=identity, org=OrganizationFactory(), role='doctor')
+
+    response = client.post('/api/v1/phr/consent/', {
+        'decisions': [{'purpose': 'my_record', 'decision': 'withdrawn', 'version': '1.0'}],
+    }, format='json')
+
+    assert response.status_code == 200, response.data
+    assert response.data['account_deleted'] is True
+    assert not Person.objects.filter(person_id=person.person_id).exists()
+    assert Identity.objects.filter(pk=identity.pk).exists()
+    assert GroupAccess.objects.filter(identity=identity).exists()
+    assert DeletionLogEntry.objects.get().identity_id is None
 
 
 def test_withdrawing_another_purpose_does_not(settings):
@@ -218,6 +281,13 @@ def test_chain_verifies_and_detects_a_tampered_or_removed_row():
     assert report.broken == []
 
     with connection.cursor() as cur:
+        cur.execute('UPDATE deletion_log_entry SET reason = %s, chain_hash = %s WHERE id = %s',
+                    ['account_closed', 'f' * 64, second.pk])
+    report = svc.verify_deletion_log()
+    assert report.altered == []
+    assert report.broken == [second.pk, third.pk]
+
+    with connection.cursor() as cur:
         cur.execute('DELETE FROM deletion_log_entry WHERE id = %s', [second.pk])
     report = svc.verify_deletion_log()
     assert report.altered == []
@@ -227,13 +297,15 @@ def test_chain_verifies_and_detects_a_tampered_or_removed_row():
 # --------------------------------------------------------------- the replay
 
 
-def restored(person_id, identity_id):
-    """What a backup restore brings back: the person, record and login."""
+def restored(person_id, identity_id, created_at=None):
+    """What a backup restore brings back: the person, record and login,
+    created before the deletion unless ``created_at`` says otherwise."""
     record = PatientRecordFactory(person=PersonFactory(person_id=person_id))
     identity = Identity.objects.create_user(email=f'back{person_id}@example.test')
-    Identity.objects.filter(pk=identity.pk).update(id=identity_id)
+    Identity.objects.filter(pk=identity.pk).update(id=identity_id, created_at=created_at or EARLIER)
     identity = Identity.objects.get(pk=identity_id)
-    PatientUser.objects.create(identity=identity, person=record.person)
+    link = PatientUser.objects.create(identity=identity, person=record.person)
+    PatientUser.objects.filter(pk=link.pk).update(created_at=created_at or EARLIER)
     with suppress_patient_record_refresh():
         ConditionOccurrenceFactory(person=record.person)
     return record
@@ -258,6 +330,22 @@ def test_replay_removes_a_person_the_restore_brought_back():
     assert svc.replay().persons_deleted == []
 
 
+def test_replay_skips_a_reused_id_held_by_a_newer_account():
+    client, person, identity = member_with_data()
+    person_id, identity_id = person.person_id, identity.pk
+    assert client.delete('/api/v1/phr/account/', {'confirm': 'DELETE'}, format='json').status_code == 200
+    # A sign-up after the deletion that the restored sequences handed both ids.
+    newcomer = restored(person_id, identity_id, created_at=timezone.now() + timedelta(seconds=1))
+
+    report = svc.replay()
+
+    assert (report.persons_deleted, report.identities_deleted) == ([], [])
+    assert len(report.skipped) == 2
+    assert Person.objects.filter(person_id=person_id).exists()
+    assert Identity.objects.filter(pk=identity_id).exists()
+    assert PatientRecord.objects.filter(pk=newcomer.pk).exists()
+
+
 def test_replay_command_reports_and_refuses_a_broken_chain(capsys):
     client, person, identity = member_with_data()
     person_id = person.person_id
@@ -279,7 +367,6 @@ def test_replay_command_reports_and_refuses_a_broken_chain(capsys):
     assert exc.value.code == 1
     assert Person.objects.filter(person_id=person_id).exists()
 
-    with pytest.raises(SystemExit):
-        call_command('replay_deletion_log', '--ignore-chain')
+    call_command('replay_deletion_log', '--ignore-chain')
     assert not Person.objects.filter(person_id=person_id).exists()
     assert 'deleted 1 person(s)' in capsys.readouterr().out

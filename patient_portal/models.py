@@ -1010,7 +1010,9 @@ class DeletionLogEntry(AppendOnlyModel):
     Each row is signed with an HMAC over its fields and linked to its
     predecessor's ``chain_hash`` in the style of ``AuditEvent``, so an
     altered, removed or inserted entry is detectable
-    (``patient_portal.account_deletion.verify_deletion_log``).
+    (``patient_portal.account_deletion.verify_deletion_log``). Unlike the
+    audit trail the chain cannot be switched off and the table is never
+    pruned: the first row is the anchor.
     """
     ACCOUNT_CLOSED, PERMISSION_WITHDRAWN, ADMIN, INACTIVITY = (
         'account_closed', 'permission_withdrawn', 'admin', 'inactivity',
@@ -1066,8 +1068,6 @@ class DeletionLogEntry(AppendOnlyModel):
 
     def save(self, *args, **kwargs):
         from django.db import connection, transaction
-        if not self._state.adding:
-            raise ValidationError('This history is append-only.')
         self.signature = self.compute_signature()
         # Serialize "read latest, link, insert" so concurrent deletions extend
         # one chain rather than forking it.

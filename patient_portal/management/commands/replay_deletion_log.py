@@ -7,12 +7,15 @@ Person with everything that cascades from it, and the Identity. It writes
 no new log entries, since the existing ones already record the deletions.
 
 The chain is verified first and a log that does not verify is not replayed,
-unless ``--ignore-chain`` says the breakage is understood (a restore from
-before the chain began, say). Run it immediately after a restore, before any
-new account could be given an id the log names. ``--dry-run`` only reports.
+unless ``--ignore-chain`` says the breakage is understood. A row that was
+created after the entry's time holds a reused id and is skipped and listed,
+never deleted. Run it immediately after a restore all the same.
+``--dry-run`` only reports.
 
-Exits 1 when the chain does not verify, so it can gate a restore procedure;
-``verify_deletion_log`` alone is ``--verify-only``.
+Exit status: 0 when the chain verifies and the replay ran (also with
+``--ignore-chain``, which acknowledges the break: the ERROR lines are the
+signal), 1 when the chain does not verify and nothing was replayed.
+``--verify-only`` checks the chain and exits the same way.
 """
 from django.core.management.base import BaseCommand
 
@@ -26,7 +29,7 @@ class Command(BaseCommand):
         parser.add_argument('--dry-run', action='store_true', help='Report what would be deleted; delete nothing.')
         parser.add_argument('--verify-only', action='store_true', help='Only verify the log chain.')
         parser.add_argument('--ignore-chain', action='store_true',
-                            help='Replay even when the chain does not verify.')
+                            help='Replay even when the chain does not verify; exits 0 after replaying.')
 
     def handle(self, *args, **options):
         report = verify_deletion_log()
@@ -55,5 +58,7 @@ class Command(BaseCommand):
             self.stdout.write(f'  person {pid}')
         for iid in result.identities_deleted:
             self.stdout.write(f'  identity {iid}')
+        for why in result.skipped:
+            self.stdout.write(self.style.WARNING(f'  skipped: {why} (id reused by a newer row)'))
         if not report.ok:
-            raise SystemExit(1)
+            self.stdout.write(self.style.WARNING('Replayed over a chain that does not verify (--ignore-chain).'))

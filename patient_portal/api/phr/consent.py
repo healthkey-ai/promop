@@ -20,13 +20,14 @@ record and data are deleted in the same transaction, and the response says
 """
 from __future__ import annotations
 
-from django.contrib.auth import logout
 from django.core.exceptions import ValidationError
 from django.db import transaction
 from rest_framework.response import Response
 
 from patient_portal import consent as svc
-from patient_portal.account_deletion import delete_member
+from patient_portal.account_deletion import (
+    AlreadyDeleted, actor_snapshot, delete_member, end_session, patient_only_identity,
+)
 from patient_portal.models import (
     ConsentEvent, ConsentPurpose, DeletionLogEntry, DocumentAcceptance, LegalDocument,
 )
@@ -125,6 +126,8 @@ class ConsentView(PhrView):
             return Response({'detail': svc.NO_EMAIL}, status=400)
         purposes = {p.key: p for p in ConsentPurpose.objects.filter(is_active=True).prefetch_related('texts')}
         closes_account = False
+        actor = actor_snapshot(request.user)
+        person_id = person.person_id  # the instance loses its pk on delete
         try:
             with transaction.atomic():
                 for item in decisions:
@@ -145,16 +148,20 @@ class ConsentView(PhrView):
                     closes_account = closes_account or svc.withdrawal_closes_account(key, decision)
                 if closes_account:
                     # After every decision is recorded: the person must still
-                    # exist for the events, and the ledger keeps them all.
+                    # exist for the events, and the ledger keeps them all. A
+                    # staff or provider login is kept; its patient side goes.
+                    identity = patient_only_identity(person)
                     entry = delete_member(
-                        person, reason=DeletionLogEntry.PERMISSION_WITHDRAWN, identity=request.user,
+                        person, reason=DeletionLogEntry.PERMISSION_WITHDRAWN, identity=identity,
                     )
         except svc.StaleVersion as e:
             return Response({'detail': e.messages[0]}, status=409)
         except ValidationError as e:
             return Response({'detail': e.messages[0]}, status=400)
+        except AlreadyDeleted:
+            return Response({'detail': 'No record.'}, status=404)
         if closes_account:
-            logout(request)
+            end_session(request, actor, person_id, identity)
             return Response({
                 'account_deleted': True,
                 'detail': 'Your record permission was withdrawn, so your account and all of its data have been deleted.',

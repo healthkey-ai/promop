@@ -5,11 +5,14 @@ One service, ``delete_member``, serves every path that removes a patient:
 the member closing their account (``DELETE /api/v1/phr/account/`` and the
 legacy ``DELETE /api/patient-info/me/``), withdrawing the "my record"
 permission (``api/phr/consent.py``), and an administrator's
-``admin-delete``. In one transaction it removes the PROlog survey rows, the
-Person (which cascades to the OMOP rows, the PatientRecord, the PatientUser
-and the consent history), the login Identity when one is handed in, and
-writes a ``DeletionLogEntry``. The ``ConsentLedgerEntry`` rows, which hold
-no link to the account, stay.
+``admin-delete``. In one transaction it removes the rows no cascade reaches
+(``patient_cleanup.delete_omop_clinical_rows``: PROlog survey rows, episode
+events, measurement ownership, group memberships, representatives; plus
+break-glass grants and provenance), the Person (which cascades to the
+remaining OMOP rows, the PatientRecord, the PatientUser and the consent
+history), the login Identity when one is handed in, and writes a
+``DeletionLogEntry``. The ``ConsentLedgerEntry`` rows, which hold no link to
+the account, stay.
 
 The log holds identifiers and a time, never content. A backup taken before
 a deletion restores the rows; ``replay`` removes them again from the log.
@@ -19,38 +22,48 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 
+from django.contrib.auth import logout
 from django.db import transaction
 
-from omop_core.models import GroupAccess, Person
-from omop_oncology.models import Episode, EpisodeEvent
-from omop_core.services.prolog_cleanup import delete_prolog_data_for_persons
-from patient_portal.models import DeletionLogEntry, Identity, PatientUser
+from omop_core.models import GroupAccess, Person, ProvenanceRecord
+from omop_core.services.patient_cleanup import delete_omop_clinical_rows
+from patient_portal.models import BreakGlassGrant, DeletionLogEntry, Identity, PatientUser
 
 logger = logging.getLogger(__name__)
+
+
+class AlreadyDeleted(Person.DoesNotExist):
+    """The person was deleted by a request that committed first."""
 
 
 def patient_only_identity(person) -> Identity | None:
     """The login linked to ``person`` when it is purely a patient login.
 
-    An Identity that also holds provider access (GroupAccess) is kept, so
-    deleting a patient never revokes a provider.
+    An Identity that is staff or also holds provider access (GroupAccess) is
+    kept, so deleting a patient never revokes a provider: the person and the
+    PatientUser link go, the login stays.
     """
     link = PatientUser.objects.filter(person=person).select_related('identity').first()
-    if link is None or GroupAccess.objects.filter(identity=link.identity).exists():
+    if link is None:
         return None
-    return link.identity
+    identity = link.identity
+    if identity.is_staff or GroupAccess.objects.filter(identity=identity).exists():
+        return None
+    return identity
 
 
 def _delete_person_rows(person) -> None:
     """Remove ``person`` and everything that hangs off it. Inside a transaction."""
-    # EpisodeEvent holds a bare integer episode id, which no CASCADE covers.
-    episode_ids = list(Episode.objects.filter(person=person).values_list('episode_id', flat=True))
-    if episode_ids:
-        EpisodeEvent.objects.filter(episode_id__in=episode_ids).delete()
-    # A survey response protects its participant, so PROlog's rows go first
-    # or person.delete() raises ProtectedError.
-    delete_prolog_data_for_persons([person.person_id])
+    person_id = person.person_id
+    # PROlog rows (a response PROTECTs its participant), episode events, and
+    # the access rows keyed by a bare person_id that would otherwise outlive
+    # the person and grant their old representatives and groups access to
+    # whoever gets the id next.
+    delete_omop_clinical_rows(person)
+    BreakGlassGrant.objects.filter(person_id=person_id).delete()
+    ProvenanceRecord.objects.filter(target_patient_id=str(person_id)).delete()
     person.delete()
 
 
@@ -59,14 +72,17 @@ def delete_member(person, *, reason: str, identity=None) -> DeletionLogEntry:
     log it, all in one transaction. Returns the log entry.
 
     ``reason`` is one of ``DeletionLogEntry.REASONS``. ``identity`` is the
-    login to delete with the person: the member's own on a self-deletion,
-    ``patient_only_identity(person)`` on an administrator's.
+    login to delete with the person, normally ``patient_only_identity(person)``.
+    Raises ``AlreadyDeleted`` when another request deleted the person first,
+    so a double submit never logs a deletion that removed nothing.
     """
     if reason not in dict(DeletionLogEntry.REASONS):
         raise ValueError(f'Unknown deletion reason {reason!r}.')
     person_id = person.person_id
     identity_id = identity.pk if identity is not None else None
     with transaction.atomic():
+        if not Person.objects.select_for_update().filter(pk=person_id).exists():
+            raise AlreadyDeleted(f'Person {person_id} is already deleted.')
         _delete_person_rows(person)
         if identity is not None:
             identity.delete()
@@ -76,6 +92,32 @@ def delete_member(person, *, reason: str, identity=None) -> DeletionLogEntry:
         person_id, identity_id, reason, entry.pk,
     )
     return entry
+
+
+# ------------------------------------------------------------ the request
+
+
+def actor_snapshot(user) -> SimpleNamespace:
+    """What the audit trail needs of the caller, taken before the deletion:
+    after ``identity.delete()`` the instance has no pk, and after ``logout``
+    the request has no user."""
+    return SimpleNamespace(pk=user.pk, email=getattr(user, 'email', '') or '', is_authenticated=True)
+
+
+def end_session(request, actor, person_id: int, deleted_identity) -> None:
+    """After the deletion committed: hand the audit middleware the actor and
+    the person it acted on, and log the caller out when a login was deleted
+    (on the self paths that is always the caller's own). A login kept for
+    its provider access stays signed in.
+
+    Only after the commit: a rolled-back deletion must not have flushed the
+    session.
+    """
+    http_request = getattr(request, '_request', request)
+    http_request.audit_user = actor
+    http_request.audit_resource_id = str(person_id)
+    if deleted_identity is not None:
+        logout(request)
 
 
 # ------------------------------------------------------------------ the log
@@ -99,7 +141,12 @@ def verify_deletion_log(entries=None) -> ChainReport:
     ``entries`` defaults to the whole table; an iterable of entries (for
     example read back from an export) can be verified the same way. The
     first entry is the anchor: its predecessor is the empty string, as it
-    was when the chain began.
+    was when the chain began, so the table is never pruned.
+
+    A row whose fields changed is ``altered`` (and ``broken``, since its
+    signature feeds its link); a row whose ``chain_hash`` alone changed, or
+    that follows a removed or inserted row, is ``broken``, as is the row
+    after it, which was linked to the hash as it stood.
     """
     if entries is None:
         entries = DeletionLogEntry.objects.order_by('id').iterator(chunk_size=2000)
@@ -120,6 +167,21 @@ class ReplayReport:
     entries: int = 0
     persons_deleted: list[int] = field(default_factory=list)
     identities_deleted: list[int] = field(default_factory=list)
+    skipped: list[str] = field(default_factory=list)  # ids held by rows newer than the deletion
+
+
+def _newer_than(entry, person, identity) -> list[str]:
+    """Rows that carry a logged id but were created after the deletion: a
+    new account the restored sequence handed the id to, never the one the
+    entry names. Person has no timestamp, so its link is the evidence."""
+    reasons = []
+    if identity is not None and identity.created_at > entry.deleted_at:
+        reasons.append(f'identity {identity.pk} created after entry {entry.pk}')
+    if person is not None:
+        link = PatientUser.objects.filter(person=person).only('created_at').first()
+        if link is not None and link.created_at > entry.deleted_at:
+            reasons.append(f'person {person.person_id} linked to a login created after entry {entry.pk}')
+    return reasons
 
 
 def replay(entries=None, *, dry_run: bool = False) -> ReplayReport:
@@ -127,9 +189,10 @@ def replay(entries=None, *, dry_run: bool = False) -> ReplayReport:
     Identity an entry names that exists again. Writes no new log entries;
     the existing ones already record these deletions.
 
-    Each entry is applied in its own transaction so a failure on one leaves
-    the others done. Run this immediately after the restore, before any new
-    account could take an id the log names.
+    A row created after the entry's time is a new account that was handed a
+    logged id, so it is skipped and reported, not deleted. Each entry is
+    applied in its own transaction so a failure on one leaves the others
+    done. Run this immediately after the restore all the same.
     """
     if entries is None:
         entries = DeletionLogEntry.objects.order_by('id').iterator(chunk_size=2000)
@@ -139,6 +202,10 @@ def replay(entries=None, *, dry_run: bool = False) -> ReplayReport:
         person = Person.objects.filter(person_id=entry.person_id).first()
         identity = Identity.objects.filter(pk=entry.identity_id).first() if entry.identity_id else None
         if person is None and identity is None:
+            continue
+        newer = _newer_than(entry, person, identity)
+        if newer:
+            report.skipped.extend(newer)
             continue
         if person is not None:
             report.persons_deleted.append(entry.person_id)

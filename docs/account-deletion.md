@@ -12,10 +12,10 @@ live rows at once, in one transaction, through one service:
 
 | Removed | How |
 |---|---|
-| PROlog survey responses, answers, invitations, consents | `omop_core.services.prolog_cleanup.delete_prolog_data_for_persons` (a response protects its participant, so these go first) |
-| Therapy episode events | explicitly: `EpisodeEvent.episode_id` is a bare integer no cascade covers |
+| PROlog survey responses, answers, invitations, consents; episode events; measurement ownership; group memberships; personal representatives | `omop_core.services.patient_cleanup.delete_omop_clinical_rows`, the rows no cascade reaches. The access rows are keyed by a bare `person_id` and would otherwise grant the member's old representatives and groups access to whoever gets the id next |
+| Break-glass grants and provenance records naming the person | explicitly, for the same reason |
 | The `Person` and everything that cascades from it: the OMOP clinical rows, `PatientRecord`, `PatientUser`, `ConsentEvent` and `DocumentAcceptance` history, shares, messages | `person.delete()` |
-| The login `Identity` | when one is handed in (see below) |
+| The login `Identity` | when it is purely a patient login (see below) |
 
 | Kept | Why |
 |---|---|
@@ -24,17 +24,29 @@ live rows at once, in one transaction, through one service:
 | The `DeletionLogEntry` written by the deletion | see below |
 
 A deletion that fails rolls back whole: no entry without a deletion, no
-deletion without an entry. The session is logged out only after the commit.
+deletion without an entry. The person row is locked first, so a request
+that arrives after another deleted the account gets 404 and logs nothing.
+The session is logged out only after the commit, and the audit trail's
+`record_delete` event still names the actor and the person
+(`account_deletion.end_session` hands them to `AuditLogMiddleware`, which
+would otherwise see a logged-out request).
 
 ### The paths
 
-| Path | Reason logged | Identity deleted |
-|---|---|---|
-| `DELETE /api/v1/phr/account/` with `{"confirm": "DELETE"}` (`api/phr/account.py`) | `account_closed` | the member's own |
-| `DELETE /api/patient-info/me/` (legacy, same body) | `account_closed` | the member's own |
-| `POST /api/v1/phr/consent/` recording `withdrawn` on the record purpose | `permission_withdrawn` | the member's own |
-| `DELETE /api/v1/patient-records/{person_id}/admin-delete/` | `admin` | the linked login, unless it also holds provider access (`GroupAccess`) |
-| (reserved) | `inactivity` | — |
+| Path | Reason logged |
+|---|---|
+| `DELETE /api/v1/phr/account/` with `{"confirm": "DELETE"}` (`api/phr/account.py`) | `account_closed` |
+| `DELETE /api/patient-info/me/` (legacy, same body) | `account_closed` |
+| `POST /api/v1/phr/consent/` recording `withdrawn` on the record purpose | `permission_withdrawn` |
+| `DELETE /api/v1/patient-records/{person_id}/admin-delete/` | `admin` |
+| (reserved) | `inactivity` |
+
+On every path the login goes only when it is purely a patient login
+(`account_deletion.patient_only_identity`): an Identity that is staff or holds
+provider access (`GroupAccess`) keeps its login and its grants, loses its
+`PatientUser` link and record, and stays signed in; the log entry then has no
+`identity_id`. A clinician who is also a member cannot revoke their own
+provider access by withdrawing a permission.
 
 The record purpose is the one whose key is `CONSENT_RECORD_PURPOSE_KEY`
 (`my_record` by default). The member's consent view records every decision in
@@ -64,9 +76,12 @@ deletes nothing.
 No content, no email: identifiers and a time. The key is `AUDIT_HMAC_KEY`,
 falling back to `SECRET_KEY`, as for `AuditEvent`; appends are serialized
 under their own advisory lock so concurrent deletions extend one chain.
-`account_deletion.verify_deletion_log()` recomputes every signature and link:
-an altered row is reported as `altered`, a removed or inserted row as `broken`
-on the row that follows the gap.
+`account_deletion.verify_deletion_log()` recomputes every signature and link.
+A row whose fields changed is `altered` (and `broken`, since its signature
+feeds its link); a row whose `chain_hash` alone changed, or that follows a
+removed or inserted row, is `broken`, as is the row after it. Unlike the
+audit trail the chain cannot be switched off (`AUDIT_HASH_CHAIN_ENABLED` does
+not apply) and the table is never pruned: the first row is the anchor.
 
 ## Replay after a restore
 
@@ -79,12 +94,18 @@ DATABASE_URL="${STAGING_DATABASE_URL:?}" python manage.py replay_deletion_log
 ```
 
 The command verifies the chain first and refuses to replay a log that does not
-verify (`--ignore-chain` overrides, `--verify-only` just checks; exit 1 on a
-break). Then, for every entry, it deletes the Person and the Identity the entry
-names if they exist again, each entry in its own transaction, and lists what
-it removed. It writes no new entries. Run it immediately after the restore,
-before new sign-ups: ids are not reused in normal operation, but a restored
-sequence could hand a logged id to a new account.
+verify: exit 1, nothing replayed. `--ignore-chain` replays anyway and exits 0,
+with the breaks reported as errors; `--verify-only` just checks. Then, for
+every entry, it deletes the Person and the Identity the entry names if they
+exist again, each entry in its own transaction, and lists what it removed. It
+writes no new entries.
+
+Ids are not reused in normal operation, but a restored sequence could hand a
+logged id to a new sign-up. A row created after the entry's time (the
+Identity's `created_at`, or the `PatientUser` link's for a Person, which has
+no timestamp) is therefore skipped and listed as `skipped`, never deleted. A
+Person with no login and a reused id cannot be told apart, so run the replay
+immediately after the restore all the same.
 
 Entries written after the backup are themselves lost by the restore. Keep an
 export of the table outside the database (`manage.py dumpdata
