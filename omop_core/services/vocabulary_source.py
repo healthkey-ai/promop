@@ -24,6 +24,7 @@ import json
 import os
 import re
 import shutil
+import time
 from pathlib import Path
 from urllib.parse import quote, urlparse
 
@@ -40,6 +41,22 @@ _LOINC_RE = LOINC_ZIP_RE
 _CHUNK = 1024 * 1024
 MANIFEST_TIMEOUT = 30
 DOWNLOAD_TIMEOUT = (30, 300)
+# GitHub's media endpoint dropped a 1 GB stream partway on the first staging
+# load (#2288): "Connection broken: IncompleteRead". Resume with a Range
+# request before giving the archive up to the Drive fallback.
+DOWNLOAD_ATTEMPTS = 4
+DOWNLOAD_BACKOFF_MAX = 15  # seconds; the backoff doubles from 2 s and stops here
+# A 4xx other than these says the same thing on every attempt.
+RETRIABLE_STATUSES = frozenset({408, 429})
+
+
+def _retriable(exc):
+    """A transport failure or a server-side status is worth another attempt."""
+    if isinstance(exc, requests.HTTPError):
+        response = exc.response
+        status = response.status_code if response is not None else 0
+        return status >= 500 or status in RETRIABLE_STATUSES
+    return isinstance(exc, requests.RequestException)
 # The identity column is CharField(500) and holds two names beside two hashes.
 MAX_FILE_NAME = 150
 LOINC_LOCAL_NAME = 'loinc-release.zip'
@@ -196,28 +213,68 @@ def _discard(path):
         pass
 
 
+def _received(partial):
+    return partial.stat().st_size if partial.exists() else 0
+
+
+def _stream(url, partial, log):
+    """Fetch ``url`` into ``partial``, continuing from the bytes already there.
+
+    A resume asks for a Range. A server that answers 200 instead of 206 sent
+    the whole object again, so the file is restarted rather than appended.
+    What arrived before a broken stream stays on disk for the next attempt.
+    """
+    received = _received(partial)
+    headers = {'Range': f'bytes={received}-'} if received else {}
+    with requests.get(url, stream=True, timeout=DOWNLOAD_TIMEOUT, headers=headers) as response:
+        if received and response.status_code == 416:
+            # Nothing past what is on disk: the stream broke after the last
+            # byte. The caller's hash decides whether the file is the object.
+            return
+        response.raise_for_status()
+        resumed = (
+            bool(received) and response.status_code == 206
+            and (response.headers.get('Content-Range') or '').startswith(f'bytes {received}-')
+        )
+        if received and not resumed:
+            log('  The server did not resume from the bytes on disk; restarting the download.')
+        with open(partial, 'ab' if resumed else 'wb') as out:
+            for chunk in response.iter_content(chunk_size=_CHUNK):
+                if chunk:
+                    out.write(chunk)
+
+
 def download_lfs_file(url, dest, sha256=None, log=lambda _msg: None):
-    """Stream one LFS object to ``dest`` and verify its SHA-256 when given."""
+    """Stream one LFS object to ``dest`` and verify its SHA-256 when given.
+
+    A broken stream is resumed from where it stopped, up to
+    ``DOWNLOAD_ATTEMPTS`` tries; the SHA-256 is taken over the finished file.
+    """
     dest = Path(dest)
     partial = dest.with_name(dest.name + '.part')
-    digest = hashlib.sha256()
     log(f'  Downloading {dest.name} from {url}...')
     try:
         dest.parent.mkdir(parents=True, exist_ok=True)
-        with requests.get(url, stream=True, timeout=DOWNLOAD_TIMEOUT) as response:
-            response.raise_for_status()
-            with open(partial, 'wb') as out:
-                for chunk in response.iter_content(chunk_size=_CHUNK):
-                    if chunk:
-                        out.write(chunk)
-                        digest.update(chunk)
+        _discard(partial)
+        for attempt in range(1, DOWNLOAD_ATTEMPTS + 1):
+            try:
+                _stream(url, partial, log)
+                break
+            except requests.RequestException as exc:
+                if attempt == DOWNLOAD_ATTEMPTS or not _retriable(exc):
+                    raise
+                log(
+                    f'  WARNING: download interrupted after {_received(partial):,} bytes ({exc}); '
+                    f'resuming (attempt {attempt + 1} of {DOWNLOAD_ATTEMPTS})...'
+                )
+                time.sleep(min(2 ** attempt, DOWNLOAD_BACKOFF_MAX))
     except (requests.RequestException, OSError, ValueError) as exc:
         # OSError: the scratch disk, not GitHub -- but the caller's fallback
         # decision is the same, and the receipt should say which file failed.
         # ValueError: a path open() refuses.
         _discard(partial)
         raise LfsSourceError(f'LFS download failed for {url}: {exc}') from exc
-    actual = digest.hexdigest()
+    actual = sha256_file(partial)
     if sha256 and actual != sha256:
         _discard(partial)
         raise LfsSourceError(
