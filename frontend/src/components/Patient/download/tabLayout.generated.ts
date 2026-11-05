@@ -1030,6 +1030,10 @@ export const TAB_LAYOUT: TabLayout = {
           "pregnancy_test_result_value"
         ],
         [
+          "Negative Pregnancy Test Result",
+          "pregnancy_test_result"
+        ],
+        [
           "Using Contraceptives",
           "contraceptive_use"
         ],

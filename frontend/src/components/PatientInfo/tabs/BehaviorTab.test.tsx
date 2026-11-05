@@ -52,6 +52,11 @@ const DESCRIPTORS: Record<string, unknown> = {
     value_kind: 'boolean',
     answer_labels: { true: 'Not pregnant or lactating', false: 'Pregnant or lactating' },
   },
+  pregnancy_test_result: {
+    kind: 'direct', writable: true, target: 'patient_record',
+    value_kind: 'boolean',
+    answer_labels: { true: 'Negative', false: 'Not negative' },
+  },
 };
 
 beforeEach(() => {
@@ -140,6 +145,18 @@ describe('BehaviorTab', () => {
     // True answers the negative question with its reviewed wording, not "Yes".
     expect(within(container).getByRole('combobox'))
       .toHaveTextContent('Not pregnant or lactating');
+  });
+
+  it('words a negative pregnancy test as its own answer', async () => {
+    render(
+      <BehaviorTab formData={{ pregnancy_test_result: true }}
+        onChange={vi.fn()} onRefresh={vi.fn()} />,
+    );
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+
+    const labelEl = screen.getByText('Negative Pregnancy Test Result');
+    const container = labelEl.closest('.space-y-1\\.5') as HTMLElement;
+    expect(within(container).getByRole('combobox')).toHaveTextContent('Negative');
   });
 
   it('keeps every section it had before the conversion', async () => {
