@@ -8,6 +8,17 @@ All notable changes to PRomop are documented here.
 
 ### Added
 
+- **A member can download their own record from the PHR API** —
+  `GET /api/v1/phr/record/export/?format=fhir` is the signed FHIR R4 bundle
+  the person-id export serves, resolved through the member's own link so no
+  id is needed, and `?format=pdf` is the same record as a PDF, one page per
+  section (about, diagnoses, lines of therapy, check-ins, medications,
+  procedures, labs), built from the section builders the app's screens read.
+  `?lang=` is accepted as on `consent/`; the PDF's text is English for now.
+  Every export writes a `record_view` audit row carrying `detail.export`, and
+  the integrity headers of both FHIR exports are now readable cross-origin
+  (#1603). Adds `reportlab`. See [PHR record export](docs/phr-record-export.md).
+  (#2308)
 - **Consent model v2** — purposes (permissions, contact preferences,
   declarations) and legal documents are data with versioned texts per
   language, loaded by `load_consent_texts` or edited in the admin, so legal

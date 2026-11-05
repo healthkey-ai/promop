@@ -170,15 +170,19 @@ def _test_meta(concept, markers: dict[str, LabMarker]) -> dict[str, Any]:
     return {k: v for k, v in meta.items() if v is not None}
 
 
-def _cancers(person, record) -> list[dict[str, str]]:
-    """The patient's cancers as lab filters: the record's slug for the primary, the name's for the rest."""
+def _cancers(person, record, diagnosed: dict | None = None) -> list[dict[str, str]]:
+    """The patient's cancers as lab filters: the record's slug for the primary, the name's for the rest.
+
+    ``diagnosed`` is the Diagnoses section when the caller already built it;
+    else it is derived here.
+    """
     from omop_core.services.disease_episodes import disease_slug
 
     from .views import diagnoses
 
     out, seen = [], set()
     primary_slug = ((record.disease_slug if record else '') or '').lower()
-    for cancer in diagnoses(person, record)['cancer']:
+    for cancer in (diagnosed if diagnosed is not None else diagnoses(person, record))['cancer']:
         slug = primary_slug if cancer['id'] == 'primary' and primary_slug else (disease_slug(cancer['name']) or '')
         if slug and slug not in seen:
             seen.add(slug)
@@ -190,7 +194,8 @@ def _markers() -> dict[str, LabMarker]:
     return {m.loinc_code: m for m in LabMarker.objects.all()}
 
 
-def labs(person, record) -> dict[str, Any]:
+def labs(person, record, diagnosed: dict | None = None) -> dict[str, Any]:
+    """The latest result per test. ``diagnosed``: the Diagnoses section, when already built."""
     rows = list(_rows(person))
     groups = _grouped(rows)
     latest_rows = [group[0] for group in groups.values()]
@@ -215,7 +220,7 @@ def labs(person, record) -> dict[str, Any]:
     marked = {s for t in tests for s in t['disease_slugs']}
     filters = {
         # A filter for each of the patient's cancers that has marker tests, primary first.
-        'diagnoses': [c for c in _cancers(person, record) if c['slug'] in marked],
+        'diagnoses': [c for c in _cancers(person, record, diagnosed) if c['slug'] in marked],
         'panels': panels,
     }
     return {'tests': tests, 'filters': filters}
