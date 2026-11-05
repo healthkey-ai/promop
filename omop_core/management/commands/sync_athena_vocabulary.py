@@ -6,6 +6,7 @@ fallback (#2288); see ``omop_core.services.vocabulary_source``.
 
 import hashlib
 import tempfile
+import time
 from pathlib import Path
 
 from django.core.management import call_command
@@ -25,6 +26,60 @@ from omop_core.services.vocabulary_source import DEFAULT_LFS_URL
 
 
 LOCK_ID = 1_652_202_609
+HEARTBEAT_EVERY = 30  # seconds between heartbeat writes, however often the loader logs
+
+
+class HeartbeatOutput:
+    """An output that also records, on the receipt, that the sync is alive.
+
+    Wraps the command's stdout, so every progress line the sync or the loader
+    writes refreshes ``heartbeat_at`` (at most every ``HEARTBEAT_EVERY``
+    seconds). The write goes through its own autocommit connection: the delta
+    runs inside one transaction on Django's connection, and a heartbeat on
+    that connection would be invisible until commit, which is exactly when it
+    is no longer needed.
+    """
+
+    def __init__(self, inner, sync_id, every=HEARTBEAT_EVERY):
+        self._inner = inner
+        self._sync_id = sync_id
+        self._every = every
+        self._last = 0.0
+        self._connection = None
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    def write(self, *args, **kwargs):
+        self._inner.write(*args, **kwargs)
+        self.beat()
+
+    def flush(self):
+        self._inner.flush()
+
+    def beat(self, force=False):
+        now = time.monotonic()
+        if not force and now - self._last < self._every:
+            return
+        self._last = now
+        try:
+            if self._connection is None:
+                self._connection = connection.get_new_connection(connection.get_connection_params())
+                self._connection.autocommit = True
+            with self._connection.cursor() as cursor:
+                cursor.execute(
+                    'UPDATE athena_vocabulary_sync SET heartbeat_at = NOW() WHERE id = %s',
+                    [self._sync_id],
+                )
+        except Exception:  # the heartbeat must never fail the load it reports on
+            self._connection = None
+
+    def close(self):
+        if self._connection is not None:
+            try:
+                self._connection.close()
+            finally:
+                self._connection = None
 TABLE_MODELS = {
     'relationship': 'Relationship',
     'vocabulary': 'Vocabulary',
@@ -91,6 +146,17 @@ class Command(BaseCommand):
 
     def handle(self, *args, **options):
         self._sync_id = options.get('sync_id')
+        heartbeat = None
+        if self._sync_id:
+            heartbeat = self.stdout = HeartbeatOutput(self.stdout, self._sync_id)
+            heartbeat.beat(force=True)
+        try:
+            return self._handle(*args, **options)
+        finally:
+            if heartbeat is not None:
+                heartbeat.close()
+
+    def _handle(self, *args, **options):
         started_at = timezone.now()
         lfs, gdrive = self._remote_sources(options)
         archive = options.get('archive')
