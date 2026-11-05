@@ -25,7 +25,7 @@ from omop_core.services.boolean_answers import BOOLEAN_ANSWERS
 from omop_core.services.demographics import choices as demographic_choices
 from omop_core.services.mappings import (
     CONCEPT_EHR_TYPE, CONCEPT_LAB_TYPE, CONCEPT_PATIENT_REPORTED_TYPE,
-    DERIVED_FIELD_TO_CODE, LAB_FIELD_TO_LOINC,
+    DERIVED_FIELD_TO_CODE, FIELD_COMMON_UNITS, LAB_FIELD_TO_LOINC,
 )
 from omop_core.services.patient_record_service import (
     DERIVED_LANGUAGE_FIELDS,
@@ -1460,4 +1460,24 @@ def build_writable_field_descriptor():
         row = clinical_mappings.get(field)
         if field in NEW_INPUT_FIELDS or (row is not None and row.concept_id == 0):
             descriptor[field] = entry
+
+    # The unit choices (#2318). `FIELD_COMMON_UNITS` is the curated list per
+    # field, already ordered; the client draws its picker from it rather than
+    # spelling the values a second time. Both the field a write lands in and the
+    # `*_units` entry beside it carry the same list, so a client that resolves
+    # either shape sees one answer.
+    for name, units in FIELD_COMMON_UNITS.items():
+        entry = descriptor.get(name)
+        if entry is not None and units:
+            entry['unit_options'] = [
+                {'value': unit, 'label': unit} for unit in units
+            ]
+    for field, entry in descriptor.items():
+        if not field.endswith('_units') or entry.get('kind') != KIND_SELECTABLE:
+            continue
+        units = FIELD_COMMON_UNITS.get(entry.get('qualifies') or '')
+        if units:
+            entry['unit_options'] = [
+                {'value': unit, 'label': unit} for unit in units
+            ]
     return descriptor
