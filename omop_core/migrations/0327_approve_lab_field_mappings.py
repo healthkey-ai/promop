@@ -163,5 +163,5 @@ def reverse(apps, schema_editor):
 
 
 class Migration(migrations.Migration):
-    dependencies = [('omop_core', '0325_add_dlbcl_disease_category')]
+    dependencies = [('omop_core', '0326_athena_sync_heartbeat')]
     operations = [migrations.RunPython(forwards, reverse)]

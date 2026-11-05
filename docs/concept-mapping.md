@@ -258,7 +258,7 @@ the PatientRecord lab fields in three lookup tiers. The LOINC code → field rou
 and 2 is resolved once per refresh by `resolve_lab_code_fields` from the curation tables: the
 approved, concept-resolved `FieldConceptMapping` of each lab field names its canonical code and
 approved global `SourceCodeConceptMapping` LOINC aliases add further codes. `_LOINC_LAB_FIELDS`
-is the checked-in inventory those rows are seeded from (migrations 0240, 0285, 0326) and
+is the checked-in inventory those rows are seeded from (migrations 0240, 0285, 0327) and
 decides a field's codes only while the field has no such mapping, such as on a fresh install
 before Athena is loaded.
 

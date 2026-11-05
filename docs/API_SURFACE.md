@@ -1145,7 +1145,7 @@ kappa_lambda_ratio                 104546-7   {ratio}         Kappa/Lambda light
 clonal_plasma_cells                11118-7    %               Plasma cells/100 cells in Bone marrow
 
 # The invented demo codes 33944-8 (kappa) and 33945-5 (lambda) were retired by
-# migration 0327, which recoded their rows to 36916-5 and 33944-0; the MM
+# migration 0328, which recoded their rows to 36916-5 and 33944-0; the MM
 # generator emits those real LOINC codes. 36916-5 is kappa, 33944-0 is lambda.
 #
 # UNITS: kappa_flc and lambda_flc are converted to mg/L from the Measurement's

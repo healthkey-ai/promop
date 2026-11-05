@@ -85,7 +85,7 @@ concept names each lab field's canonical code; approved global
 so a curator's alias selects, converts and attributes a result exactly as the
 canonical code does. `_LOINC_LAB_FIELDS` in the same module is the checked-in
 inventory of the lab fields and their codes: migration 0240 seeds the mapping
-rows from `field_curation_v1.json`, 0285 approves the alias codes and 0326
+rows from `field_curation_v1.json`, 0285 approves the alias codes and 0327
 approves what the seed left proposed. The table decides a field's codes only
 while that field has no approved, concept-resolved mapping -- on a fresh
 install before `load_athena_vocabularies`, the seeded rows carry no concept --

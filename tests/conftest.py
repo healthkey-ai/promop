@@ -13,7 +13,7 @@ FIELD_CURATION_FIXTURE = (
 def lab_field_mappings(db):
     """Seed the lab-field curation rows a migrated database carries.
 
-    pytest runs ``--no-migrations``, so 0240, 0285 and 0326 never fire here and
+    pytest runs ``--no-migrations``, so 0240, 0285 and 0327 never fire here and
     the lab routing falls back to ``_LOINC_LAB_FIELDS``. This loads the
     fixture's lab rows through the apply logic 0240 uses, with a LOINC Concept
     for each so the rows resolve, then runs 0285's alias approval, so a test

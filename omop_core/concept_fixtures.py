@@ -344,7 +344,7 @@ _CONCEPTS = [
     _c(9001003, 'Protein [electrophoresis] in Urine',             'Measurement', 'LOINC', 'Lab Test', 'S', '32730-5'),  # M-spike urine
     # Kappa and lambda FLC are the real LOINC codes 36916-5 and 33944-0 (loaded
     # from Athena); the invented 33944-8 / 33945-5 concepts were retired by
-    # migration 0327. Never seed a concept under a code that is not in its
+    # migration 0328. Never seed a concept under a code that is not in its
     # vocabulary: an invented code in the LOINC range cannot be told from a
     # typo of a real one, and a HealthKey-minted concept is the way to say
     # something LOINC does not.

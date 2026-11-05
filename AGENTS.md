@@ -61,12 +61,12 @@ document for interactive edits, and the rules below assume it.
   once per refresh, by every lab reader: the extractor, the FLC pairing, the
   SLiM scan, the blood-count selection and the provenance registry.
   `_LOINC_LAB_FIELDS` in that module is the inventory those rows are seeded
-  from (migrations 0240, 0285, 0326) and decides only for a field with no such
+  from (migrations 0240, 0285, 0327) and decides only for a field with no such
   mapping, so adding a lab field means adding it there **and** to
   `omop_core/data/field_curation_v1.json`: a fresh install seeds the row from
   the fixture, while an existing instance (0240 is one-shot) derives it from
   the table until a curator approves it, `copy_reference_data` brings it over,
-  or a later migration approves it as 0326 does. A new alias code is an
+  or a later migration approves it as 0327 does. A new alias code is an
   approved SCCM row, not a table entry. The FHIR bundle generators read the
   table directly: they run before import with no database in reach. See
   [field_concept_mapping_architecture.md](docs/field_concept_mapping_architecture.md#lab-derivation-reads-the-mapping-tables).

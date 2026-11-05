@@ -81,5 +81,5 @@ def reverse(apps, schema_editor):
 
 
 class Migration(migrations.Migration):
-    dependencies = [('omop_core', '0326_approve_lab_field_mappings')]
+    dependencies = [('omop_core', '0327_approve_lab_field_mappings')]
     operations = [migrations.RunPython(recode_demo_flc, reverse)]

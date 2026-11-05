@@ -1,7 +1,7 @@
 """Lab derivation routes through the curation tables; _LOINC_LAB_FIELDS seeds them.
 
 The checked-in table stays as the inventory of lab fields and the seed for
-FieldConceptMapping (0240, 0326) and the alias SourceCodeConceptMapping rows
+FieldConceptMapping (0240, 0327) and the alias SourceCodeConceptMapping rows
 (0285). At derivation time the tables decide: ``resolve_lab_code_fields``
 reads approved, concept-resolved mappings and their approved aliases, and the
 table answers only for a field that has no such mapping.
@@ -32,7 +32,7 @@ from tests.migration_utils import run_data_migration
 pytestmark = pytest.mark.django_db
 
 migration = importlib.import_module(
-    'omop_core.migrations.0326_approve_lab_field_mappings',
+    'omop_core.migrations.0327_approve_lab_field_mappings',
 )
 
 def _approve_alias(code, field, **extra):
@@ -47,9 +47,9 @@ def _approve_alias(code, field, **extra):
 
 def test_fixture_approves_every_extractor_field_on_a_code_the_table_routes():
     """Each lab field in the table has an approved LOINC measurement mapping in
-    the fixture 0240 seeds, on a code the table sends to that same field; 0326
+    the fixture 0240 seeds, on a code the table sends to that same field; 0327
     carries the identical pair for the fields it froze. A field added after
-    0326 ran is seeded by the fixture on a fresh install and derives from the
+    0327 ran is seeded by the fixture on a fresh install and derives from the
     table on an existing one until a curator (or a later migration) approves
     it, so the migration's set is a subset, never pinned to the inventory."""
     rows = {row['field_name']: row
@@ -197,10 +197,10 @@ def test_one_refresh_resolves_the_routing_once(lab_field_mappings):
     assert len(curation) == 1, curation
 
 
-# ── Migration 0326 ──────────────────────────────────────────────────────────
+# ── Migration 0327 ──────────────────────────────────────────────────────────
 
 def _migrate():
-    run_data_migration('0326_approve_lab_field_mappings', 'approve_lab_field_mappings')
+    run_data_migration('0327_approve_lab_field_mappings', 'approve_lab_field_mappings')
 
 
 def test_migration_creates_missing_rows_and_approves_the_untouched_proposal():
@@ -278,9 +278,9 @@ def test_migration_drops_a_colliding_source_value_when_approving():
     assert (crcl.status, crcl.source_value) == ('approved', '')
 
 
-# ── Migration 0327 ──────────────────────────────────────────────────────────
+# ── Migration 0328 ──────────────────────────────────────────────────────────
 
-recode = importlib.import_module('omop_core.migrations.0327_retire_invented_flc_codes')
+recode = importlib.import_module('omop_core.migrations.0328_retire_invented_flc_codes')
 
 
 def test_recode_moves_demo_rows_to_real_loinc_and_retires_the_concepts():
@@ -297,8 +297,8 @@ def test_recode_moves_demo_rows_to_real_loinc_and_retires_the_concepts():
         person=person, measurement_concept=fake_lambda, measurement_source_value='33945-5',
         value_as_number=5, unit_source_value='mg/L',
     )
-    run_data_migration('0327_retire_invented_flc_codes', 'recode_demo_flc')
-    run_data_migration('0327_retire_invented_flc_codes', 'recode_demo_flc')
+    run_data_migration('0328_retire_invented_flc_codes', 'recode_demo_flc')
+    run_data_migration('0328_retire_invented_flc_codes', 'recode_demo_flc')
     kappa.refresh_from_db()
     lam.refresh_from_db()
     assert (kappa.measurement_source_value, kappa.measurement_concept_id) == ('36916-5', real_kappa.pk)

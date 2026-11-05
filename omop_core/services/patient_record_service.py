@@ -305,7 +305,7 @@ PATIENT_RECORD_OMOP_MAPPED_FIELDS = frozenset(_OMOP_DERIVED_FIELDS) | frozenset(
 # The checked-in inventory of lab fields the extractor derives from OMOP
 # Measurement rows, and the seed for the curation tables: migration 0240 loads
 # every field here as a FieldConceptMapping from field_curation_v1.json, 0285
-# approves the alias codes as SourceCodeConceptMapping rows, and 0326 approves
+# approves the alias codes as SourceCodeConceptMapping rows, and 0327 approves
 # what was still proposed. Routing at derivation time reads those tables
 # (``resolve_lab_code_fields``); this table decides a field's codes only while
 # the field has no approved, concept-resolved mapping -- a fresh install before
@@ -373,7 +373,7 @@ _LOINC_LAB_FIELDS = {
     '30341-2': ('esr',                            int),
     # MM disease burden labs. Real-world data codes these several ways, so every
     # LOINC spelling is listed. The invented demo codes 33944-8 / 33945-5 that
-    # used to sit here were retired by migration 0327; the MM generator now
+    # used to sit here were retired by migration 0328; the MM generator now
     # emits 36916-5 / 33944-0. CAUTION: 36916-5 is kappa and 33944-0 is lambda.
     '51435-6': ('monoclonal_protein_serum',       float),  # M-protein band 1, SPEP
     '33358-3': ('monoclonal_protein_serum',       float),  # M-protein, SPEP (3046299)
