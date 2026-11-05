@@ -23629,6 +23629,57 @@ class CodeMappingLoadedSinceProposalTest(TestCase):
         self.assertEqual(mapping.status, 'proposed')
         self.assertEqual(mapping.target_concept.vocabulary_id, 'HK-Drug')
 
+    def _hcpcs_j_code(self, code='J9041', concept_id=40_000_201):
+        hcpcs, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='HCPCS',
+            defaults={'vocabulary_name': 'HCPCS', 'vocabulary_reference': 'x',
+                      'vocabulary_version': '2026', 'vocabulary_concept_id': 0},
+        )
+        ConceptClass.objects.get_or_create(
+            concept_class_id='HCPCS', defaults={'concept_class_name': 'HCPCS', 'concept_class_concept_id': 0},
+        )
+        return self._concept(concept_id, code, hcpcs, self.drug_domain, 'HCPCS', None)
+
+    def test_a_non_standard_direct_hit_resolves_through_its_maps_to(self):
+        """#2300: an HCPCS J-code is the RxNorm ingredient it maps to, never its own id."""
+        j_code = self._hcpcs_j_code()
+        ingredient = self._concept(
+            40_000_202, '1234', self.rxnorm, self.drug_domain, 'Quant Clinical Drug', 'S',
+        )
+        maps_to, _ = Relationship.objects.get_or_create(
+            relationship_id='Maps to',
+            defaults={'relationship_name': 'Maps to', 'is_hierarchical': 0, 'defines_ancestry': 0,
+                      'reverse_relationship_id': 'Mapped from', 'relationship_concept_id': 0},
+        )
+        ConceptRelationship.objects.create(
+            concept_1=j_code, concept_2=ingredient, relationship=maps_to,
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+
+        concept, mapping = self._resolve_before_load('J9041', 'HCPCS', 'drug_exposure')
+
+        self.assertEqual(concept.concept_id, ingredient.concept_id)
+        self.assertEqual(mapping.status, 'approved')
+        self.assertEqual(mapping.origin_system, 'athena-direct')
+        self.assertEqual(mapping.source_concept_id, j_code.concept_id)
+        self.assertEqual(mapping.target_concept_id, ingredient.concept_id)
+        self.assertEqual(mapping.destination_vocabulary_id, 'RxNorm')
+
+    def test_a_non_standard_direct_hit_without_a_maps_to_stays_with_a_curator(self):
+        """#2300: loading HCPCS must not approve a J-code to a non-standard Drug concept."""
+        self._hcpcs_j_code()
+
+        concept, mapping = self._resolve_before_load('J9041', 'HCPCS', 'drug_exposure')
+
+        self.assertIsNone(concept)
+        self.assertEqual(mapping.status, 'proposed')
+        self.assertNotEqual(mapping.origin_system, 'athena-direct')
+        self.assertFalse(
+            SourceCodeConceptMapping.objects.filter(
+                source_vocabulary_id='HCPCS', source_code='J9041', status='approved',
+            ).exists()
+        )
+
     def test_loinc_gap_yields_once_loinc_is_loaded(self):
         _, gap = self._resolve_before_load('2160-0', 'LOINC', 'measurement')
         self.assertIsNone(gap.target_concept_id)

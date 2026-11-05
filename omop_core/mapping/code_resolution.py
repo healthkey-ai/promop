@@ -397,14 +397,37 @@ def _name_minted_concept(mapping, name):
     Concept.objects.filter(concept_id=concept_id).update(concept_name=name)
 
 
-def _effective_direct_mapping(*, source_vocabulary_id, source_code, concept, omop_table):
+def _standard_maps_to(concept):
+    """The one live standard concept a non-standard Athena concept maps to, or None.
+
+    A J-code (HCPCS, Drug domain) is non-standard and carries a 'Maps to'
+    RxNorm ingredient; an ICD-10-CM code maps to SNOMED. ``sync_athena_mappings``
+    turns those edges into approved SCCM rows for the codes it is pointed at,
+    but a code it has not met yet should resolve the same way here rather
+    than to its own non-standard id, which no OMOP consumer can use.
+    """
+    targets = list(
+        Concept.objects.filter(
+            relationships_as_target__concept_1=concept,
+            relationships_as_target__relationship_id='Maps to',
+            relationships_as_target__invalid_reason__isnull=True,
+            standard_concept='S', invalid_reason__isnull=True,
+        ).distinct()[:2]
+    )
+    return targets[0] if len(targets) == 1 else None
+
+
+def _effective_direct_mapping(*, source_vocabulary_id, source_code, concept, omop_table,
+                              target=None):
     """Cache an authoritative direct vocabulary hit in SCCM.
 
     ``approved`` remains the effective state for backwards compatibility, but
     ``origin_system`` makes this a refreshable Athena-derived cache entry, not
     a curator sign-off.  A concurrent creator, or any existing curator row,
-    always wins rather than being overwritten.
+    always wins rather than being overwritten. ``target`` is the standard
+    concept the hit maps to when the hit itself is not standard.
     """
+    target = target or concept
     source_code = source_code[:SOURCE_CODE_MAX]
     existing = SourceCodeConceptMapping.objects.filter(
         organization__isnull=True, source_vocabulary_id=source_vocabulary_id or '',
@@ -421,10 +444,10 @@ def _effective_direct_mapping(*, source_vocabulary_id, source_code, concept, omo
                 source_code=source_code,
                 source_code_description=(concept.concept_name or '')[:255],
                 source_concept=concept,
-                target_concept=concept,
-                destination_vocabulary_id=concept.vocabulary_id or '',
-                domain_id=concept.domain_id or _DOMAIN_FOR_TABLE.get(omop_table, ''),
-                omop_table=table_for_domain(concept.domain_id) if standard_identity else omop_table,
+                target_concept=target,
+                destination_vocabulary_id=target.vocabulary_id or '',
+                domain_id=target.domain_id or _DOMAIN_FOR_TABLE.get(omop_table, ''),
+                omop_table=table_for_domain(target.domain_id) if standard_identity else omop_table,
                 source='Athena', status='approved', origin='import',
                 origin_system=IDENTITY_ORIGIN if standard_identity else 'athena-direct', occurrence_count=0,
             )
@@ -642,13 +665,25 @@ def _resolve_source_code(*, source_code, omop_table, source_vocabulary_id,
         )
         return None, gap
 
-    # Rule 3a — resolve against Athena as before.
+    # Rule 3a — resolve against Athena as before. A standard, valid concept
+    # is the answer. A non-standard one (an HCPCS J-code, an ICD-10-CM code
+    # the mapping sync has not met) is the answer only through its one
+    # 'Maps to' standard target; with none it stays with a curator, as a
+    # non-standard hit already does on the promotion path (#2300).
     concept = _direct_concept(source_vocabulary_id, source_code)
     if concept is not None:
-        return concept, _effective_direct_mapping(
-            source_vocabulary_id=source_vocabulary_id,
-            source_code=source_code, concept=concept, omop_table=table,
-        )
+        if concept.standard_concept == 'S' and not concept.invalid_reason:
+            return concept, _effective_direct_mapping(
+                source_vocabulary_id=source_vocabulary_id,
+                source_code=source_code, concept=concept, omop_table=table,
+            )
+        target = _standard_maps_to(concept)
+        if target is not None:
+            return target, _effective_direct_mapping(
+                source_vocabulary_id=source_vocabulary_id,
+                source_code=source_code, concept=concept, omop_table=table,
+                target=target,
+            )
 
     # Rule 4 — the suggestion service owns every retrieval/ranking strategy.
     # Its returned target is useful evidence for a curator but never an answer

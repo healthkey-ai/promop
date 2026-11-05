@@ -24,12 +24,12 @@ counts describe stored mappings, not proof of clinical equivalence.
 
 The selected concept has two views, and opens on the second (#2010):
 
-- Existing mappings: SCCM rows already targeting that concept, grouped by
+- Mapped Codes: SCCM rows already targeting that concept, grouped by
   status. Approved mappings come first, folded, then the proposed mappings
   open for review, then rejected ones, folded. Each group is fetched and paged
   on its own; the group headers carry the counts of all three under the current
   search and Seen filter.
-- Suggested source codes: a saved preview retrieved from local vocabulary
+- Suggested Codes: a saved preview retrieved from local vocabulary
   evidence. No SCCM rows change when this search runs, with one exception: a
   candidate whose units imply several LOINC axis sets (the blue "n axis
   values") has each axis variant without a destination suggested a standard

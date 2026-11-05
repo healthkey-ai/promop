@@ -32,6 +32,7 @@ def test_web_startup_commands_and_failure_gates(tmp_path, failed_command):
             "PATH": f"{tmp_path}:{os.environ['PATH']}",
             "STARTUP_LOG": str(log),
             "FAIL_COMMAND": failed_command or "",
+            "ATHENA_VOCABULARY_LFS_URL": "https://github.com/example/vocab",
             "ATHENA_VOCABULARY_GDRIVE_URL": "https://example.test/athena",
         },
         capture_output=True,
@@ -44,8 +45,9 @@ def test_web_startup_commands_and_failure_gates(tmp_path, failed_command):
             assert command.split()[1] in get_commands(), command
     expected = [
         "manage.py check --deploy --fail-level ERROR",
-        "manage.py prepare_production_database --gdrive https://example.test/athena",
-        "manage.py queue_athena_vocabulary_sync --gdrive https://example.test/athena",
+        # LFS first, the Drive folder as fallback (#2288); both flags travel.
+        "manage.py prepare_production_database --lfs https://github.com/example/vocab --gdrive https://example.test/athena",
+        "manage.py queue_athena_vocabulary_sync --lfs https://github.com/example/vocab --gdrive https://example.test/athena",
         "manage.py setup_admin",
         # Last of the preparation steps, and deliberately unable to stop the
         # boot: it dispatches a LOINC load when the release has moved, and a
@@ -60,3 +62,40 @@ def test_web_startup_commands_and_failure_gates(tmp_path, failed_command):
     else:
         assert commands == expected
         assert result.returncode == 0
+
+
+def test_start_sh_does_not_choose_the_settings_module(tmp_path):
+    """The entrypoint must leave the settings module to manage.py and wsgi.py.
+
+    The security-review gate leaves start.sh ungated and gates promop/wsgi.py,
+    promop/celery.py and manage.py, on the grounds that the
+    `os.environ.setdefault('DJANGO_SETTINGS_MODULE', ...)` in those three is
+    what selects production's settings. A single `export DJANGO_SETTINGS_MODULE=`
+    line here would override all three from outside the gate, so that premise
+    has to be pinned rather than assumed. The argv form is already pinned by the
+    exact-sequence assertion above: a `--settings=` appended to any manage.py
+    line fails it. This covers the environment form, which nothing else reaches.
+    """
+    log = tmp_path / "commands"
+    for executable in ("python", "gunicorn"):
+        shim = tmp_path / executable
+        shim.write_text(
+            '#!/bin/sh\necho "${DJANGO_SETTINGS_MODULE-<unset>}" >> "$STARTUP_LOG"\n'
+        )
+        shim.chmod(0o755)
+    env = {k: v for k, v in os.environ.items() if k != "DJANGO_SETTINGS_MODULE"}
+    subprocess.run(
+        ["bash", str(ROOT / "start.sh")],
+        cwd=ROOT,
+        env={
+            **env,
+            "PATH": f"{tmp_path}:{os.environ['PATH']}",
+            "STARTUP_LOG": str(log),
+            "FAIL_COMMAND": "",
+            "ATHENA_VOCABULARY_GDRIVE_URL": "https://example.test/athena",
+        },
+        capture_output=True,
+        text=True,
+    )
+    observed = set(log.read_text().split())
+    assert observed == {"<unset>"}, observed

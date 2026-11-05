@@ -48,9 +48,14 @@ services:
       - key: CELERY_BROKER_URL
         sync: false
 
-      # Used once when migration 0201 is pending and any of its target LOINC
-      # concepts are absent. The bounded bootstrap scans the archive but inserts
-      # only those concepts; full vocabulary loads are separate maintenance.
+      # Where the Athena vocabulary and LOINC release ZIPs come from (#2288).
+      # The Git LFS repository is tried first; the Drive folder is the
+      # fallback. Used once when migration 0201 is pending and any of its
+      # target LOINC concepts are absent (the bounded bootstrap scans the
+      # archive but inserts only those concepts) and on every deploy to queue
+      # the freshness check the worker performs.
+      - key: ATHENA_VOCABULARY_LFS_URL
+        value: https://github.com/healthkey-ai/omop-vocabularies
       - key: ATHENA_VOCABULARY_GDRIVE_URL
         sync: false
 
@@ -123,6 +128,15 @@ services:
           name: promop
           type: web
           envVarKey: LOINC_PASSWORD
+      # The queued Athena sync runs here and resolves its own sources: the LFS
+      # repository from the receipt, the Drive fallback from this environment.
+      - key: ATHENA_VOCABULARY_LFS_URL
+        value: https://github.com/healthkey-ai/omop-vocabularies
+      - key: ATHENA_VOCABULARY_GDRIVE_URL
+        fromService:
+          name: promop
+          type: web
+          envVarKey: ATHENA_VOCABULARY_GDRIVE_URL
       # Taken from the web service rather than generated: two different keys
       # would be two different signing secrets for the same data.
       - key: SECRET_KEY
@@ -268,6 +282,15 @@ services:
           name: promop-staging
           type: web
           envVarKey: ANTHROPIC_API_KEY
+      # The queued Athena sync runs here and resolves its own sources: the LFS
+      # repository from the receipt, the Drive fallback from this environment.
+      - key: ATHENA_VOCABULARY_LFS_URL
+        value: https://github.com/healthkey-ai/omop-vocabularies
+      - key: ATHENA_VOCABULARY_GDRIVE_URL
+        fromService:
+          name: promop-staging
+          type: web
+          envVarKey: ATHENA_VOCABULARY_GDRIVE_URL
       - key: ANTHROPIC_WORKSPACE_ID
         fromService:
           name: promop-staging

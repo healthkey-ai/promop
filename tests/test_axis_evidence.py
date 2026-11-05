@@ -97,10 +97,11 @@ def test_the_summary_counts_a_code_once_per_axis_and_round_trips():
     stale = axis_evidence.Summary({'codes': 2, 'axes': {'property': {'settled': 1, 'bases': {'bogus': 3, 'unit': 1}}}})
     assert stale.as_dict()['axes']['property']['bases'] == {'unit': 1}, 'a basis the code no longer knows is dropped'
     assert stale.codes_with_units == 0 and stale.codes_with_based_on == 0
-    # Legacy format with codes_with_specimens is read as codes_with_based_on for backward compat.
+    # A summary stored before basedOn was counted carries specimen keys; those
+    # are not basedOn references and must not be shown as them (#2296).
     legacy = axis_evidence.Summary({'codes': 5, 'codes_with_specimens': 3, 'distinct_specimens': {'Ser': 2}})
-    assert legacy.codes_with_based_on == 3
-    assert legacy.distinct_based_on == {'Ser': 2}
+    assert legacy.codes_with_based_on == 0
+    assert legacy.distinct_based_on == {}
 
 
 def test_resources_are_read_per_code_in_one_query(django_assert_num_queries):

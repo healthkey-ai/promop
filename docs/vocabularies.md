@@ -27,49 +27,86 @@ clears patient-facing references to it (using `NULL`, or concept `0` for a
 required OMOP field). It retains patients and clinical events, including their
 source values; it never uses `TRUNCATE ... CASCADE`.
 
-### Option A: use the PRomop Google Drive zip
+### Option A: use the published PRomop archives
 
-This is the easiest path for local setup and staging repairs. The command
-downloads the first zip from the shared folder, extracts it under `/tmp/vocab`,
-loads the vocabulary tables, and publishes a `vocabulary_release` manifest.
+This is the easiest path for local setup and staging repairs. The same two
+archives are published in two places, and every command that loads them tries
+them in this order (#2288):
 
-[Open the supplied vocabulary folder](https://drive.google.com/drive/u/1/folders/1HoRWGepqcH3pMKK03KNb1oWpaVs0Avl7).
+1. **Git LFS** -- the public
+   [healthkey-ai/omop-vocabularies](https://github.com/healthkey-ai/omop-vocabularies)
+   repository holds the Athena bundle and the LOINC release as LFS objects, with
+   a `manifest.json` naming each file, its SHA-256 and size. Resolving a release
+   is one small HTTPS request; the archives are fetched from GitHub's LFS media
+   endpoint only when the installed vocabulary differs. No Google account,
+   quota or `gdown` is involved. `--lfs` on the commands below, or
+   `ATHENA_VOCABULARY_LFS_URL`; append `/tree/<tag>` to pin a release.
+2. **Google Drive** -- the
+   [governed folder](https://drive.google.com/drive/u/1/folders/1HoRWGepqcH3pMKK03KNb1oWpaVs0Avl7)
+   the project used before, through `gdown`. It is the fallback when the LFS
+   manifest or download fails, and the only path when no LFS URL is given.
+   `--gdrive`, or `ATHENA_VOCABULARY_GDRIVE_URL`.
+
+The command downloads the ZIP, streams the vocabulary tables out of it, and
+publishes a `vocabulary_release` manifest. The source a run used, and any
+fallback it took, is in its log. Publishing a new release to the LFS repository
+is described in its README; `vocabulary_source.build_manifest` writes the
+manifest.
 
 ## Athena freshness and insert-only updates
 
 Deployments only create a durable sync request and publish it to the dedicated
-Celery `athena` queue. The worker resolves the selected ZIP in the governed
-Drive folder and performs both a new instance's initial load and later updates;
-archive processing, synonym refresh, and release hashing never block a web
-deploy. Repeated deploy/boot preparation deduplicates queued or running work.
+Celery `athena` queue. The worker resolves the published release -- the LFS
+manifest, else the selected ZIP in the governed Drive folder -- and performs
+both a new instance's initial load and later updates; archive processing,
+synonym refresh, and release hashing never block a web deploy. Repeated
+deploy/boot preparation deduplicates queued or running work.
 
 A file identity already recorded by a successful sync exits on the worker
-without downloading the archive or touching vocabulary tables. Queue the same
-asynchronous check manually (including to retry a failed job):
+without downloading the archive or touching vocabulary tables. So does an LFS
+manifest whose SHA-256 a previous sync recorded, whichever source that sync
+used: switching a deployment from Drive to LFS never reloads an unchanged
+vocabulary. Queue the same asynchronous check manually (including to retry a
+failed job):
 
 ```bash
-python manage.py queue_athena_vocabulary_sync --gdrive "$ATHENA_VOCABULARY_GDRIVE_URL"
+python manage.py queue_athena_vocabulary_sync --lfs "$ATHENA_VOCABULARY_LFS_URL" --gdrive "$ATHENA_VOCABULARY_GDRIVE_URL"
 ```
+
+The receipt records the primary source; a worker that finds an LFS URL there
+falls back to `ATHENA_VOCABULARY_GDRIVE_URL` from its own environment, and to
+nothing when that is unset (`render.yaml` gives both workers the web service's
+value). A LOINC release that is new while the Athena bundle is unchanged is
+loaded on its own, under the same locks as the full delta; when it cannot be
+(download failed, the LOINC release job held the lock) the receipt omits it so
+the next sync tries again. A check run or `--dry-run` reports it instead.
+
+For production, pin the LFS URL to a tag (`.../tree/athena-YYYYMMDD-loinc-x.yy`)
+rather than `main`: `raw.githubusercontent.com` caches branch refs for a few
+minutes, so a deploy right after a publish on `main` can read the previous
+manifest. The first deploy of this change may record one `failed` receipt with a
+`gdown` error against a `github.com` URL: a worker still on the previous image
+took a receipt the new web service queued. The next boot queues again.
 
 The durable receipt progresses through `queued`, `running`, and then
 `current`, `applied`, or `failed`. Check a database synchronously without
 changing it only for diagnosis:
 
 ```bash
-python manage.py sync_athena_vocabulary --gdrive
+python manage.py sync_athena_vocabulary          # LFS, then the Drive folder
 ```
 
 When that reports a different artifact, measure the missing-row delta inside a
 transaction that is rolled back:
 
 ```bash
-python manage.py sync_athena_vocabulary --gdrive --dry-run
+python manage.py sync_athena_vocabulary --dry-run
 ```
 
 Apply only absent rows with the existing conflict-tolerant Athena loader:
 
 ```bash
-python manage.py sync_athena_vocabulary --gdrive --apply
+python manage.py sync_athena_vocabulary --apply
 ```
 
 The apply path holds a database advisory lock, never enables `--replace`, and
@@ -82,10 +119,11 @@ queue; `start-worker.sh` provides that configuration.
 
 ```bash
 DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" DEBUG=True \
-  .venv/bin/python manage.py load_athena_vocabularies --gdrive
+  .venv/bin/python manage.py load_athena_vocabularies --lfs --gdrive
 ```
 
-To load a specific Google Drive file instead of the first zip in the folder,
+`--lfs` alone never touches Drive; `--gdrive` alone never touches GitHub. To
+load a specific Google Drive file instead of the first zip in the folder,
 pass its Drive URL:
 
 ```bash
@@ -100,7 +138,7 @@ to create a vocabulary download. Select these vocabularies:
 
 | Purpose | Select in Athena |
 |---|---|
-| Core clinical terminology and mappings | **SNOMED**, **ICD10CM**, **CPT4**, **LOINC**, **CIEL**, **RxNorm**, **RxNorm Extension**, **OMOP Extension**, **UCUM** |
+| Core clinical terminology and mappings | **SNOMED**, **ICD10CM**, **CPT4**, **HCPCS**, **LOINC**, **CIEL**, **RxNorm**, **RxNorm Extension**, **OMOP Extension**, **UCUM** |
 | Immunizations and visits | **CVX**, **Visit**, **Type Concept** |
 | Drug classification and oncology treatment | **ATC**, **HemOnc** |
 | Genomics, cancer registry, and clinical study data | **OMOP Genomic**, **ICDO3**, **NCIt**, **Cancer Modifier**, **NAACCR**, **CDISC** |
@@ -218,6 +256,7 @@ Loaded by `load_athena_vocabularies`. `source` is `NULL` for all of these.
 | **LOINC** | 277,784 | Measurement, Meas Value, Observation, Note | `nnnnn-n`, e.g. `94762-2`; answers are `LA…`, e.g. `LA28366-5` | Laboratory tests **and** clinical observations, survey instruments and document types. **Standard for the Measurement domain.** Not only labs — the wearable metrics use LOINC codes, and `Meas Value` entries are answer-list values. |
 | **RxNorm** | 148,875 | Drug | numeric, e.g. `26744` | US drug terminology — ingredients, clinical drugs, brand names. **Standard for the Drug domain.** |
 | **ICD10CM** | 73,484 | Condition, Observation, Measurement | `J11.1` | US clinical modification of ICD-10. **Non-standard** — billing codes, mapped onward to SNOMED. |
+| **HCPCS** | ~12,700 | Procedure, Observation, Drug, Device | alphanumeric, e.g. `J9145`, `G0463` | CMS HCPCS Level II: drugs administered (J-codes), supplies and equipment, and services not in CPT. Procedure-domain codes are standard; J-codes map onward to RxNorm. Loaded since #2300 so the PHR names them. |
 | **HemOnc** | 13,386 | Drug, Condition, Procedure, Episode | numeric, e.g. `1091` | Haematology/oncology terminology: antineoplastic agents and, importantly, **treatment regimens**. Regimen concepts are Standard for the Episode domain; the drug-level concepts are mostly non-standard and map to RxNorm. |
 | **UCUM** | 1,128 | Unit | e.g. `{ai}`, `mg/dL` | Units of measure, used in `unit_concept_id`. |
 | **ATC** | 482 | Drug | e.g. `L01XE52` | WHO Anatomical Therapeutic Chemical classification. Classification concepts (`'C'`), used for drug-class roll-ups rather than stored directly. |

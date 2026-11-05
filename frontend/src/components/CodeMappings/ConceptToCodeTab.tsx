@@ -81,7 +81,7 @@ function Pagination({ data, change, disabled = false }: {
 }
 
 type SourceMode = 'linked' | 'candidates';
-/** A stored mapping's status; Existing mappings shows one group per status (#2010). */
+/** A stored mapping's status; Mapped Codes shows one group per status (#2010). */
 type Status = 'approved' | 'proposed' | 'rejected';
 const STATUSES: Status[] = ['approved', 'proposed', 'rejected'];
 type SourcePage = Page<Source> & { zero_seen: number; status_counts?: Record<Status, number> };
@@ -421,7 +421,7 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
   suggestCache: Map<number, { run: Run | null; previousCandidates: Source[] }>;
 }) {
   const cached = suggestCache.get(concept.concept_id);
-  // Suggested source codes is the view a curator comes for, so it opens first (#2010).
+  // Suggested Codes is the view a curator comes for, so it opens first (#2010).
   const [mode, setMode] = useState<SourceMode>('candidates');
   const [search, setSearch] = useState('');
   const [seenOnly, setSeenOnly] = useState(true);
@@ -852,7 +852,7 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
   const retry = () => { resetView(); setError(''); setRevision(value => value + 1); };
   return <section aria-label={`Source codes for ${concept.concept_name}`} className="space-y-4">
     <div role="group" aria-label="Source code views" className="flex flex-wrap gap-2">
-      {([['candidates', 'Suggested source codes'], ['linked', 'Existing mappings']] as const).map(([key, label]) =>
+      {([['candidates', 'Suggested Codes'], ['linked', 'Mapped Codes']] as const).map(([key, label]) =>
         <button key={key} className={`${button} ${mode === key ? 'bg-slate-100 font-semibold' : ''}`} disabled={writing} aria-pressed={mode === key}
           onClick={() => changeMode(key)}>{label}</button>)}
     </div>

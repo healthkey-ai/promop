@@ -23,6 +23,8 @@ import requests
 
 import logging
 
+from omop_core.services import vocabulary_source
+from omop_core.services.vocabulary_source import DEFAULT_LFS_URL, LOINC_ZIP_RE, sha256_file
 from omop_core.models import (
     Vocabulary, Domain, ConceptClass, Concept,
     Relationship, ConceptRelationship, ConceptAncestor, CdmSource,
@@ -49,8 +51,16 @@ VOCAB_SCOPE = frozenset({
     'SNOMED', 'ICD10CM', 'CVX',
     # US procedure and professional-service codes. CPT4 is used as a source
     # vocabulary by the code-mapping and FHIR ingestion paths, so it must be
-    # retained whenever the Athena bundle includes it.
-    'CPT4',
+    # retained whenever the Athena bundle includes it. HCPCS Level II (~12.7k
+    # concepts) names the supplies, drugs administered and services the ETL
+    # sends as HCPCS codes; without it the PHR showed the bare code (#2300).
+    # Its Procedure/Device/Observation concepts are standard, so they become
+    # Suggest candidates too; its Drug-domain J-codes are non-standard and
+    # resolve through their 'Maps to' RxNorm edges, which only a full load
+    # (not --concepts-only) carries. NDC is deliberately not here: ~1.3M
+    # concepts, and the 14-digit package codes seen in ETL data match no
+    # Athena NDC, so loading it names nothing.
+    'CPT4', 'HCPCS',
     # Genomic + oncology coding vocabularies (#459)
     'OMOP Genomic', 'ICDO3', 'NCIt',
     # Oncology staging/grading modifiers + cancer registry
@@ -201,11 +211,10 @@ def _resolve_gdrive_vocabulary(url, log):
         )
         if result is None:
             raise CommandError(f'Google Drive folder listing failed: {url}')
-        _loinc_re = re.compile(r'(?i)loinc.*\.zip$')
         zips = sorted(
             (item for item in result
              if Path(item.path).suffix.lower() == '.zip'
-             and not _loinc_re.match(PurePosixPath(item.path).name)),
+             and not LOINC_ZIP_RE.match(PurePosixPath(item.path).name)),
             key=lambda item: item.path,
         )
         if not zips:
@@ -218,7 +227,7 @@ def _resolve_gdrive_vocabulary(url, log):
         name = Path(zips[0].path).name
         loinc_zips = sorted(
             (item for item in result
-             if re.match(r'(?i)loinc.*\.zip$', PurePosixPath(item.path).name)),
+             if LOINC_ZIP_RE.match(PurePosixPath(item.path).name)),
             key=lambda item: item.path,
             reverse=True,
         )
@@ -385,12 +394,8 @@ def _validate_umls_archive(path):
         raise CommandError(f'UMLS archive {path} is not a valid zip file.') from exc
 
 
-def _sha256_file(path):
-    digest = hashlib.sha256()
-    with open(path, 'rb') as source:
-        for chunk in iter(lambda: source.read(1024 * 1024), b''):
-            digest.update(chunk)
-    return digest.hexdigest()
+# Kept under this name for its importers; the one definition is the service's.
+_sha256_file = sha256_file
 
 
 def _cache_umls_release(api_key, cache_dir, release_url=None, log=lambda _msg: None,
@@ -531,7 +536,14 @@ class Command(EmbeddingLoadCommand):
         parser.add_argument('--gdrive', nargs='?', const=DEFAULT_GDRIVE_URL,
                             help=(
                                 'Google Drive folder or file URL containing a zipped '
-                                f'Athena vocabulary export. Defaults to {DEFAULT_GDRIVE_URL}.'
+                                f'Athena vocabulary export. Defaults to {DEFAULT_GDRIVE_URL}. '
+                                'With --lfs it is the fallback source.'
+                            ))
+        parser.add_argument('--lfs', nargs='?', const=DEFAULT_LFS_URL,
+                            help=(
+                                'GitHub repository publishing the Athena and LOINC ZIPs as '
+                                'Git LFS objects with a manifest.json. Tried before --gdrive. '
+                                f'Defaults to {DEFAULT_LFS_URL}.'
                             ))
         parser.add_argument('--replace', action='store_true', help=(
             'Remove Athena concepts absent from the incoming release after loading. '
@@ -585,6 +597,7 @@ class Command(EmbeddingLoadCommand):
         archive = options['archive']
         bucket_name = options['bucket']
         gdrive_url = options['gdrive']
+        lfs_url = options.get('lfs')
         replace = options['replace']
         dry_run = options['dry_run']
         loinc_archive = options.get('loinc_archive')
@@ -600,9 +613,12 @@ class Command(EmbeddingLoadCommand):
             options['concepts_only'] = True
             options['skip_umls_cache'] = True
 
-        sources = [bool(base), bool(archive), bool(bucket_name), bool(gdrive_url)]
+        # --lfs and --gdrive may be given together: LFS first, Drive as the
+        # fallback (#2288). Every other source stands alone.
+        remote = bool(lfs_url or gdrive_url)
+        sources = [bool(base), bool(archive), bool(bucket_name), remote]
         if sum(sources) != 1:
-            raise CommandError('Provide exactly one of --path, --archive, --bucket, or --gdrive')
+            raise CommandError('Provide exactly one of --path, --archive, --bucket, or --gdrive/--lfs')
 
         self._gcs_bucket = None
         self._archive = None
@@ -610,8 +626,22 @@ class Command(EmbeddingLoadCommand):
             from google.cloud import storage as gcs
             self._gcs_bucket = gcs.Client().bucket(bucket_name)
             self._log(f'Loading from gs://{bucket_name}/ (download-one-process-delete)')
-        if gdrive_url:
-            archive = _download_gdrive_vocabulary(gdrive_url, download_dir, self._log)
+        if remote:
+            selection = vocabulary_source.resolve_vocabulary_source(
+                lfs=lfs_url, gdrive=gdrive_url, log=self._log,
+            )
+            archive = vocabulary_source.download_vocabulary_archive(
+                selection, download_dir, self._log,
+            )
+            # The published LOINC release rides along unless --loinc-archive
+            # named one. Not on a dry run or the migration bootstrap, which
+            # return before the axes load: the web boot would download 93 MB
+            # to discard it.
+            wants_loinc = not dry_run and not migration_bootstrap
+            if wants_loinc and self._loinc_archive_path is None and selection.get('loinc_archive_id'):
+                self._loinc_archive_path = vocabulary_source.download_loinc_archive(
+                    selection, download_dir, self._log,
+                )
         if archive:
             self._archive = _VocabularyArchive(archive, self._log)
 

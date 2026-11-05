@@ -16,13 +16,8 @@ export type AxisEvidence = {
   codes: number; axes: Record<string, AxisEvidenceCounts>;
   codes_with_units?: number; codes_with_based_on?: number;
   distinct_units?: Record<string, number>; distinct_units_total?: number;
+  /** Absent on a summary stored by a walk that predates basedOn counting (#2296). */
   distinct_based_on?: Record<string, number>; distinct_based_on_total?: number;
-  /** @deprecated Use codes_with_based_on. Kept for backward compat with stored summaries. */
-  codes_with_specimens?: number;
-  /** @deprecated Use distinct_based_on. */
-  distinct_specimens?: Record<string, number>;
-  /** @deprecated Use distinct_based_on_total. */
-  distinct_specimens_total?: number;
 };
 export type Walk = {
   id: number; outcome: 'queued' | 'running' | 'done' | 'failed'; reason: string; rebuild_evidence: boolean;
@@ -162,10 +157,12 @@ export default function AxisVariantWalkPanel({ canApprove }: { canApprove: boole
         <p className="mt-1 text-slate-500">Units settle the property and scale. If no other axis is ever settled or varies,
           the data holds no evidence for more than one LOINC per unit variant.</p>
         {(() => {
-          const codesWithBasedOn = evidence.codes_with_based_on ?? evidence.codes_with_specimens;
-          const distinctBasedOn = evidence.distinct_based_on ?? evidence.distinct_specimens;
-          const distinctBasedOnTotal = evidence.distinct_based_on_total ?? evidence.distinct_specimens_total;
-          return (evidence.codes_with_units != null || codesWithBasedOn != null) && <div className="mt-2 border-t border-slate-200 pt-1">
+          // An older walk's summary has no basedOn keys: it did not count them,
+          // which is not the same as counting none (#2296).
+          const codesWithBasedOn = evidence.codes_with_based_on;
+          const distinctBasedOn = evidence.distinct_based_on;
+          const distinctBasedOnTotal = evidence.distinct_based_on_total;
+          return <div className="mt-2 border-t border-slate-200 pt-1">
             <p className="font-medium text-slate-600">Raw data availability</p>
             <ul className="mt-0.5 list-disc pl-4">
               {evidence.codes_with_units != null && <li>
@@ -178,6 +175,7 @@ export default function AxisVariantWalkPanel({ canApprove }: { canApprove: boole
                 {(distinctBasedOnTotal ?? 0) > 0 &&
                   <> ({(distinctBasedOnTotal ?? 0).toLocaleString()} distinct)</>}
               </li>}
+              {codesWithBasedOn == null && <li>BasedOn references were not counted by this walk. Walk the source codes again to count them.</li>}
             </ul>
             {distinctBasedOn && Object.keys(distinctBasedOn).length > 0 && <details className="mt-1">
               <summary className="cursor-pointer text-slate-500">BasedOn references</summary>
