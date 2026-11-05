@@ -46,6 +46,7 @@ from omop_core.services.hemoglobin_units import (
     UNIT_FIELD as HEMOGLOBIN_UNIT,
     SOURCE_PAIRS as _SOURCE_PAIRS,
     canonical_from_pair as hemoglobin_canonical_from_pair,
+    canonical_in_range as hemoglobin_canonical_in_range,
     same_number,
 )
 from omop_core.services.blood_count_source_pairs import (
@@ -1252,6 +1253,9 @@ def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fiel
     canonical_now = getattr(patient_info, HEMOGLOBIN_CANONICAL)
     pair_authoritative = (
         not canonical_import and pair_recognised
+        # An import may hold a value the canonical column cannot store; that is
+        # a preserved legacy fact, not a read-model matching can consume.
+        and hemoglobin_canonical_in_range(pair_value)
         and (pair_pending or canonical_now is None
              or same_number(pair_value, canonical_now))
     )

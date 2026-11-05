@@ -645,3 +645,109 @@ def test_a_caller_read_only_unit_is_not_rewritten_when_echoed(api):
     # value is normalised in the stored unit.
     assert saved.hemoglobin_level_units == 'G/L'
     assert float(saved.hemoglobin_g_dl) == 13.0
+
+
+def test_the_canonical_helpers_match_the_stored_column():
+    from omop_core.services.hemoglobin_units import CANONICAL_LIMIT, CANONICAL_QUANTUM
+
+    field = PatientRecord._meta.get_field('hemoglobin_g_dl')
+    assert CANONICAL_QUANTUM == Decimal(1).scaleb(-field.decimal_places)
+    assert CANONICAL_LIMIT == (
+        Decimal(10) ** (field.max_digits - field.decimal_places) - CANONICAL_QUANTUM
+    )
+
+
+def test_the_derived_canonical_already_has_the_stored_precision():
+    from omop_core.services.hemoglobin_units import canonical_from_pair
+
+    # 99.99 g/L is 9.999 g/dL. The column stores one decimal, so the value the
+    # caller projects must be that same 10.0, not a more precise number that
+    # the database would round separately.
+    recognised, canonical = canonical_from_pair(Decimal('99.99'), 'G/L')
+    assert recognised is True
+    assert canonical == Decimal('10.0')
+
+    record = _record()
+    serializer = _patch(record, {
+        'hemoglobin_level': Decimal('99.99'), 'hemoglobin_level_units': 'g/L',
+    })
+    assert serializer.is_valid(), serializer.errors
+    assert serializer.validated_data['hemoglobin_g_dl'] == Decimal('10.0')
+    serializer.save()
+
+    record.refresh_from_db()
+    assert record.hemoglobin_g_dl == Decimal('10.0')
+
+
+def test_the_projected_fact_carries_the_same_precision(api):
+    record = _record()
+    _edit(api, record, {
+        'hemoglobin_level': 99.99, 'hemoglobin_level_units': 'g/L',
+    })
+
+    assert record.hemoglobin_g_dl == Decimal('10.0')
+    assert _projected(record).value_as_number == Decimal('10.0')
+
+
+def test_a_pair_outside_the_canonical_range_is_refused():
+    record = _record()
+    serializer = _patch(record, {
+        'hemoglobin_level': 2_000_000, 'hemoglobin_level_units': 'g/L',
+    })
+
+    assert not serializer.is_valid()
+    assert 'hemoglobin_level' in serializer.errors
+
+
+def test_the_shared_form_refuses_a_pair_outside_the_canonical_range(api):
+    from omop_core.services.patient_form import apply_patient_form_patch
+
+    record = _record()
+    saved, result = apply_patient_form_patch(
+        record.person,
+        {'hemoglobin_level': 2_000_000, 'hemoglobin_level_units': 'g/L'},
+    )
+
+    assert result.rejected.get('hemoglobin_level')
+    assert not result.applied
+    assert saved.hemoglobin_level is None
+    assert saved.hemoglobin_g_dl is None
+
+
+@pytest.mark.parametrize('value,unit,expected', [
+    (Decimal('-0.05'), 'G/DL', Decimal('-0.1')),
+    (Decimal('-0.04'), 'G/DL', Decimal('0.0')),
+    (Decimal('9999.94'), 'G/DL', Decimal('9999.9')),
+    (Decimal('-9999.94'), 'G/DL', Decimal('-9999.9')),
+    (Decimal('99999.95'), 'G/L', Decimal('10000.0')),
+])
+def test_the_quantisation_matches_the_column(value, unit, expected):
+    from omop_core.services.hemoglobin_units import canonical_from_pair
+
+    recognised, canonical = canonical_from_pair(value, unit)
+
+    assert recognised is True
+    assert canonical == expected
+
+
+def test_recompute_does_not_derive_an_unstorable_canonical():
+    from omop_core.services.patient_record_service import recompute_patient_record_fields
+
+    record = _record()
+    record.hemoglobin_level = Decimal('2000000')
+    record.hemoglobin_level_units = 'G/L'
+    # A valid canonical already on the record. Without the range guard the
+    # oversized pair replaces it and the overflow cleaner then nulls it, so
+    # this assertion is what isolates the guard from that cleaner.
+    record.hemoglobin_g_dl = Decimal('11.0')
+    record.user_edited_fields = ['hemoglobin_level', 'hemoglobin_level_units']
+    record.save()
+
+    recompute_patient_record_fields(record)
+
+    record.refresh_from_db()
+    assert record.hemoglobin_level == Decimal('2000000')
+    assert record.hemoglobin_g_dl == Decimal('11.0')
+    assert record.hemoglobin_level_units == 'G/L'
+    assert {'hemoglobin_level', 'hemoglobin_level_units'} <= set(
+        record.user_edited_fields or [])

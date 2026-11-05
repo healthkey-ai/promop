@@ -25,6 +25,7 @@ from omop_core.services.hemoglobin_units import (
     PAIR_FIELD as HEMOGLOBIN_PAIR,
     UNIT_FIELD as HEMOGLOBIN_UNIT,
     canonical_from_pair as hemoglobin_canonical_from_pair,
+    canonical_in_range as hemoglobin_canonical_in_range,
     normalize_unit as normalize_hemoglobin_unit,
 )
 from omop_core.services.blood_count_source_pairs import (
@@ -517,6 +518,11 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
             )
             if not recognised:
                 result.rejected[HEMOGLOBIN_PAIR] = 'Enter a number.'
+                changes.pop(HEMOGLOBIN_PAIR, None)
+                changes.pop(HEMOGLOBIN_UNIT, None)
+            elif not hemoglobin_canonical_in_range(canonical_value):
+                result.rejected[HEMOGLOBIN_PAIR] = (
+                    'Hemoglobin is outside the storable range.')
                 changes.pop(HEMOGLOBIN_PAIR, None)
                 changes.pop(HEMOGLOBIN_UNIT, None)
             else:

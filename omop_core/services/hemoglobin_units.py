@@ -5,6 +5,7 @@ read the normalised g/dL value, so the conversion lives here: the serializer,
 derivation and both form writers use the same helpers rather than each spelling
 the factor and the accepted labels again.
 """
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 #: The writable source value and the unit stored beside it.
 PAIR_FIELD = 'hemoglobin_level'
@@ -15,7 +16,15 @@ CANONICAL_FIELD = 'hemoglobin_g_dl'
 DEFAULT_UNIT = 'G/DL'
 
 #: Stored `TextChoices` code -> multiplier into the canonical g/dL value.
-UNIT_FACTORS = {'G/DL': 1.0, 'G/L': 0.1}
+UNIT_FACTORS = {'G/DL': Decimal('1'), 'G/L': Decimal('0.1')}
+
+#: `PatientRecord.hemoglobin_g_dl` is `DecimalField(max_digits=5,
+#: decimal_places=1)`. The derived value must already have that precision:
+#: persistence, projection and matching read the same number, so rounding only
+#: at the database would let the three disagree. `tests/test_hemoglobin_source_pair.py`
+#: asserts these constants against the model field.
+CANONICAL_QUANTUM = Decimal('0.1')
+CANONICAL_LIMIT = Decimal('9999.9')
 
 _SPELLINGS = {
     spelling.casefold(): code
@@ -44,6 +53,10 @@ def canonical_from_pair(value, unit):
     A missing unit means the default g/dL, the unit every canonical value is
     recorded in. A clear (``value is None``) is recognised and normalises to
     ``None`` whatever the unit says.
+
+    The result is quantised to ``CANONICAL_QUANTUM`` with half-up rounding, the
+    same rounding the database applies, so the value the caller projects is
+    exactly the value stored in ``hemoglobin_g_dl``.
     """
     if value is None:
         return True, None
@@ -54,9 +67,21 @@ def canonical_from_pair(value, unit):
     if factor is None:
         return False, None
     try:
-        return True, round(float(value) * factor, 4)
-    except (TypeError, ValueError):
+        canonical = (Decimal(str(value)) * factor).quantize(
+            CANONICAL_QUANTUM, rounding=ROUND_HALF_UP,
+        )
+    except (InvalidOperation, TypeError, ValueError):
         return False, None
+    if not canonical.is_finite():
+        return False, None
+    return True, canonical
+
+
+def canonical_in_range(value):
+    """Whether a canonical value fits the `hemoglobin_g_dl` column."""
+    if value is None:
+        return True
+    return -CANONICAL_LIMIT <= value <= CANONICAL_LIMIT
 
 
 def same_number(left, right):
