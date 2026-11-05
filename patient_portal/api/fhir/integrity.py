@@ -111,6 +111,29 @@ def verify_content_digest(request, raw_bytes: bytes) -> str | None:
     return None
 
 
+def signed_fhir_response(person, filename: str | None = None):
+    """The person's signed bundle as the HTTP response both exports return.
+
+    The digest and signature headers cover the body byte for byte, which is why
+    this is a plain HttpResponse and not a DRF Response: a renderer would
+    re-serialize the body and the digest would no longer match it. A
+    ``filename`` makes it a download. The record is the member's own health
+    data, so it is never cached.
+    """
+    from django.http import HttpResponse
+
+    from omop_core.services.fhir_export import serialize_signed_fhir_bundle
+
+    body, digest, signature = serialize_signed_fhir_bundle(person)
+    response = HttpResponse(body, content_type='application/fhir+json')
+    response[EXPORT_DIGEST_HEADER] = digest
+    response[EXPORT_SIGNATURE_HEADER] = signature
+    response['Cache-Control'] = 'no-store'
+    if filename:
+        response['Content-Disposition'] = f'attachment; filename="{filename}"'
+    return response
+
+
 def negotiated_fhir_version(request) -> str | None:
     """Return a client-requested FHIR version token, if any.
 

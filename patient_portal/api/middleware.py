@@ -156,6 +156,28 @@ def _get_resource_id(request):
     return None
 
 
+# A view's own note on its request (``request.audit_detail``): a small JSON
+# object, free of health data, that the row carries in ``detail`` and the
+# stdout line repeats. It is part of the row's HMAC. Anything else is dropped
+# with an ops warning rather than written, so the row is still recorded.
+_AUDIT_DETAIL_MAX_LENGTH = 2048
+
+
+def _audit_detail(request):
+    detail = getattr(request, 'audit_detail', None)
+    if not isinstance(detail, dict) or not detail:
+        return None
+    try:
+        encoded = json.dumps(detail, sort_keys=True)
+    except (TypeError, ValueError):
+        ops_logger.warning("audit_detail on %s is not JSON; dropped", request.path)
+        return None
+    if len(encoded) > _AUDIT_DETAIL_MAX_LENGTH:
+        ops_logger.warning("audit_detail on %s exceeds %d bytes; dropped", request.path, _AUDIT_DETAIL_MAX_LENGTH)
+        return None
+    return json.loads(encoded)
+
+
 def _should_audit(request):
     """True when this request is on an auditable path (API / OAuth / admin) with
     an audited method. Access to the audit trail itself IS audited (TI.2.2#04)."""
@@ -203,6 +225,11 @@ class AuditLogMiddleware:
                     or request.META.get('REMOTE_ADDR')
                 ),
                 'duration_ms': round((time.monotonic() - start) * 1000),
+                # A view may mark its request (``request.audit_detail``, a small
+                # JSON object) so the row says more than method and path: the
+                # record export writes ``{'export': 'fhir'|'pdf', ...}`` so the
+                # exports of a record can be listed from the audit trail alone.
+                'detail': _audit_detail(request),
             }
         except Exception:
             ops_logger.warning("AuditLogMiddleware failed to build audit entry", exc_info=True)
@@ -239,6 +266,7 @@ class AuditLogMiddleware:
             resource_id=entry['resource_id'],
             ip_address=(entry['ip_address'] or '')[:64] or None,
             duration_ms=entry['duration_ms'],
+            detail=entry.get('detail'),
         )
 
 
