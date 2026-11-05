@@ -61,11 +61,19 @@ is recorded in the document's subject metadata. Adding a language is a new
 entry in that table.
 
 The PDF is built with `reportlab` (pure Python, no system libraries, unlike
-weasyprint) using its built-in Helvetica, which covers Latin scripts only: a
-name, drug or facility in another script (Cyrillic, Greek, CJK) renders as
-boxes, though the export still succeeds. Embedding a Unicode font (Noto Sans
-or DejaVu Sans under `patient_portal/api/phr/fonts/`) is the follow-up, and a
-prerequisite for any non-English `lang`.
+weasyprint) and set in DejaVu Sans, bundled under
+`patient_portal/api/phr/fonts/` with its licence (Bitstream Vera; see
+`THIRD_PARTY_NOTICES.md`) and embedded in each PDF, subset to the glyphs
+used. reportlab's built-in Helvetica carries Western Latin glyphs only, so a
+name, drug or facility in Cyrillic, Greek or an extended Latin script
+(Polish, Vietnamese) used to render as boxes; now it reads as written.
+`register_fonts` registers the two faces (regular and bold) once per process,
+and every paragraph style, table cell and the page footer names them, so no
+run of text falls back to Helvetica. The remaining gap is CJK: DejaVu Sans
+has no Chinese, Japanese or Korean glyphs, so such a name still shows as
+boxes (the export succeeds). Closing it means a second, much larger font
+(Noto Sans CJK) switched in per run of text, which reportlab does not do by
+itself.
 
 The whole PDF is built in the request: every section's rows, with no cap.
 That is what the app's screens show across seven requests, so it is the cost
