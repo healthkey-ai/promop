@@ -777,4 +777,28 @@ describe('source-pair unit picker (#5700)', () => {
       hemoglobin_level: 13, hemoglobin_level_units: 'G/DL',
     });
   });
+
+  it('does not resurrect an empty-value draft after an external pair comes and goes', async () => {
+    const user = userEvent.setup();
+    const { store, patch } = await setup(pairFields,
+      { hemoglobin_level: null, hemoglobin_level_units: 'G/DL' });
+    render(<PatientFieldEditor store={store} name="hemoglobin_level" label="Hemoglobin" />);
+
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Unit for Hemoglobin' }), 'G/L');
+    // Another editor writes a pair, then clears it again. The obsolete draft
+    // must not come back when the value is empty once more.
+    act(() => store.applyServerValues({
+      hemoglobin_level: 12, hemoglobin_level_units: 'G/DL',
+    }));
+    act(() => store.applyServerValues({
+      hemoglobin_level: null, hemoglobin_level_units: 'G/DL',
+    }));
+
+    expect(screen.getByRole('combobox', { name: 'Unit for Hemoglobin' })).toHaveValue('G/DL');
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Hemoglobin' }), { target: { value: '13' } });
+    await act(async () => { await store.flush(); });
+    expect(patch.mock.calls.at(-1)?.[1]).toEqual({
+      hemoglobin_level: 13, hemoglobin_level_units: 'G/DL',
+    });
+  });
 });

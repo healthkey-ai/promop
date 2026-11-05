@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { Pencil } from 'lucide-react';
 import Field from '@/components/PatientInfo/Field';
@@ -97,6 +97,24 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
   // A source pair's unit is chosen beside the value (#5700). `null` follows the
   // stored/pending unit until the reader picks one.
   const [unitDraft, setUnitDraft] = useState<string | null>(null);
+  // A draft chosen while the value was empty must not survive a pair that
+  // arrives from elsewhere (another mounted editor, a refresh, or a rollback
+  // after a rejected clear). If the pair later clears again, a surviving draft
+  // would quietly reapply an obsolete unit to the next typed number. Computing
+  // this before the early returns keeps the hook order stable.
+  const initialCanonical = store.resolve(name);
+  const initialPending = initialCanonical && initialCanonical in state.pending
+    ? state.pending[initialCanonical] : undefined;
+  const initialValue = initialCanonical
+    ? (initialCanonical in state.pending
+      ? (initialPending && typeof initialPending === 'object'
+        && !Array.isArray(initialPending) && 'value' in initialPending
+        ? (initialPending as { value: unknown }).value : initialPending)
+      : state.values[initialCanonical])
+    : undefined;
+  useEffect(() => {
+    if (unitDraft && initialValue != null && initialValue !== '') setUnitDraft(null);
+  }, [unitDraft, initialValue]);
   if (state.loading) return <span role="status">Loading patient value…</span>;
   if (state.error) return <div role="alert">{state.error} <button onClick={() => void store.load()}>Retry</button></div>;
   const canonical = store.resolve(name);
