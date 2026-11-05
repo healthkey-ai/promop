@@ -159,6 +159,20 @@ describe('BehaviorTab', () => {
     expect(within(container).getByRole('combobox')).toHaveTextContent('Negative');
   });
 
+  it('does not call a not-negative answer positive, and mounts without saving', async () => {
+    const onChange = vi.fn();
+    render(
+      <BehaviorTab formData={{ pregnancy_test_result: false }}
+        onChange={onChange} onRefresh={vi.fn()} />,
+    );
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+
+    const labelEl = screen.getByText('Negative Pregnancy Test Result');
+    const container = labelEl.closest('.space-y-1\\.5') as HTMLElement;
+    expect(within(container).getByRole('combobox')).toHaveTextContent('Not negative');
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
   it('keeps every section it had before the conversion', async () => {
     renderTab();
     await waitFor(() => expect(mockGet).toHaveBeenCalled());
