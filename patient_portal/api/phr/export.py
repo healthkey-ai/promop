@@ -64,13 +64,15 @@ FONT = 'DejaVuSans'
 FONT_BOLD = 'DejaVuSans-Bold'
 FONT_DIR = Path(__file__).resolve().parent / 'fonts'
 
-# One PDF build at a time per process. The registered TTFont objects are
+# One PDF save at a time per process. The registered TTFont objects are
 # process-global, and when a document is saved reportlab subsets the face by
 # walking the font file with a cursor kept on that shared object
 # (``TTFontFace.makeSubset``), so two exports saving at once on one gunicorn
 # worker (both Dockerfiles run ``--threads 2``) interleave their reads and
 # embed corrupt glyphs, or fail with a KeyError. Helvetica, being built in,
-# had no such state. Exports are rare and short, so the wait is bounded.
+# had no such state. Only registration and ``doc.build`` hold the lock: the
+# section reads and the story are built outside it, so one member's
+# database time never queues another's export.
 _PDF_LOCK = threading.Lock()
 
 
@@ -490,11 +492,10 @@ SECTIONS = (
 def render_record_pdf(person, record, lang: str = 'en') -> bytes:
     """The member's record as a PDF: a title page, then one page per section."""
     # Paragraphs measure their text as they are made, so the fonts must be
-    # registered before the story is built, and the build must not overlap
-    # another's save (see _PDF_LOCK).
+    # registered before the story is built.
     with _PDF_LOCK:
         register_fonts()
-        return _render_record_pdf(person, record, lang)
+    return _render_record_pdf(person, record, lang)
 
 
 def _render_record_pdf(person, record, lang: str) -> bytes:
@@ -535,5 +536,6 @@ def _render_record_pdf(person, record, lang: str) -> bytes:
         # resources even when nothing is drawn with it; start it on ours.
         initialFontName=FONT,
     )
-    doc.build(story, onFirstPage=footer, onLaterPages=footer)
+    with _PDF_LOCK:  # the save subsets the shared font objects
+        doc.build(story, onFirstPage=footer, onLaterPages=footer)
     return buffer.getvalue()

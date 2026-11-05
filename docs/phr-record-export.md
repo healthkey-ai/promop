@@ -69,7 +69,7 @@ name, drug or facility in Cyrillic, Greek or an extended Latin script
 (Polish, Vietnamese) used to render as boxes; now it reads as written.
 `register_fonts` registers the two faces (regular and bold) once per process,
 and every paragraph style, table cell and the page footer names them, so no
-run of text falls back to Helvetica. Builds are serialised per process
+run of text falls back to Helvetica. Saves are serialised per process
 (`_PDF_LOCK`): reportlab subsets the shared font object with a cursor kept on
 the object itself, so two exports saving at once on one worker would corrupt
 each other's embedded glyphs. The remaining gap is CJK: DejaVu Sans

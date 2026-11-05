@@ -204,8 +204,9 @@ def test_pdf_export_uses_the_embedded_font_everywhere():
     assert any(name.endswith('DejaVuSans-Bold') for name in fonts), fonts
 
 
+@pytest.mark.django_db(transaction=True)  # committed, so the worker threads' connections see the rows
 def test_concurrent_pdf_builds_embed_the_same_font_bytes():
-    """reportlab subsets the shared TTFont with a cursor on the face itself; builds are serialised
+    """reportlab subsets the shared TTFont with a cursor on the face itself; saves are serialised
     per process so two exports on one worker cannot interleave their reads (and embed corrupt glyphs)."""
     import sys
     from concurrent.futures import ThreadPoolExecutor
@@ -217,6 +218,7 @@ def test_concurrent_pdf_builds_embed_the_same_font_bytes():
     record = member(facility_name='Больница №1')
     record.person.given_name, record.person.family_name = 'Nguyễn', 'Hồng Ánh'
     record.person.save(update_fields=['given_name', 'family_name'])
+    condition(record, icd10('E11.9', 'Сахарный диабет'), '2020-01-01')
     person = record.person
 
     def font_files(body: bytes) -> set[bytes]:
@@ -236,7 +238,9 @@ def test_concurrent_pdf_builds_embed_the_same_font_bytes():
         finally:
             connection.close()  # each thread opened its own; the test database must be droppable
 
-    expected = font_files(render_record_pdf(person, record))
+    serial = render_record_pdf(person, record)
+    expected = font_files(serial)
+    assert 'Сахарный диабет' in pdf_text(serial)
     interval = sys.getswitchinterval()
     sys.setswitchinterval(1e-6)
     try:
@@ -244,6 +248,7 @@ def test_concurrent_pdf_builds_embed_the_same_font_bytes():
             bodies = list(pool.map(render, range(8)))
     finally:
         sys.setswitchinterval(interval)
+    assert all(pdf_text(body) == pdf_text(serial) for body in bodies)
     assert all(font_files(body) == expected for body in bodies)
 
 
