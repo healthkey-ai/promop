@@ -123,9 +123,11 @@ class Summary:
         data = data or {}
         self.codes = int(data.get('codes') or 0)
         self.codes_with_units = int(data.get('codes_with_units') or 0)
-        self.codes_with_based_on = int(data.get('codes_with_based_on') or data.get('codes_with_specimens') or 0)
+        # A summary stored before basedOn was counted has only the old
+        # specimen keys; they are not basedOn and are not read as it (#2296).
+        self.codes_with_based_on = int(data.get('codes_with_based_on') or 0)
         self.distinct_units = Counter(data.get('distinct_units') or {})
-        self.distinct_based_on = Counter(data.get('distinct_based_on') or data.get('distinct_specimens') or {})
+        self.distinct_based_on = Counter(data.get('distinct_based_on') or {})
         self.axes = {}
         for axis in AXES:
             stored = (data.get('axes') or {}).get(axis) or {}

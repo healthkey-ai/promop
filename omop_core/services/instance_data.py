@@ -26,6 +26,12 @@ SYSTEM: frozenset[str] = frozenset({
     'patient_portal.ServiceAccessToken', 'patient_portal.ServiceApplication',
     # Tied to a login account, which is system data.
     'patient_portal.PatientConsent', 'patient_portal.PatientInvitation',
+    # Consent model v2: what this deployment asks, and what its members answered.
+    # Consent is given to a deployment, so copy_patient does not carry it.
+    'patient_portal.ConsentPurpose', 'patient_portal.ConsentText',
+    'patient_portal.LegalDocument', 'patient_portal.LegalDocumentVersion',
+    'patient_portal.ConsentEvent', 'patient_portal.DocumentAcceptance',
+    'patient_portal.ConsentLedgerEntry',
     'patient_portal.PatientMessage', 'patient_portal.PatientUser',
     # Access a patient granted to their record, and who opened it. A link is
     # derived from this deployment's own key, so it would open nothing elsewhere.

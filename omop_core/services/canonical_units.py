@@ -4,7 +4,7 @@ Conversions are deliberately limited to explicit, property-compatible UCUM scale
 No inference of molecular weight, assay calibration, missing units or free text.
 """
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 import logging
 import re
 
@@ -53,6 +53,7 @@ UNIT_ALIASES = {'cells/uL': '/uL', 'cell/uL': '/uL', '{cells}/uL': '/uL', '#/uL'
                 'cells/L': '/L', 'cell/L': '/L', '{cells}/L': '/L', '#/L': '/L',
                 '10^3/uL': '10*3/uL', '10^9/L': '10*9/L', '10^6/uL': '10*6/uL',
                 '10^12/L': '10*12/L', 'K/uL': '10*3/uL', 'G/L': '10*9/L'}
+_KNOWN_UNITS = frozenset(unit for units in UNIT_GROUPS.values() for unit in units) | frozenset(UNIT_ALIASES.values())
 
 
 @dataclass(frozen=True)
@@ -159,9 +160,8 @@ def _spelling_index():
     A spelling two units share is left out rather than guessed: ``g/l`` is
     gram per litre, but ``G/L`` (giga per litre) is an alias of ``10*9/L``.
     """
-    known = {unit for units in UNIT_GROUPS.values() for unit in units} | set(UNIT_ALIASES.values())
     index = {}
-    for unit in known:
+    for unit in _KNOWN_UNITS:
         for spelling in {unit.casefold(), unit.casefold().replace('/', '')}:
             index.setdefault(spelling, set()).add(unit)
     for alias in UNIT_ALIASES:
@@ -192,6 +192,11 @@ def unit_code(unit):
     spelled = _UNIT_WORD.sub(lambda word: _UNIT_WORDS.get(word.group(), word.group()).casefold(), folded)
     spelled = re.sub(r'\s+', '', spelled)
     return _SPELLINGS.get(spelled, unit)
+
+
+def is_known_unit(unit):
+    """Whether ``unit_code`` reads this source unit as a unit promop knows."""
+    return unit_code(unit) in _KNOWN_UNITS
 
 
 def property_for(concept, metadata=None, axes=None):
@@ -356,79 +361,170 @@ def resolve_mapping_conversion(concept, destination_unit_concept=None,
 
 
 def measurement_normalized(measurement, preferences):
-    unit = measurement.unit_source_value
-    if not unit or not unit.strip():
-        concept = measurement.unit_concept
-        unit = concept.concept_code if concept and concept.vocabulary_id == 'UCUM' else None
     concept_id = measurement.measurement_concept_id or measurement.measurement_source_concept_id
-    return normalize(preferences.get(concept_id),
-                     measurement.value_as_number, unit, measurement.range_low, measurement.range_high)
+    return normalize(preferences.get(concept_id), measurement.value_as_number,
+                     measurement_stored_unit(measurement),
+                     measurement.range_low, measurement.range_high)
+
+
+# ---------------------------------------------------------------------------
+# Which unit a stored value is in (#2249)
+# ---------------------------------------------------------------------------
+#
+# Write-time conversion rewrites value_as_number, its range and unit_concept,
+# but keeps unit_source_value. A UCUM unit_concept that names a different,
+# convertible unit is a hint of conversion, not proof: some rows carry one
+# beside the number as sent. The sent number in value_source_value decides.
+# A row it cannot decide is unknown, and its value is not read as either unit.
+
+_SOURCE, _CONVERTED, _UNKNOWN = 'source', 'converted', 'unknown'
+_STORED_SCALE = Decimal('0.00001')  # Measurement.value_as_number
+
+
+def _as_stored(number):
+    """The number as the column stores it; PostgreSQL rounds half away from zero."""
+    try:
+        return number.quantize(_STORED_SCALE, rounding=ROUND_HALF_UP)
+    except InvalidOperation:
+        return None
+
+
+def _sent_number(text):
+    try:
+        number = Decimal((text or '').strip())
+    except InvalidOperation:
+        return None
+    return number if number.is_finite() else None
+
+
+def _reading(value, unit_source_value, unit_concept_code, unit_vocabulary_id, value_source_value):
+    """Whether *value* is in the source unit, converted to the concept's, or unknown.
+
+    Returns the verdict and the number as sent. A converted value matches the
+    conversion of the sent number at the column's scale, from the number as
+    sent or as first stored, since older writes converted the rounded value.
+    """
+    source = (unit_source_value or '').strip()
+    if value is None or not source or not unit_concept_code or unit_vocabulary_id != 'UCUM':
+        return _SOURCE, None
+    source, stored = unit_code(source), unit_code(unit_concept_code)
+    prop = _find_property(source, stored) if source != stored else ''
+    if not prop:
+        return _SOURCE, None  # one unit spelled two ways, or labels this module cannot relate
+    sent = _sent_number(value_source_value)
+    if sent is None:
+        return _UNKNOWN, None
+    value = Decimal(str(value))
+    candidates = {sent, _as_stored(sent)} - {None}
+    if value in candidates:
+        return _SOURCE, sent
+    for number in candidates:
+        try:
+            if value == _as_stored(convert(number, source, stored, prop)):
+                return _CONVERTED, sent
+        except ValueError:
+            continue
+    return _UNKNOWN, sent
+
+
+def _reading_args(measurement):
+    unit = measurement.unit_concept if measurement.unit_concept_id else None
+    return {
+        'value': measurement.value_as_number,
+        'unit_source_value': measurement.unit_source_value,
+        'unit_concept_code': unit.concept_code if unit else None,
+        'unit_vocabulary_id': unit.vocabulary_id if unit else None,
+        'value_source_value': measurement.value_source_value,
+    }
+
+
+def stored_unit(**reading):
+    """The unit value_as_number and its range are stored in, or None when unknown or absent."""
+    verdict, _ = _reading(**reading)
+    if verdict == _CONVERTED:
+        return reading['unit_concept_code']
+    if verdict == _UNKNOWN:
+        return None
+    if (reading['unit_source_value'] or '').strip():
+        return reading['unit_source_value']
+    return reading['unit_concept_code']
+
+
+def measurement_stored_unit(measurement):
+    """stored_unit() for a Measurement instance."""
+    return stored_unit(**_reading_args(measurement))
+
+
+def is_unproven(measurement):
+    """True when no unit can be shown for value_as_number: show neither it nor its range."""
+    return _reading(**_reading_args(measurement))[0] == _UNKNOWN
+
+
+def value_in_source_unit(measurement):
+    """value_as_number in unit_source_value's unit, or None when that cannot be shown."""
+    verdict, sent = _reading(**_reading_args(measurement))
+    if verdict == _CONVERTED:
+        return sent
+    if verdict == _UNKNOWN:
+        return None
+    return measurement.value_as_number
 
 
 # ---------------------------------------------------------------------------
 # Write-time unit normalization
 # ---------------------------------------------------------------------------
 
-def _resolve_target_unit(mapping, target_concept_id=None):
-    """Determine the target UCUM unit and property code.
+def _curated_target_unit(mapping):
+    """The unit a curator chose for the mapping's rows: ``(unit, property)``.
 
-    Returns ``(target_unit, property_code)`` or ``(None, None)`` when no
-    conversion target can be determined.
-
-    *target_concept_id* overrides ``mapping.target_concept_id`` — needed when
-    an axis variant is being approved: the variant's target concept differs
-    from the parent mapping's, and the mapping's ``destination_unit_concept``
-    was chosen for the mapping's own LOINC code, not the variant's.  When an
-    override is provided, ``mapping.destination_unit_concept`` is skipped.
-
-    Precedence:
-    1. ``mapping.destination_unit_concept`` — curator-set UCUM concept on the
-       SCCM row (skipped when *target_concept_id* overrides).
-    2. ``CanonicalUnitPreference`` for the target concept.
-    3. LOINC property base unit — derived from the target concept's axes.
+    Write-time conversion happens only on this explicit choice (#2157). An
+    inferred LOINC base unit is not one: g/L and /L do not fit the column for
+    ng/mL or 10*3/uL results. Nor is a ``CanonicalUnitPreference``, which is a
+    read-time display setting over stored values. Returns ``(None, None)`` when
+    the mapping names no convertible unit.
     """
-    effective_concept_id = target_concept_id or getattr(
-        mapping, 'target_concept_id', None)
-
-    # 1. Explicit destination_unit_concept on the mapping row.
-    #    Skipped for variant overrides: the mapping's unit was picked for its
-    #    own LOINC, not the variant's (code_mapping_lookup does the same).
-    if target_concept_id is None:
-        duc = getattr(mapping, 'destination_unit_concept', None)
-        if duc is not None:
-            dst = unit_code(duc.concept_code)
-            for prop, units in UNIT_GROUPS.items():
-                if dst in units:
-                    return dst, prop
-            return None, None
-
-    # 2. CanonicalUnitPreference for the target concept.
-    if effective_concept_id:
-        from omop_core.models import CanonicalUnitPreference
-        try:
-            pref = CanonicalUnitPreference.objects.get(
-                concept_id=effective_concept_id)
-            if pref.unit and pref.property:
-                return pref.unit, pref.property
-        except CanonicalUnitPreference.DoesNotExist:
-            pass
-
-    # 3. LOINC property base unit — the same fallback resolve_mapping_conversion
-    #    uses when destination_unit_concept is None.
-    if effective_concept_id:
-        from omop_core.models import Concept
-        try:
-            concept = Concept.objects.get(pk=effective_concept_id)
-        except Concept.DoesNotExist:
-            return None, None
-        axes = loinc_axes_for_concepts([concept])
-        prop = property_for(concept, axes=axes.get(concept.pk))
-        if prop:
-            base = _base_unit(prop)
-            if base:
-                return base, prop
-
+    duc = getattr(mapping, 'destination_unit_concept', None)
+    if duc is None:
+        return None, None
+    dst = unit_code(duc.concept_code)
+    for prop, units in UNIT_GROUPS.items():
+        if dst in units:
+            return dst, prop
     return None, None
+
+
+# value_as_number, range_low and range_high are Decimal(15, 5).
+_STORED_LIMIT = Decimal('1e10')
+_STORED_STEP = Decimal('0.00001')
+_VALUE_FIELDS = ('value_as_number', 'range_low', 'range_high')
+
+
+def _storable(value):
+    """True when the column holds *value* exactly: no overflow and no rounding."""
+    return value is None or (abs(value) < _STORED_LIMIT and value == value.quantize(_STORED_STEP))
+
+
+def _convert_row(row, src, target_unit, prop, target_ucum):
+    """Convert the row's value and range in place.
+
+    Returns False, leaving the row untouched, when any of them cannot be
+    converted or stored exactly: a value moved without its unit, or a unit
+    without its value, would mislabel the result.
+    """
+    try:
+        converted = [convert(getattr(row, f), src, target_unit, prop) for f in _VALUE_FIELDS]
+    except (ValueError, InvalidOperation):
+        return False
+    if not all(_storable(v) for v in converted):
+        return False
+    if not (row.value_source_value or '').strip():
+        # The number as sent is what proves the conversion on read (#2249).
+        row.value_source_value = format(Decimal(str(row.value_as_number)).normalize(), 'f')
+    for field, value in zip(_VALUE_FIELDS, converted):
+        setattr(row, field, value)
+    if target_ucum:
+        row.unit_concept_id = target_ucum.concept_id
+    return True
 
 
 def _ucum_concept(unit_str):
@@ -442,26 +538,25 @@ def _ucum_concept(unit_str):
     )
 
 
-def normalize_measurement_units(qs, mapping, target_concept_id=None):
-    """Convert value/unit on Measurement rows to the mapping's target unit.
+def normalize_measurement_units(qs, mapping):
+    """Convert value/unit on Measurement rows to the mapping's curated unit.
 
     *qs* is a queryset of ``Measurement`` rows (already filtered to the rows
-    that were just repointed or resolved).  *mapping* is the
-    ``SourceCodeConceptMapping`` that was applied.
-
-    *target_concept_id*, when provided, overrides the mapping's own target
-    concept for unit resolution — needed when an axis variant is approved,
-    because the variant's destination LOINC differs from the mapping's.
+    that were just written, repointed or resolved).  *mapping* is the
+    ``SourceCodeConceptMapping`` they belong to; only its
+    ``destination_unit_concept`` is a target (see ``_curated_target_unit``).
+    Rows an axis variant owns are the caller's to leave out: a variant has
+    no curated unit of its own.
 
     Only rows with a non-null ``value_as_number`` and a recognisable
     ``unit_source_value`` are touched.  ``unit_source_value`` is never changed
     (it records the hospital's original unit).  Rows whose source unit is
-    already the target, or whose source unit is incompatible, are silently
-    skipped.
+    already the target, whose source unit is incompatible, or whose converted
+    value or range the column cannot hold exactly are skipped.
 
     Returns the number of rows whose ``value_as_number`` was rewritten.
     """
-    target_unit, prop = _resolve_target_unit(mapping, target_concept_id)
+    target_unit, prop = _curated_target_unit(mapping)
     if not target_unit or not prop:
         return 0
 
@@ -498,40 +593,27 @@ def normalize_measurement_units(qs, mapping, target_concept_id=None):
         if not _find_property(src, target_unit):
             continue
 
-        # Fetch rows in batches, convert individually, bulk_update.
+        # Fetch rows in batches, convert individually, bulk_update. Paged by
+        # pk, not offset: a converted row leaves qs (its unit_concept is now
+        # the target), so an offset would skip as many rows as it converted.
         batch_qs = qs.filter(
             unit_source_value=raw, value_as_number__isnull=False,
         ).order_by('pk')
         BATCH = 1000
-        offset = 0
+        last_pk = None
         while True:
-            rows = list(batch_qs[offset:offset + BATCH])
+            page = batch_qs if last_pk is None else batch_qs.filter(pk__gt=last_pk)
+            rows = list(page[:BATCH])
             if not rows:
                 break
-            changed = []
-            for row in rows:
-                try:
-                    new_val = convert(
-                        row.value_as_number, src, target_unit, prop)
-                    row.value_as_number = new_val
-                    if row.range_low is not None:
-                        row.range_low = convert(
-                            row.range_low, src, target_unit, prop)
-                    if row.range_high is not None:
-                        row.range_high = convert(
-                            row.range_high, src, target_unit, prop)
-                    if target_ucum:
-                        row.unit_concept_id = target_ucum.concept_id
-                    changed.append(row)
-                except (ValueError, InvalidOperation):
-                    continue
+            last_pk = rows[-1].pk
+            changed = [row for row in rows
+                       if _convert_row(row, src, target_unit, prop, target_ucum)]
             if changed:
-                fields = ['value_as_number', 'range_low', 'range_high',
-                          'unit_concept_id']
+                fields = [*_VALUE_FIELDS, 'unit_concept_id', 'value_source_value']
                 from omop_core.models import Measurement
                 Measurement.objects.bulk_update(changed, fields)
                 total_normalized += len(changed)
-            offset += BATCH
 
     if total_normalized:
         logger.info(
@@ -539,47 +621,3 @@ def normalize_measurement_units(qs, mapping, target_concept_id=None):
             total_normalized, target_unit, prop,
         )
     return total_normalized
-
-
-def normalize_measurement_instances(instances, mapping=None,
-                                    target_unit=None, property_code=None):
-    """Convert value/unit on in-memory Measurement instances before bulk_create.
-
-    Either pass *mapping* (a ``SourceCodeConceptMapping``) to derive the
-    target, or pass *target_unit* and *property_code* directly.
-
-    Mutates instances in place.  Returns the count of instances converted.
-    """
-    if mapping is not None and target_unit is None:
-        target_unit, property_code = _resolve_target_unit(mapping)
-    if not target_unit or not property_code:
-        return 0
-
-    target_ucum = _ucum_concept(target_unit)
-    converted = 0
-    for inst in instances:
-        raw = getattr(inst, 'unit_source_value', None)
-        if not raw or inst.value_as_number is None:
-            continue
-        src = unit_code(raw)
-        if src == target_unit:
-            if target_ucum:
-                inst.unit_concept_id = target_ucum.concept_id
-            continue
-        if not _find_property(src, target_unit):
-            continue
-        try:
-            inst.value_as_number = convert(
-                inst.value_as_number, src, target_unit, property_code)
-            if inst.range_low is not None:
-                inst.range_low = convert(
-                    inst.range_low, src, target_unit, property_code)
-            if inst.range_high is not None:
-                inst.range_high = convert(
-                    inst.range_high, src, target_unit, property_code)
-            if target_ucum:
-                inst.unit_concept_id = target_ucum.concept_id
-            converted += 1
-        except (ValueError, InvalidOperation):
-            continue
-    return converted

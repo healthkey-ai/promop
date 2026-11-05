@@ -8,6 +8,17 @@ All notable changes to PRomop are documented here.
 
 ### Added
 
+- **Consent model v2** — purposes (permissions, contact preferences,
+  declarations) and legal documents are data with versioned texts per
+  language, loaded by `load_consent_texts` or edited in the admin, so legal
+  rewording is a new version and not a code change. Every answer is an
+  append-only `ConsentEvent` carrying the version seen; withdrawal keeps the
+  grant in the history. A `ConsentLedgerEntry` store with no link to the
+  account holds the email address and permission history and outlives
+  deletion. `/api/v1/phr/consent/` serves sign-up, settings and "confirm the
+  new Terms"; `has_consent(person, key)` and `persons_granting(key)` are the
+  enforcement points, with a per-country gate, though nothing enforces
+  through them yet. See [consent model v2](docs/consent-v2.md).
 - **Versioned clinical source-input SDK on dev** — opt-in, per-field approved
   source writes for laboratory ULN ratios, explicit swallowing answers and SCT
   dates append corrections/clear tombstones and verify refreshed readback.
@@ -116,6 +127,11 @@ All notable changes to PRomop are documented here.
 
 ### Changed
 
+- **One instruction file for every coding agent** — `AGENTS.md` now holds the
+  whole rulebook (the former `CLAUDE.md` content and the former `AGENTS.md`
+  conventions), and `CLAUDE.md` is `@AGENTS.md` plus a short Claude Code
+  section, so Claude Code, Codex and the rest read the same file. Personal
+  additions go in the gitignored `CLAUDE.local.md`. (#2236)
 - **The deployed commit sits under the PRomop logo** — in tiny type, with
   the full SHA as a tooltip, so a report from staging names its build. It
   comes from the new public `GET /api/v1/version/`, which answers with

@@ -70,8 +70,8 @@ describeLive('ConceptToCodeTab against a live backend', () => {
     fireEvent.click(within(editor).getByRole('button', { name: 'Update Mapping' }));
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Edit Mapping' })).not.toBeInTheDocument(), { timeout: 15000 });
 
-    // Read it back: the code now maps to the concept, under Existing mappings.
-    fireEvent.click(within(coverage).getByRole('button', { name: 'Existing mappings' }));
+    // Read it back: the code now maps to the concept, under Mapped Codes.
+    fireEvent.click(within(coverage).getByRole('button', { name: 'Mapped Codes' }));
     const linked = await within(coverage).findByRole('button', { name: SOURCE }, { timeout: 10000 });
     const row = linked.closest('tr')!;
     expect(within(row).getByText(`OMOP ${CONCEPT_ID} · Standard`)).toBeInTheDocument();

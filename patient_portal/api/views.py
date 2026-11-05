@@ -995,9 +995,36 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             else:
                 queryset = queryset.filter(organization__slug=org_slug)
 
+        disease_category = self._normalize_all_param(params.get('disease_category'))
+        if disease_category:
+            from omop_core.models import DiseaseCategoryMapping
+            cat_diseases = list(
+                DiseaseCategoryMapping.objects
+                .filter(category__iexact=disease_category)
+                .values_list('disease_name', flat=True)
+            )
+            if cat_diseases:
+                from omop_core.services.disease_episodes import disease_slug as _cat_slug
+                cat_match = Q()
+                for d in cat_diseases:
+                    cat_match |= Q(disease__iexact=d)
+                    slug = _cat_slug(d)
+                    if slug:
+                        cat_match |= Q(disease_slugs__contains=[slug])
+                queryset = queryset.filter(cat_match)
+            else:
+                queryset = queryset.none()
+
         disease = self._normalize_all_param(params.get('disease'))
         if disease:
-            queryset = queryset.filter(disease__iexact=disease)
+            # Any cancer on the record, not only the primary one (#2182). The
+            # primary match also covers records not re-derived since.
+            from omop_core.services.disease_episodes import disease_slug
+            match = Q(disease__iexact=disease)
+            slug = disease_slug(disease)
+            if slug:
+                match |= Q(disease_slugs__contains=[slug])
+            queryset = queryset.filter(match)
 
         stage = self._normalize_all_param(params.get('stage'))
         if stage:
@@ -1059,13 +1086,30 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         if queryset.filter(organization__isnull=True).exists():
             org_options.append({'value': '__unassigned__', 'label': 'Unassigned'})
 
-        from omop_core.models import DiseaseCategory, DiseaseCategoryChoice
+        from omop_core.models import DiseaseCategory, DiseaseCategoryChoice, DiseaseCategoryMapping
         rows = list(DiseaseCategoryChoice.objects.values_list('label', flat=True))
         diseases = rows if rows else [c.label for c in DiseaseCategory]
+
+        # Categories as {value, label} objects
+        category_rows = list(DiseaseCategoryChoice.objects.values('code', 'label'))
+        if category_rows:
+            disease_categories = [{'value': r['code'], 'label': r['label']} for r in category_rows]
+        else:
+            disease_categories = [{'value': c.value, 'label': c.label} for c in DiseaseCategory]
+
+        # Diseases grouped by category code
+        mapping_rows = DiseaseCategoryMapping.objects.values_list('category', 'disease_name')
+        diseases_by_category = {}
+        for cat_code, disease_name in mapping_rows:
+            diseases_by_category.setdefault(cat_code, []).append(disease_name)
+        for v in diseases_by_category.values():
+            v.sort()
 
         return {
             'orgs': org_options,
             'diseases': diseases,
+            'disease_categories': disease_categories,
+            'diseases_by_category': diseases_by_category,
             'stages': ['I', 'II', 'III', 'IV'],
         }
     
@@ -5364,6 +5408,23 @@ def login_view(request):
                 user = authenticate(request, username=identity.uid, password=password)
 
         if user is not None:
+            # Block login for self-signup accounts that have not verified their
+            # email. Only self-signup sets pending_email_verification on the grant;
+            # admin-created, ETL-provisioned and invited accounts are unaffected.
+            from omop_core.models import GroupAccess
+            if (user.has_usable_password()
+                    and not user.has_verified_email
+                    and GroupAccess.objects.filter(
+                        identity=user, pending_email_verification=True,
+                    ).exists()):
+                from patient_portal.api.email_verification import send_verification_email
+                send_verification_email(user)
+                return Response({
+                    'error': 'Please verify your email address before signing in. '
+                             'We have sent a new verification link to your email.',
+                    'code': 'email_not_verified',
+                }, status=status.HTTP_403_FORBIDDEN)
+
             login(request, user)
             user_serializer = UserSerializer(user)
             return Response({
@@ -5472,6 +5533,22 @@ def _disease_labels() -> dict[str, str]:
     return labels
 
 
+def _patients_per_disease(queryset) -> list[tuple[str, int]]:
+    """(disease_slug, patients) for the records in ``queryset``, largest first.
+
+    A patient counts once under each cancer on the record (``disease_slugs``,
+    plus ``disease_slug``, which a direct edit can change alone); a patient
+    with none counts under ''. Counts therefore add up to more than the
+    patients when anyone has two cancers (#2182).
+    """
+    from collections import Counter
+
+    counts = Counter()
+    for primary, slugs in queryset.values_list('disease_slug', 'disease_slugs').iterator():
+        counts.update({s for s in (primary, *(slugs or ())) if s} or {''})
+    return sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+
+
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def org_disease_stats(request):
@@ -5479,22 +5556,15 @@ def org_disease_stats(request):
     from django.db.models import Count
 
     def _disease_counts(qs):
-        rows = (
-            qs.values('disease_slug')
-            .annotate(count=Count('id'))
-            .order_by('-count')
-        )
         labels = _disease_labels()
         return [
             {
-                'disease_slug': r['disease_slug'] or '',
-                'label': labels.get(r['disease_slug'] or '', r['disease_slug'] or 'Unknown'),
-                'count': r['count'],
+                'disease_slug': slug,
+                'label': labels.get(slug, slug or 'Unknown'),
+                'count': count,
             }
-            for r in rows
+            for slug, count in _patients_per_disease(qs)
         ]
-
-    from django.db.models import Count
 
     orgs = get_visible_orgs(request.user)
     org_list = list(orgs.order_by('name'))
@@ -5517,8 +5587,9 @@ def org_disease_stats(request):
 
     result = []
     for org in org_list:
-        owned_counts = _disease_counts(PatientRecord.objects.filter(organization=org))
-        owned_count = sum(d['count'] for d in owned_counts)
+        # A patient with two cancers is in two disease rows, so totals are
+        # counted on their own, never summed from the rows (#2182).
+        owned_count = PatientRecord.objects.filter(organization=org).count()
         accessible_count = owned_count + sum(granting_counts.get(gid, 0) for gid in trusting_map[org.id])
         accessible_org_ids = {org.id} | trusting_map[org.id]
         counts = _disease_counts(PatientRecord.objects.filter(organization_id__in=accessible_org_ids))
@@ -5534,9 +5605,10 @@ def org_disease_stats(request):
 
     # For staff users: also surface patients not assigned to any org.
     if getattr(request.user, 'is_staff', False):
-        counts = _disease_counts(PatientRecord.objects.filter(organization__isnull=True))
-        if counts:
-            unassigned_total = sum(d['count'] for d in counts)
+        unassigned = PatientRecord.objects.filter(organization__isnull=True)
+        unassigned_total = unassigned.count()
+        if unassigned_total:
+            counts = _disease_counts(unassigned)
             result.insert(0, {
                 'org_slug': '__unassigned__',
                 'org_name': 'All Patients (Unassigned)',
@@ -7210,12 +7282,10 @@ class _UpsertPlan:
 def _normalize_bulk_measurement_rows(model_cls, new_ids):
     """Normalize units on newly-inserted Measurement rows (post-create).
 
-    Groups rows by ``measurement_source_value``, looks up the approved SCCM
-    mapping for each to determine the target unit.  When the mapping has
-    approved axis variants, rows are sub-grouped by unit and each variant's
-    target concept drives the conversion — because the variant's LOINC may
-    have a different property (and therefore different canonical unit) from
-    the parent mapping's.
+    Groups rows by ``measurement_source_value`` and converts each group to its
+    approved mapping's curated unit (``destination_unit_concept``). A row with
+    no approved mapping, or one whose unit an approved axis variant owns, is
+    stored as sent: neither names a unit a curator chose (#2157).
 
     Works on already-persisted rows so the upsert identity is never altered.
     """
@@ -7250,79 +7320,30 @@ def _normalize_bulk_measurement_rows(model_cls, new_ids):
     for m in sccm_qs:
         mappings_by_sv.setdefault(m.source_code, m)
 
-    # Batch-fetch approved variants for the mappings that have them.
+    # Units owned by approved variants, per mapping.
     mapping_ids = [m.id for m in mappings_by_sv.values()
-                   if m.axis_variant_count]
-    variants_by_mapping = defaultdict(list)
+                   if m.axis_variant_count and m.destination_unit_concept_id]
+    variant_units = defaultdict(set)
     if mapping_ids:
-        for v in SourceCodeAxisVariant.objects.filter(
+        for mapping_id, units in SourceCodeAxisVariant.objects.filter(
             mapping_id__in=mapping_ids,
             status='approved',
             target_concept__isnull=False,
-        ):
-            variants_by_mapping[v.mapping_id].append(v)
+        ).values_list('mapping_id', 'units'):
+            variant_units[mapping_id].update(units or ())
 
-    # Normalize each source-value group.
     for sv, mapping in mappings_by_sv.items():
+        if not mapping.destination_unit_concept_id:
+            continue
         sv_qs = rows.filter(measurement_source_value=sv)
-        variants = variants_by_mapping.get(mapping.id, [])
-
-        if variants:
-            # Route by unit: each variant covers a set of unit spellings.
-            # Rows matching a variant normalize to the variant's concept;
-            # remaining rows normalize to the mapping's concept.
-            # Fetch all distinct raw unit spellings once (not per variant).
-            raw_units = list(
-                sv_qs.exclude(unit_source_value__isnull=True)
-                .exclude(unit_source_value='')
-                .values_list('unit_source_value', flat=True)
-                .distinct()
-            )
-            claimed_pks = set()
-            for variant in variants:
-                wanted = set(variant.units or [])
-                if not wanted or not variant.target_concept_id:
-                    continue
-                spellings = [r for r in raw_units if unit_code(r) in wanted]
-                if spellings:
-                    var_qs = sv_qs.filter(unit_source_value__in=spellings)
-                    claimed_pks.update(
-                        var_qs.values_list('pk', flat=True))
-                    normalize_measurement_units(
-                        var_qs, mapping,
-                        target_concept_id=variant.target_concept_id)
-            # Remaining rows (not claimed by any variant) use the mapping.
-            # normalize_measurement_units returns 0 when no rows match,
-            # so no exists() guard needed.
-            unclaimed = sv_qs.exclude(pk__in=claimed_pks) if claimed_pks else sv_qs
-            normalize_measurement_units(unclaimed, mapping)
-        else:
-            normalize_measurement_units(sv_qs, mapping)
-
-    # For source values with no SCCM mapping, normalize by concept_id.
-    # _resolve_target_unit's LOINC property fallback handles this via the
-    # target_concept_id parameter.
-    unmapped_svs = source_values - mappings_by_sv.keys()
-    if unmapped_svs:
-        unmapped_rows = rows.filter(measurement_source_value__in=unmapped_svs)
-        concept_ids = set(
-            unmapped_rows
-            .exclude(measurement_concept_id__isnull=True)
-            .exclude(measurement_concept_id=0)
-            .values_list('measurement_concept_id', flat=True)
-            .distinct()
-        )
-        # Normalization fires only on newly-inserted rows by design.
-        # Rows updated by the upsert are normalized by
-        # repoint_clinical_rows when the mapping destination changes.
-        from types import SimpleNamespace
-        for cid in concept_ids:
-            mock_mapping = SimpleNamespace(
-                destination_unit_concept=None,
-                target_concept_id=cid,
-            )
-            cid_qs = unmapped_rows.filter(measurement_concept_id=cid)
-            normalize_measurement_units(cid_qs, mock_mapping)
+        owned = variant_units.get(mapping.id)
+        if owned:
+            spellings = [
+                raw for raw in sv_qs.values_list('unit_source_value', flat=True).distinct()
+                if raw and unit_code(raw) in owned
+            ]
+            sv_qs = sv_qs.exclude(unit_source_value__in=spellings)
+        normalize_measurement_units(sv_qs, mapping)
 
 
 def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances,
@@ -8063,7 +8084,7 @@ class _OmopBulkCreateMixin:
     the batch entrance to the same fast internals ``fhir/sync.py::_bulk_insert``
     uses — batched PK allocation plus ``bulk_create`` — without going through FHIR.
 
-    Semantics (summarised in CLAUDE.md, "Bulk OMOP Row Writes"):
+    Semantics (summarised in AGENTS.md, "Bulk OMOP Row Writes"):
 
     * A single dict body with no client-supplied primary key uses the same
       natural-key upsert semantics, while preserving the single-row response
@@ -10622,6 +10643,9 @@ def disease_category_mapping_list(request):
         search = request.query_params.get('search', '').strip()
         if search:
             qs = qs.filter(disease_name__icontains=search)
+        category_param = request.query_params.get('category', '').strip()
+        if category_param:
+            qs = qs.filter(category__iexact=category_param)
         return Response([
             {'id': m.id, 'disease_name': m.disease_name, 'category': m.category}
             for m in qs
@@ -11522,7 +11546,7 @@ class TrialSearchPreferencesViewSet(_OmopFilterMixin, viewsets.ModelViewSet):
             #
             # `select_for_update` is a no-op on SQLite, which `settings.py`
             # falls back to when DATABASE_URL is unset. Every deployment and
-            # CI run is PostgreSQL, and CLAUDE.md sends local work there too,
+            # CI run is PostgreSQL, and AGENTS.md sends local work there too,
             # so the guarantee holds everywhere it is claimed — but on that
             # dev fallback the precondition degrades to best-effort, and the
             # concurrency tests skip rather than pretend to prove otherwise.

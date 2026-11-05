@@ -410,7 +410,7 @@ def dispatch_release_sync(allow_inline=False):
     time. Production is exactly that shape: ``render.yaml`` leaves
     ``CELERY_BROKER_URL`` dashboard-managed (``sync: false``) on the web
     service, so a deployment that has not pasted the Redis URL in has no broker
-    -- the trap CLAUDE.md already documents for the Suggest inline ceiling.
+    -- the trap AGENTS.md already documents for the Suggest inline ceiling.
     Staging has both a broker and a pre-deploy hook and would not have shown
     it.
     """

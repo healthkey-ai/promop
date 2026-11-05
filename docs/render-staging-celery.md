@@ -78,7 +78,7 @@ Django uses the broker for its shared cache.
 - After a changed Athena artifact, `athena_vocabulary_sync` must progress from
   `queued` to `running` and then `applied` (or `current` when no table work is
   needed). A `failed` row can be retried with
-  `queue_athena_vocabulary_sync --gdrive ...` without redeploying.
+  `queue_athena_vocabulary_sync --lfs ... --gdrive ...` without redeploying.
 
 To roll back, remove staging's broker/result-backend references from the
 Blueprint and clear those web environment values in Render, then redeploy.

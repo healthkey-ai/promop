@@ -16,6 +16,7 @@ from omop_core.models import (
 from omop_core.services.concept_to_code import (
     browse_concepts, concept_payload, eligible_sources, source_payload, standard_destinations,
 )
+from omop_core.services.mapping_samples import attach_source_samples
 from omop_core.services.source_vocabularies import DOMAIN_TO_TABLE, VOCABULARY_OID_ALIASES
 from omop_core.services.suggest_jobs import get_dispatcher, InlineDispatcher
 
@@ -153,6 +154,7 @@ def concept_to_code_detail(request, concept_id):
                         else confidence.asc(nulls_last=True))
     page, paging = _paginate(rows.select_related('target_concept').prefetch_related('axis_variants__target_concept')
                              .order_by(*ordering), request.query_params)
+    attach_source_samples(page)
     return Response({**paging, **counts, 'status_counts': status_counts, 'concept': concept_payload(concept),
                      'results': [source_payload(row) for row in page]})
 
@@ -292,6 +294,19 @@ def concept_to_code_suggest(request):
     include_declined = data.get('include_declined', False)
     if type(include_declined) is not bool:
         raise ValidationError({'include_declined': 'Supply a boolean.'})
+    exclude_keys = data.get('exclude_keys', [])
+    if not isinstance(exclude_keys, list) or any(
+        not isinstance(pair, list) or len(pair) != 2
+        or not isinstance(pair[0], str) or not isinstance(pair[1], str)
+        for pair in exclude_keys
+    ):
+        raise ValidationError({'exclude_keys': 'Supply a list of [vocabulary_id, code] pairs.'})
+    exclude_keys = [tuple(pair) for pair in exclude_keys]
+    auto_propose_threshold = data.get('auto_propose_threshold', None)
+    if auto_propose_threshold is not None:
+        if not isinstance(auto_propose_threshold, (int, float)) or not 0 <= auto_propose_threshold <= 1:
+            raise ValidationError({'auto_propose_threshold': 'Supply a number between 0 and 1, or null to disable.'})
+        auto_propose_threshold = float(auto_propose_threshold)
     limit = data.get('limit', 10)
     if type(limit) is not int or not 1 <= limit <= 100:
         raise ValidationError({'limit': 'Choose a whole number from 1 to 100.'})
@@ -300,6 +315,7 @@ def concept_to_code_suggest(request):
     limit = min(limit, max(1, ceiling // len(ids)))
     params = dict(direction='reverse', concept_ids=ids, strategies=strategies, limit=limit,
                   include_zero_seen=include_zero, include_declined=include_declined, ranking_model=ranking_model,
+                  exclude_keys=exclude_keys, auto_propose_threshold=auto_propose_threshold,
                   retrieval_timeout_ms=8000 if inline else 30000)
     with transaction.atomic():
         run = SuggestRun.objects.create(
@@ -313,8 +329,8 @@ def concept_to_code_suggest(request):
 
 def _run_payload(run):
     return {'run_id': str(run.pk), 'state': run.state, 'total': run.total,
-            'done': run.done, 'error': run.error, 'selection': run.selection,
-            'activity': run.activity or []}
+            'done': run.done, 'destinations': run.destinations, 'error': run.error,
+            'selection': run.selection, 'activity': run.activity or []}
 
 
 @api_view(['GET'])
@@ -400,8 +416,8 @@ def concept_to_code_apply(request, concept_id, mapping_id):
     if (row.domain_id and row.domain_id != concept.domain_id) or (row.omop_table and row.omop_table != table):
         raise ValidationError({'detail': 'Source and destination domains disagree. Review this source in the full editor.'})
     selected_status = request.data.get('status', 'proposed')
-    if selected_status not in ('proposed', 'approved'):
-        raise ValidationError({'status': 'Choose proposed or approved.'})
+    if selected_status not in ('proposed', 'approved', 'rejected'):
+        raise ValidationError({'status': 'Choose proposed, approved or rejected.'})
     row, repoint = _upsert_source_code_mapping(concept, {
         'status': selected_status, 'domain_id': concept.domain_id, 'omop_table': table,
         'destination_vocabulary_id': concept.vocabulary_id,

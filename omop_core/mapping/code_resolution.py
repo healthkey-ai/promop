@@ -397,14 +397,37 @@ def _name_minted_concept(mapping, name):
     Concept.objects.filter(concept_id=concept_id).update(concept_name=name)
 
 
-def _effective_direct_mapping(*, source_vocabulary_id, source_code, concept, omop_table):
+def _standard_maps_to(concept):
+    """The one live standard concept a non-standard Athena concept maps to, or None.
+
+    A J-code (HCPCS, Drug domain) is non-standard and carries a 'Maps to'
+    RxNorm ingredient; an ICD-10-CM code maps to SNOMED. ``sync_athena_mappings``
+    turns those edges into approved SCCM rows for the codes it is pointed at,
+    but a code it has not met yet should resolve the same way here rather
+    than to its own non-standard id, which no OMOP consumer can use.
+    """
+    targets = list(
+        Concept.objects.filter(
+            relationships_as_target__concept_1=concept,
+            relationships_as_target__relationship_id='Maps to',
+            relationships_as_target__invalid_reason__isnull=True,
+            standard_concept='S', invalid_reason__isnull=True,
+        ).distinct()[:2]
+    )
+    return targets[0] if len(targets) == 1 else None
+
+
+def _effective_direct_mapping(*, source_vocabulary_id, source_code, concept, omop_table,
+                              target=None):
     """Cache an authoritative direct vocabulary hit in SCCM.
 
     ``approved`` remains the effective state for backwards compatibility, but
     ``origin_system`` makes this a refreshable Athena-derived cache entry, not
     a curator sign-off.  A concurrent creator, or any existing curator row,
-    always wins rather than being overwritten.
+    always wins rather than being overwritten. ``target`` is the standard
+    concept the hit maps to when the hit itself is not standard.
     """
+    target = target or concept
     source_code = source_code[:SOURCE_CODE_MAX]
     existing = SourceCodeConceptMapping.objects.filter(
         organization__isnull=True, source_vocabulary_id=source_vocabulary_id or '',
@@ -421,10 +444,10 @@ def _effective_direct_mapping(*, source_vocabulary_id, source_code, concept, omo
                 source_code=source_code,
                 source_code_description=(concept.concept_name or '')[:255],
                 source_concept=concept,
-                target_concept=concept,
-                destination_vocabulary_id=concept.vocabulary_id or '',
-                domain_id=concept.domain_id or _DOMAIN_FOR_TABLE.get(omop_table, ''),
-                omop_table=table_for_domain(concept.domain_id) if standard_identity else omop_table,
+                target_concept=target,
+                destination_vocabulary_id=target.vocabulary_id or '',
+                domain_id=target.domain_id or _DOMAIN_FOR_TABLE.get(omop_table, ''),
+                omop_table=table_for_domain(target.domain_id) if standard_identity else omop_table,
                 source='Athena', status='approved', origin='import',
                 origin_system=IDENTITY_ORIGIN if standard_identity else 'athena-direct', occurrence_count=0,
             )
@@ -642,13 +665,25 @@ def _resolve_source_code(*, source_code, omop_table, source_vocabulary_id,
         )
         return None, gap
 
-    # Rule 3a — resolve against Athena as before.
+    # Rule 3a — resolve against Athena as before. A standard, valid concept
+    # is the answer. A non-standard one (an HCPCS J-code, an ICD-10-CM code
+    # the mapping sync has not met) is the answer only through its one
+    # 'Maps to' standard target; with none it stays with a curator, as a
+    # non-standard hit already does on the promotion path (#2300).
     concept = _direct_concept(source_vocabulary_id, source_code)
     if concept is not None:
-        return concept, _effective_direct_mapping(
-            source_vocabulary_id=source_vocabulary_id,
-            source_code=source_code, concept=concept, omop_table=table,
-        )
+        if concept.standard_concept == 'S' and not concept.invalid_reason:
+            return concept, _effective_direct_mapping(
+                source_vocabulary_id=source_vocabulary_id,
+                source_code=source_code, concept=concept, omop_table=table,
+            )
+        target = _standard_maps_to(concept)
+        if target is not None:
+            return target, _effective_direct_mapping(
+                source_vocabulary_id=source_vocabulary_id,
+                source_code=source_code, concept=concept, omop_table=table,
+                target=target,
+            )
 
     # Rule 4 — the suggestion service owns every retrieval/ranking strategy.
     # Its returned target is useful evidence for a curator but never an answer
@@ -856,30 +891,28 @@ def repoint_clinical_rows(*, mapping, old_concept_id, new_concept_id,
                 organization_id=mapping.organization_id,
             )
 
-            # Normalize units on repointed Measurement rows (#2088).
-            # When units is set this is a variant approval: the variant's
-            # target concept (new_concept_id) differs from the mapping's,
-            # and the mapping's destination_unit_concept was chosen for its
-            # own LOINC, not the variant's.
-            if repointed_pks:
+            # Normalize units on repointed Measurement rows (#2088) to the
+            # mapping's curated unit. Not for a variant approval (units set):
+            # the variant has no curated unit of its own, and the mapping's
+            # was chosen for the mapping's LOINC, not the variant's (#2157).
+            # The savepoint keeps a failed conversion from undoing the move.
+            if repointed_pks and units is None:
                 try:
                     from omop_core.services.canonical_units import (
                         normalize_measurement_units,
                     )
-                    norm_qs = model.objects.filter(pk__in=repointed_pks)
-                    variant_concept = new_concept_id if units is not None else None
-                    result['rows_normalized'] = normalize_measurement_units(
-                        norm_qs, mapping,
-                        target_concept_id=variant_concept)
-                    # Re-collapse: normalization may have made previously-
-                    # distinct values identical (e.g. 100.4 and 100.6 umol/L
-                    # both round to 0.1 mmol/L).
-                    if result['rows_normalized']:
-                        result['rows_collapsed'] += _collapse_duplicates(
-                            model, concept_col, source_col, match,
-                            new_concept_id, person_ids,
-                            organization_id=mapping.organization_id,
-                        )
+                    with transaction.atomic():
+                        norm_qs = model.objects.filter(pk__in=repointed_pks)
+                        result['rows_normalized'] = normalize_measurement_units(
+                            norm_qs, mapping)
+                        # Re-collapse: one result reported in two units (1 g/L
+                        # and 100 mg/dL) is one value once both are converted.
+                        if result['rows_normalized']:
+                            result['rows_collapsed'] += _collapse_duplicates(
+                                model, concept_col, source_col, match,
+                                new_concept_id, person_ids,
+                                organization_id=mapping.organization_id,
+                            )
                 except Exception:
                     logger.exception(
                         'Unit normalization failed for mapping %s',
@@ -900,7 +933,7 @@ def _collapse_duplicates(model, concept_col, source_col, match,
                          concept_id, person_ids, organization_id=None):
     """Collapse rows the re-point just made identical.
 
-    "Identical" is the event identity CLAUDE.md documents for the bulk write
+    "Identical" is the event identity AGENTS.md documents for the bulk write
     path, not just (person, date). Measurement and Observation carry more of it
     on purpose: a patient legitimately has several distinct results for one
     analyte on one day, and keying on the date alone would delete real results
@@ -1146,16 +1179,17 @@ def resolve_person_source_codes(person, *, source_values=None, omop_tables=None)
                     )
                     rows_to_update.update(**{concept_col: target_concept_id})
                     # Normalize units on resolved Measurement rows (#2088).
-                    # Wrapped in try/except so a normalization failure (e.g.
-                    # numeric overflow in bulk_update) does not roll back the
-                    # concept update or abort resolution for remaining groups.
+                    # Wrapped in a savepoint and try/except so a normalization
+                    # failure does not roll back the concept update or abort
+                    # resolution for remaining groups.
                     if resolved_pks:
                         try:
                             from omop_core.services.canonical_units import (
                                 normalize_measurement_units,
                             )
                             norm_qs = model.objects.filter(pk__in=resolved_pks)
-                            normalize_measurement_units(norm_qs, mapping)
+                            with transaction.atomic():
+                                normalize_measurement_units(norm_qs, mapping)
                         except Exception:
                             logger.exception(
                                 'Unit normalization failed for %s (mapping %s)',

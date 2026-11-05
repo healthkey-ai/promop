@@ -12,6 +12,7 @@ import math
 import re
 import statistics
 from collections import defaultdict
+from collections.abc import Callable, Iterable, Mapping
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from datetime import date, datetime, timedelta
 from django.db import DatabaseError, models, transaction
@@ -32,8 +33,9 @@ from omop_core.services.mappings import (
     WEARABLE_TREND_IMPROVING_PCT, WEARABLE_TREND_DECLINING_PCT,
 )
 from omop_core.services.clinical_units import (
+    BLOOD_COUNT_FIELDS,
     canonical_wbc_unit, flc_to_canonical, wbc_to_canonical, blood_count_projection,
-    count_in_cells_per_ul,
+    count_in_cells_per_ul, measurement_count_unit,
 )
 from omop_core.services.lot_regimens import (
     get_regimen_concept_id,
@@ -67,7 +69,7 @@ def _usable_concept_name(concept) -> str | None:
 
 # Bump this whenever aggregation or computation logic changes in any section
 # extractor or in _compute_derived_fields.  See DERIVATION_CHANGELOG.md.
-DERIVATION_VERSION = 19
+DERIVATION_VERSION = 26
 
 # These PatientRecord columns are projections of PersonLanguageSkill, never
 # independent edits. Older PATCH requests could mark them as user-edited and
@@ -92,7 +94,7 @@ _OMOP_DERIVED_FIELDS = [
     'validation_date', 'suppress_demographics_for_others',
     # Disease / condition
     'disease', 'diagnosis_date', 'diagnosis_date_precision',
-    'death_date', 'condition_clinical_status', 'disease_slug',
+    'death_date', 'condition_clinical_status', 'disease_slug', 'disease_slugs',
     'active_infection_status', 'no_active_infection_status',
     'active_malignancies', 'no_other_active_malignancies',
     # Therapy lines
@@ -299,7 +301,16 @@ PATIENT_RECORD_OMOP_MAPPED_FIELDS = frozenset(_OMOP_DERIVED_FIELDS) | frozenset(
 
 
 # LOINC code → (PatientRecord field name, coercion function)
-# Used to derive UI lab fields from the OMOP Measurement table.
+#
+# The checked-in inventory of lab fields the extractor derives from OMOP
+# Measurement rows, and the seed for the curation tables: migration 0240 loads
+# every field here as a FieldConceptMapping from field_curation_v1.json, 0285
+# approves the alias codes as SourceCodeConceptMapping rows, and 0327 approves
+# what was still proposed. Routing at derivation time reads those tables
+# (``resolve_lab_code_fields``); this table decides a field's codes only while
+# the field has no approved, concept-resolved mapping -- a fresh install before
+# Athena loads, or a test database built without migrations. The cast per
+# field lives only here (``_LAB_FIELD_CASTS``).
 _LOINC_LAB_FIELDS = {
     # CBC
     '718-7':   ('hemoglobin_g_dl',               float),
@@ -360,21 +371,17 @@ _LOINC_LAB_FIELDS = {
     '1952-1':  ('beta2_microglobulin',            float),
     '1988-5':  ('c_reactive_protein',             float),
     '30341-2': ('esr',                            int),
-    # MM disease burden labs. Real-world data codes these differently from the
-    # demo concepts this app seeds, so both spellings are listed. '33944-8' and
-    # '33945-5' are not LOINC at all and only resolve against seeded rows.
-    #
-    # CAUTION: '33944-8' (seeded kappa) and '33944-0' (real LOINC lambda) differ
-    # by one character and are opposite analytes. Do not tidy them together.
+    # MM disease burden labs. Real-world data codes these several ways, so every
+    # LOINC spelling is listed. The invented demo codes 33944-8 / 33945-5 that
+    # used to sit here were retired by migration 0328; the MM generator now
+    # emits 36916-5 / 33944-0. CAUTION: 36916-5 is kappa and 33944-0 is lambda.
     '51435-6': ('monoclonal_protein_serum',       float),  # M-protein band 1, SPEP
     '33358-3': ('monoclonal_protein_serum',       float),  # M-protein, SPEP (3046299)
     '32730-5': ('monoclonal_protein_urine',       float),  # Urine M-spike 24h
     '42482-0': ('monoclonal_protein_urine',       float),  # Approved FCM destination
-    '33944-8': ('kappa_flc',                      Decimal),  # seeded demo concept only
     '36916-5': ('kappa_flc',                      Decimal),  # Kappa FLC, Serum (3034860)
     '80515-0': ('kappa_flc',                      Decimal),  # Kappa FLC by nephelometry
     '104544-2': ('kappa_flc',                     Decimal),  # Approved FCM destination
-    '33945-5': ('lambda_flc',                     Decimal),  # seeded demo concept only
     '33944-0': ('lambda_flc',                     Decimal),  # Lambda FLC, Serum (3047169)
     '80516-8': ('lambda_flc',                     Decimal),  # Lambda FLC by nephelometry
     '48378-4': ('kappa_lambda_ratio',             Decimal),  # Kappa/lambda ratio (3053209)
@@ -385,6 +392,12 @@ _LOINC_LAB_FIELDS = {
     '11118-7': ('clonal_plasma_cells',            float),  # Plasma cells/100 cells in marrow (3003879)
     '93021-4': ('clonal_plasma_cells',            float),  # Approved FCM destination
 }
+
+# Every lab field the extractor can populate, and how each value is cast.
+# Readers that need the field inventory use these; readers that need a code
+# → field route use ``resolve_lab_code_fields`` / ``_lab_routing``.
+LAB_FIELDS = frozenset(field for field, _ in _LOINC_LAB_FIELDS.values())
+_LAB_FIELD_CASTS = {field: cast for field, cast in _LOINC_LAB_FIELDS.values()}
 
 # Keyed by field name not by code, so a new LOINC spelling above feeds both the
 # lab projection and the SLiM criteria.
@@ -520,12 +533,90 @@ _SOURCE_VALUE_LAB_FIELDS = {
     'Free light chain ratio':                     'kappa_lambda_ratio',
 }
 
-# Bounds the SLiM query. Without it the criteria walk every Measurement a person
-# owns, which on a bulk loaded patient is tens of thousands of rows.
-_SLIM_MATCH_VALUES = frozenset(
-    [code for code, (field, _) in _LOINC_LAB_FIELDS.items() if field in _SLIM_FIELDS]
-    + [name for name, field in _SOURCE_VALUE_LAB_FIELDS.items() if field in _SLIM_FIELDS]
+# Display names the SLiM scan matches on, beside the routed LOINC codes.
+_SLIM_SOURCE_NAMES = frozenset(
+    name for name, field in _SOURCE_VALUE_LAB_FIELDS.items() if field in _SLIM_FIELDS
 )
+
+
+def _slim_match_values(code_fields: Mapping[str, tuple[str, Callable]]) -> frozenset[str]:
+    """Codes and names that bound the SLiM query, from the resolved routing.
+
+    Without a bound the criteria walk every Measurement a person owns, which on
+    a bulk loaded patient is tens of thousands of rows.
+    """
+    return frozenset(
+        [code for code, (field, _) in code_fields.items() if field in _SLIM_FIELDS]
+    ) | _SLIM_SOURCE_NAMES
+
+
+def resolve_lab_code_fields(
+    measurements: Iterable | None = None,
+) -> dict[str, tuple[str, Callable]]:
+    """LOINC code → (PatientRecord lab field, cast) for lab derivation.
+
+    The curation tables are the authority (#1796): an approved, concept-resolved
+    FieldConceptMapping decides which code feeds each field in ``LAB_FIELDS``,
+    and approved global SourceCodeConceptMapping LOINC aliases whose target is
+    that mapping's concept add further codes for it. ``_LOINC_LAB_FIELDS``
+    supplies a field only while it has no such mapping: a fresh install before
+    Athena loads (migration 0240 seeds the rows with no concept), or a test
+    database built without migrations.
+
+    With ``measurements`` given, the tables are not queried for a person
+    without a LOINC-coded numeric Measurement, so unrelated measurements do not
+    raise the full-refresh query budget (#541); the table alone answers.
+    """
+    code_fields = dict(_LOINC_LAB_FIELDS)
+    if measurements is not None and not any(
+        m.value_as_number is not None and (
+            getattr(m.measurement_concept, 'vocabulary_id', None) == 'LOINC'
+            or bool(_LOINC_CODE_RE.fullmatch(m.measurement_source_value or ''))
+        ) for m in measurements
+    ):
+        return code_fields
+    from omop_core.models import FieldConceptMapping, SourceCodeConceptMapping
+    # A row's own concept_code column may be blank; the concept's code is the
+    # same thing and is never blank, so the field cannot silently route nothing.
+    approved = [
+        (field, code or concept_code, concept_id)
+        for field, code, concept_id, concept_code in FieldConceptMapping.objects.filter(
+            field_name__in=LAB_FIELDS,
+            status='approved', vocabulary_id='LOINC', omop_table__iexact='measurement',
+            concept_id__isnull=False,
+        ).values_list('field_name', 'concept_code', 'concept_id', 'concept__concept_code')
+    ]
+    if not approved:
+        return code_fields
+    mapped = {field for field, _, _ in approved}
+    code_fields = {code: entry for code, entry in code_fields.items()
+                   if entry[0] not in mapped}
+    field_by_target = {concept_id: field for field, _, concept_id in approved}
+    # Every routed field is in LAB_FIELDS, so its cast is in the table.
+    for field, code, _ in approved:
+        code_fields[code] = (field, _LAB_FIELD_CASTS[field])
+    for code, target_id in SourceCodeConceptMapping.objects.filter(
+        organization_id=None, source_vocabulary_id='LOINC',
+        status='approved', omop_table__iexact='measurement',
+        target_concept_id__in=field_by_target,
+    ).values_list('source_code', 'target_concept_id'):
+        field = field_by_target[target_id]
+        code_fields[code] = (field, _LAB_FIELD_CASTS[field])
+    return code_fields
+
+
+def _lab_routing(snapshot: 'OmopSnapshot') -> dict[str, tuple[str, Callable]]:
+    """``resolve_lab_code_fields`` for a snapshot, resolved once per refresh.
+
+    Memoized on the snapshot so the lab, MM and blood-count readers of one
+    refresh share the two curation queries; never cached process-wide.
+    """
+    cache = getattr(snapshot, 'lab_routing_cache', None)
+    if cache is None:
+        return resolve_lab_code_fields(snapshot.measurements)
+    if 'code_fields' not in cache:
+        cache['code_fields'] = resolve_lab_code_fields(snapshot.measurements)
+    return cache['code_fields']
 
 # Historic, non-LOINC test names for the old paired lab fields. This fallback
 # must be an explicit allowlist: substring matching turns distinct analytes
@@ -680,7 +771,7 @@ def _clear_derived_fields(patient_info: PatientRecord) -> None:
                 'later_component_ids', 'therapy_component_ids',
                 'first_line_therapy_type_ids', 'second_line_therapy_type_ids',
                 'later_therapy_type_ids', 'therapy_type_ids',
-                'stem_cell_transplant_history', 'sct_eligibility',
+                'stem_cell_transplant_history', 'sct_eligibility', 'disease_slugs',
             ) or field in _genomic_patient_fields() else None
             if field == 'medication_contexts':
                 default = {}
@@ -730,6 +821,8 @@ class OmopSnapshot:
     # by concept+source and cannot clear an older legacy SCT concept by source.
     clinical_input_observations: list | None = None
     cancer_detail_rows: list = dataclasses.field(default_factory=list, compare=False)
+    # Per-refresh memo of the LOINC → lab field routing (``_lab_routing``).
+    lab_routing_cache: dict = dataclasses.field(default_factory=dict, compare=False)
 
 
 def _first_by_code(snapshot: OmopSnapshot, code: str, table: str = 'measurement'):
@@ -804,6 +897,35 @@ def _fact_recency_key(row):
     raise TypeError(f'not an OMOP fact row: {type(row)!r}')
 
 
+def _read_values_in_source_units(person, measurements):
+    """Give every extractor the value in unit_source_value's unit (#2249).
+
+    Extractors read value_as_number in unit_source_value's unit, but a row
+    converted on write holds it in unit_concept's. These instances are only
+    read, never saved. A row whose unit cannot be shown loses its value, so
+    nothing presents it in the wrong unit, and so do the older results of the
+    same test: the newest decides, and an older one is not the current value.
+    *measurements* is newest first.
+    """
+    from omop_core.services.canonical_units import value_in_source_unit
+    unknown = 0
+    blocked = set()
+    for measurement in measurements:
+        concept = measurement.measurement_concept if measurement.measurement_concept_id else None
+        test = concept.concept_code if concept else measurement.measurement_source_value
+        value = None if test in blocked else value_in_source_unit(measurement)
+        if value is None and measurement.value_as_number is not None:
+            unknown += 1
+            blocked.add(test)
+        measurement.value_as_number = value
+    if unknown:
+        logger.warning(
+            'Ignoring %s measurement value(s) for person_id=%s: stored in a unit that '
+            'is neither unit_source_value nor a proven conversion of it, or older than one',
+            unknown, person.person_id,
+        )
+
+
 def _build_snapshot(person: Person) -> OmopSnapshot:
     """Fetch all OMOP rows for *person* in ~6 SQL queries and build lookup indexes."""
     measurements = list(
@@ -817,6 +939,7 @@ def _build_snapshot(person: Person) -> OmopSnapshot:
         )
         .order_by('-measurement_date', '-measurement_id')
     )
+    _read_values_in_source_units(person, measurements)
     observations = list(
         Observation.objects
         .filter(person=person, is_erroneous=False)
@@ -1081,7 +1204,9 @@ def refresh_patient_record(person: Person) -> PatientRecord:
             # The lab extractor has already selected the latest code across
             # canonical and approved-alias results (including unit handling).
             # An older exact FCM row must not overwrite that latest result.
-            if field not in lab_derived_fields:
+            if field in _ANSWER_LINE_FIELDS and value is not None:
+                value = _answer_line(field, value)
+            if field not in lab_derived_fields and _fits_column(patient_info, field, value):
                 setattr(patient_info, field, value)
 
         for field, value in linked_cancer_values.items():
@@ -1221,6 +1346,23 @@ def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fiel
         updates['updated_at'] = timezone.now()
         PatientRecord.objects.filter(pk=patient_info.pk).update(**updates)
     return patient_info
+
+
+def _fits_column(patient_info: PatientRecord, field: str, value) -> bool:
+    """Whether a mapped text value fits its column (#2290).
+
+    One that doesn't is not written, and not cut either: cutting could change
+    what it says. The field keeps what the extractors derived in this refresh,
+    and the rest of the record still saves.
+    """
+    width = getattr(PatientRecord._meta.get_field(field), 'max_length', None)
+    if not (width and isinstance(value, str) and len(value) > width):
+        return True
+    logger.warning(
+        'Skipping overlong mapped value for person_id=%s field=%s (%s chars, max_length=%s)',
+        patient_info.person_id, field, len(value), width,
+    )
+    return False
 
 
 def _clear_overflowing_decimal_fields(patient_info: PatientRecord) -> None:
@@ -1631,22 +1773,42 @@ def _primary_cancer_condition(person, snapshot: OmopSnapshot, cancers: list):
     return max(cancers, key=rank)
 
 
-# Names a cancer without being one: a past cancer, a complication of one, a
-# benign or uncertain growth, a test or a worry. Shared with the PHR's
-# diagnoses (HealthTree/ht-phr-one#119).
+# Names a cancer without being one: a past cancer, a complication or symptom
+# of one (#2181), a benign or uncertain growth, a test, a visit, an inherited
+# risk or a worry, or "malignant" in its other sense (malignant hypertension).
+# Shared with the PHR's diagnoses (HealthTree/ht-phr-one#119).
 NOT_CANCER_NAME = re.compile(
     r'\bhistory of\b|\bh/o\b|\bdue to\b|\bsecondary to\b|\bbenign\b|uncertain behaviou?r|'
-    r'\bscreening\b|\bsuspected\b|\brisk of\b|\bfear of\b',
+    r'\bscreening\b|\bsuspected\b|\brisk of\b|\bfear of\b|\bpredisposition\b|'
+    r'\bpain\b|\bfatigue\b|\bcachexia\b|\bnausea\b|\bascites\b|\banx(iety|ious)\b|\ban(a)?emia (in|assoc)|'
+    r'\bamyloidosis\b|\bneuropathy\b|\bfracture\b|\btumou?r lysis\b|\bcompression\b|'
+    r'\beffusion\b|\bmorbidity\b|\bresearch study\b|'
+    r'\bencounter\b|\bfollow.?up\b|\baftercare\b|\bchemotherapy\b|\btumou?r markers?\b|\btemplate\b|'
+    r'\bsusceptibility\b|\bcounsell?ing\b|\brisk evaluation\b|\bhamartoma\b|'
+    r'\bhypertension\b|\bhyperthermia\b|\bneuroleptic\b',
     re.IGNORECASE,
 )
+
+# A cancer that has spread to a site, naming the site and not the cancer
+# (#2181). Metastatic melanoma or lung cancer name their cancer and are not
+# matched.
+METASTASIS_NAME = re.compile(
+    r'\bmetasta\w*\s+(to|from)\b|\bmetastatic malignant neoplas|'
+    r'\bsecondary (and unspecified )?malignant\b|\bmetastatic, nos\b',
+    re.IGNORECASE,
+)
+
+
+def _condition_names(cond) -> tuple[str, str]:
+    cname = (cond.condition_concept.concept_name or '').lower() if cond.condition_concept else ''
+    return cname, (cond.condition_source_value or '').lower()
 
 
 def _is_oncologic(cond):
     """Shared cancer predicate for the primary selector and scoped projections."""
     if cond.is_erroneous:
         return False
-    cname = (cond.condition_concept.concept_name or '').lower() if cond.condition_concept else ''
-    src = (cond.condition_source_value or '').lower()
+    cname, src = _condition_names(cond)
     if 'screening' in cname or (not cond.condition_concept_id and 'screening' in src):
         return False
     if NOT_CANCER_NAME.search(cname) or NOT_CANCER_NAME.search(src):
@@ -1657,12 +1819,22 @@ def _is_oncologic(cond):
     ))
 
 
+def _cancer_conditions(conditions) -> list:
+    """The cancers on the record, in the order given.
+
+    A metastasis stands in only when no cancer names its primary (#2181).
+    """
+    cancers = [c for c in conditions if _is_oncologic(c)]
+    primaries = [c for c in cancers if not any(METASTASIS_NAME.search(n) for n in _condition_names(c))]
+    return primaries or cancers
+
+
 def _get_disease_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     data = {}
     snapshot = snapshot or _build_snapshot(person)
 
     # snapshot.conditions is ordered -condition_start_date (newest first).
-    cancers = [c for c in snapshot.conditions if _is_oncologic(c)]
+    cancers = _cancer_conditions(snapshot.conditions)
     cancer_condition = _primary_cancer_condition(person, snapshot, cancers)
 
     if cancer_condition:
@@ -1710,6 +1882,17 @@ def _get_disease_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     disease_name = data.get('disease', '')
     if disease_name:
         data['disease_slug'] = _disease_name_to_slug(disease_name)
+
+    # Every cancer on the record, primary first, so a patient with two cancers
+    # is found under both (#2182). Same cancers the primary is chosen from.
+    slugs = [data['disease_slug']] if data.get('disease_slug') else []
+    for condition in cancers:
+        if condition is cancer_condition:
+            continue  # its slug is disease_slug, named by the rule above
+        slug = _condition_slug(condition)
+        if slug and slug not in slugs:
+            slugs.append(slug)
+    data['disease_slugs'] = slugs
 
     return data
 
@@ -3145,7 +3328,7 @@ def _get_genomics_pathology_data(person: Person, snapshot: OmopSnapshot = None) 
     if specimen:
         value = _coded_value(specimen)
         if value:
-            data['test_specimen_type'] = value[:50]
+            data['test_specimen_type'] = _answer_line('test_specimen_type', value)
 
     interpretation = latest('69548-6')
     if interpretation:
@@ -3491,6 +3674,19 @@ def _assertion_value(row, value_kind):
     return not parsed if value_kind == 'inverse_boolean' else parsed
 
 
+# Labs append comments to these answers, such as "NEG\nSamples with Specific
+# Gravity <1.010 ..." (#2250) or "Passed Stone\nMAYO MEDICAL LABORATORIES, ..."
+# (#2290). The first line is the answer.
+_ANSWER_LINE_FIELDS = frozenset({'pregnancy_test_result_value', 'test_specimen_type'})
+
+
+def _answer_line(field, value):
+    """The first line of a text answer, trimmed and cut to the field's width."""
+    lines = str(value).strip().splitlines()
+    answer = lines[0].strip() if lines else ''
+    return answer[:PatientRecord._meta.get_field(field).max_length] or None
+
+
 def _assertion_detail(row):
     """Return optional detail text carried beside an assertion answer."""
     for attr in ('value_source_value', 'qualifier_source_value'):
@@ -3555,6 +3751,8 @@ def _get_assertion_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     for field, (row_date, _, code, row) in _latest_assertion_rows(snapshot).items():
         value_kind = _ASSERTION_FIELDS[code][1]
         value = _assertion_value(row, value_kind)
+        if field == 'pregnancy_test_result_value' and value is not None:
+            value = _answer_line(field, value)
         if value is None:
             continue
         data[field] = value
@@ -3627,18 +3825,25 @@ _SLIM_INVOLVED_FLC_MG_L = Decimal('100')
 _FLC_PAIR_UNSET = object()
 
 
-def _lab_field_for_measurement(measurement):
-    """Return the target lab field for either LOINC or display-name rows."""
+def _lab_field_for_measurement(
+    measurement, code_fields: Mapping[str, tuple[str, Callable]],
+) -> str | None:
+    """Return the target lab field for either LOINC or display-name rows.
+
+    ``code_fields`` is the resolved routing (``resolve_lab_code_fields``).
+    """
     code = _measurement_code(measurement)
-    field = _LOINC_LAB_FIELDS.get(code, (None, None))[0]
+    field = code_fields.get(code, (None, None))[0]
     if field is None:
         field = _SOURCE_VALUE_LAB_FIELDS.get(measurement.measurement_source_value)
     return field
 
 
-def _flc_field_for_measurement(measurement):
+def _flc_field_for_measurement(
+    measurement, code_fields: Mapping[str, tuple[str, Callable]],
+) -> str | None:
     """Return kappa_flc/lambda_flc for either LOINC or display-name rows."""
-    field = _lab_field_for_measurement(measurement)
+    field = _lab_field_for_measurement(measurement, code_fields)
     return field if field in _FLC_FIELDS else None
 
 
@@ -3685,7 +3890,9 @@ def _flc_event_observed_at(measurement):
     return (event_date, 0, 0, 0, 0, 0)
 
 
-def _select_flc_pair_with_ratio(measurements):
+def _select_flc_pair_with_ratio(
+    measurements, code_fields: Mapping[str, tuple[str, Callable]] | None = None,
+):
     """Return the newest complete kappa/lambda pair and its same-event ratio.
 
     A ratio must not combine kappa from one draw with lambda from another. The
@@ -3698,11 +3905,13 @@ def _select_flc_pair_with_ratio(measurements):
     grouped events explicitly so a later draw on the same day wins even when
     its rows were inserted first.
     """
+    if code_fields is None:
+        code_fields = resolve_lab_code_fields(measurements)
     events = {}
     for measurement in measurements:
         if measurement.value_as_number is None:
             continue
-        field = _lab_field_for_measurement(measurement)
+        field = _lab_field_for_measurement(measurement, code_fields)
         if field not in _FLC_FIELDS and field != 'kappa_lambda_ratio':
             continue
         key = _flc_event_key(measurement)
@@ -3749,9 +3958,11 @@ def _select_flc_pair_with_ratio(measurements):
     return None
 
 
-def _select_flc_pair(measurements):
+def _select_flc_pair(
+    measurements, code_fields: Mapping[str, tuple[str, Callable]] | None = None,
+):
     """Return the newest complete kappa/lambda pair from one lab event."""
-    selected = _select_flc_pair_with_ratio(measurements)
+    selected = _select_flc_pair_with_ratio(measurements, code_fields)
     return selected[:2] if selected is not None else None
 
 
@@ -3791,7 +4002,7 @@ def _meets_flc_criterion(
 def _get_mm_specific_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     """Derive MM-specific boolean and coded fields from OMOP Observation table.
 
-    Covers fields not derivable via _LOINC_LAB_FIELDS (boolean / string-valued
+    Covers fields the lab routing cannot derive (boolean / string-valued
     observations): plasma_cell_leukemia, bone_lesions, meets_crab.
     Uses measurement_source_value as the LOINC lookup since Concept rows may not
     be loaded in all environments.
@@ -3851,7 +4062,9 @@ def _get_mm_specific_data(person: Person, snapshot: OmopSnapshot = None) -> dict
     # EHR rows carry the display name in source_value and the LOINC on the
     # concept, so a source_value-only filter saw demo data and nothing else.
     slim_vals = {}
-    _slim_candidates = _rows_by_codes(snapshot, _SLIM_MATCH_VALUES) + _rows_by_sources(snapshot, _SLIM_MATCH_VALUES)
+    code_fields = _lab_routing(snapshot)
+    slim_match_values = _slim_match_values(code_fields)
+    _slim_candidates = _rows_by_codes(snapshot, slim_match_values) + _rows_by_sources(snapshot, slim_match_values)
     # Deduplicate (a row could appear in both indexes) via seen set
     _slim_seen = set()
     slim_measurements = []
@@ -3861,18 +4074,15 @@ def _get_mm_specific_data(person: Person, snapshot: OmopSnapshot = None) -> dict
             slim_measurements.append(m)
     slim_measurements.sort(key=lambda m: (m.measurement_date or date.min, m.measurement_id))
     for m in slim_measurements:
-        code = _measurement_code(m)
-        field = _LOINC_LAB_FIELDS.get(code, (None, None))[0]
-        if field is None:
-            # The row matched on source_value, so its concept resolved to some
-            # other code. Fall back to the display name map.
-            field = _SOURCE_VALUE_LAB_FIELDS.get(m.measurement_source_value)
+        # A row that matched on source_value resolved its concept to some other
+        # code; _lab_field_for_measurement falls back to the display name map.
+        field = _lab_field_for_measurement(m, code_fields)
         if field in _SLIM_FIELDS:
             slim_vals.setdefault(field, []).append(
                 (float(m.value_as_number), m.unit_source_value))
 
     plasma_pcts = [v for v, _unit in slim_vals.get('clonal_plasma_cells', [])]
-    flc_pair = _select_flc_pair_with_ratio(snapshot.measurements)
+    flc_pair = _select_flc_pair_with_ratio(snapshot.measurements, code_fields)
 
     meets_slim = False
     # Sixty criterion: any plasma cells measurement ≥60%
@@ -3983,20 +4193,32 @@ def _get_assessment_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     return data
 
 
-def _latest_blood_count_measurements(snapshot):
-    # Select ANC/platelets once across coded, source-only and legacy-name facts.
-    # The latest result owns the projection even if its value/unit is unknown.
-    count_fields = {'751-8': 'anc_thousand_per_ul', '777-3': 'platelet_count_thousand_per_ul'}
+def _latest_blood_count_measurements(
+    snapshot, code_fields: Mapping[str, tuple[str, Callable]] | None = None,
+) -> dict:
+    # Select ANC/ALC/AMC/platelets once across coded, source-only and
+    # legacy-name facts (#640, #2282). The latest result owns the projection
+    # even if its value/unit is unknown. ``code_fields`` is the refresh's
+    # resolved code -> (field, cast) map (approved FieldConceptMapping
+    # destinations and SCCM aliases; see resolve_lab_code_fields), so a
+    # LOINC a curator routed to a count field joins this selection instead
+    # of falling through to the unconverted cast in the generic lab loop.
+    if code_fields is None:
+        code_fields = _lab_routing(snapshot)
+    count_codes = {code: field for code, (field, _) in code_fields.items()
+                   if field in BLOOD_COUNT_FIELDS}
     selected_counts = {}
     for measurement in snapshot.measurements:
         code = _measurement_code(measurement)
-        field = count_fields.get(code)
+        field = count_codes.get(code)
         if field is None:
             field = _SOURCE_VALUE_LAB_FIELDS.get(measurement.measurement_source_value)
-        if field not in count_fields.values():
+        if field not in BLOOD_COUNT_FIELDS:
             name = (getattr(measurement.measurement_concept, 'concept_name', '') or '').casefold().strip()
             field = {'platelet count': 'platelet_count_thousand_per_ul',
-                     'absolute neutrophil count': 'anc_thousand_per_ul'}.get(name)
+                     'absolute neutrophil count': 'anc_thousand_per_ul',
+                     'absolute lymphocyte count': 'alc_thousand_per_ul',
+                     'absolute monocyte count': 'amc_thousand_per_ul'}.get(name)
         if field is None or field in selected_counts:
             continue
         selected_counts[field] = measurement
@@ -4007,44 +4229,11 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     data = {}
     snapshot = snapshot or _build_snapshot(person)
     measurements = snapshot.measurements
-    # Approved FCM rows define the PatientRecord destination. SCCM supplies
-    # additional source-code spellings for that destination; the checked-in
-    # extractor table is a compatibility fallback for fields not yet backed by
-    # an Athena-resolved FCM (including older test/demo installations).
-    code_fields = dict(_LOINC_LAB_FIELDS)
-    # Do not query curation tables for patients without a LOINC-coded numeric
-    # Measurement. In particular, unrelated measurements must not increase the
-    # full-refresh query budget (#541). Source-only LOINC codes still qualify.
-    has_loinc_lab = any(
-        m.value_as_number is not None and (
-            getattr(m.measurement_concept, 'vocabulary_id', None) == 'LOINC'
-            or bool(_LOINC_CODE_RE.fullmatch(m.measurement_source_value or ''))
-        ) for m in measurements
-    )
-    if has_loinc_lab:
-        from omop_core.models import FieldConceptMapping, SourceCodeConceptMapping
-        field_casts = {field: cast for field, cast in _LOINC_LAB_FIELDS.values()}
-        approved = list(FieldConceptMapping.objects.filter(
-            field_name__in={field for field, _ in _LOINC_LAB_FIELDS.values()},
-            status='approved', vocabulary_id='LOINC', omop_table__iexact='measurement',
-            concept_id__isnull=False,
-        ).values_list('field_name', 'concept_code', 'concept_id'))
-        if approved:
-            field_by_target = {concept_id: field for field, _, concept_id in approved}
-            for field, _, _ in approved:
-                code_fields = {code: entry for code, entry in code_fields.items()
-                               if entry[0] != field}
-            for field, code, _ in approved:
-                if code:
-                    code_fields[code] = (field, field_casts[field])
-            for code, target_id in SourceCodeConceptMapping.objects.filter(
-                organization_id=None, source_vocabulary_id='LOINC',
-                status='approved', omop_table__iexact='measurement',
-                target_concept_id__in=field_by_target,
-            ).values_list('source_code', 'target_concept_id'):
-                field = field_by_target[target_id]
-                code_fields[code] = (field, field_casts[field])
-    for field, measurement in _latest_blood_count_measurements(snapshot).items():
+    # Approved FCM rows define the PatientRecord destination and approved SCCM
+    # rows supply further source-code spellings for it; see
+    # resolve_lab_code_fields for what the checked-in table still decides.
+    code_fields = _lab_routing(snapshot)
+    for field, measurement in _latest_blood_count_measurements(snapshot, code_fields).items():
         data.update(blood_count_projection(field, measurement))
 
     # --- Legacy fields via exact historic concept-name matching ---
@@ -4098,7 +4287,7 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     # The ratio-bearing values must come from one lab event, not the newest
     # kappa and the newest lambda independently. The individual fields above
     # remain useful for display; this transient pair is what IMWG/SLiM consume.
-    data['_flc_pair'] = _select_flc_pair(measurements)
+    data['_flc_pair'] = _select_flc_pair(measurements, code_fields)
 
     # --- New UI fields via LOINC concept code (primary path) ---
     # Lazy unit_system: queried at most once, outside the per-measurement loop.
@@ -4122,18 +4311,23 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
         field, cast = code_fields[code]
         if field in _FLC_FIELDS:
             continue
+        if field in BLOOD_COUNT_FIELDS:
+            # Owned by the blood count projection above, which reads the
+            # unit; the raw cast here would land the lab's own scale.
+            continue
         canonical_value = None
         if code == '6690-2':
             if wbc_projection_blocked:
                 continue
-            canonical_value = wbc_to_canonical(m.value_as_number, m.unit_source_value)
+            unit = measurement_count_unit(m)
+            canonical_value = wbc_to_canonical(m.value_as_number, unit)
             if canonical_value is None:
                 # This is the latest WBC row due to the query ordering. Do not
                 # silently substitute an older result with a known unit.
                 wbc_projection_blocked = True
                 logger.warning(
                     'WBC projections skipped for person_id=%s: unsupported or absent '
-                    'unit_source_value=%r', person.person_id, m.unit_source_value,
+                    'unit=%r', person.person_id, unit,
                 )
                 continue
         if field not in data:
@@ -4151,7 +4345,7 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
                 continue
             if field == 'wbc_count_thousand_per_ul' and wbc_projection_blocked:
                 continue
-            if field in data or field in _FLC_FIELDS:
+            if field in data or field in _FLC_FIELDS or field in BLOOD_COUNT_FIELDS:
                 continue
             for m in snapshot.meas_by_source.get(source_value, ()):
                 if m.value_as_number is not None:
@@ -4361,7 +4555,7 @@ def _get_cll_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
 
     # 731-0 (ALC) is intentionally absent — the canonical column is
     # alc_thousand_per_ul, populated by _get_laboratory_data via
-    # _LOINC_LAB_FIELDS.  Deriving absolute_lymphocyte_count here duplicated
+    # the lab routing.  Deriving absolute_lymphocyte_count here duplicated
     # the value under an ambiguous name (see issue #544).
     loinc_map = {
         '48094-6': 'serum_beta2_microglobulin_level',

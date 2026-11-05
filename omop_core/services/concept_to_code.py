@@ -40,7 +40,7 @@ def source_payload(row):
         'confidence': row.suggestion_confidence,
         'source_label_norm': row.source_label_norm,
         'units': [e.get('display') or e.get('unit', '') for e in (row.source_unit_evidence or []) if isinstance(e, dict)],
-        'specimen': (row.loinc_axes or {}).get('system', ''),
+        'based_on': getattr(row, '_source_samples', {}).get('based_on', []),
         # Its units imply this many LOINC axis sets (the blue "n axis values").
         'axis_variant_count': row.axis_variant_count,
         # ... and these are the variants, each with its own destination (#2012).

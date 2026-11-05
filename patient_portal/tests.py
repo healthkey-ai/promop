@@ -15511,16 +15511,21 @@ class OrgPatientSignupTest(TestCase):
         })
         self.assertEqual(resp.status_code, 201)
         self.assertIn('person_id', resp.data)
-        self.assertEqual(resp.data['redirect_url'], '/org/signup-org/')
+        # Signup no longer auto-logs in; email verification is required first.
+        self.assertTrue(resp.data['email_verification_required'])
+        self.assertNotIn('redirect_url', resp.data)
+        self.assertNotIn('_auth_user_id', client.session)
 
         identity = Identity.objects.get(email='self-signup@test.com')
         self.assertTrue(identity.has_usable_password())
         self.assertFalse(identity.is_staff)
         self.assertFalse(identity.is_superuser)
-        self.assertEqual(client.session['_auth_user_id'], str(identity.pk))
         self.assertTrue(PatientUser.objects.filter(identity=identity).exists())
         self.assertTrue(
-            GroupAccess.objects.filter(identity=identity, org=self.org, role='analyst').exists()
+            GroupAccess.objects.filter(
+                identity=identity, org=self.org, role='analyst',
+                pending_email_verification=True,
+            ).exists()
         )
 
     def _private_org_with_patients(self):
@@ -15564,6 +15569,8 @@ class OrgPatientSignupTest(TestCase):
 
         # Typed, not proved: self-access only, and nobody else's record.
         self.assertEqual(roles(), ['patient'])
+        # Signup no longer auto-logs in; authenticate explicitly for the checks.
+        client.force_authenticate(user=identity)
         user = client.get('/api/v1/user/').data['user']
         self.assertTrue(user['is_patient'])
         self.assertFalse(user['email_verified'])
@@ -15576,6 +15583,10 @@ class OrgPatientSignupTest(TestCase):
         self.assertEqual(verified.status_code, 200)
 
         self.assertEqual(roles(), ['analyst'])
+        # Re-authenticate with a fresh identity — force_authenticate caches the
+        # model instance, so the stale one still has email_verified_at=None.
+        identity.refresh_from_db()
+        client.force_authenticate(user=identity)
         user = client.get('/api/v1/user/').data['user']
         self.assertFalse(user['is_patient'])
         self.assertTrue(user['email_verified'])
@@ -15606,6 +15617,8 @@ class OrgPatientSignupTest(TestCase):
                  .values_list('role', flat=True)),
             ['patient'],
         )
+        # Signup no longer auto-logs in; authenticate explicitly for the checks.
+        client.force_authenticate(user=identity)
         self.assertTrue(client.get('/api/v1/user/').data['user']['is_patient'])
         self.assertEqual(
             client.get('/api/v1/patient-records/77801/').status_code, 404,
@@ -15738,6 +15751,135 @@ class OrgPatientSignupTest(TestCase):
     EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend',
     APP_BASE_URL='https://app.test',
 )
+class EmailVerificationLoginGateTest(TestCase):
+    """Login is blocked for local accounts that have not verified their email."""
+
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+        self.org = Organization.objects.create(
+            name='Gate Org', slug='gate-org', allows_patient_signup=True,
+        )
+
+    def test_self_signup_unverified_cannot_login(self):
+        """A self-signup account with pending_email_verification gets 403."""
+        client = APIClient()
+        resp = client.post('/api/v1/orgs/gate-org/patient-signup/', {
+            'email': 'unverified@test.com',
+            'password': 'Str0ng!Pass99',
+            'given_name': 'Test',
+            'family_name': 'User',
+        })
+        self.assertEqual(resp.status_code, 201)
+        resp = client.post('/api/auth/login/', {
+            'username': 'unverified@test.com',
+            'password': 'Str0ng!Pass99',
+        })
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(resp.data['code'], 'email_not_verified')
+
+    def test_admin_created_account_can_login_without_verification(self):
+        """An admin-created account (no pending_email_verification grant) is
+        not blocked — only self-signups are gated."""
+        Identity.objects.create_user(
+            email='admin-created@test.com', password='Str0ng!Pass99',
+        )
+        resp = APIClient().post('/api/auth/login/', {
+            'username': 'admin-created@test.com',
+            'password': 'Str0ng!Pass99',
+        })
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('user', resp.data)
+
+    def test_verified_local_account_can_login(self):
+        """A local account that has verified its email can login normally."""
+        identity = Identity.objects.create_user(
+            email='verified@test.com', password='Str0ng!Pass99',
+        )
+        identity.mark_email_verified()
+        resp = APIClient().post('/api/auth/login/', {
+            'username': 'verified@test.com',
+            'password': 'Str0ng!Pass99',
+        })
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn('user', resp.data)
+
+    def test_login_gate_resends_verification_email(self):
+        """Blocked login resends the verification email."""
+        from django.core import mail
+        client = APIClient()
+        client.post('/api/v1/orgs/gate-org/patient-signup/', {
+            'email': 'resend@test.com',
+            'password': 'Str0ng!Pass99',
+            'given_name': 'Resend',
+            'family_name': 'Test',
+        })
+        mail.outbox.clear()  # Clear the signup verification email.
+        resp = client.post('/api/auth/login/', {
+            'username': 'resend@test.com',
+            'password': 'Str0ng!Pass99',
+        })
+        self.assertEqual(resp.status_code, 403)
+        self.assertTrue(any('resend@test.com' in m.to for m in mail.outbox))
+
+    def test_signup_then_login_blocked_until_verified(self):
+        """Full flow: signup -> login blocked -> verify -> login succeeds."""
+        import re
+        from django.core import mail
+        client = APIClient()
+        # Sign up
+        resp = client.post('/api/v1/orgs/gate-org/patient-signup/', {
+            'email': 'flow@test.com',
+            'password': 'Str0ng!Pass99',
+            'given_name': 'Flow',
+            'family_name': 'Test',
+        })
+        self.assertEqual(resp.status_code, 201)
+        self.assertTrue(resp.data['email_verification_required'])
+
+        # Login blocked
+        login_resp = client.post('/api/auth/login/', {
+            'username': 'flow@test.com',
+            'password': 'Str0ng!Pass99',
+        })
+        self.assertEqual(login_resp.status_code, 403)
+        self.assertEqual(login_resp.data['code'], 'email_not_verified')
+
+        # Verify email via token
+        token = re.search(r'verify-email\?token=(\S+)', mail.outbox[-1].body).group(1)
+        verify_resp = APIClient().post('/api/v1/auth/verify-email/', {'token': token})
+        self.assertEqual(verify_resp.status_code, 200)
+
+        # Login succeeds
+        login_resp = client.post('/api/auth/login/', {
+            'username': 'flow@test.com',
+            'password': 'Str0ng!Pass99',
+        })
+        self.assertEqual(login_resp.status_code, 200)
+        self.assertIn('user', login_resp.data)
+
+    def test_oauth_account_without_password_can_login(self):
+        """OAuth/SSO accounts (no usable password) bypass the email check."""
+        identity = Identity.objects.create_user(
+            email='oauth@test.com', password='Str0ng!Pass99',
+        )
+        identity.set_unusable_password()
+        identity.save()
+        # OAuth users authenticate through their provider, not through login_view.
+        # But if they somehow hit login_view with credentials, the unusable password
+        # means authenticate() returns None, not a 403.
+        resp = APIClient().post('/api/auth/login/', {
+            'username': 'oauth@test.com',
+            'password': 'anything',
+        })
+        # authenticate() returns None for unusable password -> 401 not 403
+        self.assertEqual(resp.status_code, 401)
+
+
+@override_settings(
+    EMAIL_BACKEND='django.core.mail.backends.locmem.EmailBackend',
+    APP_BASE_URL='https://app.test',
+)
 class SelfSignupEmailTrustTest(TestCase):
     """A self-signed-up address is a claim, and nothing may be granted on a claim.
 
@@ -15784,8 +15926,12 @@ class SelfSignupEmailTrustTest(TestCase):
         """The attack: sign up at a public org, claiming a trusted domain."""
         from omop_core.models import OrgTrust
         OrgTrust.objects.create(granting_org=self.private, trusted_domain='trusted.org')
-        client, resp = self._signup('attacker@trusted.org')
+        _, resp = self._signup('attacker@trusted.org')
         self.assertEqual(resp.status_code, 201)
+        # Signup no longer auto-logs in; authenticate to test authorization.
+        identity = Identity.objects.get(email='attacker@trusted.org')
+        client = APIClient()
+        client.force_authenticate(identity)
         self.assertEqual(self._reads_private_patient(client), 404)
         user = client.get('/api/v1/user/').data['user']
         self.assertFalse(user['email_verified'])
@@ -15795,10 +15941,16 @@ class SelfSignupEmailTrustTest(TestCase):
         """The legitimate user is not locked out: the link restores the trust."""
         from omop_core.models import OrgTrust
         OrgTrust.objects.create(granting_org=self.private, trusted_domain='trusted.org')
-        client, _ = self._signup('real@trusted.org')
+        _, _ = self._signup('real@trusted.org')
+        identity = Identity.objects.get(email='real@trusted.org')
+        client = APIClient()
+        client.force_authenticate(identity)
         self.assertEqual(self._reads_private_patient(client), 404)
         resp = APIClient().post('/api/v1/auth/verify-email/', {'token': self._token_from_last_email()})
         self.assertEqual(resp.status_code, 200)
+        # Refresh identity after verification changed the DB.
+        identity.refresh_from_db()
+        client.force_authenticate(identity)
         self.assertEqual(self._reads_private_patient(client), 200)
 
     def test_invitation_acceptance_and_federated_logins_count_as_verified(self):
@@ -15859,8 +16011,12 @@ class SelfSignupEmailTrustTest(TestCase):
     # -- the link itself -------------------------------------------------------
 
     def test_inviting_an_existing_unverified_login_waits_for_mailbox_proof(self):
-        client, _ = self._signup('doctor@elsewhere.com')
+        _, _ = self._signup('doctor@elsewhere.com')
         identity = Identity.objects.get(email='doctor@elsewhere.com')
+        # Signup no longer auto-logs in; authenticate explicitly for the
+        # authorization checks below.
+        client = APIClient()
+        client.force_authenticate(identity)
         admin = Identity.objects.create_user(email='operator@example.com', is_staff=True)
         inviter = APIClient()
         inviter.force_authenticate(admin)
@@ -15883,7 +16039,10 @@ class SelfSignupEmailTrustTest(TestCase):
         identity.refresh_from_db()
         self.assertTrue(identity.has_verified_email)
         self.assertFalse(identity.check_password(self.PASSWORD))
-        self.assertIn(self._reads_private_patient(client), (401, 403))
+        # The invitation acceptance changed the password, so a fresh
+        # unauthenticated client represents the invalidated session.
+        stale_client = APIClient()
+        self.assertIn(self._reads_private_patient(stale_client), (401, 403))
 
     def test_verification_works_with_a_session_cookie_and_without_csrf_token(self):
         client = APIClient(enforce_csrf_checks=True)
@@ -15987,16 +16146,24 @@ class SelfSignupEmailTrustTest(TestCase):
         self.assertIn(
             APIClient().post('/api/v1/auth/verify-email/resend/').status_code, (401, 403),
         )
-        client, _ = self._signup('user@example.com')
+        _, _ = self._signup('user@example.com')
+        identity = Identity.objects.get(email='user@example.com')
+        client = APIClient()
+        client.force_authenticate(identity)
         sent_before = len(mail.outbox)
         self.assertEqual(client.post('/api/v1/auth/verify-email/resend/').status_code, 200)
         self.assertEqual(len(mail.outbox), sent_before + 1)
         APIClient().post('/api/v1/auth/verify-email/', {'token': self._token_from_last_email()})
+        identity.refresh_from_db()
+        client.force_authenticate(identity)
         self.assertEqual(client.post('/api/v1/auth/verify-email/resend/').status_code, 200)
         self.assertEqual(len(mail.outbox), sent_before + 1)
 
     def test_normal_api_traffic_does_not_consume_the_resend_limit(self):
-        client, _ = self._signup('resend@example.com')
+        _, _ = self._signup('resend@example.com')
+        identity = Identity.objects.get(email='resend@example.com')
+        client = APIClient()
+        client.force_authenticate(identity)
         for _ in range(4):
             self.assertEqual(client.get('/api/v1/user/').status_code, 200)
         for _ in range(3):
@@ -18882,7 +19049,7 @@ class WearableUploadEndpointTest(TestCase):
 
 # ---------------------------------------------------------------------------
 # Bulk OMOP row write endpoint
-# (contract summarised in CLAUDE.md, "Bulk OMOP Row Writes")
+# (contract summarised in AGENTS.md, "Bulk OMOP Row Writes")
 # ---------------------------------------------------------------------------
 
 @override_settings(SERVICE_AUTH_SCOPES='patient/*.read patient/*.write')
@@ -23461,6 +23628,57 @@ class CodeMappingLoadedSinceProposalTest(TestCase):
         self.assertEqual(mapping.pk, queued.pk)
         self.assertEqual(mapping.status, 'proposed')
         self.assertEqual(mapping.target_concept.vocabulary_id, 'HK-Drug')
+
+    def _hcpcs_j_code(self, code='J9041', concept_id=40_000_201):
+        hcpcs, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='HCPCS',
+            defaults={'vocabulary_name': 'HCPCS', 'vocabulary_reference': 'x',
+                      'vocabulary_version': '2026', 'vocabulary_concept_id': 0},
+        )
+        ConceptClass.objects.get_or_create(
+            concept_class_id='HCPCS', defaults={'concept_class_name': 'HCPCS', 'concept_class_concept_id': 0},
+        )
+        return self._concept(concept_id, code, hcpcs, self.drug_domain, 'HCPCS', None)
+
+    def test_a_non_standard_direct_hit_resolves_through_its_maps_to(self):
+        """#2300: an HCPCS J-code is the RxNorm ingredient it maps to, never its own id."""
+        j_code = self._hcpcs_j_code()
+        ingredient = self._concept(
+            40_000_202, '1234', self.rxnorm, self.drug_domain, 'Quant Clinical Drug', 'S',
+        )
+        maps_to, _ = Relationship.objects.get_or_create(
+            relationship_id='Maps to',
+            defaults={'relationship_name': 'Maps to', 'is_hierarchical': 0, 'defines_ancestry': 0,
+                      'reverse_relationship_id': 'Mapped from', 'relationship_concept_id': 0},
+        )
+        ConceptRelationship.objects.create(
+            concept_1=j_code, concept_2=ingredient, relationship=maps_to,
+            valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+
+        concept, mapping = self._resolve_before_load('J9041', 'HCPCS', 'drug_exposure')
+
+        self.assertEqual(concept.concept_id, ingredient.concept_id)
+        self.assertEqual(mapping.status, 'approved')
+        self.assertEqual(mapping.origin_system, 'athena-direct')
+        self.assertEqual(mapping.source_concept_id, j_code.concept_id)
+        self.assertEqual(mapping.target_concept_id, ingredient.concept_id)
+        self.assertEqual(mapping.destination_vocabulary_id, 'RxNorm')
+
+    def test_a_non_standard_direct_hit_without_a_maps_to_stays_with_a_curator(self):
+        """#2300: loading HCPCS must not approve a J-code to a non-standard Drug concept."""
+        self._hcpcs_j_code()
+
+        concept, mapping = self._resolve_before_load('J9041', 'HCPCS', 'drug_exposure')
+
+        self.assertIsNone(concept)
+        self.assertEqual(mapping.status, 'proposed')
+        self.assertNotEqual(mapping.origin_system, 'athena-direct')
+        self.assertFalse(
+            SourceCodeConceptMapping.objects.filter(
+                source_vocabulary_id='HCPCS', source_code='J9041', status='approved',
+            ).exists()
+        )
 
     def test_loinc_gap_yields_once_loinc_is_loaded(self):
         _, gap = self._resolve_before_load('2160-0', 'LOINC', 'measurement')

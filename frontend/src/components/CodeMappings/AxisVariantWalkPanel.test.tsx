@@ -49,6 +49,27 @@ describe('AxisVariantWalkPanel', () => {
     expect(rows[1]).toHaveTextContent(/Component\s*0\s*—\s*0\s*0/);
   });
 
+  it('shows the basedOn count a walk made, and says when a walk did not count it (#2296)', async () => {
+    const counted: Walk = { ...done, axis_evidence: { ...done.axis_evidence!, codes_with_units: 40000, distinct_units_total: 12,
+      codes_with_based_on: 2500, distinct_based_on_total: 3, distinct_based_on: { 'Complete blood count': 2000 } } };
+    get.mockResolvedValue({ data: { ...idle, last: counted, completed: counted } });
+    await renderPanel();
+    const panel = screen.getByRole('region', { name: 'Source-code walk' });
+    expect(panel).toHaveTextContent('2,500 of 41,000 codes have BasedOn references (3 distinct)');
+    expect(panel).not.toHaveTextContent('were not counted');
+  });
+
+  it('does not present an older walk\'s specimen count as a BasedOn count (#2296)', async () => {
+    const stale = { ...done, axis_evidence: { ...done.axis_evidence!, codes_with_units: 40000,
+      codes_with_specimens: 0, distinct_specimens: {}, distinct_specimens_total: 0 } } as Walk;
+    get.mockResolvedValue({ data: { ...idle, last: stale, completed: stale } });
+    await renderPanel();
+    const panel = screen.getByRole('region', { name: 'Source-code walk' });
+    expect(panel).toHaveTextContent('40,000 of 41,000 codes have unit strings');
+    expect(panel).not.toHaveTextContent('have BasedOn references');
+    expect(panel).toHaveTextContent('BasedOn references were not counted by this walk');
+  });
+
   it('starts a rebuild walk and shows the request it made', async () => {
     get.mockResolvedValue({ data: idle });
     post.mockResolvedValue({ data: { ...running, created: true } });

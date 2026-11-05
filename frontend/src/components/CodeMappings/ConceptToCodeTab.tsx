@@ -32,8 +32,8 @@ type Source = {
   source_label_norm?: string | null;
   /** Distinct units this code has been observed in (from source_unit_evidence). */
   units?: string[];
-  /** LOINC system axis (specimen type), e.g. "Ser", "Plas", "Bld". */
-  specimen?: string;
+  /** FHIR basedOn display labels (e.g. order names like "Complete blood count"). */
+  based_on?: string[];
   /** The ranker's confidence (0-1) in this source → concept pairing. */
   confidence?: number | null;
   /** Saved in the full editor since the preview: no longer a bulk-review row. */
@@ -44,8 +44,8 @@ type Source = {
 type ConfidenceOrder = '' | '-confidence' | 'confidence';
 type Page<T> = { results: T[]; page: number; page_size: number; total: number };
 type Run = {
-  run_id: string; state: string; error: string; done: number; total: number;
-  selection: { limit: number; include_zero_seen: boolean; include_declined?: boolean; ranking_model?: string };
+  run_id: string; state: string; error: string; done: number; total: number; destinations: number;
+  selection: { limit: number; include_zero_seen: boolean; include_declined?: boolean; ranking_model?: string; auto_propose_threshold?: number | null };
   activity: { concept: { concept_id: number }; candidates: Source[] }[];
 };
 /** How many concepts a page may show: more per page lets a curator drag a
@@ -81,7 +81,7 @@ function Pagination({ data, change, disabled = false }: {
 }
 
 type SourceMode = 'linked' | 'candidates';
-/** A stored mapping's status; Existing mappings shows one group per status (#2010). */
+/** A stored mapping's status; Mapped Codes shows one group per status (#2010). */
 type Status = 'approved' | 'proposed' | 'rejected';
 const STATUSES: Status[] = ['approved', 'proposed', 'rejected'];
 type SourcePage = Page<Source> & { zero_seen: number; status_counts?: Record<Status, number> };
@@ -114,6 +114,10 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange, initialC
   const [writing, setWriting] = useState(false);
   // The Edit Mapping dialog sits inside this one; Escape must not close both.
   const [editing, setEditing] = useState(false);
+  // Cache suggestion state per concept so it survives dialog close/reopen.
+  // The cache lives for the lifetime of the tab, which is the natural scope.
+  // useState (not useRef) so the identity is stable and accessible during render.
+  const [suggestCache] = useState(() => new Map<number, { run: Run | null; previousCandidates: Source[] }>());
 
   useEffect(() => {
     let active = true;
@@ -287,7 +291,7 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange, initialC
         </div>
         <SourceCoverage key={selected.concept_id} concept={selected} canApprove={canApprove}
           onWriting={value => { setWriting(value); onWritingChange?.(value); }} onSaved={() => setRevision(value => value + 1)}
-          onEditingChange={setEditing} />
+          onEditingChange={setEditing} suggestCache={suggestCache} />
       </Dialog.Content>
     </Dialog.Portal>}
   </Dialog.Root>;
@@ -411,11 +415,13 @@ function useSourceGroup(conceptId: number, status: Status, enabled: boolean, que
   return { data, setData, page, setPage, loading, failed, reset };
 }
 
-function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChange }: {
+function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChange, suggestCache }: {
   concept: Concept; canApprove: boolean; onSaved: () => void; onWriting: (value: boolean) => void;
   onEditingChange?: (value: boolean) => void;
+  suggestCache: Map<number, { run: Run | null; previousCandidates: Source[] }>;
 }) {
-  // Suggested source codes is the view a curator comes for, so it opens first (#2010).
+  const cached = suggestCache.get(concept.concept_id);
+  // Suggested Codes is the view a curator comes for, so it opens first (#2010).
   const [mode, setMode] = useState<SourceMode>('candidates');
   const [search, setSearch] = useState('');
   const [seenOnly, setSeenOnly] = useState(true);
@@ -425,10 +431,18 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
   // so the proposals waiting for review are what the curator sees first.
   const [open, setOpen] = useState<Record<Status, boolean>>({ approved: false, proposed: true, rejected: false });
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [run, setRun] = useState<Run | null>(null);
+  const [run, setRun] = useState<Run | null>(cached?.run ?? null);
   // Candidates from previous finished runs, keyed by source key for dedup.
   // A new run's results overlay these; approvals and patches apply to both.
-  const [previousCandidates, setPreviousCandidates] = useState<Source[]>([]);
+  const [previousCandidates, setPreviousCandidates] = useState<Source[]>(cached?.previousCandidates ?? []);
+  // All candidates ever seen across runs, for building exclude_keys.
+  // Updated synchronously in start() and the polling callback so it is
+  // always current — an effect would lag behind the click that reads it,
+  // and an inline run (no polling) would never trigger the polling path
+  // at all, leaving exclude_keys empty on the second Suggest (#2274).
+  const seenRef = useRef<Map<string, Source>>(
+    new Map((cached?.previousCandidates ?? []).map(row => [sourceKey(row), row])),
+  );
   // Rows saved or approved while a run is still streaming, by source key. The
   // poll replaces the run wholesale, so edits live beside it and are laid over
   // its candidates on every render (#2028).
@@ -436,6 +450,9 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
   const [starting, setStarting] = useState(false);
   const [ranker, setRanker] = useState('jev');
   const [limit, setLimit] = useState(25);
+  // Auto-propose candidates above this confidence threshold (#2269).
+  const [autoPropose, setAutoPropose] = useState(true);
+  const [proposeThreshold, setProposeThreshold] = useState(80);
   // Retry the sources a ranker declined in earlier runs, instead of skipping them (#2034).
   const [retryDeclined, setRetryDeclined] = useState(false);
   const [strategies, setStrategies] = useState({ umls: true, lexical: true });
@@ -468,6 +485,24 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
   const writingRef = useRef(false);
   const active = useRef(true);
   useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
+
+  // Keep refs to current state so the unmount cleanup captures the latest values.
+  const runRef = useRef(run);
+  const prevCandRef = useRef(previousCandidates);
+  useEffect(() => { runRef.current = run; }, [run]);
+  useEffect(() => { prevCandRef.current = previousCandidates; }, [previousCandidates]);
+  // Save suggestion state to the parent's cache on unmount so it survives
+  // dialog close/reopen (#2253).
+  useEffect(() => {
+    return () => {
+      if (runRef.current || prevCandRef.current.length) {
+        suggestCache.set(concept.concept_id, {
+          run: runRef.current, previousCandidates: prevCandRef.current,
+        });
+      }
+    };
+  }, [concept.concept_id, suggestCache]);
+
   const running = starting || run?.state === 'queued' || run?.state === 'running';
   const finishedRun = run && !running ? run.run_id : null;
 
@@ -492,19 +527,39 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
     // A finished run recorded declines, which the estimate now skips.
   }, [concept.concept_id, strategyKey, seenOnly, retryDeclined, revision, finishedRun]);
 
+  // Poll a queued/running run until it finishes.  When a terminal state is
+  // detected, absorb candidates into seenRef and previousCandidates so the
+  // next run's exclude_keys skips them.  This happens here (inside the
+  // async polling callback, not in a synchronous effect body) so the lint
+  // rule set-state-in-effect is satisfied, and it handles Celery runs.
+  // Inline runs skip polling entirely; their candidates are absorbed in
+  // start() before the next POST fires — see the comment there (#2274).
   useEffect(() => {
     if (!run || !['queued', 'running'].includes(run.state)) return;
     let current = true;
     const timer = window.setTimeout(async () => {
       try {
         const { data: next } = await api.get<Run>(`/v1/concept-to-code/suggest-runs/${run.run_id}/`);
-        if (current) setRun(next);
+        if (current) {
+          setRun(next);
+          if (next.state === 'success' || next.state === 'failure') {
+            const finished = (next.activity.find(e => e.concept.concept_id === concept.concept_id)?.candidates ?? [])
+              .filter((item: Source) => !item.declined);
+            for (const item of finished) seenRef.current.set(sourceKey(item), item);
+            if (finished.length) {
+              setPreviousCandidates([...seenRef.current.values()]);
+            }
+            // Auto-proposed mappings land in the Existing Mappings groups; bump
+            // revision so those groups reload once the run finishes (#2269).
+            if (next.destinations) setRevision(v => v + 1);
+          }
+        }
       } catch {
         if (current) { setError('Could not read search progress. Run the search again to retry.'); setRun(previous => previous ? { ...previous, state: 'failure' } : null); }
       }
     }, 1500);
     return () => { current = false; window.clearTimeout(timer); };
-  }, [run]);
+  }, [run, concept.concept_id]);
 
   const changeMode = (next: typeof mode) => { setMode(next); setSearch(''); resetView(); setError(''); };
   const toggleGroup = (status: Status) => {
@@ -515,31 +570,33 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
     setSelected(new Set());
   };
   const start = async () => {
-    // Accumulate the current run's candidates before starting a new one so
-    // previous results stay visible while the next batch streams in.
-    // Read `run` directly (stable in this click handler) rather than nesting
-    // setPreviousCandidates inside a setRun updater, which would be impure.
+    // Absorb the outgoing run's candidates into seenRef so exclude_keys
+    // always reflects every candidate the frontend has shown, regardless of
+    // whether the run completed via polling (Celery) or inline (the POST
+    // already returned state='success').  seenRef is a plain Map mutated
+    // synchronously, so it is current when we build excludeKeys below —
+    // unlike previousCandidates state, which would lag behind by one render
+    // and produce an empty exclude_keys on the second inline click (#2274).
     if (run?.activity.length) {
       const raw = run.activity.find(event => event.concept.concept_id === concept.concept_id)?.candidates ?? [];
-      // Apply the patched overlay so approvals made during the run survive the
-      // snapshot, and exclude rows the ranker declined (they re-surface only
-      // when the curator explicitly checks "Retry declined").
       const finished = raw
         .map(item => { const edit = patched[sourceKey(item)]; return edit ? { ...item, ...edit } as Source : item; })
         .filter(item => !item.declined);
-      if (finished.length) {
-        setPreviousCandidates(accumulated => {
-          const seen = new Set(finished.map(sourceKey));
-          // Latest run wins: drop old duplicates, then append the finished run's rows.
-          return [...accumulated.filter(row => !seen.has(sourceKey(row))), ...finished];
-        });
-      }
+      for (const item of finished) seenRef.current.set(sourceKey(item), item);
+      if (finished.length) setPreviousCandidates([...seenRef.current.values()]);
     }
-    setRun(null); setStarting(true); setError(''); setProgress(''); setSelected(new Set()); setPatched({}); setExpanded(new Set()); setMode('candidates');
+    // Build exclude_keys from the ref (always current) so the backend skips
+    // every source the frontend has already shown (#2262).
+    const excludeKeys = [...seenRef.current.values()].map(
+      row => [row.source_vocabulary_id, row.source_code] as [string, string],
+    );
+    setRun(null); setStarting(true); setError(''); setProgress(''); setSelected(new Set()); setPatched({}); setMode('candidates');
     try {
+      const threshold = autoPropose && ranker !== 'none' ? proposeThreshold / 100 : null;
       const { data: next } = await api.post<Run>('/v1/concept-to-code/suggest/', {
         concept_ids: [concept.concept_id], strategies: Object.keys(strategies).filter(key => strategies[key as keyof typeof strategies]),
         limit, include_zero_seen: !seenOnly, ranking_model: ranker, include_declined: retryDeclined,
+        exclude_keys: excludeKeys, auto_propose_threshold: threshold,
       });
       if (active.current) setRun(next);
     } catch (failure) { if (active.current) setError(destinationError(failure)); }
@@ -795,7 +852,7 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
   const retry = () => { resetView(); setError(''); setRevision(value => value + 1); };
   return <section aria-label={`Source codes for ${concept.concept_name}`} className="space-y-4">
     <div role="group" aria-label="Source code views" className="flex flex-wrap gap-2">
-      {([['linked', 'Existing mappings'], ['candidates', 'Suggested source codes']] as const).map(([key, label]) =>
+      {([['candidates', 'Suggested Codes'], ['linked', 'Mapped Codes']] as const).map(([key, label]) =>
         <button key={key} className={`${button} ${mode === key ? 'bg-slate-100 font-semibold' : ''}`} disabled={writing} aria-pressed={mode === key}
           onClick={() => changeMode(key)}>{label}</button>)}
     </div>
@@ -811,6 +868,13 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
         <label className="flex items-center gap-1 text-sm" title="Search the sources a ranker declined in earlier runs again, instead of skipping them">
           <input type="checkbox" checked={retryDeclined} disabled={busy} onChange={event => setRetryDeclined(event.target.checked)} />
           Retry declined</label>
+        <label className="flex items-center gap-1 text-sm" title="Automatically propose source codes with confidence at or above this threshold">
+          <input type="checkbox" checked={autoPropose} disabled={busy || ranker === 'none'} onChange={event => setAutoPropose(event.target.checked)} />
+          Auto-propose &ge;</label>
+        <input type="number" aria-label="Auto-propose confidence threshold" className={`${input} w-16`}
+          value={proposeThreshold} min={1} max={100} disabled={busy || !autoPropose || ranker === 'none'}
+          onChange={event => setProposeThreshold(Number(event.target.value))} />
+        <span className="text-sm text-slate-500">%</span>
         <span className="flex flex-nowrap items-center gap-3">
           <select aria-label="Source suggestion ranker" className={input} value={ranker} disabled={busy} onChange={event => setRanker(event.target.value)}>
             <option value="jev">Jev assistance</option><option value="anthropic">Anthropic assistance</option>
@@ -826,7 +890,7 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
     <p className="text-xs text-slate-500">Review clinical meaning before selecting codes. Suggestions do not change mappings; approval updates the mapping and matching stored clinical rows.
       {' '}New vocabulary codes have Seen = 0; approving one proposes it from this preview first.</p>
     {run && mode === 'candidates' && <p role="status" className="text-sm text-slate-600">
-      {running ? 'Searching local vocabulary evidence…' : `${currentRunCandidates.length} candidates retrieved (limit ${run.selection.limit})${previousCandidates.length ? `, ${candidates.length} total across runs` : ''}.`}
+      {running ? 'Searching local vocabulary evidence…' : `${currentRunCandidates.length} candidates retrieved (limit ${run.selection.limit})${previousCandidates.length ? `, ${candidates.length} total across runs` : ''}${run.destinations ? `, ${run.destinations} auto-proposed` : ''}.`}
       {!running && declinedHidden > 0 && ` ${declinedHidden} declined by the ranker and hidden${run.selection.include_declined ? '' : '; the next run moves on to other codes'}.`}
       {!running && unrankedHidden > 0 && ` ${unrankedHidden} could not be ranked (the ranker was unavailable) and ${unrankedHidden === 1 ? 'is' : 'are'} hidden.`}
       {run.error && ` ${run.error}`}
@@ -952,16 +1016,18 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
           onClick={() => void openEditor(row)}>{row.source_vocabulary_id || 'Uncoded'}:{row.source_code}</button><AxisVariantFlag count={row.axis_variant_count} />
           <AxisVariantList variants={row.axis_variants} canApprove={canApprove} busy={locked} onApprove={variant => void approveVariant(row, variant)} /></td>
         <td className="p-2 text-slate-500">{row.source_code_description || '—'}
-          {(row.units?.length || row.specimen) ? <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-xs">
+          {(row.units?.length || row.based_on?.length) ? <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-xs">
             {row.units?.length ? <span title="Units observed"><span className="font-medium text-slate-600">Units:</span> {row.units.join(', ')}</span> : null}
-            {row.specimen ? <span title="Specimen type (LOINC system)"><span className="font-medium text-slate-600">Specimen:</span> {row.specimen}</span> : null}
+            {row.based_on?.length ? <span title="FHIR basedOn (order context)"><span className="font-medium text-slate-600">BasedOn:</span> {row.based_on.join(', ')}</span> : null}
           </div> : null}
         </td><td className="p-2 text-right tabular-nums">{row.occurrence_count}</td>
         <td className="p-2 text-xs">{row.destination_concept_name || 'None'}{row.destination_concept_id && <div className="mt-1 text-slate-500">
           OMOP {row.destination_concept_id} · {row.destination_standard_concept === 'S' ? 'Standard' : 'Nonstandard'}</div>}</td>
         <td className="p-2 text-xs"><span className={row.status === 'approved' ? 'font-medium text-green-800' : 'text-slate-700'}>{row.status === 'unmapped' ? 'Not yet mapped' : row.status}</span>
-          {(row.status === 'proposed' || mode === 'candidates') && <div className="mt-1 text-slate-700">
-            Confidence: {row.confidence != null ? <span className="font-medium tabular-nums">{percent(row.confidence)}</span> : <span className="text-slate-500">not scored</span>}</div>}
+          <div className="mt-1 text-slate-700">
+            {row.confidence != null
+              ? <>Confidence: <span className="font-medium tabular-nums">{percent(row.confidence)}</span></>
+              : <span className="text-slate-500">not scored</span>}</div>
           {row.edited && <div className="mt-1 text-slate-700">Saved in the editor</div>}</td>
       </tr>)}
     </React.Fragment>;
@@ -983,13 +1049,20 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
           disabled={locked} aria-haspopup="dialog" title={`Open ${row.source_code} in Edit Mapping`}
           onClick={() => void openEditor(row)}>{row.source_vocabulary_id || 'Uncoded'}:{row.source_code}</button><AxisVariantFlag count={row.axis_variant_count} />
           <AxisVariantList variants={row.axis_variants} canApprove={canApprove} busy={locked} onApprove={variant => void approveVariant(row, variant)} /></td>
-        <td className="p-2">{row.source_code_description || '—'}</td><td className="p-2 text-right tabular-nums">{row.occurrence_count}</td>
+        <td className="p-2">{row.source_code_description || '—'}
+          {(row.units?.length || row.based_on?.length) ? <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-xs">
+            {row.units?.length ? <span title="Units observed"><span className="font-medium text-slate-600">Units:</span> {row.units.join(', ')}</span> : null}
+            {row.based_on?.length ? <span title="FHIR basedOn (order context)"><span className="font-medium text-slate-600">BasedOn:</span> {row.based_on.join(', ')}</span> : null}
+          </div> : null}
+        </td><td className="p-2 text-right tabular-nums">{row.occurrence_count}</td>
         <td className="p-2 text-xs">{row.destination_concept_name || 'None'}{row.destination_concept_id && <div className="mt-1 text-slate-500">
           OMOP {row.destination_concept_id} · {row.destination_standard_concept === 'S' ? 'Standard' : 'Nonstandard'}</div>}</td>
         <td className="p-2 text-xs"><span className={row.status === 'approved' ? 'font-medium text-green-800' : 'text-slate-700'}>{row.status === 'unmapped' ? 'Not yet mapped' : row.status}</span>
           {!!row.evidence?.length && <div className="mt-1 text-slate-500">{row.evidence.join(' + ')}</div>}
-          {(row.status === 'proposed' || mode === 'candidates') && <div className="mt-1 text-slate-700">
-            Confidence: {row.confidence != null ? <span className="font-medium tabular-nums">{percent(row.confidence)}</span> : <span className="text-slate-500">not scored</span>}</div>}
+          <div className="mt-1 text-slate-700">
+            {row.confidence != null
+              ? <>Confidence: <span className="font-medium tabular-nums">{percent(row.confidence)}</span></>
+              : <span className="text-slate-500">not scored</span>}</div>
           {row.verdict === 'supported' && <div className="mt-1 text-sky-800">Model-supported; curator review required</div>}
           {row.note && <p className="mt-1 max-w-xs text-slate-500">{row.note}</p>}
           {row.edited && <div className="mt-1 text-slate-700">Saved in the editor</div>}</td>

@@ -17,9 +17,9 @@ from omop_core.services.mappings import (
     SUGGESTED_FIELD_CODES,
 )
 from omop_core.services.patient_record_service import (
+    LAB_FIELDS,
     PATIENT_RECORD_OMOP_MAPPED_FIELDS,
     _LAB_FIELD_ALIASES,
-    _LOINC_LAB_FIELDS,
 )
 from omop_core.services.provenance_registry import get_registry
 from omop_core.services.formula_evaluator import validate_formula
@@ -109,7 +109,7 @@ _COMPUTED_FIELDS = frozenset({
     # the next refresh.
     'english_speak', 'english_read', 'english_write', 'english_understand',
     'spanish_speak', 'spanish_read', 'spanish_write', 'spanish_understand',
-    'bmi', 'disease_slug',
+    'bmi', 'disease_slug', 'disease_slugs',
     'meets_crab', 'meets_slim', 'involved_uninvolved_ratio',
     'active_infection_status', 'active_malignancies',
     'no_active_infection_status',
@@ -165,6 +165,7 @@ def _get_explanation(field_name: str, category: str) -> str | None:
         explanations = {
             'bmi': 'Calculated from weight and height',
             'disease_slug': 'URL-safe slug derived from disease name',
+            'disease_slugs': 'Every cancer on the record, as disease slugs',
             'meets_crab': 'Derived from CRAB criteria fields',
             'meets_slim': 'Derived from SLiM criteria fields',
             'involved_uninvolved_ratio': 'Calculated from kappa and lambda FLC values',
@@ -181,12 +182,10 @@ for aliases in _LAB_FIELD_ALIASES.values():
     _ALL_ALIASES.update(aliases)
 
 # Fields that are editable via the LOINC lab write-through: either in
-# LAB_FIELD_TO_LOINC (the write map) or as a target in _LOINC_LAB_FIELDS
-# (the derivation map, which names fields the extractor can populate via a
-# known LOINC code — those 18 recovered attributions from #596/#607).
-_LOINC_EDITABLE_FIELDS = frozenset(LAB_FIELD_TO_LOINC.keys()) | frozenset(
-    field_name for field_name, _cast in _LOINC_LAB_FIELDS.values()
-)
+# LAB_FIELD_TO_LOINC (the write map) or in LAB_FIELDS (the lab fields the
+# extractor derives, routed through the curation tables — those 18 recovered
+# attributions from #596/#607). A field inventory, not a code route.
+_LOINC_EDITABLE_FIELDS = frozenset(LAB_FIELD_TO_LOINC.keys()) | LAB_FIELDS
 
 
 def _get_field_type_label(field) -> str:
@@ -271,7 +270,7 @@ _TAB_DISEASE = frozenset({
     # beta2_microglobulin moved to _TAB_LABS with the section that renders it
     # (#955). _TAB_DISEASE is tested first, so leaving it here would make the
     # Labs entry dead and put the field on a tab that no longer shows it.
-    'ldh_level', 'disease_slug',
+    'ldh_level', 'disease_slug', 'disease_slugs',
     # Reclassified from "other"
     'tumor_size', 'lymph_node_status', 'metastasis_status',
     'biopsy_grade', 'biopsy_grade_depr', 'plasma_cell_leukemia',

@@ -69,9 +69,16 @@ variable "environment" {
   default     = "dev"
 }
 
+variable "athena_vocabulary_lfs_url" {
+  type        = string
+  default     = "https://github.com/healthkey-ai/omop-vocabularies"
+  description = "Public Git LFS repository publishing the Athena vocabulary and LOINC ZIPs with a manifest.json. Tried before the Drive folder."
+}
+
 variable "athena_vocabulary_gdrive_url" {
   type        = string
-  description = "Google Drive folder holding the Athena vocabulary ZIP, shared 'anyone with the link'. The release job refuses to run without it."
+  default     = ""
+  description = "Google Drive folder holding the Athena vocabulary ZIP, shared 'anyone with the link'. The fallback when the LFS repository cannot be reached. The release job refuses to run when neither source is set."
 }
 
 variable "admin_email" {
@@ -169,6 +176,7 @@ locals {
     CORS_ALLOWED_ORIGINS         = join(",", concat([for h in local.hosts : "https://${h}"], var.extra_cors_origins))
     APP_BASE_URL                 = local.app_base_url
     ADMIN_EMAIL                  = var.admin_email
+    ATHENA_VOCABULARY_LFS_URL    = var.athena_vocabulary_lfs_url
     ATHENA_VOCABULARY_GDRIVE_URL = var.athena_vocabulary_gdrive_url
     CELERY_BROKER_URL            = local.redis_url
   }, var.extra_env)

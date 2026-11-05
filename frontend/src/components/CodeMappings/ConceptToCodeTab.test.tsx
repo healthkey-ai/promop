@@ -23,7 +23,7 @@ const source = {
 };
 const page = <T,>(results: T[]) => ({ results, total: results.length, page: 1, page_size: 50, zero_seen: 3 });
 const run = (state = 'success') => ({
-  run_id: 'run-1', state, error: '', total: 1, done: state === 'success' ? 1 : 0,
+  run_id: 'run-1', state, error: '', total: 1, done: state === 'success' ? 1 : 0, destinations: 0,
   selection: { limit: 25, include_zero_seen: false },
   activity: [{ concept: { concept_id: 123 }, candidates: [{ ...source, evidence: ['umls'], verdict: 'review' }] }],
 });
@@ -35,9 +35,9 @@ beforeEach(() => {
   post.mockResolvedValue({ data: { ...source, destination_concept_id: 123, status: 'approved' } });
 });
 
-/** The dialog opens on Suggested source codes (#2010); stored rows are under Existing mappings. */
+/** The dialog opens on Suggested Codes (#2010); stored rows are under Mapped Codes. */
 async function showExisting(dialog: HTMLElement = screen.getByRole('dialog')) {
-  fireEvent.click(within(dialog).getByRole('button', { name: 'Existing mappings' }));
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Mapped Codes' }));
 }
 
 async function selectConcept(canApprove = true) {
@@ -297,7 +297,7 @@ describe('concept-first curation', () => {
     await screen.findByText('1 candidates retrieved (limit 25).');
     expect(post).toHaveBeenCalledTimes(1);
     expect(post).toHaveBeenCalledWith('/v1/concept-to-code/suggest/', {
-      concept_ids: [123], strategies: ['umls', 'lexical'], limit: 25, include_zero_seen: false, ranking_model: 'jev', include_declined: false,
+      concept_ids: [123], strategies: ['umls', 'lexical'], limit: 25, include_zero_seen: false, ranking_model: 'jev', include_declined: false, exclude_keys: [], auto_propose_threshold: 0.8,
     });
     expect(screen.getByRole('button', { name: 'Approve selected (0)' })).toBeDisabled();
   });
@@ -413,6 +413,33 @@ describe('concept-first curation', () => {
   });
 });
 
+describe('suggest accumulation (#2274)', () => {
+  it('sends exclude_keys from a completed inline run on the second Suggest click', async () => {
+    const first = { ...source, mapping_id: null, source_code: 'A1', source_vocabulary_id: 'V1',
+      evidence: ['lexical'], verdict: 'review', confidence: 0.9, declined: false };
+    const firstRun = { ...run(), activity: [{ concept: { concept_id: 123 }, candidates: [first] }] };
+    post.mockResolvedValueOnce({ data: firstRun });
+    await selectConcept();
+    fireEvent.click(screen.getByRole('button', { name: 'Suggest source codes' }));
+    await screen.findByText('1 candidates retrieved (limit 25).');
+    // The first run's exclude_keys should be empty.
+    expect(post).toHaveBeenCalledWith('/v1/concept-to-code/suggest/',
+      expect.objectContaining({ exclude_keys: [] }));
+
+    // Now click Suggest again — the second run should exclude the first run's candidate.
+    const second = { ...source, mapping_id: null, source_code: 'B1', source_vocabulary_id: 'V2',
+      evidence: ['lexical'], verdict: 'review', confidence: 0.8, declined: false };
+    const secondRun = { ...run(), run_id: 'run-2',
+      activity: [{ concept: { concept_id: 123 }, candidates: [second] }] };
+    post.mockResolvedValueOnce({ data: secondRun });
+    fireEvent.click(screen.getByRole('button', { name: 'Suggest source codes' }));
+    // Second run retrieves 1 new candidate, 2 total across runs.
+    await screen.findByText(/1 candidates retrieved \(limit 25\), 2 total across runs/);
+    expect(post).toHaveBeenLastCalledWith('/v1/concept-to-code/suggest/',
+      expect.objectContaining({ exclude_keys: [['V1', 'A1']] }));
+  });
+});
+
 describe('axis variants on a source code (#2012)', () => {
   const glucose = { concept_id: 3020491, concept_name: 'Glucose [Moles/volume] in Serum or Plasma', concept_code: '14749-6', vocabulary_id: 'LOINC' };
   const variants = [
@@ -503,13 +530,13 @@ describe('suggestion confidence', () => {
     return screen.findByText('SNOMED:HIGH');
   }
 
-  it('shows the confidence of every proposed mapping in the last column', async () => {
+  it('shows the confidence of every mapping that has one, regardless of status', async () => {
     await openScored();
     const cell = (code: string) => screen.getByText(`SNOMED:${code}`).closest('tr')!.lastElementChild as HTMLElement;
     expect(cell('HIGH')).toHaveTextContent('Confidence: 85%');
     expect(cell('MID')).toHaveTextContent('Confidence: 55%');
-    expect(cell('NONE')).toHaveTextContent('Confidence: not scored');
-    expect(cell('DONE')).not.toHaveTextContent('Confidence');
+    expect(cell('NONE')).not.toHaveTextContent('Confidence');
+    expect(cell('DONE')).toHaveTextContent('Confidence: 90%');
   });
 
   it('orders by confidence from the last column header and back by Seen', async () => {
@@ -605,7 +632,7 @@ describe('opening a linked concept', () => {
     const handled = vi.fn();
     render(<ConceptToCodeTab canApprove initialConceptId={123} onInitialConceptHandled={handled} />);
     const dialog = await screen.findByRole('dialog', { name: 'Source codes for Serum albumin' });
-    expect(within(dialog).getByRole('button', { name: 'Suggested source codes' })).toHaveAttribute('aria-pressed', 'true');
+    expect(within(dialog).getByRole('button', { name: 'Suggested Codes' })).toHaveAttribute('aria-pressed', 'true');
     expect(get).toHaveBeenCalledWith('/v1/concept-to-code/123/');
     // Never the list's text search, which matches the digits in names and codes.
     expect(get).not.toHaveBeenCalledWith('/v1/concept-to-code/', expect.objectContaining({
@@ -621,15 +648,15 @@ describe('opening a linked concept', () => {
     expect(handled).toHaveBeenCalledTimes(1);
   });
 
-  it('opens a concept clicked in the list on Suggested source codes, with Existing mappings a click away (#2010)', async () => {
+  it('opens a concept clicked in the list on Suggested Codes, with Mapped Codes a click away (#2010)', async () => {
     render(<ConceptToCodeTab canApprove />);
     fireEvent.click(await screen.findByRole('button', { name: 'Serum albumin' }));
     const dialog = screen.getByRole('dialog', { name: 'Source codes for Serum albumin' });
-    expect(within(dialog).getByRole('button', { name: 'Suggested source codes' })).toHaveAttribute('aria-pressed', 'true');
+    expect(within(dialog).getByRole('button', { name: 'Suggested Codes' })).toHaveAttribute('aria-pressed', 'true');
     expect(within(dialog).getByText(/Run Suggest source codes to search/)).toBeInTheDocument();
     expect(get).not.toHaveBeenCalledWith('/v1/concept-to-code/123/', expect.anything());
     await showExisting(dialog);
-    expect(within(dialog).getByRole('button', { name: 'Existing mappings' })).toHaveAttribute('aria-pressed', 'true');
+    expect(within(dialog).getByRole('button', { name: 'Mapped Codes' })).toHaveAttribute('aria-pressed', 'true');
     await waitFor(() => expect(get).toHaveBeenCalledWith('/v1/concept-to-code/123/', expect.objectContaining({
       params: expect.objectContaining({ mode: 'linked', status: 'proposed' }) })));
   });
@@ -687,7 +714,7 @@ describe('editing a source code from a concept (#1915)', () => {
     // The run's own controls wait for it; the rows do not.
     expect(screen.getByRole('button', { name: 'Searching…' })).toBeDisabled();
     expect(screen.getByRole('checkbox', { name: 'Select SNOMED S1' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Existing mappings' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Mapped Codes' })).toBeEnabled();
     expect(code).toBeEnabled();
     fireEvent.click(code);
     expect(await screen.findByRole('dialog', { name: 'Edit Mapping' })).toBeInTheDocument();

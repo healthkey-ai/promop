@@ -94,7 +94,9 @@ DATABASE_URL="postgresql://postgres@localhost:5432/promop_dev" DEBUG=True \
   .venv/bin/python manage.py load_athena_vocabularies --gdrive
 ```
 
-`--gdrive` defaults to the shared PRomop vocabulary folder. See
+`--lfs` defaults to the public `healthkey-ai/omop-vocabularies` Git LFS
+repository and `--gdrive` to the shared PRomop vocabulary folder; given
+together, LFS is tried first and Drive is the fallback. See
 [docs/vocabularies.md](docs/vocabularies.md) for the required Athena selection
 scope and other load options, including `--archive` for a downloaded Athena
 zip, `--path` for an extracted Athena directory, and `--bucket` for
@@ -102,9 +104,11 @@ GCS-backed deployments.
 
 #### Render deployment requirement
 
-Set `ATHENA_VOCABULARY_GDRIVE_URL` to the folder containing the **full** Athena
-export before deploying. The production startup script fails closed when it is
-missing, migrates the schema through `0200`, loads that export, and then runs
+Set `ATHENA_VOCABULARY_LFS_URL` to the Git LFS repository publishing the
+**full** Athena export (`render.yaml` sets the public one), and optionally
+`ATHENA_VOCABULARY_GDRIVE_URL` to the Drive folder used as the fallback, before
+deploying. The production startup script fails closed when neither is set,
+migrates the schema through `0200`, loads that export, and then runs
 the remaining migrations. This ordering is required; it prevents migration
 `0201` from creating null-target HK-Labs-to-LOINC mappings.
 

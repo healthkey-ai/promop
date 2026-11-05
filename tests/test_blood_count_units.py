@@ -7,7 +7,7 @@ import pytest
 from rest_framework.test import APIClient
 
 from omop_core.models import FieldConceptMapping, Measurement, PatientRecord
-from omop_core.services.clinical_units import blood_count_to_canonical
+from omop_core.services.clinical_units import blood_count_to_canonical, count_unit
 from omop_core.services.patient_record_service import refresh_patient_record
 from tests.factories import ConceptFactory, MeasurementFactory, PatientRecordFactory, PersonFactory
 
@@ -98,16 +98,54 @@ def test_latest_unknown_blocks_older_code_and_display_fallbacks(code, field, ali
     assert getattr(record, alias + '_units') is None
 
 
+@pytest.mark.parametrize('text,ucum,expected', [
+    ('x10E3/uL', '10*3/uL', '10*3/uL'),     # the ETL names what the lab spelling means
+    ('K/cu mm', None, 'K/cu mm'),            # no concept: unreadable, as before
+    ('', '/uL', '/uL'), (None, '/uL', '/uL'), (None, None, None),
+    ('K/uL', '/L', 'K/uL'),                  # readable text wins over a converted concept
+    ('mg/dL', '10*3/uL', 'mg/dL'),           # readable, just not a count
+])
+def test_count_unit_reads_the_ucum_concept_only_when_the_text_is_unreadable(text, ucum, expected):
+    assert count_unit(text, ucum) == expected
+
+
 @pytest.mark.django_db
-def test_ucum_unit_concept_is_used_only_when_source_unit_absent():
+def test_ucum_unit_concept_stands_in_for_unreadable_or_absent_text():
     person = PersonFactory()
     measurement = MeasurementFactory(
         person=person, measurement_source_value='751-8', value_as_number=1500,
         unit_concept=ConceptFactory(vocabulary__vocabulary_id='UCUM', concept_code='/uL'),
     )
     assert refresh_patient_record(person).anc_thousand_per_ul == Decimal('1.5')
-    Measurement.objects.filter(pk=measurement.pk).update(unit_source_value='unknown')
+    Measurement.objects.filter(pk=measurement.pk).update(unit_source_value='/MM3')
+    assert refresh_patient_record(person).anc_thousand_per_ul == Decimal('1.5')
+    # Readable text with a different concept is #2249's unproven conversion.
+    Measurement.objects.filter(pk=measurement.pk).update(unit_source_value='10*3/uL')
     assert refresh_patient_record(person).anc_thousand_per_ul is None
+    Measurement.objects.filter(pk=measurement.pk).update(unit_source_value='x1000', unit_concept=None)
+    assert refresh_patient_record(person).anc_thousand_per_ul is None
+
+
+@pytest.mark.django_db
+def test_lab_spellings_with_a_ucum_concept_fill_wbc_anc_and_platelets():
+    """The issue's repro: x10E3/uL and friends, with the unit the ETL read them as."""
+    person = PersonFactory()
+    ucum = {code: ConceptFactory(vocabulary__vocabulary_id='UCUM', concept_code=code)
+            for code in ('10*3/uL', '10*9/L')}
+    for code, value, text, unit in [
+        ('6690-2', 5.2, 'x10E3/uL', '10*3/uL'),
+        ('751-8', 2.4, 'x10(9)/L', '10*9/L'),
+        ('777-3', 213, 'K/cu mm', '10*3/uL'),
+    ]:
+        MeasurementFactory(
+            person=person, measurement_concept=ConceptFactory(concept_code=code), measurement_source_value=code,
+            value_as_number=value, unit_source_value=text, unit_concept=ucum[unit],
+        )
+    record = refresh_patient_record(person)
+    record.refresh_from_db()
+    assert record.wbc_count_thousand_per_ul == Decimal('5.2')
+    assert record.anc_thousand_per_ul == Decimal('2.4')
+    assert record.platelet_count_thousand_per_ul == Decimal('213')
 
 
 @pytest.mark.django_db
@@ -135,7 +173,8 @@ def test_raw_eligibility_benchmark_uses_canonical_counts():
     from omop_core.management.commands.benchmark_trial_eligibility import _fetch_omop_trial_row
     person = PersonFactory()
     MeasurementFactory(person=person, measurement_source_value='751-8', value_as_number=1500, unit_source_value='cells/uL')
-    MeasurementFactory(person=person, measurement_source_value='777-3', value_as_number=150500, unit_source_value='cells/uL')
+    MeasurementFactory(person=person, measurement_source_value='777-3', value_as_number=150.5, unit_source_value='THOU/uL',
+                       unit_concept=ConceptFactory(vocabulary__vocabulary_id='UCUM', concept_code='10*3/uL'))
     result = _fetch_omop_trial_row(person.pk)
     assert result['anc_thousand_per_ul'] == Decimal('1.5')
     assert result['platelet_count_thousand_per_ul'] == Decimal('150.5')
@@ -187,3 +226,149 @@ def test_fhir_upload_retains_source_scale_and_projects_counts(code_only, request
     assert response.status_code in (200, 201), response.data
     record.refresh_from_db()
     assert record.anc_thousand_per_ul == Decimal('1500')
+
+
+# --- Lymphocyte and monocyte counts (#2282) -------------------------------
+
+@pytest.mark.django_db
+def test_alc_and_amc_in_cells_per_ul_are_scaled_to_thousands():
+    """The issue's repro: ALC 900 /MM3 (with the UCUM unit the ETL read it as) is 0.9, not 900."""
+    person = PersonFactory()
+    per_ul = ConceptFactory(vocabulary__vocabulary_id='UCUM', concept_code='/uL')
+    MeasurementFactory(
+        person=person, measurement_concept=ConceptFactory(concept_code='731-0'), measurement_source_value='731-0',
+        value_as_number=900, unit_source_value='/MM3', unit_concept=per_ul,
+    )
+    MeasurementFactory(
+        person=person, measurement_concept=ConceptFactory(concept_code='742-7'), measurement_source_value='742-7',
+        value_as_number=450, unit_source_value='cells/uL',
+    )
+    record = refresh_patient_record(person)
+    record.refresh_from_db()
+    assert record.alc_thousand_per_ul == Decimal('0.9')
+    assert record.absolute_lymphocyte_count == 900
+    assert record.amc_thousand_per_ul == Decimal('0.5')
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize('code,field,source,value,expected', [
+    ('731-0', 'alc_thousand_per_ul', 'cells/uL', 1500, 1.5),
+    ('731-0', 'alc_thousand_per_ul', '10*9/L', 1.5, 1.5),
+    ('742-7', 'amc_thousand_per_ul', '/uL', 600, 0.6),
+    ('742-7', 'amc_thousand_per_ul', 'K/uL', 0.6, 0.6),
+])
+@pytest.mark.parametrize('path', ['loinc', 'source-code', 'source-display', 'legacy-name', 'curated'])
+def test_alc_amc_projection_paths_preserve_scale_and_source(code, field, source, value, expected, path):
+    person = PersonFactory()
+    display = 'Absolute Lymphocyte Count' if code == '731-0' else 'Absolute Monocyte Count'
+    kwargs = {'person': person, 'value_as_number': value, 'unit_source_value': source}
+    if path in ('loinc', 'curated'):
+        concept = ConceptFactory(concept_code=code)
+        kwargs.update(measurement_concept=concept, measurement_source_value=code)
+        if path == 'curated':
+            FieldConceptMapping.objects.create(
+                field_name=field, concept=concept, vocabulary_id='LOINC', concept_code=code,
+                status='approved', omop_table='measurement', source_value=code, value_kind='number',
+            )
+    elif path == 'source-code':
+        kwargs.update(measurement_concept_id=0, measurement_source_value=code)
+    elif path == 'source-display':
+        kwargs.update(measurement_concept_id=0, measurement_source_value=display)
+    else:
+        kwargs['measurement_concept'] = ConceptFactory(concept_name=display.lower())
+    measurement = MeasurementFactory(**kwargs)
+    for _ in range(2):
+        record = refresh_patient_record(person)
+        record.refresh_from_db()
+        assert float(getattr(record, field)) == expected
+        if field == 'alc_thousand_per_ul':
+            assert record.absolute_lymphocyte_count == expected * 1000
+    measurement.refresh_from_db()
+    assert float(measurement.value_as_number) == value
+    assert measurement.unit_source_value == source
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize('code,field', [('731-0', 'alc_thousand_per_ul'), ('742-7', 'amc_thousand_per_ul')])
+@pytest.mark.parametrize('unit,value', [(None, 900), ('/MM3', 900), ('mg/dL', 900), ('cells/uL', None)])
+def test_latest_unknown_alc_amc_leaves_field_empty_and_blocks_older(code, field, unit, value):
+    """An unreadable unit without a UCUM concept is unknown, never taken as thousands/µL."""
+    person = PersonFactory()
+    concept = ConceptFactory(concept_code=code)
+    MeasurementFactory(
+        person=person, measurement_concept=concept, measurement_source_value=code,
+        measurement_date=date(2024, 1, 1), value_as_number=1500, unit_source_value='cells/uL',
+    )
+    MeasurementFactory(
+        person=person, measurement_concept=concept, measurement_source_value=code,
+        measurement_date=date(2024, 1, 2), value_as_number=value, unit_source_value=unit,
+    )
+    record = refresh_patient_record(person)
+    assert getattr(record, field) is None
+    if field == 'alc_thousand_per_ul':
+        assert record.absolute_lymphocyte_count is None
+
+
+@pytest.mark.django_db
+def test_curator_alias_code_is_converted_like_the_canonical_code(lab_field_mappings):
+    """26474-7 approved as an alias of alc_thousand_per_ul: a 1500 cells/uL row
+    goes through the blood-count selection and derives 1.5 (10^3/uL)."""
+    from omop_core.models import SourceCodeConceptMapping
+    person = PersonFactory()
+    SourceCodeConceptMapping.objects.create(
+        source_vocabulary_id='LOINC', source_code='26474-7', status='approved',
+        omop_table='measurement', origin='curator',
+        target_concept_id=FieldConceptMapping.objects.get(field_name='alc_thousand_per_ul').concept_id,
+    )
+    MeasurementFactory(
+        person=person, measurement_concept=ConceptFactory(concept_code='26474-7'),
+        measurement_source_value='26474-7', value_as_number=1500, unit_source_value='cells/uL',
+    )
+    record = refresh_patient_record(person)
+    record.refresh_from_db()
+    assert record.alc_thousand_per_ul == Decimal('1.5')
+    assert record.absolute_lymphocyte_count == Decimal('1500')
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize('via', ['field-mapping', 'source-code-alias'])
+def test_curator_added_loinc_for_a_count_field_converts_by_unit(via):
+    """A LOINC a curator routes to a count field joins the unit-converting selection.
+
+    Before this, a row under a code outside the four checked-in LOINCs fell
+    through to the plain float cast and landed in the lab's own scale.
+    """
+    from omop_core.models import SourceCodeConceptMapping
+    person = PersonFactory()
+    canonical = ConceptFactory(vocabulary__vocabulary_id='LOINC', concept_code='731-0')
+    alias = ConceptFactory(vocabulary__vocabulary_id='LOINC', concept_code='26474-7')
+    if via == 'field-mapping':
+        FieldConceptMapping.objects.create(
+            field_name='alc_thousand_per_ul', concept=alias, vocabulary_id='LOINC', concept_code='26474-7',
+            status='approved', omop_table='measurement', source_value='26474-7', value_kind='number',
+        )
+    else:
+        FieldConceptMapping.objects.create(
+            field_name='alc_thousand_per_ul', concept=canonical, vocabulary_id='LOINC', concept_code='731-0',
+            status='approved', omop_table='measurement', source_value='731-0', value_kind='number',
+        )
+        SourceCodeConceptMapping.objects.create(
+            domain_id='Measurement', source_vocabulary_id='LOINC', source_code='26474-7',
+            target_concept=canonical, destination_vocabulary_id='LOINC', omop_table='measurement',
+            status='approved', origin='curator',
+        )
+    MeasurementFactory(
+        person=person, measurement_concept=alias, measurement_source_value='26474-7',
+        measurement_date=date(2024, 1, 2), value_as_number=1500, unit_source_value='cells/uL',
+    )
+    record = refresh_patient_record(person)
+    assert record.alc_thousand_per_ul == Decimal('1.5')
+    assert record.absolute_lymphocyte_count == 1500
+    # The newest row under the curator's code owns the field, unknown unit included.
+    MeasurementFactory(
+        person=person, measurement_concept=alias, measurement_source_value='26474-7',
+        measurement_date=date(2024, 1, 3), value_as_number=900, unit_source_value='/MM3',
+    )
+    record = refresh_patient_record(person)
+    assert record.alc_thousand_per_ul is None
+    assert record.absolute_lymphocyte_count is None

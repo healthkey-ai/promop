@@ -150,6 +150,10 @@ record; providers and service callers must pass the normal patient access checks
 consent rows on first list, self-scopes to the authenticated patient, and exposes PATCH
 toggle behavior. Consent timestamps update when the consent state changes.
 
+That model is legacy. [Consent model v2](consent-v2.md) holds purposes and documents
+as versioned data, every answer as append-only history, and a ledger that outlives the
+account, served at `/api/v1/phr/consent/`.
+
 ## Patient-Originated Data
 
 `PatientCrudPermission` allows session-authenticated patients to create and update the

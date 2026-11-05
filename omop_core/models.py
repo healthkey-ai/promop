@@ -3991,6 +3991,10 @@ class PatientRecord(models.Model):
     death_date = models.DateField(blank=True, null=True, help_text="Date of death (from OMOP Death)")
     condition_clinical_status = models.CharField(max_length=50, blank=True, null=True, help_text="Clinical status: active/remission/relapse")
     disease_slug = models.CharField(max_length=100, blank=True, null=True, help_text="Machine-readable disease ID e.g. 'multiple-myeloma'")
+    disease_slugs = models.JSONField(
+        blank=True, null=True, default=list,
+        help_text="Every cancer on the record as a disease_slug, primary first (#2182). Derived.",
+    )
     validated = models.BooleanField(blank=True, null=True, help_text="Clinician validation flag")
     validated_by = models.CharField(max_length=100, blank=True, null=True, help_text="Name of clinician who validated")
     validation_date = models.DateField(blank=True, null=True, help_text="Date validated by clinician")
@@ -5118,6 +5122,12 @@ class AthenaVocabularySync(models.Model):
     failure_reason = models.TextField(blank=True)
     started_at = models.DateTimeField()
     completed_at = models.DateTimeField(null=True, blank=True)
+    # Touched by the running sync as it logs progress, from its own autocommit
+    # connection so it is visible while the load's transaction is open. A
+    # worker retired mid-load (a rolling deploy) leaves the receipt 'running'
+    # with no heartbeat; the next boot takes it over instead of waiting for
+    # the broker to redeliver (#2288 live test).
+    heartbeat_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         db_table = 'athena_vocabulary_sync'

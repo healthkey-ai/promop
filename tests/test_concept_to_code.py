@@ -167,6 +167,21 @@ def test_lexical_uses_synonyms_and_seen_priority_without_writing(concept):
     assert not SourceCodeConceptMapping.objects.exclude(target_concept=None).exists()
 
 
+def test_suggested_sources_carry_the_patients_units_and_based_on(concept):
+    """The Suggested Codes payload samples the patients' rows as Mapped Codes does (#2295)."""
+    from omop_core.models import PatientSourceCode
+    from tests.factories import PersonFactory
+    row = source('SEEN', occurrence_count=10)
+    PatientSourceCode.objects.create(
+        person=PersonFactory(), source_value='SEEN', source_vocabulary_id='SNOMED', omop_table='measurement',
+        source_unit='g/dL', source_metadata={'fhir': {'resourceType': 'Observation', 'basedOn': [
+            {'display': 'Complete blood count', 'reference': 'ServiceRequest/1'}]}})
+    candidates = reverse_retrieval_pool(concept, strategies=['lexical'], limit=10)
+    assert [c['source_code'] for c in candidates] == ['SEEN']
+    assert candidates[0]['based_on'] == ['Complete blood count']
+    assert candidates[0]['mapping_id'] == row.pk
+
+
 def test_umls_matches_vocabulary_and_code_including_aliases(concept):
     release = UmlsRelease.objects.create(release_version='test')
     cui = UmlsConcept.objects.create(cui='C0000001', release=release)
@@ -319,6 +334,32 @@ def test_a_ranked_run_remembers_what_the_ranker_declined_and_the_next_run_moves_
     event = client.get(f'{BASE}suggest-runs/{run_id}/').data['activity'][0]
     assert [c['source_code'] for c in event['candidates']] == ['A0', 'A1', 'A2']
     assert rest  # the B rows exist throughout
+
+
+def test_a_queued_run_skips_exclude_keys_that_arrive_as_json_lists(client, concept):
+    """Celery hands the worker its params as JSON, so each exclude key is a list,
+    not a tuple. The run must still skip them rather than fail (#2274)."""
+    import json
+    source('A0', occurrence_count=10)
+    source('A1', occurrence_count=9)
+    source('B0', occurrence_count=2)
+    dispatcher = FakeDispatcher()
+    body = {'concept_ids': [concept.pk], 'strategies': ['lexical'], 'limit': 2, 'ranking_model': 'none'}
+    with use_dispatcher(dispatcher):
+        assert client.post(f'{BASE}suggest/', body, format='json').status_code == 202
+        run_id, params = dispatcher.calls[-1]
+        execute_run(run_id, params)
+    event = client.get(f'{BASE}suggest-runs/{run_id}/').data['activity'][0]
+    shown = [[c['source_vocabulary_id'], c['source_code']] for c in event['candidates']]
+    assert [key[1] for key in shown] == ['A0', 'A1']
+
+    with use_dispatcher(dispatcher):
+        assert client.post(f'{BASE}suggest/', {**body, 'exclude_keys': shown}, format='json').status_code == 202
+        run_id, params = dispatcher.calls[-1]
+        execute_run(run_id, json.loads(json.dumps(params)))
+    data = client.get(f'{BASE}suggest-runs/{run_id}/').data
+    assert data['state'] == 'success', data.get('error')
+    assert [c['source_code'] for c in data['activity'][0]['candidates']] == ['B0']
 
 
 def test_an_unavailable_ranker_declines_nothing(client, concept):
@@ -1085,3 +1126,62 @@ def test_a_patient_cannot_see_the_walk(django_user_model):
     api = APIClient()
     api.force_authenticate(django_user_model.objects.create_user(email='patient@test.com'))
     assert api.get(WALK).status_code == 403
+
+
+def _confident_ranker(concept, confidence=0.9):
+    chosen = {'concept_id': concept.pk, 'confidence': confidence}
+    return patch('omop_core.mapping.suggestions.rank_candidates_dispatch',
+                 return_value=(chosen, 'high', [chosen], {}))
+
+
+def test_auto_propose_repoints_stored_proposals_at_the_concept(client, concept):
+    """Every candidate on a loaded instance is a stored proposal: a queue row
+    with no destination, or a row a forward run pointed elsewhere. Auto-propose
+    used to skip anything with a mapping id, so the run wrote nothing (#2272)."""
+    other = ConceptFactory(concept_name='Serum globulin', concept_code='GLOBULIN')
+    gap = source('GAP', origin_system='healthtree-unmapped-v2', occurrence_count=9)
+    weaker = source('WEAK', target_concept=other, origin_system='suggest v0.4',
+                    suggestion_confidence=0.7, occurrence_count=8)
+    stronger = source('STRONG', target_concept=other, origin_system='suggest v0.4',
+                      suggestion_confidence=0.95, occurrence_count=7)
+    event, _ = _run(client, concept, FakeDispatcher(), lambda: _confident_ranker(concept),
+                    ranking_model='jev', auto_propose_threshold=0.8)
+    by_code = {c['source_code']: c for c in event['candidates']}
+    assert by_code['GAP']['auto_proposed'] is True and by_code['GAP']['mapping_id'] == gap.pk
+    assert by_code['WEAK']['auto_proposed'] is True
+    # A stronger stored proposal is not replaced by a weaker score.
+    assert 'auto_proposed' not in by_code['STRONG']
+    for row in (gap, weaker, stronger):
+        row.refresh_from_db()
+    assert (gap.target_concept_id, gap.status, gap.suggestion_confidence) == (concept.pk, 'proposed', 0.9)
+    assert (weaker.target_concept_id, weaker.suggestion_confidence) == (concept.pk, 0.9)
+    assert (stronger.target_concept_id, stronger.suggestion_confidence) == (other.pk, 0.95)
+    assert SuggestRun.objects.get(direction='reverse').destinations == 2
+    # The Existing mappings Proposed group now shows them.
+    proposed = client.get(f'{BASE}{concept.pk}/', {'status': 'proposed'}).data
+    assert {row['source_code'] for row in proposed['results']} == {'GAP', 'WEAK'}
+
+
+def test_auto_propose_leaves_rows_below_the_threshold_or_without_one(client, concept):
+    gap = source('GAP', origin_system='healthtree-unmapped-v2')
+    event, _ = _run(client, concept, FakeDispatcher(), lambda: _confident_ranker(concept, 0.6),
+                    ranking_model='jev', auto_propose_threshold=0.8)
+    assert 'auto_proposed' not in event['candidates'][0]
+    event, _ = _run(client, concept, FakeDispatcher(), lambda: _confident_ranker(concept, 0.9),
+                    ranking_model='jev')
+    assert 'auto_proposed' not in event['candidates'][0]
+    gap.refresh_from_db()
+    assert gap.target_concept_id is None
+    assert all(run.destinations == 0 for run in SuggestRun.objects.filter(direction='reverse'))
+
+
+def test_auto_propose_never_writes_a_row_another_curator_holds(client, concept, django_user_model):
+    locked = source('LOCKED', origin_system='healthtree-unmapped-v2',
+                    locked_by=django_user_model.objects.create_user(email='other@test.com'),
+                    locked_at=timezone.now())
+    event, _ = _run(client, concept, FakeDispatcher(), lambda: _confident_ranker(concept),
+                    ranking_model='jev', auto_propose_threshold=0.8)
+    assert 'auto_proposed' not in event['candidates'][0]
+    locked.refresh_from_db()
+    assert locked.target_concept_id is None
+    assert SuggestRun.objects.get(direction='reverse').destinations == 0

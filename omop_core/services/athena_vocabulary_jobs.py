@@ -1,5 +1,8 @@
 """Durable scheduling for long-running Athena vocabulary synchronization."""
 
+from datetime import timedelta
+
+from django.conf import settings
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
@@ -7,6 +10,53 @@ from omop_core.models import AthenaVocabularySync
 
 
 ACTIVE_OUTCOMES = ('queued', 'running')
+# A running sync beats every HEARTBEAT_EVERY seconds from a thread, whatever
+# the loader is doing. A worker retired by a rolling deploy mid-load never
+# beats again; thirty minutes without one is sixty missed beats.
+STALE_RUNNING = timedelta(minutes=30)
+
+
+def _stale_queued():
+    """How long a queued receipt may wait before it is judged abandoned.
+
+    The broker keeps an unconsumed message indefinitely, so this is a
+    heuristic, not a redelivery bound: a receipt this old with no worker
+    having claimed it is replaced. If its message is consumed later the
+    task finds the receipt retired and skips it.
+    """
+    return timedelta(seconds=settings.CELERY_BROKER_TRANSPORT_OPTIONS.get(
+        'visibility_timeout', 25_200,
+    ))
+
+
+def stale_reason(sync, now=None):
+    """Why an active receipt no longer describes live work, or ``None``."""
+    now = now or timezone.now()
+    if sync.outcome == 'running':
+        last = max(filter(None, (sync.heartbeat_at, sync.started_at)))
+        if now - last > STALE_RUNNING:
+            return (
+                f'Worker lost: no heartbeat since {last:%Y-%m-%d %H:%M:%S %Z} '
+                f'(a running sync beats as it logs; limit {STALE_RUNNING}).'
+            )
+    elif sync.outcome == 'queued':
+        if now - sync.started_at > _stale_queued():
+            return (
+                f'Never started: queued at {sync.started_at:%Y-%m-%d %H:%M:%S %Z}, '
+                'longer than the broker keeps an unconsumed message.'
+            )
+    return None
+
+
+def retire_stale(sync):
+    """Mark a stale active receipt failed so a new one can be queued; True if it was."""
+    reason = stale_reason(sync)
+    if reason is None:
+        return False
+    updated = AthenaVocabularySync.objects.filter(
+        pk=sync.pk, outcome=sync.outcome,
+    ).update(outcome='failed', failure_reason=reason, completed_at=timezone.now())
+    return bool(updated)
 
 
 def enqueue_sync(source_url):
@@ -23,7 +73,7 @@ def enqueue_sync(source_url):
     active = AthenaVocabularySync.objects.filter(
         source_url=source_url, outcome__in=ACTIVE_OUTCOMES,
     ).order_by('-started_at', '-pk').first()
-    if active:
+    if active and not retire_stale(active):
         return active, False
 
     try:

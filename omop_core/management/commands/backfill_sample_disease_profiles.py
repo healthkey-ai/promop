@@ -66,6 +66,8 @@ class Command(BaseCommand):
                 documented_mm = set(ConditionOccurrence.objects.filter(person_id__in=people, is_erroneous=False, condition_concept__concept_name__icontains='myeloma').values_list('person_id', flat=True))
                 creates = {Measurement: [], Observation: []}
                 changed_records, changed_fields = [], set()
+                from omop_core.services.patient_record_service import resolve_lab_code_fields
+                lab_code_fields = resolve_lab_code_fields()
                 for record in records:
                     disease = options['disease'] or SAMPLE_ORG_DISEASES[record.organization.slug.lower()]
                     if disease == 'FL' and 'mantle' in (record.disease or '').lower():
@@ -77,7 +79,7 @@ class Command(BaseCommand):
                     if disease == 'MM' and record.person_id in documented_mm and 'screening' in (record.disease or '').lower() and 'disease' not in (record.user_edited_fields or []):
                         record.disease, record.disease_slug = 'Multiple Myeloma', 'multiple-myeloma'
                     protected = set(record.user_edited_fields or [])
-                    recovered = recover_sample_source_fields(record, rows[record.person_id], disease)
+                    recovered = recover_sample_source_fields(record, rows[record.person_id], disease, lab_code_fields)
                     if disease == 'MM' and record.person_id in transplants:
                         recovered.setdefault('stem_cell_transplant_history', ['autologous SCT'])
                         recovered.setdefault('sct_date', transplants[record.person_id])

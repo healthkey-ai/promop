@@ -490,6 +490,8 @@ class PatientRecordSerializer(serializers.ModelSerializer):
             # Tracks fields with direct user edits not yet backed by OMOP facts;
             # managed by the PATCH handler, not by the client.
             'user_edited_fields', 'custom_fields', 'therapy_overrides',
+            # Every cancer on the record; derived, never edited (#2182).
+            'disease_slugs',
         )
 
     def to_internal_value(self, data):

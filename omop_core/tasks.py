@@ -267,16 +267,23 @@ def sync_athena_vocabulary_task(self, sync_id: int) -> dict[str, Any]:
     from omop_core.models import AthenaVocabularySync
 
     sync = AthenaVocabularySync.objects.get(pk=sync_id)
-    if sync.outcome in ('current', 'applied'):
-        return {'sync_id': sync_id, 'outcome': sync.outcome}
-
-    AthenaVocabularySync.objects.filter(pk=sync_id).update(
+    # Claim only an active receipt. A finished one is done; a receipt the
+    # web boot retired as stale ("Worker lost") has been replaced by a newer
+    # one, and the broker redelivering its message (acks_late, after the
+    # visibility timeout, or an unconsumed message once a worker returns)
+    # must not revive it, rerun the load, or erase its reason. Redelivery
+    # of a receipt still 'running' is the legitimate lost-worker retry.
+    claimed = AthenaVocabularySync.objects.filter(
+        pk=sync_id, outcome__in=('queued', 'running'),
+    ).update(
         outcome='running', started_at=timezone.now(), completed_at=None,
         failure_reason='', task_id=self.request.id or sync.task_id,
     )
+    if not claimed:
+        return {'sync_id': sync_id, 'outcome': sync.outcome, 'skipped': True}
     try:
         call_command(
-            'sync_athena_vocabulary', gdrive=sync.source_url, apply=True,
+            'sync_athena_vocabulary', source=sync.source_url, apply=True,
             sync_id=sync_id,
         )
     except Exception as exc:
