@@ -2838,6 +2838,31 @@ class WearableConceptMappingTest(TestCase):
             self.assertEqual(seeded['source'], 'HealthKey')
             self.assertIsNone(seeded['standard_concept'])
 
+    def test_hk_genomics_bcma_matches_seed_definition(self):
+        """Migration 0327 duplicates its row into the fixture; no drift (#5674)."""
+        from importlib import import_module
+
+        mig = import_module(
+            'omop_core.migrations.0327_hk_genomics_bcma_marker')
+        seed_by_key = {
+            (r['vocabulary_id'], r['concept_code']): r for r in self._seed_rows()
+        }
+
+        for concept_id, concept_code, concept_name in mig._CONCEPTS:
+            key = ('HK-Genomics', concept_code)
+            self.assertIn(
+                key, seed_by_key,
+                f'migration 0327 seeds {key}, which the fixture does not')
+            seeded = seed_by_key[key]
+            self.assertEqual(seeded['concept_id'], concept_id,
+                             f'{concept_code} concept_id differs')
+            self.assertEqual(seeded['concept_name'], concept_name,
+                             f'{concept_code} concept_name differs')
+            self.assertEqual(seeded['domain_id'], 'Measurement')
+            self.assertEqual(seeded['concept_class_id'], 'Lab Test')
+            self.assertEqual(seeded['source'], 'HealthKey')
+            self.assertIsNone(seeded['standard_concept'])
+
     def test_every_skill_level_has_a_capability_concept(self):
         """The mint must cover the vocabulary, not a subset of it.
 
