@@ -238,7 +238,7 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
                 ? 'These inputs are read-only in this view.'
                 : gated
                   ? 'The result stays read-only. Editing these inputs records the source facts it is computed from; it does not set the result itself.'
-                  : 'Computed from the inputs below. Save their values to update this result.'}</Dialog.Description>
+                  : 'Computed from the inputs below. Changes save automatically; this result is recalculated.'}</Dialog.Description>
               {field.compatibility_reason && <p role="alert">{field.compatibility_reason}</p>}
               {inputs.map((input) => <PatientFieldEditor key={input} store={store} name={input}
                 readOnly={readOnly} infoHref={infoHref}
