@@ -15,11 +15,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from django.core.management import call_command
-from django.db import connection
+from django.db import connection, transaction
 from django.test.utils import CaptureQueriesContext
 
 from omop_core.management.commands.load_athena_vocabularies import Command as AthenaCommand
-from omop_core.models import FieldConceptMapping, SourceCodeConceptMapping
+from omop_core.models import Concept, FieldConceptMapping, SourceCodeConceptMapping
 from omop_core.services.field_concept_resolution import (
     ResolutionResult,
     fixture_concept_refs,
@@ -100,8 +100,9 @@ def test_uncoded_row_resolves_through_the_fixture_pair():
     """The SCT rows carry no code (keyed by source_value); the pair the
     fixture resolved them to is what names their concept. On a fresh
     instance migration 0156 skips them (type concept 32817 is not loaded
-    yet) and 0240 seeds them with no concept; the test database already
-    holds 32817, so that state is built explicitly."""
+    yet) and 0240 seeds them with no concept. The test database may already
+    hold 32817 from another test, in which case apply_payload resolves it at
+    seed time, so the fresh-instance state is forced."""
     rows = _seed_without_concepts('sct_date', 'sct_eligibility', coded=False, concept_loaded=True)
     FieldConceptMapping.objects.filter(field_name__in=rows).update(concept=None)
     assert fixture_concept_refs()['sct_date'] == ('Type Concept', 'OMOP4976890')
@@ -219,8 +220,8 @@ def test_rows_without_a_code_are_not_candidates():
 
 
 def test_resolution_batches_its_queries():
-    """Concepts are looked up per batch, not per row: one Concept query and
-    one locking read per batch, then one UPDATE per row saved."""
+    """Concepts are looked up per batch, not per row: one Concept query per
+    batch, then one locking read and one UPDATE per row saved."""
     vocabulary = VocabularyFactory(vocabulary_id='LOINC')
     for n in range(6):
         FieldConceptMapping.objects.create(
@@ -232,12 +233,53 @@ def test_resolution_batches_its_queries():
         result = resolve_field_concept_mappings(batch_size=3)
 
     assert result.resolved == 6
-    # 1 candidate select + per batch (1 concept select + 1 locking select),
-    # then 1 UPDATE per row; savepoints are neither.
+    # 1 candidate select + 1 concept select per batch, then 1 locking select
+    # and 1 UPDATE per row; savepoints are neither.
     selects = [q for q in queries.captured_queries if q['sql'].startswith('SELECT')]
     updates = [q for q in queries.captured_queries if q['sql'].startswith('UPDATE')]
-    assert len(selects) == 5
+    assert len(selects) == 1 + 2 + 6
     assert len(updates) == 6
+    assert sum('FOR UPDATE' in q['sql'] for q in selects) == 6
+
+
+def test_dry_run_counts_without_locking_saving_or_projecting(settings):
+    settings.CELERY_BROKER_URL = ''
+    rows = _seed_without_concepts('hemoglobin_g_dl', 'serum_creatinine_mg_dl')
+    _load_concepts({'hemoglobin_g_dl': rows['hemoglobin_g_dl']})
+
+    with patch('omop_core.signals._project_field_sync') as project, \
+            CaptureQueriesContext(connection) as queries:
+        result = resolve_field_concept_mappings(dry_run=True)
+
+    assert (result.resolved, result.unresolved) == (1, 1)
+    assert result.unresolved_refs == [('serum_creatinine_mg_dl', 'LOINC', '2160-0')]
+    project.assert_not_called()
+    assert not any('FOR UPDATE' in q['sql'] or q['sql'].startswith('UPDATE')
+                   for q in queries.captured_queries)
+    assert FieldConceptMapping.objects.filter(concept__isnull=True).count() == 2
+
+
+def test_retired_concept_resolves_and_is_named_for_recuration():
+    """The pair is what the fixture names, so it is honoured as apply_payload
+    would; the log says which rows need a curator."""
+    rows = _seed_without_concepts('hemoglobin_g_dl')
+    _load_concepts(rows)
+    ConceptFactory(
+        concept_id=rows['hemoglobin_g_dl']['concept_id'], concept_code='718-7',
+        vocabulary=VocabularyFactory(vocabulary_id='LOINC'),
+    )
+    Concept.objects.filter(concept_id=rows['hemoglobin_g_dl']['concept_id']).update(
+        invalid_reason='U',
+    )
+
+    result = resolve_field_concept_mappings()
+
+    assert (result.resolved, result.unresolved) == (1, 0)
+    assert result.retired_refs == [('hemoglobin_g_dl', 'LOINC', '718-7')]
+    assert '1 of the resolved point at a retired concept, re-curate: hemoglobin_g_dl (LOINC:718-7).' \
+        in result.summary()
+    assert FieldConceptMapping.objects.get(field_name='hemoglobin_g_dl').concept_id \
+        == rows['hemoglobin_g_dl']['concept_id']
 
 
 def test_summary_names_the_unresolved_rows_up_to_a_cap():
@@ -393,6 +435,33 @@ def test_loader_reports_but_survives_a_failed_resolution(tmp_path, caplog):
     assert FieldConceptMapping.objects.get(field_name='hemoglobin_g_dl').concept_id is None
 
 
+def test_loader_confines_a_database_error_to_a_savepoint(tmp_path):
+    """Under sync_athena_vocabulary the loader runs inside one transaction;
+    a database error in the hook must not leave it aborted, or the sync's
+    next statement would roll the whole vocabulary back."""
+    from django.db import DatabaseError
+
+    rows = _seed_without_concepts('hemoglobin_g_dl')
+    _load_concepts(rows)
+
+    def broken(*args, **kwargs):
+        with connection.cursor() as cursor:
+            cursor.execute('SELECT 1/0')
+
+    with transaction.atomic():
+        with patch(
+            'omop_core.services.field_concept_resolution.resolve_field_concept_mappings',
+            side_effect=broken,
+        ):
+            output, _ = _run_loader(tmp_path)
+        # The outer transaction is still usable: the next statement runs.
+        assert FieldConceptMapping.objects.filter(field_name='hemoglobin_g_dl').exists()
+
+    assert 'WARNING: field mappings were not resolved' in output
+    with pytest.raises(DatabaseError):
+        broken()
+
+
 # ── The management command ─────────────────────────────────────────────────
 
 
@@ -410,12 +479,12 @@ def test_command_resolves_and_reports():
         == rows['hemoglobin_g_dl']['concept_id']
 
 
-def test_command_dry_run_rolls_back():
+def test_command_dry_run_writes_nothing():
     rows = _seed_without_concepts('hemoglobin_g_dl')
     _load_concepts(rows)
     output = StringIO()
 
     call_command('resolve_field_concept_mappings', dry_run=True, stdout=output)
 
-    assert 'Dry run, rolled back. Would have resolved 1 row(s).' in output.getvalue()
+    assert 'Dry run, nothing written. Would resolve 1 row(s).' in output.getvalue()
     assert FieldConceptMapping.objects.get(field_name='hemoglobin_g_dl').concept_id is None

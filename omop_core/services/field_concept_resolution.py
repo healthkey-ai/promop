@@ -44,7 +44,6 @@ keep their concept FKs unconstrained (``SourceCodeConceptMapping``,
 id before the Concept exists), carry text only (``FieldChoiceCode``), or are
 keyed on the Concept itself (``ConceptMappingPriority``).
 """
-from collections import defaultdict
 from dataclasses import dataclass, field
 from functools import lru_cache
 import json
@@ -79,6 +78,10 @@ class ResolutionResult:
     # (field_name, vocabulary_id, concept_code) of every row left unresolved,
     # in field_name order, so a caller can name them.
     unresolved_refs: list[tuple[str, str, str]] = field(default_factory=list)
+    # Rows resolved to a concept Athena has since retired (invalid_reason
+    # set): the pair is what the fixture names, so it is honoured, but a
+    # curator should re-point the row at the active replacement.
+    retired_refs: list[tuple[str, str, str]] = field(default_factory=list)
 
     @property
     def total(self) -> int:
@@ -94,7 +97,13 @@ class ResolutionResult:
                               for name, vocab, code in self.unresolved_refs[:_LOGGED_REFS])
             more = len(self.unresolved_refs) - _LOGGED_REFS
             text += f': {shown}' + (f', and {more} more' if more > 0 else '')
-        return text + '.'
+        text += '.'
+        if self.retired_refs:
+            shown = ', '.join(f'{name} ({vocab}:{code})'
+                              for name, vocab, code in self.retired_refs[:_LOGGED_REFS])
+            text += (f' {len(self.retired_refs)} of the resolved point at a retired '
+                     f'concept, re-curate: {shown}.')
+        return text
 
 
 @lru_cache(maxsize=1)
@@ -106,6 +115,11 @@ def fixture_concept_refs() -> dict[str, tuple[str, str]]:
     Read once per process: the fixture is checked in and does not change.
     """
     if not FIXTURE_PATH.exists():
+        # Checked in, and 0240 needs it too: a missing file is a broken
+        # install, so say so rather than quietly treating the uncoded rows
+        # as naming nothing.
+        logger.warning('field mappings: fixture %s not found; uncoded rows cannot resolve',
+                       FIXTURE_PATH)
         return {}
     data = json.loads(FIXTURE_PATH.read_text(encoding='utf-8'))
     refs = {}
@@ -128,15 +142,20 @@ def _concept_pair(field_name: str, vocabulary_id: str, concept_code: str) -> tup
     return fixture_concept_refs().get(field_name)
 
 
-def resolve_field_concept_mappings(batch_size: int = BATCH_SIZE) -> ResolutionResult:
+def resolve_field_concept_mappings(
+    batch_size: int = BATCH_SIZE, *, dry_run: bool = False,
+) -> ResolutionResult:
     """Set ``concept`` on every mapping whose named concept is loaded.
 
-    Each batch is one Concept query, then one locked save per row that
-    resolved, in one ``atomic`` block (a savepoint when the caller, such as
-    ``sync_athena_vocabulary``, already holds a transaction). A row only ever
-    moves from NULL to the Concept its own pair names: the rows are locked
-    and re-checked for NULL under the lock, so a concurrent curator save wins,
-    and a row that already points at a concept is never touched.
+    Each batch is one Concept query; each row that resolved is then locked,
+    re-checked for NULL and saved in a savepoint of its own, in pk order, so
+    a concurrent curator save wins (it waits for one row, not a batch) and a
+    row that already points at a concept is never touched. The savepoint is
+    also where the post_save projection runs inline when no broker is
+    configured. A caller holding a transaction, such as the Athena loader's
+    hook under ``sync_athena_vocabulary``, commits or discards the lot with
+    it. With ``dry_run`` the rows are counted and nothing is locked, saved
+    or projected.
     """
     result = ResolutionResult()
     candidates = []
@@ -152,34 +171,42 @@ def resolve_field_concept_mappings(batch_size: int = BATCH_SIZE) -> ResolutionRe
         # One superset query per batch (vocabularies × codes), narrowed to the
         # exact pairs in Python, as field_curation_transfer._concept_caches does.
         # (vocabulary_id, concept_code) is unique on concept, so a pair names
-        # at most one row.
-        concept_ids = {
-            (vocab, code): concept_id
-            for vocab, code, concept_id in Concept.objects.filter(
+        # at most one row. A retired concept still resolves (it is what the
+        # fixture names, as in apply_payload) and is reported.
+        concepts = {
+            (vocab, code): (concept_id, bool(invalid_reason))
+            for vocab, code, concept_id, invalid_reason in Concept.objects.filter(
                 vocabulary_id__in={vocab for vocab, _ in wanted},
                 concept_code__in={code for _, code in wanted},
-            ).values_list('vocabulary_id', 'concept_code', 'concept_id')
+            ).values_list('vocabulary_id', 'concept_code', 'concept_id', 'invalid_reason')
             if (vocab, code) in wanted
         }
         concept_by_pk: dict[int, int] = {}
         for pk, field_name, (vocab, code) in chunk:
-            concept_id = concept_ids.get((vocab, code))
-            if concept_id is None:
+            found = concepts.get((vocab, code))
+            if found is None:
                 result.unresolved += 1
                 result.unresolved_refs.append((field_name, vocab, code))
                 continue
+            concept_id, retired = found
             concept_by_pk[pk] = concept_id
-        if not concept_by_pk:
+            if retired:
+                result.retired_refs.append((field_name, vocab, code))
+        if dry_run:
+            result.resolved += len(concept_by_pk)
             continue
-        with transaction.atomic():
-            # save(), not update(): the post_save receiver is what projects a
-            # pending user edit once the mapping is in force, as a hand
-            # re-save in the editor would. update_fields keeps auto_now
-            # updated_at as it was.
-            for mapping in FieldConceptMapping.objects.select_for_update().filter(
-                pk__in=concept_by_pk, concept__isnull=True,
-            ):
-                mapping.concept_id = concept_by_pk[mapping.pk]
+        for pk in sorted(concept_by_pk):
+            with transaction.atomic():
+                mapping = FieldConceptMapping.objects.select_for_update().filter(
+                    pk=pk, concept__isnull=True,
+                ).first()
+                if mapping is None:
+                    continue
+                # save(), not update(): the post_save receiver is what
+                # projects a pending user edit once the mapping is in force,
+                # as a hand re-save in the editor would. update_fields keeps
+                # auto_now updated_at as it was.
+                mapping.concept_id = concept_by_pk[pk]
                 mapping.save(update_fields=['concept'])
                 result.resolved += 1
     return result

@@ -13,10 +13,9 @@ unresolved row is a fact about the instance, not a failure of the command.
 Re-running it is safe: a resolved row is never a candidate again.
 
 Writes to ``DATABASE_URL``; name the target explicitly. ``--dry-run`` reports
-what a run would do and rolls it back.
+what a run would do without locking, saving or projecting anything.
 """
 from django.core.management.base import BaseCommand
-from django.db import transaction
 
 from omop_core.services.field_concept_resolution import resolve_field_concept_mappings
 
@@ -28,14 +27,11 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument(
             '--dry-run', action='store_true', dest='dry_run',
-            help='Report what would be resolved, then roll back.',
+            help='Report what would be resolved; write nothing.',
         )
 
     def handle(self, *args, **options):
-        with transaction.atomic():
-            result = resolve_field_concept_mappings()
-            if options['dry_run']:
-                transaction.set_rollback(True)
+        result = resolve_field_concept_mappings(dry_run=options['dry_run'])
 
         if result.unresolved:
             self.stdout.write(self.style.WARNING(f'  ! {result.summary()}'))
@@ -43,7 +39,7 @@ class Command(BaseCommand):
             self.stdout.write(f'  {result.summary()}')
         if options['dry_run']:
             self.stdout.write(self.style.WARNING(
-                f'Dry run, rolled back. Would have resolved {result.resolved} row(s).'
+                f'Dry run, nothing written. Would resolve {result.resolved} row(s).'
             ))
         else:
             self.stdout.write(self.style.SUCCESS(

@@ -765,19 +765,24 @@ class Command(EmbeddingLoadCommand):
         baseline before the curation tables are seeded. Under the plain
         loader the table loads are already committed by then; under
         ``sync_athena_vocabulary`` the whole load, this step included, is one
-        transaction and commits together.
+        transaction: it commits together, and a sync that rolls back a load
+        with nothing new discards this too (the rows resolve on the next
+        load that applies).
 
         Best effort: the load is complete and published, so a failure here is
         logged with the manual fallback (``manage.py
-        resolve_field_concept_mappings``) and never fails the load -- under
-        the sync's transaction it would roll back the whole vocabulary.
+        resolve_field_concept_mappings``) and never fails the load. The call
+        runs in a savepoint so that a database error inside it is confined
+        and does not leave the sync's outer transaction aborted, which would
+        roll back the whole vocabulary at its next statement.
         """
         from omop_core.services.field_concept_resolution import (
             resolve_field_concept_mappings,
         )
 
         try:
-            result = resolve_field_concept_mappings()
+            with transaction.atomic():
+                result = resolve_field_concept_mappings()
         except Exception:
             logger.exception(
                 'field mappings: resolution failed after the load; run '

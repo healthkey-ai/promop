@@ -116,7 +116,9 @@ provenance and `updated_at` are untouched. A row that already points at a
 concept is never a candidate, concept 0 included (the "No matching concept"
 placeholder the genomics seeds park a field on), so "0 still unresolved"
 means every candidate's code was found, not that every field has a real
-concept; a second run changes nothing. The step is best effort: a failure is
+concept; a second run changes nothing. Each row is locked and saved in a
+savepoint of its own, so a curator's concurrent save waits for one row, not
+the run. The step is best effort: it runs in a savepoint and a failure is
 logged with the manual fallback and does not fail the load, because under
 `sync_athena_vocabulary` the whole load is one transaction and the hook runs
 inside it. The migration bootstrap (`prepare_production_database`) loads at
@@ -125,7 +127,9 @@ not run it; a scheduled sync with nothing new to load does not run the
 loader at all. An instance that loaded its vocabulary before this hook
 existed, or seeded or copied mappings after the load, runs
 `manage.py resolve_field_concept_mappings` once (`--dry-run` reports and
-rolls back). `SourceCodeConceptMapping` needs no such pass: its concept FKs
+writes nothing). A row whose pair names a concept Athena has since retired
+still resolves to it, as `apply_payload` would, and the log names it for
+re-curation. `SourceCodeConceptMapping` needs no such pass: its concept FKs
 are unconstrained, so the seed stores the id before the Concept exists.
 
 ## Scalar save, projection and refresh
