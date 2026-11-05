@@ -21,6 +21,7 @@ from omop_core.models import (
     Concept, ConditionOccurrence, DrugExposure, FieldChoice, Measurement,
     Observation, PatientRecord, PreExistingConditionCategory, ProcedureOccurrence,
 )
+from omop_core.services.boolean_answers import BOOLEAN_ANSWERS
 from omop_core.services.demographics import choices as demographic_choices
 from omop_core.services.mappings import (
     CONCEPT_EHR_TYPE, CONCEPT_LAB_TYPE, CONCEPT_PATIENT_REPORTED_TYPE,
@@ -1300,6 +1301,19 @@ def build_writable_field_descriptor():
                 f'{positive} with the opposite value.'
             ),
         })
+
+    # The words the dedicated dialog asks in (#5667). `answer_labels` is
+    # already what the form descriptor shows; the trial writable descriptor
+    # carries it too, so a federated client reading only this endpoint can say
+    # "HIV Positive" / "No HIV" instead of a generic Yes/No over a polarity
+    # boundary. Metadata only: it changes no write path.
+    for positive in _NEGATED_ALIASES.values():
+        labels = BOOLEAN_ANSWERS.get(positive)
+        if labels and positive in descriptor:
+            descriptor[positive]['answer_labels'] = {
+                'true': labels[0],
+                'false': labels[1],
+            }
 
     # The birth date is stored at one of three precisions. A full date typed
     # into a year-only record must not silently promote it (or be truncated

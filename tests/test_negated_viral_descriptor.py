@@ -56,3 +56,21 @@ def test_the_removed_negative_is_not_a_stored_column(negated):
     from omop_core.models import PatientRecord
 
     assert negated not in {field.name for field in PatientRecord._meta.concrete_fields}
+
+
+@pytest.mark.parametrize('negated,positive', sorted(PAIRS.items()))
+def test_the_canonical_entry_carries_the_words_the_dialog_asks(negated, positive):
+    """#5667: the dedicated dialog shows the record's answers, not Yes/No.
+
+    The labels ride on the CANONICAL entry, next to the field a write lands in;
+    the negated entry is the question, not the answer.
+    """
+    from omop_core.services.boolean_answers import BOOLEAN_ANSWERS
+
+    descriptor = build_writable_field_descriptor()
+    positive_label, negative_label = BOOLEAN_ANSWERS[positive]
+
+    assert descriptor[positive]['answer_labels'] == {
+        'true': positive_label,
+        'false': negative_label,
+    }
