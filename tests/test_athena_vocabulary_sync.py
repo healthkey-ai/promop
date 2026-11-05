@@ -1,3 +1,4 @@
+import time
 from io import StringIO
 from unittest.mock import Mock
 
@@ -377,3 +378,205 @@ def test_worker_records_failures_that_escape_before_the_command_receipt(monkeypa
     assert sync_row.outcome == 'failed'
     assert sync_row.failure_reason == 'command unavailable'
     assert sync_row.completed_at is not None
+
+
+# --- a lost worker must not block the next sync (#2288 live test) ------------
+
+def _active(outcome, started_minutes_ago, heartbeat_minutes_ago=None, source_url='https://github.com/x/y'):
+    now = timezone.now()
+    return AthenaVocabularySync.objects.create(
+        source_url=source_url, outcome=outcome,
+        started_at=now - timezone.timedelta(minutes=started_minutes_ago),
+        heartbeat_at=(
+            now - timezone.timedelta(minutes=heartbeat_minutes_ago)
+            if heartbeat_minutes_ago is not None else None
+        ),
+    )
+
+
+@pytest.mark.django_db
+def test_a_running_receipt_without_a_recent_heartbeat_is_taken_over(monkeypatch):
+    """The old worker instance took the job and was retired mid-load; its receipt stayed 'running'."""
+    lost = _active('running', started_minutes_ago=90, heartbeat_minutes_ago=85)
+    monkeypatch.setattr(
+        'omop_core.tasks.sync_athena_vocabulary_task.apply_async', Mock(return_value=Mock(id='t2')),
+    )
+
+    sync_row, created = athena_vocabulary_jobs.enqueue_sync('https://github.com/x/y')
+
+    assert created and sync_row.pk != lost.pk
+    lost.refresh_from_db()
+    assert lost.outcome == 'failed'
+    assert 'no heartbeat since' in lost.failure_reason
+
+
+@pytest.mark.django_db
+def test_a_running_receipt_that_still_beats_is_live(monkeypatch):
+    live = _active('running', started_minutes_ago=90, heartbeat_minutes_ago=2)
+    publish = Mock(side_effect=AssertionError('nothing to queue'))
+    monkeypatch.setattr('omop_core.tasks.sync_athena_vocabulary_task.apply_async', publish)
+
+    sync_row, created = athena_vocabulary_jobs.enqueue_sync('https://github.com/x/y')
+
+    assert (sync_row.pk, created) == (live.pk, False)
+    live.refresh_from_db()
+    assert live.outcome == 'running'
+
+
+@pytest.mark.django_db
+def test_a_running_receipt_that_never_beat_is_judged_by_its_start():
+    assert athena_vocabulary_jobs.stale_reason(_active('running', 10, source_url='https://github.com/a')) is None
+    assert 'no heartbeat' in athena_vocabulary_jobs.stale_reason(_active('running', 40, source_url='https://github.com/b'))
+
+
+@pytest.mark.django_db
+def test_a_queued_receipt_is_stale_only_past_the_broker_visibility_timeout():
+    assert athena_vocabulary_jobs.stale_reason(_active('queued', 60 * 6, source_url='https://github.com/a')) is None
+    assert 'Never started' in athena_vocabulary_jobs.stale_reason(_active('queued', 60 * 8, source_url='https://github.com/b'))
+
+
+@pytest.mark.django_db(transaction=True)
+def test_the_running_sync_heartbeats_on_its_own_connection_while_a_transaction_is_open():
+    from django.db import transaction as db_transaction
+    row = _active('running', started_minutes_ago=1)
+    out = sync.HeartbeatOutput(StringIO(), row.pk, every=0)
+    try:
+        with db_transaction.atomic():
+            out.write('  relationships: scanned 500,000...')
+            # Visible from any other connection before this transaction commits.
+            seen = AthenaVocabularySync.objects.using('default').get(pk=row.pk).heartbeat_at
+    finally:
+        out.close()
+
+    row.refresh_from_db()
+    assert row.heartbeat_at is not None
+    assert out._inner.getvalue().startswith('  relationships')
+    assert seen is not None
+
+
+@pytest.mark.django_db(transaction=True)
+def test_the_heartbeat_thread_beats_without_any_log_line():
+    """Hashing a table for the release is one long silent statement; the thread still beats."""
+    row = _active('running', started_minutes_ago=1)
+    out = sync.HeartbeatOutput(StringIO(), row.pk, every=0.05)
+    try:
+        out.start()
+        first = AthenaVocabularySync.objects.get(pk=row.pk).heartbeat_at
+        assert first is not None
+        deadline = time.monotonic() + 5
+        later = first
+        while later == first and time.monotonic() < deadline:
+            time.sleep(0.1)
+            later = AthenaVocabularySync.objects.get(pk=row.pk).heartbeat_at
+    finally:
+        out.close()
+    assert later > first
+    assert out._thread is None  # close() stopped it
+
+
+@pytest.mark.django_db(transaction=True)
+def test_the_loader_s_output_wrapper_still_reaches_the_heartbeat():
+    """call_command wraps a passed stdout in OutputWrapper; the loader's lines must still beat."""
+    from django.core.management.base import OutputWrapper
+    row = _active('running', started_minutes_ago=1)
+    out = sync.HeartbeatOutput(StringIO(), row.pk, every=0)
+    try:
+        OutputWrapper(out).write('  concepts: scanned 500,000')
+    finally:
+        out.close()
+    assert AthenaVocabularySync.objects.get(pk=row.pk).heartbeat_at is not None
+    assert out._inner.getvalue().strip() == 'concepts: scanned 500,000'
+
+
+def test_heartbeat_is_throttled_by_time(monkeypatch):
+    out = sync.HeartbeatOutput(StringIO(), sync_id=1, every=30)
+    updates = []
+
+    class _Cursor:
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def execute(self, sql, params): updates.append(params)
+
+    class _Conn:
+        def cursor(self): return _Cursor()
+        def close(self): pass
+
+    monkeypatch.setattr(out, '_connect', lambda: _Conn())
+    clock = [1000.0]
+    monkeypatch.setattr(sync.time, 'monotonic', lambda: clock[0])
+    out.write('a')          # first beat
+    clock[0] += 10
+    out.write('b')          # within 30 s: no beat
+    clock[0] += 25
+    out.write('c')          # 35 s after the first: beats
+    out.beat(force=True)    # a forced beat ignores the throttle
+    out.close()
+    out.write('after close')  # never reopens
+    assert len(updates) == 3
+
+
+def test_a_failing_heartbeat_closes_its_connection_and_warns_once(monkeypatch, caplog):
+    closed = []
+
+    class _Conn:
+        def cursor(self): raise RuntimeError('connection reset')
+        def close(self): closed.append(True)
+
+    out = sync.HeartbeatOutput(StringIO(), sync_id=1, every=0)
+    monkeypatch.setattr(out, '_connect', lambda: _Conn())
+    with caplog.at_level('WARNING'):
+        out.write('a')
+        out.write('b')
+    out.close()
+    assert closed == [True, True]
+    assert sum('heartbeat failed' in r.message for r in caplog.records) == 1
+    assert out._inner.getvalue() == 'ab'
+
+
+@pytest.mark.django_db
+def test_the_task_skips_a_receipt_retired_as_stale(monkeypatch):
+    """The lost worker's message comes back after the visibility timeout; it must not revive the receipt."""
+    from django.core import management
+    from omop_core.tasks import sync_athena_vocabulary_task
+
+    retired = _active('running', started_minutes_ago=90, heartbeat_minutes_ago=85)
+    assert athena_vocabulary_jobs.retire_stale(retired)
+    command = Mock(side_effect=AssertionError('a retired receipt must not run'))
+    monkeypatch.setattr(management, 'call_command', command)
+
+    result = sync_athena_vocabulary_task.run(retired.pk)
+
+    assert result == {'sync_id': retired.pk, 'outcome': 'failed', 'skipped': True}
+    command.assert_not_called()
+    retired.refresh_from_db()
+    assert retired.outcome == 'failed'
+    assert 'Worker lost' in retired.failure_reason
+
+
+@pytest.mark.django_db
+def test_the_task_still_retries_a_receipt_that_is_merely_running(monkeypatch):
+    from django.core import management
+    from omop_core.tasks import sync_athena_vocabulary_task
+
+    row = _active('running', started_minutes_ago=5, heartbeat_minutes_ago=1)
+
+    def command(name, **options):
+        AthenaVocabularySync.objects.filter(pk=row.pk).update(outcome='applied')
+
+    monkeypatch.setattr(management, 'call_command', command)
+    assert sync_athena_vocabulary_task.run(row.pk) == {'sync_id': row.pk, 'outcome': 'applied'}
+
+
+@pytest.mark.django_db
+def test_a_run_whose_receipt_was_retired_underneath_it_keeps_that_record():
+    row = _active('running', started_minutes_ago=90, heartbeat_minutes_ago=85)
+    command = sync.Command(stdout=StringIO())
+    command._sync_id = row.pk
+    athena_vocabulary_jobs.retire_stale(row)
+
+    kept = command._receipt('https://github.com/x/y', 'lfs-file:x', 'a' * 64, None, None, {},
+                            'current', timezone.now())
+
+    assert kept.outcome == 'failed'
+    assert 'Worker lost' in kept.failure_reason
+    assert 'was marked failed' in command.stdout.getvalue()
