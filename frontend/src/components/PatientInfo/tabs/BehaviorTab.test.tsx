@@ -9,7 +9,7 @@
  * The one exception, `insurance_type`, shows the other half: a field that gains
  * an approved mapping becomes editable here with no change to this file.
  */
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import BehaviorTab from './BehaviorTab';
@@ -47,6 +47,11 @@ const DESCRIPTORS: Record<string, unknown> = {
   alcohol_use: NEEDS_CONCEPT,
   pack_years: NEEDS_CONCEPT,
   employment_status: NEEDS_CONCEPT,
+  no_pregnancy_or_lactation_status: {
+    kind: 'direct', writable: true, target: 'patient_record',
+    value_kind: 'boolean',
+    answer_labels: { true: 'Not pregnant or lactating', false: 'Pregnant or lactating' },
+  },
 };
 
 beforeEach(() => {
@@ -121,6 +126,20 @@ describe('BehaviorTab', () => {
     await waitFor(() =>
       expect(screen.getByTestId('reason-insurance_type')).toBeInTheDocument(),
     );
+  });
+
+  it('shows the reviewed wording for the pregnancy answer', async () => {
+    render(
+      <BehaviorTab formData={{ no_pregnancy_or_lactation_status: true }}
+        onChange={vi.fn()} onRefresh={vi.fn()} />,
+    );
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+
+    const labelEl = screen.getByText('Not Pregnant or Lactating');
+    const container = labelEl.closest('.space-y-1\\.5') as HTMLElement;
+    // True answers the negative question with its reviewed wording, not "Yes".
+    expect(within(container).getByRole('combobox'))
+      .toHaveTextContent('Not pregnant or lactating');
   });
 
   it('keeps every section it had before the conversion', async () => {

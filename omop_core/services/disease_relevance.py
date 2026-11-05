@@ -56,7 +56,7 @@ DISEASE_FIELDS: dict[str, frozenset[str]] = {
     'MM': frozenset({
         'mgus', 'smoldering_multiple_myeloma', 'waldenstrom_macroglobulinemia',
         'igm_multiple_myeloma', 'al_amyloidosis', 'poems_syndrome',
-        'myeloma_type', 'stage', 'progression', 'measurable_disease_imwg', 'mrd_status',
+        'plasma_cell_leukemia', 'myeloma_type', 'stage', 'progression', 'measurable_disease_imwg', 'mrd_status',
         'meets_crab', 'meets_slim', 'stem_cell_transplant_history', 'sct_date', 'sct_eligibility',
         'monoclonal_protein_serum', 'monoclonal_protein_urine', 'kappa_flc', 'lambda_flc',
         'kappa_lambda_ratio', 'involved_uninvolved_ratio', 'bone_lesions', 'clonal_plasma_cells',

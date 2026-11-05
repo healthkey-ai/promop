@@ -267,6 +267,15 @@ BOOLEAN_ANSWERS = {
     'hiv_status': ('HIV Positive', 'No HIV'),
     'hepatitis_b_status': ('Hepatitis B Positive', 'No Hepatitis B'),
     'hepatitis_c_status': ('Hepatitis C Positive', 'No Hepatitis C'),
+    # These two already ask the negative question ("negative test result", "not
+    # pregnant or lactating"), so a bare Yes/No inverts what the reader expects
+    # (#5676). `False` on the test result is "not negative", which covers a
+    # positive result as well as one that was not recorded.
+    'pregnancy_test_result': ('Negative', 'Not negative'),
+    'no_pregnancy_or_lactation_status': ('Not pregnant or lactating', 'Pregnant or lactating'),
+    # The column records the disease, while a trial row may ask "No Plasma Cell
+    # Leukemia"; the answer labels keep the fact's own polarity visible.
+    'plasma_cell_leukemia': ('Present', 'Not present'),
 }
 
 # No PatientRecord field is refused here: death date has its dated assertion

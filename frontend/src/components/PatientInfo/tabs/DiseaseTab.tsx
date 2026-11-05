@@ -185,6 +185,7 @@ function MyelomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onChan
           <ClinicalField label="IgM Multiple Myeloma" name="igm_multiple_myeloma" descriptor={descriptors.igm_multiple_myeloma} type="boolean" value={formData?.igm_multiple_myeloma} onChange={onChange} />
           <ClinicalField label="Light-Chain (AL) Amyloidosis" name="al_amyloidosis" descriptor={descriptors.al_amyloidosis} type="boolean" value={formData?.al_amyloidosis} onChange={onChange} />
           <ClinicalField label="POEMS Syndrome" name="poems_syndrome" descriptor={descriptors.poems_syndrome} type="boolean" value={formData?.poems_syndrome} onChange={onChange} />
+          <ClinicalField label="Plasma Cell Leukemia" name="plasma_cell_leukemia" descriptor={descriptors.plasma_cell_leukemia} type="boolean" value={formData?.plasma_cell_leukemia} onChange={onChange} />
         </div>
       </Section>
 

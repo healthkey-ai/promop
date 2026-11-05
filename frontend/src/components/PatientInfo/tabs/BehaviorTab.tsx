@@ -132,6 +132,7 @@ export default function BehaviorTab({ formData, onChange, onRefresh }: Props) {
             <ClinicalField label="Pregnancy Test Result" name="pregnancy_test_result_value" descriptor={descriptors.pregnancy_test_result_value} type="text" value={formData?.pregnancy_test_result_value} onChange={onChange} />
           </div>
           <ClinicalField label="Using Contraceptives" name="contraceptive_use" descriptor={descriptors.contraceptive_use} type="boolean" value={formData?.contraceptive_use} onChange={onChange} />
+          <ClinicalField label="Not Pregnant or Lactating" name="no_pregnancy_or_lactation_status" descriptor={descriptors.no_pregnancy_or_lactation_status} type="boolean" value={formData?.no_pregnancy_or_lactation_status} onChange={onChange} />
         </div>
       </Section>
 
