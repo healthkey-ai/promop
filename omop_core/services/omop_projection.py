@@ -65,10 +65,10 @@ def projection_for_descriptor(entry):
     states its projection explicitly and is never a client write target, so the
     writable check does not apply to it.
     """
-    if not entry or entry.get('clinical_input_contract'):
+    if (not entry or entry.get('clinical_input_contract')
+            or entry.get('read_only_for_caller')):
         return None
-    normalised_read_model = (bool(entry.get('normalised_read_model'))
-                             and not entry.get('read_only_for_caller'))
+    normalised_read_model = bool(entry.get('normalised_read_model'))
     if (not normalised_read_model
             and (not entry.get('writable')
                  or entry.get('target') != 'patient_record')):

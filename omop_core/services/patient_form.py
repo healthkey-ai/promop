@@ -505,7 +505,15 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
             direct[name] = value
             continue
         entry = descriptor.get(name, {})
-        if entry.get('normalised_read_model') and not entry.get('read_only_for_caller'):
+        if entry.get('read_only_for_caller'):
+            # A caller-level restriction is absolute: it wins even when the
+            # entry also says `writable` (a supplied descriptor can carry
+            # both, and the canonical compatibility path must not override it).
+            result.rejected[name] = (
+                entry.get('reason') or 'Editing is not available for this caller.'
+            )
+            continue
+        if entry.get('normalised_read_model'):
             # A canonical import is still accepted from a client that speaks
             # the normalised field (#2318). It is not advertised as writable
             # because the source pair is the editor's target, but the server

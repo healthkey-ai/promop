@@ -367,7 +367,14 @@ def apply_field_writes(person, changes, today=None, descriptor=None, dates=None,
         if d is None:
             result.rejected[field] = 'Unknown field; not part of the writable record.'
             continue
-        if d.get('normalised_read_model') and not d.get('read_only_for_caller'):
+        if d.get('read_only_for_caller'):
+            # A caller-level restriction wins over `writable` and over the
+            # canonical compatibility flag.
+            result.rejected[field] = (
+                d.get('reason') or 'Editing is not available for this caller.'
+            )
+            continue
+        if d.get('normalised_read_model'):
             # A canonical import is honoured for compatibility (#2318); the
             # descriptor hides it from editors in favour of the source pair.
             # Caller-level restrictions still win.

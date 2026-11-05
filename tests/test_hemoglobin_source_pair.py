@@ -458,7 +458,9 @@ def test_a_caller_read_only_canonical_cannot_be_written_through_the_form(api):
     record.hemoglobin_g_dl = 12
     record.save()
     descriptor = build_writable_field_descriptor()
-    descriptor['hemoglobin_g_dl']['read_only_for_caller'] = True
+    descriptor['hemoglobin_g_dl'].update(
+        writable=True, read_only_for_caller=True,
+    )
 
     saved, result = apply_patient_form_patch(
         record.person, {'hemoglobin_g_dl': 13}, descriptor=descriptor,
@@ -476,7 +478,9 @@ def test_a_caller_read_only_canonical_cannot_be_written_by_the_applier(api):
 
     record = _record()
     descriptor = build_writable_field_descriptor()
-    descriptor['hemoglobin_g_dl']['read_only_for_caller'] = True
+    descriptor['hemoglobin_g_dl'].update(
+        writable=True, read_only_for_caller=True,
+    )
 
     result = apply_field_writes(
         record.person, {'hemoglobin_g_dl': 13}, descriptor=descriptor,
@@ -507,3 +511,13 @@ def test_a_canonical_write_retires_the_pair_without_a_refresh(api):
     assert float(record.hemoglobin_level) == 13.0
     assert record.hemoglobin_level_units == 'G/DL'
     assert float(record.hemoglobin_g_dl) == 13.0
+
+
+def test_the_projector_refuses_a_caller_read_only_canonical(api):
+    from omop_core.services.omop_projection import projection_for_descriptor
+    from omop_core.services.write_descriptor import build_writable_field_descriptor
+
+    entry = build_writable_field_descriptor()['hemoglobin_g_dl']
+    entry.update(writable=True, read_only_for_caller=True)
+
+    assert projection_for_descriptor(entry) is None
