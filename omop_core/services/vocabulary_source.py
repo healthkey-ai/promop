@@ -45,6 +45,18 @@ DOWNLOAD_TIMEOUT = (30, 300)
 # load (#2288): "Connection broken: IncompleteRead". Resume with a Range
 # request before giving the archive up to the Drive fallback.
 DOWNLOAD_ATTEMPTS = 4
+DOWNLOAD_BACKOFF_MAX = 15  # seconds; the backoff doubles from 2 s and stops here
+# A 4xx other than these says the same thing on every attempt.
+RETRIABLE_STATUSES = frozenset({408, 429})
+
+
+def _retriable(exc):
+    """A transport failure or a server-side status is worth another attempt."""
+    if isinstance(exc, requests.HTTPError):
+        response = exc.response
+        status = response.status_code if response is not None else 0
+        return status >= 500 or status in RETRIABLE_STATUSES
+    return isinstance(exc, requests.RequestException)
 # The identity column is CharField(500) and holds two names beside two hashes.
 MAX_FILE_NAME = 150
 LOINC_LOCAL_NAME = 'loinc-release.zip'
@@ -215,10 +227,17 @@ def _stream(url, partial, log):
     received = _received(partial)
     headers = {'Range': f'bytes={received}-'} if received else {}
     with requests.get(url, stream=True, timeout=DOWNLOAD_TIMEOUT, headers=headers) as response:
+        if received and response.status_code == 416:
+            # Nothing past what is on disk: the stream broke after the last
+            # byte. The caller's hash decides whether the file is the object.
+            return
         response.raise_for_status()
-        resumed = bool(received) and response.status_code == 206
+        resumed = (
+            bool(received) and response.status_code == 206
+            and (response.headers.get('Content-Range') or '').startswith(f'bytes {received}-')
+        )
         if received and not resumed:
-            log('  The server did not resume; restarting the download.')
+            log('  The server did not resume from the bytes on disk; restarting the download.')
         with open(partial, 'ab' if resumed else 'wb') as out:
             for chunk in response.iter_content(chunk_size=_CHUNK):
                 if chunk:
@@ -242,13 +261,13 @@ def download_lfs_file(url, dest, sha256=None, log=lambda _msg: None):
                 _stream(url, partial, log)
                 break
             except requests.RequestException as exc:
-                if attempt == DOWNLOAD_ATTEMPTS:
+                if attempt == DOWNLOAD_ATTEMPTS or not _retriable(exc):
                     raise
                 log(
                     f'  WARNING: download interrupted after {_received(partial):,} bytes ({exc}); '
                     f'resuming (attempt {attempt + 1} of {DOWNLOAD_ATTEMPTS})...'
                 )
-                time.sleep(min(2 ** attempt, 15))
+                time.sleep(min(2 ** attempt, DOWNLOAD_BACKOFF_MAX))
     except (requests.RequestException, OSError, ValueError) as exc:
         # OSError: the scratch disk, not GitHub -- but the caller's fallback
         # decision is the same, and the receipt should say which file failed.

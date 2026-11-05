@@ -26,14 +26,15 @@ MANIFEST = {
 
 
 class _Response:
-    def __init__(self, status=200, body=None, content=b''):
+    def __init__(self, status=200, body=None, content=b'', headers=None):
         self.status_code = status
         self._body = body
         self._content = content
+        self.headers = headers or {}
 
     def raise_for_status(self):
         if self.status_code >= 400:
-            raise requests.HTTPError(f'{self.status_code}')
+            raise requests.HTTPError(f'{self.status_code}', response=self)
 
     def json(self):
         if isinstance(self._body, Exception):
@@ -245,8 +246,11 @@ def _serve(monkeypatch, responses):
         return responses.pop(0)
 
     monkeypatch.setattr(vs.requests, 'get', get)
-    monkeypatch.setattr(vs.time, 'sleep', lambda s: None)
     return calls
+
+
+def _range(received, total):
+    return {'Content-Range': f'bytes {received}-{total - 1}/{total}'}
 
 
 def test_a_broken_stream_is_resumed_with_a_range_request(monkeypatch, tmp_path):
@@ -255,7 +259,7 @@ def test_a_broken_stream_is_resumed_with_a_range_request(monkeypatch, tmp_path):
     cut = len(content) // 2
     calls = _serve(monkeypatch, [
         _Broken(content[:cut]),
-        _Response(status=206, content=content[cut:]),
+        _Response(status=206, content=content[cut:], headers=_range(cut, len(content))),
     ])
     log = []
 
@@ -270,19 +274,62 @@ def test_a_broken_stream_is_resumed_with_a_range_request(monkeypatch, tmp_path):
 
 def test_a_server_that_does_not_resume_restarts_the_download(monkeypatch, tmp_path):
     content = b'z' * 3000
-    _serve(monkeypatch, [_Broken(content[:1000]), _Response(status=200, content=content)])
+    calls = _serve(monkeypatch, [_Broken(content[:1000]), _Response(status=200, content=content)])
     log = []
     dest = vs.download_lfs_file('https://x/y.zip', tmp_path / 'y.zip', hashlib.sha256(content).hexdigest(), log.append)
     assert dest.read_bytes() == content
+    assert calls[1] == {'Range': 'bytes=1000-'}
     assert any('did not resume' in line for line in log)
 
 
+def test_a_206_from_another_offset_restarts_instead_of_appending(monkeypatch, tmp_path):
+    content = b'q' * 3000
+    _serve(monkeypatch, [
+        _Broken(content[:1000]),
+        _Response(status=206, content=content, headers=_range(0, len(content))),
+    ])
+    log = []
+    dest = vs.download_lfs_file('https://x/y.zip', tmp_path / 'y.zip', hashlib.sha256(content).hexdigest(), log.append)
+    assert dest.read_bytes() == content
+    assert any('did not resume from the bytes on disk' in line for line in log)
+
+
+def test_a_stream_that_broke_after_the_last_byte_is_accepted_on_416(monkeypatch, tmp_path):
+    content = b'end' * 1000
+    calls = _serve(monkeypatch, [_Broken(content), _Response(status=416)])
+    dest = vs.download_lfs_file('https://x/y.zip', tmp_path / 'y.zip', hashlib.sha256(content).hexdigest())
+    assert dest.read_bytes() == content
+    assert calls == [{}, {'Range': f'bytes={len(content)}-'}]
+
+
 def test_a_stream_that_keeps_breaking_gives_up_after_the_attempts(monkeypatch, tmp_path):
-    calls = _serve(monkeypatch, [_Broken(b'a' * 10, status=206 if i else 200) for i in range(vs.DOWNLOAD_ATTEMPTS)])
+    responses = [_Broken(b'a' * 10)]
+    responses += [
+        _Broken(b'a' * 10, status=206) for _ in range(vs.DOWNLOAD_ATTEMPTS - 1)
+    ]
+    for i, response in enumerate(responses[1:], start=1):
+        response.headers = _range(10 * i, 10 * vs.DOWNLOAD_ATTEMPTS + 1)
+    calls = _serve(monkeypatch, responses)
     with pytest.raises(vs.LfsSourceError, match='LFS download failed .*IncompleteRead'):
         vs.download_lfs_file('https://x/y.zip', tmp_path / 'y.zip', None)
-    assert len(calls) == vs.DOWNLOAD_ATTEMPTS
+    # Each retry resumes from the bytes accumulated so far, not from the last start.
+    assert calls == [{}] + [{'Range': f'bytes={10 * i}-'} for i in range(1, vs.DOWNLOAD_ATTEMPTS)]
     assert not (tmp_path / 'y.zip.part').exists()
+
+
+@pytest.mark.parametrize('status', [403, 404])
+def test_a_client_error_is_not_retried(monkeypatch, tmp_path, status):
+    calls = _serve(monkeypatch, [_Response(status=status)])
+    with pytest.raises(vs.LfsSourceError, match=f'LFS download failed .*{status}'):
+        vs.download_lfs_file('https://x/y.zip', tmp_path / 'y.zip', None)
+    assert len(calls) == 1
+
+
+def test_a_server_error_is_retried(monkeypatch, tmp_path):
+    content = b'ok' * 100
+    calls = _serve(monkeypatch, [_Response(status=503), _Response(content=content)])
+    dest = vs.download_lfs_file('https://x/y.zip', tmp_path / 'y.zip', hashlib.sha256(content).hexdigest())
+    assert dest.read_bytes() == content and len(calls) == 2
 
 
 def test_failed_lfs_download_falls_back_to_drive_and_rewrites_the_selection(monkeypatch, tmp_path):
