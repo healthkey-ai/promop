@@ -103,6 +103,39 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
     No reviewed PROMOP field binding. {infoHref && <a href={infoHref}>Open Your Info</a>}
   </div>;
   if (ancestors.includes(canonical)) return <p role="alert">Circular field dependency; editing is unavailable.</p>;
+  // A field's caller owns its patient-facing wording. PROMOP descriptors provide
+  // a generated label as a fallback; when a tab supplies a reviewed label, don't
+  // let that generated value replace it (for example "Hiv status" vs "HIV Positive").
+  const label = callerLabel ?? field.label ?? canonical;
+  // A negated descriptor asks the trial's question over a record that stores the
+  // positive answer ("No HIV" over `hiv_status`). The edit lands on the positive
+  // column with the value inverted; writing the negated name itself would store
+  // the opposite answer (#5663).
+  const negatedSource = field.kind === 'negated' && typeof field.canonical === 'string'
+    ? store.resolve(field.canonical) : undefined;
+  if (negatedSource) {
+    const source = state.fields[negatedSource];
+    const queued = negatedSource in state.pending ? state.pending[negatedSource] : undefined;
+    const raw = negatedSource in state.pending
+      ? (queued && typeof queued === 'object' && !Array.isArray(queued) && 'value' in queued
+        ? (queued as { value: unknown }).value : queued)
+      : state.values[negatedSource];
+    const inverted = raw === true ? false : raw === false ? true : raw;
+    const canWrite = !readOnly && state.writable && source?.writable === true
+      && source.target === 'patient_record';
+    const answer = raw === true ? 'No' : raw === false ? 'Yes' : 'Unknown';
+    return <div className="space-y-1" data-field={canonical}>
+      {canWrite ? <Field label={compact ? '' : label} name={canonical} type="boolean"
+          value={inverted} triState={source.tri_state === true}
+          onChange={(_name, next) => store.enqueue(negatedSource,
+            next === true ? false : next === false ? true : next)} />
+        : <><div>{!compact && <span className="text-sm font-medium">{label}: </span>}{answer}</div>
+          <p className="text-xs text-muted-foreground">{field.reason ?? 'Inverted view of the positive status.'}
+            {' '}{infoHref && <a href={infoHref}>Open Your Info</a>}</p></>}
+      {negatedSource in state.pending && <span role="status" className="text-xs">Saving…</span>}
+      {state.errors[negatedSource] && <p role="alert" className="text-xs text-red-600">{state.errors[negatedSource]}</p>}
+    </div>;
+  }
   const pending = canonical in state.pending ? state.pending[canonical] : undefined;
   // A dated edit is queued as {value, date}; the row still edits the value.
   const pendingValue = pending && typeof pending === 'object' && !Array.isArray(pending) && 'value' in pending
@@ -112,10 +145,6 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
   const precision = canonical === 'date_of_birth'
     && (dobPrecision === 'day' || dobPrecision === 'month' || dobPrecision === 'year')
     ? dobPrecision : undefined;
-  // A field's caller owns its patient-facing wording. PROMOP descriptors provide
-  // a generated label as a fallback; when a tab supplies a reviewed label, don't
-  // let that generated value replace it (for example "Hiv status" vs "HIV Positive").
-  const label = callerLabel ?? field.label ?? canonical;
   // An alias descriptor points at the field it mirrors. A field the server says
   // is directly writable is edited in place: drilling into its own canonical
   // would show a pencil for a plain select (#5605 Refractory Status).
