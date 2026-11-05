@@ -459,9 +459,16 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
                      or canonical_entry.get('normalised_read_model'))
             and not canonical_entry.get('read_only_for_caller')
         )
-        if not source_allowed:
-            reason = (source_entry.get('reason')
-                      or 'No supported patient-record write path.')
+        unit_entry = descriptor.get(HEMOGLOBIN_UNIT) or {}
+        unit_forbidden = (HEMOGLOBIN_UNIT in changes
+                          and unit_entry.get('read_only_for_caller'))
+        if not source_allowed or unit_forbidden:
+            # A caller-level restriction on either half rejects the pair as a
+            # whole: saving the number without its unit would change the
+            # meaning of the value.
+            entry = unit_entry if unit_forbidden else source_entry
+            reason = (entry.get('reason')
+                      or 'Editing is not available for this caller.')
             for field in (HEMOGLOBIN_PAIR, HEMOGLOBIN_UNIT):
                 if field in changes:
                     result.rejected[field] = reason

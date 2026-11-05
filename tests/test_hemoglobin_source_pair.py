@@ -521,3 +521,34 @@ def test_the_projector_refuses_a_caller_read_only_canonical(api):
     entry.update(writable=True, read_only_for_caller=True)
 
     assert projection_for_descriptor(entry) is None
+
+
+def test_the_shared_form_cannot_change_a_caller_read_only_unit(api):
+    from omop_core.services.patient_form import apply_patient_form_patch
+    from omop_core.services.write_descriptor import build_writable_field_descriptor
+
+    record = _record()
+    record.hemoglobin_level = 12
+    record.hemoglobin_level_units = 'G/DL'
+    record.hemoglobin_g_dl = 12
+    record.user_edited_fields = ['hemoglobin_level', 'hemoglobin_level_units']
+    record.save()
+    descriptor = build_writable_field_descriptor()
+    descriptor['hemoglobin_level_units'].update(
+        writable=True, read_only_for_caller=True,
+    )
+
+    saved, result = apply_patient_form_patch(
+        record.person,
+        {'hemoglobin_level': 120, 'hemoglobin_level_units': 'g/L'},
+        descriptor=descriptor,
+    )
+
+    # The unit is the companion half of the pair: a caller who may not change
+    # it must not be able to save the number in a different unit either.
+    assert 'hemoglobin_level_units' in result.rejected
+    assert not result.applied
+    saved.refresh_from_db()
+    assert float(saved.hemoglobin_level) == 12
+    assert saved.hemoglobin_level_units == 'G/DL'
+    assert float(saved.hemoglobin_g_dl) == 12
