@@ -118,3 +118,40 @@ def test_an_unknown_unit_is_refused():
 
     assert not serializer.is_valid()
     assert 'hemoglobin_level_units' in serializer.errors
+
+
+def test_recompute_keeps_the_source_pair_while_it_is_pending():
+    from omop_core.services.patient_record_service import recompute_patient_record_fields
+
+    record = _record()
+    record.hemoglobin_level = 120
+    record.hemoglobin_level_units = 'G/L'
+    record.hemoglobin_g_dl = 12
+    record.user_edited_fields = ['hemoglobin_level', 'hemoglobin_level_units']
+    record.save()
+
+    recompute_patient_record_fields(record)
+
+    record.refresh_from_db()
+    assert float(record.hemoglobin_level) == 120
+    assert record.hemoglobin_level_units == 'G/L'
+    assert float(record.hemoglobin_g_dl) == 12
+
+
+def test_a_new_canonical_import_retires_the_pending_pair():
+    from omop_core.services.patient_record_service import recompute_patient_record_fields
+
+    record = _record()
+    record.hemoglobin_level = 120
+    record.hemoglobin_level_units = 'G/L'
+    record.hemoglobin_g_dl = 12
+    record.user_edited_fields = ['hemoglobin_level', 'hemoglobin_level_units']
+    record.save()
+
+    record.hemoglobin_g_dl = 13
+    recompute_patient_record_fields(record, changed_fields=('hemoglobin_g_dl',))
+
+    record.refresh_from_db()
+    assert float(record.hemoglobin_level) == 13
+    assert record.hemoglobin_level_units == 'G/DL'
+    assert float(record.hemoglobin_g_dl) == 13

@@ -719,6 +719,8 @@ class PatientRecordSerializer(serializers.ModelSerializer):
             raw[unit_field] = code
 
         validated = super().to_internal_value(raw)
+        self._source_pairs = set()
+        self._derived_from_pair = set()
         if pair in validated:
             # `hemoglobin_g_dl` is a read-model (read-only to clients), so it
             # never arrives through field validation; the normalised value is
@@ -729,6 +731,12 @@ class PatientRecordSerializer(serializers.ModelSerializer):
             validated['hemoglobin_g_dl'] = (
                 None if value is None else round(float(value) * factor, 4)
             )
+            # The view must treat these two differently: the canonical is a
+            # derived read-model (project it, but do not let it count as a new
+            # canonical edit that would retire the source pair), while the
+            # source is what the reader owns.
+            self._source_pairs = {pair, unit_field}
+            self._derived_from_pair = {'hemoglobin_g_dl'}
         return validated
 
     def get_patient_name(self, obj):

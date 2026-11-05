@@ -1297,6 +1297,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 for field in serializer.validated_data
                 if hasattr(patient_info, field)
             }
+            derived_from_pair = set(getattr(serializer, '_derived_from_pair', ()))
             direct_fields = {
                 field for field in serializer.validated_data
                 if field in PATIENT_RECORD_OMOP_MAPPED_FIELDS
@@ -1362,7 +1363,14 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             clinical_fields = direct_fields - profile_projected
 
             if clinical_fields:
-                edited = set(patient_info.user_edited_fields or []) | clinical_fields
+                # A source pair is the reader's fact; the canonical it derives
+                # is a read-model, so it must not enter the pending set as if
+                # it were a second edit (and must not retire the pair below).
+                edited = (
+                    set(patient_info.user_edited_fields or [])
+                    | (clinical_fields - derived_from_pair)
+                    | set(getattr(serializer, '_source_pairs', ()))
+                )
                 patient_info.user_edited_fields = sorted(edited)
                 patient_info.save(update_fields=['user_edited_fields'])
             _write_record_revisions(patient_info, previous_values, request)
@@ -1391,7 +1399,10 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 patient_info.user_edited_fields = sorted(
                     set(patient_info.user_edited_fields or []) - projected
                 )
-                recompute_patient_record_fields(patient_info, changed_fields=clinical_fields)
+                recompute_patient_record_fields(
+                    patient_info,
+                    changed_fields=clinical_fields - derived_from_pair,
+                )
                 patient_info.refresh_from_db()
             elif profile_projected or touched_languages:
                 from omop_core.services.patient_record_service import recompute_patient_record_fields
