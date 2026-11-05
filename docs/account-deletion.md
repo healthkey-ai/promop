@@ -13,7 +13,7 @@ live rows at once, in one transaction, through one service:
 | Removed | How |
 |---|---|
 | PROlog survey responses, answers, invitations, consents; episode events; measurement ownership; group memberships; personal representatives | `omop_core.services.patient_cleanup.delete_omop_clinical_rows`, the rows no cascade reaches. The access rows are keyed by a bare `person_id` and would otherwise grant the member's old representatives and groups access to whoever gets the id next |
-| Break-glass grants and provenance records naming the person | explicitly, for the same reason |
+| Break-glass grants, and provenance records describing any deleted row or naming the person | explicitly: a provenance row points at its row through a generic key with no cascade, and its patient id is the source system's, not the person id |
 | The `Person` and everything that cascades from it: the OMOP clinical rows, `PatientRecord`, `PatientUser`, `ConsentEvent` and `DocumentAcceptance` history, shares, messages | `person.delete()` |
 | The login `Identity` | when it is purely a patient login (see below) |
 
@@ -33,13 +33,19 @@ would otherwise see a logged-out request).
 
 ### Who may send it
 
-The PHR account delete and the consent POST take a session or partner login
-only (`InteractiveSessionForWrites` in `api/permissions.py`, on top of
+The PHR account delete, the legacy `me` delete and both consent POSTs
+(decisions and document acceptance) take a session or partner login only
+(`InteractiveSessionForWrites` in `api/permissions.py` and
 `is_interactive_session`). An OAuth2 access token the member delegated to an
 application, a service credential or an HTTP Basic password can be presented
-without the member, so none of them may close the account or withdraw the
-permission that closes it; they get 403. Reading the consent state with such
-a credential still works. The admin path keeps its own staff check.
+without the member, so none of them may close the account, withdraw the
+permission that closes it, or accept a document in the member's name; they
+get 403. Reading the consent state with such a credential still works. The
+admin path keeps its own staff check.
+
+The deletion runs under `suppress_patient_record_refresh`: the clinical
+rows' `post_delete` receivers would otherwise derive the record once per
+row, for a record that is deleted with the person.
 
 ### The paths
 

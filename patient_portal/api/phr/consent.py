@@ -27,6 +27,7 @@ from django.db import transaction
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
+from omop_core.models import Person
 from patient_portal import consent as svc
 from patient_portal.api.permissions import InteractiveSessionForWrites
 from patient_portal.account_deletion import (
@@ -138,6 +139,11 @@ class ConsentView(PhrView):
         person_id = person.person_id  # the instance loses its pk on delete
         try:
             with transaction.atomic():
+                # Locked before anything is written: a second withdrawal that
+                # arrives while the first deletes the person would otherwise
+                # fail its event insert on the vanished row (500, not 404).
+                if not Person.objects.select_for_update().filter(pk=person_id).exists():
+                    raise AlreadyDeleted(f'Person {person_id} is already deleted.')
                 for item in decisions:
                     if not isinstance(item, dict):
                         raise ValidationError('Each decision is an object.')
@@ -179,6 +185,7 @@ class ConsentView(PhrView):
 
 
 class ConsentDocumentsView(PhrView):
+    permission_classes = [IsAuthenticated, InteractiveSessionForWrites]
     http_method_names = ['post', 'head', 'options']
 
     def post(self, request):

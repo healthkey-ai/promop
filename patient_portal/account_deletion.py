@@ -27,9 +27,11 @@ from types import SimpleNamespace
 from django.contrib.auth import logout
 from django.db import transaction
 
-from omop_core.models import GroupAccess, Person, ProvenanceRecord
-from omop_core.services.patient_cleanup import delete_omop_clinical_rows
+from omop_core.models import PatientRecord, Person, ProvenanceRecord
+from omop_core.services.patient_cleanup import delete_omop_clinical_rows, delete_provenance_for
+from omop_core.signals import suppress_patient_record_refresh
 from patient_portal.models import BreakGlassGrant, DeletionLogEntry, Identity, PatientUser
+from patient_portal.services import has_provider_access
 
 logger = logging.getLogger(__name__)
 
@@ -41,15 +43,16 @@ class AlreadyDeleted(Person.DoesNotExist):
 def patient_only_identity(person) -> Identity | None:
     """The login linked to ``person`` when it is purely a patient login.
 
-    An Identity that is staff or also holds provider access (GroupAccess) is
-    kept, so deleting a patient never revokes a provider: the person and the
-    PatientUser link go, the login stays.
+    An Identity that is staff or holds provider access (``has_provider_access``,
+    the test ``patient_person_for`` applies) is kept, so deleting a patient
+    never revokes a provider: the person and the PatientUser link go, the
+    login stays.
     """
     link = PatientUser.objects.filter(person=person).select_related('identity').first()
     if link is None:
         return None
     identity = link.identity
-    if identity.is_staff or GroupAccess.objects.filter(identity=identity).exists():
+    if has_provider_access(identity):
         return None
     return identity
 
@@ -60,11 +63,15 @@ def _delete_person_rows(person) -> None:
     # PROlog rows (a response PROTECTs its participant), episode events, and
     # the access rows keyed by a bare person_id that would otherwise outlive
     # the person and grant their old representatives and groups access to
-    # whoever gets the id next.
-    delete_omop_clinical_rows(person)
-    BreakGlassGrant.objects.filter(person_id=person_id).delete()
-    ProvenanceRecord.objects.filter(target_patient_id=str(person_id)).delete()
-    person.delete()
+    # whoever gets the id next. The clinical rows' post_delete receivers would
+    # re-derive the PatientRecord once per row, for a record about to go.
+    with suppress_patient_record_refresh():
+        delete_omop_clinical_rows(person)
+        BreakGlassGrant.objects.filter(person_id=person_id).delete()
+        ProvenanceRecord.objects.filter(target_patient_id=str(person_id)).delete()
+        delete_provenance_for(PatientRecord, PatientRecord.objects.filter(person_id=person_id).values_list('pk', flat=True))
+        delete_provenance_for(Person, [person_id])
+        person.delete()
 
 
 def delete_member(person, *, reason: str, identity=None) -> DeletionLogEntry:
@@ -102,6 +109,19 @@ def actor_snapshot(user) -> SimpleNamespace:
     after ``identity.delete()`` the instance has no pk, and after ``logout``
     the request has no user."""
     return SimpleNamespace(pk=user.pk, email=getattr(user, 'email', '') or '', is_authenticated=True)
+
+
+def delete_own_account(request, person, *, reason: str) -> DeletionLogEntry:
+    """The self-service choreography: snapshot the caller for the audit trail,
+    delete the person with their patient-only login, then end the session.
+    Raises ``AlreadyDeleted``; the view maps it to its 404.
+    """
+    actor = actor_snapshot(request.user)
+    person_id = person.person_id  # the instance loses its pk on delete
+    identity = patient_only_identity(person)
+    entry = delete_member(person, reason=reason, identity=identity)
+    end_session(request, actor, person_id, identity)
+    return entry
 
 
 def end_session(request, actor, person_id: int, deleted_identity) -> None:

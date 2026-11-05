@@ -1,6 +1,7 @@
 """Closing an account: ``DELETE /api/v1/phr/account/``, the ``my_record``
 withdrawal hook, the deletion log and its replay after a restore."""
 from datetime import timedelta
+from unittest import mock
 
 import pytest
 from django.core.exceptions import ValidationError
@@ -9,31 +10,23 @@ from django.db import connection
 from django.utils import timezone
 from rest_framework.test import APIClient
 
+from django.contrib.contenttypes.models import ContentType
 from omop_core.models import (
     ConditionOccurrence, GroupAccess, PatientGroup, PatientGroupMembership, PatientRecord, Person,
-    PersonalRepresentative,
+    PersonalRepresentative, ProvenanceRecord,
 )
 from omop_core.signals import suppress_patient_record_refresh
 from patient_portal import account_deletion as svc
 from patient_portal import consent as consent_svc
 from patient_portal.models import (
     AuditEvent, ConsentEvent, ConsentLedgerEntry, ConsentPurpose, ConsentText, DeletionLogEntry, Identity,
+    LegalDocument,
     PatientUser,
 )
 from prolog_surveys.definitions.loader import load_definition
 from prolog_surveys.models import ResponseStatus, SurveyResponse
 from tests.factories import ConditionOccurrenceFactory, OrganizationFactory, PatientRecordFactory, PersonFactory
-
-
-def signed_in(record):
-    """A real session login, not ``force_authenticate``: the account and
-    consent writes accept only a session or partner login, and forcing
-    bypasses every authenticator."""
-    identity = Identity.objects.create_user(email=f'p{record.person_id}@example.test')
-    PatientUser.objects.create(identity=identity, person=record.person)
-    client = APIClient()
-    client.force_login(identity)
-    return client
+from tests.test_phr_read_model import signed_in
 
 
 def oauth_client(identity, scope='patient/*.read'):
@@ -103,11 +96,21 @@ def test_delete_account_removes_everything_and_leaves_the_ledger_and_the_log():
     )
     group = PatientGroup.objects.create(organization=OrganizationFactory(), name='G', slug='g')
     PatientGroupMembership.objects.create(group=group, person_id=person.person_id)
+    condition = ConditionOccurrence.objects.get(person=person)
+    # Provenance keyed by the source system's patient id, not the person id:
+    # only the content object links it to the member.
+    ProvenanceRecord.objects.create(content_object=condition, source='fhir', target_patient_id='fhir-abc')
     assert ConsentLedgerEntry.objects.count() == 1
 
-    response = client.delete('/api/v1/phr/account/', {'confirm': 'DELETE'}, format='json')
+    with mock.patch('omop_core.services.patient_record_service.refresh_patient_record') as refresh:
+        response = client.delete('/api/v1/phr/account/', {'confirm': 'DELETE'}, format='json')
 
     assert response.status_code == 200, response.data
+    # The clinical rows' post_delete receivers must not derive a record that is going.
+    refresh.assert_not_called()
+    assert not ProvenanceRecord.objects.filter(
+        content_type=ContentType.objects.get_for_model(ConditionOccurrence), object_id=condition.pk,
+    ).exists()
     assert 'deleted_at' in response.data
     assert_gone(person.person_id, identity.pk)
     # Access rows keyed by a bare person_id would otherwise outlive the person.
@@ -208,6 +211,18 @@ def test_an_oauth_token_may_read_consent_but_not_answer_it():
     assert Person.objects.filter(person_id=person.person_id).exists()
     assert not DeletionLogEntry.objects.exists()
     assert [e.decision for e in ConsentEvent.objects.filter(person=person)] == ['granted']
+    LegalDocument.objects.create(key='terms', name='Terms', is_active=True)
+    response = delegated.post('/api/v1/phr/consent/documents/', {'document': 'terms', 'version': '1.0'}, format='json')
+    assert response.status_code == 403
+
+
+def test_an_oauth_token_cannot_close_the_account_on_the_legacy_path():
+    client, person, identity = member_with_data()
+    delegated = oauth_client(identity, 'patient/*.write')
+    response = delegated.delete('/api/patient-info/me/', {'confirm': 'DELETE'}, format='json')
+    assert response.status_code == 403
+    assert Person.objects.filter(person_id=person.person_id).exists()
+    assert not DeletionLogEntry.objects.exists()
 
 
 # ----------------------------------------------------------- the consent hook

@@ -15,6 +15,7 @@ Audit finding PROMOP F20, SOC2 CC7.2.
 |---|---|---|
 | `AUDIT_HMAC_KEY` | The hash chain over `AuditEvent` rows | Events written under the old key no longer verify against the new one |
 | `EXPORT_SIGNING_KEY` | FHIR export bundle signatures | Previously issued bundles no longer verify |
+| `AUDIT_HMAC_KEY` (again) | The hash chain over `DeletionLogEntry` rows ([account deletion](account-deletion.md)) | Entries written under the old key fail `replay_deletion_log`'s check; after a rotation the replay needs `--ignore-chain`, so run `replay_deletion_log --verify-only` before rotating and keep its output |
 
 **Read that table before rotating.** Neither key is a session secret you can cycle freely:
 rotation invalidates the verifiability of everything already signed. That is the point of
