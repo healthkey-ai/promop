@@ -371,21 +371,17 @@ _LOINC_LAB_FIELDS = {
     '1952-1':  ('beta2_microglobulin',            float),
     '1988-5':  ('c_reactive_protein',             float),
     '30341-2': ('esr',                            int),
-    # MM disease burden labs. Real-world data codes these differently from the
-    # demo concepts this app seeds, so both spellings are listed. '33944-8' and
-    # '33945-5' are not LOINC at all and only resolve against seeded rows.
-    #
-    # CAUTION: '33944-8' (seeded kappa) and '33944-0' (real LOINC lambda) differ
-    # by one character and are opposite analytes. Do not tidy them together.
+    # MM disease burden labs. Real-world data codes these several ways, so every
+    # LOINC spelling is listed. The invented demo codes 33944-8 / 33945-5 that
+    # used to sit here were retired by migration 0327; the MM generator now
+    # emits 36916-5 / 33944-0. CAUTION: 36916-5 is kappa and 33944-0 is lambda.
     '51435-6': ('monoclonal_protein_serum',       float),  # M-protein band 1, SPEP
     '33358-3': ('monoclonal_protein_serum',       float),  # M-protein, SPEP (3046299)
     '32730-5': ('monoclonal_protein_urine',       float),  # Urine M-spike 24h
     '42482-0': ('monoclonal_protein_urine',       float),  # Approved FCM destination
-    '33944-8': ('kappa_flc',                      Decimal),  # seeded demo concept only
     '36916-5': ('kappa_flc',                      Decimal),  # Kappa FLC, Serum (3034860)
     '80515-0': ('kappa_flc',                      Decimal),  # Kappa FLC by nephelometry
     '104544-2': ('kappa_flc',                     Decimal),  # Approved FCM destination
-    '33945-5': ('lambda_flc',                     Decimal),  # seeded demo concept only
     '33944-0': ('lambda_flc',                     Decimal),  # Lambda FLC, Serum (3047169)
     '80516-8': ('lambda_flc',                     Decimal),  # Lambda FLC by nephelometry
     '48378-4': ('kappa_lambda_ratio',             Decimal),  # Kappa/lambda ratio (3053209)
@@ -402,12 +398,6 @@ _LOINC_LAB_FIELDS = {
 # → field route use ``resolve_lab_code_fields`` / ``_lab_routing``.
 LAB_FIELDS = frozenset(field for field, _ in _LOINC_LAB_FIELDS.values())
 _LAB_FIELD_CASTS = {field: cast for field, cast in _LOINC_LAB_FIELDS.values()}
-
-# The MM demo generator's kappa/lambda codes (_mm_generator, bulk_import_fhir_bundle).
-# Not LOINC, so no mapping row can carry them (0285 leaves them out on purpose);
-# they route from the table whatever the field's mapping says, as the demo
-# cohorts on staging depend on them for the FLC pair and SLiM.
-_DEMO_ONLY_LAB_CODES = frozenset({'33944-8', '33945-5'})
 
 # Keyed by field name not by code, so a new LOINC spelling above feeds both the
 # lab projection and the SLiM criteria.
@@ -571,8 +561,7 @@ def resolve_lab_code_fields(
     that mapping's concept add further codes for it. ``_LOINC_LAB_FIELDS``
     supplies a field only while it has no such mapping: a fresh install before
     Athena loads (migration 0240 seeds the rows with no concept), or a test
-    database built without migrations. Its ``_DEMO_ONLY_LAB_CODES`` entries
-    are kept either way.
+    database built without migrations.
 
     With ``measurements`` given, the tables are not queried for a person
     without a LOINC-coded numeric Measurement, so unrelated measurements do not
@@ -601,7 +590,7 @@ def resolve_lab_code_fields(
         return code_fields
     mapped = {field for field, _, _ in approved}
     code_fields = {code: entry for code, entry in code_fields.items()
-                   if entry[0] not in mapped or code in _DEMO_ONLY_LAB_CODES}
+                   if entry[0] not in mapped}
     field_by_target = {concept_id: field for field, _, concept_id in approved}
     # Every routed field is in LAB_FIELDS, so its cast is in the table.
     for field, code, _ in approved:

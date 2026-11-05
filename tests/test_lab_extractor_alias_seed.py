@@ -22,8 +22,7 @@ def test_alias_seed_covers_every_real_approved_extractor_alias():
     approved = {row['field_name']: row['concept_code'] for row in fixture['mappings']
                 if row['status'] == 'approved' and row['vocabulary_id'] == 'LOINC'}
     expected = {code for code, (field, _) in _LOINC_LAB_FIELDS.items()
-                if field in approved and code != approved[field]
-                and code not in {'33944-8', '33945-5'}}
+                if field in approved and code != approved[field]}
     assert set(seed.ALIASES) == expected
 
 

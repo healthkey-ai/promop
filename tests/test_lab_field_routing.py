@@ -15,11 +15,14 @@ import pytest
 from django.contrib.auth import get_user_model
 from django.db import connection
 
-from omop_core.models import FieldConceptMapping, SourceCodeConceptMapping
+from omop_core.models import (
+    Concept, ConceptEmbedding, FieldConceptMapping, Measurement,
+    SourceCodeConceptMapping,
+)
 from omop_core.services.patient_record_service import (
-    LAB_FIELDS, _DEMO_ONLY_LAB_CODES, _LOINC_LAB_FIELDS, _build_snapshot,
-    _get_mm_specific_data, _latest_blood_count_measurements,
-    refresh_patient_record, resolve_lab_code_fields,
+    LAB_FIELDS, _LOINC_LAB_FIELDS, _build_snapshot, _get_mm_specific_data,
+    _latest_blood_count_measurements, refresh_patient_record,
+    resolve_lab_code_fields,
 )
 from omop_core.services.provenance_registry import get_registry
 from tests.conftest import FIELD_CURATION_FIXTURE
@@ -63,11 +66,9 @@ def test_fixture_approves_every_extractor_field_on_a_code_the_table_routes():
 
 
 def test_seeded_tables_route_every_table_code_to_the_same_field(lab_field_mappings):
-    """Once the tables are seeded they route every real code the table lists,
-    and the two demo-only codes (no mapping row can carry them) still come
-    from the table, so the routing is the table's content exactly."""
+    """Once the tables are seeded they route every code the table lists, so the
+    table itself is not consulted for any of them."""
     assert lab_field_mappings == _LOINC_LAB_FIELDS
-    assert _DEMO_ONLY_LAB_CODES <= set(lab_field_mappings)
     approved = FieldConceptMapping.objects.filter(
         field_name__in=LAB_FIELDS, status='approved', concept__isnull=False,
     ).count()
@@ -97,7 +98,7 @@ def test_demo_bundle_completion_needs_no_database(django_assert_num_queries):
     bundle = {'entry': [
         {'resource': {'resourceType': 'Patient', 'id': 'p1', 'birthDate': '1960-01-01'}},
         {'resource': {'resourceType': 'Observation', 'subject': {'reference': 'Patient/p1'},
-                      'code': {'coding': [{'code': '33944-8'}]}, 'valueQuantity': {'value': 1000}}},
+                      'code': {'coding': [{'code': '36916-5'}]}, 'valueQuantity': {'value': 1000}}},
     ]}
     with django_assert_num_queries(0):
         complete_demo_fhir_bundle(bundle, 'MM')
@@ -145,10 +146,11 @@ def test_curator_alias_feeds_the_blood_count_selection(lab_field_mappings):
     assert record.absolute_lymphocyte_count == Decimal('1500')
 
 
-def test_demo_flc_codes_still_form_the_pair_once_tables_are_seeded(lab_field_mappings):
-    """Staging's synthea-mm cohort carries FLC only under the generator's codes."""
+def test_generator_flc_codes_form_the_pair_once_tables_are_seeded(lab_field_mappings):
+    """The MM generator's kappa (36916-5) and lambda (33944-0) codes: the alias
+    and the canonical code of their fields."""
     person = PersonFactory()
-    for code, value in (('33944-8', 1000), ('33945-5', 5)):
+    for code, value in (('36916-5', 1000), ('33944-0', 5)):
         MeasurementFactory(
             person=person, measurement_concept=ConceptFactory(concept_code=code),
             measurement_source_value=code, measurement_date=date(2024, 3, 1),
@@ -274,3 +276,34 @@ def test_migration_drops_a_colliding_source_value_when_approving():
     _migrate()
     crcl = FieldConceptMapping.objects.get(field_name='creatinine_clearance_ml_min')
     assert (crcl.status, crcl.source_value) == ('approved', '')
+
+
+# ── Migration 0327 ──────────────────────────────────────────────────────────
+
+recode = importlib.import_module('omop_core.migrations.0327_retire_invented_flc_codes')
+
+
+def test_recode_moves_demo_rows_to_real_loinc_and_retires_the_concepts():
+    fake_kappa = ConceptFactory(concept_id=9001004, concept_code='33944-8')
+    fake_lambda = ConceptFactory(concept_id=9001005, concept_code='33945-5')
+    real_kappa = ConceptFactory(concept_id=3034860, concept_code='36916-5')
+    # No real lambda concept loaded: the row's code is still corrected.
+    person = PersonFactory()
+    kappa = MeasurementFactory(
+        person=person, measurement_concept=fake_kappa, measurement_source_value='33944-8',
+        value_as_number=1000, unit_source_value='mg/L',
+    )
+    lam = MeasurementFactory(
+        person=person, measurement_concept=fake_lambda, measurement_source_value='33945-5',
+        value_as_number=5, unit_source_value='mg/L',
+    )
+    run_data_migration('0327_retire_invented_flc_codes', 'recode_demo_flc')
+    run_data_migration('0327_retire_invented_flc_codes', 'recode_demo_flc')
+    kappa.refresh_from_db()
+    lam.refresh_from_db()
+    assert (kappa.measurement_source_value, kappa.measurement_concept_id) == ('36916-5', real_kappa.pk)
+    assert lam.measurement_source_value == '33944-0'
+    assert lam.measurement_concept_id == fake_lambda.pk  # nothing real to point at yet
+    assert not Concept.objects.filter(pk=fake_kappa.pk).exists()
+    assert Concept.objects.filter(pk=fake_lambda.pk).exists()  # still referenced, kept
+    assert Measurement.objects.filter(measurement_source_value__in=['33944-8', '33945-5']).count() == 0

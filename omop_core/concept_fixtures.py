@@ -342,8 +342,12 @@ _CONCEPTS = [
     # ------------------------------------------------------------------
     _c(9001002, 'Protein [electrophoresis] in Serum',             'Measurement', 'LOINC', 'Lab Test', 'S', '51435-6'),  # M-spike serum
     _c(9001003, 'Protein [electrophoresis] in Urine',             'Measurement', 'LOINC', 'Lab Test', 'S', '32730-5'),  # M-spike urine
-    _c(9001004, 'Kappa free light chains [Mass/volume] in Serum', 'Measurement', 'LOINC', 'Lab Test', 'S', '33944-8'),
-    _c(9001005, 'Lambda free light chains [Mass/volume] in Serum','Measurement', 'LOINC', 'Lab Test', 'S', '33945-5'),
+    # Kappa and lambda FLC are the real LOINC codes 36916-5 and 33944-0 (loaded
+    # from Athena); the invented 33944-8 / 33945-5 concepts were retired by
+    # migration 0327. Never seed a concept under a code that is not in its
+    # vocabulary: an invented code in the LOINC range cannot be told from a
+    # typo of a real one, and a HealthKey-minted concept is the way to say
+    # something LOINC does not.
     # 26098-4 is 'XR Ankle - left Views' in LOINC, 11118-7 is the marrow code.
     _c(9001006, 'Plasma cells/100 cells in Bone marrow by Manual count', 'Measurement', 'LOINC', 'Lab Test', 'S', '11118-7'),
     # 9001019 is skipped, a test uses it to stand in for a retired mint.
