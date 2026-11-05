@@ -187,7 +187,13 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
     ? state.pending[unitFieldName] : undefined;
   const storedUnit = String(pendingUnit
     ?? (unitFieldName ? state.values[unitFieldName] : undefined) ?? '');
-  const chosenUnit = unitDraft ?? (storedUnit || unitOptions[0]?.value || '');
+  // A draft chosen while the value was empty must not outlive a pair that
+  // arrived from elsewhere (another mounted editor, or a rollback after a
+  // rejected clear). Once the shared value is non-empty, the saved/pending pair
+  // is the authority; the draft is ignored and cleared by the next queued edit.
+  const authoritativeUnit = storedUnit || unitOptions[0]?.value || '';
+  const chosenUnit = (value == null || value === '')
+    ? (unitDraft ?? authoritativeUnit) : authoritativeUnit;
   const showUnitPicker = writable && Boolean(unitFieldName) && unitOptions.length > 1;
   const pairError = state.errors[canonical]
     ?? (unitFieldName ? state.errors[unitFieldName] : undefined);
