@@ -13,6 +13,10 @@ member who prints it sees what the app shows.
 ``?lang=xx`` picks the language as ``consent/`` does. The PDF's text is English
 only for now; the choice is recorded in the document's metadata.
 
+The PDF is set in DejaVu Sans (``fonts/``), embedded, so a name, drug or
+facility in Cyrillic, Greek or an extended Latin script (Polish, Vietnamese)
+renders as written. CJK scripts are the remaining gap: see ``FONT``.
+
 Every export writes an audit row with an export marker (``detail.export``),
 so the Privacy Policy's record of exports can be answered from the audit trail
 (see ``AuditLogMiddleware``).
@@ -20,6 +24,8 @@ so the Privacy Policy's record of exports can be answered from the audit trail
 from __future__ import annotations
 
 import io
+import threading
+from pathlib import Path
 from typing import Any
 from xml.sax.saxutils import escape
 
@@ -43,6 +49,57 @@ PDF_CONTENT_TYPE = 'application/pdf'
 
 # A4 less the margins render_record_pdf sets; every table is laid out to it.
 PAGE_MARGIN_MM = 15
+
+# The PDF's one typeface. reportlab's built-in Helvetica carries WinAnsi
+# glyphs only, so anything outside Western Latin rendered as boxes; DejaVu
+# Sans (Bitstream Vera licence, ``fonts/LICENSE-DejaVu.txt``) is embedded,
+# subset to the glyphs used, and covers Latin with its extensions, Greek,
+# Cyrillic, Armenian and Georgian. It has Arabic and Hebrew glyphs too, but
+# reportlab does no bidi reordering or shaping, so those do not read as
+# written either. It has no CJK glyphs: a Chinese, Japanese or Korean name
+# still shows as boxes, the export still succeeds. That needs a second, much
+# larger font (Noto Sans CJK) switched in per run of text, which reportlab
+# does not do by itself.
+FONT = 'DejaVuSans'
+FONT_BOLD = 'DejaVuSans-Bold'
+FONT_DIR = Path(__file__).resolve().parent / 'fonts'
+
+# One PDF save at a time per process. The registered TTFont objects are
+# process-global, and when a document is saved reportlab subsets the face by
+# walking the font file with a cursor kept on that shared object
+# (``TTFontFace.makeSubset``), so two exports saving at once on one gunicorn
+# worker (both Dockerfiles run ``--threads 2``) interleave their reads and
+# embed corrupt glyphs, or fail with a KeyError. Helvetica, being built in,
+# had no such state. Only registration and ``doc.build`` hold the lock: the
+# section reads and the story are built outside it, so one member's
+# database time never queues another's export.
+_PDF_LOCK = threading.Lock()
+
+
+def register_fonts() -> None:
+    """Register the typeface with reportlab, once per process.
+
+    reportlab's registry is process-global, so the second call is a no-op;
+    it is called from ``render_record_pdf`` rather than at import so that
+    loading this module never reads font files. The caller holds
+    ``_PDF_LOCK``: the check and the registrations are one step, so a second
+    thread cannot see the regular face registered and build before the bold
+    face and the family mapping exist.
+    """
+    from reportlab.lib.fonts import addMapping
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+
+    if FONT_BOLD in pdfmetrics.getRegisteredFontNames():
+        return
+    pdfmetrics.registerFont(TTFont(FONT, str(FONT_DIR / f'{FONT}.ttf')))
+    pdfmetrics.registerFont(TTFont(FONT_BOLD, str(FONT_DIR / f'{FONT_BOLD}.ttf')))
+    # ``<b>`` inside a Paragraph resolves through this family table; there is
+    # no italic face, so ``<i>`` falls back to the upright one.
+    addMapping(FONT, 0, 0, FONT)
+    addMapping(FONT, 1, 0, FONT_BOLD)
+    addMapping(FONT, 0, 1, FONT)
+    addMapping(FONT, 1, 1, FONT_BOLD)
 
 
 class RecordExportView(PhrView):
@@ -195,14 +252,18 @@ def _styles():
     from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 
     sheet = getSampleStyleSheet()
+    # The sample sheet is set in Helvetica; every style is re-based on the
+    # embedded face (bold for the title and headings) so no run of text
+    # falls back to a font without the glyphs.
+    body = ParagraphStyle('body', parent=sheet['BodyText'], fontName=FONT)
     return {
-        'title': sheet['Title'],
-        'h1': sheet['Heading1'],
-        'h2': sheet['Heading2'],
-        'h3': sheet['Heading3'],
-        'body': sheet['BodyText'],
-        'small': ParagraphStyle('small', parent=sheet['BodyText'], fontSize=8, leading=10, textColor='#555555'),
-        'cell': ParagraphStyle('cell', parent=sheet['BodyText'], fontSize=9, leading=11),
+        'title': ParagraphStyle('title', parent=sheet['Title'], fontName=FONT_BOLD),
+        'h1': ParagraphStyle('h1', parent=sheet['Heading1'], fontName=FONT_BOLD),
+        'h2': ParagraphStyle('h2', parent=sheet['Heading2'], fontName=FONT_BOLD),
+        'h3': ParagraphStyle('h3', parent=sheet['Heading3'], fontName=FONT_BOLD),
+        'body': body,
+        'small': ParagraphStyle('small', parent=body, fontSize=8, leading=10, textColor='#555555'),
+        'cell': ParagraphStyle('cell', parent=body, fontSize=9, leading=11),
     }
 
 
@@ -223,6 +284,9 @@ def _table(rows: list[list[str]], weights: list[float], styles) -> Any:
     data = [[Paragraph(_s(cell), styles['cell']) for cell in row] for row in rows]
     table = Table(data, colWidths=widths, repeatRows=1)
     table.setStyle(TableStyle([
+        # The cells are Paragraphs in the cell style, but the table sets its
+        # own cell font (Helvetica by default) before drawing each one.
+        ('FONTNAME', (0, 0), (-1, -1), FONT),
         ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#eeeeee')),
         ('LINEBELOW', (0, 0), (-1, 0), 0.5, colors.HexColor('#999999')),
         ('LINEBELOW', (0, 1), (-1, -1), 0.25, colors.HexColor('#dddddd')),
@@ -427,6 +491,14 @@ SECTIONS = (
 
 def render_record_pdf(person, record, lang: str = 'en') -> bytes:
     """The member's record as a PDF: a title page, then one page per section."""
+    # Paragraphs measure their text as they are made, so the fonts must be
+    # registered before the story is built.
+    with _PDF_LOCK:
+        register_fonts()
+    return _render_record_pdf(person, record, lang)
+
+
+def _render_record_pdf(person, record, lang: str) -> bytes:
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.units import mm
     from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer
@@ -450,7 +522,7 @@ def render_record_pdf(person, record, lang: str = 'en') -> bytes:
 
     def footer(canvas, doc):
         canvas.saveState()
-        canvas.setFont('Helvetica', 8)
+        canvas.setFont(FONT, 8)
         canvas.drawRightString(A4[0] - PAGE_MARGIN_MM * mm, 10 * mm,
                                f'{name} · {today.isoformat()} · {doc.page}'.strip(' ·'))
         canvas.restoreState()
@@ -460,6 +532,10 @@ def render_record_pdf(person, record, lang: str = 'en') -> bytes:
         buffer, pagesize=A4, leftMargin=PAGE_MARGIN_MM * mm, rightMargin=PAGE_MARGIN_MM * mm,
         topMargin=PAGE_MARGIN_MM * mm, bottomMargin=18 * mm,
         title=f"{labels['title']} – {name}".strip(' –'), author=name or '', subject=f'lang={lang}',
+        # The canvas names its default font (Helvetica) on every page's
+        # resources even when nothing is drawn with it; start it on ours.
+        initialFontName=FONT,
     )
-    doc.build(story, onFirstPage=footer, onLaterPages=footer)
+    with _PDF_LOCK:  # the save subsets the shared font objects
+        doc.build(story, onFirstPage=footer, onLaterPages=footer)
     return buffer.getvalue()

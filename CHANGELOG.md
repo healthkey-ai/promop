@@ -8,6 +8,12 @@ All notable changes to PRomop are documented here.
 
 ### Added
 
+- **The PHR record PDF renders Cyrillic, Greek and extended Latin names** —
+  the export is set in DejaVu Sans, bundled under `patient_portal/api/phr/fonts/`
+  and embedded in each PDF, instead of reportlab's built-in Helvetica, whose
+  glyphs stop at Western Latin. A member's name, drug or facility in
+  Russian, Greek, Polish or Vietnamese reads as written; CJK remains a
+  documented gap. See [PHR record export](docs/phr-record-export.md). (#2308)
 - **A member can download their own record from the PHR API** —
   `GET /api/v1/phr/record/export/?format=fhir` is the signed FHIR R4 bundle
   the person-id export serves, resolved through the member's own link so no

@@ -41,3 +41,17 @@ vocabulary export. The following notice is required by Section 10 of the
 LOINC content is licensed separately from PRomop. Use and redistribution of
 that content remain subject to the LOINC license, including any notices for
 third-party content identified in the LOINC distribution.
+
+## DejaVu Sans
+
+The PHR record PDF export (`patient_portal/api/phr/export.py`) embeds the
+DejaVu Sans typeface, regular and bold, bundled as
+`patient_portal/api/phr/fonts/DejaVuSans.ttf` and `DejaVuSans-Bold.ttf`
+(taken unmodified from the DejaVu 2.35 distribution).
+
+DejaVu fonts are derived from Bitstream Vera Fonts, copyright (c) 2003 by
+Bitstream, Inc., with changes in the public domain and glyphs imported from
+Arev fonts, copyright (c) 2006 by Tavmjong Bah. Both permission notices are
+reproduced in full in
+[patient_portal/api/phr/fonts/LICENSE-DejaVu.txt](patient_portal/api/phr/fonts/LICENSE-DejaVu.txt),
+and the fonts are redistributed under their own names as those notices require.
