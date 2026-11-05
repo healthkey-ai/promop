@@ -11,8 +11,9 @@ standard concepts by ``(vocabulary_id, concept_code)``.  On a database that has
 not yet loaded Athena vocabularies (``load_athena_vocabularies``), concept
 resolution will fail and the seeded mappings will have ``concept=None``.  They
 are still usable — the vocabulary_id/concept_code columns carry the intent —
-and will resolve correctly once Athena is loaded and the mapping is re-saved or
-``copy_reference_data`` is run.
+and ``load_athena_vocabularies`` points them at their Concepts at the end of a
+successful load (``manage.py resolve_field_concept_mappings`` does it for an
+instance that loaded Athena earlier).
 """
 import json
 import os
