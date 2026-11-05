@@ -197,6 +197,12 @@ FORM_INPUTS = {
     'high_risk_mcl_criteria': ['mipi_risk', 'mipi_c_risk', 'ki67_proliferation_index',
                                'cytogenetic_markers', 'largest_lymph_node_size',
                                'spleen_size', 'alc_thousand_per_ul'],
+    # Trial Details reads these two patient attributes as answers, and both are
+    # derived from facts the patient already records: no column exists, so the
+    # row navigates to the sources instead of offering a second place to type
+    # the verdict. The values themselves are `PatientRecord` properties.
+    'abnormal_kappa_lambda_ratio': ['kappa_flc', 'lambda_flc'],
+    'day_since_stem_cell_transplant': ['sct_date'],
 }
 COMPATIBILITY_GATES = {
     'meets_slim': 'The SLiM result is not authored by this form and its full parity with Trial Details '
