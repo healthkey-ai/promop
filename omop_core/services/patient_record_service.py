@@ -1251,13 +1251,20 @@ def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fiel
         getattr(patient_info, HEMOGLOBIN_UNIT),
     )
     canonical_now = getattr(patient_info, HEMOGLOBIN_CANONICAL)
+    # An explicit canonical edit/clear is itself a pending user answer. A pair
+    # that is no longer pending must not re-derive over it from a stale source
+    # column: a legacy clear writes canonical None while the old source value can
+    # survive until derivation, and the pair would otherwise resurrect it.
+    canonical_pending = HEMOGLOBIN_CANONICAL in pending_aliases
     pair_authoritative = (
         not canonical_import and pair_recognised
         # An import may hold a value the canonical column cannot store; that is
         # a preserved legacy fact, not a read-model matching can consume.
         and hemoglobin_canonical_in_range(pair_value)
-        and (pair_pending or canonical_now is None
-             or same_number(pair_value, canonical_now))
+        and (pair_pending
+             or (not canonical_pending
+                 and (canonical_now is None
+                      or same_number(pair_value, canonical_now))))
     )
     dependency_changed = set(changed_fields)
     if pair_authoritative:
@@ -1286,10 +1293,13 @@ def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fiel
             source, getattr(patient_info, source), unit,
         )
         canonical_now = getattr(patient_info, canonical)
+        canonical_pending = canonical in pending_aliases
         authoritative = (
             not canonical_import and recognised
-            and (source_pending or canonical_now is None
-                 or same_number(source_value, canonical_now))
+            and (source_pending
+                 or (not canonical_pending
+                     and (canonical_now is None
+                          or same_number(source_value, canonical_now))))
         )
         if authoritative:
             if not same_number(canonical_now, source_value):
