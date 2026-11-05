@@ -155,6 +155,19 @@ export class PatientFormStore {
     })();
     return this.loading;
   };
+  private enqueueEntries = (entries: Record<string, unknown>) => {
+    const names = Object.keys(entries);
+    for (const name of names) {
+      this.queue[name] = entries[name];
+      this.revisions[name] = ++this.revision;
+    }
+    const errors = { ...this.snapshot.errors };
+    for (const name of names) delete errors[name];
+    this.publish({ pending: { ...this.snapshot.pending, ...entries }, errors });
+    clearTimeout(this.timer);
+    this.timer = setTimeout(() => { void this.flush(); }, 500);
+  };
+
   enqueue = (name: string, value: unknown) => {
     const field = this.snapshot.fields[name];
     if (!this.snapshot.writable || !field?.writable || field.target !== 'patient_record') return;
@@ -165,13 +178,23 @@ export class PatientFormStore {
       this.publish({ errors: { ...this.snapshot.errors, [name]: STALE_DATES_ERROR } });
       return;
     }
-    this.queue[name] = value;
-    this.revisions[name] = ++this.revision;
-    const errors = { ...this.snapshot.errors };
-    delete errors[name];
-    this.publish({ pending: { ...this.snapshot.pending, [name]: value }, errors });
-    clearTimeout(this.timer);
-    this.timer = setTimeout(() => { void this.flush(); }, 500);
+    this.enqueueEntries({ [name]: value });
+  };
+
+  /** Queue a source value and its companion unit as one assertion (#5700).
+   *
+   * The unit descriptor is selectable (`writable: false`), because the value is
+   * what the write lands in; the pair is still one clinical answer. Both keys
+   * travel in the same PATCH so a refusal cannot save a number without the unit
+   * the reader chose. The server converts to the canonical unit; the client
+   * never does. */
+  enqueuePair = (name: string, value: unknown, unitField: string, unit: string): boolean => {
+    const field = this.snapshot.fields[name];
+    const unitDescriptor = this.snapshot.fields[unitField];
+    if (!this.snapshot.writable || !field?.writable || field.target !== 'patient_record') return false;
+    if (!unitDescriptor || unitDescriptor.qualifies !== name) return false;
+    this.enqueueEntries({ [name]: value, [unitField]: unit });
+    return true;
   };
   private reloadFields = async (): Promise<boolean> => {
     const personId = this.snapshot.personId;

@@ -56,6 +56,10 @@ export interface FieldDescriptor {
   inputs?: string[];
   /** selectable */
   qualifies?: string;
+  /** The curated unit choices for a field that stores its unit beside the
+   *  value (`hemoglobin_level` + `hemoglobin_level_units`, #2318/#2319). The
+   *  editor renders the picker from this list; it never spells the factors. */
+  unit_options?: Array<{ value: string; label?: string }>;
   /** profile: the curated choices the server resolves a concept from. Not the
    *  whole vocabulary — OMOP's Race holds 1,409 concepts, which is not the
    *  question a clinical form asks. */

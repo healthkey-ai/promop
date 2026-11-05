@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { Pencil } from 'lucide-react';
 import Field from '@/components/PatientInfo/Field';
@@ -94,6 +94,27 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
   const [resultDateOverride, setResultDateOverride] = useState<string | null>(null);
   const [valueDraft, setValueDraft] = useState<{ set: boolean; value: unknown }>(
     { set: false, value: undefined });
+  // A source pair's unit is chosen beside the value (#5700). `null` follows the
+  // stored/pending unit until the reader picks one.
+  const [unitDraft, setUnitDraft] = useState<string | null>(null);
+  // A draft chosen while the value was empty must not survive a pair that
+  // arrives from elsewhere (another mounted editor, a refresh, or a rollback
+  // after a rejected clear). If the pair later clears again, a surviving draft
+  // would quietly reapply an obsolete unit to the next typed number. Computing
+  // this before the early returns keeps the hook order stable.
+  const initialCanonical = store.resolve(name);
+  const initialPending = initialCanonical && initialCanonical in state.pending
+    ? state.pending[initialCanonical] : undefined;
+  const initialValue = initialCanonical
+    ? (initialCanonical in state.pending
+      ? (initialPending && typeof initialPending === 'object'
+        && !Array.isArray(initialPending) && 'value' in initialPending
+        ? (initialPending as { value: unknown }).value : initialPending)
+      : state.values[initialCanonical])
+    : undefined;
+  useEffect(() => {
+    if (unitDraft && initialValue != null && initialValue !== '') setUnitDraft(null);
+  }, [unitDraft, initialValue]);
   if (state.loading) return <span role="status">Loading patient value…</span>;
   if (state.error) return <div role="alert">{state.error} <button onClick={() => void store.load()}>Retry</button></div>;
   const canonical = store.resolve(name);
@@ -172,6 +193,30 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
   const inputGraph = inspectInputs(store, state.fields, inputs, new Set([canonical]));
   const editPath = inputGraph.editable || inputGraph.cyclic;
   const writable = !readOnly && state.writable && field.writable && field.target === 'patient_record';
+  // The unit beside a source value (#5700). The descriptor names the companion
+  // entry by `qualifies`; the pair travels together so the server normalises the
+  // canonical and the client never converts or guesses a factor.
+  const unitFieldName = Object.keys(state.fields).find(
+    (key) => state.fields[key].qualifies === canonical
+      && (state.fields[key].unit_options?.length ?? 0) > 1);
+  const unitOptions = field.unit_options
+    ?? (unitFieldName ? state.fields[unitFieldName].unit_options : undefined) ?? [];
+  const pendingUnit = unitFieldName && unitFieldName in state.pending
+    ? state.pending[unitFieldName] : undefined;
+  const storedUnit = String(pendingUnit
+    ?? (unitFieldName ? state.values[unitFieldName] : undefined) ?? '');
+  // A draft chosen while the value was empty must not outlive a pair that
+  // arrived from elsewhere (another mounted editor, or a rollback after a
+  // rejected clear). Once the shared value is non-empty, the saved/pending pair
+  // is the authority; the draft is ignored and cleared by the next queued edit.
+  const authoritativeUnit = storedUnit || unitOptions[0]?.value || '';
+  const chosenUnit = (value == null || value === '')
+    ? (unitDraft ?? authoritativeUnit) : authoritativeUnit;
+  const showUnitPicker = writable && Boolean(unitFieldName) && unitOptions.length > 1;
+  const pairError = state.errors[canonical]
+    ?? (unitFieldName ? state.errors[unitFieldName] : undefined);
+  const pairPending = canonical in state.pending
+    || Boolean(unitFieldName && unitFieldName in state.pending);
   // A dated input commits only through its own "Save result" pair, so the
   // dialog must not promise that every edit saves itself.
   // The gate reason used to be reachable inside the dialog. Rows that lose the
@@ -221,6 +266,23 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
     ? 'select'
     : field.control ?? (field.value_kind === 'number' ? 'number'
       : field.value_kind === 'boolean' ? 'boolean' : field.value_kind === 'date' ? 'date' : 'text');
+  const onChangeValue = (name: string, next: unknown) => {
+    if (dated) { setValueDraft({ set: true, value: next }); return; }
+    if (showUnitPicker && unitFieldName) {
+      // Once queued, the pending pair (then the server value) owns the choice.
+      // Keeping a local draft would let a rejected unit survive its rollback and
+      // contaminate the next number edit.
+      if (store.enqueuePair(canonical, next, unitFieldName, chosenUnit)) setUnitDraft(null);
+      return;
+    }
+    store.enqueue(name, next);
+  };
+  const controlNode = <Field label={compact ? '' : label} ariaLabel={label}
+    name={canonical} type={control}
+    value={dated ? datedValue : value} options={field.options ?? []}
+    triState={field.tri_state === true} answerLabels={field.answer_labels}
+    precision={precision}
+    onChange={onChangeValue} />;
   return <div className="space-y-1" data-field={canonical}>
     {inputs.length && !inputsUnavailable && editPath ? <>
       {!compact && <div className="text-sm font-medium">{label}</div>}
@@ -254,15 +316,30 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
         </Dialog.Root>
       </div>
     </> : writable ? <>
-      <Field label={compact ? '' : label} ariaLabel={label}
-        name={canonical} type={control}
-        value={dated ? datedValue : value} options={field.options ?? []}
-        triState={field.tri_state === true} answerLabels={field.answer_labels}
-        precision={precision}
-        onChange={(name, next) => {
-          if (dated) setValueDraft({ set: true, value: next });
-          else store.enqueue(name, next);
-        }} />
+      {showUnitPicker ? <div className="flex items-start gap-2">
+        <div className="min-w-0 flex-1">{controlNode}</div>
+        <label className="flex shrink-0 flex-col gap-1 text-xs text-muted-foreground">
+          <span className="sr-only">Unit for {label}</span>
+          <select aria-label={`Unit for ${label}`} value={chosenUnit}
+            onChange={(event) => {
+              const nextUnit = event.target.value;
+              setUnitDraft(nextUnit);
+              // A unit change with a value is a real edit of the same pair, not
+              // a formatting change; a unit alone cannot be written.
+              if (value != null && value !== '' && unitFieldName
+                  && store.enqueuePair(canonical, value, unitFieldName, nextUnit)) {
+                // A rejected save restores the server pair; the selector must
+                // follow it rather than keep the rejected unit.
+                setUnitDraft(null);
+              }
+            }}
+            className="rounded-md border border-input px-2 py-1 text-sm">
+            {unitOptions.map((option) => (
+              <option key={option.value} value={option.value}>{option.label ?? option.value}</option>
+            ))}
+          </select>
+        </label>
+      </div> : controlNode}
       {dated && <div className="mt-1 flex flex-wrap items-center gap-2">
         <label htmlFor={`${canonical}-result-date`} className="text-xs text-muted-foreground whitespace-nowrap">
           Result date
@@ -290,10 +367,11 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
         <p className="text-xs text-muted-foreground">{reason} {infoHref && <a href={infoHref}>Open Your Info</a>} {field.retryable &&
           <button type="button" className="underline" onClick={() => void store.load()}>Retry</button>}</p></>}
     {field.options_note && <p role="status" className="text-xs text-muted-foreground">{field.options_note}</p>}
-    {(field.unit ?? field.projection?.unit) && <span className="text-xs text-muted-foreground">{field.unit ?? field.projection?.unit}</span>}
+    {!showUnitPicker && (field.unit ?? field.projection?.unit)
+      && <span className="text-xs text-muted-foreground">{field.unit ?? field.projection?.unit}</span>}
     {writable && field.projection?.omop_table === 'measurement' && !dated
       && <p className="text-xs text-muted-foreground">This edit is recorded with today’s date.</p>}
-    {canonical in state.pending && <span role="status" className="text-xs">Saving…</span>}
-    {state.errors[canonical] && <p role="alert" className="text-xs text-red-600">{state.errors[canonical]}</p>}
+    {pairPending && <span role="status" className="text-xs">Saving…</span>}
+    {pairError && <p role="alert" className="text-xs text-red-600">{pairError}</p>}
   </div>;
 }
