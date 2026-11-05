@@ -58,6 +58,10 @@ const DESCRIPTORS: Record<string, unknown> = {
   igm_multiple_myeloma: triStateBoolean('IgM-MM'),
   al_amyloidosis: triStateBoolean('23132008'),
   poems_syndrome: triStateBoolean('79268002'),
+  plasma_cell_leukemia: {
+    ...triStateBoolean('PCL'),
+    answer_labels: { true: 'Present', false: 'Not present' },
+  },
   cytogenetic_markers: {
     ...observation('mm-cytogenetic-markers', 'string', true),
     options: [
@@ -707,6 +711,7 @@ describe('MyelomaSection — current-diagnosis disorders (#5521)', () => {
     'IgM Multiple Myeloma',
     'Light-Chain (AL) Amyloidosis',
     'POEMS Syndrome',
+    'Plasma Cell Leukemia',
   ];
 
   /** The control beside a field label; labels are not HTML-associated. */
@@ -716,7 +721,7 @@ describe('MyelomaSection — current-diagnosis disorders (#5521)', () => {
     return within(control).getByTestId('select-control') as HTMLSelectElement;
   };
 
-  it('renders all six current-diagnosis fields', () => {
+  it('renders all seven current-diagnosis fields', () => {
     renderMyeloma();
 
     expect(screen.getByText('Myeloma Related Disorders')).toBeInTheDocument();
@@ -739,5 +744,23 @@ describe('MyelomaSection — current-diagnosis disorders (#5521)', () => {
     fireEvent.change(controlFor('MGUS'), { target: { value: 'unknown' } });
 
     expect(onChange).toHaveBeenCalledWith('mgus', null);
+  });
+
+  it('keeps the disease polarity of a plasma-cell-leukemia answer', () => {
+    const onChange = vi.fn();
+    renderMyeloma({ plasma_cell_leukemia: true }, onChange);
+
+    const control = controlFor('Plasma Cell Leukemia');
+    const labels = [...control.options].map((o) => o.label);
+    expect(labels).toContain('Present');
+    expect(labels).toContain('Not present');
+    expect(labels).not.toContain('Yes');
+    expect(control.value).toBe('true');
+
+    fireEvent.change(control, { target: { value: 'false' } });
+
+    // Not inverted: the column records the disease, even when a trial asks
+    // the opposite question.
+    expect(onChange).toHaveBeenCalledWith('plasma_cell_leukemia', false);
   });
 });
