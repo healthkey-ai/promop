@@ -406,3 +406,104 @@ def test_the_unit_label_is_case_insensitive(api):
 
     assert record.hemoglobin_level_units == 'G/L'
     assert float(record.hemoglobin_g_dl) == 12.0
+
+
+@pytest.mark.parametrize('value,unit', [(12, 'G/DL'), (120, 'G/L')])
+def test_the_pair_stays_pending_for_both_units(api, value, unit):
+    record = _record()
+    _edit(api, record, {
+        'hemoglobin_level': value, 'hemoglobin_level_units': unit,
+    })
+    assert {'hemoglobin_level', 'hemoglobin_level_units'} <= set(
+        record.user_edited_fields or [])
+
+    record = refresh_patient_record(record.person)
+
+    assert {'hemoglobin_level', 'hemoglobin_level_units'} <= set(
+        record.user_edited_fields or [])
+
+
+
+def test_the_shared_form_cannot_write_a_withheld_pair(api):
+    from omop_core.services.patient_form import apply_patient_form_patch
+
+    record = _record()
+    record.hemoglobin_level = 12
+    record.hemoglobin_level_units = 'G/DL'
+    record.hemoglobin_g_dl = 12
+    record.user_edited_fields = ['hemoglobin_level', 'hemoglobin_level_units']
+    record.save()
+
+    saved, result = apply_patient_form_patch(
+        record.person,
+        {'hemoglobin_level': 120, 'hemoglobin_level_units': 'g/L'},
+        allowed_fields={'hemoglobin_g_dl'},
+    )
+
+    # The host withheld the source; the canonical must not carry the pair's
+    # normalised value and the unit must not change either.
+    assert 'hemoglobin_level' in result.rejected
+    assert not result.applied
+    saved.refresh_from_db()
+    assert float(saved.hemoglobin_level) == 12
+    assert saved.hemoglobin_level_units == 'G/DL'
+    assert float(saved.hemoglobin_g_dl) == 12
+
+
+def test_a_caller_read_only_canonical_cannot_be_written_through_the_form(api):
+    from omop_core.services.patient_form import apply_patient_form_patch
+    from omop_core.services.write_descriptor import build_writable_field_descriptor
+
+    record = _record()
+    record.hemoglobin_g_dl = 12
+    record.save()
+    descriptor = build_writable_field_descriptor()
+    descriptor['hemoglobin_g_dl']['read_only_for_caller'] = True
+
+    saved, result = apply_patient_form_patch(
+        record.person, {'hemoglobin_g_dl': 13}, descriptor=descriptor,
+    )
+
+    assert 'hemoglobin_g_dl' in result.rejected
+    assert not result.applied
+    saved.refresh_from_db()
+    assert float(saved.hemoglobin_g_dl) == 12
+
+
+def test_a_caller_read_only_canonical_cannot_be_written_by_the_applier(api):
+    from omop_core.services.field_write_service import apply_field_writes
+    from omop_core.services.write_descriptor import build_writable_field_descriptor
+
+    record = _record()
+    descriptor = build_writable_field_descriptor()
+    descriptor['hemoglobin_g_dl']['read_only_for_caller'] = True
+
+    result = apply_field_writes(
+        record.person, {'hemoglobin_g_dl': 13}, descriptor=descriptor,
+    )
+
+    assert 'hemoglobin_g_dl' in result.rejected
+    assert not Measurement.objects.filter(person=record.person).exists()
+
+
+def test_a_canonical_write_retires_the_pair_without_a_refresh(api):
+    from omop_core.services.field_write_service import apply_field_writes
+
+    record = _record()
+    record.hemoglobin_level = 120
+    record.hemoglobin_level_units = 'G/L'
+    record.hemoglobin_g_dl = 12
+    record.user_edited_fields = ['hemoglobin_level', 'hemoglobin_level_units']
+    record.save()
+
+    apply_field_writes(record.person, {'hemoglobin_g_dl': 13}, refresh=False)
+
+    record.refresh_from_db()
+    assert not ({'hemoglobin_level', 'hemoglobin_level_units'}
+                & set(record.user_edited_fields or []))
+    # The caller owns the refresh; when it runs, the canonical wins and the
+    # old source pair is replaced rather than preserved beside it.
+    record = refresh_patient_record(record.person)
+    assert float(record.hemoglobin_level) == 13.0
+    assert record.hemoglobin_level_units == 'G/DL'
+    assert float(record.hemoglobin_g_dl) == 13.0

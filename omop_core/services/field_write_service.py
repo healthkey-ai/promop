@@ -367,9 +367,10 @@ def apply_field_writes(person, changes, today=None, descriptor=None, dates=None,
         if d is None:
             result.rejected[field] = 'Unknown field; not part of the writable record.'
             continue
-        if d.get('normalised_read_model'):
+        if d.get('normalised_read_model') and not d.get('read_only_for_caller'):
             # A canonical import is honoured for compatibility (#2318); the
             # descriptor hides it from editors in favour of the source pair.
+            # Caller-level restrictions still win.
             d = {**d, 'kind': 'direct', 'writable': True,
                  'target': 'patient_record'}
         kind = d.get('kind')
@@ -428,10 +429,14 @@ def apply_field_writes(person, changes, today=None, descriptor=None, dates=None,
         apply_location(person, location_updates, person_dirty)
     if person_dirty:
         person.save(update_fields=sorted(person_dirty))
+    # A canonical import supersedes its source pair in every refresh path,
+    # including a mixed batch whose clinical inputs refresh through
+    # write_clinical_inputs and a caller-supplied `refresh=False`.
+    if result.applied:
+        _retire_source_pairs(person, result.applied)
     # write_clinical_inputs derives for its readback, from the fully-applied
     # state, so a batch that carries a clinical field must not derive twice.
     if refresh and result.applied and not clinical:
-        _retire_source_pairs(person, result.applied)
         refresh_patient_record(person)
     if clinical:
         write_clinical_inputs(person, clinical, today=today)

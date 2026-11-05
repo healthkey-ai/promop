@@ -67,7 +67,8 @@ def projection_for_descriptor(entry):
     """
     if not entry or entry.get('clinical_input_contract'):
         return None
-    normalised_read_model = bool(entry.get('normalised_read_model'))
+    normalised_read_model = (bool(entry.get('normalised_read_model'))
+                             and not entry.get('read_only_for_caller'))
     if (not normalised_read_model
             and (not entry.get('writable')
                  or entry.get('target') != 'patient_record')):

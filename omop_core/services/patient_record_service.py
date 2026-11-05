@@ -44,8 +44,15 @@ from omop_core.services.hemoglobin_units import (
     CANONICAL_FIELD as HEMOGLOBIN_CANONICAL,
     PAIR_FIELD as HEMOGLOBIN_PAIR,
     UNIT_FIELD as HEMOGLOBIN_UNIT,
+    SOURCE_PAIRS as _SOURCE_PAIRS,
     canonical_from_pair as hemoglobin_canonical_from_pair,
     same_number as hemoglobin_same_number,
+)
+
+#: The columns of a declared source pair. They are one assertion, so a
+#: canonical match in the default unit must not acknowledge them independently.
+_SOURCE_PAIR_FIELDS = frozenset(
+    field for fields in _SOURCE_PAIRS.values() for field in fields
 )
 
 
@@ -1138,7 +1145,15 @@ def refresh_patient_record(person: Person) -> PatientRecord:
             # Dropping its marker there would let a later derivation or a
             # mapping approval treat an unbacked edit as confirmed.
             has_evidence = field in derived_fields or field in _OMOP_DERIVED_FIELDS
-            if field == 'medication_contexts':
+            if field in _SOURCE_PAIR_FIELDS:
+                # A source pair is one assertion, not two independently
+                # acknowledged columns. The extractor mirrors the canonical
+                # into the legacy alias in g/dL, so a numerical match would
+                # clear a g/dL pair but keep the equivalent g/L pair pending.
+                # Only an explicit canonical import retires it (recompute);
+                # the chosen unit is the reader's declaration.
+                matches = False
+            elif field == 'medication_contexts':
                 from omop_core.services.medication_context import context_delta, merge_contexts
                 eligible = {str(row.pk) for row in snapshot.drug_exposures}
                 value = {pk: attributes for pk, attributes in (value or {}).items() if pk in eligible}

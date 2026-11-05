@@ -444,7 +444,29 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
     # canonical g/dL column.
     pair_derived = set()
     if HEMOGLOBIN_PAIR in changes or HEMOGLOBIN_UNIT in changes:
-        if HEMOGLOBIN_UNIT in changes and HEMOGLOBIN_PAIR not in changes:
+        # Permission comes from the filtered descriptor, before any value is
+        # added: a host that withheld the source pair must not have its
+        # canonical or unit changed through the pair path.
+        source_entry = descriptor.get(HEMOGLOBIN_PAIR) or {}
+        source_allowed = (
+            bool(source_entry) and bool(source_entry.get('writable'))
+            and not source_entry.get('read_only_for_caller')
+        )
+        canonical_entry = descriptor.get(HEMOGLOBIN_CANONICAL) or {}
+        canonical_allowed = (
+            bool(canonical_entry)
+            and bool(canonical_entry.get('writable')
+                     or canonical_entry.get('normalised_read_model'))
+            and not canonical_entry.get('read_only_for_caller')
+        )
+        if not source_allowed:
+            reason = (source_entry.get('reason')
+                      or 'No supported patient-record write path.')
+            for field in (HEMOGLOBIN_PAIR, HEMOGLOBIN_UNIT):
+                if field in changes:
+                    result.rejected[field] = reason
+                    changes.pop(field, None)
+        elif HEMOGLOBIN_UNIT in changes and HEMOGLOBIN_PAIR not in changes:
             result.rejected[HEMOGLOBIN_UNIT] = 'Send the unit together with its value.'
             changes.pop(HEMOGLOBIN_UNIT, None)
         else:
@@ -452,7 +474,7 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
                     or getattr(record, HEMOGLOBIN_UNIT, None)
                     or HEMOGLOBIN_DEFAULT_UNIT)
             code = normalize_hemoglobin_unit(sent)
-            recognised, canonical = hemoglobin_canonical_from_pair(
+            recognised, canonical_value = hemoglobin_canonical_from_pair(
                 changes.get(HEMOGLOBIN_PAIR), code,
             )
             if code is None:
@@ -464,11 +486,14 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
                 changes.pop(HEMOGLOBIN_UNIT, None)
             else:
                 changes[HEMOGLOBIN_UNIT] = code
-                changes[HEMOGLOBIN_CANONICAL] = canonical
-                pair_derived.add(HEMOGLOBIN_CANONICAL)
-                if HEMOGLOBIN_PAIR in fact_dates:
-                    # The canonical projection is the same dated result.
-                    fact_dates[HEMOGLOBIN_CANONICAL] = fact_dates[HEMOGLOBIN_PAIR]
+                if canonical_allowed:
+                    # A host that withheld the canonical still gets the pair;
+                    # recompute derives the read-model without projecting it.
+                    changes[HEMOGLOBIN_CANONICAL] = canonical_value
+                    pair_derived.add(HEMOGLOBIN_CANONICAL)
+                    if HEMOGLOBIN_PAIR in fact_dates:
+                        # The canonical projection is the same dated result.
+                        fact_dates[HEMOGLOBIN_CANONICAL] = fact_dates[HEMOGLOBIN_PAIR]
     side_effect_projections = {}
     record_profile_fields = set()
     birth_changes = {}
@@ -480,7 +505,7 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
             direct[name] = value
             continue
         entry = descriptor.get(name, {})
-        if entry.get('normalised_read_model'):
+        if entry.get('normalised_read_model') and not entry.get('read_only_for_caller'):
             # A canonical import is still accepted from a client that speaks
             # the normalised field (#2318). It is not advertised as writable
             # because the source pair is the editor's target, but the server
