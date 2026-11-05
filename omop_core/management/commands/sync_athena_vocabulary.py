@@ -108,10 +108,14 @@ class HeartbeatOutput:
             try:
                 if self._connection is None:
                     self._connection = self._connect()
+                from psycopg import sql
+
+                meta = AthenaVocabularySync._meta
                 with self._connection.cursor() as cursor:
                     cursor.execute(
-                        f'UPDATE {AthenaVocabularySync._meta.db_table} SET heartbeat_at = NOW() '
-                        f'WHERE {AthenaVocabularySync._meta.pk.column} = %s',
+                        sql.SQL('UPDATE {table} SET heartbeat_at = NOW() WHERE {pk} = %s').format(
+                            table=sql.Identifier(meta.db_table), pk=sql.Identifier(meta.pk.column),
+                        ),
                         [self._sync_id],
                     )
             except Exception as exc:  # the heartbeat must never fail the load it reports on
@@ -125,8 +129,8 @@ class HeartbeatOutput:
         if conn is not None:
             try:
                 conn.close()
-            except Exception:
-                pass
+            except Exception as exc:  # a connection broken mid-statement may refuse to close
+                logger.debug('Athena sync %s heartbeat connection close failed: %s', self._sync_id, exc)
 
     def close(self):
         self._stop.set()
