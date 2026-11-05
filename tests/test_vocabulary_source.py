@@ -26,14 +26,15 @@ MANIFEST = {
 
 
 class _Response:
-    def __init__(self, status=200, body=None, content=b''):
+    def __init__(self, status=200, body=None, content=b'', headers=None):
         self.status_code = status
         self._body = body
         self._content = content
+        self.headers = headers or {}
 
     def raise_for_status(self):
         if self.status_code >= 400:
-            raise requests.HTTPError(f'{self.status_code}')
+            raise requests.HTTPError(f'{self.status_code}', response=self)
 
     def json(self):
         if isinstance(self._body, Exception):
@@ -49,6 +50,11 @@ class _Response:
 
     def __exit__(self, *exc):
         return False
+
+
+@pytest.fixture(autouse=True)
+def _no_download_backoff(monkeypatch):
+    monkeypatch.setattr(vs.time, 'sleep', lambda s: None)
 
 
 def _drive_selection(**overrides):
@@ -218,6 +224,112 @@ def test_a_write_failure_is_an_lfs_error_so_the_fallback_still_applies(monkeypat
     blocker.write_text('')  # a file where the parent directory must go
     with pytest.raises(vs.LfsSourceError, match='LFS download failed'):
         vs.download_lfs_file('https://x/y.zip', blocker / 'y.zip', None)
+
+
+class _Broken(_Response):
+    """Streams ``good`` bytes, then the connection breaks."""
+
+    def __init__(self, good, status=200):
+        super().__init__(status=status, content=good)
+
+    def iter_content(self, chunk_size):
+        yield from super().iter_content(chunk_size)
+        raise requests.ConnectionError('Connection broken: IncompleteRead')
+
+
+def _serve(monkeypatch, responses):
+    """Answer successive requests.get calls from ``responses``; record Range headers."""
+    calls = []
+
+    def get(url, **kw):
+        calls.append(kw.get('headers') or {})
+        return responses.pop(0)
+
+    monkeypatch.setattr(vs.requests, 'get', get)
+    return calls
+
+
+def _range(received, total):
+    return {'Content-Range': f'bytes {received}-{total - 1}/{total}'}
+
+
+def test_a_broken_stream_is_resumed_with_a_range_request(monkeypatch, tmp_path):
+    """GitHub dropped the 1 GB stream partway on staging; the rest is fetched, not the whole."""
+    content = bytes(range(256)) * 8192  # 2 MiB, two chunks
+    cut = len(content) // 2
+    calls = _serve(monkeypatch, [
+        _Broken(content[:cut]),
+        _Response(status=206, content=content[cut:], headers=_range(cut, len(content))),
+    ])
+    log = []
+
+    dest = vs.download_lfs_file(
+        'https://x/y.zip', tmp_path / 'y.zip', hashlib.sha256(content).hexdigest(), log.append,
+    )
+
+    assert dest.read_bytes() == content
+    assert calls == [{}, {'Range': f'bytes={cut}-'}]
+    assert any('resuming (attempt 2 of' in line for line in log)
+
+
+def test_a_server_that_does_not_resume_restarts_the_download(monkeypatch, tmp_path):
+    content = b'z' * 3000
+    calls = _serve(monkeypatch, [_Broken(content[:1000]), _Response(status=200, content=content)])
+    log = []
+    dest = vs.download_lfs_file('https://x/y.zip', tmp_path / 'y.zip', hashlib.sha256(content).hexdigest(), log.append)
+    assert dest.read_bytes() == content
+    assert calls[1] == {'Range': 'bytes=1000-'}
+    assert any('did not resume' in line for line in log)
+
+
+def test_a_206_from_another_offset_restarts_instead_of_appending(monkeypatch, tmp_path):
+    content = b'q' * 3000
+    _serve(monkeypatch, [
+        _Broken(content[:1000]),
+        _Response(status=206, content=content, headers=_range(0, len(content))),
+    ])
+    log = []
+    dest = vs.download_lfs_file('https://x/y.zip', tmp_path / 'y.zip', hashlib.sha256(content).hexdigest(), log.append)
+    assert dest.read_bytes() == content
+    assert any('did not resume from the bytes on disk' in line for line in log)
+
+
+def test_a_stream_that_broke_after_the_last_byte_is_accepted_on_416(monkeypatch, tmp_path):
+    content = b'end' * 1000
+    calls = _serve(monkeypatch, [_Broken(content), _Response(status=416)])
+    dest = vs.download_lfs_file('https://x/y.zip', tmp_path / 'y.zip', hashlib.sha256(content).hexdigest())
+    assert dest.read_bytes() == content
+    assert calls == [{}, {'Range': f'bytes={len(content)}-'}]
+
+
+def test_a_stream_that_keeps_breaking_gives_up_after_the_attempts(monkeypatch, tmp_path):
+    responses = [_Broken(b'a' * 10)]
+    responses += [
+        _Broken(b'a' * 10, status=206) for _ in range(vs.DOWNLOAD_ATTEMPTS - 1)
+    ]
+    for i, response in enumerate(responses[1:], start=1):
+        response.headers = _range(10 * i, 10 * vs.DOWNLOAD_ATTEMPTS + 1)
+    calls = _serve(monkeypatch, responses)
+    with pytest.raises(vs.LfsSourceError, match='LFS download failed .*IncompleteRead'):
+        vs.download_lfs_file('https://x/y.zip', tmp_path / 'y.zip', None)
+    # Each retry resumes from the bytes accumulated so far, not from the last start.
+    assert calls == [{}] + [{'Range': f'bytes={10 * i}-'} for i in range(1, vs.DOWNLOAD_ATTEMPTS)]
+    assert not (tmp_path / 'y.zip.part').exists()
+
+
+@pytest.mark.parametrize('status', [403, 404])
+def test_a_client_error_is_not_retried(monkeypatch, tmp_path, status):
+    calls = _serve(monkeypatch, [_Response(status=status)])
+    with pytest.raises(vs.LfsSourceError, match=f'LFS download failed .*{status}'):
+        vs.download_lfs_file('https://x/y.zip', tmp_path / 'y.zip', None)
+    assert len(calls) == 1
+
+
+def test_a_server_error_is_retried(monkeypatch, tmp_path):
+    content = b'ok' * 100
+    calls = _serve(monkeypatch, [_Response(status=503), _Response(content=content)])
+    dest = vs.download_lfs_file('https://x/y.zip', tmp_path / 'y.zip', hashlib.sha256(content).hexdigest())
+    assert dest.read_bytes() == content and len(calls) == 2
 
 
 def test_failed_lfs_download_falls_back_to_drive_and_rewrites_the_selection(monkeypatch, tmp_path):
