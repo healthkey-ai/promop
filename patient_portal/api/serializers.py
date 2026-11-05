@@ -1540,7 +1540,10 @@ class FieldConceptMappingSerializer(serializers.ModelSerializer):
             }
             from omop_core.services.genomics_components import components
             genomic_components = {'genetic_mutations.' + a['key'] for a in components()}
-            if field_name not in concrete_names | genomic_components:
+            # A custom field lives in custom_fields, not a column, and its
+            # mapping is curated through this same endpoint (#2328).
+            custom_names = set(CustomPatientField.objects.values_list('field_name', flat=True))
+            if field_name not in concrete_names | genomic_components | custom_names:
                 raise serializers.ValidationError({
                     'field_name': f"'{field_name}' is not a concrete PatientRecord field."
                 })
@@ -1608,7 +1611,15 @@ class FieldConceptMappingSerializer(serializers.ModelSerializer):
             validated_data['provenance'] = user_provenance(request.user)
         elif recipe_changed:
             validated_data['provenance'] = CURATOR_PROVENANCE
-        return super().update(instance, validated_data)
+        instance = super().update(instance, validated_data)
+        # A custom field carries its own tab for the custom-field list and its
+        # ordering; the mapping's placement is the one readers resolve, so a
+        # change here follows through (#2328).
+        custom = getattr(instance, 'custom_patient_field', None)
+        if 'tab' in validated_data and custom is not None:
+            custom.tab = instance.tab or UNPLACED_TAB
+            custom.save(update_fields=['tab', 'updated_at'])
+        return instance
 
 
 class CustomPatientFieldSerializer(serializers.ModelSerializer):

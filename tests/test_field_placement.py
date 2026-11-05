@@ -151,3 +151,63 @@ def test_creating_a_custom_field_without_a_tab_leaves_it_unplaced(staff):
     }, format='json')
     assert response.status_code == 201, response.data
     assert CustomPatientField.objects.get(field_name='frailty_note').mapping.tab == 'disease'
+
+
+# ── Review follow-ups ─────────────────────────────────────────────────────
+
+def test_patching_a_custom_fields_mapping_tab_moves_the_custom_field_too(staff):
+    concept = ConceptFactory(vocabulary_id='LOINC', concept_code='2160-0')
+    mapping = FieldConceptMapping.objects.create(
+        field_name='frailty_index', concept=concept, omop_table='observation',
+        source_value='frailty_index', value_kind='number', status='approved', tab='general',
+    )
+    CustomPatientField.objects.create(
+        field_name='frailty_index', display_name='Frailty Index', tab='general',
+        field_type='number', mapping=mapping,
+    )
+    response = staff.patch(f'/api/v1/field-mappings/{mapping.pk}/', {'tab': 'disease'}, format='json')
+    assert response.status_code == 200, response.data
+    listed = {d['field_name']: d for d in staff.get('/api/v1/custom-patient-fields/').data}
+    assert listed['frailty_index']['tab'] == 'disease'
+    assert _descriptor('frailty_index')['tab'] == 'disease'
+
+    response = staff.patch(f'/api/v1/field-mappings/{mapping.pk}/', {'tab': ''}, format='json')
+    assert response.status_code == 200, response.data
+    assert CustomPatientField.objects.get(field_name='frailty_index').tab == UNPLACED_TAB
+
+
+def test_an_older_payload_leaves_a_curated_placement_alone_on_update():
+    concept = ConceptFactory(vocabulary_id='LOINC', concept_code='2160-0')
+    FieldConceptMapping.objects.create(
+        field_name='creatinine', concept=concept, vocabulary_id='LOINC',
+        concept_code='2160-0', omop_table='measurement', source_value='creatinine',
+        value_kind='number', status='approved', tab='labs',
+    )
+    payload = read_payload('default', tables=('mappings',))
+    row = next(r for r in payload['mappings'] if r['field_name'] == 'creatinine')
+    del row['tab']
+    row['notes'] = 'from the older instance'
+    apply_payload(payload)
+    mapping = FieldConceptMapping.objects.get(field_name='creatinine')
+    assert mapping.notes == 'from the older instance'
+    assert mapping.tab == 'labs'
+
+
+def test_disease_relevance_counts_a_field_where_the_curator_placed_it():
+    from omop_core.services.disease_relevance import _common_fields
+
+    concept = ConceptFactory(vocabulary_id='LOINC', concept_code='882-1')
+    # blood_type is unplaced by the code; placed on General it becomes common.
+    FieldConceptMapping.objects.create(
+        field_name='blood_type', concept=concept, omop_table='observation',
+        status='approved', tab='general',
+    )
+    # hemoglobin_g_dl is on Blood by the code; moved to unplaced it drops out.
+    FieldConceptMapping.objects.create(
+        field_name='hemoglobin_g_dl', concept=concept, omop_table='measurement',
+        status='approved', tab=UNPLACED_TAB,
+    )
+    common = _common_fields(['blood_type', 'hemoglobin_g_dl', 'serum_creatinine_level'])
+    assert 'blood_type' in common
+    assert 'hemoglobin_g_dl' not in common
+    assert 'serum_creatinine_level' in common
