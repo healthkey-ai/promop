@@ -138,7 +138,7 @@ to create a vocabulary download. Select these vocabularies:
 
 | Purpose | Select in Athena |
 |---|---|
-| Core clinical terminology and mappings | **SNOMED**, **ICD10CM**, **CPT4**, **LOINC**, **CIEL**, **RxNorm**, **RxNorm Extension**, **OMOP Extension**, **UCUM** |
+| Core clinical terminology and mappings | **SNOMED**, **ICD10CM**, **CPT4**, **HCPCS**, **LOINC**, **CIEL**, **RxNorm**, **RxNorm Extension**, **OMOP Extension**, **UCUM** |
 | Immunizations and visits | **CVX**, **Visit**, **Type Concept** |
 | Drug classification and oncology treatment | **ATC**, **HemOnc** |
 | Genomics, cancer registry, and clinical study data | **OMOP Genomic**, **ICDO3**, **NCIt**, **Cancer Modifier**, **NAACCR**, **CDISC** |
@@ -256,6 +256,7 @@ Loaded by `load_athena_vocabularies`. `source` is `NULL` for all of these.
 | **LOINC** | 277,784 | Measurement, Meas Value, Observation, Note | `nnnnn-n`, e.g. `94762-2`; answers are `LA…`, e.g. `LA28366-5` | Laboratory tests **and** clinical observations, survey instruments and document types. **Standard for the Measurement domain.** Not only labs — the wearable metrics use LOINC codes, and `Meas Value` entries are answer-list values. |
 | **RxNorm** | 148,875 | Drug | numeric, e.g. `26744` | US drug terminology — ingredients, clinical drugs, brand names. **Standard for the Drug domain.** |
 | **ICD10CM** | 73,484 | Condition, Observation, Measurement | `J11.1` | US clinical modification of ICD-10. **Non-standard** — billing codes, mapped onward to SNOMED. |
+| **HCPCS** | ~12,700 | Procedure, Observation, Drug, Device | alphanumeric, e.g. `J9145`, `G0463` | CMS HCPCS Level II: drugs administered (J-codes), supplies and equipment, and services not in CPT. Procedure-domain codes are standard; J-codes map onward to RxNorm. Loaded since #2300 so the PHR names them. |
 | **HemOnc** | 13,386 | Drug, Condition, Procedure, Episode | numeric, e.g. `1091` | Haematology/oncology terminology: antineoplastic agents and, importantly, **treatment regimens**. Regimen concepts are Standard for the Episode domain; the drug-level concepts are mostly non-standard and map to RxNorm. |
 | **UCUM** | 1,128 | Unit | e.g. `{ai}`, `mg/dL` | Units of measure, used in `unit_concept_id`. |
 | **ATC** | 482 | Drug | e.g. `L01XE52` | WHO Anatomical Therapeutic Chemical classification. Classification concepts (`'C'`), used for drug-class roll-ups rather than stored directly. |

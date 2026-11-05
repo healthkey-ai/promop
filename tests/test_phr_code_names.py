@@ -87,6 +87,17 @@ def test_text_and_unknown_codes_are_shown_as_recorded(record):
     assert [m['name'] for m in meds] == ['Vitamin D3 / 2000 IU', '999999', '2762']
 
 
+def test_an_unmapped_medicine_recorded_as_an_hcpcs_j_code_shows_its_name(record):
+    """#2300: a drug administered arrives as a J-code, often filed under no table."""
+    concept('HCPCS', 'J9041', 'Injection, bortezomib, 0.1 mg')
+    unmapped_drug(record, 'J9041')
+    recorded(record, 'J9041', 'urn:oid:2.16.840.1.113883.6.14', '')
+
+    meds = signed_in(record).get('/api/v1/phr/medications/').data['medications']
+
+    assert [m['name'] for m in meds] == ['Injection, bortezomib, 0.1 mg']
+
+
 def test_an_unmapped_procedure_coded_in_cpt_or_hcpcs_shows_its_name(record):
     concept('CPT4', '85025', 'Blood count; complete (CBC), automated and automated differential WBC count')
     concept('HCPCS', 'J9041', 'Injection, bortezomib, 0.1 mg')

@@ -15,6 +15,7 @@ from django.utils import timezone
 
 from omop_core.management.commands.load_athena_vocabularies import (
     DEFAULT_GDRIVE_URL,
+    VOCAB_SCOPE,
     _sha256_file,
     load_loinc_axes_from_archive,
 )
@@ -103,6 +104,17 @@ class Command(BaseCommand):
         identity = ''
         sha256 = ''
         previous = self._latest_release()
+        # A vocabulary added to VOCAB_SCOPE is a delta the archive's hash
+        # cannot see: three earlier additions reached no deployed instance
+        # until the next bundle (#2300). The published release records the
+        # scope it was loaded under, so a changed scope disables the
+        # "current" shortcuts for this run and the delta loads the new rows.
+        self._scope_changed = self._scope_differs(previous)
+        if self._scope_changed:
+            self.stdout.write(
+                '  Vocabulary scope changed since the installed release '
+                f'({self._scope_delta(previous)}); loading the delta regardless of the archive.'
+            )
 
         try:
             with tempfile.TemporaryDirectory(prefix='promop-athena-sync-') as directory:
@@ -116,7 +128,7 @@ class Command(BaseCommand):
                     # The resolve step may already have fallen back to Drive;
                     # the receipt names the source that answered.
                     source_url = selection.get('source_url') or source_url
-                    if self._identity_is_current(identity):
+                    if self._identity_is_current(identity) and not self._scope_changed:
                         self._receipt(
                             source_url, identity, '', previous, previous, {},
                             'current', started_at,
@@ -133,7 +145,7 @@ class Command(BaseCommand):
                     # identity also carries the LOINC release, which may be the
                     # only thing that moved; then only the LOINC axes are loaded.
                     manifest_sha = selection.get('sha256') or ''
-                    if manifest_sha and self._sha_is_current(manifest_sha):
+                    if manifest_sha and self._sha_is_current(manifest_sha) and not self._scope_changed:
                         sha256 = manifest_sha
                         identity, outcome = self._settle_loinc(
                             selection, Path(directory), identity, None, options,
@@ -163,7 +175,7 @@ class Command(BaseCommand):
                     sha256 = _path_sha256(source_path)
                 identity = identity or f'sha256:{sha256}'
 
-                if self._sha_is_current(sha256):
+                if self._sha_is_current(sha256) and not self._scope_changed:
                     # Same Athena content under a new identity: the LOINC
                     # release is the only thing that can have moved.
                     identity, outcome = self._settle_loinc(
@@ -328,7 +340,8 @@ class Command(BaseCommand):
         installed = None
         with transaction.atomic():
             self._acquire_lock()
-            if self._sha_is_current(sha256):
+            scope_changed = getattr(self, '_scope_changed', False)
+            if self._sha_is_current(sha256) and not scope_changed:
                 return {}, self._latest_release(), 'current'
             prior_release = self._latest_release()
             before = _table_counts()
@@ -347,7 +360,9 @@ class Command(BaseCommand):
                 if after[table] != count
             }
             installed = self._latest_release()
-            if dry_run or not missing:
+            # A scope change with nothing to insert still publishes: the new
+            # release records the scope, which is what stops this running again.
+            if dry_run or (not missing and not scope_changed):
                 transaction.set_rollback(True)
                 return missing, None if dry_run else prior_release, (
                     'dry_run' if dry_run else 'current'
@@ -367,6 +382,28 @@ class Command(BaseCommand):
             cursor.execute('SELECT pg_try_advisory_xact_lock(%s)', [LOCK_ID])
             if not cursor.fetchone()[0]:
                 raise CommandError('Another Athena freshness check or delta load is already running.')
+
+    @staticmethod
+    def _scope_differs(release):
+        """Whether the running VOCAB_SCOPE is not the one the release was loaded under.
+
+        A release with no recorded scope (pre-dating the field) is trusted.
+        """
+        if release is None or not release.scope:
+            return False
+        return sorted(release.scope) != sorted(VOCAB_SCOPE)
+
+    @staticmethod
+    def _scope_delta(release):
+        recorded = set(release.scope or ())
+        added = sorted(VOCAB_SCOPE - recorded)
+        removed = sorted(recorded - VOCAB_SCOPE)
+        return ', '.join(
+            part for part in (
+                '+' + ', +'.join(added) if added else '',
+                '-' + ', -'.join(removed) if removed else '',
+            ) if part
+        )
 
     @staticmethod
     def _latest_release():
