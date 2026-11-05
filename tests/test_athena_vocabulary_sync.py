@@ -165,6 +165,108 @@ def test_apply_commits_missing_rows_and_tags_the_new_release(monkeypatch):
 
 
 @pytest.mark.django_db
+def test_a_scope_change_loads_the_delta_for_a_current_archive(monkeypatch):
+    """#2300: a vocabulary added to VOCAB_SCOPE reaches an instance holding the same bundle."""
+    from omop_core.management.commands.load_athena_vocabularies import VOCAB_SCOPE
+
+    previous = _release('old')
+    previous.scope = sorted(VOCAB_SCOPE - {'HCPCS'})
+    previous.source_artifact_sha256 = 'a' * 64
+    previous.save()
+
+    def load(*_args, **_kwargs):
+        Relationship.objects.create(
+            relationship_id='HCPCS relationship', relationship_name='HCPCS',
+            is_hierarchical=0, defines_ancestry=0,
+            reverse_relationship_id='HCPCS reverse', relationship_concept_id=0,
+        )
+        release = _release('new')
+        release.scope = sorted(VOCAB_SCOPE)
+        release.save()
+
+    monkeypatch.setattr(sync, 'call_command', load)
+    command = sync.Command(stdout=StringIO())
+    assert command._sha_is_current('a' * 64)
+    command._scope_changed = command._scope_differs(previous)
+    assert command._scope_changed
+    assert command._scope_delta(previous) == '+HCPCS'
+
+    missing, installed, outcome = command._load_delta(
+        archive='/tmp/not-read.zip', source_path=None,
+        identity='lfs-file:same', sha256='a' * 64, dry_run=False,
+    )
+
+    assert outcome == 'applied'
+    assert missing == {'relationship': 1}
+    assert installed.scope == sorted(VOCAB_SCOPE)
+    # The new release records the scope, so the next run is current again.
+    assert not command._scope_differs(command._latest_release())
+
+
+@pytest.mark.django_db
+def test_a_scope_change_with_nothing_to_insert_still_publishes_the_scope(monkeypatch):
+    from omop_core.management.commands.load_athena_vocabularies import VOCAB_SCOPE
+
+    previous = _release('old')
+    previous.scope = sorted(VOCAB_SCOPE - {'HCPCS'})
+    previous.save()
+
+    def load(*_args, **_kwargs):
+        release = _release('new')
+        release.scope = sorted(VOCAB_SCOPE)
+        release.save()
+
+    monkeypatch.setattr(sync, 'call_command', load)
+    command = sync.Command(stdout=StringIO())
+    command._scope_changed = True
+
+    missing, installed, outcome = command._load_delta(
+        archive='/tmp/not-read.zip', source_path=None,
+        identity='lfs-file:same', sha256='c' * 64, dry_run=False,
+    )
+
+    assert outcome == 'applied'
+    assert missing == {}
+    assert installed.scope == sorted(VOCAB_SCOPE)
+    assert VocabularyRelease.objects.count() == 2
+
+
+def test_an_unchanged_or_unrecorded_scope_is_current():
+    from omop_core.management.commands.load_athena_vocabularies import VOCAB_SCOPE
+
+    class R:
+        scope = sorted(VOCAB_SCOPE)
+    assert not sync.Command._scope_differs(R())
+    R.scope = []
+    assert not sync.Command._scope_differs(R())
+    assert not sync.Command._scope_differs(None)
+
+
+@pytest.mark.django_db
+def test_a_scope_change_skips_the_current_shortcut(monkeypatch):
+    from omop_core.services import vocabulary_source
+    command = sync.Command(stdout=StringIO())
+    monkeypatch.setattr(command, '_latest_release', lambda: object())
+    monkeypatch.setattr(command, '_scope_differs', lambda release: True)
+    monkeypatch.setattr(command, '_scope_delta', lambda release: '+HCPCS')
+    monkeypatch.setattr(
+        vocabulary_source, 'resolve_vocabulary_source',
+        lambda **kw: {'kind': 'lfs', 'sha256': 'a' * 64, 'identity': 'lfs-file:same'},
+    )
+    monkeypatch.setattr(command, '_identity_is_current', lambda identity: True)
+    monkeypatch.setattr(command, '_sha_is_current', lambda digest: True)
+    download = Mock(side_effect=CommandError('download reached'))
+    monkeypatch.setattr(vocabulary_source, 'download_vocabulary_archive', download)
+    monkeypatch.setattr(command, '_receipt', Mock())
+
+    with pytest.raises(CommandError, match='download reached'):
+        command.handle(**_options(lfs='https://github.com/x/y', gdrive=None, apply=True))
+
+    download.assert_called_once()
+    assert 'Vocabulary scope changed' in command.stdout.getvalue()
+
+
+@pytest.mark.django_db
 def test_dry_run_rolls_back_rows_and_release(monkeypatch):
     previous = _release('old')
 

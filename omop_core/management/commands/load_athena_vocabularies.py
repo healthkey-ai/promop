@@ -51,11 +51,15 @@ VOCAB_SCOPE = frozenset({
     'SNOMED', 'ICD10CM', 'CVX',
     # US procedure and professional-service codes. CPT4 is used as a source
     # vocabulary by the code-mapping and FHIR ingestion paths, so it must be
-    # retained whenever the Athena bundle includes it. HCPCS Level II names
-    # the supplies, drugs-administered and services the ETL sends as HCPCS
-    # codes; without it the PHR showed the bare code (#2300). ~12.7k concepts.
-    # NDC is deliberately not here: ~1.3M concepts, and the 14-digit package
-    # codes seen in ETL data match no Athena NDC, so loading it names nothing.
+    # retained whenever the Athena bundle includes it. HCPCS Level II (~12.7k
+    # concepts) names the supplies, drugs administered and services the ETL
+    # sends as HCPCS codes; without it the PHR showed the bare code (#2300).
+    # Its Procedure/Device/Observation concepts are standard, so they become
+    # Suggest candidates too; its Drug-domain J-codes are non-standard and
+    # resolve through their 'Maps to' RxNorm edges, which only a full load
+    # (not --concepts-only) carries. NDC is deliberately not here: ~1.3M
+    # concepts, and the 14-digit package codes seen in ETL data match no
+    # Athena NDC, so loading it names nothing.
     'CPT4', 'HCPCS',
     # Genomic + oncology coding vocabularies (#459)
     'OMOP Genomic', 'ICDO3', 'NCIt',

@@ -26,13 +26,13 @@ from omop_core.services.source_descriptions import describe_source_code
 from omop_core.services.source_vocabularies import canonical_source_vocabulary, hospital_vendor
 
 # Where a bare code in each table usually comes from, when the record does not say.
-DRUG_VOCABULARIES = ('RxNorm', 'RxNorm Extension')
+DRUG_VOCABULARIES = ('RxNorm', 'RxNorm Extension', 'HCPCS')
 VACCINE_VOCABULARIES = ('CVX',) + DRUG_VOCABULARIES
 PROCEDURE_VOCABULARIES = ('CPT4', 'HCPCS', 'ICD10PCS')
 
 # The systems a recorded code may name for each table, best first. A code the
 # patient's source codes file under no table is trusted only in one of these.
-DRUG_SYSTEMS = ('RxNorm', 'RxNorm Extension', 'CVX', 'NDC')
+DRUG_SYSTEMS = ('RxNorm', 'RxNorm Extension', 'CVX', 'NDC', 'HCPCS')
 PROCEDURE_SYSTEMS = PROCEDURE_VOCABULARIES
 
 # The standard systems importers send by OID or URI, as the vocabulary ids we name them in.
