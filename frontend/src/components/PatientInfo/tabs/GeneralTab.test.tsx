@@ -214,9 +214,13 @@ describe('GeneralTab', () => {
     await renderTab({ disease: 'Multiple Myeloma', stage: 'III', histologic_type: 'Plasma cell myeloma', hiv_status: false });
     await waitFor(() => expect(mockGet).toHaveBeenCalled());
 
-    expect(screen.queryByLabelText('Disease')).not.toBeInTheDocument();
-    expect(screen.queryByLabelText('Stage')).not.toBeInTheDocument();
-    expect(screen.queryByLabelText('Histologic Type')).not.toBeInTheDocument();
+    // The controls now carry accessible names, so "not found by label" is no
+    // longer the right question: none of them may be an *editable* duplicate.
+    for (const label of ['Disease', 'Stage', 'Histologic Type']) {
+      for (const control of screen.queryAllByLabelText(label)) {
+        expect(control).toBeDisabled();
+      }
+    }
     expect(screen.getByTestId('reason-hiv_status')).toBeInTheDocument();
   });
 

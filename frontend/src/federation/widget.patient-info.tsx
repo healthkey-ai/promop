@@ -96,6 +96,7 @@ export function mountFields(el: HTMLElement, opts: MountOptions = {}): () => voi
   roots.set(el, root);
   root.render(<StrictMode>{slots.map((slot, index) => createPortal(
     <PatientFieldEditor store={runtime.store} name={slot.dataset.promopField!}
+      label={slot.dataset.promopLabel}
       readOnly={opts.readOnly ?? true} infoHref={opts.infoHref} compact />,
     slot, String(index),
   ))}</StrictMode>);

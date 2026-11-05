@@ -494,11 +494,22 @@ describe('host-labelled options', () => {
     }, { planned_therapies: '' });
     render(<PatientFieldEditor store={store} name="planned_therapies" />);
 
-    await userEvent.click(screen.getByRole('button', { name: /Select/ }));
+    // The control is named by the field label plus the current selection.
+    await userEvent.click(screen.getByRole('button', { name: /Planned Therapies/ }));
     await userEvent.click(await screen.findByText('R-CHOP'));
     await act(async () => { await store.flush(); });
 
     expect(patch.mock.calls[0][1]).toEqual({ planned_therapies: 'r_chop' });
+    expect(screen.getByRole('button', { name: 'Planned Therapies: R-CHOP' }))
+      .toBeInTheDocument();
+  });
+
+  it('names a compact control by the caller label', async () => {
+    const { store } = await setup();
+    render(<PatientFieldEditor store={store} name="height" compact label="Height at intake" />);
+
+    // Compact mounts hide the visible label; the control still needs a name.
+    expect(screen.getByRole('spinbutton', { name: 'Height at intake' })).toBeInTheDocument();
   });
 
   it('explains an empty catalog instead of rendering a bare picker', async () => {

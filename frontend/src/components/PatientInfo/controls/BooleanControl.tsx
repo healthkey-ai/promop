@@ -7,6 +7,7 @@ export default function BooleanControl({
   triState = false,
   trueLabel = 'Yes',
   falseLabel = 'No',
+  ariaLabel,
 }: {
   value: boolean | null | undefined;
   disabled?: boolean;
@@ -15,6 +16,7 @@ export default function BooleanControl({
   /** Reviewed wording for the two answers (#5601). */
   trueLabel?: string;
   falseLabel?: string;
+  ariaLabel?: string;
 }) {
   const strValue = value === true
     ? "true"
@@ -28,6 +30,7 @@ export default function BooleanControl({
     <SelectControl
       value={strValue}
       disabled={disabled}
+      ariaLabel={ariaLabel}
       placeholder="Select…"
       treatEmptyOptionAsUnknown={false}
       allowClear={!triState}
