@@ -27,10 +27,13 @@ its errors as JSON regardless.
 
 ## FHIR
 
-The same bundle `GET /api/v1/patient-records/{person_id}/export-fhir/` serves,
-from `omop_core/services/fhir_export.serialize_signed_fhir_bundle`: canonical
-bytes, with `X-Content-SHA256` and `X-Content-Signature` computed over exactly
-the body returned (see [FHIR export](fhir-export-architecture.md)). A
+The same bundle `GET /api/v1/patient-records/{person_id}/export-fhir/` serves:
+both go through `patient_portal/api/fhir/integrity.signed_fhir_response`,
+which serializes the bundle to canonical bytes and sets `X-Content-SHA256`
+and `X-Content-Signature` over exactly the body returned (see
+[FHIR export](fhir-export-architecture.md)). The PHR export adds a
+`Content-Disposition` filename, making it a download; the person-id export,
+an integration surface, does not. Both answer `Cache-Control: no-store`. A
 `fhirVersion` other than R4, in the query or the `Accept` header, is refused
 with 406 as on the person-id export.
 
@@ -58,8 +61,19 @@ is recorded in the document's subject metadata. Adding a language is a new
 entry in that table.
 
 The PDF is built with `reportlab` (pure Python, no system libraries, unlike
-weasyprint) using its built-in Helvetica, which covers Latin scripts only; a
-name in another script needs an embedded font before that language is added.
+weasyprint) using its built-in Helvetica, which covers Latin scripts only: a
+name, drug or facility in another script (Cyrillic, Greek, CJK) renders as
+boxes, though the export still succeeds. Embedding a Unicode font (Noto Sans
+or DejaVu Sans under `patient_portal/api/phr/fonts/`) is the follow-up, and a
+prerequisite for any non-English `lang`.
+
+The whole PDF is built in the request: every section's rows, with no cap.
+That is what the app's screens show across seven requests, so it is the cost
+of seven reads plus the layout. A heavily loaded record (thousands of
+results) may need a row cap per section or a queued build; neither exists yet.
+
+`HEAD` is refused (405): Django would otherwise run the whole export to
+discard the body, and the middleware does not audit HEAD.
 
 ## Audit
 
@@ -73,4 +87,7 @@ export (400, 404) is audited as a plain read, without the marker, because
 nothing left the system.
 
 Any view can use the same hook: set a small JSON object on the Django request
-(`request._request` from a DRF view) and it lands in `detail`.
+(`request._request` from a DRF view) and it lands in `detail`. It must be
+JSON, under 2 KB serialized, and free of health data: the stdout line repeats
+it. Anything else is dropped with an ops warning and the row is written
+without it.

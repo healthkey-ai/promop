@@ -20,7 +20,6 @@ so the Privacy Policy's record of exports can be answered from the audit trail
 from __future__ import annotations
 
 import io
-from datetime import date
 from typing import Any
 from xml.sax.saxutils import escape
 
@@ -30,12 +29,7 @@ from rest_framework import status
 from rest_framework.renderers import JSONRenderer
 from rest_framework.response import Response
 
-from omop_core.services.fhir_export import serialize_signed_fhir_bundle
-from patient_portal.api.fhir.integrity import (
-    EXPORT_DIGEST_HEADER,
-    EXPORT_SIGNATURE_HEADER,
-    check_fhir_version,
-)
+from patient_portal.api.fhir.integrity import check_fhir_version, signed_fhir_response
 
 from .consent import language_of
 from .labs import labs
@@ -45,14 +39,19 @@ from .therapy import therapy
 from .views import PhrView, about_fields, diagnoses, patient_name
 
 FORMATS = ('fhir', 'pdf')
-FHIR_CONTENT_TYPE = 'application/fhir+json'
 PDF_CONTENT_TYPE = 'application/pdf'
+
+# A4 less the margins render_record_pdf sets; every table is laid out to it.
+PAGE_MARGIN_MM = 15
 
 
 class RecordExportView(PhrView):
     """The member's record as a file: ``?format=fhir`` or ``?format=pdf``."""
 
     renderer_classes = [JSONRenderer]
+    # Django answers HEAD with get(): the whole export built and thrown away,
+    # unaudited (the middleware skips HEAD). Nothing needs it.
+    http_method_names = ['get', 'options']
 
     def perform_content_negotiation(self, request, force=False):
         # ``?format=`` names the export here, not a DRF renderer: the default
@@ -78,7 +77,7 @@ class RecordExportView(PhrView):
             return error
 
         if fmt == 'fhir':
-            response = fhir_response(person)
+            response = signed_fhir_response(person, filename='my-record.fhir.json')
         else:
             response = pdf_response(person, record, language_of(request))
         # The middleware writes one audit row per request; this marks it as an
@@ -89,20 +88,11 @@ class RecordExportView(PhrView):
         return response
 
 
-def fhir_response(person) -> HttpResponse:
-    """The signed bundle, byte-for-byte what the digest and signature cover."""
-    body, digest, signature = serialize_signed_fhir_bundle(person)
-    response = HttpResponse(body, content_type=FHIR_CONTENT_TYPE)
-    response[EXPORT_DIGEST_HEADER] = digest
-    response[EXPORT_SIGNATURE_HEADER] = signature
-    response['Content-Disposition'] = 'attachment; filename="my-record.fhir.json"'
-    return response
-
-
 def pdf_response(person, record, lang: str) -> HttpResponse:
     body = render_record_pdf(person, record, lang)
     response = HttpResponse(body, content_type=PDF_CONTENT_TYPE)
     response['Content-Disposition'] = 'attachment; filename="my-record.pdf"'
+    response['Cache-Control'] = 'no-store'
     return response
 
 
@@ -216,10 +206,20 @@ def _styles():
     }
 
 
-def _table(rows: list[list[str]], widths: list[float] | None, styles) -> Any:
+def _frame_width() -> float:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import mm
+
+    return A4[0] - 2 * PAGE_MARGIN_MM * mm
+
+
+def _table(rows: list[list[str]], weights: list[float], styles) -> Any:
+    """A table across the full frame, its columns in proportion to ``weights``."""
     from reportlab.lib import colors
     from reportlab.platypus import Paragraph, Table, TableStyle
 
+    frame = _frame_width()
+    widths = [frame * w / sum(weights) for w in weights]
     data = [[Paragraph(_s(cell), styles['cell']) for cell in row] for row in rows]
     table = Table(data, colWidths=widths, repeatRows=1)
     table.setStyle(TableStyle([
@@ -243,7 +243,7 @@ def _pairs(rows: list[tuple[str, Any]], styles) -> list:
     ]
 
 
-def _about(person, record, labels, styles) -> list:
+def _about(person, record, labels, styles, diagnosed) -> list:
     rows = [(labels['name'], patient_name(person) or None)]
     for field in about_fields(record, person):
         value = field['value']
@@ -278,10 +278,10 @@ def _cancer_entry(entry: dict, labels, styles) -> list:
     return out
 
 
-def _diagnoses(person, record, labels, styles) -> list:
+def _diagnoses(person, record, labels, styles, diagnosed) -> list:
     from reportlab.platypus import Paragraph
 
-    data = diagnoses(person, record)
+    data = diagnosed
     out = []
     if data['cancer']:
         out.append(Paragraph(labels['cancer'], styles['h2']))
@@ -297,11 +297,11 @@ def _diagnoses(person, record, labels, styles) -> list:
     return out
 
 
-def _therapy(person, record, labels, styles) -> list:
+def _therapy(person, record, labels, styles, diagnosed) -> list:
     from reportlab.platypus import Paragraph
 
     out = []
-    for track in therapy(person, record)['tracks']:
+    for track in therapy(person, record, diagnosed)['tracks']:
         out.append(Paragraph(_s(track['diagnosis']['name']), styles['h2']))
         if not track['lines']:
             out.append(Paragraph(labels['nothing'], styles['body']))
@@ -326,7 +326,7 @@ def _therapy(person, record, labels, styles) -> list:
     return out
 
 
-def _outcomes(person, record, labels, styles) -> list:
+def _outcomes(person, record, labels, styles, diagnosed) -> list:
     surveys = outcomes(person, record)['surveys']
     if not surveys:
         return []
@@ -342,7 +342,7 @@ def _outcomes(person, record, labels, styles) -> list:
     return [_table(rows, [190, 70, 90, 90, 90], styles)]
 
 
-def _medications(person, record, labels, styles) -> list:
+def _medications(person, record, labels, styles, diagnosed) -> list:
     items = medications(person, record)['medications']
     if not items:
         return []
@@ -362,7 +362,7 @@ def _medications(person, record, labels, styles) -> list:
     return [_table(rows, [150, 80, 90, 65, 65, 80], styles)]
 
 
-def _procedures(person, record, labels, styles) -> list:
+def _procedures(person, record, labels, styles, diagnosed) -> list:
     items = procedures(person, record)['procedures']
     if not items:
         return []
@@ -399,8 +399,8 @@ def _lab_range(result: dict | None) -> str:
     return f'≥ {low}' if low is not None else f'≤ {high}'
 
 
-def _labs(person, record, labels, styles) -> list:
-    tests = labs(person, record)['tests']
+def _labs(person, record, labels, styles, diagnosed) -> list:
+    tests = labs(person, record, diagnosed)['tests']
     if not tests:
         return []
     rows = [[labels['test'], labels['date'], labels['latest'], labels['range'], labels['recent'], labels['results']]]
@@ -435,6 +435,8 @@ def render_record_pdf(person, record, lang: str = 'en') -> bytes:
     styles = _styles()
     name = patient_name(person)
     today = timezone.localdate()
+    # Therapy and labs each read the Diagnoses section too; built once here.
+    diagnosed = diagnoses(person, record)
 
     story = [
         Paragraph(_s(labels['title']), styles['title']),
@@ -444,17 +446,19 @@ def render_record_pdf(person, record, lang: str = 'en') -> bytes:
     for key, build in SECTIONS:
         story.append(PageBreak())
         story.append(Paragraph(_s(labels[key]), styles['h1']))
-        story.extend(build(person, record, labels, styles) or [Paragraph(labels['nothing'], styles['body'])])
+        story.extend(build(person, record, labels, styles, diagnosed) or [Paragraph(labels['nothing'], styles['body'])])
 
     def footer(canvas, doc):
         canvas.saveState()
         canvas.setFont('Helvetica', 8)
-        canvas.drawRightString(A4[0] - 15 * mm, 10 * mm, f'{name} · {today.isoformat()} · {doc.page}'.strip(' ·'))
+        canvas.drawRightString(A4[0] - PAGE_MARGIN_MM * mm, 10 * mm,
+                               f'{name} · {today.isoformat()} · {doc.page}'.strip(' ·'))
         canvas.restoreState()
 
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(
-        buffer, pagesize=A4, leftMargin=15 * mm, rightMargin=15 * mm, topMargin=15 * mm, bottomMargin=18 * mm,
+        buffer, pagesize=A4, leftMargin=PAGE_MARGIN_MM * mm, rightMargin=PAGE_MARGIN_MM * mm,
+        topMargin=PAGE_MARGIN_MM * mm, bottomMargin=18 * mm,
         title=f"{labels['title']} – {name}".strip(' –'), author=name or '', subject=f'lang={lang}',
     )
     doc.build(story, onFirstPage=footer, onLaterPages=footer)

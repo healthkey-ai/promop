@@ -3,11 +3,10 @@ import io
 import json
 
 import pytest
-from django.conf import settings
 from rest_framework.test import APIClient
 
-from patient_portal.models import AuditEvent, Identity
-from tests.factories import PatientRecordFactory
+from patient_portal.models import AuditEvent, Identity, PatientUser
+from tests.factories import PatientRecordFactory, PersonFactory
 from tests.test_phr_read_model import condition, icd10, lab, loinc, signed_in
 
 pytestmark = pytest.mark.django_db
@@ -50,6 +49,11 @@ def test_identity_without_a_record_gets_404():
     assert client.get(EXPORT + '?format=pdf').status_code == 404
 
 
+def test_head_is_not_served():
+    """HEAD would build the whole export unaudited (the middleware skips HEAD)."""
+    assert signed_in(member()).head(EXPORT + '?format=pdf').status_code == 405
+
+
 def test_the_format_must_be_named():
     client = signed_in(member())
 
@@ -84,9 +88,17 @@ def test_fhir_export_is_the_members_own_signed_bundle_and_nobody_elses():
     assert 'E11.9' not in response.content.decode()
 
 
-def test_fhir_export_integrity_headers_are_readable_cross_origin():
+def test_fhir_export_integrity_headers_are_readable_cross_origin(settings):
     """#1603: the browser app that asks for the bundle can read its digest and signature."""
-    assert {'X-Content-SHA256', 'X-Content-Signature', 'Content-Disposition'} <= set(settings.CORS_EXPOSE_HEADERS)
+    settings.CORS_ALLOWED_ORIGINS = ['https://member.example.test']
+
+    response = signed_in(member()).get(EXPORT + '?format=fhir', HTTP_ORIGIN='https://member.example.test')
+
+    assert response.status_code == 200
+    assert response['Access-Control-Allow-Origin'] == 'https://member.example.test'
+    exposed = {h.strip() for h in response['Access-Control-Expose-Headers'].split(',')}
+    assert {'X-Content-SHA256', 'X-Content-Signature', 'Content-Disposition'} <= exposed
+    assert response['Cache-Control'] == 'no-store'
 
 
 def test_fhir_export_refuses_another_fhir_version():
@@ -132,6 +144,32 @@ def test_pdf_export_has_a_page_per_section_even_when_empty():
     assert 'Nothing recorded.' in pdf_text(response.content)
 
 
+def test_pdf_export_for_a_member_whose_record_is_not_derived_yet():
+    """A linked person with no PatientRecord row still gets their (mostly empty) PDF."""
+    person = PersonFactory(given_name='Ada', family_name='Lovelace')
+    identity = Identity.objects.create_user(email='ada@example.test')
+    PatientUser.objects.create(identity=identity, person=person)
+    client = APIClient()
+    client.force_authenticate(identity)
+
+    response = client.get(EXPORT + '?format=pdf')
+
+    assert response.status_code == 200
+    assert response['Cache-Control'] == 'no-store'
+    assert 'Ada Lovelace' in pdf_text(response.content)
+
+
+def test_pdf_export_survives_a_name_outside_latin_script():
+    """Helvetica has no glyphs for it (documented); the export must still succeed."""
+    record = member()
+    record.person.given_name, record.person.family_name = 'Иван', '李'
+    record.person.save(update_fields=['given_name', 'family_name'])
+
+    response = signed_in(record).get(EXPORT + '?format=pdf')
+
+    assert response.status_code == 200 and response.content.startswith(b'%PDF')
+
+
 def test_pdf_export_falls_back_to_english_for_an_unknown_language():
     response = signed_in(member()).get(EXPORT + '?format=pdf&lang=xx')
     assert response.status_code == 200
@@ -154,6 +192,27 @@ def test_every_export_is_audited_with_an_export_marker(fmt):
     assert event.detail == {'export': fmt, 'person_id': record.person_id}
     assert event.user_email == f'p{record.person_id}@example.test'
     assert event.signature_valid()
+
+
+def test_an_audit_detail_the_row_cannot_hold_is_dropped_not_fatal(monkeypatch):
+    """The hook takes a small JSON object; anything else is dropped with a warning, the row still written."""
+    from patient_portal.api.phr import export as export_module
+
+    class Unserializable:
+        pass
+
+    def get(self, request):
+        request._request.audit_detail = {'export': Unserializable()}
+        return export_module.Response({'ok': True})
+
+    monkeypatch.setattr(export_module.RecordExportView, 'get', get)
+    client = signed_in(member())
+    AuditEvent.objects.all().delete()
+
+    assert client.get(EXPORT).status_code == 200
+
+    event = AuditEvent.objects.get(path=EXPORT)
+    assert event.detail is None and event.signature_valid()
 
 
 def test_a_refused_export_is_audited_without_the_marker():
