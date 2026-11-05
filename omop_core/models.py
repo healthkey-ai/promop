@@ -4166,6 +4166,56 @@ class PatientRecord(models.Model):
             return "No languages recorded"
         return format_language_skills(skills)
 
+    @property
+    def abnormal_kappa_lambda_ratio(self) -> bool | None:
+        """Whether the kappa/lambda free-light-chain ratio is outside 0.26-1.65.
+
+        The window and the Decimal comparison are the reviewed rule shared with
+        CB (CB #858/#5481, PROMOP #1928): a boundary ratio such as 1.65 must stay
+        on the normal side, which a binary float cannot guarantee. `None` when
+        either concentration is missing, non-finite, or the denominator is zero.
+
+        The IMWG derivation in `patient_record_service` computes the same
+        component from a same-event pair, so the two are deliberately separate:
+        that path refuses to reconstruct a ratio from fields that may belong to
+        different draws.
+        """
+        from decimal import Decimal, InvalidOperation
+
+        if self.kappa_flc is None or self.lambda_flc is None:
+            return None
+        try:
+            kappa = Decimal(str(self.kappa_flc))
+            lam = Decimal(str(self.lambda_flc))
+        except (InvalidOperation, TypeError, ValueError):
+            return None
+        if not kappa.is_finite() or not lam.is_finite() or lam == 0:
+            return None
+        ratio = kappa / lam
+        return ratio < Decimal('0.26') or ratio > Decimal('1.65')
+
+    @property
+    def day_since_stem_cell_transplant(self) -> int | None:
+        """Days from the recorded transplant date to today, or `None`.
+
+        A future date is not a negative day count: it is not a completed
+        transplant, so the trial criterion stays unknown (CB's rule).
+        """
+        from datetime import date, datetime
+
+        sct_date = self.sct_date
+        # `DateField` hands back a `date` once loaded, but an instance that was
+        # assigned a `datetime` before saving keeps it; comparing the two types
+        # raises, so normalize instead of relying on the caller.
+        if isinstance(sct_date, datetime):
+            sct_date = sct_date.date()
+        if sct_date is None:
+            return None
+        today = date.today()
+        if sct_date > today:
+            return None
+        return (today - sct_date).days
+
     def save(self, *args, **kwargs):
         """Calculate BMI, age, and update therapy-related computed fields when saving"""
         # Compute age from date_of_birth, falling back to Person.year_of_birth
