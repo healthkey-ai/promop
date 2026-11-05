@@ -200,6 +200,51 @@ def test_pdf_export_uses_the_embedded_font_everywhere():
 
     fonts = pdf_fonts(response.content)
     assert fonts and all('DejaVuSans' in name for name in fonts), fonts
+    # ``<b>Name:</b>`` on About me resolves through the family mapping to the bold face.
+    assert any(name.endswith('DejaVuSans-Bold') for name in fonts), fonts
+
+
+def test_concurrent_pdf_builds_embed_the_same_font_bytes():
+    """reportlab subsets the shared TTFont with a cursor on the face itself; builds are serialised
+    per process so two exports on one worker cannot interleave their reads (and embed corrupt glyphs)."""
+    import sys
+    from concurrent.futures import ThreadPoolExecutor
+
+    from pypdf import PdfReader
+
+    from patient_portal.api.phr.export import render_record_pdf
+
+    record = member(facility_name='Больница №1')
+    record.person.given_name, record.person.family_name = 'Nguyễn', 'Hồng Ánh'
+    record.person.save(update_fields=['given_name', 'family_name'])
+    person = record.person
+
+    def font_files(body: bytes) -> set[bytes]:
+        out = set()
+        for page in PdfReader(io.BytesIO(body)).pages:
+            for font in page['/Resources']['/Font'].values():
+                descriptor = font.get_object().get('/FontDescriptor')
+                if descriptor is not None and '/FontFile2' in descriptor.get_object():
+                    out.add(descriptor.get_object()['/FontFile2'].get_object().get_data())
+        return out
+
+    def render(_):
+        from django.db import connection
+
+        try:
+            return render_record_pdf(person, record)
+        finally:
+            connection.close()  # each thread opened its own; the test database must be droppable
+
+    expected = font_files(render_record_pdf(person, record))
+    interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    try:
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            bodies = list(pool.map(render, range(8)))
+    finally:
+        sys.setswitchinterval(interval)
+    assert all(font_files(body) == expected for body in bodies)
 
 
 def test_pdf_export_survives_a_cjk_name():

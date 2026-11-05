@@ -24,6 +24,7 @@ so the Privacy Policy's record of exports can be answered from the audit trail
 from __future__ import annotations
 
 import io
+import threading
 from pathlib import Path
 from typing import Any
 from xml.sax.saxutils import escape
@@ -53,13 +54,24 @@ PAGE_MARGIN_MM = 15
 # glyphs only, so anything outside Western Latin rendered as boxes; DejaVu
 # Sans (Bitstream Vera licence, ``fonts/LICENSE-DejaVu.txt``) is embedded,
 # subset to the glyphs used, and covers Latin with its extensions, Greek,
-# Cyrillic, Armenian, Georgian, Arabic and Hebrew, among others. It has no
-# CJK glyphs: a Chinese, Japanese or Korean name still shows as boxes, the
-# export still succeeds. That needs a second, much larger font (Noto Sans CJK)
-# switched in per run of text, which reportlab does not do by itself.
+# Cyrillic, Armenian and Georgian. It has Arabic and Hebrew glyphs too, but
+# reportlab does no bidi reordering or shaping, so those do not read as
+# written either. It has no CJK glyphs: a Chinese, Japanese or Korean name
+# still shows as boxes, the export still succeeds. That needs a second, much
+# larger font (Noto Sans CJK) switched in per run of text, which reportlab
+# does not do by itself.
 FONT = 'DejaVuSans'
 FONT_BOLD = 'DejaVuSans-Bold'
 FONT_DIR = Path(__file__).resolve().parent / 'fonts'
+
+# One PDF build at a time per process. The registered TTFont objects are
+# process-global, and when a document is saved reportlab subsets the face by
+# walking the font file with a cursor kept on that shared object
+# (``TTFontFace.makeSubset``), so two exports saving at once on one gunicorn
+# worker (both Dockerfiles run ``--threads 2``) interleave their reads and
+# embed corrupt glyphs, or fail with a KeyError. Helvetica, being built in,
+# had no such state. Exports are rare and short, so the wait is bounded.
+_PDF_LOCK = threading.Lock()
 
 
 def register_fonts() -> None:
@@ -67,13 +79,16 @@ def register_fonts() -> None:
 
     reportlab's registry is process-global, so the second call is a no-op;
     it is called from ``render_record_pdf`` rather than at import so that
-    loading this module never reads font files.
+    loading this module never reads font files. The caller holds
+    ``_PDF_LOCK``: the check and the registrations are one step, so a second
+    thread cannot see the regular face registered and build before the bold
+    face and the family mapping exist.
     """
     from reportlab.lib.fonts import addMapping
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfbase.ttfonts import TTFont
 
-    if FONT in pdfmetrics.getRegisteredFontNames():
+    if FONT_BOLD in pdfmetrics.getRegisteredFontNames():
         return
     pdfmetrics.registerFont(TTFont(FONT, str(FONT_DIR / f'{FONT}.ttf')))
     pdfmetrics.registerFont(TTFont(FONT_BOLD, str(FONT_DIR / f'{FONT_BOLD}.ttf')))
@@ -474,11 +489,19 @@ SECTIONS = (
 
 def render_record_pdf(person, record, lang: str = 'en') -> bytes:
     """The member's record as a PDF: a title page, then one page per section."""
+    # Paragraphs measure their text as they are made, so the fonts must be
+    # registered before the story is built, and the build must not overlap
+    # another's save (see _PDF_LOCK).
+    with _PDF_LOCK:
+        register_fonts()
+        return _render_record_pdf(person, record, lang)
+
+
+def _render_record_pdf(person, record, lang: str) -> bytes:
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.units import mm
     from reportlab.platypus import PageBreak, Paragraph, SimpleDocTemplate, Spacer
 
-    register_fonts()
     labels = labels_for(lang)
     styles = _styles()
     name = patient_name(person)
