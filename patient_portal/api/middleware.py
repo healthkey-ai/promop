@@ -156,6 +156,11 @@ def _get_resource_id(request):
     return None
 
 
+def _audit_detail(request):
+    detail = getattr(request, 'audit_detail', None)
+    return detail if isinstance(detail, dict) and detail else None
+
+
 def _should_audit(request):
     """True when this request is on an auditable path (API / OAuth / admin) with
     an audited method. Access to the audit trail itself IS audited (TI.2.2#04)."""
@@ -203,6 +208,11 @@ class AuditLogMiddleware:
                     or request.META.get('REMOTE_ADDR')
                 ),
                 'duration_ms': round((time.monotonic() - start) * 1000),
+                # A view may mark its request (``request.audit_detail``, a small
+                # JSON object) so the row says more than method and path: the
+                # record export writes ``{'export': 'fhir'|'pdf', ...}`` so the
+                # exports of a record can be listed from the audit trail alone.
+                'detail': _audit_detail(request),
             }
         except Exception:
             ops_logger.warning("AuditLogMiddleware failed to build audit entry", exc_info=True)
@@ -239,6 +249,7 @@ class AuditLogMiddleware:
             resource_id=entry['resource_id'],
             ip_address=(entry['ip_address'] or '')[:64] or None,
             duration_ms=entry['duration_ms'],
+            detail=entry.get('detail'),
         )
 
 
