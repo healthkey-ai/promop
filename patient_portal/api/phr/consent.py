@@ -17,14 +17,18 @@ Withdrawing the record permission (``CONSENT_RECORD_PURPOSE_KEY``) closes the
 account: the withdrawal and its ledger entry are written, then the account,
 record and data are deleted in the same transaction, and the response says
 ``account_deleted`` instead of the consent state (docs/account-deletion.md).
+Because of that, the two POSTs here take a session or partner login only; an
+OAuth2 token or service credential gets 403, though it may still GET.
 """
 from __future__ import annotations
 
 from django.core.exceptions import ValidationError
 from django.db import transaction
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from patient_portal import consent as svc
+from patient_portal.api.permissions import InteractiveSessionForWrites
 from patient_portal.account_deletion import (
     AlreadyDeleted, actor_snapshot, delete_member, end_session, patient_only_identity,
 )
@@ -97,6 +101,10 @@ def document_payload(state: svc.DocumentState) -> dict:
 
 
 class ConsentView(PhrView):
+    # Any credential may read the answers; only the member's own login may
+    # record one, since withdrawing the record purpose closes the account.
+    permission_classes = [IsAuthenticated, InteractiveSessionForWrites]
+
     def build(self, person, record, language=svc.DEFAULT_LANGUAGE):
         return {
             'language': language,

@@ -17,7 +17,9 @@ All notable changes to PRomop are documented here.
   an append-only, hash-chained `DeletionLogEntry` holding ids and a time, no
   content; `manage.py replay_deletion_log` verifies the chain and deletes
   again whatever a backup restore brought back. The consent ledger stays. See
-  [account deletion](docs/account-deletion.md). (#2307)
+  [account deletion](docs/account-deletion.md). The PHR account delete and
+  consent POST accept a session or partner login only; an OAuth2 token or
+  service credential gets 403. (#2307)
 - **Consent model v2** — purposes (permissions, contact preferences,
   declarations) and legal documents are data with versioned texts per
   language, loaded by `load_consent_texts` or edited in the admin, so legal

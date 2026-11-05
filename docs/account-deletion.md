@@ -31,6 +31,16 @@ The session is logged out only after the commit, and the audit trail's
 (`account_deletion.end_session` hands them to `AuditLogMiddleware`, which
 would otherwise see a logged-out request).
 
+### Who may send it
+
+The PHR account delete and the consent POST take a session or partner login
+only (`InteractiveSessionForWrites` in `api/permissions.py`, on top of
+`is_interactive_session`). An OAuth2 access token the member delegated to an
+application, a service credential or an HTTP Basic password can be presented
+without the member, so none of them may close the account or withdraw the
+permission that closes it; they get 403. Reading the consent state with such
+a credential still works. The admin path keeps its own staff check.
+
 ### The paths
 
 | Path | Reason logged |

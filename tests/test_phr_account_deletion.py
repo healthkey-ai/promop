@@ -23,7 +23,29 @@ from patient_portal.models import (
 from prolog_surveys.definitions.loader import load_definition
 from prolog_surveys.models import ResponseStatus, SurveyResponse
 from tests.factories import ConditionOccurrenceFactory, OrganizationFactory, PatientRecordFactory, PersonFactory
-from tests.test_phr_read_model import signed_in
+
+
+def signed_in(record):
+    """A real session login, not ``force_authenticate``: the account and
+    consent writes accept only a session or partner login, and forcing
+    bypasses every authenticator."""
+    identity = Identity.objects.create_user(email=f'p{record.person_id}@example.test')
+    PatientUser.objects.create(identity=identity, person=record.person)
+    client = APIClient()
+    client.force_login(identity)
+    return client
+
+
+def oauth_client(identity, scope='patient/*.read'):
+    """A client presenting an OAuth2 access token the member delegated."""
+    from oauth2_provider.models import AccessToken, Application
+    app = Application.objects.create(name='smart-app', user=identity,
+                                     authorization_grant_type=Application.GRANT_AUTHORIZATION_CODE)
+    token = AccessToken.objects.create(application=app, user=identity, scope=scope,
+                                       expires=timezone.now() + timedelta(hours=1), token=f'tok-{identity.pk}')
+    client = APIClient()
+    client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.token}')
+    return client
 
 pytestmark = pytest.mark.django_db
 
@@ -158,10 +180,34 @@ def test_anonymous_and_staff_callers_are_refused():
     client, person, identity = member_with_data()
     assert APIClient().delete('/api/v1/phr/account/', {'confirm': 'DELETE'}, format='json').status_code in (401, 403)
     staff = APIClient()
-    staff.force_authenticate(Identity.objects.create_user(email='staff@example.test', is_staff=True))
+    staff.force_login(Identity.objects.create_user(email='staff@example.test', is_staff=True))
     assert staff.delete('/api/v1/phr/account/', {'confirm': 'DELETE'}, format='json').status_code == 404
     assert Person.objects.filter(person_id=person.person_id).exists()
     assert not DeletionLogEntry.objects.exists()
+
+
+@pytest.mark.parametrize('scope', ['patient/*.read', 'patient/*.write'])
+def test_an_oauth_token_cannot_close_the_account(scope):
+    client, person, identity = member_with_data()
+    delegated = oauth_client(identity, scope)
+    response = delegated.delete('/api/v1/phr/account/', {'confirm': 'DELETE'}, format='json')
+    assert response.status_code == 403
+    assert Person.objects.filter(person_id=person.person_id).exists()
+    assert Identity.objects.filter(pk=identity.pk).exists()
+    assert not DeletionLogEntry.objects.exists()
+
+
+def test_an_oauth_token_may_read_consent_but_not_answer_it():
+    client, person, identity = member_with_data()
+    delegated = oauth_client(identity, 'patient/*.write')
+    assert delegated.get('/api/v1/phr/consent/').status_code == 200
+    response = delegated.post('/api/v1/phr/consent/', {
+        'decisions': [{'purpose': 'my_record', 'decision': 'withdrawn', 'version': '1.0'}],
+    }, format='json')
+    assert response.status_code == 403
+    assert Person.objects.filter(person_id=person.person_id).exists()
+    assert not DeletionLogEntry.objects.exists()
+    assert [e.decision for e in ConsentEvent.objects.filter(person=person)] == ['granted']
 
 
 # ----------------------------------------------------------- the consent hook

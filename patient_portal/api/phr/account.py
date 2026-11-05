@@ -8,15 +8,19 @@ DELETE account/   ``{"confirm": "DELETE"}``; deletes the account (Identity,
                   patient side goes.
 
 The body's confirmation is required so that no client can close an account
-with a stray request. See docs/account-deletion.md.
+with a stray request, and only a session or partner login may send it: an
+OAuth2 token or service credential presented without the member is refused
+(403). See docs/account-deletion.md.
 """
 from __future__ import annotations
 
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from patient_portal.account_deletion import (
     AlreadyDeleted, actor_snapshot, delete_member, end_session, patient_only_identity,
 )
+from patient_portal.api.permissions import InteractiveSessionForWrites
 from patient_portal.models import DeletionLogEntry
 
 from .consent import body_of
@@ -24,6 +28,7 @@ from .views import PhrView
 
 
 class AccountView(PhrView):
+    permission_classes = [IsAuthenticated, InteractiveSessionForWrites]
     http_method_names = ['delete', 'options']
 
     def delete(self, request):

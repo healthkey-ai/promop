@@ -14,7 +14,17 @@ from patient_portal.models import (
     LegalDocument, LegalDocumentVersion, PatientUser,
 )
 from tests.factories import PatientRecordFactory
-from tests.test_phr_read_model import signed_in
+
+
+def signed_in(record):
+    """A real session login: consent writes refuse a forced or token credential."""
+    from rest_framework.test import APIClient
+    from patient_portal.models import Identity, PatientUser
+    identity = Identity.objects.create_user(email=f'p{record.person_id}@example.test')
+    PatientUser.objects.create(identity=identity, person=record.person)
+    client = APIClient()
+    client.force_login(identity)
+    return client
 
 pytestmark = pytest.mark.django_db
 
