@@ -30,6 +30,10 @@ def test_a_negated_entry_names_the_positive_field_and_the_inversion(negated, pos
     assert entry['canonical'] == positive
     assert entry['inverted'] is True
     assert entry['value_kind'] == 'boolean'
+    # Navigation metadata: the dialog opens on the canonical field. It is not
+    # evidence the value was present — that is the raw-boundary provenance the
+    # client reads separately (#5667).
+    assert entry['inputs'] == [positive]
     # The value itself is not writable here: the canonical field is.
     assert entry['writable'] is False
     assert 'Inverted view of' in entry['reason']
