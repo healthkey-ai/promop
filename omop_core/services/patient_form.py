@@ -290,11 +290,20 @@ def _attach_latest_fact_dates(record, entries):
     measurement_names = set()
     measurement_concepts = {}
     observation_concepts = {}
+    # A dated field without a projection of its own is a source pair: the
+    # editable cell count is stored on PatientRecord while the canonical
+    # thousands/µL measurement records the event. Derivation already copies the
+    # canonical's date to the legacy alias, so the alias is where the source's
+    # latest date comes from; requiring projection metadata on every dated field
+    # raised KeyError for these and blanked the whole shared form.
+    unprojected_dated = set()
     for name, entry in entries.items():
         if not entry.get('dated'):
             continue
-        projection = entry['projection']
+        projection = entry.get('projection') or {}
         if projection.get('concept_id') is None:
+            if not projection:
+                unprojected_dated.add(name)
             continue
         if projection['omop_table'] == 'measurement':
             measurement_names.add(name)
@@ -303,11 +312,11 @@ def _attach_latest_fact_dates(record, entries):
             observation_concepts.setdefault(
                 projection['concept_id'], []).append(name)
     latest = {}
-    if measurement_names:
+    if measurement_names or unprojected_dated:
         from omop_core.services.patient_record_service import _get_laboratory_data
         lab_dates = {}
         _get_laboratory_data(record.person, dates_out=lab_dates)
-        for name in measurement_names:
+        for name in measurement_names | unprojected_dated:
             if lab_dates.get(name) is not None:
                 latest[name] = lab_dates[name]
     if observation_concepts:

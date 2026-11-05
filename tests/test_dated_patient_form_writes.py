@@ -215,6 +215,25 @@ def test_a_restricted_readable_set_does_not_name_an_excluded_count():
     assert entry['latest_date'] == '2026-08-01'
 
 
+def test_a_dated_source_pair_names_the_canonical_results_date():
+    """The cells/µL count is dated but has no projection of its own (#5700)."""
+    person = _person_with_lab()
+    ConceptFactory(concept_code='751-8', concept_name='Absolute neutrophil count')
+    Measurement.objects.create(
+        measurement_id=next_pk(Measurement, 'measurement_id'), person=person,
+        measurement_concept=Concept.objects.get(concept_code='751-8'),
+        measurement_date=date(2026, 8, 1), measurement_type_concept_id=32865,
+        value_as_number=4.2, unit_source_value='10*3/uL')
+    record = PatientRecord.objects.get(person=person)
+
+    descriptor = patient_form_descriptors(record=record)
+
+    source = descriptor['absolute_neutrophile_count']
+    assert source['dated'] is True
+    assert source['latest_date'] == '2026-08-01'
+    assert descriptor['anc_thousand_per_ul']['latest_date'] == '2026-08-01'
+
+
 def test_a_dated_edit_records_the_supplied_clinical_date():
     person = _person_with_lab()
 
