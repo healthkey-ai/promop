@@ -245,7 +245,10 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
   const onChangeValue = (name: string, next: unknown) => {
     if (dated) { setValueDraft({ set: true, value: next }); return; }
     if (showUnitPicker && unitFieldName) {
-      store.enqueuePair(canonical, next, unitFieldName, chosenUnit);
+      // Once queued, the pending pair (then the server value) owns the choice.
+      // Keeping a local draft would let a rejected unit survive its rollback and
+      // contaminate the next number edit.
+      if (store.enqueuePair(canonical, next, unitFieldName, chosenUnit)) setUnitDraft(null);
       return;
     }
     store.enqueue(name, next);
@@ -299,8 +302,11 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
               setUnitDraft(nextUnit);
               // A unit change with a value is a real edit of the same pair, not
               // a formatting change; a unit alone cannot be written.
-              if (value != null && value !== '' && unitFieldName) {
-                store.enqueuePair(canonical, value, unitFieldName, nextUnit);
+              if (value != null && value !== '' && unitFieldName
+                  && store.enqueuePair(canonical, value, unitFieldName, nextUnit)) {
+                // A rejected save restores the server pair; the selector must
+                // follow it rather than keep the rejected unit.
+                setUnitDraft(null);
               }
             }}
             className="rounded-md border border-input px-2 py-1 text-sm">

@@ -188,12 +188,13 @@ export class PatientFormStore {
    * travel in the same PATCH so a refusal cannot save a number without the unit
    * the reader chose. The server converts to the canonical unit; the client
    * never does. */
-  enqueuePair = (name: string, value: unknown, unitField: string, unit: string) => {
+  enqueuePair = (name: string, value: unknown, unitField: string, unit: string): boolean => {
     const field = this.snapshot.fields[name];
     const unitDescriptor = this.snapshot.fields[unitField];
-    if (!this.snapshot.writable || !field?.writable || field.target !== 'patient_record') return;
-    if (!unitDescriptor || unitDescriptor.qualifies !== name) return;
+    if (!this.snapshot.writable || !field?.writable || field.target !== 'patient_record') return false;
+    if (!unitDescriptor || unitDescriptor.qualifies !== name) return false;
     this.enqueueEntries({ [name]: value, [unitField]: unit });
+    return true;
   };
   private reloadFields = async (): Promise<boolean> => {
     const personId = this.snapshot.personId;

@@ -700,4 +700,40 @@ describe('source-pair unit picker (#5700)', () => {
       hemoglobin_level: 120, hemoglobin_level_units: 'G/L',
     });
   });
+
+  it('returns the selector to the saved unit after a refusal', async () => {
+    const user = userEvent.setup();
+    const { store, patch } = await setup(pairFields,
+      { hemoglobin_level: 12, hemoglobin_level_units: 'G/DL' });
+    patch.mockRejectedValueOnce({ response: { data: { rejected: {
+      hemoglobin_level: 'Hemoglobin is outside the storable range.',
+      hemoglobin_level_units: 'Unsupported unit.',
+    } } } });
+    render(<PatientFieldEditor store={store} name="hemoglobin_level" label="Hemoglobin" />);
+
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Unit for Hemoglobin' }), 'G/L');
+    await act(async () => { await store.flush(); });
+
+    expect(screen.getByRole('combobox', { name: 'Unit for Hemoglobin' })).toHaveValue('G/DL');
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Hemoglobin' }), { target: { value: '13' } });
+    await act(async () => { await store.flush(); });
+    expect(patch.mock.calls.at(-1)?.[1]).toEqual({
+      hemoglobin_level: 13, hemoglobin_level_units: 'G/DL',
+    });
+  });
+
+  it('keeps every mounted editor on the same chosen pair', async () => {
+    const user = userEvent.setup();
+    const { store } = await setup(pairFields,
+      { hemoglobin_level: 12, hemoglobin_level_units: 'G/DL' });
+    render(<>
+      <PatientFieldEditor store={store} name="hemoglobin_level" label="Hemoglobin" />
+      <PatientFieldEditor store={store} name="hemoglobin_level" label="Hemoglobin again" />
+    </>);
+
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Unit for Hemoglobin' }), 'G/L');
+
+    expect(screen.getByRole('combobox', { name: 'Unit for Hemoglobin' })).toHaveValue('G/L');
+    expect(screen.getByRole('combobox', { name: 'Unit for Hemoglobin again' })).toHaveValue('G/L');
+  });
 });
