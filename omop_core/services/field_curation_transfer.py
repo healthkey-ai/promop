@@ -80,8 +80,12 @@ _MAPPING_FIELDS = (
     'status', 'reviewed_at', 'notes',
     'tab',
 )
-# Columns a payload written before they existed may omit; they read as blank.
+# Columns a payload written before they existed may omit. Provenance reads as
+# blank: attribution does not cross instances. A placement is curation the
+# target owns, so an absent ``tab`` is not carried: blank on create, left
+# alone on update (the committed fixture predates the column, #2328).
 _OPTIONAL_MAPPING_FIELDS = frozenset({'provenance', 'tab'})
+_NOT_CARRIED_WHEN_ABSENT = frozenset({'tab'})
 _CUSTOM_FIELD_FIELDS = ('display_name', 'tab', 'field_type', 'mode')
 
 # Excludes id, the concept FKs (re-resolved), the user FKs (cleared), the auto
@@ -421,6 +425,8 @@ def _apply_mappings(rows: list[dict], stats: TransferStats) -> None:
             FieldConceptMapping.objects.create(field_name=row['field_name'], **values)
             stats._bump(stats.created, 'mappings')
             continue
+        for name in _NOT_CARRIED_WHEN_ABSENT - set(row):
+            values.pop(name)
         for name, value in values.items():
             setattr(mapping, name, value)
         mapping.save(update_fields=[*values, 'updated_at'])

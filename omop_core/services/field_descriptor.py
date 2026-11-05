@@ -385,9 +385,9 @@ def _classify_tab(field_name: str) -> str:
     Internal fields are excluded from the API entirely (no tab). A field no
     list names is unplaced (``omop``): it keeps its mapping and derivation,
     but no tab renders a control for it, so its facts show only as raw rows
-    on the patient's OMOP tab (#2328). Wearable ``_30d`` aggregates are such
-    fields. A curator's ``FieldConceptMapping.tab`` overrides this; see
-    :func:`resolve_tab`.
+    on the patient's OMOP tab (#2328); ``blood_type``, ``red_blood_cell_count``
+    and ``pod24`` are such fields. A curator's ``FieldConceptMapping.tab``
+    overrides this; see :func:`resolve_tab`.
     """
     if field_name == 'genetic_mutations' or field_name.startswith('genomics_'):
         return 'genomics'
