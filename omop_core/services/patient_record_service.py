@@ -40,6 +40,21 @@ from omop_core.services.lot_regimens import (
     get_regimen_concept_id_by_name,
     normalize_drug_name,
 )
+from omop_core.services.hemoglobin_units import (
+    CANONICAL_FIELD as HEMOGLOBIN_CANONICAL,
+    PAIR_FIELD as HEMOGLOBIN_PAIR,
+    UNIT_FIELD as HEMOGLOBIN_UNIT,
+    SOURCE_PAIRS as _SOURCE_PAIRS,
+    canonical_from_pair as hemoglobin_canonical_from_pair,
+    canonical_in_range as hemoglobin_canonical_in_range,
+    same_number as hemoglobin_same_number,
+)
+
+#: The columns of a declared source pair. They are one assertion, so a
+#: canonical match in the default unit must not acknowledge them independently.
+_SOURCE_PAIR_FIELDS = frozenset(
+    field for fields in _SOURCE_PAIRS.values() for field in fields
+)
 
 
 # ---------------------------------------------------------------------------
@@ -1131,7 +1146,15 @@ def refresh_patient_record(person: Person) -> PatientRecord:
             # Dropping its marker there would let a later derivation or a
             # mapping approval treat an unbacked edit as confirmed.
             has_evidence = field in derived_fields or field in _OMOP_DERIVED_FIELDS
-            if field == 'medication_contexts':
+            if field in _SOURCE_PAIR_FIELDS:
+                # A source pair is one assertion, not two independently
+                # acknowledged columns. The extractor mirrors the canonical
+                # into the legacy alias in g/dL, so a numerical match would
+                # clear a g/dL pair but keep the equivalent g/L pair pending.
+                # Only an explicit canonical import retires it (recompute);
+                # the chosen unit is the reader's declaration.
+                matches = False
+            elif field == 'medication_contexts':
                 from omop_core.services.medication_context import context_delta, merge_contexts
                 eligible = {str(row.pk) for row in snapshot.drug_exposures}
                 value = {pk: attributes for pk, attributes in (value or {}).items() if pk in eligible}
@@ -1171,7 +1194,8 @@ def refresh_patient_record(person: Person) -> PatientRecord:
         )
 
 
-def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fields=()) -> PatientRecord:
+def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fields=(),
+                                    pair_derived=()) -> PatientRecord:
     """Save aliases and calculations from the current record without reading OMOP facts.
 
     This does not advance derived_at/version: those describe the last full
@@ -1197,14 +1221,58 @@ def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fiel
         patient_info.patient_age = None
 
     pending_aliases = set(patient_info.user_edited_fields or [])
+    pair_derived = set(pair_derived)
+    # The hemoglobin source pair (#2318) is authoritative for the canonical
+    # read-model while it is pending or is the only value present. A refresh
+    # clears derived fields before extraction, so without this a failed or
+    # missing projection would leave the pair on the record and the canonical
+    # None — matching would silently read the wrong value.
+    pair_pending = HEMOGLOBIN_PAIR in pending_aliases
+    canonical_import = (HEMOGLOBIN_CANONICAL in changed_fields
+                        and HEMOGLOBIN_CANONICAL not in pair_derived)
+    if canonical_import:
+        # An explicit canonical edit/import supersedes the pair; its unit is
+        # not an independent user edit and must not outlive it.
+        pending_aliases.discard(HEMOGLOBIN_PAIR)
+        pending_aliases.discard(HEMOGLOBIN_UNIT)
+    pair_recognised, pair_value = hemoglobin_canonical_from_pair(
+        getattr(patient_info, HEMOGLOBIN_PAIR),
+        getattr(patient_info, HEMOGLOBIN_UNIT),
+    )
+    canonical_now = getattr(patient_info, HEMOGLOBIN_CANONICAL)
+    pair_authoritative = (
+        not canonical_import and pair_recognised
+        # An import may hold a value the canonical column cannot store; that is
+        # a preserved legacy fact, not a read-model matching can consume.
+        and hemoglobin_canonical_in_range(pair_value)
+        and (pair_pending or canonical_now is None
+             or hemoglobin_same_number(pair_value, canonical_now))
+    )
+    dependency_changed = set(changed_fields)
+    if pair_authoritative:
+        if not hemoglobin_same_number(canonical_now, pair_value):
+            setattr(patient_info, HEMOGLOBIN_CANONICAL, pair_value)
+            dependency_changed.add(HEMOGLOBIN_CANONICAL)
+        # The pair stays pending: the chosen unit is the patient's declaration
+        # and derivation cannot reproduce it from a g/dL fact. Only an explicit
+        # canonical import retires it (handled above).
     for canonical, aliases in _LAB_FIELD_ALIASES.items():
         value = getattr(patient_info, canonical)
-        if canonical in changed_fields:
+        if canonical == HEMOGLOBIN_CANONICAL and pair_authoritative:
+            # The pair already supplies the canonical; copying it back would
+            # replace the reader's chosen unit with g/dL.
+            continue
+        retire_aliases = canonical in changed_fields and canonical not in pair_derived
+        if retire_aliases:
             # A new canonical edit supersedes an older pending edit to a field
-            # that is now an alias. A refresh without such an edit must not
-            # erase the old user's value before its conflict is reviewed.
+            # that is now an alias — including the alias's chosen unit, which
+            # arrives as a separate record field (#2318). A refresh without
+            # such an edit must not erase the old user's value before its
+            # conflict is reviewed.
             pending_aliases.difference_update(aliases)
-        if (canonical == 'hemoglobin_g_dl' and canonical not in changed_fields
+            pending_aliases.difference_update(
+                {f'{alias}_units' for alias in aliases})
+        if (canonical == HEMOGLOBIN_CANONICAL and not retire_aliases
                 and value is None and patient_info.hemoglobin_level_units
                 and patient_info.hemoglobin_level_units.strip().casefold() != 'g/dl'):
             # An uncoded hemoglobin result in another unit is a legacy fact,
@@ -1248,7 +1316,9 @@ def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fiel
     # MM defining events are computed, but their source facts are ordinary
     # editable inputs. A direct edit to one of those inputs must move the verdict
     # now rather than leaving a stale result from the last OMOP refresh.
-    if MEETS_CRAB_INPUT_FIELDS.intersection(changed_fields):
+    if MEETS_CRAB_INPUT_FIELDS.intersection(dependency_changed):
+        # A source-pair edit changes the canonical g/dL read-model without
+        # being an explicit canonical write, so the verdict must follow it too.
         patient_info.meets_crab = derive_meets_crab(patient_info)
     if MEETS_SLIM_INPUT_FIELDS.intersection(changed_fields):
         patient_info.meets_slim = derive_meets_slim(patient_info)

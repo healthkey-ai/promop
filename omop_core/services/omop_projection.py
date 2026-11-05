@@ -56,9 +56,22 @@ def _is_empty(value):
 
 
 def projection_for_descriptor(entry):
-    """Use the same recipe and value/unit semantics the editor advertises."""
+    """Use the same recipe and value/unit semantics the editor advertises.
+
+    A computed entry normally has no projection: it follows from inputs stored
+    on the record. The one exception is a normalised read-model, such as
+    hemoglobin's g/dL value derived from the source pair (#2318): the source is
+    what the reader writes, and this entry is what reaches OMOP. Such an entry
+    states its projection explicitly and is never a client write target, so the
+    writable check does not apply to it.
+    """
     if (not entry or entry.get('clinical_input_contract')
-            or not entry.get('writable') or entry.get('target') != 'patient_record'):
+            or entry.get('read_only_for_caller')):
+        return None
+    normalised_read_model = bool(entry.get('normalised_read_model'))
+    if (not normalised_read_model
+            and (not entry.get('writable')
+                 or entry.get('target') != 'patient_record')):
         return None
     if not entry.get('projection'):
         return None

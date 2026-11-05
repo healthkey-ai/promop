@@ -67,12 +67,18 @@ class TestMappedFields:
         concept = _load_loinc('718-7')
         unit = _load_ucum('g/dL')
 
-        entry = build_writable_field_descriptor()['hemoglobin_g_dl']
+        descriptor = build_writable_field_descriptor()
+        source = descriptor['hemoglobin_level']
+        entry = descriptor['hemoglobin_g_dl']
 
-        assert entry['writable'] is True
-        assert entry['target'] == 'patient_record'
-        assert entry['kind'] == 'direct'
-        assert entry['value_kind'] == 'number'
+        # The patient writes the source pair; the canonical is the read-model
+        # that carries the OMOP recipe (#2318).
+        assert source['writable'] is True
+        assert source['target'] == 'patient_record'
+        assert source['kind'] == 'direct'
+        assert source['value_kind'] == 'number'
+        assert entry['kind'] == 'computed'
+        assert entry['writable'] is False
         assert entry['unit'] == 'g/dL'
         # OMOP routing lives under 'projection'
         proj = entry['projection']
@@ -87,23 +93,26 @@ class TestMappedFields:
 
     def test_every_key_a_measurement_write_needs_is_present(self):
         _load_loinc('718-7')
-        entry = build_writable_field_descriptor()['hemoglobin_g_dl']
+        descriptor = build_writable_field_descriptor()
+        entry = descriptor['hemoglobin_g_dl']
         assert 'projection' in entry
         required = {
             'omop_table', 'concept_id', 'type_concept_id', 'source_value',
         }
         assert required <= set(entry['projection'])
-        assert 'value_kind' in entry
+        assert 'value_kind' in descriptor['hemoglobin_level']
 
     def test_missing_unit_concept_does_not_make_the_field_unwritable(self):
         """UCUM may be absent; the fact is still writable with a source unit string."""
         _load_loinc('718-7')
 
-        entry = build_writable_field_descriptor()['hemoglobin_g_dl']
-
-        assert entry['writable'] is True
-        assert entry['unit'] == 'g/dL'
-        assert entry['projection']['unit_concept_id'] is None
+        descriptor = build_writable_field_descriptor()
+        # The SOURCE pair is the write target; the canonical keeps the
+        # projection. The missing UCUM concept must not close the edit path.
+        assert descriptor['hemoglobin_level']['writable'] is True
+        canonical = descriptor['hemoglobin_g_dl']
+        assert canonical['unit'] == 'g/dL'
+        assert canonical['projection']['unit_concept_id'] is None
 
 
     def test_a_score_has_no_unit(self):
@@ -134,11 +143,11 @@ class TestUnmappedFields:
         """Without the vocab, no OMOP projection — but the field is directly writable."""
         descriptor = build_writable_field_descriptor()
 
-        entry = descriptor['hemoglobin_g_dl']
-        assert entry['writable'] is True
-        assert entry['target'] == 'patient_record'
-        assert '718-7' in entry.get('reason', '')
-        assert 'projection' not in entry  # no OMOP projection without the concept
+        assert descriptor['hemoglobin_level']['writable'] is True
+        assert descriptor['hemoglobin_level']['target'] == 'patient_record'
+        # No OMOP projection without the concept; the canonical is the
+        # read-model either way.
+        assert 'projection' not in descriptor['hemoglobin_g_dl']
 
     def test_every_mapped_projection_field_appears(self):
         descriptor = build_writable_field_descriptor()
@@ -184,10 +193,14 @@ class TestKinds:
         """Writing an alias and its canonical collides on one LOINC row (#471)."""
         descriptor = build_writable_field_descriptor()
         for alias in ('calcium_mg_dl', 'creatinine_mg_dl', 'blood_urea_nitrogen',
-                      'hemoglobin_level', 'absolute_lymphocyte_count'):
+                      'absolute_lymphocyte_count'):
             assert descriptor[alias]['kind'] == 'alias'
             assert descriptor[alias]['writable'] is False
-        assert descriptor['hemoglobin_level']['canonical'] == 'hemoglobin_g_dl'
+        # Hemoglobin is the source pair now (#2318): the patient writes the
+        # number and its unit, and the canonical is derived.
+        assert descriptor['hemoglobin_level']['kind'] == 'direct'
+        assert descriptor['hemoglobin_level']['writable'] is True
+        assert descriptor['hemoglobin_g_dl']['kind'] == 'computed'
         assert descriptor['absolute_lymphocyte_count']['canonical'] == 'alc_thousand_per_ul'
 
     def test_a_computed_field_names_its_inputs(self):
@@ -213,9 +226,9 @@ class TestKinds:
 
     def test_a_mapped_lab_is_direct_with_projection(self):
         _load_loinc('718-7')
-        entry = build_writable_field_descriptor()['hemoglobin_g_dl']
-        assert entry['kind'] == 'direct'
-        assert 'projection' in entry
+        descriptor = build_writable_field_descriptor()
+        assert descriptor['hemoglobin_level']['kind'] == 'direct'
+        assert 'projection' in descriptor['hemoglobin_g_dl']
 
     def test_every_field_carries_a_reason_when_not_writable(self):
         """A UI must always be able to say why a box is not typeable."""

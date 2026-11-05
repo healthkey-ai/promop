@@ -19,6 +19,15 @@ from omop_core.services.patient_record_service import (
 )
 from omop_core.services.write_descriptor import build_writable_field_descriptor
 from omop_core.services.boolean_answers import BOOLEAN_ANSWERS
+from omop_core.services.hemoglobin_units import (
+    CANONICAL_FIELD as HEMOGLOBIN_CANONICAL,
+    DEFAULT_UNIT as HEMOGLOBIN_DEFAULT_UNIT,
+    PAIR_FIELD as HEMOGLOBIN_PAIR,
+    UNIT_FIELD as HEMOGLOBIN_UNIT,
+    canonical_from_pair as hemoglobin_canonical_from_pair,
+    canonical_in_range as hemoglobin_canonical_in_range,
+    normalize_unit as normalize_hemoglobin_unit,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -430,12 +439,125 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
     # both federation PATCH paths behave the same.
     from omop_core.services.field_write_service import split_dated_edits
     changes, fact_dates = split_dated_edits(changes, descriptor)
+    # Hemoglobin's source pair (#2318): the form writer must apply the same
+    # validation and normalisation as the native serializer, because the
+    # descriptor now offers `hemoglobin_level` and its unit rather than the
+    # canonical g/dL column.
+    pair_derived = set()
+    pair_pending = set()
+    if HEMOGLOBIN_PAIR in changes or HEMOGLOBIN_UNIT in changes:
+        # Permission comes from the filtered descriptor, before any value is
+        # added: a host that withheld the source pair must not have its
+        # canonical or unit changed through the pair path.
+        source_entry = descriptor.get(HEMOGLOBIN_PAIR) or {}
+        source_allowed = (
+            bool(source_entry) and bool(source_entry.get('writable'))
+            and not source_entry.get('read_only_for_caller')
+        )
+        canonical_entry = descriptor.get(HEMOGLOBIN_CANONICAL) or {}
+        canonical_allowed = (
+            bool(canonical_entry)
+            and bool(canonical_entry.get('writable')
+                     or canonical_entry.get('normalised_read_model'))
+            and not canonical_entry.get('read_only_for_caller')
+        )
+        unit_entry = descriptor.get(HEMOGLOBIN_UNIT) or {}
+        explicit_unit = HEMOGLOBIN_UNIT in changes
+        stored_code = normalize_hemoglobin_unit(
+            getattr(record, HEMOGLOBIN_UNIT, None))
+        requested_code = (normalize_hemoglobin_unit(changes.get(HEMOGLOBIN_UNIT))
+                          if explicit_unit else None)
+        unit_forbidden = bool(unit_entry.get('read_only_for_caller'))
+        # A read-only unit may still be used as it is already stored. Changing
+        # it — or initialising one where the record has none — is the write the
+        # caller is not allowed to make.
+        unit_change_forbidden = unit_forbidden and (
+            (explicit_unit and requested_code != stored_code)
+            or stored_code is None
+        )
+        if not source_allowed:
+            # A caller-level restriction on either half rejects the pair as a
+            # whole: saving the number without its unit would change the
+            # meaning of the value.
+            reason = (source_entry.get('reason')
+                      or 'Editing is not available for this caller.')
+            for field in (HEMOGLOBIN_PAIR, HEMOGLOBIN_UNIT):
+                changes.pop(field, None)
+                result.rejected[field] = reason
+        elif explicit_unit and requested_code is None:
+            result.rejected[HEMOGLOBIN_UNIT] = 'Choose one of: g/dL, g/L.'
+            changes.pop(HEMOGLOBIN_PAIR, None)
+            changes.pop(HEMOGLOBIN_UNIT, None)
+        elif unit_change_forbidden:
+            reason = (unit_entry.get('reason')
+                      or 'Editing is not available for this caller.')
+            for field in (HEMOGLOBIN_PAIR, HEMOGLOBIN_UNIT):
+                changes.pop(field, None)
+                result.rejected[field] = reason
+        elif explicit_unit and HEMOGLOBIN_PAIR not in changes:
+            result.rejected[HEMOGLOBIN_UNIT] = 'Send the unit together with its value.'
+            changes.pop(HEMOGLOBIN_UNIT, None)
+        else:
+            code = requested_code or stored_code or HEMOGLOBIN_DEFAULT_UNIT
+            recognised, canonical_value = hemoglobin_canonical_from_pair(
+                changes.get(HEMOGLOBIN_PAIR), code,
+            )
+            if not recognised:
+                result.rejected[HEMOGLOBIN_PAIR] = 'Enter a number.'
+                changes.pop(HEMOGLOBIN_PAIR, None)
+                changes.pop(HEMOGLOBIN_UNIT, None)
+            elif not hemoglobin_canonical_in_range(canonical_value):
+                result.rejected[HEMOGLOBIN_PAIR] = (
+                    'Hemoglobin is outside the storable range.')
+                changes.pop(HEMOGLOBIN_PAIR, None)
+                changes.pop(HEMOGLOBIN_UNIT, None)
+            else:
+                if unit_forbidden:
+                    # A read-only unit is left untouched; the pair's value is
+                    # normalised in the unit the record already has. The
+                    # companion marker still has to be pending, or the next
+                    # refresh clears the unit and reads the number as g/dL.
+                    changes.pop(HEMOGLOBIN_UNIT, None)
+                    pair_pending.add(HEMOGLOBIN_UNIT)
+                else:
+                    changes[HEMOGLOBIN_UNIT] = code
+                if canonical_allowed:
+                    # A host that withheld the canonical still gets the pair;
+                    # recompute derives the read-model without projecting it.
+                    changes[HEMOGLOBIN_CANONICAL] = canonical_value
+                    pair_derived.add(HEMOGLOBIN_CANONICAL)
+                    if HEMOGLOBIN_PAIR in fact_dates:
+                        # The canonical projection is the same dated result.
+                        fact_dates[HEMOGLOBIN_CANONICAL] = fact_dates[HEMOGLOBIN_PAIR]
     side_effect_projections = {}
     record_profile_fields = set()
     birth_changes = {}
     from omop_core.services.therapy_line_form import THERAPY_LINE_FORM_FIELDS
     for name, value in changes.items():
+        if name == HEMOGLOBIN_UNIT and HEMOGLOBIN_PAIR in changes:
+            # Normalised with the pair above: the unit is its companion, not
+            # an independently editable selectable field.
+            direct[name] = value
+            continue
         entry = descriptor.get(name, {})
+        if entry.get('read_only_for_caller'):
+            # A caller-level restriction is absolute: it wins even when the
+            # entry also says `writable` (a supplied descriptor can carry
+            # both, and the canonical compatibility path must not override it).
+            result.rejected[name] = (
+                entry.get('reason') or 'Editing is not available for this caller.'
+            )
+            continue
+        if entry.get('normalised_read_model'):
+            # A canonical import is still accepted from a client that speaks
+            # the normalised field (#2318). It is not advertised as writable
+            # because the source pair is the editor's target, but the server
+            # honours the old shape and retires the pending pair in recompute.
+            # `direct` here restores the pre-pair path exactly: the record is
+            # written first and the projection is the same best-effort side
+            # effect, not the legacy facts applier.
+            entry = {**entry, 'kind': 'direct', 'writable': True,
+                     'target': 'patient_record'}
         if not entry.get('writable') or entry.get('target') != 'patient_record':
             result.rejected[name] = entry.get('reason') or 'No supported patient-record write path.'
             continue
@@ -713,7 +835,7 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
                 unit_fields.add(f'{field}_units')
         clinical_direct = set(direct) - set(profile_changes)
         record.user_edited_fields = sorted(
-            set(record.user_edited_fields or []) | clinical_direct)
+            set(record.user_edited_fields or []) | clinical_direct | pair_pending)
         record.save(update_fields=sorted(set(direct) | unit_fields)
                     + ['user_edited_fields'])
         from omop_core.services.patient_record_revisions import write_record_revisions
@@ -803,6 +925,7 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
         record = recompute_patient_record_fields(
             PatientRecord.objects.select_for_update().get(pk=record.pk),
             changed_fields=set(direct) | profile_applied | therapy_overrides_applied,
+            pair_derived=pair_derived,
         )
         if therapy_overrides_applied:
             # Active formulas run after the save; reapply the explicit answers

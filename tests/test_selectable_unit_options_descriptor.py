@@ -38,6 +38,12 @@ EXPECTED = {
     field: [{'value': unit, 'label': unit} for unit in FIELD_COMMON_UNITS[qualifies]]
     for field, qualifies in PAIRS
 }
+# Hemoglobin's slice (#2318) offers the two convertible scales, with the stored
+# code as the value. mmol/L waits for a reviewed factor.
+EXPECTED['hemoglobin_level_units'] = [
+    {'value': 'G/DL', 'label': 'g/dL'},
+    {'value': 'G/L', 'label': 'g/L'},
+]
 
 
 def test_the_descriptor_still_has_twelve_selectable_unit_fields():

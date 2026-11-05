@@ -24,6 +24,7 @@ from django.db import transaction
 
 from omop_core.models import Concept, Location, Measurement, Observation, PatientRecord, Person
 from omop_core.services.patient_record_service import _ASSERTION_FIELDS, refresh_patient_record
+from omop_core.services.hemoglobin_units import SOURCE_PAIRS
 from omop_core.services.genomic_concepts import (
     MUTATION_INTERPRETATION_CONCEPTS,
     MUTATION_ORIGIN_CONCEPTS,
@@ -260,6 +261,32 @@ def split_dated_edits(changes, descriptor):
     return values, dates
 
 
+def _retire_source_pairs(person, applied):
+    """A canonical import supersedes a pending source pair (#2318).
+
+    This applier writes the fact directly and then refreshes, but it does not
+    pass a changed-field set to the recompute. Clearing the pair's pending
+    markers first lets the refresh re-derive the source from the new canonical
+    instead of preserving the old number and unit beside it.
+    """
+    retired = {
+        field
+        for canonical, fields in SOURCE_PAIRS.items()
+        if canonical in applied
+        for field in fields
+    }
+    if not retired:
+        return
+    record = PatientRecord.objects.filter(person=person).first()
+    if record is None:
+        return
+    pending = set(record.user_edited_fields or [])
+    if not pending & retired:
+        return
+    record.user_edited_fields = sorted(pending - retired)
+    record.save(update_fields=['user_edited_fields'])
+
+
 @transaction.atomic
 def apply_field_writes(person, changes, today=None, descriptor=None, dates=None, refresh=True):
     """Apply {projection_field: value} edits to `person` as descriptor-driven OMOP facts.
@@ -340,6 +367,19 @@ def apply_field_writes(person, changes, today=None, descriptor=None, dates=None,
         if d is None:
             result.rejected[field] = 'Unknown field; not part of the writable record.'
             continue
+        if d.get('read_only_for_caller'):
+            # A caller-level restriction wins over `writable` and over the
+            # canonical compatibility flag.
+            result.rejected[field] = (
+                d.get('reason') or 'Editing is not available for this caller.'
+            )
+            continue
+        if d.get('normalised_read_model'):
+            # A canonical import is honoured for compatibility (#2318); the
+            # descriptor hides it from editors in favour of the source pair.
+            # Caller-level restrictions still win.
+            d = {**d, 'kind': 'direct', 'writable': True,
+                 'target': 'patient_record'}
         kind = d.get('kind')
         if d.get('writable') and (
                 kind == KIND_PROFILE or d.get('projection_target') in ('person', 'location')):
@@ -396,6 +436,11 @@ def apply_field_writes(person, changes, today=None, descriptor=None, dates=None,
         apply_location(person, location_updates, person_dirty)
     if person_dirty:
         person.save(update_fields=sorted(person_dirty))
+    # A canonical import supersedes its source pair in every refresh path,
+    # including a mixed batch whose clinical inputs refresh through
+    # write_clinical_inputs and a caller-supplied `refresh=False`.
+    if result.applied:
+        _retire_source_pairs(person, result.applied)
     # write_clinical_inputs derives for its readback, from the fully-applied
     # state, so a batch that carries a clinical field must not derive twice.
     if refresh and result.applied and not clinical:

@@ -58,7 +58,11 @@ def test_complex_verdict_gate_withholds_the_result_but_not_its_source_facts():
     for verdict in ('meets_crab', 'meets_slim', 'mipi_risk', 'mipi_c_risk', 'high_risk_mcl_criteria'):
         assert descriptor[verdict]['writable'] is False, verdict
         assert descriptor[verdict].get('compatibility_scope') == 'result', verdict
-    assert descriptor['hemoglobin_g_dl']['writable'] is True
+    # Hemoglobin's source pair is the writable target (#2318); the canonical
+    # g/dL value is the computed read-model the verdict derives from. The
+    # canonical import below still works for clients that speak the old shape.
+    assert descriptor['hemoglobin_level']['writable'] is True
+    assert descriptor['hemoglobin_g_dl']['writable'] is False
     assert descriptor['serum_calcium_mg_dl']['writable'] is True
 
     rejected = client.patch(f'/api/v1/patient-records/{record.person_id}/',
