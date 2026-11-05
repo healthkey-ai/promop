@@ -52,7 +52,7 @@ def seed_bcma_marker(apps, schema_editor):
     )
 
     for concept_id, concept_code, concept_name in _CONCEPTS:
-        Concept.objects.get_or_create(
+        concept, created = Concept.objects.get_or_create(
             vocabulary_id='HK-Genomics',
             concept_code=concept_code,
             defaults={
@@ -67,6 +67,17 @@ def seed_bcma_marker(apps, schema_editor):
                 'invalid_reason': None,
             },
         )
+        if not created and (
+            concept.concept_id != concept_id
+            or concept.concept_name != concept_name
+            or concept.domain_id != 'Measurement'
+            or concept.concept_class_id != 'Lab Test'
+        ):
+            raise RuntimeError(
+                f'{concept_code} already exists under a different identity '
+                f'({concept.concept_id} {concept.concept_name!r}); refusing to '
+                'silently keep a row EXACT will address by the fixed id.'
+            )
 
 
 def unseed_bcma_marker(apps, schema_editor):
