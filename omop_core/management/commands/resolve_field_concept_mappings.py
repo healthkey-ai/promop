@@ -10,12 +10,17 @@ pending on the field. Rows whose code is not loaded here (a vocabulary
 outside the load scope, a HealthKey concept this instance has not minted)
 are listed and left as they are; the command exits 0 either way, because an
 unresolved row is a fact about the instance, not a failure of the command.
-Re-running it is safe: a resolved row is never a candidate again.
+Re-running it is safe: a resolved row is never a candidate again. Rows that
+come into force take part in derivation and editing from the next refresh of
+each record; a populated instance then runs ``backfill_patient_records --all``
+(the command says so). ``--fail-on-unresolved`` exits 1 when any candidate is
+still unresolved, with or without ``--dry-run``, so a deploy check or cron can
+detect an instance whose load never resolved its mappings.
 
 Writes to ``DATABASE_URL``; name the target explicitly. ``--dry-run`` reports
 what a run would do without locking, saving or projecting anything.
 """
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 
 from omop_core.services.field_concept_resolution import resolve_field_concept_mappings
 
@@ -28,6 +33,10 @@ class Command(BaseCommand):
         parser.add_argument(
             '--dry-run', action='store_true', dest='dry_run',
             help='Report what would be resolved; write nothing.',
+        )
+        parser.add_argument(
+            '--fail-on-unresolved', action='store_true', dest='fail_on_unresolved',
+            help='Exit 1 when any mapping that names a concept is still unresolved.',
         )
 
     def handle(self, *args, **options):
@@ -46,3 +55,10 @@ class Command(BaseCommand):
                 f'Resolved {result.resolved} field mapping concept(s); '
                 f'{result.unresolved} still unresolved.'
             ))
+            if result.rollout_note():
+                self.stdout.write(self.style.WARNING(result.rollout_note()))
+        if options['fail_on_unresolved'] and result.unresolved:
+            raise CommandError(
+                f'{result.unresolved} field mapping(s) still unresolved; '
+                'their concept is not loaded on this instance.'
+            )

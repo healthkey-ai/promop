@@ -31,7 +31,9 @@ from omop_core.services.patient_record_service import (
     _LOINC_LAB_FIELDS, resolve_lab_code_fields,
 )
 from tests.conftest import FIELD_CURATION_FIXTURE
-from tests.factories import ConceptFactory, VocabularyFactory
+from tests.factories import (
+    ConceptFactory, PatientRecordFactory, PersonFactory, VocabularyFactory,
+)
 
 pytestmark = pytest.mark.django_db
 
@@ -379,6 +381,7 @@ def test_loader_resolves_field_mappings_after_a_successful_load(tmp_path):
         == rows['hemoglobin_g_dl']['concept_id']
     assert FieldConceptMapping.objects.get(field_name='serum_creatinine_mg_dl').concept_id is None
     assert '1 row(s) now point at their Concept, 1 still unresolved' in output
+    assert 'backfill_patient_records --all' in output
     assert 'serum_creatinine_mg_dl (LOINC:2160-0)' in output
     # After every table load and the release publication, once.
     assert order.count('_resolve_field_concept_mappings') == 1
@@ -488,3 +491,166 @@ def test_command_dry_run_writes_nothing():
 
     assert 'Dry run, nothing written. Would resolve 1 row(s).' in output.getvalue()
     assert FieldConceptMapping.objects.get(field_name='hemoglobin_g_dl').concept_id is None
+
+
+# ── Review follow-ups ──────────────────────────────────────────────────────
+
+
+def test_dry_run_summary_says_would_not_now():
+    rows = _seed_without_concepts('hemoglobin_g_dl')
+    _load_concepts(rows)
+
+    dry = resolve_field_concept_mappings(dry_run=True)
+    real = resolve_field_concept_mappings()
+
+    assert '1 row(s) would point at their Concept' in dry.summary()
+    assert 'now point' not in dry.summary()
+    assert '1 row(s) now point at their Concept' in real.summary()
+
+
+def test_rollout_note_only_after_a_pass_that_resolved_something():
+    rows = _seed_without_concepts('hemoglobin_g_dl')
+    _load_concepts(rows)
+
+    dry = resolve_field_concept_mappings(dry_run=True)
+    real = resolve_field_concept_mappings()
+    again = resolve_field_concept_mappings()
+
+    assert dry.rollout_note() == ''
+    assert 'backfill_patient_records --all' in real.rollout_note()
+    assert again.rollout_note() == ''
+
+
+def test_command_prints_the_rollout_note_only_when_rows_resolved():
+    rows = _seed_without_concepts('hemoglobin_g_dl')
+    _load_concepts(rows)
+    first, second = StringIO(), StringIO()
+
+    call_command('resolve_field_concept_mappings', stdout=first)
+    call_command('resolve_field_concept_mappings', stdout=second)
+
+    assert 'backfill_patient_records --all' in first.getvalue()
+    assert 'backfill_patient_records' not in second.getvalue()
+
+
+def test_fail_on_unresolved_exits_nonzero_while_a_candidate_is_unresolved():
+    from django.core.management.base import CommandError
+
+    rows = _seed_without_concepts('hemoglobin_g_dl', 'serum_creatinine_mg_dl')
+    _load_concepts({'hemoglobin_g_dl': rows['hemoglobin_g_dl']})
+
+    # A dry run is the detection check: it raises and writes nothing.
+    with pytest.raises(CommandError, match='1 field mapping'):
+        call_command('resolve_field_concept_mappings', dry_run=True,
+                     fail_on_unresolved=True, stdout=StringIO())
+    assert FieldConceptMapping.objects.get(field_name='hemoglobin_g_dl').concept_id is None
+
+    # Without the flag the same run succeeds, as documented.
+    call_command('resolve_field_concept_mappings', stdout=StringIO())
+
+    # With everything resolvable resolved, the flag passes.
+    _load_concepts({'serum_creatinine_mg_dl': rows['serum_creatinine_mg_dl']})
+    call_command('resolve_field_concept_mappings', fail_on_unresolved=True, stdout=StringIO())
+
+
+def test_a_row_recoded_after_the_read_is_not_given_the_old_pairs_concept():
+    """A curator edits the text between the candidate read and the row lock:
+    the old pair's concept must not be written beside the new text; the next
+    run resolves the row under the text it has now."""
+    from omop_core.services import field_concept_resolution as service
+
+    rows = _seed_without_concepts('hemoglobin_g_dl', 'serum_creatinine_mg_dl')
+    _load_concepts({'hemoglobin_g_dl': rows['hemoglobin_g_dl']})
+    new_code = rows['serum_creatinine_mg_dl']['concept_code']
+    real_pair, recoded = service._concept_pair, []
+
+    def recode_after_the_read(field_name, vocabulary_id, concept_code):
+        pair = real_pair(field_name, vocabulary_id, concept_code)
+        if field_name == 'hemoglobin_g_dl' and not recoded:
+            recoded.append(True)
+            FieldConceptMapping.objects.filter(field_name='hemoglobin_g_dl').update(
+                concept_code=new_code,
+            )
+        return pair
+
+    with patch.object(service, '_concept_pair', recode_after_the_read):
+        result = resolve_field_concept_mappings()
+
+    assert recoded and result.resolved == 0
+    assert FieldConceptMapping.objects.get(field_name='hemoglobin_g_dl').concept_id is None
+
+    _load_concepts({'serum_creatinine_mg_dl': rows['serum_creatinine_mg_dl']})
+    resolve_field_concept_mappings()
+    assert FieldConceptMapping.objects.get(field_name='hemoglobin_g_dl').concept_id \
+        == rows['serum_creatinine_mg_dl']['concept_id']
+
+
+def test_resolving_a_mapping_projects_a_pending_user_edit_into_omop(settings):
+    """End to end, nothing mocked: a value the user entered while the mapping
+    had no concept becomes an OMOP fact once the concept arrives."""
+    from omop_core.models import Observation
+
+    settings.CELERY_BROKER_URL = ''
+    person = PersonFactory()
+    record = PatientRecordFactory(person=person, planned_therapies='some therapy plan')
+    record.user_edited_fields = ['planned_therapies']
+    record.save(update_fields=['user_edited_fields'])
+    mapping = FieldConceptMapping.objects.create(
+        field_name='planned_therapies', concept=None, vocabulary_id='SNOMED',
+        concept_code='313059006', omop_table='observation',
+        source_value='planned-therapies', value_kind='string', status='approved',
+    )
+    assert not Observation.objects.filter(person=person).exists()
+    VocabularyFactory(vocabulary_id='SNOMED')
+    snomed = ConceptFactory(
+        concept_code='313059006', vocabulary_id='SNOMED', concept_name='Planned therapy',
+    )
+    VocabularyFactory(vocabulary_id='Type Concept')
+    ConceptFactory(concept_id=32817, concept_code='32817', vocabulary_id='Type Concept',
+                   concept_name='EHR')
+
+    result = resolve_field_concept_mappings()
+
+    assert result.resolved == 1
+    mapping.refresh_from_db()
+    assert mapping.concept_id == snomed.concept_id
+    assert Observation.objects.filter(
+        person=person, observation_source_value='planned-therapies',
+    ).exists()
+
+
+def test_broker_path_dispatches_after_commit_and_not_after_a_rollback(
+    settings, django_capture_on_commit_callbacks,
+):
+    """With a broker the projection is queued on commit, one task per approved
+    resolved row: not while the loader's transaction is open, and never when
+    that transaction (or the sync's) rolls back."""
+
+    class _Rollback(Exception):
+        pass
+
+    settings.CELERY_BROKER_URL = 'redis://broker.invalid:6379/0'
+    rows = _seed_without_concepts('hemoglobin_g_dl', 'serum_creatinine_mg_dl')
+    _load_concepts(rows)
+    approved = set(FieldConceptMapping.objects.filter(
+        status='approved', omop_table__gt='',
+    ).values_list('pk', flat=True))
+    assert approved
+
+    with patch('omop_core.tasks.project_field_to_omop_task') as task:
+        with django_capture_on_commit_callbacks(execute=True):
+            with pytest.raises(_Rollback):
+                with transaction.atomic():
+                    resolve_field_concept_mappings()
+                    raise _Rollback
+        task.delay.assert_not_called()
+        assert not FieldConceptMapping.objects.filter(
+            field_name__in=rows, concept__isnull=False,
+        ).exists()
+
+        with django_capture_on_commit_callbacks(execute=True):
+            with transaction.atomic():
+                resolve_field_concept_mappings()
+                task.delay.assert_not_called()
+        queued = [call.args[0] for call in task.delay.call_args_list]
+        assert sorted(queued) == sorted(approved)

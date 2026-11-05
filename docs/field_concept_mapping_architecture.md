@@ -88,16 +88,19 @@ inventory of the lab fields and their codes: migration 0240 seeds the mapping
 rows from `field_curation_v1.json`, 0285 approves the alias codes and 0327
 approves what the seed left proposed. The table decides a field's codes only
 while that field has no approved, concept-resolved mapping -- on a fresh
-install before `load_athena_vocabularies`, the seeded rows carry no concept --
-and a test database built without migrations; `tests/conftest.py`'s
+install before `load_athena_vocabularies`, a seeded row whose concept is not
+yet loaded carries none -- and a test database built without migrations; `tests/conftest.py`'s
 `lab_field_mappings` fixture seeds the rows for a test that must derive through
 the tables.
 
 A seeded row resolves its concept when the vocabulary arrives. On a fresh
-instance the migrations run before any vocabulary is loaded, so 0240 saves
-every row with `concept = NULL` and only its `(vocabulary_id, concept_code)`
-text (`FieldConceptMapping.concept` is a db-constrained FK, so nothing else
-is possible); `resolve_lab_code_fields` requires a resolved concept, so the
+instance the migrations run before the full vocabulary is loaded, so 0240
+saves each row whose concept is not loaded yet with `concept = NULL` and only
+its `(vocabulary_id, concept_code)` text (`FieldConceptMapping.concept` is a
+db-constrained FK, so nothing else is possible). A bootstrapped production
+instance already holds the bootstrap's LOINC subset when 0240 runs, so those
+rows resolve at seed time; the SNOMED, NAACCR and similar rows, and any LOINC
+code outside the subset, stay NULL until the load. `resolve_lab_code_fields` requires a resolved concept, so the
 instance would stay on the extractor table, the alias join would find
 nothing, and the editor and `copy_reference_data` would see every seeded row
 unresolved. `load_athena_vocabularies` therefore ends every successful
@@ -116,21 +119,44 @@ provenance and `updated_at` are untouched. A row that already points at a
 concept is never a candidate, concept 0 included (the "No matching concept"
 placeholder the genomics seeds park a field on), so "0 still unresolved"
 means every candidate's code was found, not that every field has a real
-concept; a second run changes nothing. Each row is locked and saved in a
-savepoint of its own, so a curator's concurrent save waits for one row, not
-the run. The step is best effort: it runs in a savepoint and a failure is
+concept; a second run changes nothing. Each row is locked, re-checked (still
+no concept, still the text its pair came from) and saved in an `atomic` block
+of its own, in pk order. How long the lock lasts depends on the caller. In
+`manage.py resolve_field_concept_mappings`, which holds no transaction, every
+block commits and releases its lock before the next, so a curator's concurrent
+save waits for one row and a failure keeps the rows already done. In the
+loader hook (and under `sync_athena_vocabulary`, the sync's whole load) the
+blocks are savepoints: the locks are held until the hook's or the sync's
+transaction ends, a curator's save of a row already processed waits for the
+rest of the run, and a failure discards the whole pass. The step is best effort: it runs in a savepoint and a failure is
 logged with the manual fallback and does not fail the load, because under
 `sync_athena_vocabulary` the whole load is one transaction and the hook runs
 inside it. The migration bootstrap (`prepare_production_database`) loads at
 the 0200 schema baseline, before the curation tables are seeded, and does
-not run it; a scheduled sync with nothing new to load does not run the
-loader at all. An instance that loaded its vocabulary before this hook
-existed, or seeded or copied mappings after the load, runs
-`manage.py resolve_field_concept_mappings` once (`--dry-run` reports and
-writes nothing). A row whose pair names a concept Athena has since retired
+not run it. A scheduled sync whose archive was already applied does not
+run the loader at all, and one whose archive is new but adds no rows runs it
+and rolls it back with the rest, so resolve by hand after such a sync. An
+instance that loaded its vocabulary before this hook existed, or seeded or
+copied mappings after the load, runs `manage.py resolve_field_concept_mappings`
+once (`--dry-run` reports and writes nothing; `--fail-on-unresolved` exits 1
+while any mapping that names a concept is still unresolved, so `--dry-run
+--fail-on-unresolved` is the check a deploy or cron can run). A failed hook
+leaves only a log line, so that check is how an operator finds it. A row whose pair names a concept Athena has since retired
 still resolves to it, as `apply_payload` would, and the log names it for
 re-curation. `SourceCodeConceptMapping` needs no such pass: its concept FKs
 are unconstrained, so the seed stores the id before the Concept exists.
+
+Resolving the FK switches a mapping on. While `concept` is NULL an approved
+row is inert: the editor does not offer the field, the curated reader keys on
+`(concept_id, source_value)` and never matches, and the post-save projection
+returns early. After the pass the roughly 160 approved rows take part in
+editing, derivation and the pending-edit projection from the next refresh of
+each record. On a fresh instance that changes nothing visible, there being no
+patients. On a populated one, records derived earlier were derived without
+them; `DERIVATION_VERSION` does not move, because no derivation logic changed,
+so `backfill_patient_records` would skip them as current. The command and the
+loader log therefore tell the operator to run `backfill_patient_records
+--all` whenever a pass resolved anything.
 
 ## Scalar save, projection and refresh
 

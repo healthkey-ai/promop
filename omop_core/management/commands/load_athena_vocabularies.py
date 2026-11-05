@@ -792,6 +792,8 @@ class Command(EmbeddingLoadCommand):
                       'run manage.py resolve_field_concept_mappings.')
             return
         self._log(f'  {result.summary()}')
+        if result.rollout_note():
+            self._log(f'  {result.rollout_note()}')
 
     def _load_loinc_axes(self):
         """Load LOINC axes from a LOINC release archive when available.

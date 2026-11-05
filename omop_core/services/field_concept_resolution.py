@@ -61,6 +61,16 @@ BATCH_SIZE = 500
 
 FIXTURE_PATH = Path(__file__).resolve().parent.parent / 'data' / 'field_curation_v1.json'
 
+# A resolved approved mapping is live for editing, curated derivation and the
+# pending-edit projection from its next use. Records derived while it had no
+# concept were derived without it, and no DERIVATION_VERSION bump marks them
+# stale, so a populated instance re-derives them on request.
+ROLLOUT_NOTE = (
+    'Resolved mappings take part in derivation and editing from the next refresh of '
+    'each record. Records already loaded were derived without them: run '
+    'manage.py backfill_patient_records --all to re-derive them.'
+)
+
 # How many unresolved references a log line names before it says "and N more".
 _LOGGED_REFS = 20
 
@@ -75,6 +85,8 @@ class ResolutionResult:
 
     resolved: int = 0
     unresolved: int = 0
+    # A dry run reports what a pass would do; the summary then says "would".
+    dry_run: bool = False
     # (field_name, vocabulary_id, concept_code) of every row left unresolved,
     # in field_name order, so a caller can name them.
     unresolved_refs: list[tuple[str, str, str]] = field(default_factory=list)
@@ -87,10 +99,17 @@ class ResolutionResult:
     def total(self) -> int:
         return self.resolved + self.unresolved
 
+    def rollout_note(self) -> str:
+        """What an operator must do after rows came into force, or '' if none did."""
+        if self.dry_run or not self.resolved:
+            return ''
+        return ROLLOUT_NOTE
+
     def summary(self) -> str:
         if not self.total:
             return 'field mappings: every row with a concept code already names its Concept.'
-        text = (f'field mappings: {self.resolved} row(s) now point at their Concept, '
+        verb = 'would point' if self.dry_run else 'now point'
+        text = (f'field mappings: {self.resolved} row(s) {verb} at their Concept, '
                 f'{self.unresolved} still unresolved')
         if self.unresolved_refs:
             shown = ', '.join(f'{name} ({vocab}:{code})'
@@ -148,26 +167,37 @@ def resolve_field_concept_mappings(
     """Set ``concept`` on every mapping whose named concept is loaded.
 
     Each batch is one Concept query; each row that resolved is then locked,
-    re-checked for NULL and saved in a savepoint of its own, in pk order, so
-    a concurrent curator save wins (it waits for one row, not a batch) and a
-    row that already points at a concept is never touched. The savepoint is
-    also where the post_save projection runs inline when no broker is
-    configured. A caller holding a transaction, such as the Athena loader's
-    hook under ``sync_athena_vocabulary``, commits or discards the lot with
-    it. With ``dry_run`` the rows are counted and nothing is locked, saved
-    or projected.
+    re-checked (still no concept, still the text the pair came from) and
+    saved in an ``atomic`` block of its own, in pk order, so a row that
+    already points at a concept, or was re-coded meanwhile, is never touched.
+    The block is also where the post_save projection runs inline when no
+    broker is configured.
+
+    How long a row stays locked depends on the caller. With no transaction
+    open, as in ``manage.py resolve_field_concept_mappings``, each block is
+    a transaction: the lock is released and the row committed before the
+    next, a curator's concurrent save waits for one row, and a failure keeps
+    the rows already done. Inside a caller's transaction, as in the Athena
+    loader's hook (and, under ``sync_athena_vocabulary``, the sync's whole
+    load), each block is only a savepoint: every lock is held until the
+    caller commits, a curator's save of a row already processed waits for
+    the rest of the run, and a failure discards the whole pass. With
+    ``dry_run`` the rows are counted and nothing is locked, saved or
+    projected.
     """
-    result = ResolutionResult()
+    result = ResolutionResult(dry_run=dry_run)
+    # (pk, field_name, text read, pair): the text the pair was computed from
+    # travels with the candidate so the row lock can check it is unchanged.
     candidates = []
     for pk, field_name, vocab, code in unresolved_mappings().values_list(
         'pk', 'field_name', 'vocabulary_id', 'concept_code',
     ):
         pair = _concept_pair(field_name, vocab, code)
         if pair is not None:
-            candidates.append((pk, field_name, pair))
+            candidates.append((pk, field_name, (vocab, code), pair))
     for start in range(0, len(candidates), batch_size):
         chunk = candidates[start:start + batch_size]
-        wanted = {pair for _, _, pair in chunk}
+        wanted = {pair for _, _, _, pair in chunk}
         # One superset query per batch (vocabularies × codes), narrowed to the
         # exact pairs in Python, as field_curation_transfer._concept_caches does.
         # (vocabulary_id, concept_code) is unique on concept, so a pair names
@@ -182,7 +212,8 @@ def resolve_field_concept_mappings(
             if (vocab, code) in wanted
         }
         concept_by_pk: dict[int, int] = {}
-        for pk, field_name, (vocab, code) in chunk:
+        text_by_pk: dict[int, tuple[str, str]] = {}
+        for pk, field_name, text, (vocab, code) in chunk:
             found = concepts.get((vocab, code))
             if found is None:
                 result.unresolved += 1
@@ -190,6 +221,7 @@ def resolve_field_concept_mappings(
                 continue
             concept_id, retired = found
             concept_by_pk[pk] = concept_id
+            text_by_pk[pk] = text
             if retired:
                 result.retired_refs.append((field_name, vocab, code))
         if dry_run:
@@ -197,8 +229,13 @@ def resolve_field_concept_mappings(
             continue
         for pk in sorted(concept_by_pk):
             with transaction.atomic():
+                # Still no concept AND still the text the pair came from: a
+                # curator who re-coded the row since the read gets the new
+                # pair on the next run, not the old pair's concept now.
+                vocab_text, code_text = text_by_pk[pk]
                 mapping = FieldConceptMapping.objects.select_for_update().filter(
                     pk=pk, concept__isnull=True,
+                    vocabulary_id=vocab_text, concept_code=code_text,
                 ).first()
                 if mapping is None:
                     continue

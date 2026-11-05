@@ -64,11 +64,13 @@ document for interactive edits, and the rules below assume it.
   from (migrations 0240, 0285, 0327) and decides only for a field with no such
   mapping, so adding a lab field means adding it there **and** to
   `omop_core/data/field_curation_v1.json`: a fresh install seeds the row from
-  the fixture (with no concept, since migrations run before the vocabulary
-  loads; `load_athena_vocabularies` resolves the seeded rows' concepts at the
-  end of every successful load -- a scheduled sync with nothing new to load
-  does not run it -- and `manage.py resolve_field_concept_mappings` does it
-  for an instance that loaded earlier), while an existing instance
+  the fixture (with no concept for a row whose concept is not loaded yet,
+  since migrations run before the full vocabulary loads;
+  `load_athena_vocabularies` resolves the seeded rows' concepts at the end of
+  every successful load -- a scheduled sync whose archive adds nothing does not
+  keep it -- and `manage.py resolve_field_concept_mappings` does it for an
+  instance that loaded earlier; on a populated instance follow it with
+  `backfill_patient_records --all`), while an existing instance
   (0240 is one-shot) derives it from the table until a curator approves it,
   `copy_reference_data` brings it over, or a later migration approves it as
   0327 does. A new alias code is an approved SCCM row, not a table entry. The
