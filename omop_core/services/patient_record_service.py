@@ -2878,8 +2878,9 @@ def _apply_treatment_assertions(data, person, episodes, snapshot: OmopSnapshot =
         if value and line in bounds:
             assertions.append((obs.observation_date, line, match.group(2), value))
 
-    # The FHIR import writes these non-laboratory observations to Measurement.
-    # They are only assigned where the date has one unambiguous line owner.
+    # Both FHIR importers write these non-laboratory observations to
+    # Measurement (the bulk importer lists them in MEASUREMENT_LOINC). They
+    # are only assigned where the date has one unambiguous line owner.
     # 104803-2 is "Therapeutic intent", 64882-4 "Reason stopped"; the codes
     # read before (42804-5, a fungus culture, and 91379-3, not a LOINC code)
     # were retired by migration 0329.
@@ -3525,13 +3526,21 @@ def _get_bc_clinical_data(person: Person, snapshot: OmopSnapshot = None) -> dict
 
     # Peripheral neuropathy CTCAE grade — LOINC 75691-6 (the approved mapping),
     # else a concept whose name says peripheral ... neuropathy
+    def _is_neuropathy_grade(row):
+        code = getattr(row, 'observation_source_value', None) or getattr(row, 'measurement_source_value', None)
+        if code == '75691-6':
+            return True
+        concept = getattr(row, 'observation_concept', None)
+        if concept is None or not concept.concept_name:
+            return False
+        name = concept.concept_name.lower()
+        return concept.concept_code == '75691-6' or ('neuropathy' in name and 'peripheral' in name)
+
+    # The legacy uploader writes every observation to Measurement, the bulk
+    # importer puts 75691-6 in Observation; read both.
     pn_obs = next(
-        (o for o in snapshot.observations
-         if (o.observation_source_value == '75691-6'
-             or (o.observation_concept and o.observation_concept.concept_code == '75691-6')
-             or (o.observation_concept and o.observation_concept.concept_name
-                 and 'neuropathy' in o.observation_concept.concept_name.lower()
-                 and 'peripheral' in o.observation_concept.concept_name.lower()))),
+        (o for o in list(snapshot.observations) + list(snapshot.meas_by_source.get('75691-6', ()))
+         if _is_neuropathy_grade(o)),
         None,
     )
     if pn_obs and pn_obs.value_as_number is not None:

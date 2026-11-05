@@ -273,6 +273,26 @@ def test_recurated_field_mapping_is_left_alone():
     assert row.concept_id == other.pk and row.concept_code == '999999'
 
 
+def test_rows_the_editor_projected_follow_the_moved_mapping():
+    """An approved mapping's own rows keep deriving after the repoint."""
+    person = PersonFactory()
+    wrong = ConceptFactory(vocabulary=VocabularyFactory(vocabulary_id='SNOMED'), concept_code='405193005',
+                           concept_name='Caregiver wellbeing status')
+    FieldConceptMapping.objects.create(
+        field_name='consent_capability', concept=wrong, vocabulary_id='SNOMED', concept_code='405193005',
+        omop_table='observation', value_kind='boolean', status='approved',
+    )
+    mine = ObservationFactory(person=person, observation_concept=wrong, observation_source_value='405193005',
+                              value_as_number=1)
+    other_field = ObservationFactory(person=person, observation_source_value='405193005', value_as_number=1)
+    _run()
+    mine.refresh_from_db()
+    other_field.refresh_from_db()
+    assert mine.observation_source_value == 'hko:consent-capability'
+    assert mine.observation_concept.concept_code == 'hko:consent-capability'
+    assert other_field.observation_source_value == '405193005'
+
+
 def test_bone_imaging_result_loses_its_invented_concept():
     fake = _loinc('24646-7', 'Bone lesion XR study', concept_id=2100000012)
     row = FieldConceptMapping.objects.create(

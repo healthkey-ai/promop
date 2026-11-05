@@ -372,6 +372,7 @@ class Command(BaseCommand):
             '10839-9', '6598-7', '42637-9', '2345-7', '4548-4', '2532-0', '14804-9',
             '6301-6', '5902-2', '3173-2', '2039-6', '25390-6', '2857-1',
             '8806-2',  # EF
+            '104803-2', '64882-4',  # therapy intent / reason stopped: the line reader reads Measurement
             '51435-6', '33358-3', '42482-0',  # MM disease burden (32730-5 retired by 0329)
             '36916-5', '80515-0', '33944-0', '80516-8',  # free light chains
             '48378-4', '80517-6', '104546-7',  # free light chain ratio

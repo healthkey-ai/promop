@@ -576,7 +576,7 @@ categorical fields, `value_as_number` for numeric.
 
 | PatientRecord field | OMOP table | LOINC codes |
 |---------------------|------------|------------|
-| `genetic_mutations` | `measurement` | 21636-6 (BRCA1), 79208-5 (BRCA2), 103680-5 (TP53), 12375-4 (KRAS), 81704-2 (EGFR), 62318-1 (PIK3CA) |
+| `genetic_mutations` | `measurement` | 21636-6 (BRCA1), 79208-5 (BRCA2), 103680-5 (TP53), 12375-4 (KRAS), 81704-2 (EGFR), 60034-6 (PIK3CA) |
 
 Result is a JSON array: `[{gene, origin, interpretation}, …]`
 

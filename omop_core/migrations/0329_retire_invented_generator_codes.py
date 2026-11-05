@@ -56,7 +56,7 @@ from datetime import date
 
 import logging
 
-from django.db import migrations, transaction
+from django.db import IntegrityError, connections, migrations, transaction
 from django.db.models import Q
 from django.db.models.deletion import ProtectedError
 
@@ -219,23 +219,80 @@ def _mint_concepts(apps, db):
         )
 
 
-def _guard(guard, value_field, string_field):
-    """Q narrowing rows under a mis-identified real code to the generator's shape."""
+def _matches(guard, number, string):
+    """Does a row's value have the shape the generator wrote under a mis-identified code?"""
     if guard is None:
-        return Q()
+        return True
     if guard == BOOLEAN:
-        return Q(**{f'{value_field}__in': (0, 1), f'{string_field}__isnull': True})
+        return string is None and number is not None and number in (0, 1)
     if guard == SMALL_INTEGER:
-        return Q(**{f'{value_field}__gte': 0, f'{value_field}__lte': 20, f'{string_field}__isnull': True})
+        return string is None and number is not None and 0 <= number <= 20
     if guard == PERCENT:
-        return Q(**{f'{value_field}__gte': 0, f'{value_field}__lte': 100, f'{string_field}__isnull': True})
+        return string is None and number is not None and 0 <= number <= 100
     if guard == ISOTYPE:
-        return Q(**{f'{string_field}__in': MYELOMA_ISOTYPES})
+        return string in MYELOMA_ISOTYPES
     if guard.startswith(VALUES):
-        return Q(**{f'{string_field}__in': guard[len(VALUES):].split('|')})
+        return string in guard[len(VALUES):].split('|')
     if guard.startswith(PREFIX):
-        return Q(**{f'{string_field}__startswith': guard[len(PREFIX):]})
+        return string is not None and string.startswith(guard[len(PREFIX):])
     raise ValueError(guard)
+
+
+def _recode_table(apps, db, model, prefix, invented_ids, new_by_code, old_ids_by_code):
+    """One scan of a clinical table, then set-based updates per retired code.
+
+    ``*_source_value`` has no index, so the candidate rows are read once with
+    every retired code in one predicate rather than once per code.
+    """
+    Concept = apps.get_model('omop_core', 'Concept')
+    source = f'{prefix}_source_value'
+    concept = f'{prefix}_concept_id'
+    source_concept = f'{prefix}_source_concept_id'
+    candidates = model.objects.using(db).filter(
+        Q(**{f'{source}__in': list(RECODE)})
+        | Q(**{f'{concept}__in': invented_ids})
+        | Q(**{f'{source_concept}__in': invented_ids})
+    ).values_list('pk', source, concept, source_concept, 'value_as_number', 'value_as_string')
+    code_of_invented = {cid: code for code, ids in old_ids_by_code.items()
+                        for cid in ids if RECODE[code][2] is None}
+    selected = {code: [] for code in RECODE}
+    for pk, sv, cid, scid, number, string in candidates.iterator(chunk_size=2000):
+        code = sv if sv in RECODE else code_of_invented.get(cid) or code_of_invented.get(scid)
+        if code is None:
+            continue
+        guard = RECODE[code][2]
+        if guard is not None and (sv != code or cid not in old_ids_by_code[code]):
+            continue
+        if not _matches(guard, number, string):
+            continue
+        selected[code].append(pk)
+
+    zero_exists = Concept.objects.using(db).filter(pk=0).exists()
+    for old_code, ids in selected.items():
+        if not ids:
+            continue
+        vocab, new_code, guard = RECODE[old_code]
+        new = new_by_code[old_code]
+        old_ids = old_ids_by_code[old_code]
+        target = model.objects.using(db).filter(pk__in=ids)
+        target.filter(**{source: old_code}).update(**{source: new_code})
+        if new is not None:
+            if guard is None:
+                target.update(**{concept: new.pk})
+            else:
+                target.filter(**{f'{concept}__in': old_ids}).update(**{concept: new.pk})
+            target.filter(**{f'{source_concept}__in': old_ids - {0}}).update(**{source_concept: new.pk})
+        elif guard is None and (old_ids - {0}):
+            # Replacement not loaded yet (Athena absent): the code routes the
+            # row, and nothing may keep pointing at the invented concept or it
+            # could never be deleted. Concept 0 is where the generator's rows
+            # already sit on an instance without Athena.
+            if zero_exists:
+                target.filter(**{f'{concept}__in': old_ids - {0}}).update(**{concept: 0})
+            target.filter(**{f'{source_concept}__in': old_ids - {0}}).update(**{source_concept: None})
+        left = model.objects.using(db).filter(**{source: old_code}).count() if guard is not None else 0
+        logger.info('0329: %s -> %s: %d %s rows recoded%s', old_code, new_code, len(ids), prefix,
+                    f', {left} left under the old code (not the generator\'s shape)' if left else '')
 
 
 def _recode_rows(apps, db):
@@ -243,49 +300,41 @@ def _recode_rows(apps, db):
     Measurement = apps.get_model('omop_core', 'Measurement')
     Observation = apps.get_model('omop_core', 'Observation')
 
-    for old_code, (vocab, new_code, guard) in RECODE.items():
-        new = Concept.objects.using(db).filter(vocabulary_id=vocab, concept_code=new_code).first()
+    new_by_code = {}
+    old_ids_by_code = {}
+    for old_code, (vocab, new_code, _guard) in RECODE.items():
+        new_by_code[old_code] = Concept.objects.using(db).filter(
+            vocabulary_id=vocab, concept_code=new_code).first()
         # The concept the old code resolved to: the invented row for an invented
         # code, the real-but-wrong row for a mis-identified one.
-        old_ids = set(Concept.objects.using(db).filter(
+        old_ids_by_code[old_code] = set(Concept.objects.using(db).filter(
             vocabulary_id='LOINC', concept_code=old_code,
         ).values_list('concept_id', flat=True)) | {0}
-        for model, prefix in ((Measurement, 'measurement'), (Observation, 'observation')):
-            source = f'{prefix}_source_value'
-            concept = f'{prefix}_concept_id'
-            source_concept = f'{prefix}_source_concept_id'
-            if guard is None:
-                # Every row under an invented code is the generator's: by source
-                # value, or attached to the invented concept however it got there.
-                rows = model.objects.using(db).filter(
-                    Q(**{source: old_code})
-                    | Q(**{f'{concept}__in': old_ids - {0}})
-                    | Q(**{f'{source_concept}__in': old_ids - {0}})
-                )
-            else:
-                rows = model.objects.using(db).filter(**{source: old_code}).filter(
-                    _guard(guard, 'value_as_number', 'value_as_string'),
-                    **{f'{concept}__in': old_ids},
-                )
-            ids = list(rows.values_list('pk', flat=True))
-            if not ids:
-                continue
-            target = model.objects.using(db).filter(pk__in=ids)
-            target.filter(**{source: old_code}).update(**{source: new_code})
-            if new is not None:
-                if guard is None:
-                    target.update(**{concept: new.pk})
-                else:
-                    target.filter(**{f'{concept}__in': old_ids}).update(**{concept: new.pk})
-                target.filter(**{f'{source_concept}__in': old_ids - {0}}).update(**{source_concept: new.pk})
-            elif guard is None and (old_ids - {0}):
-                # Replacement not loaded yet (Athena absent): the code routes the
-                # row, and nothing may keep pointing at the invented concept or it
-                # could never be deleted. Concept 0 is where the generator's rows
-                # already sit on an instance without Athena.
-                if Concept.objects.using(db).filter(pk=0).exists():
-                    target.filter(**{f'{concept}__in': old_ids - {0}}).update(**{concept: 0})
-                target.filter(**{f'{source_concept}__in': old_ids - {0}}).update(**{source_concept: None})
+    invented_ids = [cid for code, ids in old_ids_by_code.items()
+                    if RECODE[code][2] is None for cid in ids if cid]
+    for model, prefix in ((Measurement, 'measurement'), (Observation, 'observation')):
+        _recode_table(apps, db, model, prefix, invented_ids, new_by_code, old_ids_by_code)
+
+
+def _recode_projected_rows(apps, db, row, old_code, new):
+    Measurement = apps.get_model('omop_core', 'Measurement')
+    Observation = apps.get_model('omop_core', 'Observation')
+    tables = {t.strip().lower() for t in (row.omop_table or '').split(',')}
+    for model, prefix in ((Measurement, 'measurement'), (Observation, 'observation')):
+        if prefix not in tables:
+            continue
+        source = f'{prefix}_source_value'
+        concept = f'{prefix}_concept_id'
+        rows = model.objects.using(db).filter(**{concept: row.concept_id}).filter(
+            Q(**{source: old_code}) | Q(**{source: row.source_value or old_code}))
+        n = rows.count()
+        if not n:
+            continue
+        updates = {source: FCM_REPOINT[row.field_name][3]}
+        if new is not None:
+            updates[concept] = new.pk
+        rows.update(**updates)
+        logger.info('0329: %s: %d %s rows moved with the mapping', row.field_name, n, prefix)
 
 
 def _repoint_field_mappings(apps, db):
@@ -309,6 +358,12 @@ def _repoint_field_mappings(apps, db):
             # one; a curator who reviewed it is not overruled here.
             continue
         new = Concept.objects.using(db).filter(vocabulary_id=new_vocab, concept_code=new_code).first()
+        if old_code not in RECODE and row.concept_id:
+            # Rows the editor projected under this mapping (its concept, keyed by
+            # the old code or the mapping's blank source value) follow it, so a
+            # value entered in the UI still derives. Scoped to the mapping's own
+            # concept: another field on the same code keeps its rows.
+            _recode_projected_rows(apps, db, row, old_code, new)
         if new is None:
             # Athena not loaded yet: the code routes, the FK resolves later.
             row.concept = None
@@ -320,6 +375,7 @@ def _repoint_field_mappings(apps, db):
             row.source_value = new_code
         row.notes = f'{row.notes} {note}'.strip() if row.notes else note
         row.save(update_fields=['concept', 'vocabulary_id', 'concept_code', 'source_value', 'notes'])
+        logger.info('0329: %s mapping moved %s %s -> %s %s', field, old_vocab, old_code, new_vocab, new_code)
 
     # bone_imaging_result only ever pointed at the invented 24646-7 concept.
     # No vocabulary has a bone-lesion imaging result observable, so the
@@ -339,9 +395,10 @@ def _repoint_field_mappings(apps, db):
 
 def _delete_retired_source_mappings(apps, db):
     SourceCodeConceptMapping = apps.get_model('omop_core', 'SourceCodeConceptMapping')
-    SourceCodeConceptMapping.objects.using(db).filter(
+    deleted, _ = SourceCodeConceptMapping.objects.using(db).filter(
         source_code__in=RETIRED_SOURCE_CODES,
     ).filter(Q(source_vocabulary_id='LOINC') | Q(source_vocabulary_id='')).delete()
+    logger.info('0329: %d source-code mapping rows for retired codes deleted', deleted)
 
 
 def _delete_invented_concepts(apps, db):
@@ -371,10 +428,19 @@ def _delete_invented_concepts(apps, db):
         try:
             with transaction.atomic(using=db):
                 fake.delete()
-        except ProtectedError as exc:
-            # Still referenced by a table this migration does not recode; the
-            # rows are recoded and the concept waits for the next pass.
+                # A remaining DO_NOTHING reference (drug_strength, source_to_
+                # concept_map) would otherwise fail at commit, outside this
+                # savepoint; make it fail here, where it is caught.
+                with connections[db].cursor() as cursor:
+                    cursor.execute('SET CONSTRAINTS ALL IMMEDIATE')
+        except (ProtectedError, IntegrityError) as exc:
+            # Still referenced by a table this migration does not recode. The
+            # concept stays, permanently: nothing re-runs this. Find it with
+            # Concept.objects.filter(vocabulary_id='LOINC', concept_code__in=
+            # INVENTED_LOINC_CONCEPT_CODES) and repoint the rows by hand.
             logger.warning('0329: concept %s still referenced, left in place: %s', fake.pk, exc)
+        else:
+            logger.info('0329: invented concept %s (%s) deleted', fake.pk, fake.concept_code)
 
 
 def forwards(apps, schema_editor):
