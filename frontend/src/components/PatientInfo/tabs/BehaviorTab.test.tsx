@@ -9,7 +9,7 @@
  * The one exception, `insurance_type`, shows the other half: a field that gains
  * an approved mapping becomes editable here with no change to this file.
  */
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 import BehaviorTab from './BehaviorTab';
