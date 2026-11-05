@@ -656,3 +656,48 @@ describe('dated lab results', () => {
       .toEqual({ hemoglobin_g_dl: { value: 14, date: '2026-08-01' } });
   });
 });
+
+describe('source-pair unit picker (#5700)', () => {
+  const pairFields = {
+    hemoglobin_level: {
+      writable: true, target: 'patient_record', control: 'number',
+      label: 'Hemoglobin', value_kind: 'number',
+      unit_options: [{ value: 'G/DL', label: 'g/dL' }, { value: 'G/L', label: 'g/L' }],
+    },
+    hemoglobin_level_units: {
+      writable: false, kind: 'selectable', qualifies: 'hemoglobin_level',
+      label: 'Hemoglobin unit',
+      unit_options: [{ value: 'G/DL', label: 'g/dL' }, { value: 'G/L', label: 'g/L' }],
+    },
+  };
+
+  it('preselects the stored unit and sends the value with the chosen unit', async () => {
+    const user = userEvent.setup();
+    const { store, patch } = await setup(pairFields,
+      { hemoglobin_level: 12, hemoglobin_level_units: 'G/DL' });
+    render(<PatientFieldEditor store={store} name="hemoglobin_level" label="Hemoglobin" />);
+
+    expect(screen.getByRole('combobox', { name: 'Unit for Hemoglobin' })).toHaveValue('G/DL');
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Hemoglobin' }), { target: { value: '120' } });
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Unit for Hemoglobin' }), 'G/L');
+    await act(async () => { await store.flush(); });
+
+    expect(patch.mock.calls.at(-1)?.[1]).toEqual({
+      hemoglobin_level: 120, hemoglobin_level_units: 'G/L',
+    });
+  });
+
+  it('treats a unit-only change as a real edit of the same pair', async () => {
+    const user = userEvent.setup();
+    const { store, patch } = await setup(pairFields,
+      { hemoglobin_level: 120, hemoglobin_level_units: 'G/DL' });
+    render(<PatientFieldEditor store={store} name="hemoglobin_level" label="Hemoglobin" />);
+
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Unit for Hemoglobin' }), 'G/L');
+    await act(async () => { await store.flush(); });
+
+    expect(patch.mock.calls.at(-1)?.[1]).toEqual({
+      hemoglobin_level: 120, hemoglobin_level_units: 'G/L',
+    });
+  });
+});

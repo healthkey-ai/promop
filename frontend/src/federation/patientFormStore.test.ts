@@ -665,3 +665,80 @@ describe('planned-therapy options follow a disease change', () => {
     expect(store.getSnapshot().fields.planned_therapies.writable).toBe(true);
   });
 });
+
+describe('source-pair writes (#5700)', () => {
+  const pairFields = {
+    hemoglobin_level: {
+      writable: true, target: 'patient_record', control: 'number',
+      unit_options: [{ value: 'G/DL', label: 'g/dL' }, { value: 'G/L', label: 'g/L' }],
+    },
+    hemoglobin_level_units: {
+      writable: false, kind: 'selectable', qualifies: 'hemoglobin_level',
+      unit_options: [{ value: 'G/DL', label: 'g/dL' }, { value: 'G/L', label: 'g/L' }],
+    },
+    height: { writable: true, target: 'patient_record', control: 'number' },
+    height_units: {
+      writable: false, kind: 'selectable', qualifies: 'height',
+      unit_options: [{ value: 'cm', label: 'cm' }],
+    },
+  };
+  function pairSetup() {
+    const get = vi.fn(async (url: string) => ({ data: url.includes('writable-fields') ? pairFields : {
+      patient_info: { person_id: 12, hemoglobin_level: 120, hemoglobin_level_units: 'G/DL' },
+      write_enabled: true,
+    } }));
+    const patch = vi.fn(async (_url: string, edits: Record<string, unknown>) => ({ data: {
+      patient_info: { person_id: 12, ...edits, hemoglobin_g_dl: 12 },
+      write: { applied: Object.keys(edits), rejected: {} },
+    } }));
+    const store = new PatientFormStore({ get, patch } as unknown as AxiosInstance, '/api');
+    return { store, patch };
+  }
+
+  it('sends the value and its unit in the same PATCH', async () => {
+    const { store, patch } = pairSetup();
+    await store.load();
+
+    store.enqueuePair('hemoglobin_level', 120, 'hemoglobin_level_units', 'G/L');
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(patch).toHaveBeenCalledWith('/api/v1/patient-records/12/',
+      { hemoglobin_level: 120, hemoglobin_level_units: 'G/L' },
+      { headers: { 'X-Patient-Form': '1' } });
+    expect(store.getSnapshot().pending).toEqual({});
+  });
+
+  it('refuses a companion entry that does not qualify the field', async () => {
+    const { store, patch } = pairSetup();
+    await store.load();
+
+    store.enqueuePair('hemoglobin_level', 120, 'hemoglobin_level_units', 'G/L');
+    // A unit descriptor must name the value it qualifies; a mismatched pair is
+    // a client error, not two half-writes that corrupt both fields.
+    store.enqueuePair('hemoglobin_level', 999, 'height_units', 'cm');
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(patch).toHaveBeenCalledOnce();
+    expect(patch.mock.calls[0][1]).toEqual({
+      hemoglobin_level: 120, hemoglobin_level_units: 'G/L',
+    });
+  });
+
+  it('reports a refusal on both halves without keeping a half-saved pair', async () => {
+    const { store, patch } = pairSetup();
+    await store.load();
+    patch.mockRejectedValueOnce({ response: { data: { rejected: {
+      hemoglobin_level: 'Hemoglobin is outside the storable range.',
+      hemoglobin_level_units: 'Unsupported unit.',
+    } } } });
+
+    store.enqueuePair('hemoglobin_level', 120, 'hemoglobin_level_units', 'G/L');
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(store.getSnapshot().pending).toEqual({});
+    expect(store.getSnapshot().values.hemoglobin_level).toBe(120);
+    expect(store.getSnapshot().values.hemoglobin_level_units).toBe('G/DL');
+    expect(store.getSnapshot().errors.hemoglobin_level).toMatch(/outside the storable range/);
+    expect(store.getSnapshot().errors.hemoglobin_level_units).toMatch(/Unsupported unit/);
+  });
+});
