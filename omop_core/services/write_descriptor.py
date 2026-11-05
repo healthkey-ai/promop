@@ -1286,6 +1286,14 @@ def build_writable_field_descriptor():
             'canonical': positive,
             'inverted': True,
             'value_kind': 'boolean',
+            # Navigation only: it tells an editor which field the answer comes
+            # from, so the dialog can open on the canonical control instead of
+            # guessing. It is NOT evidence that the value was present — see
+            # EXACT's raw-boundary provenance (`available`/`value`), which is
+            # the only thing that may say whether the source was supplied
+            # (#5667). A client that treats `inputs` as presence shows a
+            # confident answer for a patient who never answered.
+            'inputs': [positive],
             'reason': (
                 f'Inverted view of {positive}: the record stores the positive '
                 f'status, and this row asks the negated question. Write '
