@@ -106,3 +106,18 @@ def test_the_verdicts_are_not_writable_fields():
     assert set(result.rejected) == {
         'abnormal_kappa_lambda_ratio', 'day_since_stem_cell_transplant',
     }
+
+
+@pytest.mark.parametrize(
+    ('name', 'true_label', 'false_label'),
+    [
+        ('pregnancy_test_result', 'Negative', 'Not negative'),
+        ('no_pregnancy_or_lactation_status', 'Not pregnant or lactating', 'Pregnant or lactating'),
+        ('plasma_cell_leukemia', 'Present', 'Not present'),
+    ],
+)
+def test_the_answer_words_keep_the_question_polarity(name, true_label, false_label):
+    """A bare Yes/No on a negative question reads as the opposite answer."""
+    fields = patient_form_descriptors(readable_fields={name}, writable=True)
+
+    assert fields[name]['answer_labels'] == {'true': true_label, 'false': false_label}
