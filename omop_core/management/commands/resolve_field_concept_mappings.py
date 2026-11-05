@@ -3,12 +3,14 @@
 ``load_athena_vocabularies`` runs this resolution itself after a successful
 load. This command is for an instance that loaded its vocabulary before the
 loader did so, or whose mappings were seeded or copied after the load: it
-finds every ``FieldConceptMapping`` with a ``(vocabulary_id, concept_code)``
-but no ``concept`` FK and points it at the loaded Concept. Rows whose code is
-not loaded here (a HealthKey-minted concept, a vocabulary outside the load
-scope) are listed and left as they are; the command exits 0 either way,
-because an unresolved row is a fact about the instance, not a failure of the
-command. Re-running it is safe: a resolved row is never a candidate again.
+finds every ``FieldConceptMapping`` that names a concept but has no
+``concept`` FK and saves the loaded Concept onto it, as a re-save in the
+editor would, so the post-save projection backfills any user edit that was
+pending on the field. Rows whose code is not loaded here (a vocabulary
+outside the load scope, a HealthKey concept this instance has not minted)
+are listed and left as they are; the command exits 0 either way, because an
+unresolved row is a fact about the instance, not a failure of the command.
+Re-running it is safe: a resolved row is never a candidate again.
 
 Writes to ``DATABASE_URL``; name the target explicitly. ``--dry-run`` reports
 what a run would do and rolls it back.

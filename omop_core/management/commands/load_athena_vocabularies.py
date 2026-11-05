@@ -759,18 +759,33 @@ class Command(EmbeddingLoadCommand):
         loaded, so every FieldConceptMapping it seeds has its concept named
         only by (vocabulary_id, concept_code) and a NULL FK; lab derivation
         then falls back to the extractor table and the editor shows every row
-        unresolved. Runs after the concept rows are committed (each table
-        loads in its own transaction), on every successful non-dry-run load
-        including --concepts-only, and not on the migration bootstrap, which
-        loads at the 0200 schema baseline before the curation tables are
-        seeded. An instance that loaded Athena before this hook existed runs
-        ``manage.py resolve_field_concept_mappings`` once.
+        unresolved. Runs after every table load and the release publication,
+        on every successful non-dry-run load including --concepts-only, and
+        not on the migration bootstrap, which loads at the 0200 schema
+        baseline before the curation tables are seeded. Under the plain
+        loader the table loads are already committed by then; under
+        ``sync_athena_vocabulary`` the whole load, this step included, is one
+        transaction and commits together.
+
+        Best effort: the load is complete and published, so a failure here is
+        logged with the manual fallback (``manage.py
+        resolve_field_concept_mappings``) and never fails the load -- under
+        the sync's transaction it would roll back the whole vocabulary.
         """
         from omop_core.services.field_concept_resolution import (
             resolve_field_concept_mappings,
         )
 
-        result = resolve_field_concept_mappings()
+        try:
+            result = resolve_field_concept_mappings()
+        except Exception:
+            logger.exception(
+                'field mappings: resolution failed after the load; run '
+                'manage.py resolve_field_concept_mappings'
+            )
+            self._log('  WARNING: field mappings were not resolved; '
+                      'run manage.py resolve_field_concept_mappings.')
+            return
         self._log(f'  {result.summary()}')
 
     def _load_loinc_axes(self):

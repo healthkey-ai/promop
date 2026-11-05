@@ -104,19 +104,29 @@ unresolved. `load_athena_vocabularies` therefore ends every successful
 non-dry-run load, `--concepts-only` included, by running
 `resolve_field_concept_mappings` in the
 [field concept resolution service](../omop_core/services/field_concept_resolution.py):
-every mapping with no concept but a vocabulary and a code is pointed at the
-Concept that pair names, in batches, and the load log reports how many rows
-resolved and which are still unresolved (a code outside the load scope, or a
-HealthKey-minted concept). Only the FK is filled in: text, status, provenance
-and `updated_at` are untouched, a row that already points at a concept is
-never a candidate, and a second run changes nothing. The migration bootstrap
-(`prepare_production_database`) loads at the 0200 schema baseline, before the
-curation tables are seeded, and does not run it. An instance that loaded its
-vocabulary before this hook existed, or seeded or copied mappings after the
-load, runs `manage.py resolve_field_concept_mappings` once (`--dry-run`
-reports and rolls back). `SourceCodeConceptMapping` needs no such pass: its
-concept FKs are unconstrained, so the seed stores the id before the Concept
-exists.
+every mapping with no concept is pointed at the Concept its pair names, in
+batches, and the load log reports how many rows resolved and which are still
+unresolved (a code outside the load scope, or a HealthKey concept this
+instance has not minted). The pair is the row's own text, or, for a row
+whose text is blank, the pair the fixture resolved that field to (the three
+SCT rows are keyed by `source_value` and carry no code). Each row is saved
+as the editor would save it, so the post-save projection backfills a user
+edit that was pending on the field; only the FK changes, and text, status,
+provenance and `updated_at` are untouched. A row that already points at a
+concept is never a candidate, concept 0 included (the "No matching concept"
+placeholder the genomics seeds park a field on), so "0 still unresolved"
+means every candidate's code was found, not that every field has a real
+concept; a second run changes nothing. The step is best effort: a failure is
+logged with the manual fallback and does not fail the load, because under
+`sync_athena_vocabulary` the whole load is one transaction and the hook runs
+inside it. The migration bootstrap (`prepare_production_database`) loads at
+the 0200 schema baseline, before the curation tables are seeded, and does
+not run it; a scheduled sync with nothing new to load does not run the
+loader at all. An instance that loaded its vocabulary before this hook
+existed, or seeded or copied mappings after the load, runs
+`manage.py resolve_field_concept_mappings` once (`--dry-run` reports and
+rolls back). `SourceCodeConceptMapping` needs no such pass: its concept FKs
+are unconstrained, so the seed stores the id before the Concept exists.
 
 ## Scalar save, projection and refresh
 
