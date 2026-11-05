@@ -108,18 +108,29 @@ def patient_person_for(identity):
     if pu is None:
         return None
 
+    if has_provider_access(identity):
+        return None
+
+    return pu.person
+
+
+def has_provider_access(identity) -> bool:
+    """Staff, or an unexpired GroupAccess grant in a provider role.
+
+    The one test of "is this login acting in a provider capacity", shared by
+    ``patient_person_for`` and account deletion, so that the login a deletion
+    keeps is exactly the one the PHR would refuse to treat as a patient.
+    """
+    if getattr(identity, 'is_staff', False):
+        return True
     now = timezone.now()
-    has_provider_grant = GroupAccess.objects.filter(
+    return GroupAccess.objects.filter(
         identity=identity,
     ).exclude(
         role='patient',
     ).filter(
         Q(expires_at__isnull=True) | Q(expires_at__gt=now),
     ).exists()
-    if has_provider_grant:
-        return None
-
-    return pu.person
 
 
 def resolve_or_create_person(identity, email=None, allow_create=True, email_verified=None):

@@ -68,8 +68,7 @@ from omop_core.services.patient_record_service import (
 )
 from omop_core.services.vocab_snapshot import TABLE_COLUMNS
 from omop_core.services.derivation_jobs import get_dispatcher
-from omop_core.services.patient_cleanup import delete_omop_clinical_rows
-from omop_core.services.prolog_cleanup import delete_prolog_data_for_persons
+from omop_core.services.patient_cleanup import delete_omop_clinical_rows, delete_provenance_for
 from omop_core.services.lot_inference_service import infer_lot_for_person
 from omop_core.services.episode_service import upsert_therapy_line_episode
 from omop_core.services.mappings import CONCEPT_GENERIC_LAB, CONCEPT_PATIENT_REPORTED_TYPE, get_gender_concept
@@ -141,7 +140,7 @@ from .permissions import (
     PatientCrudPermission, GenomicsCrudPermission,
     PatientDeletePermission, PatientSelfScopePermission, ScopedTokenPermission,
     VocabReadPermission, LabSyncPermission, EtlProvisionPermission,
-    get_request_org, is_service_token, is_machine_request,
+    get_request_org, is_interactive_session, is_service_token, is_machine_request,
 )
 from .providers.base import TokenClaims
 from .therapy_line_import import TherapyLineImportSerializer, import_therapy_lines
@@ -1781,6 +1780,14 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         from patient_portal.services import patient_person_for
         from patient_portal.models import PatientUser
 
+        # The same rule as /api/v1/phr/account/: a delegated OAuth2 token, a
+        # service credential or a Basic password can be presented without the
+        # member, so none of them may close the account.
+        if not is_interactive_session(request):
+            return Response(
+                {'detail': 'This action requires the member to be signed in.'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         patient_person = patient_person_for(request.user)
         if patient_person is None:
             return Response(
@@ -1795,37 +1802,17 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        person_id = patient_person.person_id
-        identity = request.user
-
-        with transaction.atomic():
-            # Delete EpisodeEvent rows — bare integer FK, not covered by CASCADE
-            episode_ids = list(
-                Episode.objects.filter(person=patient_person)
-                .values_list('episode_id', flat=True)
-            )
-            if episode_ids:
-                EpisodeEvent.objects.filter(episode_id__in=episode_ids).delete()
-
-            # Delete Person — cascades to all OMOP tables, PatientRecord, PatientUser
-            patient_person.delete()
-
-            # Delete the Identity (auth credential)
-            identity.delete()
-
-        # Log out the current session AFTER the transaction succeeds. If the
-        # transaction rolled back, the identity would still exist and we must
-        # not have flushed the session. Other open sessions resolve to
-        # AnonymousUser once the Identity row is gone (Django's session
-        # middleware loads the user by PK and falls back to AnonymousUser on
-        # DoesNotExist).
-        from django.contrib.auth import logout
-        logout(request)
-
-        logger.info(
-            'patient_account_deleted person_id=%s identity_id=%s',
-            person_id, identity.pk,
-        )
+        # One transaction: PROlog rows, Person (cascading the OMOP rows,
+        # PatientRecord, PatientUser), the Identity, and the deletion log
+        # entry (docs/account-deletion.md). The session is logged out only
+        # after the commit; other open sessions resolve to AnonymousUser
+        # once the Identity row is gone.
+        from patient_portal.account_deletion import AlreadyDeleted, delete_own_account
+        from patient_portal.models import DeletionLogEntry
+        try:
+            delete_own_account(request, patient_person, reason=DeletionLogEntry.ACCOUNT_CLOSED)
+        except AlreadyDeleted:
+            return Response({'detail': 'No record.'}, status=status.HTTP_404_NOT_FOUND)
 
         return Response({'detail': 'Account and all associated data have been permanently deleted.'})
 
@@ -1848,8 +1835,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         Requires body ``{"confirm": "DELETE"}``. The request is audited by
         AuditLogMiddleware (record_delete); an explicit log line is also emitted.
         """
-        from patient_portal.models import PatientUser
-        from omop_core.models import GroupAccess, Person
+        from omop_core.models import Person
 
         # Resolve by person_id directly — authorization here is the explicit
         # staff/org-admin check below, which is stricter than mere view access
@@ -1885,25 +1871,13 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         person_id = person.person_id
         # Remove a purely-patient login alongside the record; keep an Identity that
         # also holds provider access (GroupAccess) so we don't revoke a provider.
-        linked_identity = None
-        pu = PatientUser.objects.filter(person=person).select_related('identity').first()
-        if pu and not GroupAccess.objects.filter(identity=pu.identity).exists():
-            linked_identity = pu.identity
-
-        with transaction.atomic():
-            # EpisodeEvent has a bare integer FK not covered by CASCADE.
-            episode_ids = list(
-                Episode.objects.filter(person=person).values_list('episode_id', flat=True)
-            )
-            if episode_ids:
-                EpisodeEvent.objects.filter(episode_id__in=episode_ids).delete()
-            # A survey response protects its participant, so PROlog's rows go
-            # first or person.delete() raises ProtectedError.
-            delete_prolog_data_for_persons([person.person_id])
-            # Person delete cascades to OMOP rows, PatientRecord(s), PatientUser.
-            person.delete()
-            if linked_identity is not None:
-                linked_identity.delete()
+        # One transaction with the deletion log entry (docs/account-deletion.md).
+        from patient_portal.account_deletion import AlreadyDeleted, delete_member, patient_only_identity
+        from patient_portal.models import DeletionLogEntry
+        try:
+            delete_member(person, reason=DeletionLogEntry.ADMIN, identity=patient_only_identity(person))
+        except AlreadyDeleted:
+            return Response({'detail': 'Patient not found.'}, status=status.HTTP_404_NOT_FOUND)
 
         logger.info(
             'admin_patient_deleted person_id=%s by_identity_id=%s is_staff=%s',
@@ -8775,10 +8749,7 @@ class _OmopBulkDeleteMixin:
         """Remove rows that point at these ids without a database cascade."""
         # A GenericForeignKey has no cascade, and MeasurementOwnership holds a
         # bare integer, so both outlive the row they describe.
-        ProvenanceRecord.objects.filter(
-            content_type=ContentType.objects.get_for_model(model_cls),
-            object_id__in=row_ids,
-        ).delete()
+        delete_provenance_for(model_cls, row_ids)
         if model_cls is Measurement:
             MeasurementOwnership.objects.filter(
                 measurement_id__in=row_ids).delete()

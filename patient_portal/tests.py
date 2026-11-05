@@ -13214,7 +13214,7 @@ class PatientAccountDeletionTest(TestCase):
 
     def _client_as(self, identity):
         c = APIClient()
-        c.force_authenticate(user=identity)
+        c.force_login(identity)  # a session: the delete refuses forced or token credentials
         return c
 
     def test_delete_account_success(self):

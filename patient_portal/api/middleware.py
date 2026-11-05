@@ -209,7 +209,10 @@ class AuditLogMiddleware:
 
         entry = None
         try:
-            user = getattr(request, 'user', None)
+            # A view that deletes the caller's own login stashes who acted
+            # before logging out (account_deletion.end_session); otherwise
+            # the request's user.
+            user = getattr(request, 'audit_user', None) or getattr(request, 'user', None)
             authed = bool(user and user.is_authenticated)
             entry = {
                 'event': _classify_event_type(request),
@@ -219,7 +222,7 @@ class AuditLogMiddleware:
                 'client_id': _get_client_id(request),
                 'user_id': str(user.pk) if authed else None,
                 'user_email': (getattr(user, 'email', '') or None) if authed else None,
-                'resource_id': _get_resource_id(request),
+                'resource_id': getattr(request, 'audit_resource_id', None) or _get_resource_id(request),
                 'ip_address': (
                     request.META.get('HTTP_X_FORWARDED_FOR', '').split(',')[0].strip()
                     or request.META.get('REMOTE_ADDR')

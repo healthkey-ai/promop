@@ -16,6 +16,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Iterable
 
+from django.conf import settings
 from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.utils import timezone
@@ -34,6 +35,21 @@ from patient_portal.models import (
 
 DEFAULT_LANGUAGE = 'en'
 ACCEPTED = 'accepted'
+
+
+def record_purpose_key() -> str:
+    """The key of the permission that stands for keeping a record at all
+    (``CONSENT_RECORD_PURPOSE_KEY``, ``my_record`` by default)."""
+    return getattr(settings, 'CONSENT_RECORD_PURPOSE_KEY', 'my_record')
+
+
+def withdrawal_closes_account(purpose_key: str, decision: str) -> bool:
+    """Whether recording ``decision`` on ``purpose_key`` closes the account:
+    a withdrawal of the record permission does. The member's consent view
+    runs ``account_deletion.delete_member`` in the same transaction as the
+    event and its ledger entry, after every decision in the batch is
+    recorded, so that the ledger shows the withdrawal that ended the account."""
+    return decision == ConsentEvent.WITHDRAWN and purpose_key == record_purpose_key()
 
 
 # ------------------------------------------------------------------ texts

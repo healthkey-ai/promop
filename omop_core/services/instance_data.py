@@ -32,6 +32,8 @@ SYSTEM: frozenset[str] = frozenset({
     'patient_portal.LegalDocument', 'patient_portal.LegalDocumentVersion',
     'patient_portal.ConsentEvent', 'patient_portal.DocumentAcceptance',
     'patient_portal.ConsentLedgerEntry',
+    # Who was deleted and when, for replay after a restore. Never copied.
+    'patient_portal.DeletionLogEntry',
     'patient_portal.PatientMessage', 'patient_portal.PatientUser',
     # Access a patient granted to their record, and who opened it. A link is
     # derived from this deployment's own key, so it would open nothing elsewhere.

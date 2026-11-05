@@ -59,6 +59,25 @@ def is_interactive_session(request) -> bool:
     return isinstance(getattr(request, "auth", None), TokenClaims)
 
 
+class InteractiveSessionForWrites(BasePermission):
+    """Unsafe methods need the person, not a credential they handed out.
+
+    Reads pass for any authenticated caller. A write (closing the account,
+    answering consent) must come from a session or partner login, as
+    ``is_interactive_session`` defines it: an OAuth2 access token a member
+    delegated to an application, a service credential or an HTTP Basic
+    password can be presented without the member, and none of them should be
+    able to delete the account or withdraw the permission that deletes it.
+    """
+
+    message = 'This action requires the member to be signed in.'
+
+    def has_permission(self, request, view):
+        if request.method in ('GET', 'HEAD', 'OPTIONS'):
+            return True
+        return is_interactive_session(request)
+
+
 def reject_machine_actor_claims(request, actor_iss, actor_sub):
     """A service credential proves the service, never a user named in JSON."""
     if is_machine_request(request) and (actor_iss or actor_sub):
