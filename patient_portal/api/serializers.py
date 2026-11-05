@@ -680,10 +680,56 @@ class PatientRecordSerializer(serializers.ModelSerializer):
 
     def get_fields(self):
         fields = super().get_fields()
+        # Hemoglobin's source pair is an exception the descriptor states
+        # (#2318): `hemoglobin_level` is the write target and its unit rides
+        # beside it. The pair validator below rejects a unit on its own.
+        unit_pair = {'hemoglobin_level', 'hemoglobin_level_units'}
         for name in get_serializer_read_only_fields():
-            if name in fields:
+            if name in fields and name not in unit_pair:
                 fields[name].read_only = True
         return fields
+
+    def to_internal_value(self, data):
+        # Hemoglobin's source pair (#2318). Normalise the unit spelling BEFORE
+        # field validation: the column's `TextChoices` only accepts the stored
+        # code, and a reader may send the display label.
+        pair = 'hemoglobin_level'
+        unit_field = f'{pair}_units'
+        raw = data.copy() if hasattr(data, 'copy') else dict(data)
+        if unit_field in raw and pair not in raw:
+            raise serializers.ValidationError({
+                unit_field: 'Send the unit together with its value.',
+            })
+        allowed = {'G/DL': ('g/dL', 1.0), 'G/L': ('g/L', 0.1)}
+        by_spelling = {
+            spelling.casefold(): code
+            for code, (label, _factor) in allowed.items()
+            for spelling in (code, label)
+        }
+        code = None
+        if pair in raw:
+            sent = (raw.get(unit_field)
+                    or (self.instance and getattr(self.instance, unit_field, None))
+                    or 'G/DL')
+            code = by_spelling.get(str(sent).casefold())
+            if code is None:
+                raise serializers.ValidationError({
+                    unit_field: 'Choose one of: g/dL, g/L.',
+                })
+            raw[unit_field] = code
+
+        validated = super().to_internal_value(raw)
+        if pair in validated:
+            # `hemoglobin_g_dl` is a read-model (read-only to clients), so it
+            # never arrives through field validation; the normalised value is
+            # added here for the projection and the save.
+            value = validated[pair]
+            validated[unit_field] = code or 'G/DL'
+            factor = allowed[code or 'G/DL'][1]
+            validated['hemoglobin_g_dl'] = (
+                None if value is None else round(float(value) * factor, 4)
+            )
+        return validated
 
     def get_patient_name(self, obj):
         if obj.person:

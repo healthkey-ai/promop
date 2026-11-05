@@ -1461,6 +1461,44 @@ def build_writable_field_descriptor():
         if field in NEW_INPUT_FIELDS or (row is not None and row.concept_id == 0):
             descriptor[field] = entry
 
+    # Hemoglobin's source pair (#2318). The patient records the number in the
+    # unit their lab used; `hemoglobin_g_dl` becomes the normalised read-model
+    # that matching and CRAB consume. The pair is the write target and the
+    # canonical value is derived from it: the old entry pointed the other way,
+    # so an editor wrote g/dL and derivation overwrote whatever unit the reader
+    # had chosen.
+    descriptor['hemoglobin_level'] = {
+        'kind': KIND_DIRECT,
+        'writable': True,
+        'target': 'patient_record',
+        'value_kind': 'number',
+    }
+    descriptor['hemoglobin_level_units'] = {
+        'kind': KIND_SELECTABLE,
+        'writable': False,
+        'qualifies': 'hemoglobin_level',
+        'reason': (
+            'Unit of hemoglobin_level; selected alongside that value and '
+            'stored with it. The canonical g/dL value is derived from the pair.'
+        ),
+    }
+    canonical_hemoglobin = descriptor.get('hemoglobin_g_dl') or {}
+    descriptor['hemoglobin_g_dl'] = {
+        'kind': KIND_COMPUTED,
+        'writable': False,
+        'inputs': ['hemoglobin_level'],
+        'reason': (
+            'Normalised from hemoglobin_level in the default unit (g/dL); '
+            'edit that field and its unit instead.'
+        ),
+        # The projection stays here: the pair's write fills this field with the
+        # normalised value, and this is what reaches OMOP.
+        **({'projection': canonical_hemoglobin['projection']}
+           if canonical_hemoglobin.get('projection') else {}),
+        **({'unit': canonical_hemoglobin['unit']}
+           if canonical_hemoglobin.get('unit') else {'unit': 'g/dL'}),
+    }
+
     # The unit choices (#2318). `FIELD_COMMON_UNITS` is the curated list per
     # field, already ordered; the client draws its picker from it rather than
     # spelling the values a second time. Both the field a write lands in and the
@@ -1480,4 +1518,18 @@ def build_writable_field_descriptor():
             entry['unit_options'] = [
                 {'value': unit, 'label': unit} for unit in units
             ]
+
+    # Hemoglobin's slice (#2318) offers the two scales it can convert today.
+    # The value is the stored code (`G/L`), the label the display text — the
+    # model's `TextChoices`, not the curated display strings, because the
+    # write side validates against the column's choices. mmol/L waits for a
+    # reviewed factor.
+    hemoglobin_units = [
+        {'value': 'G/DL', 'label': 'g/dL'},
+        {'value': 'G/L', 'label': 'g/L'},
+    ]
+    for field in ('hemoglobin_level', 'hemoglobin_level_units'):
+        entry = descriptor.get(field)
+        if entry is not None:
+            entry['unit_options'] = hemoglobin_units
     return descriptor
