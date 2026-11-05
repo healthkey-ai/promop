@@ -652,7 +652,9 @@ SUGGESTED_FIELD_CODES: dict[str, tuple[str, str]] = {
     'autoimmune_cytopenias_refractory_to_steroids': ('439478003', 'SNOMED'),  # Autoimmune cytopenia
     'btk_inhibitor_refractory':      ('182854000', 'SNOMED'),  # Treatment refractory
     'bcl2_inhibitor_refractory':     ('182854000', 'SNOMED'),  # Treatment refractory
-    'measurable_disease_iwcll':      ('711259004', 'SNOMED'),  # Measurable disease
+    # measurable_disease_iwcll: no suggestion. SNOMED 711259004, suggested
+    # before, is absent from Athena (staging holds it as a HealthKey-range
+    # concept tagged SNOMED, 2100000005 — a follow-up curation pass).
     'measurable_disease_imwg':       ('hko:measurable-disease-imwg', HK_OBSERVATION_VOCABULARY),
     'post_transformation_outcome':   ('91860004',  'SNOMED'),  # Richter / transformation
     'dlbcl_transformation_date':     ('91860004',  'SNOMED'),  # Richter / transformation

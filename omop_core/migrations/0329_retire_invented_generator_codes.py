@@ -41,6 +41,12 @@ For each retired code this migration:
 - deletes the invented LOINC-vocabulary Concepts, embeddings first, once
   nothing references them (a still-referenced one is left, protected).
 
+Out of scope here, and left as they are: the HealthKey-range concepts tagged
+``SNOMED`` or ``LOINC`` that ``field_curation_v1.json`` seeds (ids 2100000001
+to 2100000043, such as SNOMED 711259004 for ``measurable_disease_iwcll`` or
+LOINC 98847-0 for ``mrd_status``). They are a curation pass of their own; the
+one the generators touched (``measurable_disease_imwg``) moves here.
+
 Reverse is a no-op: recoded rows are not moved back and the deleted
 concepts are not recreated. Idempotent: a second run finds nothing under
 the retired codes. Test databases are not skipped — the mints are wanted
@@ -48,9 +54,13 @@ there and the rest finds no rows.
 """
 from datetime import date
 
+import logging
+
 from django.db import migrations, transaction
 from django.db.models import Q
 from django.db.models.deletion import ProtectedError
+
+logger = logging.getLogger(__name__)
 
 
 HK_VOCABULARY = 'HK-Observation'
@@ -75,11 +85,17 @@ LOCAL_CONCEPT_ID_MIN = 2_000_000_000
 # Value-shape guards for rows stored under a mis-identified *real* code.
 BOOLEAN = 'boolean'          # value_as_number in (0, 1), no string
 SMALL_INTEGER = 'integer'    # value_as_number 0..20, no string
+PERCENT = 'percent'          # value_as_number 0..100, no string
 ISOTYPE = 'isotype'          # the generator's myeloma isotype labels
-STRING = 'string'            # any value_as_string, no number
 PREFIX = 'prefix:'           # value_as_string starts with the text after the colon
+VALUES = 'values:'           # value_as_string is one of the '|'-separated texts after the colon
 
 MYELOMA_ISOTYPES = ('IgG', 'IgA', 'IgM', 'IgD', 'IgE', 'light_chain_only', 'non_secretory')
+# The closed vocabularies the breast-cancer generator wrote; a genuine result
+# under the mis-identified code (a sexual orientation, a fungus) is none of them.
+THERAPY_INTENTS = ('DEFINITIVE_LOCAL', 'ADJUVANT', 'NEOADJUVANT', 'INDUCTION', 'CONSOLIDATION',
+                   'MAINTENANCE', 'METASTATIC_DISEASE_CONTROL', 'PALLIATIVE_SYMPTOM', 'SALVAGE')
+MENOPAUSAL_STATES = ('Premenopausal', 'Perimenopausal', 'Postmenopausal')
 
 # retired code -> (replacement vocabulary, replacement code, guard or None).
 # A guard of None means the old code is invented: every row under it is the
@@ -116,16 +132,16 @@ RECODE = {
     '85319-5': ('LOINC', '32525-8', None),                      # CD19 cells/cells in Bone marrow
     # Therapy lines
     '91379-3': ('LOINC', '64882-4', None),                      # Reason stopped
-    '42804-5': ('LOINC', '104803-2', STRING),                   # Therapeutic intent; was Fungus identified
+    '42804-5': ('LOINC', '104803-2', VALUES + '|'.join(THERAPY_INTENTS)),  # Therapeutic intent; was Fungus identified
     # Breast cancer genomics and biomarkers
     '47423-8': ('LOINC', '103680-5', None),                     # TP53
     '88039-1': ('LOINC', '81845-0', None),                      # PALB2
     '21637-4': ('LOINC', '79208-5', PREFIX + 'BRCA2'),          # was BRCA1 c.185delAG
     '21667-1': ('LOINC', '103680-5', PREFIX + 'TP53'),          # was F5 gene mutations
     '62318-1': ('LOINC', '60034-6', PREFIX + 'PIK3CA'),         # was Niemann-Pick newborn screen
-    '76690-7': (HK_VOCABULARY, 'hko:menopausal-status', PREFIX + ''),  # was Sexual orientation
-    '85336-6': ('LOINC', '105305-7', SMALL_INTEGER),            # PD-L1 immune cells; was DCIS extension
-    '96893-3': ('LOINC', '105303-2', SMALL_INTEGER),            # PD-L1 CPS; was ERBB2 duplication
+    '76690-7': (HK_VOCABULARY, 'hko:menopausal-status', VALUES + '|'.join(MENOPAUSAL_STATES)),  # was Sexual orientation
+    '85336-6': ('LOINC', '105305-7', PERCENT),                  # PD-L1 immune cells; was DCIS extension
+    '96893-3': ('LOINC', '105303-2', PERCENT),                  # PD-L1 CPS; was ERBB2 duplication
 }
 
 # Invented codes that had Concept rows minted under vocabulary_id='LOINC'.
@@ -211,10 +227,12 @@ def _guard(guard, value_field, string_field):
         return Q(**{f'{value_field}__in': (0, 1), f'{string_field}__isnull': True})
     if guard == SMALL_INTEGER:
         return Q(**{f'{value_field}__gte': 0, f'{value_field}__lte': 20, f'{string_field}__isnull': True})
+    if guard == PERCENT:
+        return Q(**{f'{value_field}__gte': 0, f'{value_field}__lte': 100, f'{string_field}__isnull': True})
     if guard == ISOTYPE:
         return Q(**{f'{string_field}__in': MYELOMA_ISOTYPES})
-    if guard == STRING:
-        return Q(**{f'{string_field}__isnull': False, f'{value_field}__isnull': True})
+    if guard.startswith(VALUES):
+        return Q(**{f'{string_field}__in': guard[len(VALUES):].split('|')})
     if guard.startswith(PREFIX):
         return Q(**{f'{string_field}__startswith': guard[len(PREFIX):]})
     raise ValueError(guard)
@@ -236,19 +254,38 @@ def _recode_rows(apps, db):
             source = f'{prefix}_source_value'
             concept = f'{prefix}_concept_id'
             source_concept = f'{prefix}_source_concept_id'
-            rows = model.objects.using(db).filter(**{source: old_code}).filter(
-                _guard(guard, 'value_as_number', 'value_as_string'),
-            )
-            if guard is not None:
-                rows = rows.filter(**{f'{concept}__in': old_ids})
+            if guard is None:
+                # Every row under an invented code is the generator's: by source
+                # value, or attached to the invented concept however it got there.
+                rows = model.objects.using(db).filter(
+                    Q(**{source: old_code})
+                    | Q(**{f'{concept}__in': old_ids - {0}})
+                    | Q(**{f'{source_concept}__in': old_ids - {0}})
+                )
+            else:
+                rows = model.objects.using(db).filter(**{source: old_code}).filter(
+                    _guard(guard, 'value_as_number', 'value_as_string'),
+                    **{f'{concept}__in': old_ids},
+                )
             ids = list(rows.values_list('pk', flat=True))
             if not ids:
                 continue
             target = model.objects.using(db).filter(pk__in=ids)
-            target.update(**{source: new_code})
+            target.filter(**{source: old_code}).update(**{source: new_code})
             if new is not None:
-                target.filter(**{f'{concept}__in': old_ids}).update(**{concept: new.pk})
+                if guard is None:
+                    target.update(**{concept: new.pk})
+                else:
+                    target.filter(**{f'{concept}__in': old_ids}).update(**{concept: new.pk})
                 target.filter(**{f'{source_concept}__in': old_ids - {0}}).update(**{source_concept: new.pk})
+            elif guard is None and (old_ids - {0}):
+                # Replacement not loaded yet (Athena absent): the code routes the
+                # row, and nothing may keep pointing at the invented concept or it
+                # could never be deleted. Concept 0 is where the generator's rows
+                # already sit on an instance without Athena.
+                if Concept.objects.using(db).filter(pk=0).exists():
+                    target.filter(**{f'{concept}__in': old_ids - {0}}).update(**{concept: 0})
+                target.filter(**{f'{source_concept}__in': old_ids - {0}}).update(**{source_concept: None})
 
 
 def _repoint_field_mappings(apps, db):
@@ -266,6 +303,10 @@ def _repoint_field_mappings(apps, db):
             ).exists()
         )
         if not points_at_old:
+            continue
+        if field == 'clonal_bone_marrow_b_lymphocytes' and (row.status == 'approved' or row.reviewed_at):
+            # 42759-1 is a real concept with the wrong unit, not an invented
+            # one; a curator who reviewed it is not overruled here.
             continue
         new = Concept.objects.using(db).filter(vocabulary_id=new_vocab, concept_code=new_code).first()
         if new is None:
@@ -306,18 +347,34 @@ def _delete_retired_source_mappings(apps, db):
 def _delete_invented_concepts(apps, db):
     Concept = apps.get_model('omop_core', 'Concept')
     ConceptEmbedding = apps.get_model('omop_core', 'ConceptEmbedding')
+    ConceptRelationship = apps.get_model('omop_core', 'ConceptRelationship')
+    ConceptSynonym = apps.get_model('omop_core', 'ConceptSynonym')
+    ConceptAncestor = apps.get_model('omop_core', 'ConceptAncestor')
+    SourceCodeConceptMapping = apps.get_model('omop_core', 'SourceCodeConceptMapping')
     for fake in Concept.objects.using(db).filter(
         vocabulary_id='LOINC', concept_code__in=INVENTED_LOINC_CONCEPT_CODES,
     ):
+        # Vocabulary metadata hangs off the concept through DO_NOTHING FKs:
+        # Django would delete the concept and the deferred constraint would
+        # fail the whole migration at commit (staging has a self "Maps to" /
+        # "Mapped from" pair on 9001003). Remove it first; a mapping that
+        # still targets the concept is a curator's row and keeps it alive.
+        if SourceCodeConceptMapping.objects.using(db).filter(target_concept_id=fake.pk).exists():
+            logger.warning('0329: concept %s is still a mapping destination; left in place', fake.pk)
+            continue
         ConceptEmbedding.objects.using(db).filter(concept_id=fake.pk).delete()
+        ConceptRelationship.objects.using(db).filter(
+            Q(concept_1_id=fake.pk) | Q(concept_2_id=fake.pk)).delete()
+        ConceptSynonym.objects.using(db).filter(concept_id=fake.pk).delete()
+        ConceptAncestor.objects.using(db).filter(
+            Q(ancestor_concept_id=fake.pk) | Q(descendant_concept_id=fake.pk)).delete()
         try:
             with transaction.atomic(using=db):
                 fake.delete()
-        except ProtectedError:
-            # Still referenced (a replacement concept not loaded yet, or a
-            # table this migration does not know); the rows are recoded and
-            # the concept waits for the next pass.
-            pass
+        except ProtectedError as exc:
+            # Still referenced by a table this migration does not recode; the
+            # rows are recoded and the concept waits for the next pass.
+            logger.warning('0329: concept %s still referenced, left in place: %s', fake.pk, exc)
 
 
 def forwards(apps, schema_editor):

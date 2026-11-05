@@ -73,7 +73,8 @@ from omop_core.services.prolog_cleanup import delete_prolog_data_for_persons
 from omop_core.services.lot_inference_service import infer_lot_for_person
 from omop_core.services.episode_service import upsert_therapy_line_episode
 from omop_core.services.mappings import (
-    CONCEPT_GENERIC_LAB, CONCEPT_PATIENT_REPORTED_TYPE, HK_OBSERVATION_SYSTEM, get_gender_concept,
+    CONCEPT_GENERIC_LAB, CONCEPT_PATIENT_REPORTED_TYPE, HK_OBSERVATION_SYSTEM, LOINC_SYSTEM,
+    SNOMED_SYSTEM, get_gender_concept,
 )
 from omop_core.services.demographics import resolve_concept as resolve_demographic_concept
 from omop_core.services.pk import next_pk, next_pk_batch
@@ -3089,7 +3090,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                     break
                             if loinc_code is None:
                                 for coding in obs_code['coding']:
-                                    if coding.get('system') in ('http://snomed.info/sct', HK_OBSERVATION_SYSTEM):
+                                    if coding.get('system') in (SNOMED_SYSTEM, HK_OBSERVATION_SYSTEM):
                                         loinc_code = coding.get('code')
                                         break
                         
@@ -3531,7 +3532,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         obs_alt_vocab = obs_alt_code = None
                         if obs_loinc is None:
                             for _c in obs_code.get('coding', []):
-                                if _c.get('system') == 'http://snomed.info/sct' and _c.get('code'):
+                                if _c.get('system') == SNOMED_SYSTEM and _c.get('code'):
                                     obs_alt_vocab, obs_alt_code = 'SNOMED', _c.get('code')
                                     break
                                 if _c.get('system') == HK_OBSERVATION_SYSTEM and _c.get('code'):
