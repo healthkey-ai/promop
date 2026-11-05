@@ -18,6 +18,10 @@ from django.utils.timezone import localdate
 from django.utils import timezone
 from omop_core.services.access import get_admin_access_paths, has_org_admin_access, has_explicit_org_admin_access
 from omop_core.services.patient_record_service import PATIENT_RECORD_OMOP_MAPPED_FIELDS
+from omop_core.services.hemoglobin_units import (
+    CANONICAL_FIELD, DEFAULT_UNIT, PAIR_FIELD, UNIT_FIELD,
+    canonical_from_pair, normalize_unit,
+)
 from omop_core.services.write_descriptor import get_serializer_read_only_fields
 
 #: Columns that Measurement and Observation validate as one value.
@@ -683,7 +687,7 @@ class PatientRecordSerializer(serializers.ModelSerializer):
         # Hemoglobin's source pair is an exception the descriptor states
         # (#2318): `hemoglobin_level` is the write target and its unit rides
         # beside it. The pair validator below rejects a unit on its own.
-        unit_pair = {'hemoglobin_level', 'hemoglobin_level_units'}
+        unit_pair = {PAIR_FIELD, UNIT_FIELD}
         for name in get_serializer_read_only_fields():
             if name in fields and name not in unit_pair:
                 fields[name].read_only = True
@@ -693,25 +697,19 @@ class PatientRecordSerializer(serializers.ModelSerializer):
         # Hemoglobin's source pair (#2318). Normalise the unit spelling BEFORE
         # field validation: the column's `TextChoices` only accepts the stored
         # code, and a reader may send the display label.
-        pair = 'hemoglobin_level'
-        unit_field = f'{pair}_units'
+        pair = PAIR_FIELD
+        unit_field = UNIT_FIELD
         raw = data.copy() if hasattr(data, 'copy') else dict(data)
         if unit_field in raw and pair not in raw:
             raise serializers.ValidationError({
                 unit_field: 'Send the unit together with its value.',
             })
-        allowed = {'G/DL': ('g/dL', 1.0), 'G/L': ('g/L', 0.1)}
-        by_spelling = {
-            spelling.casefold(): code
-            for code, (label, _factor) in allowed.items()
-            for spelling in (code, label)
-        }
         code = None
         if pair in raw:
             sent = (raw.get(unit_field)
                     or (self.instance and getattr(self.instance, unit_field, None))
-                    or 'G/DL')
-            code = by_spelling.get(str(sent).casefold())
+                    or DEFAULT_UNIT)
+            code = normalize_unit(sent)
             if code is None:
                 raise serializers.ValidationError({
                     unit_field: 'Choose one of: g/dL, g/L.',
@@ -726,18 +724,19 @@ class PatientRecordSerializer(serializers.ModelSerializer):
             # legacy client may still write it alone. When the source pair is
             # present it wins, and the normalised value is added here for the
             # projection and the record save.
-            value = validated[pair]
-            validated[unit_field] = code or 'G/DL'
-            factor = allowed[code or 'G/DL'][1]
-            validated['hemoglobin_g_dl'] = (
-                None if value is None else round(float(value) * factor, 4)
+            recognised, canonical = canonical_from_pair(
+                validated[pair], code or DEFAULT_UNIT,
             )
+            if not recognised:
+                raise serializers.ValidationError({pair: 'Enter a number.'})
+            validated[unit_field] = code or DEFAULT_UNIT
+            validated[CANONICAL_FIELD] = canonical
             # The view must treat these two differently: the canonical is a
             # derived read-model (project it, but do not let it count as a new
             # canonical edit that would retire the source pair), while the
             # source is what the reader owns.
             self._source_pairs = {pair, unit_field}
-            self._derived_from_pair = {'hemoglobin_g_dl'}
+            self._derived_from_pair = {CANONICAL_FIELD}
         return validated
 
     def get_patient_name(self, obj):

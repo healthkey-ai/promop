@@ -37,7 +37,13 @@ def _patch(record, data):
 def api(settings):
     """A staff editor, the LOINC/UCUM concepts and the patient-reported type."""
     settings.CELERY_BROKER_URL = ''
-    ConceptFactory(concept_id=32865, concept_code='patient-report-type')
+    type_vocab = VocabularyFactory(
+        vocabulary_id='Type Concept', vocabulary_name='Type Concept',
+    )
+    ConceptFactory(
+        concept_id=32865, concept_code='PT-SELF-REPORT',
+        concept_name='Patient self-report', vocabulary=type_vocab,
+    )
     ConceptFactory(
         concept_code='718-7', vocabulary=VocabularyFactory(vocabulary_id='LOINC'),
     )
@@ -244,9 +250,10 @@ def test_two_refreshes_keep_the_pair_and_one_today_fact(api):
         assert float(record.hemoglobin_level) == 120
         assert record.hemoglobin_level_units == 'G/L'
         assert float(record.hemoglobin_g_dl) == 12.0
-        assert set(record.user_edited_fields or []) >= {
-            'hemoglobin_level', 'hemoglobin_level_units',
-        }
+        # The chosen unit is the patient's declaration and derivation cannot
+        # reproduce it from a g/dL fact, so the pair stays protected.
+        assert {'hemoglobin_level', 'hemoglobin_level_units'} <= set(
+            record.user_edited_fields or [])
 
     assert Measurement.objects.filter(
         person=record.person, measurement_source_value='718-7',
@@ -271,3 +278,131 @@ def test_a_second_pair_edit_reuses_todays_fact(api):
     assert rows.count() == 1
     assert rows.get().value_as_number == Decimal('11.0')
     assert rows.get().unit_source_value == 'g/dL'
+
+
+def test_a_refresh_without_omop_backing_keeps_the_canonical_from_the_pair():
+    record = _record()
+    record.hemoglobin_level = 120
+    record.hemoglobin_level_units = 'G/L'
+    record.hemoglobin_g_dl = 12
+    record.user_edited_fields = ['hemoglobin_level', 'hemoglobin_level_units']
+    record.save()
+
+    refreshed = refresh_patient_record(record.person)
+
+    # No LOINC concept/measurement exists, so the projection never landed.
+    # The pair must still supply the read-model matching sees.
+    assert float(refreshed.hemoglobin_level) == 120
+    assert refreshed.hemoglobin_level_units == 'G/L'
+    assert float(refreshed.hemoglobin_g_dl) == 12.0
+    assert {'hemoglobin_level', 'hemoglobin_level_units'} <= set(
+        refreshed.user_edited_fields or [])
+
+
+def test_a_pair_edit_moves_the_crab_verdict(api):
+    record = _record()
+    _edit(api, record, {
+        'hemoglobin_level': 8.4, 'hemoglobin_level_units': 'g/dL',
+    })
+    assert record.meets_crab is True
+
+    _edit(api, record, {
+        'hemoglobin_level': 13, 'hemoglobin_level_units': 'g/dL',
+    })
+    # The canonical is derived from the pair, not typed as its own edit, but
+    # the verdict must still follow the new value.
+    assert record.meets_crab is None
+
+
+def test_the_shared_form_normalises_the_source_pair(api):
+    from omop_core.services.patient_form import apply_patient_form_patch
+
+    record = _record()
+    saved, result = apply_patient_form_patch(
+        record.person, {'hemoglobin_level': 120, 'hemoglobin_level_units': 'g/L'},
+    )
+
+    assert {'hemoglobin_level', 'hemoglobin_level_units', 'hemoglobin_g_dl'} <= set(
+        result.applied)
+    assert float(saved.hemoglobin_level) == 120
+    assert saved.hemoglobin_level_units == 'G/L'
+    assert float(saved.hemoglobin_g_dl) == 12.0
+    row = _projected(saved)
+    assert row.value_as_number == Decimal('12.0')
+    assert row.unit_source_value == 'g/dL'
+
+
+def test_the_shared_form_refuses_a_unit_without_its_value(api):
+    from omop_core.services.patient_form import apply_patient_form_patch
+
+    record = _record()
+    saved, result = apply_patient_form_patch(
+        record.person, {'hemoglobin_level_units': 'g/L'},
+    )
+
+    assert result.rejected.get('hemoglobin_level_units')
+    assert not result.applied
+    assert saved.hemoglobin_level is None
+
+
+def test_the_shared_form_refuses_an_unknown_unit(api):
+    from omop_core.services.patient_form import apply_patient_form_patch
+
+    record = _record()
+    saved, result = apply_patient_form_patch(
+        record.person,
+        {'hemoglobin_level': 120, 'hemoglobin_level_units': 'mmol/L'},
+    )
+
+    assert result.rejected.get('hemoglobin_level_units')
+    assert not result.applied
+    assert saved.hemoglobin_level is None
+    assert saved.hemoglobin_g_dl is None
+
+
+def test_a_canonical_write_retires_a_pending_pair(api):
+    from omop_core.services.field_write_service import apply_field_writes
+
+    record = _record()
+    record.hemoglobin_level = 120
+    record.hemoglobin_level_units = 'G/L'
+    record.hemoglobin_g_dl = 12
+    record.user_edited_fields = ['hemoglobin_level', 'hemoglobin_level_units']
+    record.save()
+
+    apply_field_writes(record.person, {'hemoglobin_g_dl': 13})
+
+    record.refresh_from_db()
+    assert float(record.hemoglobin_g_dl) == 13.0
+    assert float(record.hemoglobin_level) == 13.0
+    assert record.hemoglobin_level_units == 'G/DL'
+    assert not ({'hemoglobin_level', 'hemoglobin_level_units'}
+                & set(record.user_edited_fields or []))
+
+
+def test_clearing_the_pair_clears_the_projected_fact(api):
+    from omop_core.services.omop_projection import CLEAR_VALUE
+
+    record = _record()
+    _edit(api, record, {
+        'hemoglobin_level': 120, 'hemoglobin_level_units': 'g/L',
+    })
+    _edit(api, record, {
+        'hemoglobin_level': None, 'hemoglobin_level_units': 'g/L',
+    })
+
+    assert record.hemoglobin_level is None
+    assert record.hemoglobin_g_dl is None
+    row = _projected(record)
+    assert row.value_as_number is None
+    assert row.value_source_value == CLEAR_VALUE
+
+
+def test_the_unit_label_is_case_insensitive(api):
+    record = _record()
+    _edit(api, record, {
+        'hemoglobin_level': 120, 'hemoglobin_level_units': 'g/l',
+    })
+
+    assert record.hemoglobin_level_units == 'G/L'
+    assert float(record.hemoglobin_g_dl) == 12.0

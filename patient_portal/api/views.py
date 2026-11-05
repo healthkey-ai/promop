@@ -1401,7 +1401,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 )
                 recompute_patient_record_fields(
                     patient_info,
-                    changed_fields=clinical_fields - derived_from_pair,
+                    changed_fields=clinical_fields,
+                    pair_derived=derived_from_pair,
                 )
                 patient_info.refresh_from_db()
             elif profile_projected or touched_languages:

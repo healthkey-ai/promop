@@ -102,16 +102,21 @@ def test_hemoglobin_source_pair_replaces_the_canonical_value(editor):
 def test_pending_legacy_edit_survives_refresh_until_a_new_canonical_edit(editor):
     record, client = editor
     PatientRecord.objects.filter(pk=record.pk).update(
-        hemoglobin_level=Decimal('9.0'), user_edited_fields=['hemoglobin_level'],
+        hemoglobin_level=Decimal('9.0'), hemoglobin_level_units='G/L',
+        user_edited_fields=['hemoglobin_level', 'hemoglobin_level_units'],
     )
     refreshed = refresh_patient_record(record.person)
     assert refreshed.hemoglobin_level == Decimal('9.0')
-    assert 'hemoglobin_level' in refreshed.user_edited_fields
+    assert refreshed.hemoglobin_level_units == 'G/L'
+    assert {'hemoglobin_level', 'hemoglobin_level_units'} <= set(
+        refreshed.user_edited_fields)
     response = client.patch(f'/api/patient-info/{record.person_id}/', {'hemoglobin_g_dl': '13.0'}, format='json')
     assert response.status_code == 200, response.data
     record.refresh_from_db()
     assert record.hemoglobin_level == Decimal('13.0')
-    assert 'hemoglobin_level' not in record.user_edited_fields
+    assert record.hemoglobin_level_units == 'G/DL'
+    assert not ({'hemoglobin_level', 'hemoglobin_level_units'}
+                & set(record.user_edited_fields or []))
 
 
 def test_canonical_edit_supersedes_legacy_hemoglobin_in_another_unit(editor):

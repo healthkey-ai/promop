@@ -19,6 +19,14 @@ from omop_core.services.patient_record_service import (
 )
 from omop_core.services.write_descriptor import build_writable_field_descriptor
 from omop_core.services.boolean_answers import BOOLEAN_ANSWERS
+from omop_core.services.hemoglobin_units import (
+    CANONICAL_FIELD as HEMOGLOBIN_CANONICAL,
+    DEFAULT_UNIT as HEMOGLOBIN_DEFAULT_UNIT,
+    PAIR_FIELD as HEMOGLOBIN_PAIR,
+    UNIT_FIELD as HEMOGLOBIN_UNIT,
+    canonical_from_pair as hemoglobin_canonical_from_pair,
+    normalize_unit as normalize_hemoglobin_unit,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -430,11 +438,47 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
     # both federation PATCH paths behave the same.
     from omop_core.services.field_write_service import split_dated_edits
     changes, fact_dates = split_dated_edits(changes, descriptor)
+    # Hemoglobin's source pair (#2318): the form writer must apply the same
+    # validation and normalisation as the native serializer, because the
+    # descriptor now offers `hemoglobin_level` and its unit rather than the
+    # canonical g/dL column.
+    pair_derived = set()
+    if HEMOGLOBIN_PAIR in changes or HEMOGLOBIN_UNIT in changes:
+        if HEMOGLOBIN_UNIT in changes and HEMOGLOBIN_PAIR not in changes:
+            result.rejected[HEMOGLOBIN_UNIT] = 'Send the unit together with its value.'
+            changes.pop(HEMOGLOBIN_UNIT, None)
+        else:
+            sent = (changes.get(HEMOGLOBIN_UNIT)
+                    or getattr(record, HEMOGLOBIN_UNIT, None)
+                    or HEMOGLOBIN_DEFAULT_UNIT)
+            code = normalize_hemoglobin_unit(sent)
+            recognised, canonical = hemoglobin_canonical_from_pair(
+                changes.get(HEMOGLOBIN_PAIR), code,
+            )
+            if code is None:
+                result.rejected[HEMOGLOBIN_UNIT] = 'Choose one of: g/dL, g/L.'
+            elif not recognised:
+                result.rejected[HEMOGLOBIN_PAIR] = 'Enter a number.'
+            if code is None or not recognised:
+                changes.pop(HEMOGLOBIN_PAIR, None)
+                changes.pop(HEMOGLOBIN_UNIT, None)
+            else:
+                changes[HEMOGLOBIN_UNIT] = code
+                changes[HEMOGLOBIN_CANONICAL] = canonical
+                pair_derived.add(HEMOGLOBIN_CANONICAL)
+                if HEMOGLOBIN_PAIR in fact_dates:
+                    # The canonical projection is the same dated result.
+                    fact_dates[HEMOGLOBIN_CANONICAL] = fact_dates[HEMOGLOBIN_PAIR]
     side_effect_projections = {}
     record_profile_fields = set()
     birth_changes = {}
     from omop_core.services.therapy_line_form import THERAPY_LINE_FORM_FIELDS
     for name, value in changes.items():
+        if name == HEMOGLOBIN_UNIT and HEMOGLOBIN_PAIR in changes:
+            # Normalised with the pair above: the unit is its companion, not
+            # an independently editable selectable field.
+            direct[name] = value
+            continue
         entry = descriptor.get(name, {})
         if entry.get('normalised_read_model'):
             # A canonical import is still accepted from a client that speaks
@@ -813,6 +857,7 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
         record = recompute_patient_record_fields(
             PatientRecord.objects.select_for_update().get(pk=record.pk),
             changed_fields=set(direct) | profile_applied | therapy_overrides_applied,
+            pair_derived=pair_derived,
         )
         if therapy_overrides_applied:
             # Active formulas run after the save; reapply the explicit answers
