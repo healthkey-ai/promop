@@ -171,6 +171,8 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
   const inputGraph = inspectInputs(store, state.fields, inputs, new Set([canonical]));
   const editPath = inputGraph.editable || inputGraph.cyclic;
   const writable = !readOnly && state.writable && field.writable && field.target === 'patient_record';
+  // A dated input commits only through its own "Save result" pair, so the
+  // dialog must not promise that every edit saves itself.
   // The gate reason used to be reachable inside the dialog. Rows that lose the
   // dialog must keep it, or the clinical restriction disappears with the pencil.
   const reason = inputsUnavailable || (inputs.length > 0 && !editPath)
@@ -234,11 +236,13 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
           <Dialog.Portal><Dialog.Overlay className="fixed inset-0 z-[60] bg-black/40" />
             <Dialog.Content className="promop-root fixed left-1/2 top-1/2 z-[61] max-h-[85vh] w-[min(32rem,calc(100%-2rem))] -translate-x-1/2 -translate-y-1/2 space-y-4 overflow-y-auto rounded-xl bg-background p-6 shadow-xl">
               <Dialog.Title className="font-semibold">{label}</Dialog.Title>
-              <Dialog.Description className="text-sm text-muted-foreground">{readOnly
+              <Dialog.Description className="text-sm text-muted-foreground">{readOnly || !state.writable
                 ? 'These inputs are read-only in this view.'
-                : gated
-                  ? 'The result stays read-only. Editing these inputs records the source facts it is computed from; it does not set the result itself.'
-                  : 'Computed from the inputs below. Changes save automatically; this result is recalculated.'}</Dialog.Description>
+                : !inputGraph.editable
+                  ? 'These inputs have no edit path in this view; the dependency is shown for reference.'
+                  : gated
+                    ? 'The result stays read-only. Editing these inputs records the source facts it is computed from; it does not set the result itself.'
+                    : 'Computed from the inputs below. This result is recalculated from them.'}</Dialog.Description>
               {field.compatibility_reason && <p role="alert">{field.compatibility_reason}</p>}
               {inputs.map((input) => <PatientFieldEditor key={input} store={store} name={input}
                 readOnly={readOnly} infoHref={infoHref}

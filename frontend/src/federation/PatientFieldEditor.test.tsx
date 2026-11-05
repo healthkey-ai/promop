@@ -423,14 +423,14 @@ describe('negated trial questions (#5663)', () => {
 });
 
 describe('computed value dialog copy', () => {
-  it('says edits save automatically instead of asking for a save step', async () => {
+  it('describes the dependency without promising a save step', async () => {
     const user = userEvent.setup();
     const { store } = await setup();
     render(<PatientFieldEditor store={store} name="bmi" />);
 
     await user.click(screen.getByRole('button', { name: /Edit BMI inputs/ }));
 
-    expect(screen.getByText(/Changes save automatically/)).toBeVisible();
+    expect(screen.getByText(/This result is recalculated from them/)).toBeVisible();
     expect(screen.queryByText(/Save their values/)).not.toBeInTheDocument();
   });
 });
