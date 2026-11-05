@@ -460,39 +460,55 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
             and not canonical_entry.get('read_only_for_caller')
         )
         unit_entry = descriptor.get(HEMOGLOBIN_UNIT) or {}
-        unit_forbidden = (HEMOGLOBIN_UNIT in changes
-                          and unit_entry.get('read_only_for_caller'))
-        if not source_allowed or unit_forbidden:
+        explicit_unit = HEMOGLOBIN_UNIT in changes
+        stored_code = normalize_hemoglobin_unit(
+            getattr(record, HEMOGLOBIN_UNIT, None))
+        requested_code = (normalize_hemoglobin_unit(changes.get(HEMOGLOBIN_UNIT))
+                          if explicit_unit else None)
+        unit_forbidden = bool(unit_entry.get('read_only_for_caller'))
+        # A read-only unit may still be used as it is already stored. Changing
+        # it — or initialising one where the record has none — is the write the
+        # caller is not allowed to make.
+        unit_change_forbidden = unit_forbidden and (
+            (explicit_unit and requested_code != stored_code)
+            or stored_code is None
+        )
+        if not source_allowed:
             # A caller-level restriction on either half rejects the pair as a
             # whole: saving the number without its unit would change the
             # meaning of the value.
-            entry = unit_entry if unit_forbidden else source_entry
-            reason = (entry.get('reason')
+            reason = (source_entry.get('reason')
                       or 'Editing is not available for this caller.')
             for field in (HEMOGLOBIN_PAIR, HEMOGLOBIN_UNIT):
-                if field in changes:
-                    result.rejected[field] = reason
-                    changes.pop(field, None)
-        elif HEMOGLOBIN_UNIT in changes and HEMOGLOBIN_PAIR not in changes:
+                changes.pop(field, None)
+                result.rejected[field] = reason
+        elif explicit_unit and requested_code is None:
+            result.rejected[HEMOGLOBIN_UNIT] = 'Choose one of: g/dL, g/L.'
+            changes.pop(HEMOGLOBIN_PAIR, None)
+            changes.pop(HEMOGLOBIN_UNIT, None)
+        elif unit_change_forbidden:
+            reason = (unit_entry.get('reason')
+                      or 'Editing is not available for this caller.')
+            for field in (HEMOGLOBIN_PAIR, HEMOGLOBIN_UNIT):
+                changes.pop(field, None)
+                result.rejected[field] = reason
+        elif explicit_unit and HEMOGLOBIN_PAIR not in changes:
             result.rejected[HEMOGLOBIN_UNIT] = 'Send the unit together with its value.'
             changes.pop(HEMOGLOBIN_UNIT, None)
         else:
-            sent = (changes.get(HEMOGLOBIN_UNIT)
-                    or getattr(record, HEMOGLOBIN_UNIT, None)
-                    or HEMOGLOBIN_DEFAULT_UNIT)
-            code = normalize_hemoglobin_unit(sent)
+            code = requested_code or stored_code or HEMOGLOBIN_DEFAULT_UNIT
             recognised, canonical_value = hemoglobin_canonical_from_pair(
                 changes.get(HEMOGLOBIN_PAIR), code,
             )
-            if code is None:
-                result.rejected[HEMOGLOBIN_UNIT] = 'Choose one of: g/dL, g/L.'
-            elif not recognised:
+            if not recognised:
                 result.rejected[HEMOGLOBIN_PAIR] = 'Enter a number.'
-            if code is None or not recognised:
                 changes.pop(HEMOGLOBIN_PAIR, None)
                 changes.pop(HEMOGLOBIN_UNIT, None)
             else:
-                changes[HEMOGLOBIN_UNIT] = code
+                if not unit_forbidden:
+                    # A read-only unit is left untouched; the pair's value is
+                    # normalised in the unit the record already has.
+                    changes[HEMOGLOBIN_UNIT] = code
                 if canonical_allowed:
                     # A host that withheld the canonical still gets the pair;
                     # recompute derives the read-model without projecting it.

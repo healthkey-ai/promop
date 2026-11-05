@@ -552,3 +552,60 @@ def test_the_shared_form_cannot_change_a_caller_read_only_unit(api):
     assert float(saved.hemoglobin_level) == 12
     assert saved.hemoglobin_level_units == 'G/DL'
     assert float(saved.hemoglobin_g_dl) == 12
+
+
+def test_a_caller_read_only_unit_cannot_be_initialised(api):
+    from omop_core.services.patient_form import apply_patient_form_patch
+    from omop_core.services.write_descriptor import build_writable_field_descriptor
+
+    record = _record()
+    # The column defaults to G/DL, so clear it: this is the path where the
+    # value would have to initialise a unit the caller may not choose.
+    record.hemoglobin_level_units = None
+    record.save()
+    descriptor = build_writable_field_descriptor()
+    descriptor['hemoglobin_level_units'].update(
+        writable=True, read_only_for_caller=True,
+    )
+
+    saved, result = apply_patient_form_patch(
+        record.person, {'hemoglobin_level': 12}, descriptor=descriptor,
+    )
+
+    # The record has no unit, so writing the value would have to initialise
+    # one the caller may not choose.
+    assert 'hemoglobin_level_units' in result.rejected
+    assert not result.applied
+    saved.refresh_from_db()
+    assert saved.hemoglobin_level is None
+    assert saved.hemoglobin_level_units is None
+    assert saved.hemoglobin_g_dl is None
+
+
+def test_a_caller_read_only_unit_can_be_used_as_stored(api):
+    from omop_core.services.patient_form import apply_patient_form_patch
+    from omop_core.services.write_descriptor import build_writable_field_descriptor
+
+    record = _record()
+    record.hemoglobin_level = 120
+    record.hemoglobin_level_units = 'G/L'
+    record.hemoglobin_g_dl = 12
+    record.user_edited_fields = ['hemoglobin_level', 'hemoglobin_level_units']
+    record.save()
+    descriptor = build_writable_field_descriptor()
+    descriptor['hemoglobin_level_units'].update(
+        writable=True, read_only_for_caller=True,
+    )
+
+    saved, result = apply_patient_form_patch(
+        record.person, {'hemoglobin_level': 130}, descriptor=descriptor,
+    )
+
+    # The value may change in the unit the record already uses; the unit
+    # itself is not rewritten or newly marked as edited.
+    assert 'hemoglobin_level' in result.applied
+    assert 'hemoglobin_level_units' not in result.applied
+    saved.refresh_from_db()
+    assert float(saved.hemoglobin_level) == 130
+    assert saved.hemoglobin_level_units == 'G/L'
+    assert float(saved.hemoglobin_g_dl) == 13.0
