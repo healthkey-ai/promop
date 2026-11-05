@@ -106,7 +106,7 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
   // A field's caller owns its patient-facing wording. PROMOP descriptors provide
   // a generated label as a fallback; when a tab supplies a reviewed label, don't
   // let that generated value replace it (for example "Hiv status" vs "HIV Positive").
-  const label = callerLabel ?? field.label ?? canonical;
+  const label = (callerLabel ?? '').trim() || field.label || canonical;
   // A negated descriptor asks the trial's question over a record that stores the
   // positive answer ("No HIV" over `hiv_status`). The edit lands on the positive
   // column with the value inverted; writing the negated name itself would store
@@ -131,7 +131,8 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
     const readOnlyReason = [blocked, field.reason].filter(Boolean).join(' ')
       || 'Inverted view of the positive status.';
     return <div className="space-y-1" data-field={canonical}>
-      {canWrite ? <Field label={compact ? '' : label} name={canonical} type="boolean"
+      {canWrite ? <Field label={compact ? '' : label} ariaLabel={label}
+          name={canonical} type="boolean"
           value={inverted} triState={source.tri_state === true}
           onChange={(_name, next) => store.enqueue(negatedSource,
             next === true ? false : next === false ? true : next)} />
@@ -253,7 +254,8 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
         </Dialog.Root>
       </div>
     </> : writable ? <>
-      <Field label={compact ? '' : label} name={canonical} type={control}
+      <Field label={compact ? '' : label} ariaLabel={label}
+        name={canonical} type={control}
         value={dated ? datedValue : value} options={field.options ?? []}
         triState={field.tri_state === true} answerLabels={field.answer_labels}
         precision={precision}

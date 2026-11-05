@@ -12,6 +12,7 @@ export default function MultiSelectControl({
   display,
   disabled,
   maxListHeight = "14rem",
+  ariaLabel,
   onChange,
 }: {
   options: Option[];
@@ -19,8 +20,12 @@ export default function MultiSelectControl({
   display: string;
   disabled?: boolean;
   maxListHeight?: string;
+  ariaLabel?: string;
   onChange: (nextValues: unknown[]) => void;
 }) {
+  // A plain button has no separate accessible value, and aria-label replaces
+  // its text. Include the current selection so the value is announced too.
+  const accessibleName = [ariaLabel, display].filter(Boolean).join(': ') || undefined;
   const selectedSet = useMemo(() => {
     return new Set(selectedValues.map(optionKey));
   }, [selectedValues]);
@@ -49,6 +54,7 @@ export default function MultiSelectControl({
       <PopoverTrigger asChild>
         <Button
           type="button"
+          aria-label={accessibleName}
           variant="outline"
           disabled={disabled}
           className={[

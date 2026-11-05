@@ -24,6 +24,9 @@ interface FieldProps {
   vocabSource?: VocabSource | null;
   fullWidth?: boolean;
   precision?: 'day' | 'month' | 'year' | null;
+  /** Accessible name for the control when the visible label is suppressed
+   *  (compact Trial Details mounts) or not programmatically associated. */
+  ariaLabel?: string;
 }
 
 export default function Field({
@@ -39,7 +42,11 @@ export default function Field({
   answerLabels,
   vocabSource,
   precision,
+  ariaLabel,
 }: FieldProps) {
+  // An empty string is not a name: fall through and emit no attribute rather
+  // than aria-label="" which some readers announce as a nameless control.
+  const accessibleName = (ariaLabel?.trim() || label?.trim() || '') || undefined;
   const isDisabled = disabled || readOnly;
   const optionObjects = useMemo(() => optionsToObjects(options), [options]);
 
@@ -81,6 +88,7 @@ export default function Field({
         return (
           <SelectControl
             value={value != null && value !== '' ? String(value) : ''}
+            ariaLabel={accessibleName}
             options={optionObjects}
             disabled={isDisabled}
             placeholder="Select…"
@@ -94,6 +102,7 @@ export default function Field({
       case 'multiselect':
         return (
           <MultiSelectControl
+            ariaLabel={accessibleName}
             options={optionObjects}
             selectedValues={selectedValues}
             display={msDisplay}
@@ -111,6 +120,7 @@ export default function Field({
         return (
           <BooleanControl
             value={value as boolean | null | undefined}
+            ariaLabel={accessibleName}
             disabled={isDisabled}
             triState={triState}
             trueLabel={answerLabels?.true}
@@ -123,6 +133,7 @@ export default function Field({
         return (
           <DateControl
             value={formatDateForInput(value as string)}
+            ariaLabel={accessibleName}
             disabled={isDisabled}
             onChange={(v) => onChange(name, v)}
             precision={precision}
@@ -133,6 +144,7 @@ export default function Field({
         return (
           <TextNumberControl
             type={type}
+            ariaLabel={accessibleName}
             value={value === 0 ? 0 : ((value ?? '') as string | number | null)}
             disabled={isDisabled}
             onChange={(v) => onChange(name, v)}
@@ -141,7 +153,7 @@ export default function Field({
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [type, value, optionObjects, isDisabled, name, selectedValues, msDisplay, triState,
-      answerLabels?.true, answerLabels?.false, precision]);
+      answerLabels?.true, answerLabels?.false, precision, accessibleName]);
 
   return (
     <div className="space-y-1.5">
