@@ -714,12 +714,32 @@ def test_the_shared_form_refuses_a_pair_outside_the_canonical_range(api):
     assert saved.hemoglobin_g_dl is None
 
 
+@pytest.mark.parametrize('value,unit,expected', [
+    (Decimal('-0.05'), 'G/DL', Decimal('-0.1')),
+    (Decimal('-0.04'), 'G/DL', Decimal('0.0')),
+    (Decimal('9999.94'), 'G/DL', Decimal('9999.9')),
+    (Decimal('-9999.94'), 'G/DL', Decimal('-9999.9')),
+    (Decimal('99999.95'), 'G/L', Decimal('10000.0')),
+])
+def test_the_quantisation_matches_the_column(value, unit, expected):
+    from omop_core.services.hemoglobin_units import canonical_from_pair
+
+    recognised, canonical = canonical_from_pair(value, unit)
+
+    assert recognised is True
+    assert canonical == expected
+
+
 def test_recompute_does_not_derive_an_unstorable_canonical():
     from omop_core.services.patient_record_service import recompute_patient_record_fields
 
     record = _record()
     record.hemoglobin_level = Decimal('2000000')
     record.hemoglobin_level_units = 'G/L'
+    # A valid canonical already on the record. Without the range guard the
+    # oversized pair replaces it and the overflow cleaner then nulls it, so
+    # this assertion is what isolates the guard from that cleaner.
+    record.hemoglobin_g_dl = Decimal('11.0')
     record.user_edited_fields = ['hemoglobin_level', 'hemoglobin_level_units']
     record.save()
 
@@ -727,4 +747,7 @@ def test_recompute_does_not_derive_an_unstorable_canonical():
 
     record.refresh_from_db()
     assert record.hemoglobin_level == Decimal('2000000')
-    assert record.hemoglobin_g_dl is None
+    assert record.hemoglobin_g_dl == Decimal('11.0')
+    assert record.hemoglobin_level_units == 'G/L'
+    assert {'hemoglobin_level', 'hemoglobin_level_units'} <= set(
+        record.user_edited_fields or [])
