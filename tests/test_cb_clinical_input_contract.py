@@ -931,3 +931,24 @@ def test_shared_form_clinical_input_revision_repeat_clear_and_author(patient, st
     assert revisions.last().new_value is None
     author = Identity.objects.get(email='clinical-contract@example.test')
     assert all(revision.changed_by == str(author.pk) for revision in revisions)
+
+
+def test_hemoglobin_pair_and_an_echoed_clinical_input_share_one_patch(patient, staff_client):
+    """The pair and the clinical echo must both survive the merged serializer."""
+    record = PatientRecord.objects.get(person=patient)
+    PatientRecord.objects.filter(pk=record.pk).update(prothrombin_time_uln=Decimal('1.2'))
+    url = f'/api/patient-info/{patient.pk}/'
+    payload = staff_client.get(url).data['patient_info']
+
+    response = staff_client.patch(url, {
+        'hemoglobin_level': 120,
+        'hemoglobin_level_units': 'g/L',
+        'prothrombin_time_uln': payload['prothrombin_time_uln'],
+    }, format='json')
+
+    assert response.status_code == 200, response.data
+    record.refresh_from_db()
+    assert record.hemoglobin_g_dl == Decimal('12.0')
+    assert record.hemoglobin_level_units == 'G/L'
+    # The equal echo is not an authored source write.
+    assert not Observation.objects.filter(person=patient).exists()

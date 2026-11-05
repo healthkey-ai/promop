@@ -20,7 +20,7 @@ from omop_core.services.access import get_admin_access_paths, has_org_admin_acce
 from omop_core.services.patient_record_service import PATIENT_RECORD_OMOP_MAPPED_FIELDS
 from omop_core.services.hemoglobin_units import (
     CANONICAL_FIELD, DEFAULT_UNIT, PAIR_FIELD, UNIT_FIELD,
-    canonical_from_pair, normalize_unit,
+    canonical_from_pair, canonical_in_range, normalize_unit,
 )
 from omop_core.services.write_descriptor import get_serializer_read_only_fields
 
@@ -609,6 +609,10 @@ class PatientRecordSerializer(serializers.ModelSerializer):
             )
             if not recognised:
                 raise serializers.ValidationError({pair: 'Enter a number.'})
+            if not canonical_in_range(canonical):
+                raise serializers.ValidationError({
+                    pair: 'Hemoglobin is outside the storable range.',
+                })
             validated[unit_field] = code or DEFAULT_UNIT
             validated[CANONICAL_FIELD] = canonical
             # The view must treat these two differently: the canonical is a
