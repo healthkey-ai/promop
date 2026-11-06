@@ -405,11 +405,42 @@ def _find(person, variant_id):
     return variant
 
 
+_PATIENT_SELF_REPORT = 32865
+
+
+def _assert_owned(parent, type_concept_id):
+    """Refuse a patient-scoped change to a finding the patient did not author.
+
+    `type_concept_id` is the authoring scope the caller declared (the patient
+    path derives 32865 from the authenticated role). A patient request must not
+    rewrite an imported EHR fact — CB pre-checks the same boundary, and this is
+    the writer's own contract (#1918).
+
+    Clinical/import scopes (anything other than 32865) are the reviewed
+    privileged path: they may adopt and re-type an existing finding, which is
+    how a clinician corrects a patient-entered value. The Person match is
+    enforced separately, before this check.
+    """
+    if (type_concept_id == _PATIENT_SELF_REPORT
+            and parent.measurement_type_concept_id != _PATIENT_SELF_REPORT):
+        raise ValidationError({
+            'id': 'This finding comes from a clinical source and cannot be edited here.',
+        })
+
+
 @transaction.atomic
 @suppress_patient_record_refresh()
 def save_variant(person, payload, variant_id=None, type_concept_id=32817, skip_refresh=False):
     PatientRecord.objects.select_for_update().get(person=person)
     previous = _find(person, variant_id) if variant_id is not None else None
+    if variant_id is not None:
+        # `_find` proved the row is this patient's and readable; fetch the parent
+        # to check who authored it before anything is normalised or written.
+        parent = Measurement.objects.filter(
+            person=person, pk=variant_id, is_erroneous=False).first()
+        if parent is None:
+            raise NotFound('Variant not found for this patient.')
+        _assert_owned(parent, type_concept_id)
     data = normalize_variant(payload, previous)
     marker = marker_for_variant(data)
     if data.get('marker_key') and marker is None:
@@ -453,6 +484,8 @@ def save_variant(person, payload, variant_id=None, type_concept_id=32817, skip_r
         )
     else:
         parent = Measurement.objects.get(person=person, pk=variant_id, is_erroneous=False)
+    # A patient edit keeps 32865 (the guard proved it); a clinical caller adopts
+    # the finding and records its own authoring type, as before.
     parent.measurement_type_concept_id = type_concept_id
     parent.measurement_date = data['test_date']
     parent.qualifier_source_value = data['gene']
@@ -522,9 +555,14 @@ def save_variant(person, payload, variant_id=None, type_concept_id=32817, skip_r
 
 @transaction.atomic
 @suppress_patient_record_refresh()
-def delete_variant(person, variant_id, skip_refresh=False):
+def delete_variant(person, variant_id, type_concept_id=32817, skip_refresh=False):
     PatientRecord.objects.select_for_update().get(person=person)
     previous = _find(person, variant_id)
+    parent = Measurement.objects.filter(
+        person=person, pk=variant_id, is_erroneous=False).first()
+    if parent is None:
+        raise NotFound('Variant not found for this patient.')
+    _assert_owned(parent, type_concept_id)
     marker = marker_for_variant(previous)
     if marker:
         recipe_mapping(marker['field_name'])
@@ -559,7 +597,7 @@ def replace_variants(person, payload, type_concept_id=32817):
         saved = save_variant(person, row, variant_id, type_concept_id=type_concept_id)
         keep.add(saved['id'])
     for variant_id in current.keys() - keep:
-        delete_variant(person, variant_id)
+        delete_variant(person, variant_id, type_concept_id=type_concept_id)
 
 
 @transaction.atomic
@@ -587,4 +625,4 @@ def replace_priority_fields(person, values, type_concept_id=32817):
             result = save_variant(person, {**row, 'gene': row.get('gene') or ('' if row.get('genomic_feature') else marker['gene']), 'marker_key': marker['key']}, variant_id, type_concept_id)
             keep.add(result['id'])
         for variant_id in before.keys() - keep:
-            delete_variant(person, variant_id)
+            delete_variant(person, variant_id, type_concept_id=type_concept_id)
