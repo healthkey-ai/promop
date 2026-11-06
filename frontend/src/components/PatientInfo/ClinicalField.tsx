@@ -30,6 +30,10 @@ interface Props {
    *  one reason — repeating the same paragraph beside 25 boxes buries it. The
    *  tab states it once instead. */
   showReason?: boolean;
+  /** The tab's reviewed label already names the unit (for example
+   *  "Hemoglobin (g/dL)"). The federated editor then leaves the unit out of
+   *  its own suffix, so the row shows it once (#5704). */
+  labelIncludesUnit?: boolean;
 }
 
 /**
@@ -59,6 +63,7 @@ export default function ClinicalField({
   date,
   onDateChange,
   showReason = true,
+  labelIncludesUnit = false,
 }: Props) {
   const store = usePatientFormStore();
   const formReadOnly = useContext(PatientFormReadOnlyContext);
@@ -74,7 +79,8 @@ export default function ClinicalField({
   const [ownDate, setOwnDate] = useState(today());
   // Both the tabbed profile and embedded Trial Details use the same control,
   // dependency dialogs and save queue. Dedicated authoring views remain separate.
-  if (store) return <PatientFieldEditor store={store} name={name} label={label} readOnly={formReadOnly} />;
+  if (store) return <PatientFieldEditor store={store} name={name} label={label}
+    labelIncludesUnit={labelIncludesUnit} readOnly={formReadOnly} />;
   // `absent` is stronger than "not writable": the server has no such field.
   const absent = !!unknownField;
   const curated = descriptor?.options?.map((o) => o.value);

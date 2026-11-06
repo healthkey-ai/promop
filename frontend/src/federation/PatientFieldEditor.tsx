@@ -13,6 +13,9 @@ interface Props {
   ancestors?: string[];
   compact?: boolean;
   label?: string;
+  /** The caller owns a reviewed label that already carries this field's unit.
+   * Do not append the descriptor unit beside it: one unit, one source (#5704). */
+  labelIncludesUnit?: boolean;
 }
 
 /** Today in the browser's zone, not UTC: a result date is a local calendar day. */
@@ -88,7 +91,7 @@ function inspectInputs(
 
 /** CB's computed → source-input dialog, with recursive drill-in. Medical
  * metadata and values come only from PROMOP, never the host's trial uoptions. */
-export default function PatientFieldEditor({ store, name, readOnly, infoHref, ancestors = [], compact, label: callerLabel }: Props) {
+export default function PatientFieldEditor({ store, name, readOnly, infoHref, ancestors = [], compact, label: callerLabel, labelIncludesUnit = false }: Props) {
   const state = usePatientFormSnapshot(store);
   const [open, setOpen] = useState(false);
   const [resultDateOverride, setResultDateOverride] = useState<string | null>(null);
@@ -367,7 +370,7 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
         <p className="text-xs text-muted-foreground">{reason} {infoHref && <a href={infoHref}>Open Your Info</a>} {field.retryable &&
           <button type="button" className="underline" onClick={() => void store.load()}>Retry</button>}</p></>}
     {field.options_note && <p role="status" className="text-xs text-muted-foreground">{field.options_note}</p>}
-    {!showUnitPicker && (field.unit ?? field.projection?.unit)
+    {!showUnitPicker && !labelIncludesUnit && (field.unit ?? field.projection?.unit)
       && <span className="text-xs text-muted-foreground">{field.unit ?? field.projection?.unit}</span>}
     {writable && field.projection?.omop_table === 'measurement' && !dated
       && <p className="text-xs text-muted-foreground">This edit is recorded with today’s date.</p>}

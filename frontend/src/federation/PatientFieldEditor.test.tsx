@@ -657,6 +657,111 @@ describe('dated lab results', () => {
   });
 });
 
+describe('single unit display (#5704)', () => {
+  function unitRow(extra: Record<string, unknown> = {}) {
+    return {
+      hemoglobin_g_dl: {
+        writable: true, target: 'patient_record', control: 'number',
+        label: 'Hemoglobin', unit: 'g/dL', ...extra,
+      },
+    };
+  }
+
+  it('does not append the unit when the caller label already carries it', async () => {
+    const { store } = await setup(unitRow(), { hemoglobin_g_dl: 12.5 });
+    render(<PatientFieldEditor store={store} name="hemoglobin_g_dl"
+      label="Hemoglobin (g/dL)" labelIncludesUnit />);
+
+    expect(screen.getByText('Hemoglobin (g/dL)')).toBeVisible();
+    expect(screen.queryByText('g/dL')).not.toBeInTheDocument();
+  });
+
+  it('keeps the descriptor unit when the caller label does not carry it', async () => {
+    const { store } = await setup(unitRow(), { hemoglobin_g_dl: 12.5 });
+    render(<PatientFieldEditor store={store} name="hemoglobin_g_dl" label="Hemoglobin" />);
+
+    expect(screen.getByText('Hemoglobin')).toBeVisible();
+    expect(screen.getByText('g/dL')).toBeVisible();
+  });
+
+  it('uses the projection unit as the single fallback', async () => {
+    const fields = {
+      hemoglobin_g_dl: {
+        writable: true, target: 'patient_record', control: 'number',
+        label: 'Hemoglobin', projection: { omop_table: 'measurement', unit: 'g/dL' },
+      },
+    };
+    const { store } = await setup(fields, { hemoglobin_g_dl: 12.5 });
+
+    const { unmount } = render(<PatientFieldEditor store={store} name="hemoglobin_g_dl"
+      label="Hemoglobin (g/dL)" labelIncludesUnit />);
+    expect(screen.queryByText('g/dL')).not.toBeInTheDocument();
+    unmount();
+
+    render(<PatientFieldEditor store={store} name="hemoglobin_g_dl" label="Hemoglobin" />);
+    expect(screen.getByText('g/dL')).toBeVisible();
+  });
+
+  it('suppresses a suffix that differs only in notation', async () => {
+    const { store } = await setup({
+      wbc_count_thousand_per_ul: {
+        writable: true, target: 'patient_record', control: 'number',
+        label: 'WBC Count', unit: '10*3/uL',
+      },
+    }, { wbc_count_thousand_per_ul: 7.5 });
+    render(<PatientFieldEditor store={store} name="wbc_count_thousand_per_ul"
+      label="WBC Count (10³/µL)" labelIncludesUnit />);
+
+    expect(screen.getByText(/WBC Count \(10³\/µL\)/)).toBeVisible();
+    expect(screen.queryByText('10*3/uL')).not.toBeInTheDocument();
+  });
+
+  it('does not render a second, dimensionless unit for INR', async () => {
+    const { store } = await setup({
+      inr: { writable: true, target: 'patient_record', control: 'number',
+        label: 'INR', unit: '{INR}' },
+    }, { inr: 1.1 });
+    render(<PatientFieldEditor store={store} name="inr" label="INR" labelIncludesUnit />);
+
+    expect(screen.getByText('INR')).toBeVisible();
+    expect(screen.queryByText('{INR}')).not.toBeInTheDocument();
+  });
+
+  it('applies the same rule to a read-only row', async () => {
+    const { store } = await setup({
+      hemoglobin_g_dl: { writable: false, label: 'Hemoglobin', unit: 'g/dL',
+        reason: 'Read-only.' },
+    }, { hemoglobin_g_dl: 12.5 });
+    render(<PatientFieldEditor store={store} name="hemoglobin_g_dl"
+      label="Hemoglobin (g/dL)" labelIncludesUnit />);
+
+    expect(screen.getByText(/Hemoglobin \(g\/dL\)/)).toBeVisible();
+    expect(screen.queryByText('g/dL')).not.toBeInTheDocument();
+  });
+
+  it('keeps the unit picker when the row owns a source pair', async () => {
+    const pairFields = {
+      hemoglobin_level: {
+        writable: true, target: 'patient_record', control: 'number',
+        label: 'Hemoglobin', unit_options: [{ value: 'G/DL', label: 'g/dL' },
+          { value: 'G/L', label: 'g/L' }],
+      },
+      hemoglobin_level_units: {
+        writable: false, kind: 'selectable', qualifies: 'hemoglobin_level',
+        label: 'Hemoglobin unit',
+        unit_options: [{ value: 'G/DL', label: 'g/dL' }, { value: 'G/L', label: 'g/L' }],
+      },
+    };
+    const { store } = await setup(pairFields,
+      { hemoglobin_level: 12, hemoglobin_level_units: 'G/DL' });
+    render(<PatientFieldEditor store={store} name="hemoglobin_level"
+      label="Hemoglobin (g/dL)" labelIncludesUnit />);
+
+    expect(screen.getByRole('combobox', { name: 'Unit for Hemoglobin (g/dL)' }))
+      .toHaveValue('G/DL');
+  });
+});
+
 describe('source-pair unit picker (#5700)', () => {
   const pairFields = {
     hemoglobin_level: {
