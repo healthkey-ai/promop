@@ -3749,7 +3749,7 @@ class PatientRecord(models.Model):
     consent_capability = models.BooleanField(help_text="Does the patient have cognitive ability to consent?", blank=True, null=True, default=None)
     caregiver_availability_status = models.BooleanField(help_text="Is there an available caregiver for the patient?", blank=True, null=True, default=None)
     contraceptive_use = models.BooleanField(help_text="Does the patient use contraceptives?", blank=True, null=True, default=None)
-    no_pregnancy_or_lactation_status = models.BooleanField(help_text="Does the patient self assess as not pregnant or lactating?", blank=False, null=False, default=True)
+    no_pregnancy_or_lactation_status = models.BooleanField(help_text="Does the patient self assess as not pregnant or lactating?", blank=True, null=True, default=None)
     pregnancy_test_result = models.BooleanField(help_text="Does the female patient of childbearing age have a negative test result for pregnancy?", blank=False, null=False, default=False)
     no_mental_health_disorder_status = models.BooleanField(help_text="Does the patient have a mental health disorder?", blank=True, null=True, default=None)
     no_concomitant_medication_status = models.BooleanField(help_text="Does the patient have concomitant medication?", blank=False, null=False, default=True)
@@ -4647,7 +4647,8 @@ class FieldFormula(models.Model):
             models.CheckConstraint(
                 condition=(
                     ~Q(field_name__in=('no_active_infection_status',
-                                       'no_other_active_malignancies'))
+                                       'no_other_active_malignancies',
+                                       'no_pregnancy_or_lactation_status'))
                     | Q(is_active=False)
                 ),
                 name='field_formula_explicit_answer_inactive',

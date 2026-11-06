@@ -5334,11 +5334,13 @@ def _apply_active_field_formulas(patient_info: PatientRecord) -> set[str]:
         mode='computed', mapping__status='approved',
     ).values_list('field_name', flat=True))
     changed_fields = set()
-    # #5666: these two are explicit answers. The database also refuses an
+    # #5666/#2343: these are explicit answers. The database also refuses an
     # active formula row, but the evaluator skips them defensively so an older
-    # schema or a stale object cannot overwrite an attestation.
+    # schema or a stale object cannot overwrite an attestation or a
+    # self-assessment.
     explicit_answer_fields = {
         'no_active_infection_status', 'no_other_active_malignancies',
+        'no_pregnancy_or_lactation_status',
     }
     for field_formula in FieldFormula.objects.filter(is_active=True).order_by('field_name'):
         if field_formula.field_name in explicit_answer_fields:
