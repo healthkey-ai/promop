@@ -23105,6 +23105,18 @@ class CodeMappingServiceTokenReadTest(TestCase):
             destination_vocabulary_id='LOINC', omop_table='measurement',
             status='proposed', origin='import', origin_system='hk-labs',
         )
+        # One patient's result behind the approved code: what a curator sees as
+        # a sample, and what a machine reader must not.
+        from omop_core.models import PatientSourceCode
+        cls.person = Person.objects.create(person_id=2340001)
+        PatientSourceCode.objects.create(
+            person=cls.person, source_value='MPROT', source_vocabulary_id='urn:oid:2.340.1',
+            omop_table='measurement', example_quantity='3.1', source_unit='g/dL',
+            source_metadata={'basedOn': [{'display': 'SPEP order 2340'}]},
+        )
+        cls.staff = Identity.objects.create_user(
+            email='svc_read_staff_2340@t.com', password='x', is_staff=True,
+        )
 
     def setUp(self):
         SourceCodeConceptMapping.objects.filter(origin_system='hk-labs-seed').delete()
@@ -23139,6 +23151,61 @@ class CodeMappingServiceTokenReadTest(TestCase):
         detail = client.get(f'/api/v1/code-mappings/{self.approved.pk}/')
         self.assertEqual(detail.status_code, 200, detail.content)
         self.assertEqual(detail.data['status'], 'approved')
+
+    @override_settings(SERVICE_AUTH_TOKENS={
+        'dbt': {'token': 'dbt-read-secret-0000000000000000000000000', 'scopes': 'system/*.read'},
+    }, SERVICE_AUTH_TOKEN='')
+    def test_a_machine_reads_the_row_without_the_patient_evidence(self):
+        source = {'source': 'urn:oid:2.340.1'}
+        detail_url = f'/api/v1/code-mappings/{self.approved.pk}/'
+
+        # A curator sees the sample and the source evidence ...
+        curator = APIClient()
+        curator.force_authenticate(user=self.staff)
+        row = next(r for r in curator.get('/api/v1/code-mappings/', source).data
+                   if r['source_code'] == 'MPROT')
+        self.assertEqual(row['sample_quantities'], ['3.1'])
+        self.assertEqual(row['based_on'], ['SPEP order 2340'])
+        self.assertIn('source_evidence', curator.get(detail_url).data)
+
+        # ... a machine reads the table alone, on every list shape.
+        client = self._bearer('dbt-read-secret-0000000000000000000000000')
+        for params in (source, {**source, 'browse': '1'}):
+            with self.subTest(params=params):
+                response = client.get('/api/v1/code-mappings/', params)
+                self.assertEqual(response.status_code, 200, response.content)
+                rows = response.data if isinstance(response.data, list) else response.data['results']
+                row = next(r for r in rows if r['source_code'] == 'MPROT')
+                self.assertEqual(row['status'], 'approved')
+                self.assertEqual(row['destination_concept_code'], '33358-3')
+                self.assertEqual(row['sample_quantities'], [])
+                self.assertEqual(row['example_quantity'], '')
+                self.assertEqual(row['based_on'], [])
+        detail = client.get(detail_url)
+        self.assertEqual(detail.status_code, 200, detail.content)
+        self.assertEqual(detail.data['status'], 'approved')
+        self.assertNotIn('source_evidence', detail.data)
+        self.assertEqual(detail.data['sample_quantities'], [])
+        self.assertEqual(detail.data['based_on'], [])
+
+    @override_settings(SERVICE_AUTH_TOKENS={
+        'etl': {'token': 'etl-write-secret-000000000000000000000000', 'scopes': 'system/etl.write'},
+    }, SERVICE_AUTH_TOKEN='')
+    def test_a_service_identity_with_a_role_is_still_held_to_the_scope(self):
+        # Authenticate once so the urn:service identity exists, then grant it
+        # the role that used to open the write verbs to any caller holding it.
+        client = self._bearer('etl-write-secret-000000000000000000000000')
+        self.assertEqual(client.get('/api/v1/code-mappings/').status_code, 403)
+        identity = Identity.objects.get(issuer='urn:service', sub='etl')
+        org = Organization.objects.create(name='Service Role Org 2340', slug='service-role-org-2340')
+        GroupAccess.objects.create(identity=identity, org=org, role='org_admin')
+
+        self.assertEqual(client.get('/api/v1/code-mappings/').status_code, 403)
+        url = f'/api/v1/code-mappings/{self.proposed.pk}/'
+        self.assertEqual(client.patch(url, {'status': 'approved'}, format='json').status_code, 403)
+        self.assertEqual(client.delete(url).status_code, 403)
+        self.proposed.refresh_from_db()
+        self.assertEqual(self.proposed.status, 'proposed')
 
     @override_settings(SERVICE_AUTH_TOKENS={
         'dbt': {'token': 'dbt-read-secret-0000000000000000000000000', 'scopes': 'system/*.read'},

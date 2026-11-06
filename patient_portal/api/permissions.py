@@ -119,7 +119,22 @@ _ETL_DELETE_SCOPE = 'system/etl.delete'
 # Vocabulary/concept data is reference (system) data, not patient data, so a
 # service consumer may read it with a system/reference scope in addition to the
 # patient/user read scopes. See healthkey-ai/promop#344.
-_VOCAB_READ_SCOPES = _READ_SCOPES | frozenset(('system/*.read',))
+SYSTEM_READ_SCOPE = 'system/*.read'
+_VOCAB_READ_SCOPES = _READ_SCOPES | frozenset((SYSTEM_READ_SCOPE,))
+
+
+def has_system_read_grant(request) -> bool:
+    """Whether a service credential may read reference data on this request.
+
+    Safe verbs only, and only with ``system/*.read``: the scope that reads the
+    vocabulary releases (#344) and the code-mapping table (#2340). A human is
+    never admitted here; the view decides that by role.
+    """
+    return (
+        is_service_token(request)
+        and request.method in _SAFE_METHODS
+        and SYSTEM_READ_SCOPE in service_token_scopes(request).split()
+    )
 
 
 class ScopedTokenPermission(BasePermission):

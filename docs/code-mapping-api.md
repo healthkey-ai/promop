@@ -207,20 +207,27 @@ Authorization: Bearer <service credential>
 
 The response is a bare JSON array of mapping rows, 100 to a page. Pagination is
 in the headers: `X-Total-Count`, `X-Page`, `X-Page-Size`, and a `Link` header
-with `rel="next"` and `rel="prev"` URLs. Walk `next` until the header is absent.
+with `rel="next"` and `rel="prev"` URLs. Follow the `rel="next"` URL until the
+`Link` header carries none (on the last page it still carries `rel="prev"`).
 Filters: `status` (`approved`, `proposed`, `rejected`), `source` (a source
 vocabulary id), `organization` (an organization slug, or `__none__` for
-instance-wide rows) and `search`.
+instance-wide rows) and `search`, which matches the source code, the source
+vocabulary id and the destination concept's name and code, not the source
+description.
 
 Each row carries `status`, `source_vocabulary_id`, `source_code`,
 `source_code_description`, the destination (`destination_concept_id`,
 `destination_concept_code`, `destination_concept_name`,
 `destination_vocabulary_id`, `destination_domain_id`, `destination_omop_table`),
 `organization_slug`, `reviewer` and `reviewed_at`, and `occurrence_count`. A
-queue row with no destination yet reports `status: "unmapped"`. Consume only
-`approved` rows as a vocabulary; `proposed` and `unmapped` are gaps.
+queue row with no destination yet has `destination_concept_id: null` and,
+normally, `status: "proposed"`. Consume as a vocabulary only `approved` rows
+with a destination; everything else is a gap.
 
-`GET /api/v1/code-mappings/<id>/` returns one row with its source evidence.
+A machine reads the table, not the curation evidence: for a service credential
+the per-patient samples a curator sees (`example_quantity`, `sample_quantities`,
+`based_on`) come back empty, and `GET /api/v1/code-mappings/<id>/` returns the
+row without `source_evidence`, the stored metadata as the code arrived.
 
 The read is the whole of what a machine credential may do here. POST, PATCH
 and DELETE still require a professional session, so every change to a mapping

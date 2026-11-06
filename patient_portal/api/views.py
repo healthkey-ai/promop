@@ -141,7 +141,7 @@ from .permissions import (
     PatientCrudPermission, GenomicsCrudPermission,
     PatientDeletePermission, PatientSelfScopePermission, ScopedTokenPermission,
     VocabReadPermission, LabSyncPermission, EtlProvisionPermission,
-    get_request_org, is_service_token, is_machine_request, service_token_scopes,
+    get_request_org, is_service_token, is_machine_request, has_system_read_grant,
 )
 from .providers.base import TokenClaims
 from .therapy_line_import import TherapyLineImportSerializer, import_therapy_lines
@@ -12227,9 +12227,6 @@ def _can_manage_field_mappings(user):
     return bool(getattr(user, 'is_staff', False) or has_professional_access(user))
 
 
-_MAPPING_READ_SCOPE = 'system/*.read'
-
-
 def _can_read_mappings(request):
     """Whether the caller may read the code-mapping table (#2340).
 
@@ -12238,14 +12235,25 @@ def _can_read_mappings(request):
     only, and only with ``system/*.read``: mapping rows are curated reference
     data, the same class as the vocabulary releases that scope already reads
     (#344). Nothing a machine can do here changes a mapping -- POST, PATCH and
-    DELETE still require a professional session.
+    DELETE still require a professional session -- and a service token that
+    does hold a role is still held to the scope, not the role.
     """
     if is_service_token(request):
-        return (
-            request.method in ('GET', 'HEAD', 'OPTIONS')
-            and _MAPPING_READ_SCOPE in service_token_scopes(request).split()
-        )
+        return has_system_read_grant(request)
     return _can_manage_field_mappings(request.user)
+
+
+def _without_source_samples(mappings):
+    """Blank the per-patient samples on a page of mappings for a machine reader.
+
+    ``attach_source_samples`` draws ``example_quantity``, ``sample_quantities``
+    and ``based_on`` from PatientSourceCode rows: a few real result values and
+    order labels per code, shown to curators as evidence. A service credential
+    reads the table, not the evidence, so it gets the row without them.
+    """
+    for mapping in mappings:
+        mapping._source_samples = {'quantities': [], 'based_on': [], 'units': []}
+    return mappings
 
 
 def _can_approve_mappings(user):
@@ -13391,7 +13399,12 @@ def code_mapping_list(request):
             return Response({'duplicate_summaries': mapping_duplicates(mappings, source, compact=True)})
         if request.query_params.get('browse') == '1':
             from omop_core.services.mapping_browse import browse_mappings
-            return Response(browse_mappings(mappings, request.query_params, _serialize_code_mapping_row))
+            serialize = _serialize_code_mapping_row
+            if is_service_token(request):
+                def serialize(concept, mapping, *args, **kwargs):
+                    _without_source_samples([mapping])
+                    return _serialize_code_mapping_row(concept, mapping, *args, **kwargs)
+            return Response(browse_mappings(mappings, request.query_params, serialize))
         source_filter = request.query_params.get('source')
         if source_filter is not None:
             mappings = mappings.filter(source_vocabulary_id=source_filter)
@@ -13427,6 +13440,8 @@ def code_mapping_list(request):
         from omop_core.services.mapping_samples import attach_source_samples
         mappings = list(mappings)
         attach_source_samples(mappings)
+        if is_service_token(request):
+            _without_source_samples(mappings)
         source_metadata = mapping_source_retirement(mappings)
         rows = [
             _serialize_code_mapping_row(
@@ -13489,9 +13504,14 @@ def code_mapping_detail(request, mapping_id):
     if request.method == 'GET':
         from omop_core.services.mapping_destinations import destination_options
         options = destination_options(mapping)
+        # The source evidence is the stored metadata as the code arrived, often
+        # a FHIR fragment, and is for curators; a machine reads the row alone.
+        machine = is_service_token(request)
+        if machine:
+            _without_source_samples([mapping])
         payload = _serialize_code_mapping_row(
             mapping.target_concept, mapping, destination_count=len(options),
-            include_source_evidence=True,
+            include_source_evidence=not machine,
         )
         payload['destination_options'] = options
         return Response(payload)
