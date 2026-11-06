@@ -23059,6 +23059,202 @@ class CodeMappingApiTest(TestCase):
         self.assertEqual(set(tables.values()), set(CLINICAL_TABLES))
 
 
+class CodeMappingServiceTokenReadTest(TestCase):
+    """#2340 -- a service credential may *read* the code-mapping table.
+
+    HealthTree pulls the table into dbt unattended, so the read cannot depend
+    on a logged-in analyst. Mapping rows are curated reference data, the same
+    class as the vocabulary releases ``system/*.read`` already reads (#344), so
+    that scope opens the GET verbs. Nothing else: a machine with that scope
+    still cannot create, edit or delete a mapping, and the scope still reaches
+    no patient data.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        Domain.objects.get_or_create(
+            domain_id='Measurement',
+            defaults={'domain_name': 'Measurement', 'domain_concept_id': 21},
+        )
+        ConceptClass.objects.get_or_create(
+            concept_class_id='Lab Test',
+            defaults={'concept_class_name': 'Lab Test', 'concept_class_concept_id': 0},
+        )
+        Vocabulary.objects.get_or_create(
+            vocabulary_id='LOINC',
+            defaults={
+                'vocabulary_name': 'LOINC', 'vocabulary_reference': 'https://loinc.org',
+                'vocabulary_version': '2.77', 'vocabulary_concept_id': 0,
+            },
+        )
+        cls.concept = Concept.objects.create(
+            concept_id=2340001, concept_name='Protein.monoclonal [Mass/volume] in Serum',
+            domain_id='Measurement', vocabulary_id='LOINC', concept_class_id='Lab Test',
+            standard_concept='S', concept_code='33358-3',
+            valid_start_date=date(2000, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+        cls.approved = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='urn:oid:2.340.1', source_code='MPROT',
+            source_code_description='M protein, serum', target_concept=cls.concept,
+            destination_vocabulary_id='LOINC', omop_table='measurement',
+            status='approved', origin='import', origin_system='hk-labs',
+        )
+        cls.proposed = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='urn:oid:2.340.1', source_code='MPROT2',
+            source_code_description='M protein, serum (old)', target_concept=cls.concept,
+            destination_vocabulary_id='LOINC', omop_table='measurement',
+            status='proposed', origin='import', origin_system='hk-labs',
+        )
+        # One patient's result behind the approved code: what a curator sees as
+        # a sample, and what a machine reader must not.
+        from omop_core.models import PatientSourceCode
+        cls.person = Person.objects.create(person_id=2340001)
+        PatientSourceCode.objects.create(
+            person=cls.person, source_value='MPROT', source_vocabulary_id='urn:oid:2.340.1',
+            omop_table='measurement', example_quantity='3.1', source_unit='g/dL',
+            source_metadata={'basedOn': [{'display': 'SPEP order 2340'}]},
+        )
+        cls.staff = Identity.objects.create_user(
+            email='svc_read_staff_2340@t.com', password='x', is_staff=True,
+        )
+
+    def setUp(self):
+        SourceCodeConceptMapping.objects.filter(origin_system='hk-labs-seed').delete()
+
+    @staticmethod
+    def _bearer(secret):
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION=f'Bearer {secret}')
+        return client
+
+    @override_settings(SERVICE_AUTH_TOKENS={
+        'dbt': {'token': 'dbt-read-secret-0000000000000000000000000', 'scopes': 'system/*.read'},
+    }, SERVICE_AUTH_TOKEN='')
+    def test_system_read_token_lists_and_reads_mappings(self):
+        client = self._bearer('dbt-read-secret-0000000000000000000000000')
+        source = {'source': 'urn:oid:2.340.1'}
+        response = client.get('/api/v1/code-mappings/', {**source, 'status': 'approved'})
+        self.assertEqual(response.status_code, 200, response.content)
+        rows = response.data
+        self.assertEqual([r['source_code'] for r in rows], ['MPROT'])
+        self.assertEqual(rows[0]['status'], 'approved')
+        self.assertEqual(rows[0]['destination_concept_code'], '33358-3')
+        # A bare array, paginated through headers: that is what a dbt source walks.
+        self.assertEqual(response['X-Total-Count'], '1')
+        self.assertEqual(response['X-Page'], '1')
+        self.assertNotIn('Link', response)
+
+        response = client.get('/api/v1/code-mappings/', source)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual({r['status'] for r in response.data}, {'approved', 'proposed'})
+
+        detail = client.get(f'/api/v1/code-mappings/{self.approved.pk}/')
+        self.assertEqual(detail.status_code, 200, detail.content)
+        self.assertEqual(detail.data['status'], 'approved')
+
+    @override_settings(SERVICE_AUTH_TOKENS={
+        'dbt': {'token': 'dbt-read-secret-0000000000000000000000000', 'scopes': 'system/*.read'},
+    }, SERVICE_AUTH_TOKEN='')
+    def test_a_machine_reads_the_row_without_the_patient_evidence(self):
+        source = {'source': 'urn:oid:2.340.1'}
+        detail_url = f'/api/v1/code-mappings/{self.approved.pk}/'
+
+        # A curator sees the sample and the source evidence ...
+        curator = APIClient()
+        curator.force_authenticate(user=self.staff)
+        row = next(r for r in curator.get('/api/v1/code-mappings/', source).data
+                   if r['source_code'] == 'MPROT')
+        self.assertEqual(row['sample_quantities'], ['3.1'])
+        self.assertEqual(row['based_on'], ['SPEP order 2340'])
+        self.assertIn('source_evidence', curator.get(detail_url).data)
+
+        # ... a machine reads the table alone, on every list shape.
+        client = self._bearer('dbt-read-secret-0000000000000000000000000')
+        for params in (source, {**source, 'browse': '1'}):
+            with self.subTest(params=params):
+                response = client.get('/api/v1/code-mappings/', params)
+                self.assertEqual(response.status_code, 200, response.content)
+                rows = response.data if isinstance(response.data, list) else response.data['results']
+                row = next(r for r in rows if r['source_code'] == 'MPROT')
+                self.assertEqual(row['status'], 'approved')
+                self.assertEqual(row['destination_concept_code'], '33358-3')
+                self.assertEqual(row['sample_quantities'], [])
+                self.assertEqual(row['example_quantity'], '')
+                self.assertEqual(row['based_on'], [])
+        detail = client.get(detail_url)
+        self.assertEqual(detail.status_code, 200, detail.content)
+        self.assertEqual(detail.data['status'], 'approved')
+        self.assertNotIn('source_evidence', detail.data)
+        self.assertEqual(detail.data['sample_quantities'], [])
+        self.assertEqual(detail.data['based_on'], [])
+
+    @override_settings(SERVICE_AUTH_TOKENS={
+        'etl': {'token': 'etl-write-secret-000000000000000000000000', 'scopes': 'system/etl.write'},
+    }, SERVICE_AUTH_TOKEN='')
+    def test_a_service_identity_with_a_role_is_still_held_to_the_scope(self):
+        # Authenticate once so the urn:service identity exists, then grant it
+        # the role that used to open the write verbs to any caller holding it.
+        client = self._bearer('etl-write-secret-000000000000000000000000')
+        self.assertEqual(client.get('/api/v1/code-mappings/').status_code, 403)
+        identity = Identity.objects.get(issuer='urn:service', sub='etl')
+        org = Organization.objects.create(name='Service Role Org 2340', slug='service-role-org-2340')
+        GroupAccess.objects.create(identity=identity, org=org, role='org_admin')
+
+        self.assertEqual(client.get('/api/v1/code-mappings/').status_code, 403)
+        url = f'/api/v1/code-mappings/{self.proposed.pk}/'
+        self.assertEqual(client.patch(url, {'status': 'approved'}, format='json').status_code, 403)
+        self.assertEqual(client.delete(url).status_code, 403)
+        self.proposed.refresh_from_db()
+        self.assertEqual(self.proposed.status, 'proposed')
+
+    @override_settings(SERVICE_AUTH_TOKENS={
+        'dbt': {'token': 'dbt-read-secret-0000000000000000000000000', 'scopes': 'system/*.read'},
+    }, SERVICE_AUTH_TOKEN='')
+    def test_system_read_token_cannot_change_a_mapping(self):
+        client = self._bearer('dbt-read-secret-0000000000000000000000000')
+        url = f'/api/v1/code-mappings/{self.proposed.pk}/'
+        for method, target, body in (
+            ('post', '/api/v1/code-mappings/', {
+                'source_vocabulary_id': 'urn:oid:2.340.1', 'source_code': 'NEW',
+                'omop_table': 'measurement', 'destination_concept_id': self.concept.pk,
+            }),
+            ('patch', url, {'status': 'approved'}),
+            ('delete', url, None),
+        ):
+            with self.subTest(method=method):
+                response = getattr(client, method)(target, body, format='json')
+                self.assertEqual(response.status_code, 403, response.content)
+        self.proposed.refresh_from_db()
+        self.assertEqual(self.proposed.status, 'proposed')
+        self.assertFalse(SourceCodeConceptMapping.objects.filter(source_code='NEW').exists())
+
+    @override_settings(SERVICE_AUTH_TOKENS={
+        'etl': {'token': 'etl-write-secret-000000000000000000000000', 'scopes': 'system/etl.write'},
+        'phr': {'token': 'phr-read-secret-0000000000000000000000000', 'scopes': 'patient/*.read'},
+    }, SERVICE_AUTH_TOKEN='')
+    def test_tokens_without_the_system_read_scope_are_refused(self):
+        for secret in ('etl-write-secret-000000000000000000000000',
+                       'phr-read-secret-0000000000000000000000000'):
+            with self.subTest(secret=secret[:3]):
+                client = self._bearer(secret)
+                self.assertEqual(client.get('/api/v1/code-mappings/').status_code, 403)
+                self.assertEqual(
+                    client.get(f'/api/v1/code-mappings/{self.approved.pk}/').status_code, 403)
+
+    @override_settings(SERVICE_AUTH_TOKENS={
+        'dbt': {'token': 'dbt-read-secret-0000000000000000000000000', 'scopes': 'system/*.read'},
+    }, SERVICE_AUTH_TOKEN='')
+    def test_system_read_scope_still_reaches_no_patient_data(self):
+        client = self._bearer('dbt-read-secret-0000000000000000000000000')
+        self.assertEqual(client.get('/api/v1/patient-records/').status_code, 403)
+
+    def test_a_user_without_a_professional_role_is_still_refused(self):
+        user = Identity.objects.create_user(email='no_role_2340@t.com', password='x')
+        client = APIClient()
+        client.force_authenticate(user=user)
+        self.assertEqual(client.get('/api/v1/code-mappings/').status_code, 403)
+
+
 class RunsRepointJobsMixin:
     """Run a mapping save's queued re-point as soon as it is queued.
 
