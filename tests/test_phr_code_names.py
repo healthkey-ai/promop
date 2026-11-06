@@ -212,3 +212,83 @@ def test_a_vaccine_code_recorded_in_cvx_is_named_from_its_mapping_row(record):
     meds = signed_in(record).get('/api/v1/phr/medications/').data['medications']
 
     assert [m['name'] for m in meds] == ['pneumococcal conjugate vaccine, 13 valent']
+
+
+# #2349: the name is often only on the patient's own source code row, in what
+# the ETL sent with it (``source_metadata``).
+
+MEDI_SPAN = 'urn:oid:2.16.840.1.113883.6.253'
+
+
+def recorded_with(record, code, system, table, **metadata):
+    return PatientSourceCode.objects.create(person=record.person, source_value=code, source_vocabulary_id=system,
+                                            omop_table=table, source_metadata=metadata)
+
+
+def test_a_hospital_procedure_id_is_named_by_the_patient_s_source_code_row(record):
+    recorded_with(record, '18417', EPIC_PROCEDURES, '', text=['KAPPA LAMBDA QUANT FLC'], display=['KAPPA/LAMBDA FLC'])
+    recorded(record, '18417', EPIC_PROCEDURES, 'procedure_occurrence')
+    unmapped_procedure(record, 1, '18417')
+
+    items = signed_in(record).get('/api/v1/phr/procedures/').data['procedures']
+
+    assert [p['name'] for p in items] == ['KAPPA LAMBDA QUANT FLC']
+
+
+def test_a_mapping_row_s_name_beats_the_patient_s_source_code_row(record):
+    recorded_with(record, '23521', EPIC_PROCEDURES, 'procedure_occurrence', text=['RBC REQ'])
+    mapped_name(EPIC_PROCEDURES, '23521', 'RBC product request')
+    unmapped_procedure(record, 1, '23521')
+
+    items = signed_in(record).get('/api/v1/phr/procedures/').data['procedures']
+
+    assert [p['name'] for p in items] == ['RBC product request']
+
+
+def test_a_medicine_filed_under_no_table_is_named_in_the_system_the_patient_files_medicines_in(record):
+    concept('RxNorm', '33014', 'not this medicine')
+    recorded_with(record, '33014', MEDI_SPAN, '', text=['potassium chloride'])
+    recorded(record, '82160', MEDI_SPAN, 'drug_exposure')
+    unmapped_drug(record, '33014')
+
+    meds = signed_in(record).get('/api/v1/phr/medications/').data['medications']
+
+    assert [m['name'] for m in meds] == ['potassium chloride']
+
+
+def test_the_row_filed_under_the_table_names_the_code_first(record):
+    recorded_with(record, '82160', MEDI_SPAN, '', text=['potassium chloride 20 MEQ tablet'])
+    recorded_with(record, '82160', MEDI_SPAN, 'drug_exposure', text=['potassium chloride (K-DUR) 20 MEQ tablet'])
+    unmapped_drug(record, '82160')
+
+    meds = signed_in(record).get('/api/v1/phr/medications/').data['medications']
+
+    assert [m['name'] for m in meds] == ['potassium chloride (K-DUR) 20 MEQ tablet']
+
+
+def test_a_source_code_row_in_another_system_does_not_name_the_code(record):
+    recorded_with(record, '23521', EPIC_LAB, 'measurement', text=['potassium'])
+    recorded(record, '23521', EPIC_PROCEDURES, 'procedure_occurrence')
+    unmapped_procedure(record, 1, '23521')
+
+    items = signed_in(record).get('/api/v1/phr/procedures/').data['procedures']
+
+    assert [p['name'] for p in items] == ['23521']
+
+
+def test_a_medicine_whose_source_row_holds_several_names_stays_a_code(record):
+    recorded_with(record, '27472', MEDI_SPAN, 'drug_exposure', text=['fluconazole', 'fluconazole 200 mg tablet'])
+    unmapped_drug(record, '27472')
+
+    meds = signed_in(record).get('/api/v1/phr/medications/').data['medications']
+
+    assert [m['name'] for m in meds] == ['27472']
+
+
+def test_names_differing_only_in_case_are_one_name(record):
+    recorded_with(record, '177807', MEDI_SPAN, 'drug_exposure', text=['Pomalyst 4 mg capsule', 'Pomalyst 4 MG capsule'])
+    unmapped_drug(record, '177807')
+
+    meds = signed_in(record).get('/api/v1/phr/medications/').data['medications']
+
+    assert [m['name'] for m in meds] == ['Pomalyst 4 mg capsule']

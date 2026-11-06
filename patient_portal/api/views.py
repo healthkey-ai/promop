@@ -28,6 +28,7 @@ from django.conf import settings
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.validators import validate_email
+from omop_core.services.source_descriptions import source_metadata_description
 from omop_core.services.source_fhir_context import based_on_labels as _source_based_on
 from omop_core.models import (
     Organization,
@@ -7696,31 +7697,6 @@ def _admin_denial_detail(request: Request) -> str:
     return ' | '.join(parts)
 
 
-def _source_metadata_description(metadata) -> str:
-    """The source's own name for a code, from what the ETL sent alongside it.
-
-    ``text`` (CodeableConcept.text) before ``display``: Epic files every vital
-    sign under LOINC 8716-3, whose display is "Vital signs" on all of them,
-    while the text names the measurement (#1778). Both arrive as lists, gathered
-    over every observation carrying the code, and the description lands on a
-    mapping shared by every patient -- so a key counts only when it names one
-    thing. Several texts for 8716-3 fall back to its single display.
-    """
-    if not isinstance(metadata, dict):
-        return ''
-    for key in ('text', 'display'):
-        values = metadata.get(key)
-        if isinstance(values, str):
-            values = [values]
-        if not isinstance(values, list):
-            continue
-        names = {v.strip() for v in values if isinstance(v, str) and v.strip()}
-        if len(names) == 1:
-            # SourceCodeConceptMapping.source_code_description is 255 chars.
-            return names.pop()[:255]
-    return ''
-
-
 def _contains_nul(value) -> bool:
     """Whether a JSON value holds a NUL anywhere, keys included."""
     if isinstance(value, str):
@@ -7826,7 +7802,7 @@ def _resolve_source_code_mappings(
                 # description when the mapping has one, else the source's.
                 'source_code_description': (
                     (mapping['source_code_description'] if mapping else '')
-                    or _source_metadata_description(row.get('source_metadata'))
+                    or source_metadata_description(row.get('source_metadata'))
                 ),
             }
 
