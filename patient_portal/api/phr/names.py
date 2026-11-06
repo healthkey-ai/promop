@@ -15,14 +15,16 @@ mapping row when no vocabulary we hold knows it: an Epic procedure id has
 only the name its import sent (#2168). Only a code the patient's source codes
 do not record is looked up in the vocabularies its table usually uses, and a
 code they record in another system is never: CPT "23521" is not the Epic
-procedure "23521".
+procedure "23521". When nothing else names it, the patient's own source code
+row does: the ETL sends the name it read with the code, and an Epic or
+Medi-Span code often has no mapping row to hold it (#2349).
 """
 from __future__ import annotations
 
 import re
 
 from omop_core.models import PatientSourceCode, SourceCodeConceptMapping
-from omop_core.services.source_descriptions import describe_source_code
+from omop_core.services.source_descriptions import describe_source_code, source_metadata_description
 from omop_core.services.source_vocabularies import canonical_source_vocabulary, hospital_vendor
 
 # Where a bare code in each table usually comes from, when the record does not say.
@@ -101,16 +103,40 @@ def _mapping_name(systems: tuple[str, ...], code: str, memo: dict | None) -> str
     return _memoized(memo, ('mapping', systems, code), compute)
 
 
+def _recorded_name(person_id, tables: tuple[str, ...], system: str, code: str, memo: dict | None) -> str:
+    """The name the patient's own source code row sent with the code, a row filed under the table first."""
+    def compute():
+        rows = (PatientSourceCode.objects
+                .filter(person_id=person_id, source_value=code, source_vocabulary_id=system,
+                        omop_table__in=(*tables, ''))
+                .order_by('-omop_table', 'id')
+                .values_list('source_metadata__text', 'source_metadata__display'))
+        for text, display in rows:
+            name = source_metadata_description({'text': text, 'display': display})
+            if name and name != code:
+                return name
+        return ''
+    return _memoized(memo, ('recorded-name', person_id, tables, system, code), compute)
+
+
+def _filed_systems(person_id, tables: tuple[str, ...], memo: dict | None) -> frozenset[str]:
+    """The systems the patient's source codes file any code under this table in."""
+    return _memoized(memo, ('filed', person_id, tables), lambda: frozenset(
+        PatientSourceCode.objects.filter(person_id=person_id, omop_table__in=tables)
+        .values_list('source_vocabulary_id', flat=True).distinct()))
+
+
 def _recorded_systems(person_id, tables: tuple[str, ...], code: str, memo: dict | None) -> list[str]:
     """The systems the patient's source codes record this code in, for this table, best first.
 
     A code filed under the table counts in any system. A code filed under no
-    table counts in a system the table uses, or in a hospital's own system:
-    an Epic procedure id often arrives with no table, and dropping it would
-    let a guessed CPT code name it. A code filed under another table (a lab
-    component under ``measurement``) does not count. Order: the table's usual
-    systems, then codes filed under the table, then hospital codes filed
-    under none.
+    table counts in a system the table uses, a hospital's own system, or a
+    system the patient files other codes under this table in: an Epic
+    procedure id or a Medi-Span drug id often arrives with no table, and
+    dropping it would let a guessed CPT or RxNorm code name it. A code filed
+    under another table (a lab component under ``measurement``) does not
+    count. Order: the table's usual systems, then codes filed under the
+    table, then codes filed under none.
     """
     def load():
         rows = PatientSourceCode.objects.filter(person_id=person_id, omop_table__in=(*tables, ''))
@@ -127,7 +153,8 @@ def _recorded_systems(person_id, tables: tuple[str, ...], code: str, memo: dict 
     best: dict[str, tuple] = {}
     for system, omop_table in recorded:
         filed_here = omop_table in tables
-        if not (filed_here or _vocabulary(system) in usual or hospital_vendor(system)):
+        if not (filed_here or _vocabulary(system) in usual or hospital_vendor(system)
+                or system in _filed_systems(person_id, tables, memo)):
             continue
         key = (rank.get(_vocabulary(system), len(rank)), 0 if filed_here else 1, system)
         best[system] = min(best.get(system, key), key)
@@ -144,7 +171,7 @@ def _code_name(person_id, tables: tuple[str, ...], code: str, guesses: tuple[str
                 or _mapping_name(tuple(dict.fromkeys((system, vocabulary_id))), code, memo))
         if name:
             return name
-    return ''
+    return next((name for system in systems if (name := _recorded_name(person_id, tables, system, code, memo))), '')
 
 
 def _concept_name(concept) -> str:
