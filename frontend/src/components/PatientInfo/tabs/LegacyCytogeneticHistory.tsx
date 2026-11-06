@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import type { AxiosInstance } from 'axios';
 import { clinicalClient, clinicalUrl } from '@/api/clinicalTransport';
 import { Button } from '@/components/shadcn/button';
 
@@ -16,7 +17,13 @@ const stateLabels = {
   recorded: 'Recorded', selection_cleared: 'Historical selection cleared', marked_in_error: 'Marked in error',
 };
 
-export default function LegacyCytogeneticHistory({ personId }: { personId: number }) {
+export default function LegacyCytogeneticHistory({ personId, client = clinicalClient(), url = clinicalUrl }: {
+  personId: number;
+  /** The transport to use; the federated modal passes its own so a save never
+   *  picks up whichever widget registered a global one last. */
+  client?: AxiosInstance;
+  url?: (path: string) => string;
+}) {
   const [rows, setRows] = useState<LegacyResult[]>([]);
   const [legacySummary, setLegacySummary] = useState<string | null>(null);
   const [cursor, setCursor] = useState<string>();
@@ -26,7 +33,7 @@ export default function LegacyCytogeneticHistory({ personId }: { personId: numbe
   const [retry, setRetry] = useState(0);
   useEffect(() => {
     let current = true;
-    clinicalClient().get<HistoryPage>(clinicalUrl(`/v1/patient-records/${personId}/genomics-legacy-cytogenetics/`), {
+    client.get<HistoryPage>(url(`/v1/patient-records/${personId}/genomics-legacy-cytogenetics/`), {
       params: { cursor },
     }).then(({ data }) => {
       if (current) {
@@ -37,7 +44,7 @@ export default function LegacyCytogeneticHistory({ personId }: { personId: numbe
     }).catch(() => { if (current) setError(true); })
       .finally(() => { if (current) setLoading(false); });
     return () => { current = false; };
-  }, [personId, cursor, retry]);
+  }, [personId, cursor, retry, client, url]);
 
   return <details className="rounded-md border p-3" data-patient-field="cytogenetic_markers">
     <summary className="cursor-pointer font-medium">Legacy cytogenetic results</summary>

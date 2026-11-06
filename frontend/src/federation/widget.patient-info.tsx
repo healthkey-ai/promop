@@ -20,6 +20,7 @@ import { pushClinicalTransport } from '@/api/clinicalTransport';
 import { __resetWritableFieldsCache } from '@/hooks/useWritableFields';
 import PatientFieldEditor from './PatientFieldEditor';
 import TherapyLinesPanel from './TherapyLinesPanel';
+import GenomicsFindingsModal from './GenomicsFindingsModal';
 import type { PatientFormResult } from './patientFormStore';
 
 export interface MountOptions extends PatientFormConnection {
@@ -33,6 +34,12 @@ export interface MountOptions extends PatientFormConnection {
   infoHref?: string;
   onPatientUpdated?: (result?: PatientFormResult) => unknown;
   onSaveError?: () => unknown;
+}
+
+export interface GenomicsMountOptions extends MountOptions {
+  /** Called when the reader dismisses the genomic-findings dialog, so the host
+   *  that opened it can unmount the widget. */
+  onClose?: () => void;
 }
 
 const roots = new WeakMap<HTMLElement, Root>();
@@ -133,6 +140,46 @@ export function mountTherapyLines(el: HTMLElement, opts: MountOptions = {}): () 
         // Therapy mutations bypass the store's save queue, so `store.load()`
         // alone never reaches the host's `onUpdated` listeners. The host still
         // has to invalidate its own queries and re-render the row.
+        onChanged={() => { void opts.onPatientUpdated?.(); }}
+      />
+    </StrictMode>,
+  );
+  return () => unmount(el);
+}
+
+/** The genomic-findings editor as a host-owned modal: a trial-details row
+ * mounts this when the reader wants to answer "Mutation Genes" /
+ * "Mutation Interpretations" without opening the whole patient form.
+ *
+ * PROMOP owns the dialog, the fields and the write. The host only supplies the
+ * credentials and an empty element, then unmounts it from `onClose`. Same store
+ * and the same editor as the Genomics tab, so the two surfaces cannot drift. */
+export function mountGenomics(el: HTMLElement, opts: GenomicsMountOptions = {}): () => void {
+  unmount(el);
+  injectStyles();
+  const runtime = patientFormRuntime(opts);
+  const apiBasePath = (opts.apiBase ?? "").replace(/\/+$/, "");
+  const releaseRuntime = retainPatientFormRuntime(opts);
+  subscriptions.set(el, () => {
+    releaseRuntime();
+    // Permission is per patient and can change with the session; the next host
+    // mount must ask again.
+    __resetWritableFieldsCache();
+  });
+  void runtime.store.load();
+  const root = createRoot(el);
+  roots.set(el, root);
+  root.render(
+    <StrictMode>
+      <GenomicsFindingsModal
+        store={runtime.store}
+        client={runtime.client}
+        apiBase={apiBasePath}
+        readOnly={opts.readOnly ?? true}
+        onClose={opts.onClose}
+        // The findings endpoints bypass the store's save queue, so `store.load()`
+        // never reaches the host's `onUpdated` listeners. The host still has to
+        // invalidate its own trial queries and re-render the row.
         onChanged={() => { void opts.onPatientUpdated?.(); }}
       />
     </StrictMode>,
