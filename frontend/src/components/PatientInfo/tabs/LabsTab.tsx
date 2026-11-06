@@ -174,6 +174,7 @@ export default function LabsTab({ formData, onChange }: Props) {
                 <div className="flex-1 min-w-0">
                   <ClinicalField
                     label={label}
+                    labelIncludesUnit
                     name={name}
                     type={type}
                     value={formData?.[name]}

@@ -10,10 +10,19 @@
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { vi, describe, it, expect } from 'vitest';
 import ClinicalField from './ClinicalField';
+import { PatientFormContext } from '@/federation/PatientFormContext';
 import type { FieldDescriptor } from '@/hooks/useWritableFields';
 
 vi.mock('@/hooks/useVocabulary', () => ({
   useVocabulary: () => ({ options: [], source: null, loading: false }),
+}));
+
+const federatedEditorProps = vi.hoisted(() => vi.fn());
+vi.mock('@/federation/PatientFieldEditor', () => ({
+  default: (props: Record<string, unknown>) => {
+    federatedEditorProps(props);
+    return <div data-testid="federated-editor" />;
+  },
 }));
 
 const CURATED = {
@@ -65,6 +74,25 @@ describe('ClinicalField choices', () => {
     );
 
     expect(await openSelect()).toEqual(['United States', 'Canada']);
+  });
+});
+
+describe('ClinicalField federated editor', () => {
+  it('forwards a reviewed label that carries its unit (#5704)', () => {
+    render(
+      <PatientFormContext.Provider value={{} as never}>
+        <ClinicalField
+          label="Hemoglobin (g/dL)" labelIncludesUnit
+          name="hemoglobin_g_dl" type="number" value={12.5}
+          onChange={vi.fn()}
+        />
+      </PatientFormContext.Provider>,
+    );
+
+    expect(screen.getByTestId('federated-editor')).toBeInTheDocument();
+    expect(federatedEditorProps).toHaveBeenCalledWith(expect.objectContaining({
+      name: 'hemoglobin_g_dl', label: 'Hemoglobin (g/dL)', labelIncludesUnit: true,
+    }));
   });
 });
 

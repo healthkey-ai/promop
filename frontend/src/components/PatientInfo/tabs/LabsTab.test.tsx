@@ -21,8 +21,12 @@ vi.mock('@/components/labs/LabTrendChart', () => ({
 }));
 
 vi.mock('../ClinicalField', () => ({
-  default: ({ label, name }: { label: string; name: string }) => (
-    <div data-testid={`field-${name}`}>{label}</div>
+  default: ({ label, name, labelIncludesUnit }: {
+    label: string; name: string; labelIncludesUnit?: boolean;
+  }) => (
+    <div data-testid={`field-${name}`} data-label-includes-unit={String(labelIncludesUnit)}>
+      {label}
+    </div>
   ),
 }));
 
@@ -69,6 +73,16 @@ describe('LabsTab', () => {
     render(<LabsTab formData={{}} onChange={onChange} />);
     expect(screen.getByTestId('section-Chemistry Panel')).toBeInTheDocument();
     expect(screen.getByTestId('section-Liver Function')).toBeInTheDocument();
+  });
+
+  it('tells the shared editor that the reviewed label carries the unit (#5704)', () => {
+    render(<LabsTab formData={{}} onChange={onChange} />);
+    // Every Labs caption is reviewed with its unit where the field has one, so
+    // the editor must not append a second copy beside it.
+    expect(screen.getByTestId('field-hemoglobin_g_dl'))
+      .toHaveAttribute('data-label-includes-unit', 'true');
+    expect(screen.getByTestId('field-creatinine_clearance_ml_min'))
+      .toHaveAttribute('data-label-includes-unit', 'true');
   });
 
   it('does not render the derived organ-function verdicts (#5609)', () => {
