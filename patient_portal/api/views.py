@@ -141,7 +141,7 @@ from .permissions import (
     PatientCrudPermission, GenomicsCrudPermission,
     PatientDeletePermission, PatientSelfScopePermission, ScopedTokenPermission,
     VocabReadPermission, LabSyncPermission, EtlProvisionPermission,
-    get_request_org, is_service_token, is_machine_request,
+    get_request_org, is_service_token, is_machine_request, service_token_scopes,
 )
 from .providers.base import TokenClaims
 from .therapy_line_import import TherapyLineImportSerializer, import_therapy_lines
@@ -12227,6 +12227,27 @@ def _can_manage_field_mappings(user):
     return bool(getattr(user, 'is_staff', False) or has_professional_access(user))
 
 
+_MAPPING_READ_SCOPE = 'system/*.read'
+
+
+def _can_read_mappings(request):
+    """Whether the caller may read the code-mapping table (#2340).
+
+    A human needs a professional role, as for every curation page. A service
+    credential is a machine with no role, so it is admitted on the safe verbs
+    only, and only with ``system/*.read``: mapping rows are curated reference
+    data, the same class as the vocabulary releases that scope already reads
+    (#344). Nothing a machine can do here changes a mapping -- POST, PATCH and
+    DELETE still require a professional session.
+    """
+    if is_service_token(request):
+        return (
+            request.method in ('GET', 'HEAD', 'OPTIONS')
+            and _MAPPING_READ_SCOPE in service_token_scopes(request).split()
+        )
+    return _can_manage_field_mappings(request.user)
+
+
 def _can_approve_mappings(user):
     """Whether a user may set a mapping's status to 'approved'.
 
@@ -13350,7 +13371,7 @@ def code_mapping_unit_search(request):
 @permission_classes([IsAuthenticated])
 def code_mapping_list(request):
     """GET: list curated source-code-to-OMOP-concept mappings. POST: create one."""
-    if not _can_manage_field_mappings(request.user):
+    if not _can_read_mappings(request):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     if request.method == 'GET':
@@ -13454,7 +13475,7 @@ def code_mapping_detail(request, mapping_id):
     written; the clinical rows already stored move in a background job, which
     ``repoint`` reports as queued.
     """
-    if not _can_manage_field_mappings(request.user):
+    if not _can_read_mappings(request):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     mappings = SourceCodeConceptMapping.objects.filter(id=mapping_id).select_related(

@@ -191,6 +191,42 @@ is another recorded encounter.
 The Code Mapping UI list and curator CRUD endpoints are different APIs. Browsing
 or searching those endpoints never changes `Seen`.
 
+## Reading the whole table
+
+A downstream warehouse (HealthTree's dbt models, for one) treats the mapping
+table as a source table rather than asking code by code. The list and detail
+endpoints serve that read to a service credential carrying `system/*.read`
+(#2340), the same scope that reads the vocabulary releases: mapping rows are
+curated reference data, not patient data, and that scope still reaches no
+patient endpoint.
+
+```http
+GET /api/v1/code-mappings/?status=approved
+Authorization: Bearer <service credential>
+```
+
+The response is a bare JSON array of mapping rows, 100 to a page. Pagination is
+in the headers: `X-Total-Count`, `X-Page`, `X-Page-Size`, and a `Link` header
+with `rel="next"` and `rel="prev"` URLs. Walk `next` until the header is absent.
+Filters: `status` (`approved`, `proposed`, `rejected`), `source` (a source
+vocabulary id), `organization` (an organization slug, or `__none__` for
+instance-wide rows) and `search`.
+
+Each row carries `status`, `source_vocabulary_id`, `source_code`,
+`source_code_description`, the destination (`destination_concept_id`,
+`destination_concept_code`, `destination_concept_name`,
+`destination_vocabulary_id`, `destination_domain_id`, `destination_omop_table`),
+`organization_slug`, `reviewer` and `reviewed_at`, and `occurrence_count`. A
+queue row with no destination yet reports `status: "unmapped"`. Consume only
+`approved` rows as a vocabulary; `proposed` and `unmapped` are gaps.
+
+`GET /api/v1/code-mappings/<id>/` returns one row with its source evidence.
+
+The read is the whole of what a machine credential may do here. POST, PATCH
+and DELETE still require a professional session, so every change to a mapping
+has a reviewer and a history. A credential needs `system/etl.write` as well to
+call the lookup above; one token may hold both scopes.
+
 ## Uploading a source-code inventory
 
 Users with Code Mapping access can select **Upload** on the Code Mapping page,
