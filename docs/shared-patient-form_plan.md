@@ -13,6 +13,11 @@ Browser-close delivery is not guaranteed.
 `widget.patient-info.tsx` exposes `mount` for the profile and `mountFields` for
 host-provided empty field slots, using a single remote React root with portals.
 The host retains authentication, authorization and eligibility/cache policy.
+`mountTherapyLines` and `mountGenomics` expose one host-owned editor each (the
+therapy-line list; the genomic-findings list and form), for a host that has a
+row and a modal but not the patient form. The host supplies credentials and an
+empty element, PROMOP owns the dialog, the fields and the write, and the host
+refreshes its own queries from `onPatientUpdated`.
 `omop_core/services/patient_form.py` is portable to an embedded Django host.
 
 Native v1 clients explicitly opt in with `X-Patient-Form: 1` on both descriptor
