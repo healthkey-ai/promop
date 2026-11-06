@@ -30,11 +30,29 @@ export default function MultiSelectControl({
     return new Set(selectedValues.map(optionKey));
   }, [selectedValues]);
 
+  // Some lists carry an exclusive "none" answer beside real choices (planned
+  // therapies: "No planned therapy"). It is an answer, not a clear control:
+  // selecting it must replace the other answers, and selecting a real choice
+  // must remove it.
+  const noneKey = optionKey('none');
+  const hasNone = options.some((o) => optionKey(o.value) === noneKey);
+
   const toggle = (v: unknown) => {
     const next = new Set(selectedSet);
     const k = optionKey(v);
     if (next.has(k)) next.delete(k);
     else next.add(k);
+
+    if (hasNone) {
+      if (k === noneKey) {
+        if (next.has(noneKey)) {
+          onChange([v]);
+          return;
+        }
+      } else {
+        next.delete(noneKey);
+      }
+    }
 
     const ordered = options
       .filter((o) => next.has(optionKey(o.value)))
