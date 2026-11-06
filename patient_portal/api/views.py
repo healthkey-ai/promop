@@ -1213,7 +1213,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         if request.method == 'GET':
             return Response(_find(person, variant_id))
         if request.method == 'DELETE':
-            delete_variant(person, variant_id)
+            delete_variant(person, variant_id,
+                           type_concept_id=_genomics_type_concept(request.user, person))
             return Response(status=204)
         type_id = _genomics_type_concept(request.user, person)
         return Response(save_variant(person, request.data, variant_id, type_concept_id=type_id))

@@ -396,7 +396,11 @@ class Command(BaseCommand):
                     if overwrite:
                         existing = list_variants(pr.person)
                         for v in existing:
-                            delete_variant(pr.person, v['id'], skip_refresh=True)
+                            # Sample data is written with the recipe's default
+                            # type; name the deletion scope rather than relying on
+                            # the keyword position.
+                            delete_variant(pr.person, v['id'], type_concept_id=32817,
+                                           skip_refresh=True)
 
                     for payload in payloads:
                         save_variant(pr.person, payload, skip_refresh=True)
