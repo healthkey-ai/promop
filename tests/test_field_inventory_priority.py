@@ -58,3 +58,34 @@ def test_compatible_question_candidate_does_not_approve_gene_or_variant_answers(
     assert result['fields'][0]['semantic_approval'] is False
     candidate['passes_mechanical_screen'] = False
     assert priority_field_coverage([marker], [row], {'123': candidate})['counts'] == {'source_only_parent': 1}
+
+
+def test_effective_catalog_covers_every_disease_and_palb2():
+    """The real catalog, not a fixture: 42 fields across 51 memberships."""
+    from omop_core.services.genomics_catalog import markers
+
+    rows = []
+    for marker in markers():
+        row = inventory_row('promop_field', 'PatientRecord', marker['field_name'], marker['gene'],
+                            field=marker['field_name'], kind='field')
+        row['existing_mappings'] = [{
+            'status': 'approved', 'omop_table': 'measurement', 'value_kind': 'json',
+            'multiple': True, 'source_value': 'genomics:' + marker['key'], 'concept_id': 0,
+            'vocabulary_id': 'LOINC', 'concept_code': '81252-9',
+        }]
+        rows.append(row)
+
+    result = priority_field_coverage(markers(), rows, {})
+
+    assert result['total_fields'] == 42
+    assert result['disease_memberships'] == 51
+    assert result['counts'] == {'source_only_parent': 42}
+    assert {code: len(block['field_names']) for code, block in result['by_disease'].items()} == {
+        'BC': 6, 'CLL': 8, 'FL': 5, 'MCL': 16, 'MM': 16,
+    }
+    palb2 = next(record for record in result['fields'] if record['marker_key'] == 'palb2')
+    assert palb2['field_name'] == 'genomics_palb2'
+    assert palb2['gene'] == 'PALB2'
+    assert palb2['legacy_keys'] == ['palb1']
+    assert {record['field_name'] for record in result['fields']} == {
+        'genomics_' + marker['key'] for marker in markers()}
