@@ -1529,6 +1529,33 @@ def build_writable_field_descriptor():
                 {'value': unit, 'label': unit} for unit in units
             ]
 
+    # Stored unit codes vs display labels (#2318 follow-up). The model columns
+    # are `TextChoices` whose values are the stored codes (`MG/DL`, `G/DL`, `lb`),
+    # while `FIELD_COMMON_UNITS` holds the display notation a curator writes
+    # (`mg/dL`, `g/dL`, `lbs`). Emitting the display string as the option's value
+    # advertised a choice the write side refuses: a client that sent it got a
+    # validation error, and `weight` even advertised `lbs` for a column whose
+    # code is `lb`. Each pair below names the stored code and the display the
+    # picker shows, and the test asserts every value is a real model choice.
+    unit_code_options = {
+        'weight_units': [('kg', 'kg'), ('lb', 'lb')],
+        'height_units': [('cm', 'cm'), ('in', 'in')],
+        'albumin_level_units': [('G/DL', 'g/dL'), ('G/L', 'g/L')],
+        'serum_calcium_level_units': [('MG/DL', 'mg/dL'), ('MMOL/L', 'mmol/L')],
+        'serum_creatinine_level_units': [('MG/DL', 'mg/dL'), ('UMOL/L', 'umol/L')],
+        'serum_bilirubin_level_total_units': [('MG/DL', 'mg/dL'), ('UMOL/L', 'umol/L')],
+        'serum_bilirubin_level_direct_units': [('MG/DL', 'mg/dL'), ('UMOL/L', 'umol/L')],
+    }
+    for units_field, code_pairs in unit_code_options.items():
+        entry = descriptor.get(units_field)
+        if entry is None:
+            continue
+        options = [{'value': code, 'label': label} for code, label in code_pairs]
+        entry['unit_options'] = options
+        qualified = descriptor.get(entry.get('qualifies') or '')
+        if qualified is not None:
+            qualified['unit_options'] = options
+
     # Hemoglobin's slice (#2318) offers the two scales it can convert today.
     # The value is the stored code (`G/L`), the label the display text — the
     # model's `TextChoices`, not the curated display strings, because the
