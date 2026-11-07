@@ -273,3 +273,27 @@ def test_ensure_signup_orgs_does_nothing_unset_and_rejects_a_malformed_entry(set
     for bad in (["phr"], ["Not A Slug:Name"], ["phr:"]):
         with pytest.raises(CommandError):
             _ensure(settings, bad)
+
+
+def test_deleting_an_org_removes_its_patients_family_sessions(settings):
+    """delete_org_patients deletes identities with raw SQL, which a family
+    refresh token used to block (a foreign key violation on staging)."""
+    from omop_core.models import Organization
+    from omop_core.services.organization_cleanup import delete_organization_with_patient_cascade
+
+    org = OrganizationFactory(slug="phr", allows_patient_signup=True)
+    client = APIClient()
+    assert client.post("/api/v1/orgs/phr/patient-signup/", {
+        "email": "gone@example.com", "password": "a-long-enough-pass-42",
+    }, format="json").status_code == 201
+    identity = Identity.objects.get(email="gone@example.com")
+    identity.mark_email_verified()
+    assert _login(client, "gone@example.com", "a-long-enough-pass-42").status_code == 200
+    assert RefreshToken.objects.filter(identity=identity).exists()
+
+    delete_organization_with_patient_cascade(org)
+
+    assert not Organization.objects.filter(pk=org.pk).exists()
+    assert not Identity.objects.filter(pk=identity.pk).exists()
+    assert not RefreshToken.objects.filter(identity_id=identity.pk).exists()
+

@@ -31,6 +31,7 @@ from omop_core.models import (
 )
 from omop_core.services.prolog_cleanup import prolog_delete_statements
 from omop_oncology.models import CancerModifier, Episode, EpisodeEvent, Histology, StemTable
+from family_auth.models import RefreshToken as FamilyRefreshToken
 from patient_portal.models import Identity, PatientUser
 
 
@@ -123,6 +124,13 @@ def delete_organization_with_patient_cascade(org: Organization) -> None:
                 cursor.execute(sql, [org.pk] * sql.count('%s'))
 
             if identity_ids:
+                # Rows that reference the identity and that this raw delete
+                # would otherwise trip over (no Django cascade here): the
+                # family auth sessions of patients who signed in through phr.
+                cursor.execute(
+                    f"DELETE FROM {FamilyRefreshToken._meta.db_table} WHERE identity_id = ANY(%s)",
+                    [identity_ids],
+                )
                 cursor.execute(
                     f"DELETE FROM {Identity._meta.db_table} WHERE id = ANY(%s)",
                     [identity_ids],
