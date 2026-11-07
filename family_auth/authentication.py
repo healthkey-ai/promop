@@ -19,6 +19,9 @@ from patient_portal.models import Identity
 from . import tokens
 
 
+INVALID_TOKEN = "Token is invalid or expired."
+
+
 class FamilyTokenAuthentication(BaseAuthentication):
     keyword = b"bearer"
 
@@ -31,11 +34,14 @@ class FamilyTokenAuthentication(BaseAuthentication):
             return None
         try:
             claims = tokens.decode_access(token)
-        except tokens.FamilyAuthError as exc:
-            raise AuthenticationFailed(str(exc)) from exc
+        except tokens.FamilyAuthError:
+            # One fixed answer: the reason (expired, bad signature, wrong
+            # audience) is not the caller's to learn, and no exception text
+            # reaches a response.
+            raise AuthenticationFailed(INVALID_TOKEN) from None
         identity = Identity.objects.filter(pk=claims.get("user_id"), uid=claims["sub"], is_active=True).first()
         if identity is None:
-            raise AuthenticationFailed("Invalid token.")
+            raise AuthenticationFailed(INVALID_TOKEN)
         return identity, TokenClaims(
             issuer=claims["iss"], sub=claims["sub"], email=claims.get("email", ""),
             name=identity.name or None, raw=claims, email_verified=bool(claims.get("email_verified")),

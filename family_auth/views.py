@@ -30,7 +30,7 @@ from rest_framework.throttling import SimpleRateThrottle
 from patient_portal.models import Identity
 
 from . import tokens
-from .authentication import FamilyTokenAuthentication
+from .authentication import INVALID_TOKEN, FamilyTokenAuthentication
 
 logger = logging.getLogger(__name__)
 
@@ -107,8 +107,9 @@ def refresh(request):
         return _unavailable()
     try:
         _, pair = tokens.rotate(request.data.get("refresh") or "")
-    except tokens.FamilyAuthError as exc:
-        return Response({"detail": str(exc), "code": "token_not_valid"}, status=status.HTTP_401_UNAUTHORIZED)
+    except tokens.FamilyAuthError:
+        # Expired, revoked or reused all read the same to the caller.
+        return Response({"detail": INVALID_TOKEN, "code": "token_not_valid"}, status=status.HTTP_401_UNAUTHORIZED)
     return Response({"access": pair["access"], "refresh": pair["refresh"]})
 
 

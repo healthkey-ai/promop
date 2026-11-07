@@ -162,6 +162,11 @@ def test_refresh_rotates_and_a_reused_refresh_token_revokes_the_session(account)
     # The leak is contained: the rotated token is revoked too.
     after = APIClient().post(f"{BASE}/refresh/", {"refresh": rotated.data["refresh"]}, format="json")
     assert after.status_code == 401
+    # Reused, revoked and garbage tokens get one answer, with no reason in it.
+    garbage = APIClient().post(f"{BASE}/refresh/", {"refresh": "x.y.z"}, format="json")
+    assert replay.data == after.data == garbage.data == {
+        "detail": "Token is invalid or expired.", "code": "token_not_valid",
+    }
     assert not RefreshToken.objects.filter(identity=account, revoked_at__isnull=True).exists()
 
 
