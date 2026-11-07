@@ -5,8 +5,14 @@ mg/dL value. The conversion lives here so the serializer, derivation and both
 form writers use one factor rather than each spelling it again.
 
 The divisor is **88.42**, not 88.4: that is the factor the installed
-`exact_matching` CKD-EPI calculator already uses, and a pair written here has to
-produce the same eGFR the matcher computed before the edit.
+`exact_matching` CKD-EPI calculator already uses.
+
+The canonical is a storage and projection read-model, quantised to the column's
+two decimals. eGFR must be computed from the **pair**, not from the canonical:
+the 0.01 rounding can move a value across a threshold (an 18-year-old male at
+148.63 umol/L gives 59.99 from the pair and 60.03 from the rounded 1.68 mg/dL).
+That is why the matcher reads `serum_creatinine_level` and why the consuming
+adapter keeps it as the eGFR source.
 """
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 

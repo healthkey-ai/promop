@@ -498,7 +498,17 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
             (explicit_unit and requested_code != stored_code)
             or stored_code is None
         )
-        if not source_allowed:
+        canonical_forbidden = bool(canonical_entry.get('read_only_for_caller'))
+        if canonical_forbidden:
+            # A host that marks the canonical read-only refuses the pair as a
+            # whole: the recompute would otherwise write the canonical from the
+            # pending pair and bypass the restriction entirely.
+            reason = (canonical_entry.get('reason')
+                      or 'Editing is not available for this caller.')
+            for field in (HEMOGLOBIN_PAIR, HEMOGLOBIN_UNIT):
+                changes.pop(field, None)
+                result.rejected[field] = reason
+        elif not source_allowed:
             # A caller-level restriction on either half rejects the pair as a
             # whole: saving the number without its unit would change the
             # meaning of the value.
@@ -519,6 +529,13 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
                 result.rejected[field] = reason
         elif explicit_unit and HEMOGLOBIN_PAIR not in changes:
             result.rejected[HEMOGLOBIN_UNIT] = 'Send the unit together with its value.'
+            changes.pop(HEMOGLOBIN_UNIT, None)
+        elif (not explicit_unit and stored_code is None
+              and getattr(record, HEMOGLOBIN_UNIT, None) not in (None, '')):
+            # A stored unit this slice cannot convert is not the same as a
+            # missing one: defaulting it would silently reinterpret the number.
+            result.rejected[HEMOGLOBIN_UNIT] = 'Choose one of: g/dL, g/L.'
+            changes.pop(HEMOGLOBIN_PAIR, None)
             changes.pop(HEMOGLOBIN_UNIT, None)
         else:
             code = requested_code or stored_code or HEMOGLOBIN_DEFAULT_UNIT
@@ -582,7 +599,17 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
             (explicit_unit and requested_code != stored_code)
             or stored_code is None
         )
-        if not source_allowed:
+        canonical_forbidden = bool(canonical_entry.get('read_only_for_caller'))
+        if canonical_forbidden:
+            # A host that marks the canonical read-only refuses the pair as a
+            # whole: the recompute would otherwise write the canonical from the
+            # pending pair and bypass the restriction entirely.
+            reason = (canonical_entry.get('reason')
+                      or 'Editing is not available for this caller.')
+            for field in (CREATININE_PAIR, CREATININE_UNIT):
+                changes.pop(field, None)
+                result.rejected[field] = reason
+        elif not source_allowed:
             # A caller-level restriction on either half rejects the pair as a
             # whole: saving the number without its unit would change the
             # meaning of the value.
@@ -603,6 +630,13 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
                 result.rejected[field] = reason
         elif explicit_unit and CREATININE_PAIR not in changes:
             result.rejected[CREATININE_UNIT] = 'Send the unit together with its value.'
+            changes.pop(CREATININE_UNIT, None)
+        elif (not explicit_unit and stored_code is None
+              and getattr(record, CREATININE_UNIT, None) not in (None, '')):
+            # A stored unit this slice cannot convert is not the same as a
+            # missing one: defaulting it would silently reinterpret the number.
+            result.rejected[CREATININE_UNIT] = 'Choose one of: mg/dL, umol/L.'
+            changes.pop(CREATININE_PAIR, None)
             changes.pop(CREATININE_UNIT, None)
         else:
             code = requested_code or stored_code or CREATININE_DEFAULT_UNIT

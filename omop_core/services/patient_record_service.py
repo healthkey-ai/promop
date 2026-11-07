@@ -1357,9 +1357,10 @@ def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fiel
             # replace the reader's chosen unit with g/dL.
             continue
         if canonical == CREATININE_CANONICAL and creatinine_pair_authoritative:
-            # Same rule: the creatinine pair already supplies the canonical, and
-            # copying it back would replace the reader's chosen unit with mg/dL.
-            continue
+            # The pair already supplies the canonical, so it must not be copied
+            # back (that would replace the reader's chosen unit with mg/dL). The
+            # canonical's other legacy alias still has to follow the value.
+            aliases = [alias for alias in aliases if alias != CREATININE_PAIR]
         if canonical in count_pair_authoritative:
             # The source count already supplies the canonical.
             continue
@@ -1383,7 +1384,11 @@ def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fiel
             if alias not in pending_aliases:
                 setattr(patient_info, alias, _lab_alias_value(canonical, value))
         if not any(alias in pending_aliases for alias in aliases):
-            for unit_field, unit in _lab_alias_units(canonical, value).items():
+            unit_updates = _lab_alias_units(canonical, value)
+            if canonical == CREATININE_CANONICAL and creatinine_pair_authoritative:
+                # The pair owns its own unit; only the ordinary alias is updated.
+                unit_updates.pop(CREATININE_UNIT, None)
+            for unit_field, unit in unit_updates.items():
                 setattr(patient_info, unit_field, unit)
     patient_info.user_edited_fields = sorted(pending_aliases)
     # Full refresh clears these before extraction. Direct edits need to clear
