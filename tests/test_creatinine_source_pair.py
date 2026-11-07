@@ -1,9 +1,10 @@
 """Creatinine's source pair and its normalised read-model (#2318 follow-up).
 
-The patient records the number in the unit their lab used; the matcher reads the
-normalised mg/dL value through `serum_creatinine_mg_dl`. The divisor is 88.42 —
-the one the installed CKD-EPI calculator uses — so an edit here and the matcher
-agree on the same eGFR.
+The patient records the number in the unit their lab used, and the record keeps
+it. `serum_creatinine_mg_dl` is the normalised storage/projection read-model; it
+is quantised to two decimals, so eGFR must be computed from the **pair** — the
+matcher does — not from the canonical. The divisor is 88.42, the factor the
+installed CKD-EPI calculator uses.
 
 Direct bilirubin is deliberately not in this slice: it has no separate canonical
 column yet.

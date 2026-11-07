@@ -1287,10 +1287,11 @@ def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fiel
         # The pair stays pending: the chosen unit is the patient's declaration
         # and derivation cannot reproduce it from a g/dL fact. Only an explicit
         # canonical import retires it (handled above).
-    # Creatinine's source pair (#2318 follow-up): the CKD-EPI matcher reads the
-    # normalised mg/dL value, so the canonical follows the pair the patient
-    # typed rather than the inverse. Same precedence as hemoglobin: a pending
-    # pair wins, an explicit canonical import/clear retires it.
+    # Creatinine's source pair (#2318 follow-up): the canonical follows the pair
+    # the patient typed rather than the inverse. It is a storage/projection
+    # read-model — the CKD-EPI matcher reads the pair, because the canonical's
+    # two decimals can move a threshold. Same precedence as hemoglobin: a
+    # pending pair wins, an explicit canonical import/clear retires it.
     creatinine_pair_pending = CREATININE_PAIR in pending_aliases
     creatinine_canonical_import = (
         CREATININE_CANONICAL in changed_fields

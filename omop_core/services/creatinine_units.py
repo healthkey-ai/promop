@@ -1,8 +1,9 @@
 """The creatinine source pair (#2318): mg/dL or umol/L, normalised to mg/dL.
 
-The record keeps what the lab reported, and the matcher reads the normalised
-mg/dL value. The conversion lives here so the serializer, derivation and both
-form writers use one factor rather than each spelling it again.
+The record keeps what the lab reported, and the canonical mg/dL column is the
+storage/projection read-model derived from it. The conversion lives here so the
+serializer, derivation and both form writers use one factor rather than each
+spelling it again.
 
 The divisor is **88.42**, not 88.4: that is the factor the installed
 `exact_matching` CKD-EPI calculator already uses.
@@ -19,7 +20,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 #: The writable source value and the unit stored beside it.
 PAIR_FIELD = 'serum_creatinine_level'
 UNIT_FIELD = 'serum_creatinine_level_units'
-#: The normalised read-model projected to OMOP and read by the matcher.
+#: The normalised read-model projected to OMOP. Not the eGFR source: see below.
 CANONICAL_FIELD = 'serum_creatinine_mg_dl'
 
 DEFAULT_UNIT = 'MG/DL'
@@ -29,7 +30,8 @@ UNIT_DIVISORS = {'MG/DL': Decimal('1'), 'UMOL/L': Decimal('88.42')}
 
 #: `PatientRecord.serum_creatinine_mg_dl` is `DecimalField(max_digits=5,
 #: decimal_places=2)`. The derived value must already have that precision:
-#: persistence, projection and matching read the same number.
+#: persistence and projection read the same number. eGFR does not: it reads the
+#: pair, because this rounding can cross a threshold.
 CANONICAL_QUANTUM = Decimal('0.01')
 CANONICAL_LIMIT = Decimal('999.99')
 
