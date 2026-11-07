@@ -530,7 +530,7 @@ export const TAB_LAYOUT: TabLayout = {
       "component": "CLLSection",
       "fields": [
         [
-          "Absolute Lymphocyte Count (×10⁹/L)",
+          "Absolute Lymphocyte Count (cells/µL)",
           "absolute_lymphocyte_count"
         ],
         [
