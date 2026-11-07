@@ -179,8 +179,10 @@ services:
     autoDeploy: true
     # The federation remote goes under build/ the way the Dockerfile does it:
     # WhiteNoise serves build/ at the root, so phr loads /remote/remoteEntry.js.
+    # Moved, not copied: with no WHITENOISE_ROOT, a frontend/dist/remote left
+    # behind would become the served root (promop/frontend_paths.py).
     buildCommand: python scripts/verify_source_catalog_snapshots.py && pip install -r requirements.txt && cd frontend && npm install && npm run build && npm run build:remote
-      && cp -r dist/remote build/remote && cd .. && python manage.py collectstatic --noinput
+      && mv dist/remote build/remote && cd .. && python manage.py collectstatic --noinput
     # Prepare once per deploy, not once per instance boot. A failure here
     # stops the deploy and leaves the running version serving, where the
     # same failure during boot gives a crash-looping service. This is the

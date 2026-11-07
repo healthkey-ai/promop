@@ -6,6 +6,8 @@ import subprocess
 import pytest
 import yaml
 
+from promop.frontend_paths import resolve_frontend_root
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -140,7 +142,8 @@ def test_staging_hosts_identity_for_phr_and_production_does_not_yet():
 def test_staging_build_publishes_the_federation_remote(tmp_path):
     """phr loads promop's patient record from /remote/remoteEntry.js. The
     Dockerfile builds it into frontend/build/remote; the staging Blueprint must
-    too, or WhiteNoise has no such file and the SPA fallback answers with HTML."""
+    too, or WhiteNoise has no such file and the SPA fallback answers with HTML.
+    It must also keep frontend/build the served root (see below)."""
     config = yaml.safe_load((ROOT / 'render.yaml').read_text())
     command = next(s for s in config['services'] if s['name'] == 'promop-staging')['buildCommand']
     (tmp_path / 'frontend').mkdir()
@@ -165,5 +168,10 @@ esac
     result = subprocess.run(['/bin/sh', '-c', command], cwd=tmp_path, env=env, capture_output=True, text=True)
 
     assert result.returncode == 0, result.stderr
-    assert (tmp_path / 'frontend' / 'build' / 'index.html').is_file()
-    assert (tmp_path / 'frontend' / 'build' / 'remote' / 'remoteEntry.js').read_text() == 'remote\n'
+    # Render sets no WHITENOISE_ROOT, so the served root is whichever build
+    # directory resolve_frontend_root finds first. A dist/remote left behind
+    # wins over build/ and moves the remote to /remoteEntry.js.
+    served = resolve_frontend_root(tmp_path)
+    assert served == tmp_path / 'frontend' / 'build'
+    assert (served / 'index.html').read_text() == 'spa\n'
+    assert (served / 'remote' / 'remoteEntry.js').read_text() == 'remote\n'
