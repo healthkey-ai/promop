@@ -83,13 +83,30 @@ def supported(code: str | None) -> bool:
 
 
 def _common_fields(field_names) -> set[str]:
-    from omop_core.services.field_descriptor import _classify_field, _classify_tab
+    """The approved fields on a common clinical tab, as the curator placed them.
 
+    Placement is the descriptor's resolved tab (``FieldConceptMapping.tab``
+    first, then the code, #2328): a field a curator moved to Labs counts, one
+    moved to ``omop`` (unplaced) does not.
+    """
+    from omop_core.models import FieldConceptMapping
+    from omop_core.services.field_descriptor import _classify_field, resolve_tab
+
+    placed = dict(FieldConceptMapping.objects.filter(field_name__in=field_names)
+                  .values_list('field_name', 'tab'))
     claimed = set().union(*DISEASE_FIELDS.values())
     return {f for f in field_names
             if f not in claimed
-            and _classify_tab(f) in _COMMON_TABS
+            and resolve_tab(f, mapping=_Placement(placed.get(f, ''))) in _COMMON_TABS
             and _classify_field(f) not in _NOT_CLINICAL}
+
+
+class _Placement:
+    """Just enough of a mapping row for ``resolve_tab``: its tab."""
+    __slots__ = ('tab',)
+
+    def __init__(self, tab: str):
+        self.tab = tab
 
 
 def _disease_fields(code: str) -> set[str]:

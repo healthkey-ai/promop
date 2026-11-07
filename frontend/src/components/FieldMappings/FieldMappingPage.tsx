@@ -39,6 +39,8 @@ interface FieldDescriptor {
     reviewer: string | null;
     reviewed_at: string | null;
     notes: string;
+    /** Curator placement; blank keeps the code's, "omop" is unplaced (#2328). */
+    tab?: string;
   } | null;
   suggestion: {
     concept_code: string;
@@ -82,9 +84,13 @@ const TAB_LABELS: Record<string, string> = {
   labs: "Labs",
   genomics: "Genomics",
   behavior: "Behavior",
+  wearable: "Wearable",
+  // Unplaced: the field keeps its mapping and derivation but no patient tab
+  // renders it, so its facts show only as raw OMOP rows (#2328).
+  omop: "OMOP (unplaced)",
 };
 
-const TAB_ORDER = ["general", "disease", "treatment", "blood", "labs", "genomics", "behavior"];
+const TAB_ORDER = ["general", "disease", "treatment", "blood", "labs", "genomics", "behavior", "wearable", "omop"];
 
 const STATUS_BADGE: Record<string, string> = {
   proposed: "bg-yellow-100 text-yellow-800",
