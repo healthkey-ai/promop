@@ -39,9 +39,12 @@ def url(dx):
 
 def test_migration_assigns_correct_domains_and_is_repeatable(setup):
     *_, note, team, event = setup
-    before = list(FieldConceptMapping.objects.filter(field_name__startswith='condition.').values('field_name', 'concept_id'))
+    # Ordered: an unordered queryset may come back in either order, which made
+    # this compare equal rows as different now and then.
+    rows = FieldConceptMapping.objects.filter(field_name__startswith='condition.').order_by('field_name')
+    before = list(rows.values('field_name', 'concept_id'))
     run_migration()
-    assert list(FieldConceptMapping.objects.filter(field_name__startswith='condition.').values('field_name', 'concept_id')) == before
+    assert list(rows.values('field_name', 'concept_id')) == before
     assert FieldConceptMapping.objects.get(field_name='condition.note').concept_id == note.pk
     assert FieldConceptMapping.objects.get(field_name='condition.note').omop_table == 'measurement'
     assert FieldConceptMapping.objects.get(field_name='condition.care_team').concept_id == team.pk
