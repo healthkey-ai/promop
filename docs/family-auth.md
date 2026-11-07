@@ -53,10 +53,29 @@ FAMILY_AUTH_PUBLIC_KEY    optional; derived from the private key
 FAMILY_AUTH_ISSUER        https://<this promop> (required)
 FAMILY_AUTH_AUDIENCE      promop-api[,<sibling>…]
 FAMILY_AUTH_THROTTLE_RATE 30/minute per client address (login, refresh, introspect)
+FAMILY_AUTH_SIGNUP_ORGS   slug:Name[,slug:Name…] — each installation's sign-up org
 CORS_ALLOWED_ORIGINS      + every phr installation's origin
 ```
 
 Without key and issuer the endpoints answer 404 and no family token is accepted.
+
+## Deployment
+
+On Render staging all of it is in `render.yaml` and applies with a Blueprint
+sync, except the key:
+
+- `FAMILY_AUTH_ISSUER`, `FAMILY_AUTH_AUDIENCE`, `FAMILY_AUTH_SIGNUP_ORGS`
+  (`phr:HealthKey PHR`) and phr's origin in `CORS_ALLOWED_ORIGINS` are values.
+- `FAMILY_AUTH_PRIVATE_KEY` is `sync: false`: entered once. Render can't
+  generate an RSA key, and the key must not change between deploys (every
+  session would end). One line, `\n`-escaped:
+  `openssl genrsa 2048 | awk 'BEGIN{ORS="\\n"}{print}'`.
+- Every deploy runs `manage.py ensure_signup_orgs` (`scripts/prepare-deployment.sh`):
+  each listed org is created if missing and keeps patient sign-up on. A
+  deactivated org is reported, not reactivated. Unset, it does nothing, so
+  production and Cloud Run are unaffected until they list orgs.
+
+The web service alone issues and accepts family tokens; the worker needs none of it.
 
 ## Siblings
 

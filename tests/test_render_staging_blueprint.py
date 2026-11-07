@@ -28,7 +28,10 @@ def test_staging_reuses_existing_web_settings_and_shares_broker():
     assert web_env['CELERY_RESULT_BACKEND'] == worker_env['CELERY_RESULT_BACKEND']
     assert web_env['DEBUG']['value'] == 'False'
     assert web_env['ALLOWED_HOSTS']['value'] == 'promop-staging.onrender.com'
-    assert web_env['CORS_ALLOWED_ORIGINS']['value'] == 'https://promop-staging.onrender.com'
+    # Staging itself, and the phr installation it hosts identity for (phr#43).
+    assert web_env['CORS_ALLOWED_ORIGINS']['value'] == (
+        'https://promop-staging.onrender.com,https://phr-7kf7.onrender.com'
+    )
     assert web_env['APP_BASE_URL']['value'] == 'https://promop-staging.onrender.com'
     assert web_env['SERVICE_AUTH_SCOPES']['value'] == 'patient/*.read system/etl.write'
     assert 'patient/*.write' not in web_env['SERVICE_AUTH_SCOPES']['value'].split()
@@ -112,3 +115,19 @@ def test_worker_start_defaults_to_one_child(tmp_path):
     result = subprocess.run(['bash', str(ROOT / 'start-worker.sh')], env=env, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert result.stdout == '1 1 -A promop worker --loglevel=info --queues=celery,athena,suggest'
+
+
+def test_staging_hosts_identity_for_phr_and_production_does_not_yet():
+    """Family auth (phr#43): staging issues phr's tokens; production is untouched."""
+    result = yaml.safe_load((ROOT / 'render.yaml').read_text())
+    by_name = {s['name']: s for s in result['services']}
+    staging = {e['key']: e for e in by_name['promop-staging']['envVars']}
+    production = {e['key']: e for e in by_name['promop']['envVars']}
+
+    # The signing key is a secret entered once, never a value in the repo.
+    assert staging['FAMILY_AUTH_PRIVATE_KEY'] == {'key': 'FAMILY_AUTH_PRIVATE_KEY', 'sync': False}
+    assert staging['FAMILY_AUTH_ISSUER']['value'] == 'https://promop-staging.onrender.com'
+    assert staging['FAMILY_AUTH_AUDIENCE']['value'] == staging['PHR_AUDIENCE']['value'] == 'promop-api'
+    assert staging['FAMILY_AUTH_SIGNUP_ORGS']['value'] == 'phr:HealthKey PHR'
+    assert not any(key.startswith('FAMILY_AUTH_') for key in production)
+

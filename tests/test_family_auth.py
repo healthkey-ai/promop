@@ -207,3 +207,64 @@ def test_off_until_configured(settings, account):
     settings.FAMILY_AUTH_PRIVATE_KEY = ""
     assert _login(APIClient()).status_code == 404
     assert APIClient().get(f"{BASE}/jwks/").data == {"keys": []}
+
+
+# ── ensure_signup_orgs: the installation's sign-up org, kept by every deploy ──
+
+def _ensure(settings, value):
+    from io import StringIO
+
+    from django.core.management import call_command
+
+    settings.FAMILY_AUTH_SIGNUP_ORGS = value
+    out = StringIO()
+    call_command("ensure_signup_orgs", stdout=out, stderr=out)
+    return out.getvalue()
+
+
+def test_ensure_signup_orgs_creates_the_org_and_phr_can_sign_up_into_it(settings):
+    from omop_core.models import Organization
+
+    assert "Created sign-up organization phr" in _ensure(settings, ["phr:HealthKey PHR"])
+    org = Organization.objects.get(slug="phr")
+    assert (org.name, org.allows_patient_signup) == ("HealthKey PHR", True)
+
+    signup = APIClient().post("/api/v1/orgs/phr/patient-signup/", {
+        "email": "first@example.com", "password": "a-long-enough-pass-42",
+    }, format="json")
+    assert signup.status_code == 201, signup.data
+
+
+def test_ensure_signup_orgs_is_idempotent_and_puts_sign_up_back(settings):
+    from omop_core.models import Organization
+
+    _ensure(settings, ["phr:HealthKey PHR"])
+    Organization.objects.filter(slug="phr").update(allows_patient_signup=False, name="Renamed by an admin")
+
+    assert "Turned on patient sign-up for phr" in _ensure(settings, ["phr:HealthKey PHR"])
+    org = Organization.objects.get(slug="phr")
+    assert org.allows_patient_signup is True
+    assert org.name == "Renamed by an admin"  # an existing org keeps its own settings
+    assert "is in place" in _ensure(settings, ["phr:HealthKey PHR"])
+    assert Organization.objects.filter(slug="phr").count() == 1
+
+
+def test_ensure_signup_orgs_reports_a_deactivated_org_without_reactivating_it(settings):
+    from omop_core.models import Organization
+
+    OrganizationFactory(slug="phr", name="HealthKey PHR", is_active=False, allows_patient_signup=True)
+    assert "deactivated" in _ensure(settings, ["phr:HealthKey PHR"])
+    assert Organization.objects.get(slug="phr").is_active is False
+
+
+def test_ensure_signup_orgs_does_nothing_unset_and_rejects_a_malformed_entry(settings):
+    from django.core.management.base import CommandError
+
+    from omop_core.models import Organization
+
+    before = Organization.objects.count()
+    assert "nothing to do" in _ensure(settings, [])
+    assert Organization.objects.count() == before
+    for bad in (["phr"], ["Not A Slug:Name"], ["phr:"]):
+        with pytest.raises(CommandError):
+            _ensure(settings, bad)

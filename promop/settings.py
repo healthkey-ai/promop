@@ -481,6 +481,9 @@ FAMILY_AUTH_ISSUER = os.environ.get("FAMILY_AUTH_ISSUER", "")
 FAMILY_AUTH_AUDIENCE = _env_list("FAMILY_AUTH_AUDIENCE", "promop-api")
 FAMILY_AUTH_ACCESS_SECONDS = int(os.environ.get("FAMILY_AUTH_ACCESS_SECONDS", "900"))
 FAMILY_AUTH_REFRESH_SECONDS = int(os.environ.get("FAMILY_AUTH_REFRESH_SECONDS", str(7 * 86400)))
+# Each phr installation's sign-up organization, "slug:Name" pairs. Every deploy
+# keeps them in place (manage.py ensure_signup_orgs, scripts/prepare-deployment.sh).
+FAMILY_AUTH_SIGNUP_ORGS = _env_list("FAMILY_AUTH_SIGNUP_ORGS")
 
 FIREBASE_PROJECT_ID = os.environ.get("FIREBASE_PROJECT_ID", "")
 FIREBASE_SKIP_REVOCATION_CHECK = os.environ.get(

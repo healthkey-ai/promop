@@ -66,6 +66,11 @@ python manage.py queue_athena_vocabulary_sync "${ATHENA_SOURCE_ARGS[@]}"
 echo "Creating/resetting admin user..."
 python manage.py setup_admin
 
+# phr installations' sign-up organizations (family auth, phr#43). A no-op
+# unless FAMILY_AUTH_SIGNUP_ORGS names some.
+echo "Ensuring the family auth sign-up organizations..."
+python manage.py ensure_signup_orgs
+
 # Check the LOINC release version and queue a load when it has moved. The check
 # is one small authenticated request; the archive is ~92MB and goes to a Celery
 # worker, so this does not hold up a deploy. It never fails the deploy either --
