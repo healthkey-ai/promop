@@ -42,7 +42,7 @@ def test_egfr_names_the_inputs_the_matcher_recomputes_it_from():
     assert entry['kind'] == KIND_ALIAS
     assert entry['writable'] is False
     assert entry['canonical'] == 'egfr_ml_min_173m2'
-    assert entry['inputs'] == ['serum_creatinine_level', 'patient_age', 'gender']
+    assert entry['inputs'] == ['serum_creatinine_mg_dl', 'date_of_birth', 'gender']
 
 
 def test_every_named_input_is_a_described_field():

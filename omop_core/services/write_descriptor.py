@@ -334,8 +334,13 @@ _ALIAS_TO_CANONICAL = {
 #: Naming the inputs is what lets a client offer the fields that actually move
 #: the value instead of a box that silently does nothing.
 _ALIAS_INPUTS = {
+    # The canonical creatinine the CKD-EPI matcher reads, and the birth date the
+    # age is computed from. The legacy source pair (`serum_creatinine_level` +
+    # its `_units`) is a different field a host may withhold entirely; naming it
+    # here left Trial Details unable to build the dialog even though both
+    # canonical inputs are editable (#5667).
     'estimated_glomerular_filtration_rate': [
-        'serum_creatinine_level', 'patient_age', 'gender',
+        'serum_creatinine_mg_dl', 'date_of_birth', 'gender',
     ],
 }
 
