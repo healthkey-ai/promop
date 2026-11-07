@@ -33,6 +33,14 @@ class Command(BaseCommand):
     help = "Create or update the sign-up organizations in FAMILY_AUTH_SIGNUP_ORGS."
 
     def handle(self, *args, **options):
+        # A malformed installation URL would send verification links to
+        # PROMOP instead of phr; refuse it here, at deploy.
+        from family_auth.installations import InvalidAppUrls, parse_app_urls
+
+        try:
+            parse_app_urls(settings.FAMILY_AUTH_APP_URLS)
+        except InvalidAppUrls as exc:
+            raise CommandError(str(exc)) from exc
         orgs = parse(settings.FAMILY_AUTH_SIGNUP_ORGS)
         if not orgs:
             self.stdout.write("No FAMILY_AUTH_SIGNUP_ORGS; nothing to do.")

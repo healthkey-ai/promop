@@ -129,5 +129,9 @@ def test_staging_hosts_identity_for_phr_and_production_does_not_yet():
     assert staging['FAMILY_AUTH_ISSUER']['value'] == 'https://promop-staging.onrender.com'
     assert staging['FAMILY_AUTH_AUDIENCE']['value'] == staging['PHR_AUDIENCE']['value'] == 'promop-api'
     assert staging['FAMILY_AUTH_SIGNUP_ORGS']['value'] == 'phr:HealthKey PHR'
+    # phr's sign-ups verify on phr, at the origin CORS lets call the API.
+    app_slug, app_url = staging['FAMILY_AUTH_APP_URLS']['value'].split('=')
+    assert app_slug == 'phr'
+    assert app_url in staging['CORS_ALLOWED_ORIGINS']['value'].split(',')
     assert not any(key.startswith('FAMILY_AUTH_') for key in production)
 
