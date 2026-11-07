@@ -273,3 +273,67 @@ def test_ensure_signup_orgs_does_nothing_unset_and_rejects_a_malformed_entry(set
     for bad in (["phr"], ["Not A Slug:Name"], ["phr:"]):
         with pytest.raises(CommandError):
             _ensure(settings, bad)
+
+
+# ── Verification links go to the installation the patient signed up on ──────
+
+def _signup(client, slug, email="pat@example.com"):
+    return client.post(f"/api/v1/orgs/{slug}/patient-signup/", {
+        "email": email, "password": "a-long-enough-pass-42", "given_name": "Pat", "family_name": "Lee",
+    }, format="json")
+
+
+def test_a_phr_signup_gets_its_verification_link_to_phr(settings, mailoutbox):
+    import re
+
+    OrganizationFactory(slug="phr", name="HealthKey PHR", allows_patient_signup=True)
+    settings.FAMILY_AUTH_APP_URLS = ["phr=https://phr.test"]
+    assert _signup(APIClient(), "phr").status_code == 201
+
+    message = mailoutbox[-1]
+    assert message.subject == "Confirm your email address for HealthKey PHR"
+    assert "for HealthKey PHR:" in message.body and "PROMOP" not in message.body
+    link = re.search(r"https://\S+", message.body).group(0)
+    assert link.startswith("https://phr.test/verify-email?token=")
+
+    # phr's page completes it through the family API, then login works.
+    token = link.split("token=", 1)[1]
+    verified = APIClient().post(f"{BASE}/verify-email/", {"token": token}, format="json")
+    assert verified.status_code == 200, verified.data
+    assert _login(APIClient(), "pat@example.com", "a-long-enough-pass-42").status_code == 200
+
+
+def test_the_resent_link_on_a_refused_login_also_goes_to_phr(settings, mailoutbox):
+    OrganizationFactory(slug="phr", name="HealthKey PHR", allows_patient_signup=True)
+    settings.FAMILY_AUTH_APP_URLS = ["phr=https://phr.test/"]
+    _signup(APIClient(), "phr")
+    mailoutbox.clear()
+
+    assert _login(APIClient(), "pat@example.com", "a-long-enough-pass-42").status_code == 403
+    assert "https://phr.test/verify-email?token=" in mailoutbox[-1].body
+
+
+def test_other_signups_keep_promops_own_link(settings, mailoutbox):
+    settings.APP_BASE_URL = "https://promop.test"
+    settings.FAMILY_AUTH_APP_URLS = ["phr=https://phr.test"]
+    OrganizationFactory(slug="clinic", name="A clinic", allows_patient_signup=True)
+    _signup(APIClient(), "clinic")
+
+    assert "https://promop.test/verify-email?token=" in mailoutbox[-1].body
+    assert mailoutbox[-1].subject == "Confirm your email address for PROMOP"
+
+
+def test_a_malformed_app_url_stops_the_deploy_and_is_ignored_by_mail(settings, mailoutbox):
+    from django.core.management.base import CommandError
+
+    for bad in (["phr"], ["phr=ftp://phr.test"], ["phr=https://phr.test/path"], ["Not A Slug=https://x.test"]):
+        settings.FAMILY_AUTH_APP_URLS = bad
+        with pytest.raises(CommandError):
+            _ensure(settings, ["phr:HealthKey PHR"])
+
+    settings.APP_BASE_URL = "https://promop.test"
+    settings.FAMILY_AUTH_APP_URLS = ["phr=ftp://nope"]
+    OrganizationFactory(slug="phr", name="HealthKey PHR", allows_patient_signup=True)
+    _signup(APIClient(), "phr")
+    assert "https://promop.test/verify-email?token=" in mailoutbox[-1].body
+

@@ -484,6 +484,9 @@ FAMILY_AUTH_REFRESH_SECONDS = int(os.environ.get("FAMILY_AUTH_REFRESH_SECONDS", 
 # Each phr installation's sign-up organization, "slug:Name" pairs. Every deploy
 # keeps them in place (manage.py ensure_signup_orgs, scripts/prepare-deployment.sh).
 FAMILY_AUTH_SIGNUP_ORGS = _env_list("FAMILY_AUTH_SIGNUP_ORGS")
+# Each installation's origin, "slug=https://…" by sign-up org: an account that
+# signed up there gets its verification link to that installation, not PROMOP.
+FAMILY_AUTH_APP_URLS = _env_list("FAMILY_AUTH_APP_URLS")
 
 FIREBASE_PROJECT_ID = os.environ.get("FIREBASE_PROJECT_ID", "")
 FIREBASE_SKIP_REVOCATION_CHECK = os.environ.get(

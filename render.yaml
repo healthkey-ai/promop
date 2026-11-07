@@ -247,6 +247,9 @@ services:
       # phr's sign-up org, kept in place by every deploy (ensure_signup_orgs).
       - key: FAMILY_AUTH_SIGNUP_ORGS
         value: "phr:HealthKey PHR"
+      # Where phr's patients verify their email: the phr installation itself.
+      - key: FAMILY_AUTH_APP_URLS
+        value: "phr=https://phr-7kf7.onrender.com"
       - key: ANTHROPIC_API_KEY
         sync: false
       - key: ANTHROPIC_WORKSPACE_ID

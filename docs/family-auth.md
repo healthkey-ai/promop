@@ -19,6 +19,7 @@ lives under `family/`. A phr installation sets its API base to
 | `GET me/` | bearer access | the user, phr's `AppUser` shape |
 | `GET jwks/` | — | RFC 7517 key set (RS256) |
 | `POST introspect/` | `{token}` | RFC 7662 `{active, ...claims}`, from the identity as it is now |
+| `POST verify-email/` | `{token}` from the emailed link | PROMOP's email verification, for the installation's page |
 
 Sign-up is PROMOP's public org sign-up, `POST /api/v1/orgs/<slug>/patient-signup/`
 (1 phr installation = 1 Organization with `allows_patient_signup`). It creates
@@ -27,6 +28,16 @@ refused until it is followed.
 
 Credentials are checked exactly as PROMOP's own login checks them
 (`EmailBackend`: local accounts, lockout).
+
+**Verification links go to the installation.** An account with access to an
+org listed in `FAMILY_AUTH_APP_URLS` (`phr=https://phr.example.com`) gets its
+verification email for that installation: the link is
+`https://phr.example.com/verify-email?token=…` and the email names the org
+("Confirm your email address for HealthKey PHR"). phr's page completes it with
+`POST /api/v1/family/auth/verify-email/ {token}` (PROMOP's own verify
+endpoint). Everyone else keeps `APP_BASE_URL` and "PROMOP". The base comes only
+from this setting, never from a request; a malformed entry stops the deploy
+(`ensure_signup_orgs`) and is ignored by mail.
 
 ## Tokens
 
@@ -54,6 +65,7 @@ FAMILY_AUTH_ISSUER        https://<this promop> (required)
 FAMILY_AUTH_AUDIENCE      promop-api[,<sibling>…]
 FAMILY_AUTH_THROTTLE_RATE 30/minute per client address (login, refresh, introspect)
 FAMILY_AUTH_SIGNUP_ORGS   slug:Name[,slug:Name…] — each installation's sign-up org
+FAMILY_AUTH_APP_URLS      slug=https://origin[,…] — where that org's sign-ups verify
 CORS_ALLOWED_ORIGINS      + every phr installation's origin
 ```
 
@@ -65,7 +77,8 @@ On Render staging all of it is in `render.yaml` and applies with a Blueprint
 sync, except the key:
 
 - `FAMILY_AUTH_ISSUER`, `FAMILY_AUTH_AUDIENCE`, `FAMILY_AUTH_SIGNUP_ORGS`
-  (`phr:HealthKey PHR`) and phr's origin in `CORS_ALLOWED_ORIGINS` are values.
+  (`phr:HealthKey PHR`), `FAMILY_AUTH_APP_URLS` (`phr=https://phr-7kf7.onrender.com`)
+  and phr's origin in `CORS_ALLOWED_ORIGINS` are values.
 - `FAMILY_AUTH_PRIVATE_KEY` is `sync: false`: entered once. Render can't
   generate an RSA key, and the key must not change between deploys (every
   session would end). One line, `\n`-escaped:
