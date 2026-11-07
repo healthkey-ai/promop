@@ -101,7 +101,15 @@ def test_a_self_signup_logs_in_only_after_verifying_its_email():
     allowed = _login(client, "new@example.com", "a-long-enough-pass-42")
     assert allowed.status_code == 200
     # The signup made the patient's record: the token says which.
-    assert _claims(allowed.data["access"])["person_id"] is not None
+    person_id = _claims(allowed.data["access"])["person_id"]
+    assert person_id is not None
+
+    # And the token reads it like a signed-in patient: role-based access to
+    # their own record, not an OAuth token that would need SMART scopes.
+    patient = APIClient()
+    patient.credentials(HTTP_AUTHORIZATION=f"Bearer {allowed.data['access']}")
+    record = patient.get("/api/patient-info/me/")
+    assert record.status_code == 200, record.data
 
 
 def test_me_returns_phr_shaped_user_and_promop_accepts_the_token_as_the_same_identity(account):
