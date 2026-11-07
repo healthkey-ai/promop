@@ -22,6 +22,15 @@ from omop_core.services.hemoglobin_units import (
     CANONICAL_FIELD, DEFAULT_UNIT, PAIR_FIELD, UNIT_FIELD,
     canonical_from_pair, canonical_in_range, normalize_unit,
 )
+from omop_core.services.creatinine_units import (
+    CANONICAL_FIELD as CREATININE_CANONICAL,
+    DEFAULT_UNIT as CREATININE_DEFAULT_UNIT,
+    PAIR_FIELD as CREATININE_PAIR,
+    UNIT_FIELD as CREATININE_UNIT,
+    canonical_from_pair as creatinine_canonical_from_pair,
+    canonical_in_range as creatinine_canonical_in_range,
+    normalize_unit as normalize_creatinine_unit,
+)
 from omop_core.services.blood_count_source_pairs import (
     PAIRS as COUNT_SOURCE_PAIRS,
     canonical_from_source as count_canonical_from_source,
@@ -525,6 +534,24 @@ class PatientRecordSerializer(serializers.ModelSerializer):
                 })
             data[unit_field] = code
 
+        # Creatinine's source pair (#2318 follow-up): normalise the unit before
+        # field validation, because the column's TextChoices accept only codes.
+        creatinine_code = None
+        if CREATININE_UNIT in data and CREATININE_PAIR not in data:
+            raise serializers.ValidationError({
+                CREATININE_UNIT: 'Send the unit together with its value.',
+            })
+        if CREATININE_PAIR in data:
+            sent = (data.get(CREATININE_UNIT)
+                    or (self.instance and getattr(self.instance, CREATININE_UNIT, None))
+                    or CREATININE_DEFAULT_UNIT)
+            creatinine_code = normalize_creatinine_unit(sent)
+            if creatinine_code is None:
+                raise serializers.ValidationError({
+                    CREATININE_UNIT: 'Choose one of: mg/dL, umol/L.',
+                })
+            data[CREATININE_UNIT] = creatinine_code
+
         # The count source pairs use the same pattern: the client writes the
         # legacy cells/µL field and the canonical thousands/µL value follows.
         count_units = {}
@@ -658,6 +685,22 @@ class PatientRecordSerializer(serializers.ModelSerializer):
             # source is what the reader owns.
             self._source_pairs = {pair, unit_field}
             self._derived_from_pair = {CANONICAL_FIELD}
+
+        if CREATININE_PAIR in validated:
+            recognised, canonical = creatinine_canonical_from_pair(
+                validated[CREATININE_PAIR],
+                creatinine_code or CREATININE_DEFAULT_UNIT,
+            )
+            if not recognised:
+                raise serializers.ValidationError({CREATININE_PAIR: 'Enter a number.'})
+            if not creatinine_canonical_in_range(canonical):
+                raise serializers.ValidationError({
+                    CREATININE_PAIR: 'Creatinine is outside the storable range.',
+                })
+            validated[CREATININE_UNIT] = creatinine_code or CREATININE_DEFAULT_UNIT
+            validated[CREATININE_CANONICAL] = canonical
+            self._source_pairs |= {CREATININE_PAIR, CREATININE_UNIT}
+            self._derived_from_pair.add(CREATININE_CANONICAL)
 
         for source, spec in COUNT_SOURCE_PAIRS.items():
             if source not in validated:

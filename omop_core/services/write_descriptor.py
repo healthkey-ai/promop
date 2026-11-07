@@ -752,6 +752,11 @@ def get_serializer_read_only_fields():
     read_only |= DERIVED_LANGUAGE_FIELDS
     # KIND_ALIAS: mirrors of canonical fields
     read_only |= set(_ALIAS_TO_CANONICAL)
+    # A source pair's own value is the write target even though the canonical it
+    # feeds lists it as a legacy alias (#2318 follow-up). Hemoglobin is not in
+    # `_LAB_FIELD_ALIASES` for the same reason; creatinine needs the alias entry
+    # so a canonical import still propagates back into the pair.
+    read_only -= {'serum_creatinine_level', 'serum_creatinine_level_units'}
     # Profile fields now write through PatientRecord PATCH (KIND_DIRECT),
     # so they are no longer read-only on the serializer.
     # KIND_AUTHORED / KIND_UNMAPPED: therapy-prefix fields (minus exceptions)
@@ -1507,6 +1512,39 @@ def build_writable_field_descriptor():
             'edit that field and its unit instead.'
         ),
         'unit': canonical_hemoglobin.get('unit') or 'g/dL',
+    }
+
+    # Creatinine's source pair (#2318 follow-up). The CKD-EPI matcher reads the
+    # normalised mg/dL value, and the record keeps what the lab reported. A host
+    # that withholds the pair would leave the eGFR row with no editable source.
+    descriptor['serum_creatinine_level'] = {
+        'kind': KIND_DIRECT,
+        'writable': True,
+        'target': 'patient_record',
+        'value_kind': 'number',
+    }
+    descriptor['serum_creatinine_level_units'] = {
+        'kind': KIND_SELECTABLE,
+        'writable': False,
+        'qualifies': 'serum_creatinine_level',
+        'reason': (
+            'Unit of serum_creatinine_level; selected alongside that value and '
+            'stored with it. The canonical mg/dL value is derived from the pair.'
+        ),
+    }
+    canonical_creatinine = descriptor.get('serum_creatinine_mg_dl') or {}
+    descriptor['serum_creatinine_mg_dl'] = {
+        **canonical_creatinine,
+        'kind': KIND_COMPUTED,
+        'writable': False,
+        'value_kind': 'number',
+        'inputs': ['serum_creatinine_level'],
+        'normalised_read_model': True,
+        'reason': canonical_creatinine.get('reason') or (
+            'Normalised from serum_creatinine_level in the default unit (mg/dL); '
+            'edit that field and its unit instead.'
+        ),
+        'unit': canonical_creatinine.get('unit') or 'mg/dL',
     }
 
     # The unit choices (#2318). `FIELD_COMMON_UNITS` is the curated list per
