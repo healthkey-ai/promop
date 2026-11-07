@@ -32,6 +32,7 @@ _v1_api = [
     path('', include('patient_portal.api.v1_urls')),
     path('lab-results/', include('patient_portal.api.lab_results.v1_urls')),
     path('fhir/', include('patient_portal.api.fhir.v1_urls')),
+    path('family/', include('family_auth.urls')),
     path('health/', views.health_check, name='health_check_v1'),
 ]
 _v1_schema_patterns = [path('api/v1/', include(_v1_api))]
@@ -58,6 +59,7 @@ urlpatterns = [
     path('api/', include('patient_portal.api.urls')),
     path('api/lab-results/', include('patient_portal.api.lab_results.urls')),
     path('api/fhir/', include('patient_portal.api.fhir.urls')),
+    path('api/family/', include('family_auth.urls')),
     path('api/health/', views.health_check, name='health_check'),
 
     # PROlog survey runner. Its own URL tree (health + /run/), mounted under the
