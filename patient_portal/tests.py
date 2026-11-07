@@ -507,8 +507,9 @@ class FhirUploadStringLabValueTest(FhirUploadBase):
                     'category': [{'coding': [{
                         'system': 'http://terminology.hl7.org/CodeSystem/observation-category',
                         'code': 'laboratory'}]}],
-                    'code': {'coding': [{'system': 'http://loinc.org', 'code': '21908-9-riss',
-                                         'display': 'R-ISS stage'}], 'text': 'R-ISS stage'},
+                    'code': {'coding': [{'system': 'https://healthkey.ai/fhir/CodeSystem/hk-observation',
+                                         'code': 'hko:r-iss-stage', 'display': 'R-ISS stage'}],
+                             'text': 'R-ISS stage'},
                     'valueString': 'R-ISS III',
                 }},
             ],
@@ -578,7 +579,7 @@ class FhirUploadStringLabValueTest(FhirUploadBase):
                     ],
                 }},
                 _obs('21908-9', 'ISS stage', 'ISS II'),
-                _obs('21908-9-riss', 'R-ISS stage', 'R-ISS III'),
+                _obs('hko:r-iss-stage', 'R-ISS stage', 'R-ISS III'),
             ],
         }
         bundle_bytes = json.dumps(bundle).encode('utf-8')
@@ -20233,7 +20234,7 @@ class PartialPatchValueColumnTest(TestCase):
 
     def test_row_level_patch_still_coerces_a_boolean_assertion(self):
         """The stored source value supplies the context a partial write omits."""
-        m = self._measurement(measurement_source_value='8659-8')
+        m = self._measurement(measurement_source_value='13197004')
         resp = self.client.patch(
             f'/api/v1/measurements/{m.measurement_id}/',
             {'value_as_string': 'yes'}, format='json')
@@ -20243,7 +20244,7 @@ class PartialPatchValueColumnTest(TestCase):
         self.assertEqual(m.value_as_number, 1)
 
     def test_row_level_patch_still_rejects_a_bad_assertion_value(self):
-        m = self._measurement(measurement_source_value='8659-8')
+        m = self._measurement(measurement_source_value='13197004')
         resp = self.client.patch(
             f'/api/v1/measurements/{m.measurement_id}/',
             {'value_as_string': 'sort of'}, format='json')
@@ -20253,7 +20254,7 @@ class PartialPatchValueColumnTest(TestCase):
 
     def test_bulk_update_coerces_a_boolean_assertion_the_same_way(self):
         """Parity with the row level path, which reads it off the instance."""
-        m = self._measurement(measurement_source_value='8659-8')
+        m = self._measurement(measurement_source_value='13197004')
         resp = self.client.patch(
             '/api/v1/measurements/bulk_update/',
             [{'measurement_id': m.measurement_id, 'value_as_string': 'yes'}],
@@ -20264,7 +20265,7 @@ class PartialPatchValueColumnTest(TestCase):
         self.assertEqual(m.value_as_number, 1)
 
     def test_bulk_update_rejects_a_bad_assertion_value(self):
-        m = self._measurement(measurement_source_value='8659-8')
+        m = self._measurement(measurement_source_value='13197004')
         resp = self.client.patch(
             '/api/v1/measurements/bulk_update/',
             [{'measurement_id': m.measurement_id, 'value_as_string': 'sort of'}],
@@ -20280,7 +20281,7 @@ class PartialPatchValueColumnTest(TestCase):
             'measurement_concept': self.m_concept.concept_id,
             'measurement_date': '2024-02-02',
             'measurement_type_concept': self.type_concept.concept_id,
-            'measurement_source_value': '8659-8',
+            'measurement_source_value': '13197004',
             'value_as_string': 'yes',
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
@@ -20291,7 +20292,7 @@ class PartialPatchValueColumnTest(TestCase):
     def test_an_explicit_number_wins_over_the_stored_string(self):
         """Patching an assertion from 1 to 0 must not stay true."""
         m = self._measurement(
-            measurement_source_value='8659-8', value_as_number=1,
+            measurement_source_value='13197004', value_as_number=1,
             value_as_string='True')
         resp = self.client.patch(
             f'/api/v1/measurements/{m.measurement_id}/',
@@ -20303,7 +20304,7 @@ class PartialPatchValueColumnTest(TestCase):
 
     def test_bulk_update_explicit_number_wins_too(self):
         m = self._measurement(
-            measurement_source_value='8659-8', value_as_number=1,
+            measurement_source_value='13197004', value_as_number=1,
             value_as_string='True')
         resp = self.client.patch(
             '/api/v1/measurements/bulk_update/',
@@ -20321,7 +20322,7 @@ class PartialPatchValueColumnTest(TestCase):
         resp = self.client.patch(
             '/api/v1/measurements/bulk_update/',
             [{'measurement_id': m.measurement_id,
-              'measurement_source_value': '8659-8'}],
+              'measurement_source_value': '13197004'}],
             format='json')
         self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
         m.refresh_from_db()
@@ -20334,7 +20335,7 @@ class PartialPatchValueColumnTest(TestCase):
         resp = self.client.patch(
             '/api/v1/measurements/bulk_update/',
             [{'measurement_id': m.measurement_id,
-              'measurement_source_value': '8659-8'}],
+              'measurement_source_value': '13197004'}],
             format='json')
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
         m.refresh_from_db()

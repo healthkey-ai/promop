@@ -13,6 +13,7 @@ import random
 import uuid
 from datetime import date, datetime, timedelta
 
+from omop_core.services.mappings import HK_OBSERVATION_SYSTEM, LOINC_SYSTEM
 from omop_core.services.lot_regimens import (
     FL_CONDITION_CONCEPT_ID,
     FL_LOT_WEIGHTS,
@@ -43,7 +44,8 @@ _L = {
     'b2m':        '1952-1',
     'ecog':       '89247-1',
     'kps':        '89243-0',
-    'bm_b_cells': '85319-5',
+    # CD19 cells/cells in Bone marrow (3035081); 85319-5, used before, is in no LOINC release.
+    'bm_b_cells': '32525-8',
 }
 
 # ---------------------------------------------------------------------------
@@ -62,32 +64,38 @@ _HEMONC_DRUG_ALIAS: dict[str, str] = {
 # ---------------------------------------------------------------------------
 # RxNorm / concept IDs for individual drugs
 # ---------------------------------------------------------------------------
+# RxNorm ingredient RXCUIs, checked against the loaded RxNorm vocabulary
+# (vocabulary_id='RxNorm', concept_class_id='Ingredient'). Before the #0329
+# audit this table carried 11384 (Yeasts) for vincristine, 2393 (chloroquine)
+# for chlorambucil, 3423 (hydromorphone) for etoposide, 41493 (meloxicam) for
+# methylprednisolone, 77997 (a dexamethasone brand) for oxaliplatin and ten
+# numbers in no RxNorm release at all.
 _DRUG_INFO: dict[str, tuple[str, str]] = {
     'rituximab':            ('121191',  'Rituximab (Rituxan)'),
-    'bendamustine':         ('699871',  'Bendamustine (Treanda)'),
+    'bendamustine':         ('134547',  'Bendamustine (Treanda)'),
     'cyclophosphamide':     ('3002',    'Cyclophosphamide'),
     'doxorubicin':          ('3639',    'Doxorubicin'),
-    'vincristine':          ('11384',   'Vincristine'),
-    'prednisone':           ('8638',    'Prednisone'),
-    'obinutuzumab':         ('1517319', 'Obinutuzumab (Gazyva)'),
-    'lenalidomide':         ('337535',  'Lenalidomide (Revlimid)'),
-    'tazemetostat':         ('2388032', 'Tazemetostat (Tazverik)'),
-    'axicabtagene':         ('1986200', 'Axicabtagene ciloleucel (Yescarta)'),
-    'tisagenlecleucel':     ('2049126', 'Tisagenlecleucel (Kymriah)'),
-    'mosunetuzumab':        ('2647309', 'Mosunetuzumab (Lunsumio)'),
-    'glofitamab':           ('2794909', 'Glofitamab (Columvi)'),
-    'epcoritamab':          ('2794910', 'Epcoritamab (Epkinly)'),
-    'copanlisib':           ('1860485', 'Copanlisib (Aliqopa)'),
-    'idelalisib':           ('1721006', 'Idelalisib (Zydelig)'),
-    'fludarabine':          ('3249',    'Fludarabine'),
-    'chlorambucil':         ('2393',    'Chlorambucil'),
-    'gemcitabine':          ('44785',   'Gemcitabine'),
-    'oxaliplatin':          ('77997',   'Oxaliplatin'),
+    'vincristine':          ('11202',   'Vincristine'),
+    'prednisone':           ('8640',    'Prednisone'),
+    'obinutuzumab':         ('974779',  'Obinutuzumab (Gazyva)'),
+    'lenalidomide':         ('342369',  'Lenalidomide (Revlimid)'),
+    'tazemetostat':         ('2274378', 'Tazemetostat (Tazverik)'),
+    'axicabtagene':         ('1987398', 'Axicabtagene ciloleucel (Yescarta)'),
+    'tisagenlecleucel':     ('1986438', 'Tisagenlecleucel (Kymriah)'),
+    'mosunetuzumab':        ('2625122', 'Mosunetuzumab (Lunsumio)'),
+    'glofitamab':           ('2639782', 'Glofitamab (Columvi)'),
+    'epcoritamab':          ('2637392', 'Epcoritamab (Epkinly)'),
+    'copanlisib':           ('1945077', 'Copanlisib (Aliqopa)'),
+    'idelalisib':           ('1544460', 'Idelalisib (Zydelig)'),
+    'fludarabine':          ('24698',   'Fludarabine'),
+    'chlorambucil':         ('2346',    'Chlorambucil'),
+    'gemcitabine':          ('12574',   'Gemcitabine'),
+    'oxaliplatin':          ('32592',   'Oxaliplatin'),
     'cisplatin':            ('2555',    'Cisplatin'),
     'dexamethasone':        ('3264',    'Dexamethasone'),
-    'etoposide':            ('3423',    'Etoposide'),
-    'cytarabine':           ('2585',    'Cytarabine (Ara-C)'),
-    'methylprednisolone':   ('41493',   'Methylprednisolone'),
+    'etoposide':            ('4179',    'Etoposide'),
+    'cytarabine':           ('3041',    'Cytarabine (Ara-C)'),
+    'methylprednisolone':   ('6902',    'Methylprednisolone'),
     # Radiation sentinel keys — never emitted as MedicationStatement
     'isrt':  None,
     'ifrt':  None,
@@ -506,7 +514,8 @@ class FLBundleGenerator:
             'category': [{'coding': [{'system': 'http://terminology.hl7.org/CodeSystem/condition-category', 'code': 'encounter-diagnosis'}]}],
             'code': {
                 'coding': [
-                    {'system': 'http://snomed.info/sct',        'code': '413448000', 'display': 'Follicular non-Hodgkin lymphoma'},
+                    # 308121000 is the disorder; 413448000, used before, is an adenocarcinoma morphology.
+                    {'system': 'http://snomed.info/sct',        'code': '308121000', 'display': 'Follicular lymphoma'},
                     {'system': 'http://hl7.org/fhir/sid/icd-10-cm', 'code': 'C82.90', 'display': 'Follicular lymphoma, unspecified'},
                 ],
                 'text': 'Follicular Lymphoma',
@@ -559,11 +568,12 @@ class FLBundleGenerator:
     # Observations
     # ------------------------------------------------------------------
 
-    def _obs(self, pid, obs_id, loinc, display, category, date_str, value_type, value, unit=None):
+    def _obs(self, pid, obs_id, loinc, display, category, date_str, value_type, value, unit=None,
+             system=LOINC_SYSTEM):
         resource = {
             'resourceType': 'Observation', 'id': obs_id, 'status': 'final',
             'category': [{'coding': [{'system': 'http://terminology.hl7.org/CodeSystem/observation-category', 'code': category}]}],
-            'code': {'coding': [{'system': 'http://loinc.org', 'code': loinc, 'display': display}], 'text': display},
+            'code': {'coding': [{'system': system, 'code': loinc, 'display': display}], 'text': display},
             'subject': {'reference': f'Patient/{pid}'},
             'effectiveDateTime': date_str,
         }
@@ -630,8 +640,13 @@ class FLBundleGenerator:
                       f"Stage {p['ann_arbor_stage']}{'B' if p['b_symptoms'] else ''}"),
             self._q_obs(pid, 'bm-b-cells', _L['bm_b_cells'],
                         'Clonal B lymphocytes in bone marrow biopsy (%)', p['bm_b_cells_pct'], '%', dt),
-            self._obs(pid, f"obs-{pid}-prior-lines", '21861-0', 'Prior lines of therapy', 'laboratory', dt, 'integer', p['prior_lines']),
-            self._obs(pid, f"obs-{pid}-fl-transformed", 'fl-transformed-dlbcl', 'Histologic transformation to DLBCL', 'laboratory', tx_dt, 'boolean', p['transformed']),
+            # 21861-0 ("Dx confirmed by Cancer") said nothing about prior lines; the
+            # count and the transformation flag are HealthKey concepts (the flag
+            # used to travel as 'fl-transformed-dlbcl' under loinc.org).
+            self._obs(pid, f"obs-{pid}-prior-lines", 'hko:prior-lines-of-therapy', 'Number of prior lines of therapy',
+                      'laboratory', dt, 'integer', p['prior_lines'], system=HK_OBSERVATION_SYSTEM),
+            self._obs(pid, f"obs-{pid}-fl-transformed", 'hko:fl-transformed-dlbcl', 'Histologic transformation to DLBCL',
+                      'laboratory', tx_dt, 'boolean', p['transformed'], system=HK_OBSERVATION_SYSTEM),
         ]
 
     # ------------------------------------------------------------------
@@ -717,14 +732,17 @@ class FLBundleGenerator:
 
     def _radiation_procedure(self, p, regimen_name, line_num, start_str, end_str, outcome):
         """FHIR Procedure for ISRT/IFRT radiotherapy lines."""
-        is_isrt = 'ISRT' in regimen_name
-        snomed_code    = '108290001' if is_isrt else '33195004'
-        snomed_display = 'Radiation oncology AND/OR radiotherapy' if is_isrt else 'Involved field radiotherapy'
+        # Both are external-beam radiotherapy; SNOMED has no ISRT/IFRT
+        # distinction, the regimen name carries it. 108290001, used before for
+        # ISRT, is retired in SNOMED.
+        snomed_code    = '33195004'
+        snomed_display = 'External beam radiation therapy procedure'
         return {
             'resourceType': 'Procedure',
             'id': f"proc-rt-{p['id']}-line{line_num}",
             'status': 'completed',
-            'category': {'coding': [{'system': 'http://snomed.info/sct', 'code': '367336001', 'display': 'Radiation oncology'}]},
+            # 1287742003 is Radiotherapy; 367336001, used before, is Chemotherapy.
+            'category': {'coding': [{'system': 'http://snomed.info/sct', 'code': '1287742003', 'display': 'Radiotherapy'}]},
             'code': {
                 'coding': [{'system': 'http://snomed.info/sct', 'code': snomed_code, 'display': snomed_display}],
                 'text': regimen_name,

@@ -223,6 +223,27 @@ All notable changes to PRomop are documented here.
 
 ### Fixed
 
+- **Invented and mis-identified standard codes retired from the demo
+  generators, fixtures and seeds** — an audit of every LOINC, SNOMED and
+  RxNorm code the myeloma, follicular-lymphoma and breast-cancer generators,
+  `concept_fixtures` and the bulk importer emit, against the loaded LOINC
+  release and Athena, found 24 spellings in no release (`24646-7` "bone
+  lesions", `47082-2` "plasma cell leukemia", `32730-5` urine M-spike,
+  `11286-7` drinks per week, `77243-3` annual income, `21908-9-riss`, ...),
+  five of them with Concept rows minted under `vocabulary_id='LOINC'`, and
+  a dozen real codes used for something else (`89599-5` "Meets CRAB" is a
+  Toxoplasma culture, `57905-2` "myeloma type" a stool haemoglobin test,
+  pomalidomide coded as clonidine, vincristine as a yeast). Each is now the
+  real code, the field's approved mapping, or a HealthKey `HK-Observation`
+  concept where no vocabulary says the thing (bone lesions, CRAB, R-ISS
+  stage, IMWG measurable disease, refractory drug classes, prior lines,
+  consent capability, the FL transformation flag). Migration `0329` mints those,
+  recodes stored rows (a row under a mis-identified real code moves only
+  when it has the generator's shape), repoints the mapping rows and deletes
+  the invented concepts. `concept_fixtures` seeds real LOINC codes under
+  their Athena ids instead of promop's `90010xx`. The bulk importer and the
+  generators share one HealthKey FHIR code system,
+  `https://healthkey.ai/fhir/CodeSystem/hk-observation`.
 - **A lookup's Seen bump is provisional** — `code-mappings/lookup/` asks once
   per code per batch, not once per record, so its sighting now adds one only
   while the instance holds no per-patient source-code rows for the code, and

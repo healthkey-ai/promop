@@ -331,7 +331,7 @@ def test_flc_pair_uses_collection_time_not_row_order():
 def test_refresh_does_not_pair_flc_from_different_events():
     person = PersonFactory()
     _measure(person, '33358-3', 0.1)
-    _measure(person, '32730-5', 50.0)
+    _measure(person, '42482-0', 50.0)
     _measure(person, '36916-5', 150.0, date='2023-01-01', unit='mg/L')
     _measure(person, '33944-0', 75.0, date='2024-06-01', unit='mg/L')
 
@@ -343,7 +343,7 @@ def test_refresh_does_not_pair_flc_from_different_events():
 def test_refresh_uses_a_same_event_flc_pair():
     person = PersonFactory()
     _measure(person, '33358-3', 0.1)
-    _measure(person, '32730-5', 50.0)
+    _measure(person, '42482-0', 50.0)
     _measure(person, '36916-5', 150.0, date='2024-06-01', unit='mg/L')
     _measure(person, '33944-0', 75.0, date='2024-06-01', unit='mg/L')
 

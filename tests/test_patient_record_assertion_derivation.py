@@ -14,7 +14,7 @@ from tests.factories import (
     MeasurementFactory,
     ObservationFactory,
     PatientRecordFactory,
-    PersonFactory,
+    PersonFactory, VocabularyFactory,
 )
 
 
@@ -26,28 +26,28 @@ def test_latest_typed_assertions_project_from_observation_and_measurement():
     person = PersonFactory()
     PatientRecordFactory(person=person)
     contraception = ConceptFactory(
-        concept_code='8659-8',
-        concept_name='Contraceptive use',
+        concept_code='13197004', vocabulary=VocabularyFactory(vocabulary_id='SNOMED'),
+        concept_name='Uses contraception',
     )
     mental_health = ConceptFactory(
-        concept_code='75618-3',
-        concept_name='Mental health disorders',
+        concept_code='45420-7',
+        concept_name='Mental health history',
     )
     pregnancy = ConceptFactory(concept_code='2106-3', concept_name='Pregnancy test')
 
     ObservationFactory(
         person=person, observation_concept=contraception,
-        observation_source_value='8659-8', observation_date=date(2026, 1, 1),
+        observation_source_value='13197004', observation_date=date(2026, 1, 1),
         value_as_string='yes',
     )
     MeasurementFactory(
         person=person, measurement_concept=contraception,
-        measurement_source_value='8659-8', measurement_date=date(2026, 2, 1),
+        measurement_source_value='13197004', measurement_date=date(2026, 2, 1),
         value_as_number=0,
     )
     ObservationFactory(
         person=person, observation_concept=mental_health,
-        observation_source_value='75618-3', observation_date=date(2026, 2, 2),
+        observation_source_value='45420-7', observation_date=date(2026, 2, 2),
         value_as_string='no',
     )
     MeasurementFactory(
@@ -78,9 +78,9 @@ def _approved_observation_mapping(field_name, concept, value_kind):
 @pytest.mark.parametrize(
     ('field_name', 'concept_code', 'concept_name'),
     [
-        ('consent_capability', '75985-6', 'Ability to consent'),
+        ('consent_capability', 'hko:consent-capability', 'Capacity to consent to treatment'),
         ('caregiver_availability_status', '74014-2', 'Caregiver availability'),
-        ('contraceptive_use', '8659-8', 'Contraceptive use'),
+        ('contraceptive_use', '13197004', 'Uses contraception'),
     ],
 )
 def test_older_approved_observation_cannot_overwrite_newer_measurement_answer(
@@ -120,17 +120,17 @@ def test_same_day_approved_mapping_wins_over_the_other_table_tie_break():
     """
     person = PersonFactory()
     PatientRecordFactory(person=person)
-    concept = ConceptFactory(concept_code='8659-8', concept_name='Contraceptive use')
+    concept = ConceptFactory(concept_code='13197004', vocabulary=VocabularyFactory(vocabulary_id='SNOMED'), concept_name='Uses contraception')
     _approved_observation_mapping('contraceptive_use', concept, 'boolean')
 
     ObservationFactory(
         person=person, observation_concept=concept,
-        observation_source_value='8659-8', observation_date=date(2026, 2, 1),
+        observation_source_value='13197004', observation_date=date(2026, 2, 1),
         observation_id=100, value_as_number=1,
     )
     MeasurementFactory(
         person=person, measurement_concept=concept,
-        measurement_source_value='8659-8', measurement_date=date(2026, 2, 1),
+        measurement_source_value='13197004', measurement_date=date(2026, 2, 1),
         measurement_id=200, value_as_number=0,
     )
 
@@ -184,17 +184,17 @@ def test_newer_unparseable_measurement_keeps_field_unknown():
     """A newer unusable answer is unknown, not an invitation to resurrect an older one."""
     person = PersonFactory()
     PatientRecordFactory(person=person)
-    concept = ConceptFactory(concept_code='8659-8', concept_name='Contraceptive use')
+    concept = ConceptFactory(concept_code='13197004', vocabulary=VocabularyFactory(vocabulary_id='SNOMED'), concept_name='Uses contraception')
     _approved_observation_mapping('contraceptive_use', concept, 'boolean')
 
     ObservationFactory(
         person=person, observation_concept=concept,
-        observation_source_value='8659-8', observation_date=date(2026, 1, 1),
+        observation_source_value='13197004', observation_date=date(2026, 1, 1),
         value_as_number=1,
     )
     MeasurementFactory(
         person=person, measurement_concept=concept,
-        measurement_source_value='8659-8', measurement_date=date(2026, 2, 1),
+        measurement_source_value='13197004', measurement_date=date(2026, 2, 1),
         value_as_string='perhaps',
     )
 
@@ -205,20 +205,20 @@ def test_invalid_or_erroneous_assertions_do_not_create_projection_values():
     """Unknown text and entered-in-error rows cannot manufacture an answer."""
     person = PersonFactory()
     PatientRecordFactory(person=person, consent_capability=True)
-    concept = ConceptFactory(concept_code='75985-6', concept_name='Ability to consent')
+    concept = ConceptFactory(concept_code='hko:consent-capability', vocabulary=VocabularyFactory(vocabulary_id='HK-Observation'), concept_name='Capacity to consent to treatment')
     MeasurementFactory(
         person=person, measurement_concept=concept,
-        measurement_source_value='75985-6', measurement_date=date(2026, 1, 1),
+        measurement_source_value='hko:consent-capability', measurement_date=date(2026, 1, 1),
         value_as_number=1,
     )
     ObservationFactory(
         person=person, observation_concept=concept,
-        observation_source_value='75985-6', observation_date=date(2026, 2, 1),
+        observation_source_value='hko:consent-capability', observation_date=date(2026, 2, 1),
         value_as_string='perhaps',
     )
     MeasurementFactory(
         person=person, measurement_concept=concept,
-        measurement_source_value='75985-6', value_as_number=1, is_erroneous=True,
+        measurement_source_value='hko:consent-capability', value_as_number=1, is_erroneous=True,
     )
 
     assert refresh_patient_record(person).consent_capability is None
@@ -228,12 +228,12 @@ def test_assertion_is_cleared_after_its_omop_source_is_deleted():
     person = PersonFactory()
     PatientRecordFactory(person=person)
     concept = ConceptFactory(
-        concept_code='74204-0',
-        concept_name='Non-prescription drug use',
+        concept_code='74204-9',
+        concept_name='Drug use',
     )
     assertion = ObservationFactory(
         person=person, observation_concept=concept,
-        observation_source_value='74204-0', value_as_string='no',
+        observation_source_value='74204-9', value_as_string='no',
     )
 
     assert refresh_patient_record(person).no_substance_use_status is True
@@ -245,8 +245,8 @@ def test_assertion_detail_text_projects_from_the_same_observation():
     person = PersonFactory()
     PatientRecordFactory(person=person)
     substance = ConceptFactory(
-        concept_code='74204-0',
-        concept_name='Non-prescription drug use',
+        concept_code='74204-9',
+        concept_name='Drug use',
     )
     exposure = ConceptFactory(
         concept_code='82593-5',
@@ -256,7 +256,7 @@ def test_assertion_detail_text_projects_from_the_same_observation():
     ObservationFactory(
         person=person,
         observation_concept=substance,
-        observation_source_value='74204-0',
+        observation_source_value='74204-9',
         observation_date=date(2026, 2, 1),
         value_as_string='yes',
         value_source_value='Occasional cannabis use',
@@ -282,13 +282,13 @@ def test_assertion_detail_text_projects_from_measurement_rows_too():
     person = PersonFactory()
     PatientRecordFactory(person=person)
     concept = ConceptFactory(
-        concept_code='74204-0',
-        concept_name='Non-prescription drug use',
+        concept_code='74204-9',
+        concept_name='Drug use',
     )
     MeasurementFactory(
         person=person,
         measurement_concept=concept,
-        measurement_source_value='74204-0',
+        measurement_source_value='74204-9',
         measurement_date=date(2026, 2, 1),
         value_as_number=1,
         value_source_value='Reports non-prescription stimulant use',

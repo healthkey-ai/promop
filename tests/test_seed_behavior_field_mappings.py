@@ -44,10 +44,10 @@ def test_behavior_seed_makes_simple_registered_fields_writable():
         concept_code='63640-7',
         concept_name='Pack years',
     )
-    contraception = ConceptFactory(
+    caregiver = ConceptFactory(
         vocabulary_id='LOINC',
-        concept_code='8659-8',
-        concept_name='Contraceptive use',
+        concept_code='74014-2',
+        concept_name='Caregiver availability',
     )
 
     _run_seed()
@@ -62,14 +62,14 @@ def test_behavior_seed_makes_simple_registered_fields_writable():
     assert pack_entry['value_kind'] == 'number'
     assert pack_entry['projection']['type_concept_id'] == 32856
 
-    contraception_entry = descriptor['contraceptive_use']
-    assert contraception_entry['writable'] is True
-    assert contraception_entry['target'] == 'patient_record'
-    assert contraception_entry['projection']['omop_table'] == 'observation'
-    assert contraception_entry['projection']['concept_id'] == contraception.concept_id
-    assert contraception_entry['projection']['source_value'] == '8659-8'
-    assert contraception_entry['value_kind'] == 'boolean'
-    assert contraception_entry['projection']['type_concept_id'] == 32817
+    caregiver_entry = descriptor['caregiver_availability_status']
+    assert caregiver_entry['writable'] is True
+    assert caregiver_entry['target'] == 'patient_record'
+    assert caregiver_entry['projection']['omop_table'] == 'observation'
+    assert caregiver_entry['projection']['concept_id'] == caregiver.concept_id
+    assert caregiver_entry['projection']['source_value'] == '74014-2'
+    assert caregiver_entry['value_kind'] == 'boolean'
+    assert caregiver_entry['projection']['type_concept_id'] == 32817
 
 
 def test_behavior_seeded_numeric_mapping_round_trips():
@@ -104,11 +104,11 @@ def test_behavior_seeded_boolean_mapping_round_trips():
     _type_concepts()
     ConceptFactory(
         vocabulary_id='LOINC',
-        concept_code='8659-8',
-        concept_name='Contraceptive use',
+        concept_code='74014-2',
+        concept_name='Caregiver availability',
     )
     _run_seed()
-    entry = build_writable_field_descriptor()['contraceptive_use']
+    entry = build_writable_field_descriptor()['caregiver_availability_status']
     projection = entry['projection']
     person = PersonFactory()
     PatientRecordFactory(person=person)
@@ -125,14 +125,14 @@ def test_behavior_seeded_boolean_mapping_round_trips():
 
     record = refresh_patient_record(person)
 
-    assert record.contraceptive_use is True
+    assert record.caregiver_availability_status is True
 
 
 def test_behavior_seed_does_not_make_companion_fields_independently_writable():
     ConceptFactory(
         vocabulary_id='LOINC',
-        concept_code='74204-0',
-        concept_name='Non-prescription drug use',
+        concept_code='74204-9',
+        concept_name='Drug use',
     )
     ConceptFactory(
         vocabulary_id='LOINC',

@@ -236,12 +236,12 @@ def test_mm_specific_data_merges_measurement_and_observation_sources():
 
     MeasurementFactory(
         person=person,
-        measurement_source_value='24646-7',
+        measurement_source_value='hko:bone-lesions',
         value_as_number=1,
     )
     ObservationFactory(
         person=person,
-        observation_source_value='47082-2',
+        observation_source_value='95210003',
         value_as_number=1,
     )
 

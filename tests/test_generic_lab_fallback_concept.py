@@ -69,11 +69,22 @@ class TestTheConstant:
                     # where the placeholder was minted, so still worth watching.
                     'omop_core/concept_fixtures.py'):
             tree = ast.parse((root / rel).read_text())
+            # The one legitimate use of the number: the fixture mirrors the
+            # genuine Athena row, 3000963 = LOINC 718-7 "Hemoglobin [Mass/volume]
+            # in Blood", under its own id (#0329). Anything else is a fallback.
+            genuine = {
+                id(node.args[0]) for node in ast.walk(tree)
+                if isinstance(node, ast.Call) and getattr(node.func, 'id', None) == '_c'
+                and node.args and isinstance(node.args[0], ast.Constant)
+                and node.args[0].value == STRANDED
+                and any(isinstance(a, ast.Constant) and a.value == '718-7' for a in node.args)
+            }
             for node in ast.walk(tree):
                 if (isinstance(node, ast.Constant)
                         and isinstance(node.value, int)
                         and not isinstance(node.value, bool)
-                        and node.value == STRANDED):
+                        and node.value == STRANDED
+                        and id(node) not in genuine):
                     offenders.append(f'{rel}:{node.lineno}')
         assert not offenders, offenders
 

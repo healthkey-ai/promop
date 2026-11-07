@@ -69,7 +69,11 @@ def _usable_concept_name(concept) -> str | None:
 
 # Bump this whenever aggregation or computation logic changes in any section
 # extractor or in _compute_derived_fields.  See DERIVATION_CHANGELOG.md.
-DERIVATION_VERSION = 26
+DERIVATION_VERSION = 27
+
+# Therapy-line assertions the FHIR import stores as Measurement rows.
+_THERAPY_INTENT_CODE = '104803-2'          # Therapeutic intent [Interpretation]
+_DISCONTINUATION_REASON_CODE = '64882-4'   # Reason stopped [PhenX]
 
 # These PatientRecord columns are projections of PersonLanguageSkill, never
 # independent edits. Older PATCH requests could mark them as user-edited and
@@ -377,7 +381,8 @@ _LOINC_LAB_FIELDS = {
     # emits 36916-5 / 33944-0. CAUTION: 36916-5 is kappa and 33944-0 is lambda.
     '51435-6': ('monoclonal_protein_serum',       float),  # M-protein band 1, SPEP
     '33358-3': ('monoclonal_protein_serum',       float),  # M-protein, SPEP (3046299)
-    '32730-5': ('monoclonal_protein_urine',       float),  # Urine M-spike 24h
+    # 32730-5, the demo generator's old urine M-spike code, is not a LOINC code;
+    # migration 0329 recoded its rows to 42482-0.
     '42482-0': ('monoclonal_protein_urine',       float),  # Approved FCM destination
     '36916-5': ('kappa_flc',                      Decimal),  # Kappa FLC, Serum (3034860)
     '80515-0': ('kappa_flc',                      Decimal),  # Kappa FLC by nephelometry
@@ -640,7 +645,7 @@ _BEHAVIOR_MEASUREMENT_FIELDS = {
     '72166-2': ('smoking_status', str),
     '63640-7': ('pack_years', float),
     '74013-4': ('alcohol_use', str),
-    '11286-7': ('drinks_per_week', int),
+    '44940-5': ('drinks_per_week', int),  # Alcoholic drinks per week - Reported
     '68516-4': ('exercise_frequency', str),
     '89555-7': ('exercise_minutes_per_week', int),
     '88365-2': ('diet_type', str),
@@ -653,7 +658,7 @@ _BEHAVIOR_MEASUREMENT_FIELDS = {
     '45404-1': ('marital_status', str),
     '76513-1': ('insurance_type', str),
     '63512-8': ('number_of_dependents', int),
-    '77243-3': ('annual_household_income', int),
+    '63586-2': ('annual_household_income', int),  # total family income, last year [PhenX]
 }
 
 
@@ -668,11 +673,15 @@ _BEHAVIOR_MEASUREMENT_FIELDS = {
 # ``no_*``.
 _ASSERTION_FIELDS = {
     '2106-3': ('pregnancy_test_result_value', 'string'),
-    '8659-8': ('contraceptive_use', 'boolean'),
-    '75985-6': ('consent_capability', 'boolean'),
+    # 8659-8, 75985-6, 75618-3 and 74204-0 were spellings no LOINC release
+    # contains; migration 0329 recoded their rows. contraceptive_use follows
+    # its approved mapping (SNOMED 13197004 "Uses contraception"); consent
+    # capability has no standard observable and is a HealthKey mint.
+    '13197004': ('contraceptive_use', 'boolean'),
+    'hko:consent-capability': ('consent_capability', 'boolean'),
     '74014-2': ('caregiver_availability_status', 'boolean'),
-    '75618-3': ('no_mental_health_disorder_status', 'inverse_boolean'),
-    '74204-0': ('no_substance_use_status', 'inverse_boolean'),
+    '45420-7': ('no_mental_health_disorder_status', 'inverse_boolean'),  # Mental health history
+    '74204-9': ('no_substance_use_status', 'inverse_boolean'),           # Drug use [NTDS]
     '82593-5': ('no_geographic_exposure_risk', 'inverse_boolean'),
     # Locally minted (#785, migrations 0180/0181). No Athena code says which
     # drug class the disease is refractory to, so these are the curated answer
@@ -697,7 +706,7 @@ _CURATED_REFRACTORY_CODES = {
 }
 
 _ASSERTION_DETAIL_FIELDS = {
-    '74204-0': 'substance_use_details',
+    '74204-9': 'substance_use_details',
     '82593-5': 'geographic_exposure_risk_details',
 }
 
@@ -2869,9 +2878,13 @@ def _apply_treatment_assertions(data, person, episodes, snapshot: OmopSnapshot =
         if value and line in bounds:
             assertions.append((obs.observation_date, line, match.group(2), value))
 
-    # The FHIR import writes these non-laboratory observations to Measurement.
-    # They are only assigned where the date has one unambiguous line owner.
-    _INTENT_CODES = ('42804-5', '91379-3')
+    # Both FHIR importers write these non-laboratory observations to
+    # Measurement (the bulk importer lists them in MEASUREMENT_LOINC). They
+    # are only assigned where the date has one unambiguous line owner.
+    # 104803-2 is "Therapeutic intent", 64882-4 "Reason stopped"; the codes
+    # read before (42804-5, a fungus culture, and 91379-3, not a LOINC code)
+    # were retired by migration 0329.
+    _INTENT_CODES = (_THERAPY_INTENT_CODE, _DISCONTINUATION_REASON_CODE)
     if snapshot:
         intent_measurements = sorted(
             (m for code in _INTENT_CODES
@@ -2904,7 +2917,7 @@ def _apply_treatment_assertions(data, person, episodes, snapshot: OmopSnapshot =
             continue
         value = _treatment_assertion_value(measurement)
         if value:
-            kind = 'intent' if _measurement_code(measurement) == '42804-5' else 'discontinuation'
+            kind = 'intent' if _measurement_code(measurement) == _THERAPY_INTENT_CODE else 'discontinuation'
             assertions.append((measurement.measurement_date, candidate_lines[0], kind, value))
 
     latest = {}
@@ -3022,11 +3035,14 @@ _GENETIC_MUTATION_LOINCS = {
     '81252-9': None,  # Discrete genetic variant, with linked components.
     '21636-6': 'BRCA1',
     '21640-8': 'BRCA2',   # BRCA2 gene c.6174delT [Presence] in Blood or Tissue
+    '79208-5': 'BRCA2',   # BRCA2 gene mutation analysis limited to known familial mutations (demo generators)
     '21739-8': 'TP53',    # TP53 gene mutations found [Identifier] in Blood or Tissue
     '96970-9': 'TP53',    # TP53 gene deletion and duplication mutation analysis [Identifier] in Blood or Tissue
+    '103680-5': 'TP53',   # TP53 gene full mutation analysis (demo generators)
     '48013-7': 'KRAS',
     '62862-8': 'EGFR',
     '60033-8': 'PIK3CA',  # PIK3CA gene mutations found [Identifier] in Blood or Tissue
+    '60034-6': 'PIK3CA',  # PIK3CA gene targeted mutation analysis (demo generators)
 }
 
 # Pathology report fields which have an unambiguous LOINC representation in
@@ -3159,13 +3175,15 @@ def _get_biomarker_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     if ki67_m and ki67_m.value_as_number is not None:
         data['ki67_proliferation_index'] = int(ki67_m.value_as_number)
 
-    # PD-L1 immune cell percentage — LOINC 83055-4
-    pdl1_ic_m = _first_m('83055-4')
+    # PD-L1 immune cell percentage — LOINC 83055-4, or 105305-7 (area fraction
+    # of PD-L1 expressing immune cells), which the demo generators write
+    pdl1_ic_m = _first_m('83055-4') or _first_m('105305-7')
     if pdl1_ic_m and pdl1_ic_m.value_as_number is not None:
         data['pd_l1_ic_percentage'] = int(pdl1_ic_m.value_as_number)
 
-    # PD-L1 combined positive score — LOINC 83054-7
-    pdl1_cps_m = _first_m('83054-7')
+    # PD-L1 combined positive score — LOINC 83054-7, or 105303-2 (the CPS
+    # ratio), which the demo generators write
+    pdl1_cps_m = _first_m('83054-7') or _first_m('105303-2')
     if pdl1_cps_m and pdl1_cps_m.value_as_number is not None:
         data['pd_l1_combined_positive_score'] = int(pdl1_cps_m.value_as_number)
 
@@ -3174,14 +3192,16 @@ def _get_biomarker_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     if biopsy_m and biopsy_m.value_as_number is not None:
         data['biopsy_grade'] = int(biopsy_m.value_as_number)
 
-    # Menopausal status — no reliable LOINC exists (76690-7 was "Sexual
-    # orientation", not menopausal status). Read from Observation only, matched
-    # by concept name containing 'menopaus'.
+    # Menopausal status — SNOMED 276477006 "Menopause finding", the approved
+    # mapping, which the demo generators write too (76690-7, once used, is
+    # "Sexual orientation"); otherwise read from Observation matched by a
+    # concept name containing 'menopaus'.
     menopause_obs = next(
         (obs for obs in snapshot.observations
-         if obs.observation_concept
-         and obs.observation_concept.concept_name
-         and 'menopaus' in obs.observation_concept.concept_name.lower()),
+         if obs.observation_source_value == '276477006'
+         or (obs.observation_concept
+             and obs.observation_concept.concept_name
+             and 'menopaus' in obs.observation_concept.concept_name.lower())),
         None,
     )
     if menopause_obs:
@@ -3396,12 +3416,13 @@ def _get_genomics_pathology_data(person: Person, snapshot: OmopSnapshot = None) 
     return data
 
 
-# 21908-9-riss is a non-standard code the MM generator uses for R-ISS stage
-# (it mis-resolves to an unrelated concept on import, so it is matched by
-# source_value only).
+# R-ISS has no LOINC code: hko:r-iss-stage is a HealthKey concept (migration
+# 0329), matched by source_value like the LOINC staging codes. The MM
+# generator's old spelling '21908-9-riss' was recoded by that migration.
+R_ISS_STAGE_CODE = 'hko:r-iss-stage'
 SAMPLE_STAGE_SOURCE_VALUE = 'sample-patient-stage'
 
-_STAGING_LOINCS = frozenset({'21908-9', '21908-9-riss', '21905-5', '21906-3', '21901-4'})
+_STAGING_LOINCS = frozenset({'21908-9', R_ISS_STAGE_CODE, '21905-5', '21906-3', '21901-4'})
 
 
 def _get_staging_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
@@ -3453,9 +3474,9 @@ def _get_staging_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
                 return val
         return None
 
-    # Overall stage group. For MM both ISS (21908-9) and R-ISS (21908-9-riss)
+    # Overall stage group. For MM both ISS (21908-9) and R-ISS (hko:r-iss-stage)
     # are recorded; prefer R-ISS as it is the more current MM staging system.
-    stage_val = _stage_value('21908-9-riss') or _stage_value('21908-9')
+    stage_val = _stage_value(R_ISS_STAGE_CODE) or _stage_value('21908-9')
     if not stage_val:
         # Fallback for a dated FHIR Condition.stage assertion which had no
         # standard staging code. This is still an OMOP fact; its distinct
@@ -3508,11 +3529,23 @@ def _get_bc_clinical_data(person: Person, snapshot: OmopSnapshot = None) -> dict
     snapshot = snapshot or _build_snapshot(person)
     data = {}
 
-    # Peripheral neuropathy CTCAE grade — concept name match
+    # Peripheral neuropathy CTCAE grade — LOINC 75691-6 (the approved mapping),
+    # else a concept whose name says peripheral ... neuropathy
+    def _is_neuropathy_grade(row):
+        code = getattr(row, 'observation_source_value', None) or getattr(row, 'measurement_source_value', None)
+        if code == '75691-6':
+            return True
+        concept = getattr(row, 'observation_concept', None)
+        if concept is None or not concept.concept_name:
+            return False
+        name = concept.concept_name.lower()
+        return concept.concept_code == '75691-6' or ('neuropathy' in name and 'peripheral' in name)
+
+    # The legacy uploader writes every observation to Measurement, the bulk
+    # importer puts 75691-6 in Observation; read both.
     pn_obs = next(
-        (o for o in snapshot.observations
-         if o.observation_concept and o.observation_concept.concept_name
-         and 'peripheral neuropathy' in o.observation_concept.concept_name.lower()),
+        (o for o in list(snapshot.observations) + list(snapshot.meas_by_source.get('75691-6', ()))
+         if _is_neuropathy_grade(o)),
         None,
     )
     if pn_obs and pn_obs.value_as_number is not None:
@@ -4004,7 +4037,7 @@ def _get_mm_specific_data(person: Person, snapshot: OmopSnapshot = None) -> dict
 
     Covers fields the lab routing cannot derive (boolean / string-valued
     observations): plasma_cell_leukemia, bone_lesions, meets_crab.
-    Uses measurement_source_value as the LOINC lookup since Concept rows may not
+    Uses measurement_source_value as the code lookup since Concept rows may not
     be loaded in all environments.
     """
     snapshot = snapshot or _build_snapshot(person)
@@ -4013,10 +4046,12 @@ def _get_mm_specific_data(person: Person, snapshot: OmopSnapshot = None) -> dict
     # FHIR Observations with a recognisable LOINC code arrive as Measurement
     # rows, but some environments keep them in Observation, so both tables are
     # read below.
+    # The generator's old codes (47082-2, 24646-7 — not LOINC codes — and
+    # 89599-5, a Toxoplasma culture) were recoded by migration 0329.
     MM_LOINC_CODES = {
-        '47082-2': 'plasma_cell_leukemia',   # Plasma cell leukemia status (boolean)
-        '24646-7': 'bone_lesions',            # Bone lesion presence (boolean → text)
-        '89599-5': 'meets_crab',              # CRAB criteria met (boolean)
+        '95210003': 'plasma_cell_leukemia',            # SNOMED Plasma cell leukemia (boolean)
+        'hko:bone-lesions': 'bone_lesions',            # Bone lesion presence (boolean → text)
+        'hko:meets-crab-criteria': 'meets_crab',       # CRAB criteria met (boolean)
     }
 
     def _coerce_mm_boolean(number_value, string_value):
@@ -4596,6 +4631,13 @@ def _get_cll_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
         data['largest_lymph_node_size'] = float(lymph_node.value_as_number)
 
     for m in measurements:
+        # LOINC 32525-8 "CD19 cells/cells in Bone marrow" is the FL generator's
+        # code and the field's proposed mapping (migration 0329).
+        if m.value_as_number is not None and (
+                m.measurement_source_value == '32525-8'
+                or (m.measurement_concept and m.measurement_concept.concept_code == '32525-8')):
+            data.setdefault('clonal_bone_marrow_b_lymphocytes', float(m.value_as_number))
+            continue
         if not m.measurement_concept:
             continue
         cname = m.measurement_concept.concept_name.lower()
