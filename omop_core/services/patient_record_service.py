@@ -49,6 +49,14 @@ from omop_core.services.hemoglobin_units import (
     canonical_in_range as hemoglobin_canonical_in_range,
     same_number,
 )
+from omop_core.services.creatinine_units import (
+    SOURCE_PAIRS as _CREATININE_SOURCE_PAIRS,
+    CANONICAL_FIELD as CREATININE_CANONICAL,
+    PAIR_FIELD as CREATININE_PAIR,
+    UNIT_FIELD as CREATININE_UNIT,
+    canonical_from_pair as creatinine_canonical_from_pair,
+    canonical_in_range as creatinine_canonical_in_range,
+)
 from omop_core.services.blood_count_source_pairs import (
     PAIRS as _COUNT_SOURCE_PAIRS,
     canonical_from_source as count_canonical_from_source,
@@ -59,7 +67,10 @@ from omop_core.services.blood_count_source_pairs import (
 #: The columns of a declared source pair. They are one assertion, so a
 #: canonical match in the default unit must not acknowledge them independently.
 _SOURCE_PAIR_FIELDS = frozenset(
-    field for fields in _SOURCE_PAIRS.values() for field in fields
+    field
+    for pairs in (_SOURCE_PAIRS, _CREATININE_SOURCE_PAIRS)
+    for fields in pairs.values()
+    for field in fields
 ) | count_source_fields()
 
 
@@ -441,7 +452,7 @@ _FLC_FIELDS = frozenset({'kappa_flc', 'lambda_flc'})
 # test_no_canonical_is_listed_twice guards the shape.
 _LAB_FIELD_ALIASES = {
     'serum_calcium_mg_dl':    ['calcium_mg_dl'],
-    'serum_creatinine_mg_dl': ['creatinine_mg_dl'],
+    'serum_creatinine_mg_dl': ['creatinine_mg_dl', 'serum_creatinine_level'],
     'egfr_ml_min_173m2':      ['egfr', 'estimated_glomerular_filtration_rate'],
     'bun_mg_dl':              ['blood_urea_nitrogen'],
     'sodium_meq_l':           ['serum_sodium'],
@@ -476,6 +487,8 @@ def _lab_alias_units(canonical, value):
         return {'platelet_count_units': 'CELLS/UL' if value is not None else None}
     if canonical == 'hemoglobin_g_dl':
         return {'hemoglobin_level_units': 'G/DL' if value is not None else None}
+    if canonical == 'serum_creatinine_mg_dl':
+        return {'serum_creatinine_level_units': 'MG/DL' if value is not None else None}
     return {}
 
 # A FHIR Condition.stage summary is an asserted clinical fact, but the FHIR
@@ -1274,6 +1287,37 @@ def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fiel
         # The pair stays pending: the chosen unit is the patient's declaration
         # and derivation cannot reproduce it from a g/dL fact. Only an explicit
         # canonical import retires it (handled above).
+    # Creatinine's source pair (#2318 follow-up): the CKD-EPI matcher reads the
+    # normalised mg/dL value, so the canonical follows the pair the patient
+    # typed rather than the inverse. Same precedence as hemoglobin: a pending
+    # pair wins, an explicit canonical import/clear retires it.
+    creatinine_pair_pending = CREATININE_PAIR in pending_aliases
+    creatinine_canonical_import = (
+        CREATININE_CANONICAL in changed_fields
+        and CREATININE_CANONICAL not in pair_derived
+    )
+    if creatinine_canonical_import:
+        pending_aliases.discard(CREATININE_PAIR)
+        pending_aliases.discard(CREATININE_UNIT)
+    creatinine_recognised, creatinine_pair_value = creatinine_canonical_from_pair(
+        getattr(patient_info, CREATININE_PAIR),
+        getattr(patient_info, CREATININE_UNIT),
+    )
+    creatinine_canonical_now = getattr(patient_info, CREATININE_CANONICAL)
+    creatinine_canonical_pending = CREATININE_CANONICAL in pending_aliases
+    creatinine_pair_authoritative = (
+        not creatinine_canonical_import and creatinine_recognised
+        and creatinine_canonical_in_range(creatinine_pair_value)
+        and (creatinine_pair_pending
+             or (not creatinine_canonical_pending
+                 and (creatinine_canonical_now is None
+                      or same_number(creatinine_pair_value, creatinine_canonical_now))))
+    )
+    if creatinine_pair_authoritative:
+        if not same_number(creatinine_canonical_now, creatinine_pair_value):
+            setattr(patient_info, CREATININE_CANONICAL, creatinine_pair_value)
+            dependency_changed.add(CREATININE_CANONICAL)
+
     # The same rule for the cell-count source pairs: the trial row edits
     # cells/µL (`absolute_neutrophile_count`, ...), and the canonical
     # thousands/µL column must follow it rather than the inverse.
@@ -1311,6 +1355,10 @@ def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fiel
         if canonical == HEMOGLOBIN_CANONICAL and pair_authoritative:
             # The pair already supplies the canonical; copying it back would
             # replace the reader's chosen unit with g/dL.
+            continue
+        if canonical == CREATININE_CANONICAL and creatinine_pair_authoritative:
+            # Same rule: the creatinine pair already supplies the canonical, and
+            # copying it back would replace the reader's chosen unit with mg/dL.
             continue
         if canonical in count_pair_authoritative:
             # The source count already supplies the canonical.

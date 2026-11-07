@@ -19,6 +19,15 @@ from omop_core.services.patient_record_service import (
 )
 from omop_core.services.write_descriptor import build_writable_field_descriptor
 from omop_core.services.boolean_answers import BOOLEAN_ANSWERS
+from omop_core.services.creatinine_units import (
+    CANONICAL_FIELD as CREATININE_CANONICAL,
+    DEFAULT_UNIT as CREATININE_DEFAULT_UNIT,
+    PAIR_FIELD as CREATININE_PAIR,
+    UNIT_FIELD as CREATININE_UNIT,
+    canonical_from_pair as creatinine_canonical_from_pair,
+    canonical_in_range as creatinine_canonical_in_range,
+    normalize_unit as normalize_creatinine_unit,
+)
 from omop_core.services.hemoglobin_units import (
     CANONICAL_FIELD as HEMOGLOBIN_CANONICAL,
     DEFAULT_UNIT as HEMOGLOBIN_DEFAULT_UNIT,
@@ -543,6 +552,91 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
                     if HEMOGLOBIN_PAIR in fact_dates:
                         # The canonical projection is the same dated result.
                         fact_dates[HEMOGLOBIN_CANONICAL] = fact_dates[HEMOGLOBIN_PAIR]
+    if CREATININE_PAIR in changes or CREATININE_UNIT in changes:
+        # Permission comes from the filtered descriptor, before any value is
+        # added: a host that withheld the source pair must not have its
+        # canonical or unit changed through the pair path.
+        source_entry = descriptor.get(CREATININE_PAIR) or {}
+        source_allowed = (
+            bool(source_entry) and bool(source_entry.get('writable'))
+            and not source_entry.get('read_only_for_caller')
+        )
+        canonical_entry = descriptor.get(CREATININE_CANONICAL) or {}
+        canonical_allowed = (
+            bool(canonical_entry)
+            and bool(canonical_entry.get('writable')
+                     or canonical_entry.get('normalised_read_model'))
+            and not canonical_entry.get('read_only_for_caller')
+        )
+        unit_entry = descriptor.get(CREATININE_UNIT) or {}
+        explicit_unit = CREATININE_UNIT in changes
+        stored_code = normalize_creatinine_unit(
+            getattr(record, CREATININE_UNIT, None))
+        requested_code = (normalize_creatinine_unit(changes.get(CREATININE_UNIT))
+                          if explicit_unit else None)
+        unit_forbidden = bool(unit_entry.get('read_only_for_caller'))
+        # A read-only unit may still be used as it is already stored. Changing
+        # it — or initialising one where the record has none — is the write the
+        # caller is not allowed to make.
+        unit_change_forbidden = unit_forbidden and (
+            (explicit_unit and requested_code != stored_code)
+            or stored_code is None
+        )
+        if not source_allowed:
+            # A caller-level restriction on either half rejects the pair as a
+            # whole: saving the number without its unit would change the
+            # meaning of the value.
+            reason = (source_entry.get('reason')
+                      or 'Editing is not available for this caller.')
+            for field in (CREATININE_PAIR, CREATININE_UNIT):
+                changes.pop(field, None)
+                result.rejected[field] = reason
+        elif explicit_unit and requested_code is None:
+            result.rejected[CREATININE_UNIT] = 'Choose one of: mg/dL, umol/L.'
+            changes.pop(CREATININE_PAIR, None)
+            changes.pop(CREATININE_UNIT, None)
+        elif unit_change_forbidden:
+            reason = (unit_entry.get('reason')
+                      or 'Editing is not available for this caller.')
+            for field in (CREATININE_PAIR, CREATININE_UNIT):
+                changes.pop(field, None)
+                result.rejected[field] = reason
+        elif explicit_unit and CREATININE_PAIR not in changes:
+            result.rejected[CREATININE_UNIT] = 'Send the unit together with its value.'
+            changes.pop(CREATININE_UNIT, None)
+        else:
+            code = requested_code or stored_code or CREATININE_DEFAULT_UNIT
+            recognised, canonical_value = creatinine_canonical_from_pair(
+                changes.get(CREATININE_PAIR), code,
+            )
+            if not recognised:
+                result.rejected[CREATININE_PAIR] = 'Enter a number.'
+                changes.pop(CREATININE_PAIR, None)
+                changes.pop(CREATININE_UNIT, None)
+            elif not creatinine_canonical_in_range(canonical_value):
+                result.rejected[CREATININE_PAIR] = (
+                    'Creatinine is outside the storable range.')
+                changes.pop(CREATININE_PAIR, None)
+                changes.pop(CREATININE_UNIT, None)
+            else:
+                if unit_forbidden:
+                    # A read-only unit is left untouched; the pair's value is
+                    # normalised in the unit the record already has. The
+                    # companion marker still has to be pending, or the next
+                    # refresh clears the unit and reads the number as g/dL.
+                    changes.pop(CREATININE_UNIT, None)
+                    pair_pending.add(CREATININE_UNIT)
+                else:
+                    changes[CREATININE_UNIT] = code
+                if canonical_allowed:
+                    # A host that withheld the canonical still gets the pair;
+                    # recompute derives the read-model without projecting it.
+                    changes[CREATININE_CANONICAL] = canonical_value
+                    pair_derived.add(CREATININE_CANONICAL)
+                    if CREATININE_PAIR in fact_dates:
+                        # The canonical projection is the same dated result.
+                        fact_dates[CREATININE_CANONICAL] = fact_dates[CREATININE_PAIR]
+
     # The cell-count source pairs are the same contract: the row is typed in
     # cells/µL and the canonical thousands/µL field is derived and projected.
     count_unit_sources = {
@@ -661,6 +755,10 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
         if name == HEMOGLOBIN_UNIT and HEMOGLOBIN_PAIR in changes:
             # Normalised with the pair above: the unit is its companion, not
             # an independently editable selectable field.
+            direct[name] = value
+            continue
+        if name == CREATININE_UNIT and CREATININE_PAIR in changes:
+            # Same rule for creatinine's companion unit.
             direct[name] = value
             continue
         if name in count_unit_sources and count_unit_sources[name] in changes:
