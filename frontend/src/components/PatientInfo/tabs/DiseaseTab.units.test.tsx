@@ -62,7 +62,20 @@ describe('Disease tab units', () => {
     expect(includesUnit('ki67_proliferation_index')).toBe('true');
   });
 
-  it('marks the unit-carrying myeloma and CLL captions', () => {
+  it('states the count scale the field is actually stored in', () => {
+    // `absolute_lymphocyte_count` is edited in cells/µL (the descriptor sets
+    // `unit: CELLS/UL` and there is no unit column), so a ×10⁹/L caption would
+    // mislabel the typed number by 1000× (#5733 review).
+    renderTab('cll');
+    expect(screen.getByTestId('field-absolute_lymphocyte_count').textContent)
+      .toBe('Absolute Lymphocyte Count (cells/µL)');
+  });
+
+  it('marks the unit-carrying lymphoma, myeloma and CLL captions', () => {
+    renderTab('lymphoma');
+    expect(includesUnit('clonal_bone_marrow_b_lymphocytes')).toBe('true');
+    expect(includesUnit('ldh_upper_limit_normal')).toBe('true');
+
     renderTab('myeloma');
     expect(includesUnit('clonal_plasma_cells')).toBe('true');
     expect(includesUnit('monoclonal_protein_serum')).toBe('true');
@@ -79,8 +92,13 @@ describe('Disease tab units', () => {
     // "(ER)" and "(PR)" name the receptor, not a unit.
     expect(includesUnit('estrogen_receptor_status')).toBe('false');
     expect(includesUnit('progesterone_receptor_status')).toBe('false');
-    // Unitless boolean and score rows.
+    // Unitless boolean and score rows, including the ones whose parentheses
+    // name a staging system rather than a unit.
     expect(includesUnit('measurable_disease_by_recist_status')).toBe('false');
     expect(includesUnit('oncotype_dx_score')).toBe('false');
+    renderTab('myeloma');
+    expect(includesUnit('measurable_disease_imwg')).toBe('false');
+    renderTab('cll');
+    expect(includesUnit('measurable_disease_iwcll')).toBe('false');
   });
 });

@@ -243,7 +243,7 @@ function CLLSection({ formData, onChange }: Pick<Props, 'formData' | 'onChange'>
 
       <Section title="Laboratory Markers">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <ClinicalField label="Absolute Lymphocyte Count (×10⁹/L)" labelIncludesUnit name="absolute_lymphocyte_count" descriptor={descriptors.absolute_lymphocyte_count} type="number" value={formData?.absolute_lymphocyte_count} onChange={onChange} />
+          <ClinicalField label="Absolute Lymphocyte Count (cells/µL)" labelIncludesUnit name="absolute_lymphocyte_count" descriptor={descriptors.absolute_lymphocyte_count} type="number" value={formData?.absolute_lymphocyte_count} onChange={onChange} />
           <ClinicalField label="Lymphocyte Doubling Time (months)" labelIncludesUnit name="lymphocyte_doubling_time" descriptor={descriptors.lymphocyte_doubling_time} type="number" value={formData?.lymphocyte_doubling_time} onChange={onChange} />
           <ClinicalField label="Serum Beta-2 Microglobulin (mg/L)" labelIncludesUnit name="serum_beta2_microglobulin_level" descriptor={descriptors.serum_beta2_microglobulin_level} type="number" value={formData?.serum_beta2_microglobulin_level} onChange={onChange} />
           <ClinicalField label="Clonal B-Lymphocyte Count" name="clonal_b_lymphocyte_count" descriptor={descriptors.clonal_b_lymphocyte_count} type="number" value={formData?.clonal_b_lymphocyte_count} onChange={onChange} />
