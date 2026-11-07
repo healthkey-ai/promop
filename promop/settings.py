@@ -159,6 +159,8 @@ INSTALLED_APPS = [
     # PROlog survey runner. Contributes its own tables to this database and
     # binds every response to an omop_core.Person; see docs/prolog-surveys.md.
     'prolog_surveys',
+    # PROMOP as identity host for phr installations (phr#43); docs/family-auth.md.
+    'family_auth',
 ]
 
 MIDDLEWARE = [
@@ -467,6 +469,22 @@ PHR_JWKS_CACHE_TTL = int(os.environ.get("PHR_JWKS_CACHE_TTL", "3600"))
 # including local development.
 PHR_AUDIENCE = os.environ.get("PHR_AUDIENCE", "")
 
+# ── Family auth: PROMOP as identity host (phr#43, docs/family-auth.md) ──────
+# PROMOP issues the HealthKey family's RS256 tokens for its own identities, so
+# a phr installation signs users in against PROMOP accounts. Off until a key
+# and issuer are set: the endpoints answer 404 and no token is accepted.
+FAMILY_AUTH_PRIVATE_KEY = os.environ.get("FAMILY_AUTH_PRIVATE_KEY", "").replace("\\n", "\n")
+FAMILY_AUTH_PUBLIC_KEY = os.environ.get("FAMILY_AUTH_PUBLIC_KEY", "").replace("\\n", "\n")
+# This PROMOP's https origin: the `iss` siblings trust. Never a shared name.
+FAMILY_AUTH_ISSUER = os.environ.get("FAMILY_AUTH_ISSUER", "")
+# The access token's `aud`: PROMOP's own audience plus any sibling that checks one.
+FAMILY_AUTH_AUDIENCE = _env_list("FAMILY_AUTH_AUDIENCE", "promop-api")
+FAMILY_AUTH_ACCESS_SECONDS = int(os.environ.get("FAMILY_AUTH_ACCESS_SECONDS", "900"))
+FAMILY_AUTH_REFRESH_SECONDS = int(os.environ.get("FAMILY_AUTH_REFRESH_SECONDS", str(7 * 86400)))
+# Each phr installation's sign-up organization, "slug:Name" pairs. Every deploy
+# keeps them in place (manage.py ensure_signup_orgs, scripts/prepare-deployment.sh).
+FAMILY_AUTH_SIGNUP_ORGS = _env_list("FAMILY_AUTH_SIGNUP_ORGS")
+
 FIREBASE_PROJECT_ID = os.environ.get("FIREBASE_PROJECT_ID", "")
 FIREBASE_SKIP_REVOCATION_CHECK = os.environ.get(
     "FIREBASE_SKIP_REVOCATION_CHECK", "false"
@@ -504,6 +522,8 @@ LOINC_USER = os.environ.get("LOINC_USER", "")
 LOINC_PASSWORD = os.environ.get("LOINC_PASSWORD", "")
 
 _auth_classes = [
+    # Tokens PROMOP issued itself (family auth). Others pass through untouched.
+    'family_auth.authentication.FamilyTokenAuthentication',
     'patient_portal.api.authentication.ServiceTokenAuthentication',
     'patient_portal.api.authentication.PartnerAuthentication',
     'oauth2_provider.contrib.rest_framework.OAuth2Authentication',
@@ -565,6 +585,8 @@ REST_FRAMEWORK = {
         'run.answer': os.environ.get('PROLOG_THROTTLE_ANSWER', '600/hour'),
         'run.write': os.environ.get('PROLOG_THROTTLE_WRITE', '3000/hour'),
         'patient_signup': '10/hour',
+        # Family auth login/refresh/introspect, per client address.
+        'family_auth': os.environ.get('FAMILY_AUTH_THROTTLE_RATE', '30/minute'),
         # OMOP clinical-row CRUD (conditions / drug-exposures / measurements /
         # observations / procedures). These viewsets set throttle_scope='omop_write'
         # and override throttle_classes, so this bucket REPLACES 'user' for them
