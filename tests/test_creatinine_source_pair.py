@@ -1,9 +1,10 @@
 """Creatinine's source pair and its normalised read-model (#2318 follow-up).
 
-The patient records the number in the unit their lab used; the matcher reads the
-normalised mg/dL value through `serum_creatinine_mg_dl`. The divisor is 88.42 —
-the one the installed CKD-EPI calculator uses — so an edit here and the matcher
-agree on the same eGFR.
+The patient records the number in the unit their lab used, and the record keeps
+it. `serum_creatinine_mg_dl` is the normalised storage/projection read-model; it
+is quantised to two decimals, so eGFR must be computed from the **pair** — the
+matcher does — not from the canonical. The divisor is 88.42, the factor the
+installed CKD-EPI calculator uses.
 
 Direct bilirubin is deliberately not in this slice: it has no separate canonical
 column yet.
@@ -246,3 +247,65 @@ def test_the_shared_form_normalises_the_source_pair(api):
 def test_the_divisor_is_the_matchers():
     # 88.42, not 88.4: the CKD-EPI calculator uses that factor.
     assert UNIT_DIVISORS['UMOL/L'] == Decimal('88.42')
+
+
+def test_a_read_only_canonical_refuses_the_pair():
+    """A host-level restriction must not be bypassed by the pair path (#2366)."""
+    from omop_core.services.patient_form import patient_form_descriptors
+
+    record = _record()
+    record.serum_creatinine_mg_dl = Decimal('1.00')
+    record.save()
+    descriptor = patient_form_descriptors(build_writable_field_descriptor(), record=None)
+    descriptor[CANONICAL_FIELD] = {
+        **descriptor[CANONICAL_FIELD], 'read_only_for_caller': True,
+    }
+
+    from omop_core.services.patient_form import apply_patient_form_patch
+    saved, result = apply_patient_form_patch(
+        record.person,
+        {'serum_creatinine_level': '2', 'serum_creatinine_level_units': 'mg/dL'},
+        descriptor=descriptor,
+    )
+
+    assert result.rejected.get('serum_creatinine_level')
+    assert saved.serum_creatinine_level is None
+    assert saved.serum_creatinine_mg_dl == Decimal('1.00')
+
+
+def test_an_unknown_stored_unit_is_refused_not_defaulted():
+    """`MMOL/L` in legacy data is not permission to read the number as mg/dL."""
+    from omop_core.services.patient_form import apply_patient_form_patch
+
+    record = _record()
+    PatientRecord.objects.filter(pk=record.pk).update(
+        serum_creatinine_level=None, serum_creatinine_level_units='MMOL/L',
+    )
+
+    saved, result = apply_patient_form_patch(record.person, {'serum_creatinine_level': '2'})
+
+    assert result.rejected.get('serum_creatinine_level_units')
+    assert not result.applied
+    assert saved.serum_creatinine_mg_dl is None
+
+
+def test_the_ordinary_alias_follows_the_pair():
+    """The pair is protected from the canonical copy; its sibling alias is not."""
+    from omop_core.services.patient_record_service import recompute_patient_record_fields
+
+    record = _record()
+    record.serum_creatinine_level = Decimal('88.42')
+    record.serum_creatinine_level_units = 'UMOL/L'
+    record.serum_creatinine_mg_dl = Decimal('1.00')
+    record.creatinine_mg_dl = Decimal('1.00')
+    record.user_edited_fields = ['serum_creatinine_level', 'serum_creatinine_level_units']
+    record.save()
+
+    record.serum_creatinine_level = Decimal('176.84')
+    recompute_patient_record_fields(record)
+
+    record.refresh_from_db()
+    assert record.serum_creatinine_mg_dl == Decimal('2.00')
+    assert record.serum_creatinine_level == Decimal('176.84')
+    assert record.serum_creatinine_level_units == 'UMOL/L'
+    assert record.creatinine_mg_dl == Decimal('2.00')
