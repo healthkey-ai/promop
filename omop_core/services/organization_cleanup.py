@@ -31,7 +31,6 @@ from omop_core.models import (
 )
 from omop_core.services.prolog_cleanup import prolog_delete_statements
 from omop_oncology.models import CancerModifier, Episode, EpisodeEvent, Histology, StemTable
-from family_auth.models import RefreshToken as FamilyRefreshToken
 from patient_portal.models import Identity, PatientUser
 
 
@@ -73,7 +72,6 @@ def delete_organization_with_patient_cascade(org: Organization) -> None:
                 f"OR measurement_id IN (SELECT measurement_id FROM {Measurement._meta.db_table} "
                 f"WHERE person_id IN ({person_subquery}))"
             ),
-            f"DELETE FROM {PatientUser._meta.db_table} WHERE person_id IN ({person_subquery})",
             f"DELETE FROM {Episode._meta.db_table} WHERE person_id IN ({person_subquery})",
             f"DELETE FROM {ConditionOccurrence._meta.db_table} WHERE person_id IN ({person_subquery})",
             f"DELETE FROM {ConditionEra._meta.db_table} WHERE person_id IN ({person_subquery})",
@@ -123,22 +121,22 @@ def delete_organization_with_patient_cascade(org: Organization) -> None:
                     sql = sql[0]
                 cursor.execute(sql, [org.pk] * sql.count('%s'))
 
-            if identity_ids:
-                # Rows that reference the identity and that this raw delete
-                # would otherwise trip over (no Django cascade here): the
-                # family auth sessions of patients who signed in through phr.
-                cursor.execute(
-                    f"DELETE FROM {FamilyRefreshToken._meta.db_table} WHERE identity_id = ANY(%s)",
-                    [identity_ids],
-                )
-                cursor.execute(
-                    f"DELETE FROM {Identity._meta.db_table} WHERE id = ANY(%s)",
-                    [identity_ids],
-                )
+        # The patients' identities go through the ORM, not raw SQL, so Django's
+        # collector applies every CASCADE and SET_NULL declared on a foreign key
+        # to identity: patient_user (and its consents and messages), family
+        # auth and OAuth tokens, password history, group access, break-glass
+        # grants, the admin log, and whatever is added later. Django's foreign
+        # keys are DEFERRABLE INITIALLY DEFERRED and carry no ON DELETE action,
+        # so a raw delete here does not fail on this statement: it fails at
+        # COMMIT, naming only the first table that still points at the identity
+        # (family_auth_refreshtoken on staging, #2357).
+        if identity_ids:
+            Identity.objects.filter(pk__in=identity_ids).delete()
 
-            # Delete Person rows using pre-collected IDs (subquery is now empty since
-            # PatientRecord was deleted above; raw SQL bypasses Django's CASCADE).
-            if person_ids:
+        # Delete Person rows using pre-collected IDs (subquery is now empty since
+        # PatientRecord was deleted above; raw SQL bypasses Django's CASCADE).
+        if person_ids:
+            with connection.cursor() as cursor:
                 cursor.execute(
                     f"DELETE FROM {Person._meta.db_table} WHERE person_id = ANY(%s)",
                     [person_ids],

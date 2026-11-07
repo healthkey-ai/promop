@@ -275,19 +275,25 @@ def test_ensure_signup_orgs_does_nothing_unset_and_rejects_a_malformed_entry(set
             _ensure(settings, bad)
 
 
-def test_deleting_an_org_removes_its_patients_family_sessions(settings):
+def test_deleting_an_org_removes_its_patients_family_sessions():
     """delete_org_patients deletes identities with raw SQL, which a family
-    refresh token used to block (a foreign key violation on staging)."""
+    refresh token used to block: Django's foreign keys are deferred, so the
+    violation surfaced at COMMIT on staging. The identity now goes through the
+    ORM, so every table that points at it cascades: the family session, the
+    password history a reset writes, and the patient_user with its consents."""
     from omop_core.models import Organization
     from omop_core.services.organization_cleanup import delete_organization_with_patient_cascade
+    from patient_portal.models import PasswordHistory, PatientConsent, PatientUser
+    from patient_portal.services import record_password
 
     org = OrganizationFactory(slug="phr", allows_patient_signup=True)
     client = APIClient()
-    assert client.post("/api/v1/orgs/phr/patient-signup/", {
-        "email": "gone@example.com", "password": "a-long-enough-pass-42",
-    }, format="json").status_code == 201
+    assert _signup(client, "phr", email="gone@example.com").status_code == 201
     identity = Identity.objects.get(email="gone@example.com")
     identity.mark_email_verified()
+    record_password(identity)
+    patient_user = PatientUser.objects.get(identity=identity)
+    PatientConsent.objects.create(patient_user=patient_user, consent_type="data_sharing", consent_granted=True)
     assert _login(client, "gone@example.com", "a-long-enough-pass-42").status_code == 200
     assert RefreshToken.objects.filter(identity=identity).exists()
 
@@ -296,6 +302,11 @@ def test_deleting_an_org_removes_its_patients_family_sessions(settings):
     assert not Organization.objects.filter(pk=org.pk).exists()
     assert not Identity.objects.filter(pk=identity.pk).exists()
     assert not RefreshToken.objects.filter(identity_id=identity.pk).exists()
+    assert not PasswordHistory.objects.filter(identity_id=identity.pk).exists()
+    assert not PatientUser.objects.filter(pk=patient_user.pk).exists()
+    assert not PatientConsent.objects.filter(patient_user_id=patient_user.pk).exists()
+
+
 # ── Verification links go to the installation the patient signed up on ──────
 
 def _signup(client, slug, email="pat@example.com"):
