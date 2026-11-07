@@ -20,6 +20,8 @@ SYSTEM: frozenset[str] = frozenset({
     'oauth2_provider.AccessToken', 'oauth2_provider.Application',
     'oauth2_provider.DeviceGrant', 'oauth2_provider.Grant',
     'oauth2_provider.IDToken', 'oauth2_provider.RefreshToken',
+    # Family auth refresh tokens (phr#43): this deployment's sessions.
+    'family_auth.RefreshToken',
     'patient_portal.AuditEvent', 'patient_portal.BreakGlassGrant',
     'patient_portal.Identity', 'patient_portal.Identity_groups',
     'patient_portal.Identity_user_permissions', 'patient_portal.PasswordHistory',

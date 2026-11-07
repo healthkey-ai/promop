@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 @pytest.mark.parametrize("failed_command", [None, "check", "prepare_production_database",
                                            "queue_athena_vocabulary_sync", "setup_admin",
-                                           "check_loinc_release"])
+                                           "ensure_signup_orgs", "check_loinc_release"])
 def test_web_startup_commands_and_failure_gates(tmp_path, failed_command):
     log = tmp_path / "commands"
     for executable, body in {
@@ -49,6 +49,8 @@ def test_web_startup_commands_and_failure_gates(tmp_path, failed_command):
         "manage.py prepare_production_database --lfs https://github.com/example/vocab --gdrive https://example.test/athena",
         "manage.py queue_athena_vocabulary_sync --lfs https://github.com/example/vocab --gdrive https://example.test/athena",
         "manage.py setup_admin",
+        # Family auth sign-up orgs (phr#43): a malformed list stops the deploy.
+        "manage.py ensure_signup_orgs",
         # Last of the preparation steps, and deliberately unable to stop the
         # boot: it dispatches a LOINC load when the release has moved, and a
         # stale LOINC table is not a reason to refuse to serve (#1624).
