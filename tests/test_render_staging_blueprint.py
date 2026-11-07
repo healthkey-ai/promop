@@ -135,3 +135,35 @@ def test_staging_hosts_identity_for_phr_and_production_does_not_yet():
     assert app_url in staging['CORS_ALLOWED_ORIGINS']['value'].split(',')
     assert not any(key.startswith('FAMILY_AUTH_') for key in production)
 
+
+
+def test_staging_build_publishes_the_federation_remote(tmp_path):
+    """phr loads promop's patient record from /remote/remoteEntry.js. The
+    Dockerfile builds it into frontend/build/remote; the staging Blueprint must
+    too, or WhiteNoise has no such file and the SPA fallback answers with HTML."""
+    config = yaml.safe_load((ROOT / 'render.yaml').read_text())
+    command = next(s for s in config['services'] if s['name'] == 'promop-staging')['buildCommand']
+    (tmp_path / 'frontend').mkdir()
+    bin_dir = tmp_path / 'bin'
+    bin_dir.mkdir()
+    # npm stands in for both Vite builds: each writes its output where the
+    # real config puts it (build/ for the SPA, dist/remote/ for the remote).
+    stubs = {
+        'python': '#!/bin/sh\n',
+        'pip': '#!/bin/sh\n',
+        'npm': '''#!/bin/sh
+case "$*" in
+  "run build") mkdir -p build && echo spa > build/index.html ;;
+  "run build:remote") mkdir -p dist/remote && echo remote > dist/remote/remoteEntry.js ;;
+esac
+''',
+    }
+    for name, body in stubs.items():
+        (bin_dir / name).write_text(body)
+        (bin_dir / name).chmod(0o755)
+    env = {**os.environ, 'PATH': f'{bin_dir}:{os.environ["PATH"]}'}
+    result = subprocess.run(['/bin/sh', '-c', command], cwd=tmp_path, env=env, capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / 'frontend' / 'build' / 'index.html').is_file()
+    assert (tmp_path / 'frontend' / 'build' / 'remote' / 'remoteEntry.js').read_text() == 'remote\n'
