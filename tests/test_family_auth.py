@@ -151,6 +151,23 @@ def test_jwks_publishes_the_key_that_signs_the_tokens(account):
     assert claims["user_id"] == account.pk
 
 
+def test_a_sibling_listed_in_the_audience_can_check_aud_and_promop_still_accepts(settings, account):
+    """Siblings (exact, soc, labs) verify `aud` once FAMILY_AUTH_AUDIENCE names
+    them. Adding them must not change what PROMOP itself accepts."""
+    settings.FAMILY_AUTH_AUDIENCE = ["promop-api", "exact-api", "soc-api", "labs-api"]
+    access = _login(APIClient()).data["access"]
+    public = jwt.PyJWK(APIClient().get(f"{BASE}/jwks/").data["keys"][0]).key
+
+    claims = jwt.decode(access, public, algorithms=["RS256"], audience="exact-api", issuer=ISSUER)
+    assert claims["aud"] == ["promop-api", "exact-api", "soc-api", "labs-api"]
+    with pytest.raises(jwt.InvalidAudienceError):
+        jwt.decode(access, public, algorithms=["RS256"], audience="trials-elsewhere", issuer=ISSUER)
+
+    client = APIClient()
+    client.credentials(HTTP_AUTHORIZATION=f"Bearer {access}")
+    assert client.get("/api/v1/user/").status_code == 200
+
+
 def test_refresh_rotates_and_a_reused_refresh_token_revokes_the_session(account):
     first = _login(APIClient()).data
     rotated = APIClient().post(f"{BASE}/refresh/", {"refresh": first["refresh"]}, format="json")
