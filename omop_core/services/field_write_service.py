@@ -27,6 +27,7 @@ from omop_core.services.patient_record_service import _ASSERTION_FIELDS, refresh
 from omop_core.services.creatinine_units import SOURCE_PAIRS as CREATININE_SOURCE_PAIRS
 from omop_core.services.hemoglobin_units import SOURCE_PAIRS
 from omop_core.services.blood_count_source_pairs import PAIRS as COUNT_SOURCE_PAIRS
+from omop_core.services.chemistry_units import PAIRS as CHEMISTRY_SOURCE_PAIRS
 from omop_core.services.genomic_concepts import (
     MUTATION_INTERPRETATION_CONCEPTS,
     MUTATION_ORIGIN_CONCEPTS,
@@ -273,7 +274,14 @@ def _retire_source_pairs(person, applied):
     """
     retired = {
         field
-        for canonical, fields in {**SOURCE_PAIRS, **CREATININE_SOURCE_PAIRS}.items()
+        for canonical, fields in {
+            **SOURCE_PAIRS,
+            **CREATININE_SOURCE_PAIRS,
+            **{
+                canonical: (spec['value'], spec['unit'])
+                for canonical, spec in CHEMISTRY_SOURCE_PAIRS.items()
+            },
+        }.items()
         if canonical in applied
         for field in fields
     }

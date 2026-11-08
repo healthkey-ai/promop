@@ -63,7 +63,11 @@ def test_complex_verdict_gate_withholds_the_result_but_not_its_source_facts():
     # canonical import below still works for clients that speak the old shape.
     assert descriptor['hemoglobin_level']['writable'] is True
     assert descriptor['hemoglobin_g_dl']['writable'] is False
-    assert descriptor['serum_calcium_mg_dl']['writable'] is True
+    # The chemistry pairs follow the same contract, so a CRAB source fact is
+    # the recorded value and unit, not the normalised mg/dL read-model.
+    assert descriptor['serum_calcium_level']['writable'] is True
+    assert descriptor['serum_calcium_level_units']['writable'] is False
+    assert descriptor['serum_calcium_mg_dl']['writable'] is False
 
     rejected = client.patch(f'/api/v1/patient-records/{record.person_id}/',
                             {'meets_crab': True}, format='json', HTTP_X_PATIENT_FORM='1')
