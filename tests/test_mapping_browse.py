@@ -412,7 +412,10 @@ def test_digit_search_matches_source_code_substring_and_concept_id(browse):
     data = browse(source='LOINC', search='3004061').data
 
     assert {r['source_code'] for r in data['results']} == {'LAB-3004061-A', 'OTHER'}
-    assert browse(source='LOINC', search='9' * 12).data['results'] == []
+    # Too big for an integer column; thousands of digits int() refuses;
+    # isdigit() but not int(). Each used to be, or would be, a 500.
+    for odd in ('9' * 12, '9' * 5000, '\u00b2', '\u2460'):
+        assert browse(source='LOINC', search=odd).data['results'] == []
 
 
 def test_duplicates_include_off_page_and_rejected_members(browse):
