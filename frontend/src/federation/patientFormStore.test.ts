@@ -708,6 +708,20 @@ describe('source-pair writes (#5700)', () => {
     expect(store.getSnapshot().pending).toEqual({});
   });
 
+  it('sends a dated pair as one PATCH', async () => {
+    const { store, patch } = pairSetup();
+    await store.load();
+
+    store.enqueuePair('hemoglobin_level', { value: 120, date: '2026-08-01' },
+      'hemoglobin_level_units', 'G/L');
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(patch).toHaveBeenCalledWith('/api/v1/patient-records/12/',
+      { hemoglobin_level: { value: 120, date: '2026-08-01' },
+        hemoglobin_level_units: 'G/L' },
+      { headers: { 'X-Patient-Form': '1' } });
+  });
+
   it('refuses a companion entry that does not qualify the field', async () => {
     const { store, patch } = pairSetup();
     await store.load();
