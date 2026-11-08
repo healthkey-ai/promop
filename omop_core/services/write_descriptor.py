@@ -766,6 +766,9 @@ def get_serializer_read_only_fields():
         for spec in CHEMISTRY_SOURCE_PAIRS.values()
         for field in (spec['value'], spec['unit'])
     }
+    # Direct bilirubin's pair is the write target too (#2318); the unitless
+    # alias stays read-only above.
+    read_only -= {direct_bilirubin_units.PAIR_FIELD, direct_bilirubin_units.UNIT_FIELD}
     # Profile fields now write through PatientRecord PATCH (KIND_DIRECT),
     # so they are no longer read-only on the serializer.
     # KIND_AUTHORED / KIND_UNMAPPED: therapy-prefix fields (minus exceptions)

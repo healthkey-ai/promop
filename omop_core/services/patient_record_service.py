@@ -1130,6 +1130,7 @@ def refresh_patient_record(person: Person) -> PatientRecord:
         preserved_units = set()
         for value_field, unit_field in (
             ('height', 'height_units'), ('weight', 'weight_units'),
+            (_DIRECT_PAIR_FIELD, _DIRECT_UNIT_FIELD),
         ):
             if value_field in preserved and hasattr(patient_info, unit_field):
                 preserved[unit_field] = getattr(patient_info, unit_field)
@@ -1214,6 +1215,23 @@ def refresh_patient_record(person: Person) -> PatientRecord:
             NEW_INPUT_FIELDS, values_from_snapshot,
         )
         clinical_values = values_from_snapshot(snapshot) if preserved else {}
+        # A source pair is confirmed only when number and unit both match the
+        # imported fact. The value alone is not evidence: the same number under
+        # another unit is a different result (#2318).
+        direct_pair_evidence = (
+            _DIRECT_PAIR_FIELD in derived_fields
+            and _DIRECT_UNIT_FIELD in derived_fields
+            and _derived_value_matches(
+                _DIRECT_PAIR_FIELD,
+                getattr(patient_info, _DIRECT_PAIR_FIELD, None),
+                preserved.get(_DIRECT_PAIR_FIELD),
+            )
+            and _derived_value_matches(
+                _DIRECT_UNIT_FIELD,
+                getattr(patient_info, _DIRECT_UNIT_FIELD, None),
+                preserved.get(_DIRECT_UNIT_FIELD),
+            )
+        )
         still_orphaned = []
         for field, value in preserved.items():
             if field in preserved_units:
@@ -1235,6 +1253,10 @@ def refresh_patient_record(person: Person) -> PatientRecord:
                 # Only an explicit canonical import retires it (recompute);
                 # the chosen unit is the reader's declaration.
                 matches = False
+            elif field == _DIRECT_PAIR_FIELD:
+                # Direct bilirubin has no canonical, so the pair is confirmed
+                # when the import carries the same number and unit together.
+                matches = has_evidence and direct_pair_evidence
             elif field == 'medication_contexts':
                 from omop_core.services.medication_context import context_delta, merge_contexts
                 eligible = {str(row.pk) for row in snapshot.drug_exposures}

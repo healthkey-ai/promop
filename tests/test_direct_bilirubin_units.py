@@ -65,6 +65,11 @@ def test_an_invalid_pair_value_is_not_a_fact(value):
     assert units.pair_value(value) == (False, None)
 
 
+@pytest.mark.parametrize('value', ['1e100', Decimal('1e100'), Decimal('-0.001')])
+def test_the_alias_refuses_an_out_of_range_source(value):
+    assert units.alias_from_pair(value, 'MG/DL') == (False, None)
+
+
 def test_the_pair_is_quantised_to_the_column_precision():
     recognised, value = units.pair_value(Decimal('1.234'))
 
@@ -207,7 +212,8 @@ def test_a_pending_alias_is_not_silently_reinterpreted():
 
 def test_projection_carries_the_reported_unit_not_the_recipe_default():
     person = PersonFactory()
-    record = PatientRecordFactory(person=person)
+    from omop_core.models import PatientRecord
+    record, _ = PatientRecord.objects.get_or_create(person=person)
     record.serum_bilirubin_level_direct = Decimal('10')
     record.serum_bilirubin_level_direct_units = 'UMOL/L'
     record.save()
@@ -236,7 +242,8 @@ def test_projection_carries_the_reported_unit_not_the_recipe_default():
 
 def test_projection_without_a_usable_unit_stays_pending():
     person = PersonFactory()
-    record = PatientRecordFactory(person=person)
+    from omop_core.models import PatientRecord
+    record, _ = PatientRecord.objects.get_or_create(person=person)
     record.serum_bilirubin_level_direct = Decimal('10')
     record.save()
     # The column defaults to MG/DL; bypass it to model a legacy row with no
@@ -263,3 +270,140 @@ def test_projection_without_a_usable_unit_stays_pending():
 def test_the_alias_is_not_a_client_write_target():
     assert units.ALIAS_FIELD in get_serializer_read_only_fields()
     assert build_writable_field_descriptor()[units.ALIAS_FIELD]['writable'] is False
+
+
+def test_the_native_serializer_validates_and_normalises_the_pair():
+    from patient_portal.api.serializers import PatientRecordSerializer
+
+    record = PatientRecordFactory()
+    serializer = PatientRecordSerializer(
+        record, data={
+            units.PAIR_FIELD: '34.20',
+            units.UNIT_FIELD: 'umol/L',
+        }, partial=True,
+    )
+
+    assert serializer.is_valid(), serializer.errors
+    assert serializer.validated_data[units.PAIR_FIELD] == Decimal('34.20')
+    assert serializer.validated_data[units.UNIT_FIELD] == 'UMOL/L'
+
+
+def test_the_native_serializer_refuses_a_unit_on_its_own():
+    from patient_portal.api.serializers import PatientRecordSerializer
+
+    record = PatientRecordFactory()
+    serializer = PatientRecordSerializer(
+        record, data={units.UNIT_FIELD: 'umol/L'}, partial=True)
+
+    assert not serializer.is_valid()
+    assert units.UNIT_FIELD in serializer.errors
+
+
+def test_the_native_serializer_refuses_an_unsupported_unit():
+    from patient_portal.api.serializers import PatientRecordSerializer
+
+    record = PatientRecordFactory()
+    serializer = PatientRecordSerializer(
+        record, data={
+            units.PAIR_FIELD: '1.2', units.UNIT_FIELD: 'mg/L',
+        }, partial=True)
+
+    assert not serializer.is_valid()
+    assert units.UNIT_FIELD in serializer.errors
+
+
+def test_the_shared_form_writes_the_pair_and_normalises_the_alias():
+    from omop_core.services.patient_form import apply_patient_form_patch
+
+    ConceptFactory(
+        concept_id=1968007, concept_code=LOINC_DIRECT,
+        vocabulary=VocabularyFactory(vocabulary_id='LOINC'))
+    person = PersonFactory()
+    saved, result = apply_patient_form_patch(
+        person, {units.PAIR_FIELD: '34.2', units.UNIT_FIELD: 'umol/L'})
+
+    assert {units.PAIR_FIELD, units.UNIT_FIELD} <= set(result.applied)
+    assert saved.serum_bilirubin_level_direct == Decimal('34.20')
+    assert saved.serum_bilirubin_level_direct_units == 'UMOL/L'
+    assert saved.serum_bilirubin_level == Decimal('2.00')
+
+
+def test_the_shared_form_refuses_a_unit_on_its_own():
+    from omop_core.services.patient_form import apply_patient_form_patch
+
+    person = PersonFactory()
+    _saved, result = apply_patient_form_patch(
+        person, {units.UNIT_FIELD: 'umol/L'})
+
+    assert result.rejected.get(units.UNIT_FIELD)
+    assert not result.applied
+
+
+def test_a_pending_value_keeps_its_unit_across_a_refresh():
+    person = PersonFactory()
+    MeasurementFactory(
+        person=person,
+        measurement_concept=ConceptFactory(concept_code=LOINC_DIRECT),
+        measurement_source_value=LOINC_DIRECT,
+        value_as_number=1,
+        unit_source_value='mg/dL',
+    )
+    from omop_core.models import PatientRecord
+    record, _ = PatientRecord.objects.get_or_create(person=person)
+    record.serum_bilirubin_level_direct = Decimal('17.10')
+    record.serum_bilirubin_level_direct_units = 'UMOL/L'
+    record.user_edited_fields = [units.PAIR_FIELD]
+    record.save()
+
+    record = refresh_patient_record(person)
+
+    assert record.serum_bilirubin_level_direct == Decimal('17.10')
+    assert record.serum_bilirubin_level_direct_units == 'UMOL/L'
+    assert record.serum_bilirubin_level == Decimal('1.00')
+    assert units.PAIR_FIELD in (record.user_edited_fields or [])
+
+
+def test_a_pending_pair_is_confirmed_only_when_number_and_unit_match():
+    person = PersonFactory()
+    MeasurementFactory(
+        person=person,
+        measurement_concept=ConceptFactory(concept_code=LOINC_DIRECT),
+        measurement_source_value=LOINC_DIRECT,
+        value_as_number=17.10,
+        unit_source_value='umol/L',
+    )
+    from omop_core.models import PatientRecord
+    record, _ = PatientRecord.objects.get_or_create(person=person)
+    record.serum_bilirubin_level_direct = Decimal('17.10')
+    record.serum_bilirubin_level_direct_units = 'UMOL/L'
+    record.user_edited_fields = [units.PAIR_FIELD]
+    record.save()
+
+    record = refresh_patient_record(person)
+
+    assert units.PAIR_FIELD not in (record.user_edited_fields or [])
+    assert record.serum_bilirubin_level_direct_units == 'UMOL/L'
+    assert record.serum_bilirubin_level == Decimal('1.00')
+
+
+def test_the_same_number_in_another_unit_does_not_confirm_the_pair():
+    person = PersonFactory()
+    MeasurementFactory(
+        person=person,
+        measurement_concept=ConceptFactory(concept_code=LOINC_DIRECT),
+        measurement_source_value=LOINC_DIRECT,
+        value_as_number=17.10,
+        unit_source_value='mg/dL',
+    )
+    from omop_core.models import PatientRecord
+    record, _ = PatientRecord.objects.get_or_create(person=person)
+    record.serum_bilirubin_level_direct = Decimal('17.10')
+    record.serum_bilirubin_level_direct_units = 'UMOL/L'
+    record.user_edited_fields = [units.PAIR_FIELD]
+    record.save()
+
+    record = refresh_patient_record(person)
+
+    assert units.PAIR_FIELD in (record.user_edited_fields or [])
+    assert record.serum_bilirubin_level_direct_units == 'UMOL/L'
+    assert record.serum_bilirubin_level == Decimal('1.00')

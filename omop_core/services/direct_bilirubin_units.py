@@ -105,7 +105,15 @@ def alias_from_pair(value, unit):
         return False, None
     if isinstance(value, bool) or not number.is_finite():
         return False, None
-    alias = (number / divisor).quantize(CANONICAL_QUANTUM, rounding=ROUND_HALF_UP)
+    # Check the source range before quantizing: an out-of-range value would
+    # otherwise raise InvalidOperation on the quantize, not return "unknown".
+    if number < 0 or number > CANONICAL_LIMIT:
+        return False, None
+    alias = number / divisor
     if not alias.is_finite() or alias < 0 or alias > CANONICAL_LIMIT:
+        return False, None
+    try:
+        alias = alias.quantize(CANONICAL_QUANTUM, rounding=ROUND_HALF_UP)
+    except InvalidOperation:
         return False, None
     return True, alias
