@@ -84,6 +84,21 @@ def tab_queryset(mappings, source):
     return mappings.filter(source_tab_filter(source))
 
 
+def concept_id_from_search(search):
+    """The destination concept id a search names, or None.
+
+    A concept id is an integer, so it matches whole, never as a substring:
+    ``icontains`` on the foreign key raised FieldError and turned every
+    all-digit search into a 500 (#2371). Only ASCII digits that fit an
+    integer column count: ``'\u00b2'.isdigit()`` is true but ``int('\u00b2')``
+    raises, and ``int()`` refuses a string of thousands of digits.
+    """
+    if not (search.isascii() and search.isdigit() and len(search) <= 10):
+        return None
+    value = int(search)
+    return value if value < 2 ** 31 else None
+
+
 def apply_search(mappings, tab_rows, search):
     """A search deliberately reaches across every tab, not just the active one."""
     if not search:
@@ -93,8 +108,10 @@ def apply_search(mappings, tab_rows, search):
                   'target_concept__concept_name', 'target_concept__concept_code',
                   'organization__name', 'organization__slug'):
         query |= Q(**{f'{field}__icontains': search})
-    if search.isdigit():
-        query |= Q(target_concept_id__icontains=search)
+    concept_id = concept_id_from_search(search)
+    if concept_id is not None:
+        # A partial source code is still found through ``source_code__icontains``.
+        query |= Q(target_concept_id=concept_id)
     return mappings.filter(query)
 
 
