@@ -193,6 +193,11 @@ export class PatientFormStore {
     const unitDescriptor = this.snapshot.fields[unitField];
     if (!this.snapshot.writable || !field?.writable || field.target !== 'patient_record') return false;
     if (!unitDescriptor || unitDescriptor.qualifies !== name) return false;
+    // A dated pair carries the same correction-target guard as `enqueue`.
+    if (isDatedEdit(value) && this.snapshot.datesStale) {
+      this.publish({ errors: { ...this.snapshot.errors, [name]: STALE_DATES_ERROR } });
+      return false;
+    }
     this.enqueueEntries({ [name]: value, [unitField]: unit });
     return true;
   };
@@ -305,6 +310,14 @@ export class PatientFormStore {
         if (this.revisions[name] === revisions[name]) delete pending[name];
         errors[name] = STALE_DATES_ERROR;
         delete batch[name];
+        // A companion unit is not a fact on its own. Holding the dated value
+        // must hold the unit too, or the next PATCH would write a lone unit.
+        for (const key of Object.keys(batch)) {
+          if (this.snapshot.fields[key]?.qualifies === name) {
+            if (this.revisions[key] === revisions[key]) delete pending[key];
+            delete batch[key];
+          }
+        }
       }
       this.publish({ pending, errors });
       if (!Object.keys(batch).length) return;

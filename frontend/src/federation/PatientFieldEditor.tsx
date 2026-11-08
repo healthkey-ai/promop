@@ -115,9 +115,15 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
         ? (initialPending as { value: unknown }).value : initialPending)
       : state.values[initialCanonical])
     : undefined;
+  // A dated row keeps its chosen unit as a draft until "Save result"; the
+  // stale-draft reset only applies to rows that autosave.
+  const initialDated = Boolean(
+    initialCanonical && store.getSnapshot().fields[initialCanonical]?.dated);
   useEffect(() => {
-    if (unitDraft && initialValue != null && initialValue !== '') setUnitDraft(null);
-  }, [unitDraft, initialValue]);
+    if (!initialDated && unitDraft && initialValue != null && initialValue !== '') {
+      setUnitDraft(null);
+    }
+  }, [initialDated, unitDraft, initialValue]);
   if (state.loading) return <span role="status">Loading patient value…</span>;
   if (state.error) return <div role="alert">{state.error} <button onClick={() => void store.load()}>Retry</button></div>;
   const canonical = store.resolve(name);
@@ -204,6 +210,10 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
       && (state.fields[key].unit_options?.length ?? 0) > 1);
   const unitOptions = field.unit_options
     ?? (unitFieldName ? state.fields[unitFieldName].unit_options : undefined) ?? [];
+  // A dated fact is edited with its clinical date. The latest recorded date is
+  // the correction target; a new entry defaults to today, and an older choice
+  // says plainly that it becomes history rather than the current value.
+  const dated = writable && field.dated === true;
   const pendingUnit = unitFieldName && unitFieldName in state.pending
     ? state.pending[unitFieldName] : undefined;
   const storedUnit = String(pendingUnit
@@ -213,8 +223,10 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
   // rejected clear). Once the shared value is non-empty, the saved/pending pair
   // is the authority; the draft is ignored and cleared by the next queued edit.
   const authoritativeUnit = storedUnit || unitOptions[0]?.value || '';
-  const chosenUnit = (value == null || value === '')
-    ? (unitDraft ?? authoritativeUnit) : authoritativeUnit;
+  const chosenUnit = dated
+    ? (unitDraft ?? authoritativeUnit)
+    : (value == null || value === '')
+      ? (unitDraft ?? authoritativeUnit) : authoritativeUnit;
   const showUnitPicker = writable && Boolean(unitFieldName) && unitOptions.length > 1;
   const pairError = state.errors[canonical]
     ?? (unitFieldName ? state.errors[unitFieldName] : undefined);
@@ -232,10 +244,6 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
   // computed from. Editing an input never writes the verdict; the result remains
   // read-only and is recalculated by PROMOP.
   const gated = Boolean(field.compatibility_reason);
-  // A dated fact is edited with its clinical date. The latest recorded date is
-  // the correction target; a new entry defaults to today, and an older choice
-  // says plainly that it becomes history rather than the current value.
-  const dated = writable && field.dated === true;
   const pendingDate = pending && typeof pending === 'object' && !Array.isArray(pending)
       && 'date' in pending ? (pending as { date?: unknown }).date : undefined;
   const resultDate = resultDateOverride
@@ -250,10 +258,20 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
   // attach it to the previous result's date before the user has chosen one, so
   // the pair waits for an explicit commit.
   const datedValue = dated && valueDraft.set ? valueDraft.value : value;
-  const datedDirty = dated && (valueDraft.set || resultDateOverride !== null);
+  const datedDirty = dated && (valueDraft.set || resultDateOverride !== null
+    || unitDraft !== null);
   const commitDated = () => {
     if (datesStale) return;
-    store.enqueue(canonical, { value: datedValue, date: resultDate });
+    const datedEdit = { value: datedValue, date: resultDate };
+    if (showUnitPicker && unitFieldName) {
+      // The number, its date and the unit are one result. Saving the value
+      // alone would keep the stored unit and silently change the scale.
+      if (store.enqueuePair(canonical, datedEdit, unitFieldName, chosenUnit)) {
+        setUnitDraft(null);
+      }
+    } else {
+      store.enqueue(canonical, datedEdit);
+    }
     setValueDraft({ set: false, value: undefined });
     setResultDateOverride(null);
   };
@@ -327,6 +345,9 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
             onChange={(event) => {
               const nextUnit = event.target.value;
               setUnitDraft(nextUnit);
+              // A dated row commits only through "Save result": queueing the
+              // pair here would attach the current value to today's date.
+              if (dated) return;
               // A unit change with a value is a real edit of the same pair, not
               // a formatting change; a unit alone cannot be written.
               if (value != null && value !== '' && unitFieldName

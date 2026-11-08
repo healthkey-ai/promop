@@ -907,3 +907,59 @@ describe('source-pair unit picker (#5700)', () => {
     });
   });
 });
+
+describe('dated source pairs', () => {
+  const pairFields = {
+    serum_bilirubin_level_direct: {
+      label: 'Direct bilirubin', writable: true, target: 'patient_record',
+      control: 'number', dated: true, latest_date: '2026-08-01',
+      projection: { omop_table: 'measurement' },
+    },
+    serum_bilirubin_level_direct_units: {
+      label: 'Direct bilirubin units', kind: 'selectable', writable: false,
+      qualifies: 'serum_bilirubin_level_direct',
+      unit_options: [
+        { value: 'MG/DL', label: 'mg/dL' },
+        { value: 'UMOL/L', label: 'umol/L' },
+      ],
+    },
+  };
+  const pairValues = {
+    serum_bilirubin_level_direct: 1.2,
+    serum_bilirubin_level_direct_units: 'MG/DL',
+  };
+
+  it('saves a dated value, its date and its unit together', async () => {
+    const { store, patch } = await setup(pairFields, pairValues);
+    render(<PatientFieldEditor store={store} name="serum_bilirubin_level_direct" />);
+
+    fireEvent.change(screen.getByRole('spinbutton'), { target: { value: '10' } });
+    fireEvent.change(screen.getByLabelText('Unit for Direct bilirubin'),
+      { target: { value: 'UMOL/L' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save result' }));
+    await act(async () => { await store.flush(); });
+
+    expect(patch.mock.calls[0][1]).toEqual({
+      serum_bilirubin_level_direct: { value: 10, date: '2026-08-01' },
+      serum_bilirubin_level_direct_units: 'UMOL/L',
+    });
+  });
+
+  it('does not save a dated unit change before Save result', async () => {
+    const { store, patch } = await setup(pairFields, pairValues);
+    render(<PatientFieldEditor store={store} name="serum_bilirubin_level_direct" />);
+
+    fireEvent.change(screen.getByLabelText('Unit for Direct bilirubin'),
+      { target: { value: 'UMOL/L' } });
+    await act(async () => { await store.flush(); });
+    expect(patch).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save result' }));
+    await act(async () => { await store.flush(); });
+
+    expect(patch.mock.calls[0][1]).toEqual({
+      serum_bilirubin_level_direct: { value: 1.2, date: '2026-08-01' },
+      serum_bilirubin_level_direct_units: 'UMOL/L',
+    });
+  });
+});
