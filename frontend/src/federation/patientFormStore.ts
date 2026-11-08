@@ -310,6 +310,14 @@ export class PatientFormStore {
         if (this.revisions[name] === revisions[name]) delete pending[name];
         errors[name] = STALE_DATES_ERROR;
         delete batch[name];
+        // A companion unit is not a fact on its own. Holding the dated value
+        // must hold the unit too, or the next PATCH would write a lone unit.
+        for (const key of Object.keys(batch)) {
+          if (this.snapshot.fields[key]?.qualifies === name) {
+            if (this.revisions[key] === revisions[key]) delete pending[key];
+            delete batch[key];
+          }
+        }
       }
       this.publish({ pending, errors });
       if (!Object.keys(batch).length) return;
