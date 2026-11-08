@@ -1234,6 +1234,11 @@ def refresh_patient_record(person: Person) -> PatientRecord:
         )
         still_orphaned = []
         for field, value in preserved.items():
+            if (field == _DIRECT_UNIT_FIELD
+                    and _DIRECT_PAIR_FIELD not in preserved):
+                # An orphan unit is not a fact; do not let it outlive the pair
+                # and re-attach to a later import.
+                continue
             if field in preserved_units:
                 # Restore the unit with its pending value; it is not an
                 # independent user edit and must not get its own marker.

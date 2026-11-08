@@ -4,7 +4,7 @@ Direct bilirubin has no canonical column. `serum_bilirubin_level_direct` plus
 its unit are the fact the matcher converts, and the unitless
 `serum_bilirubin_level` alias mirrors the normalised mg/dL value.
 """
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
@@ -407,3 +407,112 @@ def test_the_same_number_in_another_unit_does_not_confirm_the_pair():
     assert units.PAIR_FIELD in (record.user_edited_fields or [])
     assert record.serum_bilirubin_level_direct_units == 'UMOL/L'
     assert record.serum_bilirubin_level == Decimal('1.00')
+
+
+@pytest.fixture
+def api(settings):
+    from rest_framework.test import APIClient
+    from patient_portal.models import Identity
+
+    settings.CELERY_BROKER_URL = ''
+    type_vocab = VocabularyFactory(
+        vocabulary_id='Type Concept', vocabulary_name='Type Concept')
+    ConceptFactory(
+        concept_id=32865, concept_code='PT-SELF-REPORT',
+        concept_name='Patient self-report', vocabulary=type_vocab,
+    )
+    ConceptFactory(
+        concept_id=1968007, concept_code=LOINC_DIRECT,
+        vocabulary=VocabularyFactory(vocabulary_id='LOINC'))
+    client = APIClient()
+    client.force_authenticate(
+        Identity.objects.create_user(
+            email='direct-bilirubin@example.test', is_staff=True))
+    return client
+
+
+def _edit(client, record, data):
+    response = client.patch(
+        f'/api/patient-info/{record.person.person_id}/', data, format='json')
+    assert response.status_code == 200, response.data
+    record.refresh_from_db()
+    return response
+
+
+def test_a_successful_projection_retires_both_pair_markers(api):
+    from omop_core.models import PatientRecord
+
+    record = PatientRecordFactory()
+    _edit(api, record, {
+        units.PAIR_FIELD: '17.10', units.UNIT_FIELD: 'umol/L'})
+
+    assert units.PAIR_FIELD not in (record.user_edited_fields or [])
+    assert units.UNIT_FIELD not in (record.user_edited_fields or [])
+
+    MeasurementFactory(
+        person=record.person,
+        measurement_concept=ConceptFactory(
+            concept_code=LOINC_DIRECT,
+            vocabulary=VocabularyFactory(vocabulary_id='LOINC')),
+        measurement_source_value=LOINC_DIRECT,
+        # The import is newer than the projection written by the PATCH.
+        measurement_date=date.today() + timedelta(days=1),
+        value_as_number=2,
+        unit_source_value='mg/dL',
+    )
+    record = refresh_patient_record(record.person)
+
+    assert record.serum_bilirubin_level_direct == Decimal('2.00')
+    assert record.serum_bilirubin_level_direct_units == 'MG/DL'
+    assert record.serum_bilirubin_level == Decimal('2.00')
+
+
+def test_a_unit_only_change_with_the_same_number_is_projected(api):
+    record = PatientRecordFactory()
+    _edit(api, record, {
+        units.PAIR_FIELD: '17.10', units.UNIT_FIELD: 'mg/dL'})
+    _edit(api, record, {
+        units.PAIR_FIELD: '17.10', units.UNIT_FIELD: 'umol/L'})
+
+    row = Measurement.objects.get(
+        person=record.person, measurement_concept__concept_code=LOINC_DIRECT)
+    assert row.value_as_number == Decimal('17.10')
+    assert row.unit_source_value == 'umol/L'
+    assert record.serum_bilirubin_level_direct_units == 'UMOL/L'
+
+
+@pytest.mark.parametrize('bad_unit', [None, '', False, 0])
+def test_the_serializer_refuses_an_explicit_bad_unit(api, bad_unit):
+    from patient_portal.api.serializers import PatientRecordSerializer
+
+    record = PatientRecordFactory()
+    serializer = PatientRecordSerializer(
+        record, data={
+            units.PAIR_FIELD: '1.2', units.UNIT_FIELD: bad_unit,
+        }, partial=True)
+
+    assert not serializer.is_valid()
+    assert units.UNIT_FIELD in serializer.errors
+
+
+def test_the_shared_form_refuses_excess_precision():
+    from omop_core.services.patient_form import apply_patient_form_patch
+
+    person = PersonFactory()
+    _saved, result = apply_patient_form_patch(
+        person, {units.PAIR_FIELD: '1.234', units.UNIT_FIELD: 'mg/dL'})
+
+    assert result.rejected.get(units.PAIR_FIELD)
+    assert not result.applied
+
+
+def test_an_orphan_unit_marker_is_dropped_on_refresh():
+    person = PersonFactory()
+    record = PatientRecordFactory(person=person)
+    record.user_edited_fields = [units.UNIT_FIELD]
+    record.serum_bilirubin_level_direct_units = 'UMOL/L'
+    record.save()
+
+    record = refresh_patient_record(person)
+
+    assert units.UNIT_FIELD not in (record.user_edited_fields or [])

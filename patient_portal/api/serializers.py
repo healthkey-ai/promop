@@ -595,9 +595,12 @@ class PatientRecordSerializer(serializers.ModelSerializer):
                     'Send the unit together with its value.',
             })
         if direct_bilirubin_units.PAIR_FIELD in data:
-            sent = (data.get(direct_bilirubin_units.UNIT_FIELD)
-                    or (self.instance and getattr(
-                        self.instance, direct_bilirubin_units.UNIT_FIELD, None))
+            if direct_bilirubin_units.UNIT_FIELD in data:
+                # An explicit null/empty is a bad unit, not "use the default".
+                sent = data.get(direct_bilirubin_units.UNIT_FIELD)
+            else:
+                sent = ((self.instance and getattr(
+                    self.instance, direct_bilirubin_units.UNIT_FIELD, None))
                     or direct_bilirubin_units.DEFAULT_UNIT)
             direct_code = direct_bilirubin_units.normalize_unit(sent)
             if direct_code is None:

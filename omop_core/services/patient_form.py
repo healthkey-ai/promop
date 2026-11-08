@@ -843,6 +843,12 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
                     'Enter a valid direct bilirubin value.')
                 changes.pop(direct_pair, None)
                 changes.pop(direct_unit, None)
+            elif direct_bilirubin_units.has_excess_precision(
+                    changes.get(direct_pair)):
+                result.rejected[direct_pair] = (
+                    'Use at most two decimal places.')
+                changes.pop(direct_pair, None)
+                changes.pop(direct_unit, None)
             else:
                 changes[direct_pair] = pair_value
                 if unit_forbidden:
@@ -1292,9 +1298,13 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
         from omop_core.services.patient_record_revisions import write_record_revisions
         write_record_revisions(record, previous_direct, changed_by=changed_by)
         result.applied.extend(clinical_direct)
-        acknowledged = _project_side_effects(
+        acknowledged = set(_project_side_effects(
             person, direct, side_effect_projections, authorship,
-            dates=fact_dates, patient_author=patient_author)
+            dates=fact_dates, patient_author=patient_author))
+        if direct_bilirubin_units.PAIR_FIELD in acknowledged:
+            # The pair is one fact: a successful projection confirms the
+            # companion unit too, or it would re-attach to a later import.
+            acknowledged.add(direct_bilirubin_units.UNIT_FIELD)
         if acknowledged:
             # The fact is written, so the record no longer has to mask
             # derivation: clear only what the projection acknowledged.

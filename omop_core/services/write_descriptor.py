@@ -754,21 +754,6 @@ def get_serializer_read_only_fields():
     read_only |= DERIVED_LANGUAGE_FIELDS
     # KIND_ALIAS: mirrors of canonical fields
     read_only |= set(_ALIAS_TO_CANONICAL)
-    # A source pair's own value is the write target even though the canonical it
-    # feeds lists it as a legacy alias (#2318 follow-up). Hemoglobin is not in
-    # `_LAB_FIELD_ALIASES` for the same reason; creatinine needs the alias entry
-    # so a canonical import still propagates back into the pair.
-    read_only -= {'serum_creatinine_level', 'serum_creatinine_level_units'}
-    # The chemistry pairs are the same write target (#2318): albumin, serum
-    # calcium and total bilirubin keep the reported number and unit.
-    read_only -= {
-        field
-        for spec in CHEMISTRY_SOURCE_PAIRS.values()
-        for field in (spec['value'], spec['unit'])
-    }
-    # Direct bilirubin's pair is the write target too (#2318); the unitless
-    # alias stays read-only above.
-    read_only -= {direct_bilirubin_units.PAIR_FIELD, direct_bilirubin_units.UNIT_FIELD}
     # Profile fields now write through PatientRecord PATCH (KIND_DIRECT),
     # so they are no longer read-only on the serializer.
     # KIND_AUTHORED / KIND_UNMAPPED: therapy-prefix fields (minus exceptions)
@@ -782,6 +767,20 @@ def get_serializer_read_only_fields():
     for field in PatientRecord._meta.concrete_fields:
         if field.name.endswith('_units'):
             read_only.add(field.name)
+    # A source pair's own value is the write target even though the canonical it
+    # feeds lists it as a legacy alias (#2318 follow-up). Hemoglobin is not in
+    # `_LAB_FIELD_ALIASES` for the same reason; creatinine needs the alias entry
+    # so a canonical import still propagates back into the pair. The subtraction
+    # is after the unit loop on purpose: that loop re-adds every `*_units`.
+    read_only -= {'serum_creatinine_level', 'serum_creatinine_level_units'}
+    read_only -= {
+        field
+        for spec in CHEMISTRY_SOURCE_PAIRS.values()
+        for field in (spec['value'], spec['unit'])
+    }
+    # Direct bilirubin's pair is the write target too (#2318); the unitless
+    # alias stays read-only below.
+    read_only -= {direct_bilirubin_units.PAIR_FIELD, direct_bilirubin_units.UNIT_FIELD}
     # The unitless direct-bilirubin mirror is derived from its source pair
     # (#2318); a direct write would be overwritten by the next recompute.
     read_only.add('serum_bilirubin_level')

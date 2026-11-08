@@ -81,6 +81,26 @@ def pair_value(value):
     return True, number.quantize(CANONICAL_QUANTUM, rounding=ROUND_HALF_UP)
 
 
+def has_excess_precision(value):
+    """Whether a write carries more precision than the column stores.
+
+    Imports are quantised once when materialised; a client write is refused so
+    the value it reads back is the value it sent.
+    """
+    if value is None:
+        return False
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return False
+    if isinstance(value, bool) or not number.is_finite():
+        return False
+    try:
+        return number != number.quantize(CANONICAL_QUANTUM)
+    except InvalidOperation:
+        return True
+
+
 def alias_from_pair(value, unit):
     """Return ``(recognised, mg/dL alias)`` for a stored pair.
 

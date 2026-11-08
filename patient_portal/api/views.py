@@ -1307,6 +1307,13 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                          and field not in (patient_info.therapy_overrides or {})
                          and serializer.validated_data[field] is not None))
             }
+            # Direct bilirubin's pair is one fact (#2318): a changed unit with
+            # the same number still needs the projection to carry the new unit.
+            from omop_core.services import direct_bilirubin_units as _direct_units
+            if (_direct_units.PAIR_FIELD in serializer.validated_data
+                    and serializer.validated_data.get(_direct_units.UNIT_FIELD)
+                    != previous_values.get(_direct_units.UNIT_FIELD)):
+                direct_fields.add(_direct_units.PAIR_FIELD)
             _apply_patient_name(person, patient_name)
             if priority_edits:
                 from omop_core.services.genomics import replace_priority_fields
@@ -1394,9 +1401,14 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     projection_data['medication_contexts'] = context_delta(
                         previous_values.get('medication_contexts') or {},
                         projection_data['medication_contexts'])
-                projected = self._project_mapped_fields(
+                projected = set(self._project_mapped_fields(
                     person, clinical_fields, projection_data, actor=request.user,
-                )
+                ))
+                if _direct_units.PAIR_FIELD in projected:
+                    # A successful projection confirms the pair as a whole; an
+                    # orphan unit marker would re-attach the old unit to a
+                    # later import.
+                    projected.add(_direct_units.UNIT_FIELD)
                 patient_info.user_edited_fields = sorted(
                     set(patient_info.user_edited_fields or []) - projected
                 )
