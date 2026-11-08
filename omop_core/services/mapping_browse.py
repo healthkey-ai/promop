@@ -93,8 +93,12 @@ def apply_search(mappings, tab_rows, search):
                   'target_concept__concept_name', 'target_concept__concept_code',
                   'organization__name', 'organization__slug'):
         query |= Q(**{f'{field}__icontains': search})
-    if search.isdigit():
-        query |= Q(target_concept_id__icontains=search)
+    if search.isdigit() and int(search) < 2 ** 31:
+        # The destination concept id is an integer, so it matches whole, never
+        # as a substring: ``icontains`` on the foreign key raised FieldError and
+        # turned every all-digit search into a 500 (#2371). A partial source
+        # code is still found through ``source_code__icontains`` above.
+        query |= Q(target_concept_id=int(search))
     return mappings.filter(query)
 
 

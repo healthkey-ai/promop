@@ -398,6 +398,23 @@ def test_aliases_global_search_rejected_and_sections(browse):
     assert browse(source='').data['results'] == []
 
 
+def test_digit_search_matches_source_code_substring_and_concept_id(browse):
+    """An all-digit search used to raise FieldError (icontains on the
+    target_concept foreign key) and the page showed "Failed to load code
+    mappings" (#2371). It finds a source code containing the digits and a
+    row whose destination concept has exactly that id, and nothing else."""
+    concept = ConceptFactory(concept_id=3004061, concept_name='Hemoglobin')
+    row('LAB-3004061-A', source_vocabulary_id='LOINC')
+    row('OTHER', source_vocabulary_id='LOINC', target_concept=concept, status='approved')
+    row('30040', source_vocabulary_id='LOINC')
+    row('UNRELATED', source_vocabulary_id='LOINC')
+
+    data = browse(source='LOINC', search='3004061').data
+
+    assert {r['source_code'] for r in data['results']} == {'LAB-3004061-A', 'OTHER'}
+    assert browse(source='LOINC', search='9' * 12).data['results'] == []
+
+
 def test_duplicates_include_off_page_and_rejected_members(browse):
     row('MATCH', occurrence_count=0)
     row(' match ', status='rejected')
