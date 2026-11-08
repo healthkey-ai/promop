@@ -64,6 +64,7 @@ from omop_core.services.blood_count_source_pairs import (
     source_fields as count_source_fields,
     source_from_canonical as count_source_from_canonical,
 )
+from omop_core.services import direct_bilirubin_units
 from omop_core.services.chemistry_units import (
     PAIRS as _CHEMISTRY_PAIRS,
     canonical_from_pair as chemistry_canonical_from_pair,
@@ -79,6 +80,13 @@ _CHEMISTRY_CANONICAL_FIELDS = frozenset(_CHEMISTRY_PAIRS)
 _CHEMISTRY_PAIR_CANONICAL = {
     spec['value']: canonical for canonical, spec in _CHEMISTRY_PAIRS.items()
 }
+
+#: Direct bilirubin is a source pair without a canonical column (#2318): the
+#: pair is the stored fact and the unitless alias mirrors its mg/dL value.
+_DIRECT_PAIR_FIELD = direct_bilirubin_units.PAIR_FIELD
+_DIRECT_UNIT_FIELD = direct_bilirubin_units.UNIT_FIELD
+_DIRECT_ALIAS_FIELD = direct_bilirubin_units.ALIAS_FIELD
+_CHEMISTRY_SELECTED_FIELDS = _CHEMISTRY_CANONICAL_FIELDS | {_DIRECT_PAIR_FIELD}
 
 
 def _chemistry_reported_unit(measurement):
@@ -1122,6 +1130,7 @@ def refresh_patient_record(person: Person) -> PatientRecord:
         preserved_units = set()
         for value_field, unit_field in (
             ('height', 'height_units'), ('weight', 'weight_units'),
+            (_DIRECT_PAIR_FIELD, _DIRECT_UNIT_FIELD),
         ):
             if value_field in preserved and hasattr(patient_info, unit_field):
                 preserved[unit_field] = getattr(patient_info, unit_field)
@@ -1206,8 +1215,30 @@ def refresh_patient_record(person: Person) -> PatientRecord:
             NEW_INPUT_FIELDS, values_from_snapshot,
         )
         clinical_values = values_from_snapshot(snapshot) if preserved else {}
+        # A source pair is confirmed only when number and unit both match the
+        # imported fact. The value alone is not evidence: the same number under
+        # another unit is a different result (#2318).
+        direct_pair_evidence = (
+            _DIRECT_PAIR_FIELD in derived_fields
+            and _DIRECT_UNIT_FIELD in derived_fields
+            and _derived_value_matches(
+                _DIRECT_PAIR_FIELD,
+                getattr(patient_info, _DIRECT_PAIR_FIELD, None),
+                preserved.get(_DIRECT_PAIR_FIELD),
+            )
+            and _derived_value_matches(
+                _DIRECT_UNIT_FIELD,
+                getattr(patient_info, _DIRECT_UNIT_FIELD, None),
+                preserved.get(_DIRECT_UNIT_FIELD),
+            )
+        )
         still_orphaned = []
         for field, value in preserved.items():
+            if (field == _DIRECT_UNIT_FIELD
+                    and _DIRECT_PAIR_FIELD not in preserved):
+                # An orphan unit is not a fact; do not let it outlive the pair
+                # and re-attach to a later import.
+                continue
             if field in preserved_units:
                 # Restore the unit with its pending value; it is not an
                 # independent user edit and must not get its own marker.
@@ -1227,6 +1258,10 @@ def refresh_patient_record(person: Person) -> PatientRecord:
                 # Only an explicit canonical import retires it (recompute);
                 # the chosen unit is the reader's declaration.
                 matches = False
+            elif field == _DIRECT_PAIR_FIELD:
+                # Direct bilirubin has no canonical, so the pair is confirmed
+                # when the import carries the same number and unit together.
+                matches = has_evidence and direct_pair_evidence
             elif field == 'medication_contexts':
                 from omop_core.services.medication_context import context_delta, merge_contexts
                 eligible = {str(row.pk) for row in snapshot.drug_exposures}
@@ -1437,6 +1472,17 @@ def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fiel
                 dependency_changed.add(canonical)
             count_pair_authoritative.add(canonical)
     for canonical, aliases in _LAB_FIELD_ALIASES.items():
+        if canonical == _DIRECT_PAIR_FIELD:
+            # The unitless mirror is always normalised to mg/dL. A pending alias
+            # edit predates the pair contract and is left for the data audit
+            # rather than silently reinterpreted.
+            if _DIRECT_ALIAS_FIELD not in pending_aliases:
+                _, alias_value = direct_bilirubin_units.alias_from_pair(
+                    getattr(patient_info, _DIRECT_PAIR_FIELD),
+                    getattr(patient_info, _DIRECT_UNIT_FIELD),
+                )
+                setattr(patient_info, _DIRECT_ALIAS_FIELD, alias_value)
+            continue
         value = getattr(patient_info, canonical)
         if canonical == HEMOGLOBIN_CANONICAL and pair_authoritative:
             # The pair already supplies the canonical; copying it back would
@@ -4597,7 +4643,7 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None,
         field, cast = code_fields[code]
         if field in _FLC_FIELDS or field in blood_count_fields:
             continue
-        if field in _CHEMISTRY_CANONICAL_FIELDS:
+        if field in _CHEMISTRY_SELECTED_FIELDS:
             continue
         canonical_value = None
         if code == '6690-2':
@@ -4628,7 +4674,7 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None,
     for source_value, field in _SOURCE_VALUE_LAB_FIELDS.items():
         if field in blood_count_fields:
             continue
-        if field in _FLC_FIELDS or field in _CHEMISTRY_CANONICAL_FIELDS:
+        if field in _FLC_FIELDS or field in _CHEMISTRY_SELECTED_FIELDS:
             continue
         for m in snapshot.meas_by_source.get(source_value, ()):
             if m.value_as_number is not None:
@@ -4680,12 +4726,12 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None,
         code = _measurement_code(measurement)
         if code in code_fields:
             candidate = code_fields[code][0]
-            if candidate in _CHEMISTRY_CANONICAL_FIELDS:
+            if candidate in _CHEMISTRY_SELECTED_FIELDS:
                 field, representation = candidate, 'coded'
         if field is None:
             candidate = _SOURCE_VALUE_LAB_FIELDS.get(
                 measurement.measurement_source_value)
-            if candidate in _CHEMISTRY_CANONICAL_FIELDS:
+            if candidate in _CHEMISTRY_SELECTED_FIELDS:
                 field, representation = candidate, 'display'
         if field is None:
             concept = measurement.measurement_concept
@@ -4699,6 +4745,36 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None,
         if field is not None and field not in chemistry_winners:
             chemistry_winners[field] = (measurement, representation)
     for field, (measurement, representation) in chemistry_winners.items():
+        if field == _DIRECT_PAIR_FIELD:
+            reported_unit = _chemistry_reported_unit(measurement)
+            unit_code = (direct_bilirubin_units.DEFAULT_UNIT
+                         if reported_unit is None
+                         else direct_bilirubin_units.normalize_unit(reported_unit))
+            recognised, pair_value = direct_bilirubin_units.pair_value(
+                measurement.value_as_number)
+            alias_recognised, alias_value = direct_bilirubin_units.alias_from_pair(
+                measurement.value_as_number, unit_code)
+            if (unit_code is None or not recognised or not alias_recognised):
+                # The newest result owns the pair even when its unit is not one
+                # this slice can read. Explicit Nones also stop the curated
+                # mapping fallback from restoring the raw number.
+                logger.warning(
+                    'Direct bilirubin projection skipped for person_id=%s: '
+                    'unit=%r', person.person_id, reported_unit,
+                )
+                data[_DIRECT_PAIR_FIELD] = None
+                data[_DIRECT_UNIT_FIELD] = None
+                data[_DIRECT_ALIAS_FIELD] = None
+                continue
+            data[_DIRECT_PAIR_FIELD] = pair_value
+            data[_DIRECT_UNIT_FIELD] = unit_code
+            data[_DIRECT_ALIAS_FIELD] = alias_value
+            selected_dates[_DIRECT_PAIR_FIELD] = measurement.measurement_date
+            selected_dates[_DIRECT_ALIAS_FIELD] = measurement.measurement_date
+            if dates_out is not None:
+                dates_out[_DIRECT_PAIR_FIELD] = measurement.measurement_date
+                dates_out[_DIRECT_ALIAS_FIELD] = measurement.measurement_date
+            continue
         spec = _CHEMISTRY_PAIRS[field]
         reported_unit = _chemistry_reported_unit(measurement)
         unit_code = (spec['canonical_unit'] if reported_unit is None
@@ -4737,6 +4813,11 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None,
 
     # --- Copy canonical values to legacy aliases (issue #471) ---
     for canonical, aliases in _LAB_FIELD_ALIASES.items():
+        if canonical == _DIRECT_PAIR_FIELD:
+            # The chronological pass above writes the pair, its unit and the
+            # normalised alias together; copying the raw value back would make
+            # the unitless mirror ambiguous.
+            continue
         chemistry = _CHEMISTRY_PAIRS.get(canonical)
         if chemistry is not None:
             # The pair and canonical were selected together above; copying the

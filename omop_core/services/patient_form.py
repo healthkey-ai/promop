@@ -42,6 +42,7 @@ from omop_core.services.blood_count_source_pairs import (
     canonical_from_source as count_canonical_from_source,
     normalize_unit as normalize_count_unit,
 )
+from omop_core.services import direct_bilirubin_units
 from omop_core.services.chemistry_units import (
     PAIRS as CHEMISTRY_SOURCE_PAIRS,
     canonical_from_pair as chemistry_canonical_from_pair,
@@ -785,6 +786,77 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
                         # The canonical projection is the same dated result.
                         fact_dates[canonical] = fact_dates[pair_field]
 
+    # Direct bilirubin's pair (#2318): no canonical column, so the value and
+    # unit are the whole fact. The unitless alias follows on recompute.
+    direct_pair = direct_bilirubin_units.PAIR_FIELD
+    direct_unit = direct_bilirubin_units.UNIT_FIELD
+    if direct_pair in changes or direct_unit in changes:
+        source_entry = descriptor.get(direct_pair) or {}
+        source_allowed = (
+            bool(source_entry) and bool(source_entry.get('writable'))
+            and not source_entry.get('read_only_for_caller')
+        )
+        unit_entry = descriptor.get(direct_unit) or {}
+        explicit_unit = direct_unit in changes
+        stored_code = direct_bilirubin_units.normalize_unit(
+            getattr(record, direct_unit, None))
+        requested_code = (
+            direct_bilirubin_units.normalize_unit(changes.get(direct_unit))
+            if explicit_unit else None)
+        unit_forbidden = bool(unit_entry.get('read_only_for_caller'))
+        unit_change_forbidden = unit_forbidden and (
+            (explicit_unit and requested_code != stored_code)
+            or stored_code is None
+        )
+        if not source_allowed:
+            reason = (source_entry.get('reason')
+                      or 'Editing is not available for this caller.')
+            for field in (direct_pair, direct_unit):
+                changes.pop(field, None)
+                result.rejected[field] = reason
+        elif explicit_unit and requested_code is None:
+            result.rejected[direct_unit] = 'Choose one of: mg/dL, umol/L.'
+            changes.pop(direct_pair, None)
+            changes.pop(direct_unit, None)
+        elif unit_change_forbidden:
+            reason = (unit_entry.get('reason')
+                      or 'Editing is not available for this caller.')
+            for field in (direct_pair, direct_unit):
+                changes.pop(field, None)
+                result.rejected[field] = reason
+        elif explicit_unit and direct_pair not in changes:
+            result.rejected[direct_unit] = 'Send the unit together with its value.'
+            changes.pop(direct_unit, None)
+        elif (not explicit_unit and stored_code is None
+              and getattr(record, direct_unit, None) not in (None, '')):
+            # A stored unit this slice cannot read is not a missing one:
+            # defaulting it would reinterpret the number.
+            result.rejected[direct_unit] = 'Choose one of: mg/dL, umol/L.'
+            changes.pop(direct_pair, None)
+            changes.pop(direct_unit, None)
+        else:
+            code = requested_code or stored_code or direct_bilirubin_units.DEFAULT_UNIT
+            recognised, pair_value = direct_bilirubin_units.pair_value(
+                changes.get(direct_pair))
+            if not recognised:
+                result.rejected[direct_pair] = (
+                    'Enter a valid direct bilirubin value.')
+                changes.pop(direct_pair, None)
+                changes.pop(direct_unit, None)
+            elif direct_bilirubin_units.has_excess_precision(
+                    changes.get(direct_pair)):
+                result.rejected[direct_pair] = (
+                    'Use at most two decimal places.')
+                changes.pop(direct_pair, None)
+                changes.pop(direct_unit, None)
+            else:
+                changes[direct_pair] = pair_value
+                if unit_forbidden:
+                    changes.pop(direct_unit, None)
+                    pair_pending.add(direct_unit)
+                else:
+                    changes[direct_unit] = code
+
     # The cell-count source pairs are the same contract: the row is typed in
     # cells/µL and the canonical thousands/µL field is derived and projected.
     count_unit_sources = {
@@ -797,6 +869,8 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
     chemistry_unit_sources = {
         spec['unit']: spec['value'] for spec in CHEMISTRY_SOURCE_PAIRS.values()
     }
+    chemistry_unit_sources[direct_bilirubin_units.UNIT_FIELD] = (
+        direct_bilirubin_units.PAIR_FIELD)
     for source, spec in COUNT_SOURCE_PAIRS.items():
         unit_field = spec.get('unit_field')
         if source not in changes and not (unit_field and unit_field in changes):
@@ -1224,9 +1298,13 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
         from omop_core.services.patient_record_revisions import write_record_revisions
         write_record_revisions(record, previous_direct, changed_by=changed_by)
         result.applied.extend(clinical_direct)
-        acknowledged = _project_side_effects(
+        acknowledged = set(_project_side_effects(
             person, direct, side_effect_projections, authorship,
-            dates=fact_dates, patient_author=patient_author)
+            dates=fact_dates, patient_author=patient_author))
+        if direct_bilirubin_units.PAIR_FIELD in acknowledged:
+            # The pair is one fact: a successful projection confirms the
+            # companion unit too, or it would re-attach to a later import.
+            acknowledged.add(direct_bilirubin_units.UNIT_FIELD)
         if acknowledged:
             # The fact is written, so the record no longer has to mask
             # derivation: clear only what the projection acknowledged.

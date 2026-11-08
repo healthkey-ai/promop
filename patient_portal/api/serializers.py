@@ -44,6 +44,7 @@ from omop_core.services.chemistry_units import (
     normalize_unit as normalize_chemistry_unit,
     unit_hint as chemistry_unit_hint,
 )
+from omop_core.services import direct_bilirubin_units
 from omop_core.services.write_descriptor import get_serializer_read_only_fields
 
 #: Columns that Measurement and Observation validate as one value.
@@ -583,6 +584,32 @@ class PatientRecordSerializer(serializers.ModelSerializer):
             data[chemistry_unit] = chemistry_code
             chemistry_codes[canonical] = chemistry_code
 
+        # Direct bilirubin's pair (#2318): the value and unit are one fact, and
+        # the unitless alias is derived on recompute. Reject a unit on its own:
+        # silently dropping it would store the number under another scale.
+        direct_code = None
+        if (direct_bilirubin_units.UNIT_FIELD in data
+                and direct_bilirubin_units.PAIR_FIELD not in data):
+            raise serializers.ValidationError({
+                direct_bilirubin_units.UNIT_FIELD:
+                    'Send the unit together with its value.',
+            })
+        if direct_bilirubin_units.PAIR_FIELD in data:
+            if direct_bilirubin_units.UNIT_FIELD in data:
+                # An explicit null/empty is a bad unit, not "use the default".
+                sent = data.get(direct_bilirubin_units.UNIT_FIELD)
+            else:
+                sent = ((self.instance and getattr(
+                    self.instance, direct_bilirubin_units.UNIT_FIELD, None))
+                    or direct_bilirubin_units.DEFAULT_UNIT)
+            direct_code = direct_bilirubin_units.normalize_unit(sent)
+            if direct_code is None:
+                raise serializers.ValidationError({
+                    direct_bilirubin_units.UNIT_FIELD:
+                        'Choose one of: mg/dL, umol/L.',
+                })
+            data[direct_bilirubin_units.UNIT_FIELD] = direct_code
+
         # The count source pairs use the same pattern: the client writes the
         # legacy cells/µL field and the canonical thousands/µL value follows.
         count_units = {}
@@ -754,6 +781,22 @@ class PatientRecordSerializer(serializers.ModelSerializer):
             validated[canonical] = canonical_value
             self._source_pairs |= {chemistry_pair, spec['unit']}
             self._derived_from_pair.add(canonical)
+
+        if direct_bilirubin_units.PAIR_FIELD in validated:
+            recognised, pair_value = direct_bilirubin_units.pair_value(
+                validated[direct_bilirubin_units.PAIR_FIELD])
+            if not recognised:
+                raise serializers.ValidationError({
+                    direct_bilirubin_units.PAIR_FIELD:
+                        'Enter a valid direct bilirubin value.',
+                })
+            validated[direct_bilirubin_units.PAIR_FIELD] = pair_value
+            validated[direct_bilirubin_units.UNIT_FIELD] = (
+                direct_code or direct_bilirubin_units.DEFAULT_UNIT)
+            self._source_pairs |= {
+                direct_bilirubin_units.PAIR_FIELD,
+                direct_bilirubin_units.UNIT_FIELD,
+            }
 
         for source, spec in COUNT_SOURCE_PAIRS.items():
             if source not in validated:

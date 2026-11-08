@@ -282,6 +282,23 @@ def project_field_to_omop(mapping) -> int:
     return count
 
 
+def _projection_unit_for_person(person, projection):
+    """The stored source unit a dynamic-unit recipe projects (#2318).
+
+    Returns ``(label, concept_id)`` or ``(None, None)`` when the record has no
+    usable unit. The descriptor supplies the code -> label/concept map, so the
+    projection does not carry a second unit table.
+    """
+    from omop_core.models import PatientRecord
+    field = projection['unit_from']
+    record = PatientRecord.objects.filter(person=person).only(field).first()
+    code = getattr(record, field, None) if record is not None else None
+    choice = (projection.get('unit_by_code') or {}).get(code)
+    if not choice or not choice.get('label'):
+        return None, None
+    return choice['label'], choice.get('concept_id')
+
+
 def project_single_value(person, field_name, value, projection, *, acknowledge_existing=False,
                          after_pk=None, type_concept_id=None, patient_user_id=None,
                          fact_date=None):
@@ -340,6 +357,21 @@ def project_single_value(person, field_name, value, projection, *, acknowledge_e
     # pending on PatientRecord instead of inventing an affirmative occurrence.
     if val_num is None and (_is_empty(value) or value is False):
         return False
+
+    # A source pair projects the unit it was stored with (#2318). Resolve it
+    # before touching a fact: an unknown unit must keep the edit pending, not
+    # write a number under the recipe's static unit.
+    if projection.get('unit_from'):
+        unit_source, unit_concept_id = _projection_unit_for_person(person, projection)
+        if unit_source is None:
+            logger.warning(
+                'OMOP projection skipped for %s: the source unit is missing or '
+                'unsupported; edit remains pending', field_name,
+            )
+            return False
+    else:
+        unit_source = projection.get('unit')
+        unit_concept_id = projection.get('unit_concept_id')
 
     today = fact_date or timezone.localdate()
     fact_type = type_concept_id or projection.get('type_concept_id') or 32817
@@ -409,8 +441,8 @@ def project_single_value(person, field_name, value, projection, *, acknowledge_e
                             instance.value_as_number = float(value)
                         except (ValueError, TypeError):
                             instance.value_as_string = str(value)
-                instance.unit_source_value = projection.get('unit') or None
-                instance.unit_concept_id = projection.get('unit_concept_id') or None
+                instance.unit_source_value = unit_source or None
+                instance.unit_concept_id = unit_concept_id or None
             if existing and not note_changed and all(getattr(instance, f) == v for f, v in previous.items()):
                 if acknowledge_existing and patient_user_id:
                     _record_patient_provenance(instance, patient_user_id)

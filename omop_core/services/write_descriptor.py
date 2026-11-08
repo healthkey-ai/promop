@@ -37,6 +37,7 @@ from omop_core.services.blood_count_source_pairs import (
     UNIT_OPTIONS as COUNT_UNIT_OPTIONS,
 )
 from omop_core.services.chemistry_units import PAIRS as CHEMISTRY_SOURCE_PAIRS
+from omop_core.services import direct_bilirubin_units
 
 # Every field resolves to exactly one kind. A binary writable/not left a third of
 # the record looking broken — a field is not "unwritable" because it is a unit
@@ -753,18 +754,6 @@ def get_serializer_read_only_fields():
     read_only |= DERIVED_LANGUAGE_FIELDS
     # KIND_ALIAS: mirrors of canonical fields
     read_only |= set(_ALIAS_TO_CANONICAL)
-    # A source pair's own value is the write target even though the canonical it
-    # feeds lists it as a legacy alias (#2318 follow-up). Hemoglobin is not in
-    # `_LAB_FIELD_ALIASES` for the same reason; creatinine needs the alias entry
-    # so a canonical import still propagates back into the pair.
-    read_only -= {'serum_creatinine_level', 'serum_creatinine_level_units'}
-    # The chemistry pairs are the same write target (#2318): albumin, serum
-    # calcium and total bilirubin keep the reported number and unit.
-    read_only -= {
-        field
-        for spec in CHEMISTRY_SOURCE_PAIRS.values()
-        for field in (spec['value'], spec['unit'])
-    }
     # Profile fields now write through PatientRecord PATCH (KIND_DIRECT),
     # so they are no longer read-only on the serializer.
     # KIND_AUTHORED / KIND_UNMAPPED: therapy-prefix fields (minus exceptions)
@@ -778,6 +767,23 @@ def get_serializer_read_only_fields():
     for field in PatientRecord._meta.concrete_fields:
         if field.name.endswith('_units'):
             read_only.add(field.name)
+    # A source pair's own value is the write target even though the canonical it
+    # feeds lists it as a legacy alias (#2318 follow-up). Hemoglobin is not in
+    # `_LAB_FIELD_ALIASES` for the same reason; creatinine needs the alias entry
+    # so a canonical import still propagates back into the pair. The subtraction
+    # is after the unit loop on purpose: that loop re-adds every `*_units`.
+    read_only -= {'serum_creatinine_level', 'serum_creatinine_level_units'}
+    read_only -= {
+        field
+        for spec in CHEMISTRY_SOURCE_PAIRS.values()
+        for field in (spec['value'], spec['unit'])
+    }
+    # Direct bilirubin's pair is the write target too (#2318); the unitless
+    # alias stays read-only below.
+    read_only -= {direct_bilirubin_units.PAIR_FIELD, direct_bilirubin_units.UNIT_FIELD}
+    # The unitless direct-bilirubin mirror is derived from its source pair
+    # (#2318); a direct write would be overwritten by the next recompute.
+    read_only.add('serum_bilirubin_level')
     read_only -= {'relapse_count', 'treatment_refractory_status'}
     _CACHED_SERIALIZER_READ_ONLY = frozenset(read_only)
     return _CACHED_SERIALIZER_READ_ONLY
@@ -808,7 +814,8 @@ def build_writable_field_descriptor():
         {code for code, _unit, _display in LAB_FIELD_TO_LOINC.values()}, 'LOINC'
     )
     unit_ids = _resolve_concept_ids(
-        {unit for _code, unit, _display in LAB_FIELD_TO_LOINC.values()}, 'UCUM'
+        {unit for _code, unit, _display in LAB_FIELD_TO_LOINC.values()}
+        | {'umol/L'}, 'UCUM'
     )
     derived_concepts = _resolve_concepts(
         {(vocab, code) for code, vocab, _fn in DERIVED_FIELD_TO_CODE.values()}
@@ -1595,6 +1602,51 @@ def build_writable_field_descriptor():
             ),
             'unit': canonical_entry.get('unit') or spec['canonical_unit'],
         }
+
+    # Direct bilirubin's source pair (#2318). It has no separate canonical
+    # column: the pair is the stored fact and the matcher converts it, so the
+    # OMOP projection must carry the unit the reader chose rather than the
+    # recipe's static mg/dL. The unitless `serum_bilirubin_level` mirror is
+    # normalised to mg/dL and is not editable.
+    direct_pair = direct_bilirubin_units.PAIR_FIELD
+    direct_unit = direct_bilirubin_units.UNIT_FIELD
+    direct_entry = descriptor.get(direct_pair) or {}
+    direct_projection = dict(direct_entry.get('projection') or {})
+    direct_projection['unit_from'] = direct_unit
+    direct_projection['unit_by_code'] = {
+        code: {'label': label, 'concept_id': unit_ids.get(label)}
+        for code, label in direct_bilirubin_units.UNIT_LABELS.items()
+    }
+    descriptor[direct_pair] = {
+        **direct_entry,
+        'kind': KIND_DIRECT,
+        'writable': True,
+        'target': 'patient_record',
+        'value_kind': 'number',
+        'unit_by_code': direct_projection['unit_by_code'],
+        'projection': direct_projection,
+    }
+    descriptor[direct_unit] = {
+        **(descriptor.get(direct_unit) or {}),
+        'kind': KIND_SELECTABLE,
+        'writable': False,
+        'qualifies': direct_pair,
+        'reason': (
+            'Unit of serum_bilirubin_level_direct; selected alongside that '
+            'value and stored with it. The OMOP fact carries this unit.'
+        ),
+    }
+    descriptor[direct_bilirubin_units.ALIAS_FIELD] = {
+        'kind': KIND_COMPUTED,
+        'writable': False,
+        'value_kind': 'number',
+        'inputs': [direct_pair, direct_unit],
+        'reason': (
+            'Read-only mg/dL mirror of the direct bilirubin source pair; edit '
+            'the pair and its unit instead.'
+        ),
+        'unit': 'mg/dL',
+    }
 
     # The unit choices (#2318). `FIELD_COMMON_UNITS` is the curated list per
     # field, already ordered; the client draws its picker from it rather than
