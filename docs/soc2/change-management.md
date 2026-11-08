@@ -104,7 +104,9 @@ with its rationale and the risks accepted. The authoritative list stays in
 [the policy script](../../.github/scripts/security-review.cjs); this section says
 why it holds the shape it does.
 
-### 2026-09-24 — narrowed to auth/identity, settings and credential handling (#1496)
+### 2026-11-05 — narrowed to auth/identity, settings and credential handling (#1496)
+
+Opened 2026-09-20 as #1496; in effect from its merge on 2026-11-05.
 
 The gate had grown to fire on most PRs, which makes a required review less
 meaningful rather than more: a reviewer who is asked to approve every data
@@ -198,8 +200,11 @@ as covering more than it does:
 
 **Approval.** #1496 changed `.github/**`, `CODEOWNERS` and the pinning tests,
 so it required the designated security reviewer's approval under the control it
-modifies. The designated security reviewer approved it on 2026-11-05 and it
-merged as `62115113`; this record was back-merged onto that commit.
+modifies. The designated security reviewer
+[approved it](https://github.com/healthkey-ai/promop/pull/1496#pullrequestreview-5782064778)
+on 2026-11-05 and it merged as
+[`62115113`](https://github.com/healthkey-ai/promop/commit/62115113d8e571327b87502e2efcc06e359b0d49);
+this record was back-merged onto that commit.
 
 ## Deployment authorization
 
