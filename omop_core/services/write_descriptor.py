@@ -36,6 +36,7 @@ from omop_core.services.blood_count_source_pairs import (
     PAIRS as COUNT_SOURCE_PAIRS,
     UNIT_OPTIONS as COUNT_UNIT_OPTIONS,
 )
+from omop_core.services.chemistry_units import PAIRS as CHEMISTRY_SOURCE_PAIRS
 
 # Every field resolves to exactly one kind. A binary writable/not left a third of
 # the record looking broken — a field is not "unwritable" because it is a unit
@@ -757,6 +758,13 @@ def get_serializer_read_only_fields():
     # `_LAB_FIELD_ALIASES` for the same reason; creatinine needs the alias entry
     # so a canonical import still propagates back into the pair.
     read_only -= {'serum_creatinine_level', 'serum_creatinine_level_units'}
+    # The chemistry pairs are the same write target (#2318): albumin, serum
+    # calcium and total bilirubin keep the reported number and unit.
+    read_only -= {
+        field
+        for spec in CHEMISTRY_SOURCE_PAIRS.values()
+        for field in (spec['value'], spec['unit'])
+    }
     # Profile fields now write through PatientRecord PATCH (KIND_DIRECT),
     # so they are no longer read-only on the serializer.
     # KIND_AUTHORED / KIND_UNMAPPED: therapy-prefix fields (minus exceptions)
@@ -1546,6 +1554,47 @@ def build_writable_field_descriptor():
         ),
         'unit': canonical_creatinine.get('unit') or 'mg/dL',
     }
+
+    # The chemistry source pairs (#2318): albumin, serum calcium and total
+    # bilirubin. Same contract as creatinine — the record keeps what the lab
+    # reported, the canonical is the normalised read-model, and an editor names
+    # the source instead of the derived column.
+    for canonical, spec in CHEMISTRY_SOURCE_PAIRS.items():
+        pair = spec['value']
+        unit = spec['unit']
+        descriptor[pair] = {
+            'kind': KIND_DIRECT,
+            'writable': True,
+            'target': 'patient_record',
+            'value_kind': 'number',
+        }
+        descriptor[unit] = {
+            'kind': KIND_SELECTABLE,
+            'writable': False,
+            'qualifies': pair,
+            'reason': (
+                f'Unit of {pair}; selected alongside that value and stored '
+                f'with it. The canonical {spec["canonical_unit"]} value is '
+                'derived from the pair.'
+            ),
+        }
+        canonical_entry = descriptor.get(canonical) or {}
+        descriptor[canonical] = {
+            # Keep the canonical's diagnostics, as the creatinine read-model
+            # does: the curated mapping, projection recipe and date marker are
+            # still this column's.
+            **canonical_entry,
+            'kind': KIND_COMPUTED,
+            'writable': False,
+            'value_kind': 'number',
+            'inputs': [pair],
+            'normalised_read_model': True,
+            'reason': canonical_entry.get('reason') or (
+                f'Normalised from {pair} in the default unit '
+                f'({spec["canonical_unit"]}); edit that field and its unit instead.'
+            ),
+            'unit': canonical_entry.get('unit') or spec['canonical_unit'],
+        }
 
     # The unit choices (#2318). `FIELD_COMMON_UNITS` is the curated list per
     # field, already ordered; the client draws its picker from it rather than

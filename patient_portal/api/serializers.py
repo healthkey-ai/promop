@@ -37,6 +37,13 @@ from omop_core.services.blood_count_source_pairs import (
     normalize_unit as normalize_count_unit,
     source_fields as count_source_fields,
 )
+from omop_core.services.chemistry_units import (
+    PAIRS as CHEMISTRY_SOURCE_PAIRS,
+    canonical_from_pair as chemistry_canonical_from_pair,
+    canonical_in_range as chemistry_canonical_in_range,
+    normalize_unit as normalize_chemistry_unit,
+    unit_hint as chemistry_unit_hint,
+)
 from omop_core.services.write_descriptor import get_serializer_read_only_fields
 
 #: Columns that Measurement and Observation validate as one value.
@@ -552,6 +559,30 @@ class PatientRecordSerializer(serializers.ModelSerializer):
                 })
             data[CREATININE_UNIT] = creatinine_code
 
+        # The chemistry pairs (#2318) carry a unit choice too; normalise it
+        # before field validation because the column stores codes only.
+        chemistry_codes = {}
+        for canonical, spec in CHEMISTRY_SOURCE_PAIRS.items():
+            chemistry_pair = spec['value']
+            chemistry_unit = spec['unit']
+            if chemistry_unit in data and chemistry_pair not in data:
+                raise serializers.ValidationError({
+                    chemistry_unit: 'Send the unit together with its value.',
+                })
+            if chemistry_pair not in data:
+                continue
+            sent = (data.get(chemistry_unit)
+                    or (self.instance
+                        and getattr(self.instance, chemistry_unit, None))
+                    or spec['default_unit'])
+            chemistry_code = normalize_chemistry_unit(canonical, sent)
+            if chemistry_code is None:
+                raise serializers.ValidationError({
+                    chemistry_unit: chemistry_unit_hint(canonical),
+                })
+            data[chemistry_unit] = chemistry_code
+            chemistry_codes[canonical] = chemistry_code
+
         # The count source pairs use the same pattern: the client writes the
         # legacy cells/µL field and the canonical thousands/µL value follows.
         count_units = {}
@@ -701,6 +732,28 @@ class PatientRecordSerializer(serializers.ModelSerializer):
             validated[CREATININE_CANONICAL] = canonical
             self._source_pairs |= {CREATININE_PAIR, CREATININE_UNIT}
             self._derived_from_pair.add(CREATININE_CANONICAL)
+
+        for canonical, spec in CHEMISTRY_SOURCE_PAIRS.items():
+            chemistry_pair = spec['value']
+            if chemistry_pair not in validated:
+                continue
+            recognised, canonical_value = chemistry_canonical_from_pair(
+                canonical, validated[chemistry_pair],
+                chemistry_codes.get(canonical) or spec['default_unit'],
+            )
+            if not recognised:
+                raise serializers.ValidationError({
+                    chemistry_pair: 'Enter a number.',
+                })
+            if not chemistry_canonical_in_range(canonical, canonical_value):
+                raise serializers.ValidationError({
+                    chemistry_pair: f'{spec["label"]} is outside the storable range.',
+                })
+            validated[spec['unit']] = (
+                chemistry_codes.get(canonical) or spec['default_unit'])
+            validated[canonical] = canonical_value
+            self._source_pairs |= {chemistry_pair, spec['unit']}
+            self._derived_from_pair.add(canonical)
 
         for source, spec in COUNT_SOURCE_PAIRS.items():
             if source not in validated:

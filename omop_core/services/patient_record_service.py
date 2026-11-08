@@ -13,6 +13,7 @@ import statistics
 from collections import defaultdict
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from datetime import date, datetime, timedelta
+from django.core.exceptions import ObjectDoesNotExist
 from django.db import DatabaseError, models, transaction
 from django.db.models import DateTimeField, Q
 from django.db.models.functions import Cast, Coalesce
@@ -32,7 +33,7 @@ from omop_core.services.mappings import (
 )
 from omop_core.services.clinical_units import (
     canonical_wbc_unit, flc_to_canonical, wbc_to_canonical, blood_count_projection,
-    count_in_cells_per_ul,
+    count_in_cells_per_ul, measurement_count_unit,
 )
 from omop_core.services.lot_regimens import (
     get_regimen_concept_id,
@@ -63,6 +64,45 @@ from omop_core.services.blood_count_source_pairs import (
     source_fields as count_source_fields,
     source_from_canonical as count_source_from_canonical,
 )
+from omop_core.services.chemistry_units import (
+    PAIRS as _CHEMISTRY_PAIRS,
+    canonical_from_pair as chemistry_canonical_from_pair,
+    canonical_in_range as chemistry_canonical_in_range,
+    normalize_unit as normalize_chemistry_unit,
+)
+
+#: The canonical columns whose imports must be converted to the canonical unit
+#: (#2318). The LOINC and display-name projections copy `value_as_number`, so an
+#: SI-scale result would otherwise be stored at the wrong magnitude.
+_CHEMISTRY_CANONICAL_FIELDS = frozenset(_CHEMISTRY_PAIRS)
+#: The legacy concept-name path writes the source pair, not the canonical.
+_CHEMISTRY_PAIR_CANONICAL = {
+    spec['value']: canonical for canonical, spec in _CHEMISTRY_PAIRS.items()
+}
+
+
+def _chemistry_reported_unit(measurement):
+    """The unit a chemistry import names, or None when it names none.
+
+    An explicit source text wins; a UCUM unit concept is the fallback. A
+    concept in another vocabulary is still an explicit unit the converter does
+    not know, so its code is returned rather than dropped: the caller must
+    block the field instead of reading the number as the canonical scale.
+    """
+    text = (measurement.unit_source_value or '').strip()
+    if text:
+        return text
+    if measurement.unit_concept_id is None:
+        return None
+    try:
+        concept = measurement.unit_concept
+    except ObjectDoesNotExist:
+        # A referenced concept that is missing is still a named unit the
+        # converter cannot read; it must block rather than default.
+        return 'unknown'
+    if concept is None:
+        return 'unknown'
+    return concept.concept_code or 'unknown'
 
 #: The columns of a declared source pair. They are one assertion, so a
 #: canonical match in the default unit must not acknowledge them independently.
@@ -71,7 +111,11 @@ _SOURCE_PAIR_FIELDS = frozenset(
     for pairs in (_SOURCE_PAIRS, _CREATININE_SOURCE_PAIRS)
     for fields in pairs.values()
     for field in fields
-) | count_source_fields()
+) | count_source_fields() | frozenset(
+    field
+    for spec in _CHEMISTRY_PAIRS.values()
+    for field in (spec['value'], spec['unit'])
+)
 
 
 # ---------------------------------------------------------------------------
@@ -451,7 +495,7 @@ _FLC_FIELDS = frozenset({'kappa_flc', 'lambda_flc'})
 # 'alkaline_phosphatase' were cleared on every refresh and never repopulated.
 # test_no_canonical_is_listed_twice guards the shape.
 _LAB_FIELD_ALIASES = {
-    'serum_calcium_mg_dl':    ['calcium_mg_dl'],
+    'serum_calcium_mg_dl':    ['calcium_mg_dl', 'serum_calcium_level'],
     'serum_creatinine_mg_dl': ['creatinine_mg_dl', 'serum_creatinine_level'],
     'egfr_ml_min_173m2':      ['egfr', 'estimated_glomerular_filtration_rate'],
     'bun_mg_dl':              ['blood_urea_nitrogen'],
@@ -461,6 +505,8 @@ _LAB_FIELD_ALIASES = {
     'alkaline_phosphatase_u_l': ['alkaline_phosphatase', 'liver_enzyme_levels_alp'],
     'ldh_u_l':                ['ldh_level', 'ldh', 'lactate_dehydrogenase_level'],
     'hemoglobin_g_dl':       ['hemoglobin_level'],
+    'albumin_g_dl':          ['albumin_level'],
+    'bilirubin_total_mg_dl': ['serum_bilirubin_level_total'],
     'anc_thousand_per_ul':    ['absolute_neutrophile_count'],
     'alc_thousand_per_ul':    ['absolute_lymphocyte_count'],
     'platelet_count_thousand_per_ul': ['platelet_count'],
@@ -489,6 +535,9 @@ def _lab_alias_units(canonical, value):
         return {'hemoglobin_level_units': 'G/DL' if value is not None else None}
     if canonical == 'serum_creatinine_mg_dl':
         return {'serum_creatinine_level_units': 'MG/DL' if value is not None else None}
+    chemistry = _CHEMISTRY_PAIRS.get(canonical)
+    if chemistry is not None:
+        return {chemistry['unit']: chemistry['canonical_unit'] if value is not None else None}
     return {}
 
 # A FHIR Condition.stage summary is an asserted clinical fact, but the FHIR
@@ -1319,6 +1368,42 @@ def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fiel
             setattr(patient_info, CREATININE_CANONICAL, creatinine_pair_value)
             dependency_changed.add(CREATININE_CANONICAL)
 
+    # The chemistry source pairs (#2318): albumin, serum calcium and total
+    # bilirubin. Same contract as creatinine — the pair is what the record and
+    # the matcher read, and the canonical is the normalised storage/projection
+    # read-model, quantised to the column's one decimal.
+    chemistry_pair_authoritative_canonicals = set()
+    for canonical, spec in _CHEMISTRY_PAIRS.items():
+        chemistry_pair = spec['value']
+        chemistry_unit = spec['unit']
+        chemistry_pair_pending = chemistry_pair in pending_aliases
+        chemistry_canonical_import = (
+            canonical in changed_fields and canonical not in pair_derived
+        )
+        if chemistry_canonical_import:
+            pending_aliases.discard(chemistry_pair)
+            pending_aliases.discard(chemistry_unit)
+        chemistry_recognised, chemistry_pair_value = chemistry_canonical_from_pair(
+            canonical,
+            getattr(patient_info, chemistry_pair),
+            getattr(patient_info, chemistry_unit),
+        )
+        chemistry_canonical_now = getattr(patient_info, canonical)
+        chemistry_canonical_pending = canonical in pending_aliases
+        chemistry_pair_authoritative = (
+            not chemistry_canonical_import and chemistry_recognised
+            and chemistry_canonical_in_range(canonical, chemistry_pair_value)
+            and (chemistry_pair_pending
+                 or (not chemistry_canonical_pending
+                     and (chemistry_canonical_now is None
+                          or same_number(chemistry_pair_value, chemistry_canonical_now))))
+        )
+        if chemistry_pair_authoritative:
+            if not same_number(chemistry_canonical_now, chemistry_pair_value):
+                setattr(patient_info, canonical, chemistry_pair_value)
+                dependency_changed.add(canonical)
+            chemistry_pair_authoritative_canonicals.add(canonical)
+
     # The same rule for the cell-count source pairs: the trial row edits
     # cells/µL (`absolute_neutrophile_count`, ...), and the canonical
     # thousands/µL column must follow it rather than the inverse.
@@ -1365,6 +1450,12 @@ def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fiel
         if canonical in count_pair_authoritative:
             # The source count already supplies the canonical.
             continue
+        if canonical in chemistry_pair_authoritative_canonicals:
+            # The chemistry pair already supplies the canonical; copying it
+            # back would replace the reader's chosen unit with the canonical
+            # one. The canonical's other legacy alias still follows the value.
+            aliases = [alias for alias in aliases
+                       if alias != _CHEMISTRY_PAIRS[canonical]['value']]
         retire_aliases = canonical in changed_fields and canonical not in pair_derived
         if retire_aliases:
             # A new canonical edit supersedes an older pending edit to a field
@@ -1389,6 +1480,8 @@ def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fiel
             if canonical == CREATININE_CANONICAL and creatinine_pair_authoritative:
                 # The pair owns its own unit; only the ordinary alias is updated.
                 unit_updates.pop(CREATININE_UNIT, None)
+            if canonical in chemistry_pair_authoritative_canonicals:
+                unit_updates.pop(_CHEMISTRY_PAIRS[canonical]['unit'], None)
             for unit_field, unit in unit_updates.items():
                 setattr(patient_info, unit_field, unit)
     patient_info.user_edited_fields = sorted(pending_aliases)
@@ -4430,6 +4523,10 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None,
         field_name = _LEGACY_LAB_CONCEPT_FIELDS.get(concept_name)
         if not field_name or field_name in blood_count_fields:
             continue
+        if field_name in _CHEMISTRY_PAIR_CANONICAL:
+            # Selected with its canonical in one chronological pass below: a
+            # pair and its read-model must come from the same newest fact.
+            continue
         if (field_name == 'hemoglobin_g_dl' and measurement.unit_source_value
                 and measurement.unit_source_value.strip().casefold() != 'g/dl'):
             # We have no supported conversion for arbitrary legacy units.
@@ -4500,6 +4597,8 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None,
         field, cast = code_fields[code]
         if field in _FLC_FIELDS or field in blood_count_fields:
             continue
+        if field in _CHEMISTRY_CANONICAL_FIELDS:
+            continue
         canonical_value = None
         if code == '6690-2':
             if wbc_projection_blocked:
@@ -4529,7 +4628,7 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None,
     for source_value, field in _SOURCE_VALUE_LAB_FIELDS.items():
         if field in blood_count_fields:
             continue
-        if field in _FLC_FIELDS:
+        if field in _FLC_FIELDS or field in _CHEMISTRY_CANONICAL_FIELDS:
             continue
         for m in snapshot.meas_by_source.get(source_value, ()):
             if m.value_as_number is not None:
@@ -4567,15 +4666,94 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None,
                     select_lab_value(field, float(m.value_as_number), m)
                 break
 
+    # --- Chemistry canonical columns: one chronological pass (#2318) ---
+    # The pair and its canonical read-model must come from the same newest fact
+    # across the legacy concept-name, coded and display-name representations.
+    # Deciding per representation let a newer unconvertible row be defeated by
+    # an older convertible one from another path. Measurements are newest-first.
+    chemistry_winners = {}
+    for measurement in measurements:
+        if measurement.value_as_number is None:
+            continue
+        field = None
+        representation = None
+        code = _measurement_code(measurement)
+        if code in code_fields:
+            candidate = code_fields[code][0]
+            if candidate in _CHEMISTRY_CANONICAL_FIELDS:
+                field, representation = candidate, 'coded'
+        if field is None:
+            candidate = _SOURCE_VALUE_LAB_FIELDS.get(
+                measurement.measurement_source_value)
+            if candidate in _CHEMISTRY_CANONICAL_FIELDS:
+                field, representation = candidate, 'display'
+        if field is None:
+            concept = measurement.measurement_concept
+            concept_name = (
+                (concept.concept_name if concept else '') or ''
+            ).casefold().strip()
+            candidate = _CHEMISTRY_PAIR_CANONICAL.get(
+                _LEGACY_LAB_CONCEPT_FIELDS.get(concept_name))
+            if candidate is not None:
+                field, representation = candidate, 'legacy'
+        if field is not None and field not in chemistry_winners:
+            chemistry_winners[field] = (measurement, representation)
+    for field, (measurement, representation) in chemistry_winners.items():
+        spec = _CHEMISTRY_PAIRS[field]
+        reported_unit = _chemistry_reported_unit(measurement)
+        unit_code = (spec['canonical_unit'] if reported_unit is None
+                     else normalize_chemistry_unit(field, reported_unit))
+        recognised, canonical_value = chemistry_canonical_from_pair(
+            field, measurement.value_as_number, unit_code)
+        if (unit_code is None or not recognised
+                or not chemistry_canonical_in_range(field, canonical_value)):
+            # The newest result owns the field even when it is unusable: an
+            # older fact from another representation must not resurrect it.
+            # The explicit Nones also mark all three columns as handled, so
+            # the generic curated-mapping fallback cannot fill the canonical
+            # with the same unconverted number.
+            logger.warning(
+                'Chemistry projection skipped for person_id=%s field=%s: '
+                'unit=%r', person.person_id, field, reported_unit,
+            )
+            data[field] = None
+            data[spec['value']] = None
+            data[spec['unit']] = None
+            continue
+        data[field] = canonical_value
+        selected_dates[field] = measurement.measurement_date
+        if dates_out is not None:
+            dates_out[field] = measurement.measurement_date
+        if representation == 'legacy' and reported_unit is not None:
+            # Keep what the lab reported; the canonical above is the read-model.
+            data[spec['value']] = Decimal(str(measurement.value_as_number))
+            data[spec['unit']] = unit_code
+        else:
+            data[spec['value']] = canonical_value
+            data[spec['unit']] = spec['canonical_unit']
+        selected_dates[spec['value']] = measurement.measurement_date
+        if dates_out is not None:
+            dates_out[spec['value']] = measurement.measurement_date
+
     # --- Copy canonical values to legacy aliases (issue #471) ---
     for canonical, aliases in _LAB_FIELD_ALIASES.items():
+        chemistry = _CHEMISTRY_PAIRS.get(canonical)
+        if chemistry is not None:
+            # The pair and canonical were selected together above; copying the
+            # canonical back would replace the unit the lab reported. The
+            # ordinary legacy alias still follows the value.
+            aliases = [alias for alias in aliases
+                       if alias != chemistry['value']]
         value = data.get(canonical)
         if value is not None:
             for alias in aliases:
                 data[alias] = _lab_alias_value(canonical, value)
                 if dates_out is not None and canonical in dates_out:
                     dates_out[alias] = dates_out[canonical]
-            data.update(_lab_alias_units(canonical, value))
+            unit_updates = _lab_alias_units(canonical, value)
+            if chemistry is not None:
+                unit_updates.pop(chemistry['unit'], None)
+            data.update(unit_updates)
 
     return data
 

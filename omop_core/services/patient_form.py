@@ -42,6 +42,13 @@ from omop_core.services.blood_count_source_pairs import (
     canonical_from_source as count_canonical_from_source,
     normalize_unit as normalize_count_unit,
 )
+from omop_core.services.chemistry_units import (
+    PAIRS as CHEMISTRY_SOURCE_PAIRS,
+    canonical_from_pair as chemistry_canonical_from_pair,
+    canonical_in_range as chemistry_canonical_in_range,
+    normalize_unit as normalize_chemistry_unit,
+    unit_hint as chemistry_unit_hint,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -671,12 +678,124 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
                         # The canonical projection is the same dated result.
                         fact_dates[CREATININE_CANONICAL] = fact_dates[CREATININE_PAIR]
 
+    # The chemistry source pairs (#2318): albumin, serum calcium and total
+    # bilirubin. Same descriptor-permission and derivation contract as
+    # creatinine — the pair is the write target and the canonical follows it.
+    for canonical, spec in CHEMISTRY_SOURCE_PAIRS.items():
+        pair_field = spec['value']
+        unit_field = spec['unit']
+        if pair_field not in changes and unit_field not in changes:
+            continue
+        # Permission comes from the filtered descriptor, before any value is
+        # added: a host that withheld the pair must not have its canonical or
+        # unit changed through the pair path.
+        source_entry = descriptor.get(pair_field) or {}
+        source_allowed = (
+            bool(source_entry) and bool(source_entry.get('writable'))
+            and not source_entry.get('read_only_for_caller')
+        )
+        canonical_entry = descriptor.get(canonical) or {}
+        canonical_allowed = (
+            bool(canonical_entry)
+            and bool(canonical_entry.get('writable')
+                     or canonical_entry.get('normalised_read_model'))
+            and not canonical_entry.get('read_only_for_caller')
+        )
+        unit_entry = descriptor.get(unit_field) or {}
+        explicit_unit = unit_field in changes
+        stored_code = normalize_chemistry_unit(
+            canonical, getattr(record, unit_field, None))
+        requested_code = (normalize_chemistry_unit(canonical, changes.get(unit_field))
+                          if explicit_unit else None)
+        unit_forbidden = bool(unit_entry.get('read_only_for_caller'))
+        # A read-only unit may still be used as it is already stored. Changing
+        # it — or initialising one where the record has none — is the write the
+        # caller is not allowed to make.
+        unit_change_forbidden = unit_forbidden and (
+            (explicit_unit and requested_code != stored_code)
+            or stored_code is None
+        )
+        canonical_forbidden = bool(canonical_entry.get('read_only_for_caller'))
+        if canonical_forbidden:
+            # A host that marks the canonical read-only refuses the pair as a
+            # whole: the recompute would otherwise write the canonical from the
+            # pending pair and bypass the restriction entirely.
+            reason = (canonical_entry.get('reason')
+                      or 'Editing is not available for this caller.')
+            for field in (pair_field, unit_field):
+                changes.pop(field, None)
+                result.rejected[field] = reason
+        elif not source_allowed:
+            reason = (source_entry.get('reason')
+                      or 'Editing is not available for this caller.')
+            for field in (pair_field, unit_field):
+                changes.pop(field, None)
+                result.rejected[field] = reason
+        elif explicit_unit and requested_code is None:
+            result.rejected[unit_field] = chemistry_unit_hint(canonical)
+            changes.pop(pair_field, None)
+            changes.pop(unit_field, None)
+        elif unit_change_forbidden:
+            reason = (unit_entry.get('reason')
+                      or 'Editing is not available for this caller.')
+            for field in (pair_field, unit_field):
+                changes.pop(field, None)
+                result.rejected[field] = reason
+        elif explicit_unit and pair_field not in changes:
+            result.rejected[unit_field] = 'Send the unit together with its value.'
+            changes.pop(unit_field, None)
+        elif (not explicit_unit and stored_code is None
+              and getattr(record, unit_field, None) not in (None, '')):
+            # A stored unit this slice cannot convert is not the same as a
+            # missing one: defaulting it would silently reinterpret the number.
+            result.rejected[unit_field] = chemistry_unit_hint(canonical)
+            changes.pop(pair_field, None)
+            changes.pop(unit_field, None)
+        else:
+            code = requested_code or stored_code or spec['default_unit']
+            recognised, canonical_value = chemistry_canonical_from_pair(
+                canonical, changes.get(pair_field), code,
+            )
+            if not recognised:
+                result.rejected[pair_field] = 'Enter a number.'
+                changes.pop(pair_field, None)
+                changes.pop(unit_field, None)
+            elif not chemistry_canonical_in_range(canonical, canonical_value):
+                result.rejected[pair_field] = (
+                    f'{spec["label"]} is outside the storable range.')
+                changes.pop(pair_field, None)
+                changes.pop(unit_field, None)
+            else:
+                if unit_forbidden:
+                    # A read-only unit is left untouched; the pair's value is
+                    # normalised in the unit the record already has. The
+                    # companion marker still has to be pending, or the next
+                    # refresh clears the unit and reads the number as the
+                    # canonical unit.
+                    changes.pop(unit_field, None)
+                    pair_pending.add(unit_field)
+                else:
+                    changes[unit_field] = code
+                if canonical_allowed:
+                    # A host that withheld the canonical still gets the pair;
+                    # recompute derives the read-model without projecting it.
+                    changes[canonical] = canonical_value
+                    pair_derived.add(canonical)
+                    if pair_field in fact_dates:
+                        # The canonical projection is the same dated result.
+                        fact_dates[canonical] = fact_dates[pair_field]
+
     # The cell-count source pairs are the same contract: the row is typed in
     # cells/µL and the canonical thousands/µL field is derived and projected.
     count_unit_sources = {
         spec['unit_field']: source
         for source, spec in COUNT_SOURCE_PAIRS.items()
         if spec.get('unit_field')
+    }
+    # A chemistry pair's unit is its validated companion, not an independently
+    # editable selectable field (#2318).
+    chemistry_unit_sources = {
+        spec['unit']: spec['value'] for spec in CHEMISTRY_SOURCE_PAIRS.values()
     }
     for source, spec in COUNT_SOURCE_PAIRS.items():
         unit_field = spec.get('unit_field')
@@ -797,6 +916,10 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
             continue
         if name in count_unit_sources and count_unit_sources[name] in changes:
             # Normalised with the count source above.
+            direct[name] = value
+            continue
+        if name in chemistry_unit_sources and chemistry_unit_sources[name] in changes:
+            # Normalised with the chemistry pair above.
             direct[name] = value
             continue
         entry = descriptor.get(name, {})
