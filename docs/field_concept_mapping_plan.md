@@ -121,6 +121,9 @@ no longer depends on obtaining another export or transferring a chat.
    integrations (#1227–#1230), then transfer/reconciliation (#1231). Review the
    preserved earlier implementation against the completed inventory and current
    dev before reusing it. Full tests use a local database.
+5. Two gaps sections 1–9 never covered, where a field renders and which
+   disease it belongs to, are specified in [section 10](#10-field-placement-and-per-disease-record-structure)
+   and tracked by [#2327](https://github.com/healthkey-ai/promop/issues/2327).
 
 All #1223–#1231 and parent #21/#26 remain open at the user's instruction.
 Priority-field coverage is additionally tracked by [#1311](https://github.com/healthkey-ai/promop/issues/1311).
@@ -882,3 +885,182 @@ coordinate includes #1076 (disease mapping contracts), #1069 (aliases), #1071
 The #21 implementation is tracked by #1227 and depends on the shared inventory
 and answer-resolution work. #1231 supplies the final reconciliation and rollout
 checks for both parent issues.
+
+## 10. Field placement and per-disease record structure
+
+Added 2026-11-05 against `dev` at `a78fddcf`. Sections 1–9 decide what a
+field *means* (its concept, destination and answer values). They do not say
+where a field **renders** or which **disease** it belongs to, and the code
+decides both by hand today. Tracking issue:
+[#2327](https://github.com/healthkey-ai/promop/issues/2327).
+
+### 10.1 Where a field renders: tab placement
+
+#### Verified baseline
+
+| Decided by | How |
+|---|---|
+| Backend descriptor, `omop_core/services/field_descriptor.py::_classify_tab` | `_TAB_GENERAL`, `_TAB_DISEASE`, `_TAB_TREATMENT`, `_TAB_BLOOD`, `_TAB_LABS`, `_TAB_BEHAVIOR` frozensets, a `genomics_` prefix rule and a therapy keyword fallback; everything else is `other` |
+| Patient tab components, `frontend/src/components/PatientInfo/tabs/*.tsx` | Each tab hand-codes the fields and controls it renders |
+| `CustomPatientField.tab` | Its own `TAB_CHOICES` (`general`, `disease`, `treatment`, `blood`, `labs`, `behavior`, `wearable`); custom fields render in the "Additional fields" section at the bottom of that tab |
+| Field Mappings page, `FieldMappingPage.tsx` | `TAB_ORDER` of seven tabs with no `other`, so an `other` field is reachable only by search |
+| `disease_relevance._common_fields` | Uses `_classify_tab` to decide which fields count as clinical for extractor relevance (#1942) |
+
+The lists already disagree: `blood` is still a custom-field and mapping-page
+tab but the patient UI folded it into Labs (#955); `genomics` is a descriptor
+tab but not a custom-field choice. A new built-in field that nobody adds to a
+frozenset and a tab component renders nowhere. Its facts are visible only as
+raw rows on the patient's OMOP tab, which is admin-only. That is the current
+default, and nothing reports it.
+
+#### Intended result
+
+- **Placement is data a curator sets, not code.** Every field has a placement
+  row: `tab`, optional `section`, `sort_order`, provenance. It is reference
+  data (`instance_data.py` kind `reference`), carried by `copy_reference_data`
+  and the `field_curation_v1.json` fixture, seeded once from the frozensets
+  and the tab components' current lists so nothing moves on day one.
+- **Unplaced is an explicit state, `tab: "omop"`.** A field created or mapped
+  without a tab keeps its mapping and derivation and surfaces in two places
+  only: the patient's OMOP tab (raw facts) and an **Unplaced (OMOP only)** group
+  on the Field Mappings page, with a count. No tab renders a form control for
+  it. This is the default for a new field, visible rather than accidental.
+- **One tab vocabulary** shared by the registry, `CustomPatientField` and the
+  mapping page: `general`, `disease`, `treatment`, `labs`, `genomics`,
+  `behavior`, `wearable`, `omop`. `blood` is retired as a tab and becomes a
+  Labs section.
+- **One reader.** The descriptor emits `tab`, `section`, `sort_order` and
+  `placed`; the mapping page, the patient tabs and `disease_relevance` read
+  that, never a frozenset. The frozensets survive only as the seed source.
+- **Tabs render what the registry says.** Hand-authored controls stay, but
+  each tab also renders, through the generic `ClinicalField` slot at its
+  bottom, every placed field that no hand-authored control covers. Built-in and
+  custom fields share that slot. A drift test fails when a tab component
+  renders a field the registry places elsewhere, as
+  `tests/test_disease_relevance.py` already does for `DISEASE_FIELDS`.
+- **Curation UI.** The concept-assign dialog and the custom-field dialog use
+  one placement control; #721's "Add field" action on a tab preselects that
+  tab. Admin/staff only (#1147). A placement edit never changes a concept
+  mapping or a stored value.
+
+This absorbs #624's "organise by tab" (the mapping page already has tabs; the
+missing piece is that the grouping is code), #661's reclassification of
+`other` fields (a registry edit) and #662's computed-at-the-bottom rule (the
+Computed section follows the placed tab).
+
+#### Acceptance
+
+Every descriptor field has a placement row or is reported as `omop`; the
+seed, the tab components and the custom-field choices agree under a drift
+test; placements round-trip through `dump_field_curation`/`load_field_curation`
+and `copy_reference_data`; a new field with an approved mapping and a
+placement row renders on its tab with no frontend change; existing tabs
+render exactly today's field sets.
+
+### 10.2 PatientRecord structure per disease
+
+#### Verified baseline
+
+`PatientRecord` is one flat table of about 326 columns for every disease. A
+patient's disease is the free-text `disease`, `disease_slug` and
+`disease_slugs`; `DiseaseCategory` (`BC`, `MM`, `FL`, `CLL`, `MCL`, `Other`)
+is the coded identity `disease_relevance.DISEASES` uses. Which fields belong
+to which disease is encoded in three places with no shared source:
+
+| Where | What |
+|---|---|
+| `DiseaseTab.tsx` | A `switch` on disease type renders a hand-authored section per disease; BC also gets a staging/biomarker section |
+| `omop_core/services/disease_relevance.py::DISEASE_FIELDS` | A frozenset per disease that mirrors the tab, guarded by a drift test |
+| Genomics catalog markers' `diseases` | Per-disease priority markers (#1180, #1311) |
+
+`FieldConceptMapping`, `FieldChoice`, `CustomPatientField` and the serializer
+have no disease scope. The consequences are already filed: a BC-only field
+accepts a value on an MM patient (#1148); one `stage` column must mean ISS for
+MM, Ann Arbor/Lugano for FL and MCL, Rai/Binet for CLL (section 3); every
+parity issue adds columns to every disease (#1149, #468, #542); the API
+advertises every field as writable for every patient (#2113); the PHR bridge
+cannot ask for one disease's record (#1825).
+
+#### Intended result
+
+**Structure per disease is membership, not schema.** The physical table stays.
+A disease's record is the set of fields that are present in the descriptor,
+rendered, writable, validated, derived and relevant for it. No column is
+dropped, no per-disease table or model is added, and #54's `CancerTypePlugin`
+remains a way to *contribute* memberships, not a replacement for them.
+
+- **Membership rows** `(field, disease)` with optional `required`, `section`,
+  `sort_order` and provenance, on the placement registry of 10.1 or beside it.
+  A field with no membership rows is **common** to every disease. Seeded from
+  `DISEASE_FIELDS`, the `DiseaseTab.tsx` sections and the genomics catalog,
+  additive on replay; `DISEASE_FIELDS` becomes the seed source and
+  `disease_relevance` reads the rows. Reference data, copied and fixtured like
+  placements.
+- **A patient's record is the union** of the memberships of every disease in
+  `disease_slugs` plus the common fields. `Other` gets common fields only.
+- **The descriptor exposes it.** Each field carries `diseases`; the
+  writable-fields endpoint accepts `?disease=`; `export_field_mapping_inventory`
+  and #1311's per-disease coverage read the same rows. The legacy
+  `/api/patient-info/` response and `fields = '__all__'` do not change.
+- **The disease tab renders from memberships.** The `switch` becomes the seed;
+  hand-authored disease sections render only member fields, with the generic
+  slot for members that have no control. Adding MCL (#1149) becomes membership
+  rows plus controls, not a new branch. The Field Mappings page gets a disease
+  filter and a membership control.
+- **Disease-scoped choices.** #1224's stable scoped choices gain a disease
+  scope so `stage` offers ISS values to an MM patient and Ann Arbor/Lugano to
+  FL/MCL. One choice table, scoped, not a second one.
+- **Interactive writes only.** Membership governs what the UI and the
+  PatientRecord PATCH accept. Derivation from OMOP (`refresh_patient_record`),
+  the bulk OMOP endpoints, FHIR sync and `copy_patient` are never blocked: the
+  record is derived from facts, and a fact does not stop being true when a
+  membership row changes.
+
+#### What must not happen
+
+This is the impactful change and it ships in three stages, each gated:
+
+1. **Read-only membership** (#2331): rows, descriptor, relevance. Nothing a
+   patient sees or saves changes.
+2. **Rendering and curation** (#2332). A value stored on a field that is not a
+   member of the patient's disease (stored before a disease change, or
+   imported) renders read-only with a "not part of the *disease* record"
+   marker. It is never hidden silently and never cleared.
+3. **Write validation** (#2333), last. An audit command first counts, per
+   field and disease, stored off-disease values on staging, production and
+   HealthTree, read-only. Then warn-only: the serializer reports an
+   off-disease write in the response and the audit log and rejects nothing.
+   Then enforcement behind `PATIENT_RECORD_ENFORCE_DISEASE_MEMBERSHIP`,
+   default off, returning 400 for an interactive PATCH of a non-member field.
+   It stays off on production until the staging audit is clean or every
+   remaining row has a disposition.
+
+Throughout: changing `disease`/`disease_slugs` never clears a value; a
+multi-disease patient gets the union; membership edits never rewrite stored
+values; the frozen legacy wire format is untouched; reviewer and provenance
+are recorded on every membership change as on a mapping change.
+
+#### Acceptance
+
+Each disease's tab renders exactly today's field set under per-disease
+field-list tests; `writable-fields/?disease=MM` returns MM members plus common
+fields and nothing BC-only; a curator can add a field to a disease without a
+deploy; the choice list a patient sees follows their disease where a scoped
+choice exists; tests cover warn-only, enforced 400, derivation/ETL/sync
+unaffected, disease change preserving values, multi-disease union and `Other`.
+
+### 10.3 Implementation issues
+
+| Issue | Work | Dependencies |
+|---|---|---|
+| [#2327](https://github.com/healthkey-ai/promop/issues/2327) | Tracking: field placement and per-disease PatientRecord structure | — |
+| [#2328](https://github.com/healthkey-ai/promop/issues/2328) | Field placement registry as reference data; unplaced means OMOP-only; descriptor, mapping page and relevance read it | None |
+| [#2329](https://github.com/healthkey-ai/promop/issues/2329) | Placement curation: choose a tab when adding or mapping a field; Unplaced group | #2328 |
+| [#2330](https://github.com/healthkey-ai/promop/issues/2330) | Patient tabs render registry-placed fields through a generic slot; drift test | #2328 |
+| [#2331](https://github.com/healthkey-ai/promop/issues/2331) | Field disease membership as reference data; descriptor `diseases`; relevance reads it | #2328 |
+| [#2332](https://github.com/healthkey-ai/promop/issues/2332) | Per-disease UI and curation: DiseaseTab from memberships, disease filter, disease-scoped choices | #2330, #2331, #1224 |
+| [#2333](https://github.com/healthkey-ai/promop/issues/2333) | Per-disease write validation: audit, warn-only, enforce behind a setting | #2331 |
+
+Existing issues this coordinates with: #624, #661, #662, #721, #1147
+(placement); #54, #1076, #1148, #1149, #468, #542, #1311, #2113, #1224,
+#1825 (disease).

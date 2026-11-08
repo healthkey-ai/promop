@@ -28,6 +28,7 @@ from django.conf import settings
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.validators import validate_email
+from omop_core.services.source_descriptions import source_metadata_description
 from omop_core.services.source_fhir_context import based_on_labels as _source_based_on
 from omop_core.models import (
     Organization,
@@ -140,7 +141,7 @@ from .permissions import (
     PatientCrudPermission, GenomicsCrudPermission,
     PatientDeletePermission, PatientSelfScopePermission, ScopedTokenPermission,
     VocabReadPermission, LabSyncPermission, EtlProvisionPermission,
-    get_request_org, is_interactive_session, is_service_token, is_machine_request,
+    get_request_org, is_interactive_session, is_service_token, is_machine_request, has_system_read_grant,
 )
 from .providers.base import TokenClaims
 from .therapy_line_import import TherapyLineImportSerializer, import_therapy_lines
@@ -7670,31 +7671,6 @@ def _admin_denial_detail(request: Request) -> str:
     return ' | '.join(parts)
 
 
-def _source_metadata_description(metadata) -> str:
-    """The source's own name for a code, from what the ETL sent alongside it.
-
-    ``text`` (CodeableConcept.text) before ``display``: Epic files every vital
-    sign under LOINC 8716-3, whose display is "Vital signs" on all of them,
-    while the text names the measurement (#1778). Both arrive as lists, gathered
-    over every observation carrying the code, and the description lands on a
-    mapping shared by every patient -- so a key counts only when it names one
-    thing. Several texts for 8716-3 fall back to its single display.
-    """
-    if not isinstance(metadata, dict):
-        return ''
-    for key in ('text', 'display'):
-        values = metadata.get(key)
-        if isinstance(values, str):
-            values = [values]
-        if not isinstance(values, list):
-            continue
-        names = {v.strip() for v in values if isinstance(v, str) and v.strip()}
-        if len(names) == 1:
-            # SourceCodeConceptMapping.source_code_description is 255 chars.
-            return names.pop()[:255]
-    return ''
-
-
 def _contains_nul(value) -> bool:
     """Whether a JSON value holds a NUL anywhere, keys included."""
     if isinstance(value, str):
@@ -7800,7 +7776,7 @@ def _resolve_source_code_mappings(
                 # description when the mapping has one, else the source's.
                 'source_code_description': (
                     (mapping['source_code_description'] if mapping else '')
-                    or _source_metadata_description(row.get('source_metadata'))
+                    or source_metadata_description(row.get('source_metadata'))
                 ),
             }
 
@@ -12198,6 +12174,35 @@ def _can_manage_field_mappings(user):
     return bool(getattr(user, 'is_staff', False) or has_professional_access(user))
 
 
+def _can_read_mappings(request):
+    """Whether the caller may read the code-mapping table (#2340).
+
+    A human needs a professional role, as for every curation page. A service
+    credential is a machine with no role, so it is admitted on the safe verbs
+    only, and only with ``system/*.read``: mapping rows are curated reference
+    data, the same class as the vocabulary releases that scope already reads
+    (#344). Nothing a machine can do here changes a mapping -- POST, PATCH and
+    DELETE still require a professional session -- and a service token that
+    does hold a role is still held to the scope, not the role.
+    """
+    if is_service_token(request):
+        return has_system_read_grant(request)
+    return _can_manage_field_mappings(request.user)
+
+
+def _without_source_samples(mappings):
+    """Blank the per-patient samples on a page of mappings for a machine reader.
+
+    ``attach_source_samples`` draws ``example_quantity``, ``sample_quantities``
+    and ``based_on`` from PatientSourceCode rows: a few real result values and
+    order labels per code, shown to curators as evidence. A service credential
+    reads the table, not the evidence, so it gets the row without them.
+    """
+    for mapping in mappings:
+        mapping._source_samples = {'quantities': [], 'based_on': [], 'units': []}
+    return mappings
+
+
 def _can_approve_mappings(user):
     """Whether a user may set a mapping's status to 'approved'.
 
@@ -13321,7 +13326,7 @@ def code_mapping_unit_search(request):
 @permission_classes([IsAuthenticated])
 def code_mapping_list(request):
     """GET: list curated source-code-to-OMOP-concept mappings. POST: create one."""
-    if not _can_manage_field_mappings(request.user):
+    if not _can_read_mappings(request):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     if request.method == 'GET':
@@ -13341,7 +13346,12 @@ def code_mapping_list(request):
             return Response({'duplicate_summaries': mapping_duplicates(mappings, source, compact=True)})
         if request.query_params.get('browse') == '1':
             from omop_core.services.mapping_browse import browse_mappings
-            return Response(browse_mappings(mappings, request.query_params, _serialize_code_mapping_row))
+            serialize = _serialize_code_mapping_row
+            if is_service_token(request):
+                def serialize(concept, mapping, *args, **kwargs):
+                    _without_source_samples([mapping])
+                    return _serialize_code_mapping_row(concept, mapping, *args, **kwargs)
+            return Response(browse_mappings(mappings, request.query_params, serialize))
         source_filter = request.query_params.get('source')
         if source_filter is not None:
             mappings = mappings.filter(source_vocabulary_id=source_filter)
@@ -13377,6 +13387,8 @@ def code_mapping_list(request):
         from omop_core.services.mapping_samples import attach_source_samples
         mappings = list(mappings)
         attach_source_samples(mappings)
+        if is_service_token(request):
+            _without_source_samples(mappings)
         source_metadata = mapping_source_retirement(mappings)
         rows = [
             _serialize_code_mapping_row(
@@ -13425,7 +13437,7 @@ def code_mapping_detail(request, mapping_id):
     written; the clinical rows already stored move in a background job, which
     ``repoint`` reports as queued.
     """
-    if not _can_manage_field_mappings(request.user):
+    if not _can_read_mappings(request):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     mappings = SourceCodeConceptMapping.objects.filter(id=mapping_id).select_related(
@@ -13439,9 +13451,14 @@ def code_mapping_detail(request, mapping_id):
     if request.method == 'GET':
         from omop_core.services.mapping_destinations import destination_options
         options = destination_options(mapping)
+        # The source evidence is the stored metadata as the code arrived, often
+        # a FHIR fragment, and is for curators; a machine reads the row alone.
+        machine = is_service_token(request)
+        if machine:
+            _without_source_samples([mapping])
         payload = _serialize_code_mapping_row(
             mapping.target_concept, mapping, destination_count=len(options),
-            include_source_evidence=True,
+            include_source_evidence=not machine,
         )
         payload['destination_options'] = options
         return Response(payload)

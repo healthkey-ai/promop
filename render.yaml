@@ -177,8 +177,12 @@ services:
     repo: https://github.com/healthkey-ai/promop
     branch: dev
     autoDeploy: true
-    buildCommand: python scripts/verify_source_catalog_snapshots.py && pip install -r requirements.txt && cd frontend && npm install && npm run build && cd .. && python manage.py
-      collectstatic --noinput
+    # The federation remote goes under build/ the way the Dockerfile does it:
+    # WhiteNoise serves build/ at the root, so phr loads /remote/remoteEntry.js.
+    # Moved, not copied: with no WHITENOISE_ROOT, a frontend/dist/remote left
+    # behind would become the served root (promop/frontend_paths.py).
+    buildCommand: python scripts/verify_source_catalog_snapshots.py && pip install -r requirements.txt && cd frontend && npm install && npm run build && npm run build:remote
+      && mv dist/remote build/remote && cd .. && python manage.py collectstatic --noinput
     # Prepare once per deploy, not once per instance boot. A failure here
     # stops the deploy and leaves the running version serving, where the
     # same failure during boot gives a crash-looping service. This is the
@@ -210,8 +214,10 @@ services:
           property: connectionString
       - key: ALLOWED_HOSTS
         value: promop-staging.onrender.com
+      # The phr installation that signs in against staging's accounts
+      # (family auth, phr#43) calls the API and loads the remote from its origin.
       - key: CORS_ALLOWED_ORIGINS
-        value: https://promop-staging.onrender.com
+        value: https://promop-staging.onrender.com,https://phr-7kf7.onrender.com
       - key: APP_BASE_URL
         value: https://promop-staging.onrender.com
       - key: ADMIN_EMAIL
@@ -232,6 +238,22 @@ services:
         value: promop-api
       - key: PHR_BASE_URL
         sync: false
+      # ── Family auth: staging is the identity host for phr (phr#43) ────────
+      # docs/family-auth.md. The signing key is a secret: Render cannot
+      # generate an RSA key, and it must not change between deploys (every
+      # session would end), so it is entered once (PEM on one line, \n-escaped).
+      - key: FAMILY_AUTH_PRIVATE_KEY
+        sync: false
+      - key: FAMILY_AUTH_ISSUER
+        value: https://promop-staging.onrender.com
+      - key: FAMILY_AUTH_AUDIENCE
+        value: promop-api
+      # phr's sign-up org, kept in place by every deploy (ensure_signup_orgs).
+      - key: FAMILY_AUTH_SIGNUP_ORGS
+        value: "phr:HealthKey PHR"
+      # Where phr's patients verify their email: the phr installation itself.
+      - key: FAMILY_AUTH_APP_URLS
+        value: "phr=https://phr-7kf7.onrender.com"
       - key: ANTHROPIC_API_KEY
         sync: false
       - key: ANTHROPIC_WORKSPACE_ID
