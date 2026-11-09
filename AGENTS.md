@@ -1279,7 +1279,13 @@ code's stored rows (`omop_core/mapping/table_relocation.py`); the response's
   any other pair keeps the rows where they are and `relocation.skipped` says
   so.
 - A patient-scoped save moves that patient's rows in the request, so the
-  Source Codes tab reflects it at once. A save from a mapping tab, and a
+  Source Codes tab reflects it at once. It also carries the table the code
+  was listed under (`rows_omop_table`): a mapping created or saved under
+  another table -- an Observation-domain concept chosen for measurement rows
+  -- moves that patient's rows into the mapping's table even though the
+  mapping itself never changed table (#2393). That holds for a reject too:
+  the mapping names the table, and a rejection left under another table is
+  invisible there. An unknown `rows_omop_table` is a 400. A save from a mapping tab, and a
   code-mapping upload that re-files a code, move every patient's rows after
   commit (`relocation_jobs`; Celery when a broker is set, inline otherwise).
   Each batch of 500 rows commits on its own, so a task killed at its time

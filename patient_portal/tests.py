@@ -23748,6 +23748,76 @@ class CodeMappingRepointTest(RunsRepointJobsMixin, TestCase):
         folate = [e for e in listing.data['source_codes'] if e['source_value'] == 'FOLATE']
         self.assertEqual([(e['omop_table'], e['mapping_status']) for e in folate], [('measurement', 'approved')])
 
+    def test_a_patient_save_moves_the_rows_it_was_opened_from_into_the_mappings_table(self):
+        """#2393: the code was listed under Measurement, where its rows sit, and
+        mapped to an Observation-domain concept, so the new mapping is filed
+        under Observation. Without a move the Measurement entry stays Unmapped
+        and the Observation group has no rows. The save carries the listing
+        table and that patient's rows follow the mapping."""
+        observation_domain, _ = Domain.objects.get_or_create(
+            domain_id='Observation', defaults={'domain_name': 'Observation', 'domain_concept_id': 27})
+        alcohol = Concept.objects.create(
+            concept_id=3027199, concept_name='Alcohol use inventory', domain=observation_domain,
+            vocabulary=self.loinc_vocab, concept_class=self.concept_class, standard_concept='S',
+            concept_code='74013-4', valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+        row = self._measurement(8892101, 0, date(2026, 8, 12), None, source_value='History of Alcohol Use')
+        PatientRecord.objects.update_or_create(person=self.person, defaults={'derivation_version': 7})
+        resp = self.client.post('/api/v1/code-mappings/', {
+            'patient_id': self.person.person_id, 'source_vocabulary_id': '', 'source_code': 'History of Alcohol Use',
+            'domain_id': 'Observation', 'omop_table': 'observation', 'rows_omop_table': 'measurement',
+            'destination_concept_id': alcohol.concept_id, 'status': 'proposed',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(resp.data['destination_omop_table'], 'observation')
+        self.assertEqual((resp.data['relocation']['from_table'], resp.data['relocation']['to_table'],
+                          resp.data['relocation']['rows_relocated']), ('measurement', 'observation', 1))
+        self.assertFalse(Measurement.objects.filter(pk=row.pk).exists())
+        moved = Observation.objects.get(person=self.person, observation_source_value='History of Alcohol Use')
+        self.assertEqual(moved.observation_concept_id, 0)
+        # The page now lists the code once, under Observation, as proposed.
+        listing = self.client.get(f'/api/v1/patient-records/{self.person.person_id}/source-codes/')
+        entries = [e for e in listing.data['source_codes'] if e['source_value'] == 'History of Alcohol Use']
+        self.assertEqual([(e['omop_table'], e['mapping_status']) for e in entries], [('observation', 'proposed')])
+        # A save whose rows table matches the mapping's moves nothing.
+        again = self.client.patch(f"/api/v1/code-mappings/{resp.data['mapping_id']}/", {
+            'patient_id': self.person.person_id, 'rows_omop_table': 'observation', 'status': 'proposed',
+        }, format='json')
+        self.assertEqual(again.status_code, status.HTTP_200_OK, again.data)
+        self.assertIsNone(again.data['relocation'])
+
+    def test_rows_follow_even_when_the_mapping_came_from_a_third_table(self):
+        """The mapping was misfiled under Condition, the rows sit in measurement,
+        and the curator picks an Observation-domain concept: the table change
+        from Condition cannot move anything, but the rows still follow."""
+        Domain.objects.get_or_create(domain_id='Condition', defaults={'domain_name': 'Condition', 'domain_concept_id': 19})
+        observation_domain, _ = Domain.objects.get_or_create(
+            domain_id='Observation', defaults={'domain_name': 'Observation', 'domain_concept_id': 27})
+        alcohol = Concept.objects.create(
+            concept_id=3027199, concept_name='Alcohol use inventory', domain=observation_domain,
+            vocabulary=self.loinc_vocab, concept_class=self.concept_class, standard_concept='S',
+            concept_code='74013-4', valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+        mapping = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='', source_code='History of Alcohol Use', target_concept=self.minted,
+            domain_id='Condition', omop_table='condition', status='proposed', origin='import', origin_system='hk-labs',
+        )
+        row = self._measurement(8892102, 0, date(2026, 8, 12), None, source_value='History of Alcohol Use')
+        resp = self.client.patch(f'/api/v1/code-mappings/{mapping.id}/', {
+            'patient_id': self.person.person_id, 'domain_id': 'Observation', 'omop_table': 'observation',
+            'rows_omop_table': 'measurement', 'destination_concept_id': alcohol.concept_id, 'status': 'proposed',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual((resp.data['relocation']['from_table'], resp.data['relocation']['rows_relocated']), ('measurement', 1))
+        self.assertFalse(Measurement.objects.filter(pk=row.pk).exists())
+        self.assertTrue(Observation.objects.filter(person=self.person, observation_source_value='History of Alcohol Use').exists())
+        # An unknown rows table is a 400, not a sensible-looking skip.
+        bad = self.client.patch(f'/api/v1/code-mappings/{mapping.id}/', {
+            'patient_id': self.person.person_id, 'rows_omop_table': 'labs', 'status': 'proposed',
+        }, format='json')
+        self.assertEqual(bad.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('rows_omop_table', bad.data)
+
     def test_a_tab_save_that_changes_the_table_moves_every_patients_rows_after_commit(self):
         mapping, row, _provenance, _inventory = self._misfiled_folate()
         other = Person.objects.create(
