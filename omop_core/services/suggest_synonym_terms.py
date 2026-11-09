@@ -17,28 +17,41 @@ from omop_core.models import SUGGEST_DESTINATION_DOMAINS, SuggestSynonymTerm
 # The eligibility clause is written out in both statements rather than
 # interpolated: these are complete SQL literals with bound parameters only, which
 # is what the SAST gate (bandit B608) requires and is easier to read in a log.
+#
+# One synonym row can carry many names. Athena ships LOINC's related names as
+# a single semicolon-joined string ("...; M Protein; M-band; M-spike; Paraprotein;
+# SPEP; ..."), and trigram similarity of a short source text against that whole
+# string is near zero -- "M SPIKE 1" scored 0.09 against it and the only LOINC
+# that means an M-spike was never retrieved (#2355). Each part is a term of its
+# own, so "M-SPIKE" is there to be matched (0.8). A synonym with no semicolon is
+# its own one part.
 _INSERT_MISSING = """
     INSERT INTO suggest_synonym_term (concept_id, domain_id, term)
-    SELECT DISTINCT s.concept_id, c.domain_id, UPPER(s.concept_synonym_name)
+    SELECT DISTINCT s.concept_id, c.domain_id, UPPER(BTRIM(part))
     FROM concept_synonym s
     JOIN concept c ON c.concept_id = s.concept_id
+    CROSS JOIN LATERAL regexp_split_to_table(s.concept_synonym_name, ';') AS part
     WHERE c.standard_concept = 'S'
       AND c.invalid_reason IS NULL
       AND c.domain_id = ANY(%(domains)s)
+      AND BTRIM(part) <> ''
     ON CONFLICT (concept_id, md5(term)) DO NOTHING
 """
 
 # A term goes when its concept stopped being eligible, moved domain, or the
 # synonym itself was removed by a vocabulary load.
+# A term stored as a whole semicolon-joined string by an earlier refresh has no
+# part equal to it any more, so it goes too and its parts come in.
 _DELETE_STALE = """
     DELETE FROM suggest_synonym_term t
     WHERE NOT EXISTS (
         SELECT 1
         FROM concept c
         JOIN concept_synonym s ON s.concept_id = c.concept_id
+        CROSS JOIN LATERAL regexp_split_to_table(s.concept_synonym_name, ';') AS part
         WHERE c.concept_id = t.concept_id
           AND c.domain_id = t.domain_id
-          AND UPPER(s.concept_synonym_name) = t.term
+          AND UPPER(BTRIM(part)) = t.term
           AND c.standard_concept = 'S'
           AND c.invalid_reason IS NULL
           AND c.domain_id = ANY(%(domains)s)

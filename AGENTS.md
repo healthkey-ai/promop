@@ -1139,7 +1139,17 @@ join. It is derived, never edited: `services.suggest_synonym_terms.refresh()`
 deletes what stopped being eligible, then inserts what is missing (that order:
 a concept that changed domain would otherwise collide with its own old row).
 `load_athena_vocabularies` runs it after every full load; migration `0246`
-backfilled instances that already had a vocabulary.
+backfilled instances that already had a vocabulary, and
+`manage.py refresh_suggest_synonym_terms` runs it by hand.
+
+One `concept_synonym` row is **one term per semicolon-separated part**, not one
+term (#2355). Athena ships LOINC's related names as a single string
+("Chemistry; M Protein; M-band; M-spike; Paraprotein; SPEP; …"), and trigram
+similarity of a short source text against that whole string is near zero —
+"M SPIKE 1" scored 0.09 against it, so the one LOINC that means an M-spike was
+never retrieved, while its part "M-SPIKE" scores 0.8. An instance refreshed
+before the split holds the joined strings until the next refresh replaces them
+with their parts (about 2.3M parts from 104k joined rows on HealthTree).
 
 Measured on staging over the same 28 real queue rows, synonym retrieval went
 **32.1s → 2.8s** with identical results on all 28; name retrieval for a
