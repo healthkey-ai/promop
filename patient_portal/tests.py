@@ -23793,6 +23793,34 @@ class CodeMappingLoadedSinceProposalTest(TestCase):
                 omop_table=table, source_system='etl',
             )
 
+    def test_vocabularyless_code_ignores_a_standard_hit_in_another_domain(self):
+        """HCPCS modifier 'SG' is a standard Observation; a drug code 'SG' with
+        no code system must not resolve to it."""
+        hcpcs, _ = Vocabulary.objects.get_or_create(
+            vocabulary_id='HCPCS',
+            defaults={'vocabulary_name': 'HCPCS', 'vocabulary_reference': 'x',
+                      'vocabulary_version': '2026', 'vocabulary_concept_id': 0},
+        )
+        observation, _ = Domain.objects.get_or_create(
+            domain_id='Observation',
+            defaults={'domain_name': 'Observation', 'domain_concept_id': 27},
+        )
+        ConceptClass.objects.get_or_create(
+            concept_class_id='HCPCS Modifier',
+            defaults={'concept_class_name': 'HCPCS Modifier', 'concept_class_concept_id': 0},
+        )
+        self._concept(2721607, 'SG', hcpcs, observation, 'HCPCS Modifier', 'S')
+        concept, mapping = self._resolve_before_load('SG', '', 'drug_exposure')
+        self.assertIsNone(concept)
+        self.assertNotEqual(getattr(mapping, 'origin_system', None), 'athena-direct')
+
+    def test_vocabularyless_code_still_takes_a_hit_in_the_tables_domain(self):
+        concept = self._concept(
+            3046399, '77777-7', self.loinc, self.measurement_domain, 'Lab Test', 'S',
+        )
+        found, _mapping = self._resolve_before_load('77777-7', '', 'measurement')
+        self.assertEqual(found.concept_id, concept.concept_id)
+
     def test_minted_placeholder_yields_to_a_standard_concept_loaded_later(self):
         concept, queued = self._resolve_before_load('1807630', 'RxNorm', 'drug_exposure')
         self.assertIsNone(concept)
