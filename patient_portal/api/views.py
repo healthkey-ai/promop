@@ -77,6 +77,7 @@ from omop_core.services.mappings import CONCEPT_GENERIC_LAB, CONCEPT_PATIENT_REP
 from omop_core.services.demographics import resolve_concept as resolve_demographic_concept
 from omop_core.services.pk import next_pk, next_pk_batch
 from omop_core.mapping.table_relocation import relocatable, relocate_clinical_rows
+from omop_core.services.concept_lock import ConceptLocked, check_concept_lock, check_concept_locks
 from omop_core.services.provenance_attribution import (
     ATTRIBUTION, OWN, UNATTRIBUTED, classify, same_attribution, with_attribution,
 )
@@ -12766,6 +12767,9 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None, person_id=Non
     concept IDs are stored in ``deferred_repoint_concept_ids`` for
     Generate OMOP to apply later.
     """
+    # Another curator has claimed the destination concept (#2390): review only.
+    if concept is not None:
+        check_concept_lock(concept.pk, user)
     # Blank is legal and meaningful: a paper lab test name or a phrase from a
     # note has no code system, and requiring one would make those unmappable.
     source_vocabulary_id = str(
@@ -13410,6 +13414,20 @@ def code_mapping_group_action(request):
     if error:
         return error
     run, ids, selected_targets = locked
+    # A concept another curator holds (#2390) is refused before the job is
+    # dispatched: approve names one destination, reject touches each member's.
+    try:
+        check_concept_locks(
+            [destination_id] if action == 'approve'
+            else [cid for cid in selected_targets.values() if cid is not None],
+            request.user,
+        )
+    except ConceptLocked as exc:
+        SourceCodeConceptMapping.objects.filter(id__in=ids, locked_by=request.user).update(
+            locked_by=None, locked_at=None)
+        SuggestRun.objects.filter(pk=run.pk).update(
+            state=SuggestRun.FAILURE, error=str(exc.detail['detail'])[:2000], finished_at=timezone.now())
+        return Response(exc.detail, status=exc.status_code)
     params = {
         'mode': 'group-action', 'action': action,
         'destination_concept_id': destination_id, 'actor_id': request.user.pk,

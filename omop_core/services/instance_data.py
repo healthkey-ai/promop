@@ -38,6 +38,8 @@ SYSTEM: frozenset[str] = frozenset({
     # Access a patient granted to their record, and who opened it. A link is
     # derived from this deployment's own key, so it would open nothing elsewhere.
     'patient_portal.RecordShare', 'patient_portal.ShareScan',
+    # A curator's claim on a concept names this deployment's user (#2390).
+    'omop_core.ConceptMappingLock',
     # Tenancy and access.
     'omop_core.ApplicationOrganization', 'omop_core.GroupAccess',
     'omop_core.InterchangeAgreement', 'omop_core.OrgInvitation', 'omop_core.OrgTrust',

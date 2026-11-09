@@ -1349,6 +1349,15 @@ prefers a finished concept; the list shows Done concepts after every other, in
 italics, with "Done" where the number was, and "Not done" returns one to the queue.
 It is reference data and travels with `copy_reference_data`.
 
+A curator claims a concept with **Lock** on its row (`ConceptMappingLock`,
+`POST`/`DELETE concept-to-code/<id>/lock/`, #2390). Other curators see a lock
+icon with the holder's name, may open the concept and review its source codes,
+and get 423 on every write for it: propose, apply, Suggest for the concept,
+and any mapping save whose destination it is (`concept_lock.check_concept_lock`
+in `_upsert_source_code_mapping`). The holder sees Unlock; staff may unlock
+too. Explicit and unexpiring, unlike the mapping dialog's per-row edit lock.
+System data, never copied.
+
 ### The six LOINC axes decide which candidates are the same test
 
 A LOINC code is defined by component, property, time aspect, system, scale and

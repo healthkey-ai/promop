@@ -4456,6 +4456,30 @@ class ConceptMappingDone(models.Model):
         return f'done: concept {self.concept_id}'
 
 
+class ConceptMappingLock(models.Model):
+    """A curator's claim on a standard concept for Concept to Code work (#2390).
+
+    One lock per concept. Other curators may open the concept and review its
+    source codes; every write for it (propose, apply, Suggest for the concept,
+    a mapping save whose destination it is) is refused while someone else
+    holds it. The holder, or a staff user, releases it. System data: it names
+    this deployment's users and is never copied.
+    """
+    concept = models.OneToOneField(
+        Concept, on_delete=models.CASCADE, related_name='mapping_lock',
+    )
+    locked_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='+',
+    )
+    locked_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'concept_mapping_lock'
+
+    def __str__(self):
+        return f'locked by {self.locked_by_id}: concept {self.concept_id}'
+
+
 class CustomPatientField(models.Model):
     """Administrator-defined PatientRecord field backed by ``custom_fields``.
 
