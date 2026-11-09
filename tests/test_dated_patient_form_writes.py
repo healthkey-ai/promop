@@ -7,6 +7,7 @@ result is stored as history rather than promoted to the current value
 (docs/clinical-event-time-policy.md).
 """
 from datetime import date, timedelta
+from decimal import Decimal
 
 import pytest
 
@@ -346,3 +347,96 @@ def test_an_older_dated_correction_is_transient_until_refresh():
     assert august.value_as_number == 14.0
     refreshed = refresh_patient_record(person)
     assert float(refreshed.hemoglobin_g_dl) == 14.0
+
+
+def test_every_source_pair_value_is_dated_when_its_canonical_is():
+    """The pair is the editable half of a dated result (#2397).
+
+    A patient records the number and unit their lab used; the date belongs to
+    the same result as the canonical read-model it derives.
+    """
+    from omop_core.services import direct_bilirubin_units
+    from omop_core.services.blood_count_source_pairs import PAIRS as COUNT_PAIRS
+    from omop_core.services.chemistry_units import PAIRS as CHEMISTRY_PAIRS
+    from omop_core.services.write_descriptor import (
+        LAB_FIELD_TO_LOINC, build_writable_field_descriptor)
+
+    _person_with_lab()
+
+    pairs = {
+        'hemoglobin_level': 'hemoglobin_g_dl',
+        'serum_creatinine_level': 'serum_creatinine_mg_dl',
+        **{spec['value']: canonical for canonical, spec in CHEMISTRY_PAIRS.items()},
+        **{source: spec['canonical'] for source, spec in COUNT_PAIRS.items()},
+    }
+    # A dated canonical needs a resolved projection, so seed the LOINC rows the
+    # descriptor resolves. The fixture already has hemoglobin's 718-7.
+    seeded = {Concept.objects.get(concept_code=LOINC).concept_code}
+    for field in (*pairs.values(), direct_bilirubin_units.PAIR_FIELD):
+        code = LAB_FIELD_TO_LOINC[field][0]
+        if code in seeded:
+            continue
+        ConceptFactory(concept_code=code, concept_name=field)
+        seeded.add(code)
+
+    descriptor = build_writable_field_descriptor()
+    assert pairs
+    undated = [
+        f'{pair} (canonical {canonical})' for pair, canonical in pairs.items()
+        if descriptor[pair].get('dated') is not True
+        or descriptor[canonical].get('dated') is not True
+    ]
+    assert not undated, undated
+    assert descriptor[direct_bilirubin_units.PAIR_FIELD].get('dated') is True
+
+
+def test_the_pair_names_the_latest_recorded_date_for_its_canonical():
+    person = _person_with_lab()
+    concept = Concept.objects.get(concept_code=LOINC)
+    Measurement.objects.create(
+        measurement_id=next_pk(Measurement, 'measurement_id'), person=person,
+        measurement_concept=concept, measurement_date=date(2026, 8, 1),
+        measurement_type_concept_id=32865, value_as_number=12.5,
+        unit_source_value='g/dL')
+    record = PatientRecord.objects.get(person=person)
+
+    entry = patient_form_descriptors(
+        readable_fields={'hemoglobin_level'}, record=record)['hemoglobin_level']
+
+    assert entry['dated'] is True
+    assert entry['latest_date'] == '2026-08-01'
+
+
+def test_a_dated_source_pair_lands_on_the_day_of_the_draw():
+    person = _person_with_lab()
+
+    apply_patient_form_patch(
+        person,
+        {'hemoglobin_level': {'value': 120, 'date': '2026-07-04'},
+         'hemoglobin_level_units': 'G/L'},
+        allowed_fields={'hemoglobin_level', 'hemoglobin_level_units',
+                        'hemoglobin_g_dl'})
+
+    record = PatientRecord.objects.get(person=person)
+    assert record.hemoglobin_level == Decimal('120')
+    assert record.hemoglobin_level_units == 'G/L'
+    assert record.hemoglobin_g_dl == Decimal('12.0')
+    fact = _fact(person)
+    assert fact.measurement_date == date(2026, 7, 4)
+    assert float(fact.value_as_number) == 12.0
+    assert fact.unit_source_value == 'g/dL'
+
+
+def test_a_future_date_on_the_pair_is_refused():
+    person = _person_with_lab()
+    tomorrow = (date.today() + timedelta(days=1)).isoformat()
+
+    with pytest.raises(ValueError, match='future'):
+        apply_patient_form_patch(
+            person,
+            {'hemoglobin_level': {'value': 120, 'date': tomorrow},
+             'hemoglobin_level_units': 'G/L'},
+            allowed_fields={'hemoglobin_level', 'hemoglobin_level_units',
+                            'hemoglobin_g_dl'})
+
+    assert not Measurement.objects.filter(person=person).exists()

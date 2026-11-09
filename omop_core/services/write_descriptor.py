@@ -532,6 +532,16 @@ _MYELOMA_RELATED_DISORDER_PROJECTIONS = {
 PINNED_PROJECTION_FIELDS = frozenset(_MYELOMA_RELATED_DISORDER_PROJECTIONS)
 
 
+def _dated_with_canonical(canonical_entry):
+    """Copy the canonical's date marker onto its editable source pair (#2397).
+
+    The pair is the fact a patient edits; the canonical is the read-model that
+    carries the projection. A date the editor attaches to the pair must land on
+    the same result, so the pair is only dated when its canonical is.
+    """
+    return {'dated': True} if (canonical_entry or {}).get('dated') else {}
+
+
 def pinned_projection_source_value(field):
     """The source value that marks an OMOP row as this field's own answer.
 
@@ -1584,11 +1594,13 @@ def build_writable_field_descriptor():
     # canonical value is derived from it: the old entry pointed the other way,
     # so an editor wrote g/dL and derivation overwrote whatever unit the reader
     # had chosen.
+    canonical_hemoglobin = descriptor.get('hemoglobin_g_dl') or {}
     descriptor['hemoglobin_level'] = {
         'kind': KIND_DIRECT,
         'writable': True,
         'target': 'patient_record',
         'value_kind': 'number',
+        **_dated_with_canonical(canonical_hemoglobin),
     }
     descriptor['hemoglobin_level_units'] = {
         'kind': KIND_SELECTABLE,
@@ -1599,7 +1611,6 @@ def build_writable_field_descriptor():
             'stored with it. The canonical g/dL value is derived from the pair.'
         ),
     }
-    canonical_hemoglobin = descriptor.get('hemoglobin_g_dl') or {}
     descriptor['hemoglobin_g_dl'] = {
         # Keep the canonical's diagnostics: a curated mapping, an overlong
         # source value, the projection recipe and the date marker all still
@@ -1624,11 +1635,13 @@ def build_writable_field_descriptor():
     # Creatinine's source pair (#2318 follow-up). The CKD-EPI matcher reads the
     # normalised mg/dL value, and the record keeps what the lab reported. A host
     # that withholds the pair would leave the eGFR row with no editable source.
+    canonical_creatinine = descriptor.get('serum_creatinine_mg_dl') or {}
     descriptor['serum_creatinine_level'] = {
         'kind': KIND_DIRECT,
         'writable': True,
         'target': 'patient_record',
         'value_kind': 'number',
+        **_dated_with_canonical(canonical_creatinine),
     }
     descriptor['serum_creatinine_level_units'] = {
         'kind': KIND_SELECTABLE,
@@ -1639,7 +1652,6 @@ def build_writable_field_descriptor():
             'stored with it. The canonical mg/dL value is derived from the pair.'
         ),
     }
-    canonical_creatinine = descriptor.get('serum_creatinine_mg_dl') or {}
     descriptor['serum_creatinine_mg_dl'] = {
         **canonical_creatinine,
         'kind': KIND_COMPUTED,
@@ -1661,11 +1673,13 @@ def build_writable_field_descriptor():
     for canonical, spec in CHEMISTRY_SOURCE_PAIRS.items():
         pair = spec['value']
         unit = spec['unit']
+        canonical_entry = descriptor.get(canonical) or {}
         descriptor[pair] = {
             'kind': KIND_DIRECT,
             'writable': True,
             'target': 'patient_record',
             'value_kind': 'number',
+            **_dated_with_canonical(canonical_entry),
         }
         descriptor[unit] = {
             'kind': KIND_SELECTABLE,
@@ -1677,7 +1691,6 @@ def build_writable_field_descriptor():
                 'derived from the pair.'
             ),
         }
-        canonical_entry = descriptor.get(canonical) or {}
         descriptor[canonical] = {
             # Keep the canonical's diagnostics, as the creatinine read-model
             # does: the curated mapping, projection recipe and date marker are
@@ -1823,7 +1836,7 @@ def build_writable_field_descriptor():
             'value_kind': 'number',
             'unit': spec['unit'],
             'unit_options': source_units,
-            **({'dated': True} if (descriptor.get(canonical) or {}).get('dated') else {}),
+            **_dated_with_canonical(descriptor.get(canonical)),
         }
         if spec.get('unit_field'):
             descriptor[spec['unit_field']] = {

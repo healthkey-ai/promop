@@ -274,6 +274,14 @@ event (a `changed_fields` canonical write or import), not by a numerical match
 alone, and a plain OMOP import plus refresh does not retire it. This is the
 `_SOURCE_PAIR_FIELDS` rule in `patient_record_service.py`.
 
+The pair is also the dated target (#2397): a patient-entered lab result carries
+the day it was drawn, not the day it was typed, and the canonical projection is
+that same dated result. The pair is marked `dated` only when its canonical has a
+resolved projection — without a target there is no fact to carry the date, so a
+dated envelope is refused rather than silently stamped with today. The date
+travels with the pair through derivation, so a full refresh keeps the draw date
+instead of re-dating the answer.
+
 ## Frontend Simplification
 
 ### Before (split brain)
