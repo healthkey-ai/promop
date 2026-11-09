@@ -193,6 +193,9 @@ export default function EditMappingDialog({
   const [searchingConcepts, setSearchingConcepts] = useState(false);
   const [suggestionMessage, setSuggestionMessage] = useState("");
   const [individualSuggestion, setIndividualSuggestion] = useState<{ request: number; activity: CandidateActivity[]; running: boolean; axisKey?: string } | null>(null);
+  // True once the source text or table changed after the last Suggest run
+  // here, so its scores no longer describe the code being saved (#2382).
+  const suggestionStale = useRef(false);
   // LOINC axes (#loinc-axes): the panel's current overrides, sent with Suggest.
   // Keyed by mapping: overrides belong to the code they were made for, and
   // must never ride along with a Suggest for another row or an edited code.
@@ -450,6 +453,7 @@ export default function EditMappingDialog({
     if (field.startsWith("destination_")) dialogChoice.current = dialogRequest.current;
     if (["source_code", "source_vocabulary_id", "source_code_description", "omop_table"].includes(field)) {
       dialogRequest.current += 1;
+      suggestionStale.current = true;
       setSearchingConcepts(false);
       setError("");
     }
@@ -459,6 +463,7 @@ export default function EditMappingDialog({
   const setDomain = useCallback((domainId: string) => {
     setSuggestionMessage("");
     dialogRequest.current += 1;
+    suggestionStale.current = true;
     setSearchingConcepts(false);
     setError("");
     setForm((prev) => {
@@ -634,6 +639,7 @@ export default function EditMappingDialog({
       void suggestVariants(request);
     }
     dialogChoice.current = null;
+    suggestionStale.current = false;
     setIndividualSuggestion({ request, activity: [], running: true, axisKey });
     setError("");
     setSearchingConcepts(true);
@@ -741,11 +747,14 @@ export default function EditMappingDialog({
   };
 
   // A Suggest run in this dialog, for the code itself rather than one of its
-  // axis variants, is the only time the dialog knows what the ranker thought
-  // of the destination being saved. Without one the key is left out and the
-  // server keeps the row's own live confidence while the destination stands.
-  const suggestedHere = individualSuggestion !== null
-    && individualSuggestion.request === dialogRequest.current && !individualSuggestion.axisKey;
+  // axis variants and for the source text as it still reads, is the only time
+  // the dialog knows what the ranker thought of the destination being saved.
+  // Not dialogRequest: that counter also advances on concept-search keystrokes,
+  // which change nothing the ranker scored. Without a run the key is left out
+  // and the server keeps the row's own live confidence while the destination
+  // stands.
+  const suggestedHere = individualSuggestion !== null && !individualSuggestion.axisKey
+    && !suggestionStale.current;
 
   const savePayload = () => ({
     ...form,

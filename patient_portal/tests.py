@@ -22475,6 +22475,27 @@ class CodeMappingApiTest(TestCase):
         self.assertEqual(self.mapping.decision_confidence, 0.4)
         self.assertIsNone(self.mapping.suggestion_confidence)
 
+    def test_an_explicit_null_keeps_the_rows_confidence_while_the_destination_stands(self):
+        """The dialog's run did not score the stored destination (UMLS settled
+        it, or the rankers declined): the live score is still the ranker's
+        belief about exactly that concept."""
+        SourceCodeConceptMapping.objects.filter(pk=self.mapping.pk).update(suggestion_confidence=0.91)
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.patch(f'/api/v1/code-mappings/{self.mapping.pk}/', {
+            'status': 'approved', 'decision_surface': 'code2concept', 'decision_confidence': None,
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.mapping.refresh_from_db()
+        self.assertEqual(self.mapping.decision_confidence, 0.91)
+        # Moving the destination with a null confidence records none.
+        resp = self.client.patch(f'/api/v1/code-mappings/{self.mapping.pk}/', {
+            'destination_concept_id': self.standard.concept_id,
+            'decision_surface': 'code2concept', 'decision_confidence': None,
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.mapping.refresh_from_db()
+        self.assertIsNone(self.mapping.decision_confidence)
+
     def test_a_patient_page_save_is_patientcode_whatever_the_payload_says(self):
         person = Person.objects.create(
             person_id=2382001, gender_concept_id=0, year_of_birth=1970,
@@ -22496,6 +22517,7 @@ class CodeMappingApiTest(TestCase):
             ({'decision_surface': 'spreadsheet'}, 'decision_surface'),
             ({'decision_confidence': 1.5}, 'decision_confidence'),
             ({'decision_confidence': 'high'}, 'decision_confidence'),
+            ({'decision_confidence': True}, 'decision_confidence'),
         ):
             resp = self.client.patch(f'/api/v1/code-mappings/{self.mapping.pk}/', {
                 'status': 'approved', **payload,

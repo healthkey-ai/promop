@@ -1230,16 +1230,23 @@ therefore records two more columns (#2382), read by the accuracy analytics:
 
 - `decision_confidence`, the ranker's confidence in the destination being
   saved. The dialog sends it (`decision_confidence`) when the destination came
-  out of a Suggest run in that dialog, null when the curator chose by search;
-  without the key the row's live confidence stands while the destination is
-  unchanged, else null. The Concept to Code propose endpoint sends the
-  preview candidate's.
+  out of a Suggest run in that dialog for the source text as it still reads
+  (`rankedConfidence`: the higher score when both rankers scored the concept,
+  as the candidate table shows), null when that run never scored it. Null or
+  no key keeps the row's live confidence while the destination is unchanged;
+  a moved destination without a score records none. The Concept to Code
+  propose endpoint sends the preview candidate's.
 - `decision_surface`: `code2concept` (the Code to Concept tab's dialog,
   one-click approve and group actions), `concept2code` (the Concept to Code
   tab and its endpoints), or `patientcode` (any save scoped to a patient,
-  whatever the payload says). Blank means no curator has saved the row.
+  whatever the payload says). Blank means no curator has saved the row, or a
+  machine moved its destination since.
 
-Suggest never writes either column. Both travel with `copy_reference_data`.
+Suggest never writes either column: reverse Suggest's auto-propose goes
+through the same writer with `record_decision=False`. A machine write that
+moves a destination outside the writer (a code-mapping upload, Athena
+destination recovery) clears both, as it clears `suggestion_confidence`. Both
+travel with `copy_reference_data`.
 
 ### Replace re-answers rows, it does not delete them
 

@@ -95,7 +95,7 @@ def _repoint_proposed_row(candidate, concept, user):
         row, _ = _upsert_source_code_mapping(concept, {
             'status': 'proposed', 'domain_id': concept.domain_id, 'omop_table': table,
             'destination_vocabulary_id': concept.vocabulary_id,
-        }, user, mapping=row)
+        }, user, mapping=row, record_decision=False)
         _store_confidence(row, candidate)
     return {**candidate, 'mapping_id': row.pk, 'auto_proposed': True}
 

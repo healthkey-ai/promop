@@ -1199,3 +1199,18 @@ def test_concept_to_code_saves_record_their_surface_and_the_rankers_confidence(c
     assert apply(client, concept, unscored).status_code == 200
     unscored.refresh_from_db()
     assert (unscored.decision_surface, unscored.decision_confidence) == ('concept2code', None)
+
+
+def test_auto_propose_leaves_a_curators_decision_columns_alone(client, concept):
+    """#2382: reverse Suggest re-points a proposed row through the same writer
+    curators use, but it is a machine write, so the surface and confidence of
+    the curator's last decision stay as they were."""
+    other = ConceptFactory(concept_name='Serum globulin', concept_code='GLOBULIN')
+    decided = source('DECIDED', target_concept=other, origin_system='suggest v0.4',
+                     suggestion_confidence=0.7, occurrence_count=8,
+                     decision_surface='code2concept', decision_confidence=0.7)
+    _run(client, concept, FakeDispatcher(), lambda: _confident_ranker(concept),
+         ranking_model='jev', auto_propose_threshold=0.8)
+    decided.refresh_from_db()
+    assert decided.target_concept_id == concept.pk
+    assert (decided.decision_surface, decided.decision_confidence) == ('code2concept', 0.7)

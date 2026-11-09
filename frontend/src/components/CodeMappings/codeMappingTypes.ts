@@ -411,8 +411,14 @@ export function rankedConfidence(activity: CandidateActivity[], conceptId: strin
   for (let index = activity.length - 1; index >= 0; index -= 1) {
     const alternatives = activity[index].alternatives;
     if (!alternatives?.length) continue;
-    const scored = alternatives.find(alt => alt.concept_id === id && typeof alt.confidence === "number");
-    return scored ? scored.confidence : null;
+    // The same rule SuggestCandidates shows for the winner: a dual-ranker run
+    // lists both rankers' scores for a concept and the higher one is the
+    // candidate's confidence; a score the server would refuse (NaN, out of
+    // range) reads as unscored, not as a 400.
+    const scores = alternatives
+      .filter(alt => alt.concept_id === id && Number.isFinite(alt.confidence) && alt.confidence >= 0 && alt.confidence <= 1)
+      .map(alt => alt.confidence);
+    return scores.length ? Math.max(...scores) : null;
   }
   return null;
 }

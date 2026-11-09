@@ -717,6 +717,22 @@ describe("CodeMappingPage", () => {
       })));
     });
 
+    it("keeps the run's confidence through concept-search keystrokes that change nothing it scored", async () => {
+      await openDialog();
+      const activity = [
+        { stage: "result", suggested: loincHit, candidates: [loincHit], alternatives: [{ concept_id: loincHit.concept_id, confidence: 0.9 }] },
+      ];
+      mockPost.mockResolvedValue({ data: suggestRun({ state: "success", activity }) });
+      const dialog = within(screen.getByRole("dialog"));
+      fireEvent.click(dialog.getByRole("button", { name: "Suggest", exact: true }));
+      await waitFor(() => expect(dialog.getByLabelText("Destination Concept ID")).toHaveValue(loincHit.concept_id));
+      fireEvent.change(dialog.getByLabelText("Search destination concepts"), { target: { value: "prot" } });
+      fireEvent.click(dialog.getByRole("button", { name: "Update Mapping" }));
+      await waitFor(() => expect(mockPatch).toHaveBeenCalledWith("/v1/code-mappings/7/", expect.objectContaining({
+        destination_concept_id: loincHit.concept_id, decision_confidence: 0.9,
+      })));
+    });
+
     it("sends no confidence when the destination was not chosen from a Suggest run here", async () => {
       await openDialog();
       const dialog = within(screen.getByRole("dialog"));

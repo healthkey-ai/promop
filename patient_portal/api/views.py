@@ -12652,13 +12652,15 @@ _DECISION_SURFACES = {choice for choice, _label in SourceCodeConceptMapping.DECI
 def _decision_surface(data, person_id):
     """Which curation surface a save came from (#2382).
 
-    The patient page is known by the person it is scoped to, whatever the
-    payload says; the two mapping tabs name themselves in ``decision_surface``
-    (the Concept to Code endpoints and group actions set it server-side). An
-    unknown value is a 400 rather than a quietly blank analytics column; an
-    absent one stays blank, for callers that predate the field.
+    The patient page is known by the person the save is scoped to
+    (``_mapping_patient_scope``, the one reading of ``patient_id``), whatever
+    the payload says; the two mapping tabs name themselves in
+    ``decision_surface`` (the Concept to Code endpoints and group actions set
+    it server-side). An unknown value is a 400 rather than a quietly blank
+    analytics column; an absent one stays blank, for callers that predate the
+    field.
     """
-    if person_id is not None or data.get('patient_id') not in (None, ''):
+    if person_id is not None:
         return 'patientcode'
     surface = str(data.get('decision_surface') or '').strip()
     if surface and surface not in _DECISION_SURFACES:
@@ -12676,12 +12678,20 @@ def _decision_confidence(data, mapping, concept, previous_concept_id):
     chose by search instead). Without that key the row's own live confidence
     stands, but only while the destination is the one it scored.
     """
+    destination_stands = (
+        mapping is not None and concept is not None and concept.concept_id == previous_concept_id
+    )
     if 'decision_confidence' in data:
         raw = data.get('decision_confidence')
         if raw in (None, ''):
-            return None
+            # The dialog's run did not score this concept (UMLS settled it, the
+            # rankers declined, or the curator searched). While the stored
+            # destination stands, the row's live score is still the ranker's
+            # belief about exactly that concept.
+            return mapping.suggestion_confidence if destination_stands else None
         try:
-            confidence = float(raw)
+            # float(True) is 1.0: a boolean is not a score.
+            confidence = None if isinstance(raw, bool) else float(raw)
         except (TypeError, ValueError):
             confidence = None
         if confidence is None or not 0.0 <= confidence <= 1.0:
@@ -12689,9 +12699,7 @@ def _decision_confidence(data, mapping, concept, previous_concept_id):
                 'decision_confidence': 'Confidence must be a number between 0 and 1.',
             })
         return confidence
-    if mapping is None or concept is None or concept.concept_id != previous_concept_id:
-        return None
-    return mapping.suggestion_confidence
+    return mapping.suggestion_confidence if destination_stands else None
 
 
 def _table_label(omop_table):
@@ -12741,8 +12749,14 @@ def _existing_mapping_conflict(existing, requested_table):
     }
 
 
-def _upsert_source_code_mapping(concept, data, user, mapping=None, person_id=None):
+def _upsert_source_code_mapping(concept, data, user, mapping=None, person_id=None,
+                                record_decision=True):
     """Create or update one mapping. Returns (mapping, repoint_result).
+
+    ``record_decision`` is True for a curator's save, which stamps the row's
+    ``decision_surface`` and ``decision_confidence`` (#2382). A machine write
+    through this function (reverse Suggest's auto-propose) passes False so a
+    curator's last decision is not overwritten with a blank.
 
     ``repoint_result`` is ``{'queued': True, 'from_concept_ids': [...]}`` when
     the approval left stored rows to move **and** no ``person_id`` was
@@ -13044,10 +13058,11 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None, person_id=Non
     # What this decision was made on, and where (#2382). Recorded before the
     # live confidence below is cleared, so an override still keeps what the
     # ranker believed about the destination the curator is saving.
-    values['decision_surface'] = _decision_surface(data, person_id)
-    values['decision_confidence'] = _decision_confidence(
-        data, mapping, concept, previous_concept_id,
-    )
+    if record_decision:
+        values['decision_surface'] = _decision_surface(data, person_id)
+        values['decision_confidence'] = _decision_confidence(
+            data, mapping, concept, previous_concept_id,
+        )
     # The ranker's confidence was in the destination it chose, not this one.
     if mapping is not None and concept is not None and concept.concept_id != previous_concept_id:
         values['suggestion_confidence'] = None
