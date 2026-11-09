@@ -42,6 +42,7 @@ describe("mapping search", () => {
     expect(rowMatchesSearch(row, "concept_id:3004061")).toBe(true);
     expect(rowMatchesSearch(row, "concept_id:300406")).toBe(false);
     expect(rowMatchesSearch(row, "concept_id:abc")).toBe(false);
+    expect(rowMatchesSearch(row, "concept_id:00000003004061")).toBe(false); // over ten digits, as on the server
   });
 
   it("an unknown prefix or an empty value is plain text", () => {

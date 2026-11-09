@@ -25,7 +25,7 @@ const FIELD_ALIASES: Record<string, Field> = {
   organization: "organization", org: "organization",
 };
 
-export const SEARCH_PLACEHOLDER = "Search source codes, concepts, or OMOP IDs — or one field: code:6784, concept:myeloma, system:loinc";
+export const SEARCH_PLACEHOLDER = "Search text, or a number for a source code; one field: code:6784, concept:myeloma, concept_id:3004061, system:loinc";
 
 export function parseSearch(search: string): { field: Field | null; value: string } {
   const trimmed = search.trim();
@@ -54,7 +54,8 @@ function fieldValues(row: CodeMappingRow, field: Field): (string | undefined | n
 export function rowMatchesSearch(row: CodeMappingRow, search: string): boolean {
   const { field, value } = parseSearch(search);
   if (!value) return true;
-  if (field === "concept_id") return /^\d+$/.test(value) && row.destination_concept_id === Number(value);
+  // The server's guard: at most ten ASCII digits, below the integer column's range.
+  if (field === "concept_id") return /^\d{1,10}$/.test(value) && Number(value) < 2 ** 31 && row.destination_concept_id === Number(value);
   const q = value.toLowerCase();
   const values = field ? fieldValues(row, field)
     : /^\d+$/.test(value) ? [row.source_code]
