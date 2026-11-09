@@ -23720,10 +23720,14 @@ class CodeMappingRepointTest(RunsRepointJobsMixin, TestCase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
         self.assertEqual(resp.data['relocation']['rows_relocated'], 1)
         self.assertEqual(resp.data['relocation']['queued'], False)
-        # The observation is gone and a measurement carries its facts.
+        # The observation is gone and a measurement carries its facts. It keeps
+        # the concept it had: a patient-page approval leaves the re-point to
+        # Generate OMOP, which now knows that concept is waiting in Measurement.
         self.assertFalse(Observation.objects.filter(pk=row.pk).exists())
         moved = Measurement.objects.get(person=self.person, measurement_source_value='FOLATE')
-        self.assertEqual(moved.measurement_concept_id, self.standard.concept_id)
+        self.assertEqual(moved.measurement_concept_id, self.minted.concept_id)
+        mapping.refresh_from_db()
+        self.assertIn(self.minted.concept_id, mapping.deferred_repoint_concept_ids)
         self.assertEqual((moved.measurement_date, moved.value_as_number, moved.unit_source_value,
                           moved.value_source_value, moved.measurement_type_concept_id),
                          (date(2026, 8, 12), Decimal('12.5'), 'ng/mL', '12.5', self.type_concept.concept_id))
@@ -23758,9 +23762,23 @@ class CodeMappingRepointTest(RunsRepointJobsMixin, TestCase):
         self.assertEqual(resp.data['relocation'], {'queued': True, 'from_table': 'observation', 'to_table': 'measurement'})
         self.assertEqual(self.last_relocation['rows_relocated'], 2)
         self.assertEqual(Observation.objects.filter(observation_source_value='FOLATE').count(), 0)
+        # The re-point ran after the move (the move dispatches it; the save's
+        # own re-point then finds nothing left) and put both rows on the destination.
+        self.assertIsNotNone(self.last_repoint)
         self.assertEqual(set(Measurement.objects.filter(measurement_source_value='FOLATE')
                              .values_list('person_id', 'measurement_concept_id')),
                          {(self.person.person_id, self.standard.concept_id), (other.person_id, self.standard.concept_id)})
+
+    def test_a_move_to_a_table_that_cannot_take_the_rows_is_reported_not_done(self):
+        mapping, row, _provenance, _inventory = self._misfiled_folate()
+        Domain.objects.get_or_create(domain_id='Condition', defaults={'domain_name': 'Condition', 'domain_concept_id': 19})
+        resp = self.client.patch(f'/api/v1/code-mappings/{mapping.id}/', {
+            'patient_id': self.person.person_id, 'domain_id': 'Condition', 'omop_table': 'condition',
+            'destination_concept_id': self.standard.concept_id, 'status': 'proposed',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertIn('skipped', resp.data['relocation'])
+        self.assertTrue(Observation.objects.filter(pk=row.pk).exists())
 
     def test_a_proposed_mapping_moves_rows_with_their_concept_and_queues_the_sweep(self):
         """Not yet approved: the rows keep the concept they had, filed where the

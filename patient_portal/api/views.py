@@ -13171,6 +13171,34 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None, person_id=Non
             'none yet — its code was seen at ingest but its concept is not loaded.'
         )})
 
+    # The curator re-filed the code under another table: the rows ingest put
+    # in the old one follow it, or the patient page keeps listing the code as
+    # Unmapped there with no mapping that could ever match (#2386). One
+    # patient's rows move in the request; every patient's move after commit.
+    # The rows arrive with the concept they had and the move records those
+    # concepts for the re-point below, which puts them on the destination.
+    # Only measurement and observation rows move; see table_relocation.
+    mapping.relocation = None
+    new_table = normalize_omop_table(mapping.omop_table)
+    if table_moved and previous_table and new_table and previous_table != new_table:
+        if not relocatable(previous_table, new_table):
+            mapping.relocation = {
+                'queued': False, 'from_table': previous_table, 'to_table': new_table,
+                'skipped': 'Stored rows move only between measurement and observation.',
+            }
+        elif person_id is not None:
+            outcome = relocate_clinical_rows(
+                mapping=mapping, from_table=previous_table, to_table=new_table, person_id=person_id,
+            )
+            outcome.pop('person_ids', None)
+            mapping.relocation = {'queued': False, 'from_table': previous_table,
+                                  'to_table': new_table, **outcome}
+            # The move recorded the concepts it carried over; the re-point reads them.
+            deferred_repoints = list(mapping.deferred_repoint_concept_ids)
+        else:
+            from omop_core.services.relocation_jobs import queue_relocation
+            mapping.relocation = queue_relocation(mapping, previous_table, new_table)
+
     repoint = None
     if status_value == 'approved' and concept is not None:
         sources = set(pending_repoints) | set(deferred_repoints)
@@ -13194,24 +13222,6 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None, person_id=Non
             # only records what must move and a job moves it after commit.
             from omop_core.services.repoint_jobs import queue_repoint
             repoint = queue_repoint(mapping, sources)
-
-    # The curator re-filed the code under another table: the rows ingest put
-    # in the old one follow it, or the patient page keeps listing the code as
-    # Unmapped there with no mapping that could ever match (#2386). One
-    # patient's rows move in the request; every patient's move after commit.
-    mapping.relocation = None
-    new_table = normalize_omop_table(mapping.omop_table)
-    if table_moved and relocatable(previous_table, new_table):
-        if person_id is not None:
-            outcome = relocate_clinical_rows(
-                mapping=mapping, from_table=previous_table, to_table=new_table, person_id=person_id,
-            )
-            outcome.pop('person_ids', None)
-            mapping.relocation = {'queued': False, 'from_table': previous_table,
-                                  'to_table': new_table, **outcome}
-        else:
-            from omop_core.services.relocation_jobs import queue_relocation
-            mapping.relocation = queue_relocation(mapping, previous_table, new_table)
 
     # Mirror to concept_relationship when both concepts exist.
     if status_value == 'approved' and mapping.source_concept_id and concept:

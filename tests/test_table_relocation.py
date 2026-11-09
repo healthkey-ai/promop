@@ -23,12 +23,16 @@ def _mapping(**overrides):
     })
 
 
-def test_relocatable_needs_two_different_clinical_tables():
+def test_only_measurement_and_observation_rows_move():
+    """A drug exposure composes a therapy line and a procedure anchors a
+    document; moving those would cascade or dangle, so they stay put."""
     assert relocatable('observation', 'measurement')
-    assert relocatable('condition_occurrence', 'procedure')
+    assert relocatable('measurement', 'observation')
+    assert not relocatable('condition_occurrence', 'procedure')
+    assert not relocatable('drug_exposure', 'procedure')
+    assert not relocatable('measurement', 'condition')
     assert not relocatable('measurement', 'measurement')
     assert not relocatable('', 'measurement')
-    assert not relocatable('measurement', 'note')
 
 
 def test_measurements_become_observations_with_their_facts_provenance_and_inventory():
@@ -60,7 +64,13 @@ def test_measurements_become_observations_with_their_facts_provenance_and_invent
     assert not Measurement.objects.filter(pk=row.pk).exists()
     assert Measurement.objects.filter(pk=unrelated.pk).exists()
     moved = Observation.objects.get(person=person, observation_source_value='GLU')
-    assert moved.observation_concept_id == mapping.target_concept_id
+    # The row keeps its concept; the re-point puts it on the destination,
+    # with unit normalization and duplicate collapse, so the concept it
+    # carried is queued for that.
+    assert moved.observation_concept_id == row.measurement_concept_id
+    assert outcome['concepts_moved'] == [row.measurement_concept_id]
+    mapping.refresh_from_db()
+    assert set(mapping.deferred_repoint_concept_ids) == {0, row.measurement_concept_id}
     assert (str(moved.observation_date), moved.value_as_number, moved.unit_concept_id,
             moved.unit_source_value, moved.value_source_value) == ('2026-01-02', Decimal('5.5'), unit.pk, 'mg/dL', '5.5')
     assert moved.observation_type_concept_id == row.measurement_type_concept_id
@@ -72,14 +82,34 @@ def test_measurements_become_observations_with_their_facts_provenance_and_invent
     assert PatientRecord.objects.get(person=person).derivation_version == 0
 
 
-def test_a_proposed_mapping_keeps_the_rows_concept_and_records_it_for_the_sweep():
-    old = ConceptFactory(concept_name='Old glucose')
-    mapping = _mapping(status='proposed')
-    row = MeasurementFactory(measurement_source_value='GLU', measurement_concept=old)
-    relocate_clinical_rows(mapping=mapping, from_table='measurement', to_table='observation')
-    assert Observation.objects.get(person=row.person).observation_concept_id == old.pk
-    mapping.refresh_from_db()
-    assert old.pk in mapping.deferred_repoint_concept_ids and 0 in mapping.deferred_repoint_concept_ids
+def test_the_import_description_moves_only_rows_at_this_mappings_concepts():
+    """Two hospital codes share the display text "Glucose". The other code's
+    row, and a row a curator corrected by hand, must not be dragged across."""
+    minted = ConceptFactory(concept_name='GLU minted')
+    corrected = ConceptFactory(concept_name='Corrected by hand')
+    mapping = _mapping(origin='import', source_code_description='Glucose', target_concept=minted)
+    by_code = MeasurementFactory(measurement_source_value='GLU', measurement_concept=corrected)
+    by_text_own = MeasurementFactory(measurement_source_value='Glucose', measurement_concept=minted)
+    by_text_zero = MeasurementFactory(measurement_source_value='Glucose', measurement_concept_id=0)
+    other_codes_row = MeasurementFactory(measurement_source_value='Glucose', measurement_concept=corrected)
+    outcome = relocate_clinical_rows(mapping=mapping, from_table='measurement', to_table='observation')
+    assert outcome['rows_relocated'] == 3
+    for gone in (by_code, by_text_own, by_text_zero):
+        assert not Measurement.objects.filter(pk=gone.pk).exists()
+    assert Measurement.objects.filter(pk=other_codes_row.pk).exists()
+
+
+def test_a_second_run_finds_nothing_and_batches_commit_on_their_own(monkeypatch):
+    from omop_core.mapping import table_relocation
+    monkeypatch.setattr(table_relocation, 'BATCH', 2)
+    mapping = _mapping()
+    for _ in range(5):
+        MeasurementFactory(measurement_source_value='GLU')
+    first = relocate_clinical_rows(mapping=mapping, from_table='measurement', to_table='observation')
+    assert first['rows_relocated'] == 5
+    assert Observation.objects.filter(observation_source_value='GLU').count() == 5
+    again = relocate_clinical_rows(mapping=mapping, from_table='measurement', to_table='observation')
+    assert again['rows_relocated'] == 0
 
 
 def test_person_scope_and_dry_run():

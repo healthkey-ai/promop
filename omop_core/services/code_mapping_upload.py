@@ -9,7 +9,9 @@ from django.db import connection, transaction
 from django.utils import timezone
 
 from omop_core.mapping.code_resolution import NO_MATCHING_CONCEPT_ID
+from omop_core.mapping.table_relocation import relocatable
 from omop_core.models import CodeMappingUpload, Concept, SourceCodeConceptMapping
+from omop_core.services.relocation_jobs import queue_relocation
 from omop_core.services.repoint_jobs import queue_repoints
 from omop_core.services.source_vocabularies import DOMAIN_TO_TABLE
 
@@ -282,6 +284,7 @@ def import_upload(*, upload, vocabulary, provenance, actor, can_approve=True):
         updates = []
         unchanged = 0
         approval_repoints = []
+        relocations = []
         for row in rows:
             mapping = existing.get(row.source_code)
             concept = concepts.get(row.destination_concept_id)
@@ -365,6 +368,10 @@ def import_upload(*, upload, vocabulary, provenance, actor, can_approve=True):
                     mapping.target_concept = concept
                     mapping.destination_vocabulary_id = concept.vocabulary_id or ''
                     mapping.domain_id = concept.domain_id
+                    if relocatable(mapping.omop_table, expected_table):
+                        # The file re-filed the code: its stored rows follow
+                        # after commit, as a dialog save's do (#2386).
+                        relocations.append((mapping, mapping.omop_table, expected_table))
                     mapping.omop_table = expected_table
                     mapping.status = row.state
                     changed = True
@@ -404,6 +411,8 @@ def import_upload(*, upload, vocabulary, provenance, actor, can_approve=True):
                  'updated_by', 'updated_at'],
                 batch_size=1_000,
             )
+        for moved_mapping, from_table, to_table in relocations:
+            queue_relocation(moved_mapping, from_table, to_table)
         if approval_repoints:
             approved = {
                 mapping.source_code: mapping

@@ -6,10 +6,15 @@ when ``CELERY_BROKER_URL`` is set, inline otherwise -- the rule
 ``repoint_jobs`` follows. The patient page's save is scoped to one patient
 and moves that patient's rows in the request, so the tab reflects it at once.
 
-Unlike a re-point there is no queue column: the mapping no longer remembers
-the table it left, so the task carries it. A task that is lost leaves the
-rows where they were, which is the state before the fix; the next save of
-the mapping from either table moves them.
+The move commits per batch, so a task killed at its time limit resumes where
+it stopped on retry. Unlike a re-point there is no queue column: the mapping
+no longer remembers the table it left, so the task carries it. Rows a lost
+task leaves behind are moved by ``manage.py relocate_mapping_rows``.
+
+The rows arrive with the concept they had; an approved mapping's re-point
+puts them on the destination. The re-point task a tab save queues may run
+before this one has moved anything, so this run dispatches it again when it
+is done.
 """
 from __future__ import annotations
 
@@ -52,7 +57,10 @@ def run_relocation(mapping_id, from_table, to_table):
     mapping = SourceCodeConceptMapping.objects.filter(pk=mapping_id).first()
     if mapping is None or mapping.omop_table != to_table:
         logger.info('Relocation of mapping %s skipped: it no longer names %s.', mapping_id, to_table)
-        return {'rows_relocated': 0, 'persons_marked_stale': 0, 'source_codes_refiled': 0}
+        return {'rows_relocated': 0, 'persons_marked_stale': 0, 'source_codes_refiled': 0, 'concepts_moved': []}
     outcome = relocate_clinical_rows(mapping=mapping, from_table=from_table, to_table=to_table)
     outcome.pop('person_ids', None)
+    if outcome['rows_relocated'] and mapping.status == 'approved':
+        from omop_core.services.repoint_jobs import dispatch_repoint
+        dispatch_repoint(mapping_id)
     return outcome
