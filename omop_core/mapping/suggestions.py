@@ -1316,6 +1316,11 @@ def rank_candidates_jev(source_value, candidates, source_description='', *, sour
     return chosen, note, alternatives
 
 
+def _is_retrieval_fallback(chosen, note):
+    """Whether a ranker's pick is the retrieval-order stand-in, not a selection."""
+    return chosen is not None and 'ranking model unavailable' in (note or '').lower()
+
+
 def _anthropic_status(chosen, note, alternatives, confidence):
     """How Anthropic took part in a dual ranking, for the curator's note.
 
@@ -1418,6 +1423,19 @@ def _rank_both(source_value, candidates, source_description, **kwargs):
     a_chosen, a_note, a_alts, a_ms = results.get('anthropic', (None, '', None, 0))
     j_chosen, j_note, j_alts, j_ms = results.get('jev', (None, '', None, 0))
 
+    # A ranker that could not run hands back the first retrieval hit as a
+    # "best-match fallback". That is not a verdict, and beside a ranker that
+    # did run it must not stand in for one: on HealthTree a rejected Anthropic
+    # key made the dialog show a visual-acuity finding for "M Spike 1" while
+    # Jev had declined every candidate (#2355). The side that answered decides;
+    # the fallback is used only when neither did.
+    a_fell_back = _is_retrieval_fallback(a_chosen, a_note)
+    j_fell_back = _is_retrieval_fallback(j_chosen, j_note)
+    if a_fell_back and not j_fell_back:
+        a_chosen = None
+    elif j_fell_back and not a_fell_back:
+        j_chosen = None
+
     # Merge alternatives from both rankers.
     combined_alts = list(a_alts or []) + list(j_alts or [])
 
@@ -1442,6 +1460,8 @@ def _rank_both(source_value, candidates, source_description, **kwargs):
         winner, note = a_chosen, f'{a_note}{note_suffix}'
     elif j_chosen is not None:
         winner, note = j_chosen, f'{j_note} (Anthropic {a_status})'
+    elif a_fell_back and not j_fell_back:
+        winner, note = None, f'{j_note} (Anthropic {a_status})'
     else:
         winner, note = None, f'Both rankers declined. Anthropic: {a_note} | Jev: {j_note}'
     # The winner's own ranker first: chosen_confidence reads the first score
