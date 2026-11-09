@@ -43,11 +43,13 @@ from omop_core.services.lot_regimens import (
 )
 from omop_core.services.hemoglobin_units import (
     CANONICAL_FIELD as HEMOGLOBIN_CANONICAL,
+    DEFAULT_UNIT as HEMOGLOBIN_DEFAULT_UNIT,
     PAIR_FIELD as HEMOGLOBIN_PAIR,
     UNIT_FIELD as HEMOGLOBIN_UNIT,
     SOURCE_PAIRS as _SOURCE_PAIRS,
     canonical_from_pair as hemoglobin_canonical_from_pair,
     canonical_in_range as hemoglobin_canonical_in_range,
+    normalize_unit as normalize_hemoglobin_unit,
     same_number,
 )
 from omop_core.services.creatinine_units import (
@@ -87,6 +89,9 @@ _DIRECT_PAIR_FIELD = direct_bilirubin_units.PAIR_FIELD
 _DIRECT_UNIT_FIELD = direct_bilirubin_units.UNIT_FIELD
 _DIRECT_ALIAS_FIELD = direct_bilirubin_units.ALIAS_FIELD
 _CHEMISTRY_SELECTED_FIELDS = _CHEMISTRY_CANONICAL_FIELDS | {_DIRECT_PAIR_FIELD}
+#: The chronological import pass also owns hemoglobin's canonical/pair, because
+#: a LOINC 718-7 result can arrive in g/L and must not be stored as g/dL.
+_UNIT_PAIR_SELECTED_FIELDS = _CHEMISTRY_SELECTED_FIELDS | {HEMOGLOBIN_CANONICAL}
 
 
 def _chemistry_reported_unit(measurement):
@@ -4569,14 +4574,10 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None,
         field_name = _LEGACY_LAB_CONCEPT_FIELDS.get(concept_name)
         if not field_name or field_name in blood_count_fields:
             continue
-        if field_name in _CHEMISTRY_PAIR_CANONICAL:
+        if field_name in _CHEMISTRY_PAIR_CANONICAL or field_name == HEMOGLOBIN_CANONICAL:
             # Selected with its canonical in one chronological pass below: a
             # pair and its read-model must come from the same newest fact.
             continue
-        if (field_name == 'hemoglobin_g_dl' and measurement.unit_source_value
-                and measurement.unit_source_value.strip().casefold() != 'g/dl'):
-            # We have no supported conversion for arbitrary legacy units.
-            field_name = 'hemoglobin_level'
         selected = select_lab_value(field_name, measurement.value_as_number, measurement)
         if selected and measurement.unit_source_value:
             data[f'{field_name}_units'] = measurement.unit_source_value
@@ -4643,7 +4644,7 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None,
         field, cast = code_fields[code]
         if field in _FLC_FIELDS or field in blood_count_fields:
             continue
-        if field in _CHEMISTRY_SELECTED_FIELDS:
+        if field in _UNIT_PAIR_SELECTED_FIELDS:
             continue
         canonical_value = None
         if code == '6690-2':
@@ -4674,7 +4675,7 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None,
     for source_value, field in _SOURCE_VALUE_LAB_FIELDS.items():
         if field in blood_count_fields:
             continue
-        if field in _FLC_FIELDS or field in _CHEMISTRY_SELECTED_FIELDS:
+        if field in _FLC_FIELDS or field in _UNIT_PAIR_SELECTED_FIELDS:
             continue
         for m in snapshot.meas_by_source.get(source_value, ()):
             if m.value_as_number is not None:
@@ -4726,25 +4727,70 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None,
         code = _measurement_code(measurement)
         if code in code_fields:
             candidate = code_fields[code][0]
-            if candidate in _CHEMISTRY_SELECTED_FIELDS:
+            if candidate in _UNIT_PAIR_SELECTED_FIELDS:
                 field, representation = candidate, 'coded'
         if field is None:
             candidate = _SOURCE_VALUE_LAB_FIELDS.get(
                 measurement.measurement_source_value)
-            if candidate in _CHEMISTRY_SELECTED_FIELDS:
+            if candidate in _UNIT_PAIR_SELECTED_FIELDS:
                 field, representation = candidate, 'display'
         if field is None:
             concept = measurement.measurement_concept
             concept_name = (
                 (concept.concept_name if concept else '') or ''
             ).casefold().strip()
-            candidate = _CHEMISTRY_PAIR_CANONICAL.get(
-                _LEGACY_LAB_CONCEPT_FIELDS.get(concept_name))
+            legacy_field = _LEGACY_LAB_CONCEPT_FIELDS.get(concept_name)
+            candidate = _CHEMISTRY_PAIR_CANONICAL.get(legacy_field)
+            if candidate is None and legacy_field == HEMOGLOBIN_CANONICAL:
+                candidate = HEMOGLOBIN_CANONICAL
             if candidate is not None:
                 field, representation = candidate, 'legacy'
         if field is not None and field not in chemistry_winners:
             chemistry_winners[field] = (measurement, representation)
     for field, (measurement, representation) in chemistry_winners.items():
+        if field == HEMOGLOBIN_CANONICAL:
+            reported_unit = _chemistry_reported_unit(measurement)
+            unit_code = (HEMOGLOBIN_DEFAULT_UNIT if reported_unit is None
+                         else normalize_hemoglobin_unit(reported_unit))
+            recognised, canonical_value = hemoglobin_canonical_from_pair(
+                measurement.value_as_number, unit_code)
+            if (unit_code is None or not recognised
+                    or not hemoglobin_canonical_in_range(canonical_value)):
+                if representation == 'legacy' and reported_unit is not None:
+                    # A historic concept-name fact keeps the number and unit
+                    # the lab reported, as before (#475): the canonical stays
+                    # unknown rather than reinterpreting an unsupported scale.
+                    data[HEMOGLOBIN_CANONICAL] = None
+                    data[HEMOGLOBIN_PAIR] = Decimal(str(measurement.value_as_number))
+                    data[HEMOGLOBIN_UNIT] = reported_unit
+                    selected_dates[HEMOGLOBIN_PAIR] = measurement.measurement_date
+                    if dates_out is not None:
+                        dates_out[HEMOGLOBIN_PAIR] = measurement.measurement_date
+                    continue
+                # The newest coded/display result owns the pair even with an
+                # unreadable unit; explicit Nones stop the curated fallback.
+                logger.warning(
+                    'Hemoglobin projection skipped for person_id=%s: unit=%r',
+                    person.person_id, reported_unit,
+                )
+                data[HEMOGLOBIN_CANONICAL] = None
+                data[HEMOGLOBIN_PAIR] = None
+                data[HEMOGLOBIN_UNIT] = None
+                continue
+            data[HEMOGLOBIN_CANONICAL] = canonical_value
+            selected_dates[HEMOGLOBIN_CANONICAL] = measurement.measurement_date
+            if dates_out is not None:
+                dates_out[HEMOGLOBIN_CANONICAL] = measurement.measurement_date
+            if representation == 'legacy' and reported_unit is not None:
+                data[HEMOGLOBIN_PAIR] = Decimal(str(measurement.value_as_number))
+                data[HEMOGLOBIN_UNIT] = unit_code
+            else:
+                data[HEMOGLOBIN_PAIR] = canonical_value
+                data[HEMOGLOBIN_UNIT] = HEMOGLOBIN_DEFAULT_UNIT
+            selected_dates[HEMOGLOBIN_PAIR] = measurement.measurement_date
+            if dates_out is not None:
+                dates_out[HEMOGLOBIN_PAIR] = measurement.measurement_date
+            continue
         if field == _DIRECT_PAIR_FIELD:
             reported_unit = _chemistry_reported_unit(measurement)
             unit_code = (direct_bilirubin_units.DEFAULT_UNIT
@@ -4817,6 +4863,11 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None,
             # The chronological pass above writes the pair, its unit and the
             # normalised alias together; copying the raw value back would make
             # the unitless mirror ambiguous.
+            continue
+        if canonical == HEMOGLOBIN_CANONICAL:
+            # The pass writes the pair and its unit from the same newest fact;
+            # copying the canonical back would replace a reported g/L pair
+            # with the g/dL read-model.
             continue
         chemistry = _CHEMISTRY_PAIRS.get(canonical)
         if chemistry is not None:
