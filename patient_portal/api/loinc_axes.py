@@ -16,6 +16,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from omop_core.mapping import axis_variants, loinc_axes
+from omop_core.services import concept_lock
 from omop_core.models import Concept, LoincCodeClass, SourceCodeConceptMapping, SuggestRun
 
 AXIS_VALUE_LIMIT = 25
@@ -150,6 +151,9 @@ def code_mapping_axis_variant(request, mapping_id):
         if approve and concept is None:
             return Response({'target_concept_id': 'Choose a destination before approving.'},
                             status=status.HTTP_400_BAD_REQUEST)
+        # A variant destination on a concept another curator holds (#2390).
+        if concept is not None:
+            concept_lock.check_concept_lock(concept.pk, request.user)
         if reopen and not views._can_approve_mappings(request.user):
             # Reopening rewrites stored rows, like approving.
             return Response({'detail': 'Reopening an approved variant requires approver access.'},

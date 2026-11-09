@@ -101,3 +101,31 @@ def test_lock_endpoint_needs_a_curator_and_a_standard_concept(alice, concept, dj
     patient = APIClient()
     patient.force_authenticate(django_user_model.objects.create_user(email='patient-lock@test.com'))
     assert patient.post(f'{BASE}{concept.pk}/lock/').status_code == 403
+
+
+def test_a_csv_upload_onto_a_locked_concept_is_refused_whole(alice, bob, concept, django_user_model):
+    """The upload bypasses the mapping writer, so it checks the lock itself."""
+    from django.core.files.uploadedfile import SimpleUploadedFile
+    alice.post(f'{BASE}{concept.pk}/lock/')
+    response = bob.post('/api/v1/code-mappings/upload/', {
+        'file': SimpleUploadedFile('codes.csv', (
+            'source code,source description,seen count,destination concept ID,state\n'
+            f'A01,Albumin,8,{concept.pk},Approved\n').encode(), content_type='text/csv'),
+        'source_vocabulary_id': 'VendorLab', 'provenance': 'reviewed-catalogue',
+    }, format='multipart')
+    assert response.status_code == 423, response.data
+    assert 'alice@test.com' in response.data['detail']
+    assert not SourceCodeConceptMapping.objects.filter(source_code='A01').exists()
+
+
+def test_check_concept_locks_names_the_first_held_concept_and_ignores_the_callers_own(alice, bob, concept):
+    from omop_core.services.concept_lock import ConceptLocked, check_concept_locks
+    other = ConceptFactory(concept_name='Serum calcium', concept_code='CALCIUM')
+    alice.post(f'{BASE}{concept.pk}/lock/')
+    bob.post(f'{BASE}{other.pk}/lock/')
+    with pytest.raises(ConceptLocked) as refused:
+        check_concept_locks([other.pk, concept.pk], alice.user)
+    assert refused.value.lock.concept_id == other.pk
+    # Only the caller's own locks: nothing to refuse.
+    check_concept_locks([concept.pk], alice.user)
+    check_concept_locks([], alice.user)

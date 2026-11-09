@@ -9,7 +9,7 @@ which protects one row while a dialog is open.
 """
 from __future__ import annotations
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from rest_framework.exceptions import APIException
 
 from omop_core.models import ConceptMappingLock
@@ -63,10 +63,27 @@ def acquire(concept, user):
         lock = (ConceptMappingLock.objects.select_for_update().select_related('locked_by', 'concept')
                 .filter(concept=concept).first())
         if lock is None:
-            lock = ConceptMappingLock.objects.create(concept=concept, locked_by=user)
-        elif lock.locked_by_id != user.pk:
+            # Nothing to row-lock while the concept is free: two curators
+            # clicking at once both see None, and the second create collides
+            # on the one-per-concept key. That one loses, with the holder's name.
+            try:
+                with transaction.atomic():
+                    return ConceptMappingLock.objects.create(concept=concept, locked_by=user)
+            except IntegrityError:
+                lock = (ConceptMappingLock.objects.select_for_update().select_related('locked_by', 'concept')
+                        .get(concept=concept))
+        if lock.locked_by_id != user.pk:
             raise ConceptLocked(lock)
         return lock
+
+
+def check_concept_locks(concept_ids, user):
+    """Raise ConceptLocked for the first of *concept_ids* another user holds."""
+    lock = (ConceptMappingLock.objects.filter(concept_id__in=set(concept_ids))
+            .exclude(locked_by_id=getattr(user, 'pk', None))
+            .select_related('locked_by', 'concept').order_by('concept_id').first())
+    if lock is not None:
+        raise ConceptLocked(lock)
 
 
 def release(concept, user):

@@ -11,6 +11,7 @@ from django.utils import timezone
 from omop_core.mapping.code_resolution import NO_MATCHING_CONCEPT_ID
 from omop_core.mapping.table_relocation import relocatable
 from omop_core.models import CodeMappingUpload, Concept, SourceCodeConceptMapping
+from omop_core.services.concept_lock import check_concept_locks
 from omop_core.services.relocation_jobs import queue_relocation
 from omop_core.services.repoint_jobs import queue_repoints
 from omop_core.services.source_vocabularies import DOMAIN_TO_TABLE
@@ -279,6 +280,11 @@ def import_upload(*, upload, vocabulary, provenance, actor, can_approve=True):
                         ),
                     } for row in protected[:100]],
                 )
+        # A concept another curator has claimed (#2390) takes no destinations
+        # from a file either: the whole upload is refused, naming the holder.
+        check_concept_locks(
+            [row.destination_concept_id for row in rows if row.destination_concept_id is not None], actor,
+        )
         now = timezone.now()
         inserts = []
         updates = []
