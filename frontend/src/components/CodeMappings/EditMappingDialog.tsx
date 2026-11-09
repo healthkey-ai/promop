@@ -110,6 +110,38 @@ type SourceExamplesState =
   | { status: "error"; message: string }
   | { status: "ready"; examples: SourceExample[] };
 
+/** The `existing_mapping` block of a 400 from POST /v1/code-mappings/ (#2347). */
+interface ExistingMappingConflict {
+  id: number;
+  omop_table: string;
+  domain_id: string;
+  status: string;
+  target_concept_name: string;
+}
+
+function existingMappingConflict(detail: unknown): ExistingMappingConflict | null {
+  if (!detail || typeof detail !== "object" || Array.isArray(detail)) return null;
+  const raw = (detail as { existing_mapping?: unknown }).existing_mapping;
+  if (!raw || typeof raw !== "object") return null;
+  const block = raw as Record<string, unknown>;
+  const id = Number(block.id);
+  if (!Number.isFinite(id) || id <= 0) return null;
+  return {
+    id,
+    omop_table: String(block.omop_table ?? ""),
+    domain_id: String(block.domain_id ?? ""),
+    status: String(block.status ?? ""),
+    target_concept_name: String(block.target_concept_name ?? ""),
+  };
+}
+
+/** `drug_exposure` -> `Drug Exposure`. */
+function tableLabel(omopTable: string): string {
+  return omopTable
+    ? omopTable.split("_").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ")
+    : "no table";
+}
+
 // ── Component ───────────────────────────────────────────────────────
 
 export default function EditMappingDialog({
@@ -164,6 +196,13 @@ export default function EditMappingDialog({
   // SNOMED evidence: the panel's current settings, under the same guard.
   const [snomedSettings, setSnomedSettings] = useState<{ mappingId: number; settings: SnomedSettings } | null>(null);
   const [error, setError] = useState("");
+  /**
+   * A create that collided with a mapping already holding this code (#2347).
+   * The patient page lists a code under the clinical table its rows sit in,
+   * so a code whose mapping was filed under another table looks unmapped
+   * there. The server names that mapping; the curator can move it here.
+   */
+  const [existingMapping, setExistingMapping] = useState<ExistingMappingConflict | null>(null);
   const [saving, setSaving] = useState(false);
   const [mintOpen, setMintOpen] = useState(false);
   const [mintUnitOpen, setMintUnitOpen] = useState(false);
@@ -386,6 +425,7 @@ export default function EditMappingDialog({
     setSuggestionMessage("");
     dialogRequest.current += 1;
     setError("");
+    setExistingMapping(null);
     setSearchingConcepts(false);
     setMintOpen(false);
     // Release edit lock.
@@ -691,22 +731,43 @@ export default function EditMappingDialog({
     onSourceCodeUpdated?.();
   };
 
+  const savePayload = () => ({
+    ...form,
+    ...(patientId ? { patient_id: Number(patientId) } : {}),
+    source_unit: patientId && selectedRow?.source_code_id ? sourceUnit.trim() : form.source_unit,
+    // Empty stays empty: never send concept 0 as a destination.
+    destination_concept_id: form.destination_concept_id ? Number(form.destination_concept_id) : null,
+    target_concept_id: form.destination_concept_id ? Number(form.destination_concept_id) : null,
+    destination_unit_concept_id: form.destination_unit_concept_id
+      ? Number(form.destination_unit_concept_id) : null,
+  });
+
+  const saveFailed = (err: unknown, fallback: string) => {
+    const detail =
+      err && typeof err === "object" && "response" in err
+        ? (err as { response?: { data?: unknown } }).response?.data
+        : undefined;
+    const conflict = existingMappingConflict(detail);
+    setExistingMapping(conflict);
+    const message =
+      detail && typeof detail === "object" && !Array.isArray(detail)
+        ? Object.entries(detail as Record<string, unknown>)
+          .filter(([field]) => field !== "existing_mapping")
+          .map(([field, value]) => `${field === "detail" ? "" : `${field}: `}${Array.isArray(value) ? value.join(", ") : String(value)}`)
+          .join(" ")
+        : "";
+    setError(message || fallback);
+    setSaving(false);
+  };
+
   const submitForm = async (event: React.FormEvent) => {
     event.preventDefault();
     setSaving(true);
     setError("");
+    setExistingMapping(null);
     try {
       if (sourceContextDirty) await persistSourceContext();
-      const payload = {
-        ...form,
-        ...(patientId ? { patient_id: Number(patientId) } : {}),
-        source_unit: patientId && selectedRow?.source_code_id ? sourceUnit.trim() : form.source_unit,
-        // Empty stays empty: never send concept 0 as a destination.
-        destination_concept_id: form.destination_concept_id ? Number(form.destination_concept_id) : null,
-        target_concept_id: form.destination_concept_id ? Number(form.destination_concept_id) : null,
-        destination_unit_concept_id: form.destination_unit_concept_id
-          ? Number(form.destination_unit_concept_id) : null,
-      };
+      const payload = savePayload();
       const resp = selectedRow?.mapping_id
         ? await api.patch(`/v1/code-mappings/${selectedRow.mapping_id}/`, payload)
         : await api.post("/v1/code-mappings/", payload);
@@ -715,18 +776,30 @@ export default function EditMappingDialog({
       onSaved(resp.data, repoint);
       closeDialog();
     } catch (err) {
-      const detail =
-        err && typeof err === "object" && "response" in err
-          ? (err as { response?: { data?: { detail?: string } | Record<string, string[]> } }).response?.data
-          : undefined;
-      const message =
-        detail && typeof detail === "object" && !Array.isArray(detail)
-          ? Object.entries(detail).map(([field, value]) => `${field === "detail" ? "" : `${field}: `}${Array.isArray(value) ? value.join(", ") : value}`).join(" ")
-          : "";
-      setError(message || (sourceContextDirty
+      saveFailed(err, sourceContextDirty
         ? "Failed to save source context or code mapping. Please retry."
-        : "Failed to save code mapping."));
-      setSaving(false);
+        : "Failed to save code mapping.");
+    }
+  };
+
+  /**
+   * Re-file the mapping that already holds this code under the table and
+   * domain chosen here, with this form's destination and status. A PATCH of
+   * that row, so the server's own rules (locks, approval rights, rows still
+   * moving) still apply and the patient page then finds it under this table.
+   */
+  const moveExistingMapping = async () => {
+    if (!existingMapping) return;
+    setSaving(true);
+    setError("");
+    try {
+      const resp = await api.patch(`/v1/code-mappings/${existingMapping.id}/`, savePayload());
+      const repoint: RepointResult | null = resp.data?.repoint ?? null;
+      setExistingMapping(null);
+      onSaved(resp.data, repoint);
+      closeDialog();
+    } catch (err) {
+      saveFailed(err, "Failed to move the existing mapping.");
     }
   };
 
@@ -787,6 +860,25 @@ export default function EditMappingDialog({
             {error && (
               <div role="alert" className="mb-4 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
                 {error}
+                {existingMapping && (
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={moveExistingMapping}
+                      disabled={saving}
+                      className="rounded-md border border-red-300 bg-white px-3 py-1 text-xs font-medium text-red-700 hover:bg-red-100 disabled:opacity-50"
+                    >
+                      {existingMapping.omop_table && existingMapping.omop_table !== form.omop_table
+                        ? `Move it from ${tableLabel(existingMapping.omop_table)} to ${tableLabel(form.omop_table)}`
+                        : "Update the existing mapping"}
+                    </button>
+                    <span className="text-xs text-red-600">
+                      Saves this destination and status onto that mapping
+                      {existingMapping.target_concept_name
+                        ? `, replacing ${existingMapping.target_concept_name}` : ""}.
+                    </span>
+                  </div>
+                )}
               </div>
             )}
             {/* -- SOURCE ------------------------------------------------- */}

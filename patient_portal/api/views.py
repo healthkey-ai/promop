@@ -12642,6 +12642,52 @@ def _mapping_patient_scope(request):
     return person_id
 
 
+def _table_label(omop_table):
+    """``drug_exposure`` -> ``Drug Exposure``, for a message a curator reads."""
+    return (omop_table or '').replace('_', ' ').title() or 'no table'
+
+
+def _existing_mapping_conflict(existing, requested_table):
+    """The 400 body for a create that collides with a stored mapping (#2347).
+
+    ``source_code`` carries the sentence the dialog shows; ``existing_mapping``
+    is what it needs to offer "move that mapping here": the row's id, the table
+    and domain it is filed under now, and the table the curator asked for.
+    Values are strings because DRF renders every leaf of a ValidationError as
+    one.
+    """
+    destination = (
+        f" -> {existing.target_concept.concept_name}" if existing.target_concept_id else ''
+    )
+    filed = _table_label(existing.omop_table)
+    requested = _table_label(requested_table)
+    message = (
+        f"'{existing.source_code}' is already mapped ({existing.status}{destination}), "
+        f"and that mapping's destination table is {filed}"
+    )
+    if requested_table and requested_table != existing.omop_table:
+        message += (
+            f", not {requested}. Move the existing mapping to {requested} to use it "
+            f"here, or edit it where it is."
+        )
+    else:
+        message += '. Edit that mapping instead of creating a second one.'
+    return {
+        'source_code': message,
+        'existing_mapping': {
+            'id': str(existing.pk),
+            'omop_table': existing.omop_table or '',
+            'domain_id': existing.domain_id or '',
+            'status': existing.status,
+            'target_concept_id': str(existing.target_concept_id or ''),
+            'target_concept_name': (
+                existing.target_concept.concept_name if existing.target_concept_id else ''
+            ),
+            'requested_omop_table': requested_table or '',
+        },
+    }
+
+
 def _upsert_source_code_mapping(concept, data, user, mapping=None, person_id=None):
     """Create or update one mapping. Returns (mapping, repoint_result).
 
@@ -12970,6 +13016,25 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None, person_id=Non
                 raise serializers.ValidationError({
                     'destination_unit_concept_id': 'Unit concept not found.'
                 })
+    if mapping is None:
+        # One mapping per (organization, source system, code), whatever table
+        # it lands in. The patient page lists a code under the clinical table
+        # its rows sit in, so a code whose mapping a curator filed under another
+        # table looks unmapped there, and saving it hit the unique constraint
+        # with nothing to go on (#2347). Name the mapping that holds the code
+        # and the table it is filed under, and hand back its id so the dialog
+        # can offer to move that mapping to the table the curator is in.
+        existing = (
+            SourceCodeConceptMapping.objects
+            .filter(organization=organization, source_vocabulary_id=source_vocabulary_id,
+                    source_code=source_code)
+            .select_related('target_concept')
+            .first()
+        )
+        if existing is not None:
+            raise serializers.ValidationError(
+                _existing_mapping_conflict(existing, omop_table)
+            )
     try:
         if mapping is None:
             if concept is None:

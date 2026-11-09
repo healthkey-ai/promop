@@ -22416,6 +22416,68 @@ class CodeMappingApiTest(TestCase):
         self.assertEqual(resp.data['source_code'], 'C90.00')
         self.assertEqual(resp.data['origin'], 'curator')
 
+    def test_create_of_a_code_mapped_under_another_table_names_that_table(self):
+        """#2347: the patient page lists a code under the table its rows sit
+        in, so a mapping filed under another table looked unmapped there and
+        saving it hit the unique constraint. The error names the table the
+        existing mapping is filed under and returns its id for the dialog's
+        offer to move it."""
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.post('/api/v1/code-mappings/', {
+            'source_vocabulary_id': '',
+            'source_code': 'M-PROTEIN, SERUM',
+            'destination_concept_id': self.standard.concept_id,
+            'domain_id': 'Observation',
+            'omop_table': 'observation',
+            'status': 'approved',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
+        message = str(resp.data['source_code'])
+        self.assertIn("'M-PROTEIN, SERUM' is already mapped (proposed -> M-PROTEIN, SERUM)", message)
+        self.assertIn('destination table is Measurement, not Observation', message)
+        self.assertIn('Move the existing mapping to Observation', message)
+        existing = resp.data['existing_mapping']
+        self.assertEqual(existing['id'], str(self.mapping.pk))
+        self.assertEqual(existing['omop_table'], 'measurement')
+        self.assertEqual(existing['status'], 'proposed')
+        self.assertEqual(existing['target_concept_name'], 'M-PROTEIN, SERUM')
+        self.assertEqual(existing['requested_omop_table'], 'observation')
+        # Nothing was written: still the one mapping, unchanged.
+        self.assertEqual(SourceCodeConceptMapping.objects.filter(source_code='M-PROTEIN, SERUM').count(), 1)
+        self.mapping.refresh_from_db()
+        self.assertEqual(self.mapping.omop_table, 'measurement')
+
+    def test_create_of_a_code_mapped_under_the_same_table_says_edit_it(self):
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.post('/api/v1/code-mappings/', {
+            'source_vocabulary_id': '',
+            'source_code': 'M-PROTEIN, SERUM',
+            'destination_concept_id': self.standard.concept_id,
+            'omop_table': 'measurement',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
+        self.assertIn('Edit that mapping instead', str(resp.data['source_code']))
+        self.assertEqual(resp.data['existing_mapping']['id'], str(self.mapping.pk))
+
+    def test_the_existing_mapping_can_be_moved_to_the_requested_table(self):
+        """The dialog's offer: a PATCH of the named row with the form's table,
+        domain, destination and status."""
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.patch(f'/api/v1/code-mappings/{self.mapping.pk}/', {
+            'source_vocabulary_id': '',
+            'source_code': 'M-PROTEIN, SERUM',
+            'destination_concept_id': self.standard.concept_id,
+            'domain_id': 'Observation',
+            'omop_table': 'observation',
+            'status': 'approved',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.mapping.refresh_from_db()
+        self.assertEqual(self.mapping.omop_table, 'observation')
+        self.assertEqual(self.mapping.domain_id, 'Observation')
+        self.assertEqual(self.mapping.status, 'approved')
+        self.assertEqual(self.mapping.target_concept_id, self.standard.concept_id)
+
     def test_create_rejects_unknown_destination_concept(self):
         self.client.force_authenticate(user=self.staff)
         resp = self.client.post('/api/v1/code-mappings/', {
