@@ -724,7 +724,9 @@ def lexical_candidates(source_value, domain_id, limit=CANDIDATE_LIMIT):
     # synonyms from every domain -- 30,000 to 160,000 rows per code on staging,
     # each scored, nearly all discarded by the join. suggest_synonym_term holds
     # the same text with the domain beside it and a partial index per domain.
-    # Scores are identical: `term` is UPPER(concept_synonym_name).
+    # Its term is UPPER of each semicolon-separated part of a synonym (#2355),
+    # so it can match "M-SPIKE" inside LOINC's joined related names; the direct
+    # search below scores the whole string and cannot.
     from omop_core.services import suggest_synonym_terms
     if suggest_synonym_terms.is_populated(domain_id):
         synonym_hits = (
@@ -1316,6 +1318,24 @@ def rank_candidates_jev(source_value, candidates, source_description='', *, sour
     return chosen, note, alternatives
 
 
+def _is_retrieval_fallback(chosen, note):
+    """Whether a ranker's pick is the retrieval-order stand-in, not a selection."""
+    return chosen is not None and 'ranking model unavailable' in (note or '').lower()
+
+
+def _ranker_answered(chosen, note):
+    """A verdict: a real pick, or an explicit decline. Not a fallback, not a crash."""
+    if chosen is not None:
+        return not _is_retrieval_fallback(chosen, note)
+    return (note or '').startswith('No suitable concept')
+
+
+def _unavailable_status(note):
+    """``unavailable: <detail>`` from a fallback note, for the curator's note."""
+    detail = note.split('Details: ', 1)[1] if 'Details: ' in (note or '') else ''
+    return f'unavailable: {detail.rstrip(".")}' if detail else 'unavailable'
+
+
 def _anthropic_status(chosen, note, alternatives, confidence):
     """How Anthropic took part in a dual ranking, for the curator's note.
 
@@ -1418,6 +1438,19 @@ def _rank_both(source_value, candidates, source_description, **kwargs):
     a_chosen, a_note, a_alts, a_ms = results.get('anthropic', (None, '', None, 0))
     j_chosen, j_note, j_alts, j_ms = results.get('jev', (None, '', None, 0))
 
+    # A ranker that could not run hands back the first retrieval hit as a
+    # "best-match fallback". That is not a verdict, and beside a ranker that
+    # did run it must not stand in for one: on HealthTree a rejected Anthropic
+    # key made the dialog show a visual-acuity finding for "M Spike 1" while
+    # Jev had declined every candidate (#2355). The side that answered decides;
+    # the fallback is used only when neither did.
+    a_fell_back = _is_retrieval_fallback(a_chosen, a_note)
+    j_fell_back = _is_retrieval_fallback(j_chosen, j_note)
+    if a_fell_back and _ranker_answered(j_chosen, j_note):
+        a_chosen = None
+    elif j_fell_back and _ranker_answered(a_chosen, a_note):
+        j_chosen = None
+
     # Merge alternatives from both rankers.
     combined_alts = list(a_alts or []) + list(j_alts or [])
 
@@ -1442,6 +1475,10 @@ def _rank_both(source_value, candidates, source_description, **kwargs):
         winner, note = a_chosen, f'{a_note}{note_suffix}'
     elif j_chosen is not None:
         winner, note = j_chosen, f'{j_note} (Anthropic {a_status})'
+    elif a_fell_back and a_chosen is None:
+        winner, note = None, f'{j_note} (Anthropic {a_status})'
+    elif j_fell_back and j_chosen is None:
+        winner, note = None, f'{a_note} (Jev {_unavailable_status(j_note)})'
     else:
         winner, note = None, f'Both rankers declined. Anthropic: {a_note} | Jev: {j_note}'
     # The winner's own ranker first: chosen_confidence reads the first score

@@ -231,3 +231,81 @@ class TestRankCandidatesJev:
         assert chosen is not None
         assert chosen['concept_id'] == 100
         assert 'Jev ranking request failed' in note
+
+
+class TestDualRankerFallbackIsNotAVerdict:
+    """A ranker that could not run hands back retrieval's first hit (#2355).
+
+    Beside a ranker that did run, that stand-in must not win or hide a decline:
+    HealthTree's rejected Anthropic key put a visual-acuity finding on top for
+    "M Spike 1" while Jev had declined every candidate.
+    """
+
+    FALLBACK_NOTE = (
+        'Best-match fallback (score 0.7303). Ranking model unavailable, so this is the '
+        'first candidate in retrieval fallback order. Retrieval scores do not establish '
+        'clinical compatibility — review carefully. Details: Anthropic rejected the '
+        'configured API key (HTTP 401).'
+    )
+
+    def _both(self, anthropic_result, jev_result):
+        with patch('omop_core.mapping.suggestions.rank_candidates', return_value=anthropic_result), \
+             patch('omop_core.mapping.suggestions.rank_candidates_jev', return_value=jev_result):
+            return rank_candidates_dispatch('M Spike 1', _candidates(), 'm spike 1', ranking_model='both')
+
+    def test_a_jev_decline_beats_the_anthropic_fallback(self):
+        j_alts = [{'concept_id': 100, 'concept_name': 'Hemoglobin A1c', 'confidence': 0.09, 'ranker': 'jev'}]
+        chosen, note, alts, _ = self._both(
+            (_candidates()[0], self.FALLBACK_NOTE, None),
+            (None, 'No suitable concept (Jev ranking). Alternatives considered: Hemoglobin A1c (9%)', j_alts),
+        )
+        assert chosen is None
+        assert note.startswith('No suitable concept (Jev ranking).')
+        assert 'Anthropic unavailable: Anthropic rejected the configured API key (HTTP 401)' in note
+        assert alts == j_alts
+
+    def test_a_jev_pick_beats_the_anthropic_fallback(self):
+        j_alts = [{'concept_id': 200, 'concept_name': 'Glucose', 'confidence': 0.9, 'ranker': 'jev'}]
+        chosen, note, _, _ = self._both(
+            (_candidates()[0], self.FALLBACK_NOTE, None),
+            (_candidates()[1], 'high confidence (Jev 90%)', j_alts),
+        )
+        assert chosen['concept_id'] == 200
+        assert note.startswith('Jev wins (90% vs Anthropic unavailable')
+
+    def test_an_anthropic_pick_beats_the_jev_fallback(self):
+        a_alts = [{'concept_id': 200, 'concept_name': 'Glucose', 'confidence': 0.8, 'ranker': 'anthropic'}]
+        chosen, note, _, _ = self._both(
+            (_candidates()[1], 'high confidence: fits', a_alts),
+            (_candidates()[0], self.FALLBACK_NOTE.replace('Anthropic rejected the configured API key (HTTP 401)', 'JEV_API_KEY is not configured'), None),
+        )
+        assert chosen['concept_id'] == 200
+        assert note.startswith('high confidence: fits')
+
+    def test_the_fallback_still_stands_when_neither_ranker_ran(self):
+        chosen, note, _, _ = self._both(
+            (_candidates()[0], self.FALLBACK_NOTE, None),
+            (_candidates()[0], self.FALLBACK_NOTE, None),
+        )
+        assert chosen['concept_id'] == 100
+        assert 'Ranking model unavailable' in note
+
+    def test_an_anthropic_decline_beats_the_jev_fallback(self):
+        a_alts = [{'concept_id': 100, 'concept_name': 'Hemoglobin A1c', 'confidence': 0.05, 'ranker': 'anthropic'}]
+        chosen, note, _, _ = self._both(
+            (None, 'No suitable concept. Nothing fits.', a_alts),
+            (_candidates()[0], self.FALLBACK_NOTE.replace(
+                'Anthropic rejected the configured API key (HTTP 401)', 'JEV_API_KEY is not configured'), None),
+        )
+        assert chosen is None
+        assert note == 'No suitable concept. Nothing fits. (Jev unavailable: JEV_API_KEY is not configured)'
+
+    def test_the_fallback_stands_when_the_other_ranker_crashed(self):
+        """A crash is neither a pick nor a decline, so it cannot outrank the stand-in."""
+        with patch('omop_core.mapping.suggestions.rank_candidates',
+                   return_value=(_candidates()[0], self.FALLBACK_NOTE, None)), \
+             patch('omop_core.mapping.suggestions.rank_candidates_jev', side_effect=RuntimeError('boom')):
+            chosen, note, _, _ = rank_candidates_dispatch(
+                'M Spike 1', _candidates(), 'm spike 1', ranking_model='both')
+        assert chosen['concept_id'] == 100
+        assert 'Ranking model unavailable' in note
