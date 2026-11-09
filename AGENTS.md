@@ -1261,6 +1261,52 @@ moves a destination outside the writer (a code-mapping upload, Athena
 destination recovery) clears both, as it clears `suggestion_confidence`. Both
 travel with `copy_reference_data`.
 
+### A code's rows follow its mapping to another table
+
+A curator who changes a mapping's Domain re-files it under another clinical
+table (the move offer from #2347, or the dialog's Domain field). The rows
+ingest wrote for that code stayed in the old table, so the patient page --
+which lists a code under the table its rows sit in -- kept showing it as
+Unmapped there with no mapping that could ever match (#2386). Now a save that
+changes `omop_table` **between measurement and observation** relocates the
+code's stored rows (`omop_core/mapping/table_relocation.py`); the response's
+`relocation` reports what happened.
+
+- Only those two tables. They share the fact shape and nothing points at
+  their rows by id but provenance and ownership. A drug exposure composes a
+  therapy line (`TherapyLineExposure` cascades), a procedure anchors an
+  imaging document, an episode event names a row by bare id: a move between
+  any other pair keeps the rows where they are and `relocation.skipped` says
+  so.
+- A patient-scoped save moves that patient's rows in the request, so the
+  Source Codes tab reflects it at once. A save from a mapping tab, and a
+  code-mapping upload that re-files a code, move every patient's rows after
+  commit (`relocation_jobs`; Celery when a broker is set, inline otherwise).
+  Each batch of 500 rows commits on its own, so a task killed at its time
+  limit resumes on retry. `manage.py relocate_mapping_rows <ids> --from-table
+  <table>` moves what a lost task left behind.
+- A row is copied column by column: the core both tables share (person, date,
+  datetime, type concept, source value and source concept) plus every column
+  both carry under the same name **and shape** (value, unit, qualifier,
+  provider, visit, erroneous flag), under a new id from the destination's
+  sequence. A measurement's operator and range are dropped. Its
+  `ProvenanceRecord` follows it in one statement per batch, a measurement's
+  `MeasurementOwnership` goes, the old row is deleted, and the patient's
+  record is marked stale as a re-point does.
+- The code matches by itself; the import description matches only rows at a
+  concept this mapping named (its destination, the concepts it is moving
+  off, concept 0), the re-point's rule, so "Glucose" does not drag another
+  producer's rows or a hand-corrected one across.
+- The rows keep the concept they had. Putting them on the destination is the
+  re-point's job -- it also normalizes units, routes axis variants and
+  collapses duplicates -- so the concepts moved join
+  `deferred_repoint_concept_ids`; an approval's re-point runs after the move
+  (the move dispatches it again), and a patient-scoped approval leaves it to
+  Generate OMOP as before. An organization-scoped mapping moves only rows its
+  hospital wrote.
+- The per-patient inventory (`PatientSourceCode`) is re-filed under the new
+  table, merging into a row the patient already has there.
+
 ### Replace re-answers rows, it does not delete them
 
 It used to delete: while the candidate set came from a clinical scan, a deleted

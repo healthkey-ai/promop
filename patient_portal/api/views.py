@@ -76,6 +76,7 @@ from omop_core.services.episode_service import upsert_therapy_line_episode
 from omop_core.services.mappings import CONCEPT_GENERIC_LAB, CONCEPT_PATIENT_REPORTED_TYPE, get_gender_concept
 from omop_core.services.demographics import resolve_concept as resolve_demographic_concept
 from omop_core.services.pk import next_pk, next_pk_batch
+from omop_core.mapping.table_relocation import relocatable, relocate_clinical_rows
 from omop_core.services.provenance_attribution import (
     ATTRIBUTION, OWN, UNATTRIBUTED, classify, same_attribution, with_attribution,
 )
@@ -12922,6 +12923,7 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None, person_id=Non
     was_approved = mapping is not None and mapping.status == 'approved'
     was_proposed = mapping is not None and mapping.status == 'proposed'
     previous_concept_id = mapping.target_concept_id if mapping else None
+    previous_table = normalize_omop_table(mapping.omop_table) if mapping else ''
     pending_repoints = list(mapping.pending_repoint_concept_ids) if mapping else []
     deferred_repoints = list(mapping.deferred_repoint_concept_ids) if mapping else []
     identity_moved = mapping is not None and (
@@ -13168,6 +13170,34 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None, person_id=Non
             'Choose a destination concept before approving. This mapping has '
             'none yet — its code was seen at ingest but its concept is not loaded.'
         )})
+
+    # The curator re-filed the code under another table: the rows ingest put
+    # in the old one follow it, or the patient page keeps listing the code as
+    # Unmapped there with no mapping that could ever match (#2386). One
+    # patient's rows move in the request; every patient's move after commit.
+    # The rows arrive with the concept they had and the move records those
+    # concepts for the re-point below, which puts them on the destination.
+    # Only measurement and observation rows move; see table_relocation.
+    mapping.relocation = None
+    new_table = normalize_omop_table(mapping.omop_table)
+    if table_moved and previous_table and new_table and previous_table != new_table:
+        if not relocatable(previous_table, new_table):
+            mapping.relocation = {
+                'queued': False, 'from_table': previous_table, 'to_table': new_table,
+                'skipped': 'Stored rows move only between measurement and observation.',
+            }
+        elif person_id is not None:
+            outcome = relocate_clinical_rows(
+                mapping=mapping, from_table=previous_table, to_table=new_table, person_id=person_id,
+            )
+            outcome.pop('person_ids', None)
+            mapping.relocation = {'queued': False, 'from_table': previous_table,
+                                  'to_table': new_table, **outcome}
+            # The move recorded the concepts it carried over; the re-point reads them.
+            deferred_repoints = list(mapping.deferred_repoint_concept_ids)
+        else:
+            from omop_core.services.relocation_jobs import queue_relocation
+            mapping.relocation = queue_relocation(mapping, previous_table, new_table)
 
     repoint = None
     if status_value == 'approved' and concept is not None:
@@ -13590,6 +13620,7 @@ def code_mapping_list(request):
     from omop_core.services.mapping_destinations import destination_options
     payload = _serialize_code_mapping_row(concept, mapping, destination_count=len(destination_options(mapping)))
     payload['repoint'] = repoint
+    payload['relocation'] = getattr(mapping, 'relocation', None)
     return Response(payload, status=status.HTTP_201_CREATED)
 
 
@@ -13685,6 +13716,7 @@ def code_mapping_detail(request, mapping_id):
     from omop_core.services.mapping_destinations import destination_options
     payload = _serialize_code_mapping_row(concept, mapping, destination_count=len(destination_options(mapping)))
     payload['repoint'] = repoint
+    payload['relocation'] = getattr(mapping, 'relocation', None)
     return Response(payload)
 
 
