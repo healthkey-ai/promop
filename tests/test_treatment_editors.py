@@ -101,6 +101,7 @@ def test_descriptor_describes_the_legacy_cytogenic_spelling(editor):
     descriptors = build_writable_field_descriptor()
     assert descriptors['cytogenic_markers']['kind'] == 'alias'
     assert descriptors['cytogenic_markers']['canonical'] == 'cytogenetic_markers'
+    assert descriptors['cytogenetic_markers']['writable'] is False
 
 
 def test_descriptor_carries_the_toxicity_scale_and_overridable_flags(editor):
@@ -109,6 +110,7 @@ def test_descriptor_carries_the_toxicity_scale_and_overridable_flags(editor):
         0, 1, 2, 3, 4,
     ]
     for field in ('treatment_refractory_status', 'progression', 'stem_cell_transplant_history'):
+        assert descriptors[field]['writable'] is True
         assert descriptors[field]['overridable'] is True
 
 

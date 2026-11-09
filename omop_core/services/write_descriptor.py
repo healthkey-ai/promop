@@ -1413,7 +1413,10 @@ def build_writable_field_descriptor():
         'kind': KIND_ALIAS,
         'writable': False,
         'canonical': 'cytogenetic_markers',
-        'reason': 'Mirrors cytogenetic_markers; edit that field instead.',
+        'reason': (
+            'Legacy summary of cytogenetic_markers; that column is read-only. '
+            'Record individual findings in Genomics.'
+        ),
     })
 
     # The trial vocabulary asks the negated question ("No Hepatitis B
