@@ -22,6 +22,7 @@ from django.db.models import Field, Model, Q
 from omop_core.models import (
     Concept,
     ConceptClass,
+    ConceptMappingDone,
     ConceptMappingPriority,
     DiseaseCategoryChoice,
     DiseaseCategoryMapping,
@@ -115,6 +116,7 @@ def copied_tables() -> list[ReferenceTable]:
         # Curator priority (#1914), matched on the concept's natural key. A
         # concept not loaded here is skipped with a warning.
         ReferenceTable(ConceptMappingPriority, ('concept',)),
+        ReferenceTable(ConceptMappingDone, ('concept',)),
         ReferenceTable(DiseaseCategoryChoice, ('code',)),
         ReferenceTable(DiseaseCategoryMapping, ('disease_name',)),
     ]

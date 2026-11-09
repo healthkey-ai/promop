@@ -7,7 +7,7 @@ curator can rank a concept from any page or filter without seeing the others.
 from django.db import connection, transaction
 from django.utils import timezone
 
-from omop_core.models import ConceptMappingPriority
+from omop_core.models import ConceptMappingDone, ConceptMappingPriority
 
 
 def _lock():
@@ -53,3 +53,27 @@ def positions(domain_id=None):
     if domain_id:
         rows = rows.filter(concept__domain_id=domain_id)
     return dict(rows.values_list('concept_id', 'position'))
+
+
+def mark_done(concept, done, user=None):
+    """Mark a concept Done -- its source codes are mapped -- or return it to the queue (#2388).
+
+    Done unranks the concept first, so the list stays dense and Suggest's
+    tie-break never prefers a finished concept. Returns whether it is Done.
+    """
+    with transaction.atomic():
+        if done:
+            move(concept, None, user)
+            row, created = ConceptMappingDone.objects.get_or_create(
+                concept=concept, defaults={'marked_by': user},
+            )
+            if not created:
+                row.marked_by = user
+                row.save(update_fields=['marked_by', 'marked_at'])
+            return True
+        ConceptMappingDone.objects.filter(concept=concept).delete()
+        return False
+
+
+def done_concept_ids():
+    return set(ConceptMappingDone.objects.values_list('concept_id', flat=True))

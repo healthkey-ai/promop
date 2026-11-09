@@ -82,7 +82,8 @@ def concept_to_code_list(request):
         **paging, 'domains': list(domains),
         'results': [{**concept_payload(concept), 'fields': field_map.get(concept.pk, []),
                      'sccm_counts': {key: getattr(concept, key) for key in ('approved', 'proposed', 'rejected')},
-                     'seen': concept.seen, 'priority': concept.priority} for concept in page],
+                     'seen': concept.seen, 'priority': concept.priority,
+                     'done': concept.done} for concept in page],
         'prioritized': ConceptMappingPriority.objects.count(),
     })
 
@@ -108,6 +109,29 @@ def concept_to_code_priority(request):
     concept = get_object_or_404(standard_destinations(), pk=concept_id)
     placed = concept_priority.move(concept, position, request.user)
     return Response({'concept_id': concept.pk, 'position': placed,
+                     'prioritized': ConceptMappingPriority.objects.count()})
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def concept_to_code_done(request):
+    """Mark one concept Done, or return it to the queue (#2388).
+
+    Done unranks the concept; the list then shows it last, in italics.
+    """
+    from omop_core.services import concept_priority
+    _authorize(request.user)
+    data = request.data
+    if not isinstance(data, dict):
+        raise ValidationError({'detail': 'Supply a JSON object.'})
+    concept_id, done = data.get('concept_id'), data.get('done')
+    if type(concept_id) is not int or concept_id <= 0:
+        raise ValidationError({'concept_id': 'Supply a positive integer concept ID.'})
+    if type(done) is not bool:
+        raise ValidationError({'done': 'Supply true to mark the concept Done, false to return it to the queue.'})
+    concept = get_object_or_404(standard_destinations(), pk=concept_id)
+    marked = concept_priority.mark_done(concept, done, request.user)
+    return Response({'concept_id': concept.pk, 'done': marked, 'position': None,
                      'prioritized': ConceptMappingPriority.objects.count()})
 
 
