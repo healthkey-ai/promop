@@ -244,9 +244,21 @@ def test_done_endpoint_rejects_nonstandard_concepts_and_non_curators(client, dja
     assert patient.post(DONE, {'concept_id': standard.pk, 'done': True}, format='json').status_code == 403
 
 
-def test_copy_reference_data_carries_done_by_concept_key():
-    (alpha,) = field_concepts('Alpha')
+def test_ranking_a_done_concept_returns_it_to_the_queue():
+    alpha, beta = field_concepts('Alpha', 'Beta')
     concept_priority.mark_done(alpha, True)
+    assert concept_priority.move(alpha, 1) == 1
+    assert not ConceptMappingDone.objects.filter(concept=alpha).exists()
+    # Unranking does not make a concept Done.
+    concept_priority.move(alpha, None)
+    assert not ConceptMappingDone.objects.filter(concept=alpha).exists()
+
+
+def test_copy_reference_data_carries_done_by_concept_key(django_user_model):
+    (alpha,) = field_concepts('Alpha')
+    marker = django_user_model.objects.create_user(email='done-copier@test.com')
+    concept_priority.mark_done(alpha, True, marker)
+    assert ConceptMappingDone.objects.get(concept=alpha).marked_by == marker
     payload = read_reference('default')
     ConceptMappingDone.objects.all().delete()
 

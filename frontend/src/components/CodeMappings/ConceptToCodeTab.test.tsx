@@ -925,6 +925,13 @@ describe('concept priority (#1914)', () => {
     expect(done.className).toContain('italic');
     expect(screen.getByTestId('concept-row-2').className).toContain('italic');
     fireEvent.click(done);
+    const notDone = screen.getByRole('menuitem', { name: 'Not done' });
+    expect(notDone).toHaveFocus();
+    // Escape closes the menu without acting; a Done row cannot be dragged.
+    fireEvent.keyDown(notDone, { key: 'Escape' });
+    expect(screen.queryByRole('menuitem', { name: 'Not done' })).toBeNull();
+    expect(screen.getByTestId('concept-row-2')).toHaveAttribute('draggable', 'false');
+    fireEvent.click(done);
     fireEvent.click(screen.getByRole('menuitem', { name: 'Not done' }));
     await waitFor(() => expect(post).toHaveBeenCalledWith('/v1/concept-to-code/done/', { concept_id: 2, done: false }));
   });

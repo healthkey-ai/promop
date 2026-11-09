@@ -31,6 +31,9 @@ def move(concept, position, user=None):
             ConceptMappingPriority.objects.filter(concept_id=concept.pk).delete()
         else:
             order.insert(min(max(position, 1), len(order) + 1) - 1, concept.pk)
+            # Ranking a Done concept returns it to the queue: the two states
+            # are exclusive, or the tie-break would prefer a finished concept.
+            ConceptMappingDone.objects.filter(concept_id=concept.pk).delete()
 
         changed, now = [], timezone.now()
         for index, concept_id in enumerate(order, start=1):
@@ -73,7 +76,3 @@ def mark_done(concept, done, user=None):
             return True
         ConceptMappingDone.objects.filter(concept=concept).delete()
         return False
-
-
-def done_concept_ids():
-    return set(ConceptMappingDone.objects.values_list('concept_id', flat=True))

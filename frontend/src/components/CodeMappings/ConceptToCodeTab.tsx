@@ -274,7 +274,7 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange, initialC
           <th className="p-3 text-right">Approved</th><th className="p-3 text-right">Proposed</th><th className="p-3 text-right">Rejected</th>
         </tr></thead>
         <tbody>{data?.results.map(concept => <tr key={concept.concept_id} data-testid={`concept-row-${concept.concept_id}`}
-          draggable={!writing && !moving}
+          draggable={!writing && !moving && !concept.done}
           onDragStart={event => { event.dataTransfer?.setData('text/plain', String(concept.concept_id)); setDragged(concept); }}
           onDragEnd={() => { setDragged(null); setDropTarget(null); }}
           onDragOver={event => { if (dragged) { event.preventDefault(); setDropTarget(concept.concept_id); } }}
@@ -341,15 +341,23 @@ function PriorityCell({ concept, lastPosition, disabled, onMove, onDone }: {
     if (target.closest('input, button')) return;
     setMenuOpen(open => !open);
   };
+  // Escape, or focus leaving the cell, closes the menu; it takes focus on open.
+  const cellProps = {
+    onClick: openMenu,
+    onKeyDown: (event: React.KeyboardEvent<HTMLDivElement>) => { if (event.key === 'Escape') setMenuOpen(false); },
+    onBlur: (event: React.FocusEvent<HTMLDivElement>) => {
+      if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setMenuOpen(false);
+    },
+  };
   const menu = menuOpen && <div role="menu" aria-label={`Options for ${concept.concept_name}`}
     className="absolute left-0 top-full z-10 mt-1 rounded border border-slate-300 bg-white py-1 text-sm shadow">
-    <button type="button" role="menuitem" className="block w-full px-3 py-1 text-left not-italic hover:bg-slate-100"
+    <button type="button" role="menuitem" autoFocus className="block w-full px-3 py-1 text-left not-italic hover:bg-slate-100"
       disabled={disabled} onClick={() => { setMenuOpen(false); onDone(!concept.done); }}>
       {concept.done ? 'Not done' : 'Done'}
     </button>
   </div>;
   if (concept.done) {
-    return <div className="relative flex items-center gap-1 whitespace-nowrap" onClick={openMenu}>
+    return <div className="relative flex items-center gap-1 whitespace-nowrap" {...cellProps}>
       <button type="button" className="italic text-slate-500 underline-offset-2 hover:underline"
         aria-haspopup="menu" aria-expanded={menuOpen} aria-label={`${concept.concept_name} is Done; options`}
         disabled={disabled} onClick={event => { event.stopPropagation(); setMenuOpen(open => !open); }}>Done</button>
@@ -364,7 +372,7 @@ function PriorityCell({ concept, lastPosition, disabled, onMove, onDone }: {
     onMove(value);
   };
   const small = 'rounded border border-slate-300 px-1.5 text-xs hover:bg-slate-100 disabled:opacity-30';
-  return <div className="relative flex items-center gap-1 whitespace-nowrap" onClick={openMenu}>
+  return <div className="relative flex items-center gap-1 whitespace-nowrap" {...cellProps}>
     <span aria-hidden="true" title="Drag to reorder" className={`select-none text-slate-400 ${disabled ? '' : 'cursor-grab'}`}>⠿</span>
     <input type="number" min={1} inputMode="numeric" aria-label={`Priority for ${concept.concept_name}`}
       className="w-14 rounded border border-slate-300 px-1.5 py-1 text-sm tabular-nums" placeholder="—" value={draft} disabled={disabled}
