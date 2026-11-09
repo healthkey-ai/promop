@@ -26970,7 +26970,8 @@ class MappingStatsTest(MappingHubTestBase):
 
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
-    def test_analyst_can_see_stats(self):
+    def test_analyst_is_refused_stats(self):
+        """The mapping hub is curation an analyst does not reach (#2398)."""
         analyst = Identity.objects.create_user(
             email='analyst-mapping@test.com', password='testpass',
         )
@@ -26979,7 +26980,7 @@ class MappingStatsTest(MappingHubTestBase):
         )
         self.client.force_authenticate(user=analyst)
         resp = self.client.get('/api/v1/mapping-stats/')
-        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
 
     def test_regular_user_forbidden(self):
         self.client.force_authenticate(user=self.regular)
@@ -33460,6 +33461,20 @@ class AnalystRoleScopeTest(TestCase):
         resp = self.client.get(f'/api/patient-info/{self.person.person_id}/')
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
+    def test_an_ordinary_org_grant_lists_no_patients(self):
+        """The list shows demo-org, admin-org and group patients only; a plain
+        grant at an ordinary org sees an empty list, for an analyst as for a doctor."""
+        plain = _make_org('Plain Org', 'plain-org')
+        Person.objects.create(person_id=9952)
+        PatientRecord.objects.create(person_id=9952, organization=plain)
+        for role in ('analyst', 'doctor'):
+            user = _make_user(f'{role}-plain@test.com')
+            GroupAccess.objects.create(identity=user, org=plain, role=role)
+            self.client.force_authenticate(user=user)
+            resp = self.client.get('/api/patient-info/')
+            rows = resp.data['results'] if isinstance(resp.data, dict) else resp.data
+            self.assertEqual([r['person_id'] for r in rows], [], role)
+
     def test_code_to_concept_tab_is_reachable(self):
         resp = self.client.get('/api/v1/code-mappings/')
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
@@ -33539,3 +33554,14 @@ class AnalystRoleScopeTest(TestCase):
         doctor = _make_user('trusted-doctor@test.com')
         GroupAccess.objects.create(identity=doctor, org=self.org, role='doctor')
         self.assertIn(granting, get_admin_orgs(doctor))
+
+    def test_a_domain_trusted_analyst_is_the_admin_the_trust_makes_them(self):
+        """Domain trust is unchanged (#1454): a trusted-domain self-signup is
+        promoted to analyst and that is how it reaches the trusting org at all,
+        so the curation pages open for it as ``is_org_admin`` says."""
+        granting = _make_org('Domain Org', 'domain-org')
+        OrgTrust.objects.create(granting_org=granting, trusted_domain='test.com')
+        self.analyst.mark_email_verified()
+        resp = self.client.get('/api/user/')
+        self.assertTrue(resp.data['user']['is_org_admin'])
+        self.assertEqual(self.client.get('/api/v1/mapping-stats/').status_code, status.HTTP_200_OK)

@@ -123,7 +123,10 @@ from omop_core.mapping.therapy import (
     validate_hemonc_regimen,
 )
 from omop_core.services.concept_cache import concept_by_id as _cc_by_id, concept_by_loinc as _cc_by_loinc, concept_by_name_ilike as _cc_by_name, concept_by_vocab as _cc_by_vocab
-from omop_core.services.access import get_visible_orgs, build_trusting_map, get_admin_orgs, has_org_admin_access, has_professional_access, has_curation_access
+from omop_core.services.access import (
+    PROFESSIONAL_ROLES, get_visible_orgs, build_trusting_map, get_admin_orgs,
+    has_org_admin_access, has_professional_access, has_curation_access,
+)
 from datetime import date as _date, datetime, timedelta
 from django.utils.timezone import localdate, make_aware, is_naive
 import datetime as _dt
@@ -427,7 +430,7 @@ class CurrentUserViewSet(viewsets.ViewSet):
 
         has_active_clinical_grant = GroupAccess.objects.filter(
             identity=user,
-            role__in=['org_admin', 'doctor', 'analyst'],
+            role__in=PROFESSIONAL_ROLES,
         ).filter(
             Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now())
         ).exists()
@@ -1713,7 +1716,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 getattr(request.user, 'is_staff', False)
                 or GroupAccess.objects.filter(
                     identity=request.user,
-                    role__in=['org_admin', 'doctor', 'analyst'],
+                    role__in=PROFESSIONAL_ROLES,
                 ).filter(
                     Q(expires_at__isnull=True) | Q(expires_at__gt=now)
                 ).exists()

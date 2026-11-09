@@ -1,6 +1,6 @@
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
-import { vi, describe, it, expect, beforeEach } from "vitest";
+import { vi, describe, it, expect, beforeEach, afterEach } from "vitest";
 import CodeMappingPage from "./CodeMappingPage";
 import CodeMappingAccuracyPage from "./CodeMappingAccuracyPage";
 import type { SourceSystemContext } from "./SourceEvidencePanel";
@@ -10,6 +10,8 @@ const mockPost = vi.fn();
 const mockPatch = vi.fn();
 const mockDelete = vi.fn();
 
+const mockUseAuth = vi.hoisted(() => vi.fn(() => ({ currentUser: null })));
+vi.mock("@/hooks/useAuth", () => ({ useAuth: () => mockUseAuth() }));
 vi.mock("@/api/axios", () => ({
   default: {
     get: (...args: unknown[]) => mockGet(...args),
@@ -2040,6 +2042,8 @@ describe("server mapping pages", () => {
   });
 
   it("shows observed hospital context while retaining the exact Epic system URI", async () => {
+    // The system link opens Source Systems management, a curation page (#2398).
+    mockUseAuth.mockReturnValue({ currentUser: { id: 1, is_staff: true } });
     const oid = "urn:oid:1.2.840.114350.1.13.88.2.7.5.737384.2050";
     const context: SourceSystemContext = {
       kind: "observed", label: "UPMC", names: ["UPMC"], name_count: 1,
@@ -2623,5 +2627,28 @@ describe("CodeMappingPage links", () => {
     await screen.findByRole("table", { name: "Standard concept coverage" });
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(mockGet.mock.calls.filter(([url]) => url === "/v1/concept-to-code/4567/")).toHaveLength(1);
+  });
+});
+
+describe("curation controls follow the role (#2398)", () => {
+  const grant = (role: string) => ({
+    currentUser: { id: 9, org_accesses: [{ org_slug: "acme", org_name: "Acme", role, expires_at: null }] },
+  });
+  afterEach(() => { mockUseAuth.mockReturnValue({ currentUser: null }); });
+
+  it("hides Upload and Source systems from an analyst", async () => {
+    mockUseAuth.mockReturnValue(grant("analyst"));
+    renderPage([proposedRow]);
+    await screen.findByText("Code Mapping");
+    expect(screen.queryByRole("button", { name: "Upload" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Source systems / hospitals" })).not.toBeInTheDocument();
+  });
+
+  it("shows Upload and Source systems to a doctor", async () => {
+    mockUseAuth.mockReturnValue(grant("doctor"));
+    renderPage([proposedRow]);
+    await screen.findByText("Code Mapping");
+    expect(screen.getByRole("button", { name: "Upload" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Source systems / hospitals" })).toBeInTheDocument();
   });
 });

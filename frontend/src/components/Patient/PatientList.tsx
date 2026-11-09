@@ -9,7 +9,7 @@ import { PaginationControls } from "@/components/labs/PaginationControls";
 import { useLocalPagination } from "@/lib/pagination";
 
 import { loadPreferences, REVIEW_FILTER_DEFAULTS, VIEW_COLUMNS, type PatientView, type ReviewFilters } from './patientListViews';
-import { hasCodeMappingRole, hasCurationRole, isReadOnlyAnalyst } from '@/utils/roles';
+import { hasCodeMappingRole, hasCurationRole, isReadOnlyAnalyst, isStaffOrOrgAdmin } from '@/utils/roles';
 
 interface Patient {
   person_id: number;
@@ -325,7 +325,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
   const canMapCodes = hasCodeMappingRole(currentUser);
   // An analyst views patients read-only (#2398); the API refuses the delete too.
   const canDeletePatients = !isReadOnlyAnalyst(currentUser);
-  const canAdministerOrganizations = !!(currentUser?.is_staff || currentUser?.is_org_admin);
+  const canAdministerOrganizations = isStaffOrOrgAdmin(currentUser);
 
   const handleLogout = () => {
     void logout();
@@ -347,7 +347,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
                   Delete ({selectAllMode ? `All ${patientCount}` : selectedIds.size})
                 </button>
               )}
-              {!!(currentUser?.is_staff || currentUser?.is_org_admin) && (
+              {canAdministerOrganizations && (
                 <button
                   onClick={() => { setResolveRun(null); setResolveDialogOpen(true); }}
                   className="inline-flex items-center gap-2 rounded-md border border-input px-4 py-2 text-sm font-medium text-foreground hover:bg-accent"

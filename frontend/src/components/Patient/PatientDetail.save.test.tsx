@@ -123,6 +123,24 @@ function patchBody() {
 }
 
 describe('PatientDetail save — the edit, not the record', () => {
+  it('never PATCHes for a read-only analyst (#2398)', async () => {
+    const analyst = {
+      id: 3, sub: 'analyst', email: 'analyst@acme.test', name: 'An Analyst',
+      org_accesses: [{ org_slug: 'acme', org_name: 'Acme', role: 'analyst', expires_at: null }],
+    };
+    render(<PatientDetail user={analyst} />);
+    await waitFor(() =>
+      expect(screen.getByDisplayValue('Alishia Tawny Howell')).toBeInTheDocument(),
+    );
+    expect(screen.getByText('Read-only')).toBeInTheDocument();
+    expect(screen.getByDisplayValue('1970-01-01')).toBeDisabled();
+    expect(screen.queryByRole('button', { name: 'Invite to portal' })).not.toBeInTheDocument();
+    await editAndSave('1970-01-01', '1971-02-03');
+    expect(api.patch).not.toHaveBeenCalled();
+    // The ignored edit never reaches the editor either.
+    expect(screen.getByDisplayValue('1970-01-01')).toBeInTheDocument();
+  });
+
   it('routes a date-of-birth correction through the PatientRecord PATCH', async () => {
     await renderAndLoad();
     await editAndSave('1970-01-01', '1971-02-03');

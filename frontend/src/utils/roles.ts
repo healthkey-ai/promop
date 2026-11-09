@@ -18,10 +18,17 @@ const PROFESSIONAL_ROLES = ['org_admin', 'doctor', 'analyst'];
 const hasGrant = (user: User | null | undefined, roles: string[]): boolean =>
   !!user?.org_accesses?.some((a) => roles.includes(a.role ?? ''));
 
+/** Approves mappings, administers organizations, sees a patient's Source
+ *  Codes and OMOP tabs: staff, or org_admin by grant or trust. The server's
+ *  `_can_approve_mappings` / `has_org_admin_access`. */
+export function isStaffOrOrgAdmin(user: User | null | undefined): boolean {
+  return !!(user?.is_staff || user?.is_org_admin);
+}
+
 /** Field mappings, therapy and disease-category reference, relevance signals,
  *  source systems, the mapping hub, uploads: staff, org_admin or doctor. */
 export function hasCurationRole(user: User | null | undefined): boolean {
-  return !!(user?.is_staff || user?.is_org_admin || hasGrant(user, CURATION_ROLES));
+  return isStaffOrOrgAdmin(user) || hasGrant(user, CURATION_ROLES);
 }
 
 /** The Code Mapping page: every professional role, the analyst included. */

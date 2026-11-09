@@ -152,7 +152,7 @@ def signal_rights(user):
 
     Org admins and staff accept and reject. A doctor may reject, or return a
     rejected signal to proposed, as a doctor may reject a proposed mapping.
-    An analyst, a curator in training, only views the queue.
+    An analyst reaches neither: the queue is a curation page (#2398).
     """
     from omop_core.models import GroupAccess
     from patient_portal.api.views import _can_approve_mappings

@@ -154,7 +154,6 @@ def get_admin_access_paths(user):
         Q(expires_at__isnull=True) | Q(expires_at__gt=now),
     ).select_related('org'))
     paths = []
-    professional = {}
     org_grants = [grant for grant in active if grant.org_id]
     # An organization trust makes a professional at the trusted org an admin
     # of the granting org. Only the curation roles carry that far: an analyst
@@ -162,6 +161,7 @@ def get_admin_access_paths(user):
     # would otherwise write the granting org's patients and approve its
     # mappings through the trust (#2398). Patient-only grants never did.
     trust_expanding = {}
+    professional = {}
     for grant in org_grants:
         if grant.role == 'org_admin':
             paths.append({'org': grant.org, 'source': 'org_grant',
@@ -183,6 +183,14 @@ def get_admin_access_paths(user):
     # Preserve domain-trust policy: patient-only organization memberships do
     # not inherit admin authority just because their email matches a domain.
     # Verified only -- see get_accessible_orgs.
+    #
+    # Domain trust is deliberately NOT narrowed to the curation roles (#2398):
+    # a trusted-domain self-signup is promoted *to* analyst when the address
+    # is verified (#1454), and that promotion is how the legitimate user gets
+    # into the trusting org's patients at all
+    # (SelfSignupEmailTrustTest.test_verified_address_at_a_trusted_domain_is_trusted).
+    # So a trusted-domain analyst is the admin the trust makes them, and the
+    # curation pages open for them as ``is_org_admin`` says.
     domain = getattr(user, 'verified_email_domain', '')
     if domain and not (org_grants and not professional):
         for trust in OrgTrust.objects.filter(
@@ -253,8 +261,9 @@ def has_professional_access(user) -> bool:
     """Return True when the user holds any professional role (org_admin, doctor, analyst).
 
     Gates the Code Mapping page, which every professional may propose on
-    (approval is staff and org_admin only), and the patient list and detail
-    reads. For every other curation page use ``has_curation_access``.
+    (approval is staff and org_admin only). Patient reads are decided by
+    ``can_access_patient`` and ``get_visible_orgs``, not here. For every
+    other curation page use ``has_curation_access``.
     """
     return _has_active_role(user, PROFESSIONAL_ROLES)
 
@@ -265,5 +274,10 @@ def has_curation_access(user) -> bool:
     Everything a professional reaches beyond Code Mapping and patient reads:
     field mappings, therapy and disease-category reference, relevance
     signals, source systems, the mapping hub. An analyst gets False (#2398).
+
+    An admin path through a trust counts as org_admin here, as it does for
+    ``is_org_admin``, approval and patient writes: the one user who is an
+    admin somewhere but could not open a curation page would be a UI that
+    offers what the API refuses.
     """
-    return _has_active_role(user, CURATION_ROLES)
+    return _has_active_role(user, CURATION_ROLES) or has_org_admin_access(user)

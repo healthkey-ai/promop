@@ -3,7 +3,7 @@ import CodeMappingUploadDialog, { type CodeMappingUploadResult } from "./CodeMap
 import SourceQuantityCell from "./SourceQuantityCell";
 import { rowMatchesSearch, SEARCH_PLACEHOLDER } from "./mappingSearch";
 import PageTitle from '@/components/Branding/PageTitle';
-import { hasCurationRole } from '@/utils/roles';
+import { hasCurationRole, isStaffOrOrgAdmin } from '@/utils/roles';
 import InlineDestinationPicker from "./InlineDestinationPicker";
 import SuggestCandidates, { type CandidateActivity } from "./SuggestCandidates";
 import EditMappingDialog from "./EditMappingDialog";
@@ -320,7 +320,7 @@ const GLOBAL_ORGANIZATION = "__none__";
 export default function CodeMappingPage() {
   const navigate = useNavigate();
   const { currentUser } = useAuth();
-  const canApprove = !!(currentUser?.is_staff || currentUser?.is_org_admin);
+  const canApprove = isStaffOrOrgAdmin(currentUser);
   // The CSV upload and the source-system registry are curation, not code
   // mapping: an analyst reaches neither (#2398), and the API refuses both.
   const canCurate = hasCurationRole(currentUser);
@@ -1753,7 +1753,7 @@ export default function CodeMappingPage() {
         mode={dialogMode || "new"}
         row={selectedRow}
         reference={reference}
-        canApprove={canApprove}
+        canApprove={canApprove} canCurate={canCurate}
         sourceExamples
         strategies={strategies}
         rankingModel={rankingModel}

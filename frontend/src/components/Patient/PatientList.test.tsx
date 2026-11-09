@@ -167,7 +167,7 @@ it('places Upload immediately after Mappings', async () => {
 it.each([
   ['doctor', 'Mappings', true],
   ['analyst', 'Code Mapping', false],
-])('does not show Org Admin to an organization %s', async (role, mappingsLabel, upload) => {
+])('offers an organization %s "%s" (Upload: %s) and never Org Admin', async (role, mappingsLabel, upload) => {
   mockUseAuth.mockReturnValue({
     currentUser: {
       org_accesses: [{ role, org_name: 'Example', org_slug: 'example', expires_at: null }],
@@ -178,7 +178,8 @@ it.each([
   render(<MemoryRouter><PatientList /></MemoryRouter>);
 
   expect(await screen.findByRole('button', { name: mappingsLabel })).toBeInTheDocument();
-  expect(!!screen.queryByRole('button', { name: 'Upload' })).toBe(upload);
+  if (upload) expect(screen.getByRole('button', { name: 'Upload' })).toBeInTheDocument();
+  else expect(screen.queryByRole('button', { name: 'Upload' })).not.toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'Org Admin' })).not.toBeInTheDocument();
 });
 

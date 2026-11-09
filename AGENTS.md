@@ -673,15 +673,19 @@ and `omop_core/authorization.py` decide the reach; the frontend mirrors them in
 |---|---|
 | `org_admin` (a grant, or an admin path through an org or domain trust) | everything for its orgs: approves mappings, administers access, uploads |
 | `doctor` | every curation page (`has_curation_access`), patient writes (`can_write_patient`), proposes and rejects mappings |
-| `analyst` | the Code Mapping page only -- both tabs, the dialog, Suggest, Lock, Done, priority, axis variants, the accuracy pages (`has_professional_access`, `_can_manage_code_mappings`) -- and the patient list and detail **read-only**. PRism analytics is a separate app that shares the identity table. Nothing else (#2398). |
+| `analyst` | the Code Mapping page only -- both tabs, the dialog, Suggest, Lock, Done, priority, axis variants, the accuracy pages (`has_professional_access`, `_can_manage_code_mappings`) -- and the patient list and detail **read-only**: the patients of a public demo org (the signup path that hands out the role) or of a group the grant names; an org-level grant at an ordinary org lists nothing, as for a doctor (`PatientRecordViewSet.get_queryset`). PRism analytics is a separate app that shares the identity table. Nothing else (#2398). |
 | `patient` | their own record; never another patient's (see `PatientRecordIsolationTest`) |
 
 An analyst is refused with 403 on field mappings and their synonyms, choices and
 custom fields, therapy and disease-category reference writes, relevance signals,
 source-system management, the CSV code-mapping upload, the mapping hub and every
-patient write; the UI hides those routes and controls. An organization trust
-makes a doctor or org_admin at the trusted org an admin of the granting org; it
-does not do that for an analyst (`get_admin_access_paths`). Approval stays with
+patient write; the UI hides those routes and controls. An organization
+trust makes a doctor or org_admin at the trusted org an admin of the granting
+org; it gives an analyst nothing, not even a read of the granting org's patients
+(`get_admin_access_paths`). A **domain** trust is different and unchanged
+(#1454): a trusted-domain self-signup is promoted to analyst once the address is
+verified, and that promotion is how the user reaches the trusting org at all, so
+a trusted-domain analyst is the admin the trust makes them. Approval stays with
 staff and org_admin (`_can_approve_mappings`) for every role. Gate a new
 curation endpoint with `_can_manage_field_mappings` unless it belongs on the Code
 Mapping page, where `_can_manage_code_mappings` admits the analyst too.

@@ -27,7 +27,7 @@ import RelevanceSignalsPage from "@/components/MappingHub/RelevanceSignalsPage";
 import CodeMappingAccuracyPage from "@/components/CodeMappings/CodeMappingAccuracyPage";
 import MappingAccuracyAnalyticsPage from "@/components/CodeMappings/MappingAccuracyAnalyticsPage";
 import MappingHubPage from "@/components/MappingHub/MappingHubPage";
-import { hasCodeMappingRole, hasCurationRole } from "@/utils/roles";
+import { hasCodeMappingRole, hasCurationRole, isStaffOrOrgAdmin } from "@/utils/roles";
 import DiseaseCategoryPage from "@/components/MappingHub/DiseaseCategoryPage";
 import TherapyMappingPage from "@/components/TherapyMappings/TherapyMappingPage";
 import OrgLogin from "@/components/Auth/OrgLogin";
@@ -125,7 +125,7 @@ function AppRoutes() {
 
   const orgAdminRoute = (element: ReactNode) => {
     if (!currentUser) return <Navigate to="/login" replace />;
-    if (!(currentUser.is_staff || currentUser.is_org_admin)) return <Navigate to="/" replace />;
+    if (!isStaffOrOrgAdmin(currentUser)) return <Navigate to="/" replace />;
     return element;
   };
 

@@ -11,6 +11,7 @@
  *   mode / row          -- new or edit, the row being edited
  *   reference           -- domain & vocabulary reference data
  *   canApprove          -- whether the user can set status to Approved
+ *   canCurate           -- whether the user reaches the Source Systems page (#2398)
  *   strategies / rankingModel -- suggest settings from the parent
  *   onSaved / onDeleted -- callbacks after a successful write or delete
  *   onBanner            -- surface informational banners to the parent
@@ -78,6 +79,7 @@ export interface EditMappingDialogProps {
   row: CodeMappingRow | null;
   reference: Reference;
   canApprove: boolean;
+  canCurate?: boolean;
   strategies: { umls: boolean; lexical: boolean; vectors: boolean };
   rankingModel: "anthropic" | "jev" | "both";
   onStrategiesChange?: (next: { umls: boolean; lexical: boolean; vectors: boolean }) => void;
@@ -160,6 +162,7 @@ export default function EditMappingDialog({
   row: selectedRow,
   reference,
   canApprove,
+  canCurate = false,
   strategies,
   rankingModel,
   onStrategiesChange,
@@ -974,11 +977,15 @@ export default function EditMappingDialog({
                       {sourceSystemContext && sourceSystemContext.kind !== "none" && (
                         <p title={hospitalContextDetails(sourceSystemContext)}>{hospitalContextText(sourceSystemContext)}</p>
                       )}
-                      <p>Exact FHIR Coding.system: <a href={sourceSystemManagementUrl(form.source_vocabulary_id)}
-                        target="_blank" rel="noopener noreferrer" className="text-sky-700 underline hover:text-sky-900"
-                        title="Open Source Code Systems/Hospitals Management to review and manage facilities associated with this exact source system">
+                      <p>Exact FHIR Coding.system: {canCurate ? (
+                        <a href={sourceSystemManagementUrl(form.source_vocabulary_id)}
+                          target="_blank" rel="noopener noreferrer" className="text-sky-700 underline hover:text-sky-900"
+                          title="Open Source Code Systems/Hospitals Management to review and manage facilities associated with this exact source system">
+                          <code className="break-all">{form.source_vocabulary_id}</code>
+                        </a>
+                      ) : (
                         <code className="break-all">{form.source_vocabulary_id}</code>
-                      </a></p>
+                      )}</p>
                     </div>
                   )}
                 </Field>

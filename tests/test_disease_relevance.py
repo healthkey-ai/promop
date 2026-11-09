@@ -214,8 +214,20 @@ def test_accepted_signal_joins_the_set_and_decisions_carry_to_later_periods(djan
     assert curator.get(SIGNALS).data['results'] == []
 
 
+def test_an_analyst_does_not_reach_relevance_signals(django_user_model):
+    """Relevance signals are a curation page an analyst does not reach (#2398)."""
+    user = django_user_model.objects.create_user(email='analyst@test.com')
+    GroupAccess.objects.create(identity=user, org=OrganizationFactory(), role='analyst')
+    proposed = RelevanceSignal.objects.create(source='cdew', disease='MM', concept_id=ConceptFactory().concept_id,
+                                              period='2026-10', document_count=5)
+    api = APIClient()
+    api.force_authenticate(user)
+    assert api.get(SIGNALS, {'status': 'all'}).status_code == 403
+    assert api.patch(f'{SIGNALS}{proposed.id}/', {'status': 'rejected'}, format='json').status_code == 403
+
+
 @pytest.mark.parametrize('role,can_accept,can_reject', (
-    ('org_admin', True, True), ('doctor', False, True), ('analyst', False, False),
+    ('org_admin', True, True), ('doctor', False, True),
 ))
 def test_signal_rights_follow_the_mapping_page_roles(django_user_model, role, can_accept, can_reject):
     user = django_user_model.objects.create_user(email=f'{role}@test.com')
@@ -228,11 +240,6 @@ def test_signal_rights_follow_the_mapping_page_roles(django_user_model, role, ca
     api.force_authenticate(user)
 
     queue = api.get(SIGNALS, {'status': 'all'})
-    if role == 'analyst':
-        # Relevance signals are a curation page an analyst does not reach (#2398).
-        assert queue.status_code == 403
-        assert api.patch(f'{SIGNALS}{proposed.id}/', {'status': 'rejected'}, format='json').status_code == 403
-        return
     assert queue.status_code == 200
     assert queue.data['permissions'] == {'can_accept': can_accept, 'can_reject': can_reject}
 
