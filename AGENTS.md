@@ -1261,6 +1261,36 @@ moves a destination outside the writer (a code-mapping upload, Athena
 destination recovery) clears both, as it clears `suggestion_confidence`. Both
 travel with `copy_reference_data`.
 
+### A code's rows follow its mapping to another table
+
+A curator who changes a mapping's Domain re-files it under another clinical
+table (the move offer from #2347, or the dialog's Domain field). The rows
+ingest wrote for that code stayed in the old table, so the patient page --
+which lists a code under the table its rows sit in -- kept showing it as
+Unmapped there with no mapping that could ever match (#2386). Now a save that
+changes `omop_table` between two clinical tables relocates the code's stored
+rows (`omop_core/mapping/table_relocation.py`):
+
+- A patient-scoped save moves that patient's rows in the request, so the
+  Source Codes tab reflects it at once. A save from a mapping tab moves every
+  patient's rows after commit (`relocation_jobs`, Celery when a broker is
+  set, inline otherwise); the response's `relocation` says which.
+- A row is copied column by column onto the destination table -- the core
+  every table shares (person, date, datetime, type concept, source value and
+  source concept, provider, visit) plus whatever columns both carry under the
+  same name (the value, unit and qualifier columns of Measurement and
+  Observation) -- under a new id from that table's sequence. Columns the
+  destination lacks (a measurement's operator and range) are dropped. Its
+  `ProvenanceRecord` follows it, a measurement's `MeasurementOwnership` goes,
+  the old row is deleted, and the patient's record is marked stale as a
+  re-point does.
+- An approved mapping's rows land on its destination; a proposed mapping's
+  keep the concept they had, recorded in `deferred_repoint_concept_ids` so
+  the approval sweeps them. An organization-scoped mapping moves only rows
+  its hospital wrote, the re-point rule.
+- The per-patient inventory (`PatientSourceCode`) is re-filed under the new
+  table, merging into a row the patient already has there.
+
 ### Replace re-answers rows, it does not delete them
 
 It used to delete: while the candidate set came from a clinical scan, a deleted

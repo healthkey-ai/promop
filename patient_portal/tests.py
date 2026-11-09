@@ -15,7 +15,7 @@ from typing import Any
 import os
 import tempfile
 from pathlib import Path
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 
 from django.conf import settings
@@ -23545,9 +23545,17 @@ class RunsRepointJobsMixin:
         def run_now(pk):
             self.last_repoint = repoint_jobs.run_repoint(pk)
 
+        from omop_core.services import relocation_jobs
+        self.last_relocation = None
+
+        def relocate_now(pk, from_table, to_table):
+            self.last_relocation = relocation_jobs.run_relocation(pk, from_table, to_table)
+
         for target, value in (
             ('omop_core.services.repoint_jobs._after_commit', lambda func: func()),
             ('omop_core.services.repoint_jobs.dispatch_repoint', run_now),
+            ('omop_core.services.relocation_jobs._after_commit', lambda func: func()),
+            ('omop_core.services.relocation_jobs.dispatch_relocation', relocate_now),
         ):
             patcher = patch(target, value)
             patcher.start()
@@ -23664,6 +23672,119 @@ class CodeMappingRepointTest(RunsRepointJobsMixin, TestCase):
         # One row, not two: the point of the whole exercise.
         self.assertEqual(Measurement.objects.filter(person=self.person).count(), 1)
         self.assertEqual(self.last_repoint['rows_updated'], 1)
+
+    # ------------------------------------------------ table change (#2386)
+
+    def _observation(self, pk, person, concept_id, when, value, source_value='FOLATE'):
+        return Observation.objects.create(
+            observation_id=pk, person=person, observation_concept_id=concept_id,
+            observation_date=when, observation_datetime=datetime(2026, 8, 12, 9, 30, tzinfo=UTC),
+            observation_type_concept=self.type_concept, observation_source_value=source_value,
+            value_as_number=value, unit_source_value='ng/mL', value_source_value=str(value),
+        )
+
+    def _misfiled_folate(self):
+        """A code ingest wrote as observations, mapped under Observation."""
+        mapping = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='', source_code='FOLATE', target_concept=self.minted,
+            destination_vocabulary_id='HK-Labs', domain_id='Observation', omop_table='observation',
+            status='approved', origin='import', origin_system='hk-labs',
+        )
+        row = self._observation(7781001, self.person, self.minted.concept_id, date(2026, 8, 12), Decimal('12.5'))
+        provenance = ProvenanceRecord.objects.create(
+            source='etl', content_type=ContentType.objects.get_for_model(Observation),
+            object_id=row.pk, source_user_id='etl',
+        )
+        from omop_core.models import PatientSourceCode
+        inventory = PatientSourceCode.objects.create(
+            person=self.person, source_value='FOLATE', source_vocabulary_id='', omop_table='observation',
+            occurrence_count=1,
+        )
+        PatientRecord.objects.update_or_create(person=self.person, defaults={'derivation_version': 7})
+        return mapping, row, provenance, inventory
+
+    def test_patient_save_that_changes_the_table_moves_that_patients_rows(self):
+        """#2386: the code was filed under Observation and its rows written there.
+        Moving the mapping to Measurement from the patient page takes the
+        patient's rows with it, so the Source Codes tab stops listing the code
+        as Unmapped under Observation."""
+        mapping, row, provenance, inventory = self._misfiled_folate()
+        other = Person.objects.create(
+            person_id=910003, gender_concept_id=0, year_of_birth=1970, race_concept_id=0, ethnicity_concept_id=0,
+        )
+        other_row = self._observation(7781002, other, self.minted.concept_id, date(2026, 8, 13), Decimal('9.0'))
+        resp = self.client.patch(f'/api/v1/code-mappings/{mapping.id}/', {
+            'patient_id': self.person.person_id, 'domain_id': 'Measurement', 'omop_table': 'measurement',
+            'destination_concept_id': self.standard.concept_id, 'status': 'approved',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(resp.data['relocation']['rows_relocated'], 1)
+        self.assertEqual(resp.data['relocation']['queued'], False)
+        # The observation is gone and a measurement carries its facts.
+        self.assertFalse(Observation.objects.filter(pk=row.pk).exists())
+        moved = Measurement.objects.get(person=self.person, measurement_source_value='FOLATE')
+        self.assertEqual(moved.measurement_concept_id, self.standard.concept_id)
+        self.assertEqual((moved.measurement_date, moved.value_as_number, moved.unit_source_value,
+                          moved.value_source_value, moved.measurement_type_concept_id),
+                         (date(2026, 8, 12), Decimal('12.5'), 'ng/mL', '12.5', self.type_concept.concept_id))
+        self.assertEqual(moved.measurement_datetime, datetime(2026, 8, 12, 9, 30, tzinfo=UTC))
+        # Provenance follows the row; the inventory is re-filed; the record is stale.
+        provenance.refresh_from_db()
+        self.assertEqual((provenance.content_type, provenance.object_id),
+                         (ContentType.objects.get_for_model(Measurement), moved.pk))
+        inventory.refresh_from_db()
+        self.assertEqual(inventory.omop_table, 'measurement')
+        self.assertEqual(PatientRecord.objects.get(person=self.person).derivation_version, 0)
+        # Scoped to the patient: another patient's row waits for a tab save.
+        other_row.refresh_from_db()
+        self.assertEqual(other_row.observation_concept_id, self.minted.concept_id)
+        # The tab now lists the code once, under Measurement, mapped.
+        listing = self.client.get(f'/api/v1/patient-records/{self.person.person_id}/source-codes/')
+        self.assertEqual(listing.status_code, status.HTTP_200_OK, listing.data)
+        folate = [e for e in listing.data['source_codes'] if e['source_value'] == 'FOLATE']
+        self.assertEqual([(e['omop_table'], e['mapping_status']) for e in folate], [('measurement', 'approved')])
+
+    def test_a_tab_save_that_changes_the_table_moves_every_patients_rows_after_commit(self):
+        mapping, row, _provenance, _inventory = self._misfiled_folate()
+        other = Person.objects.create(
+            person_id=910003, gender_concept_id=0, year_of_birth=1970, race_concept_id=0, ethnicity_concept_id=0,
+        )
+        self._observation(7781002, other, self.minted.concept_id, date(2026, 8, 13), Decimal('9.0'))
+        resp = self.client.patch(f'/api/v1/code-mappings/{mapping.id}/', {
+            'domain_id': 'Measurement', 'omop_table': 'measurement',
+            'destination_concept_id': self.standard.concept_id, 'status': 'approved',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(resp.data['relocation'], {'queued': True, 'from_table': 'observation', 'to_table': 'measurement'})
+        self.assertEqual(self.last_relocation['rows_relocated'], 2)
+        self.assertEqual(Observation.objects.filter(observation_source_value='FOLATE').count(), 0)
+        self.assertEqual(set(Measurement.objects.filter(measurement_source_value='FOLATE')
+                             .values_list('person_id', 'measurement_concept_id')),
+                         {(self.person.person_id, self.standard.concept_id), (other.person_id, self.standard.concept_id)})
+
+    def test_a_proposed_mapping_moves_rows_with_their_concept_and_queues_the_sweep(self):
+        """Not yet approved: the rows keep the concept they had, filed where the
+        curator says they belong, and the approval that follows sweeps them."""
+        mapping, row, _provenance, _inventory = self._misfiled_folate()
+        resp = self.client.patch(f'/api/v1/code-mappings/{mapping.id}/', {
+            'patient_id': self.person.person_id, 'domain_id': 'Measurement', 'omop_table': 'measurement',
+            'destination_concept_id': self.standard.concept_id, 'status': 'proposed',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        moved = Measurement.objects.get(person=self.person, measurement_source_value='FOLATE')
+        self.assertEqual(moved.measurement_concept_id, self.minted.concept_id)
+        mapping.refresh_from_db()
+        self.assertIn(self.minted.concept_id, mapping.deferred_repoint_concept_ids)
+
+    def test_a_save_that_keeps_the_table_moves_nothing(self):
+        mapping, row, _provenance, _inventory = self._misfiled_folate()
+        resp = self.client.patch(f'/api/v1/code-mappings/{mapping.id}/', {
+            'patient_id': self.person.person_id, 'destination_concept_id': self.standard.concept_id,
+            'status': 'approved',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertIsNone(resp.data['relocation'])
+        self.assertTrue(Observation.objects.filter(pk=row.pk).exists())
 
     def test_patient_source_code_save_skips_repoint(self):
         """Saving with patient_id skips repoint entirely — Generate OMOP
