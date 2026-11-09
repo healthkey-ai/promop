@@ -13202,6 +13202,25 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None, person_id=Non
         else:
             from omop_core.services.relocation_jobs import queue_relocation
             mapping.relocation = queue_relocation(mapping, previous_table, new_table)
+    # The patient page opened this code from the table its rows sit in and
+    # sends that table as rows_omop_table. A mapping filed under another table
+    # -- created fresh for an Observation-domain concept against measurement
+    # rows, say -- leaves the code Unmapped there and its Proposed group empty
+    # (#2393), so that patient's rows follow the mapping too.
+    rows_table = normalize_omop_table(data.get('rows_omop_table')) if person_id is not None else ''
+    if mapping.relocation is None and rows_table and new_table and rows_table != new_table:
+        if not relocatable(rows_table, new_table):
+            mapping.relocation = {
+                'queued': False, 'from_table': rows_table, 'to_table': new_table,
+                'skipped': 'Stored rows move only between measurement and observation.',
+            }
+        else:
+            outcome = relocate_clinical_rows(
+                mapping=mapping, from_table=rows_table, to_table=new_table, person_id=person_id,
+            )
+            outcome.pop('person_ids', None)
+            mapping.relocation = {'queued': False, 'from_table': rows_table, 'to_table': new_table, **outcome}
+            deferred_repoints = list(mapping.deferred_repoint_concept_ids)
 
     repoint = None
     if status_value == 'approved' and concept is not None:

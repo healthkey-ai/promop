@@ -759,6 +759,9 @@ export default function EditMappingDialog({
   const savePayload = () => ({
     ...form,
     ...(patientId ? { patient_id: Number(patientId) } : {}),
+    // The table this code was listed under on the patient page: rows there
+    // follow the mapping when it is filed under another table (#2393).
+    ...(patientId && selectedRow?.destination_omop_table ? { rows_omop_table: selectedRow.destination_omop_table } : {}),
     ...(surface && !patientId ? { decision_surface: surface } : {}),
     ...(suggestedHere ? { decision_confidence: rankedConfidence(individualSuggestion.activity, form.destination_concept_id) } : {}),
     source_unit: patientId && selectedRow?.source_code_id ? sourceUnit.trim() : form.source_unit,

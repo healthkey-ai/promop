@@ -242,7 +242,7 @@ describe("PatientSourceCodesTab mapping filed under another table (#2347)", () =
     fireEvent.click(within(alert).getByRole("button", { name: "Move it from Observation to Measurement" }));
     await waitFor(() => expect(api.patch).toHaveBeenCalledWith(
       "/v1/code-mappings/555/",
-      expect.objectContaining({ patient_id: 48095, omop_table: "measurement", domain_id: "Measurement" }),
+      expect.objectContaining({ patient_id: 48095, omop_table: "measurement", domain_id: "Measurement", rows_omop_table: "measurement" }),
     ));
   });
 });
