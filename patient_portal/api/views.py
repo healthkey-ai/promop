@@ -13462,18 +13462,8 @@ def code_mapping_list(request):
             mappings = mappings.filter(source_vocabulary_id=source_filter)
         search = request.query_params.get('search')
         if search:
-            q = search.strip()
-            search_filter = (
-                Q(target_concept__concept_name__icontains=q)
-                | Q(target_concept__concept_code__icontains=q)
-                | Q(source_code__icontains=q)
-                | Q(source_vocabulary_id__icontains=q)
-            )
-            from omop_core.services.mapping_browse import concept_id_from_search
-            concept_id = concept_id_from_search(q)
-            if concept_id is not None:
-                search_filter |= Q(target_concept_id=concept_id)
-            mappings = mappings.filter(search_filter)
+            from omop_core.services.mapping_browse import search_filter
+            mappings = mappings.filter(search_filter(search.strip()))
         status_filter = request.query_params.get('status')
         if status_filter:
             mappings = mappings.filter(status=status_filter)

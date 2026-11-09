@@ -26152,6 +26152,22 @@ class CodeMappingCuratorWorkflowTest(RunsRepointJobsMixin, TestCase):
         self.assertEqual(row['created_by'], 'queue_curator@t.com')
         self.assertEqual(row['origin'], 'curator')
 
+    def test_legacy_list_search_follows_the_shared_rules(self):
+        """The legacy list shares ``search_filter`` with the browse path (#2376):
+        text also matches the description, a number matches only the source
+        code, and ``field:value`` searches one field."""
+        SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='urn:oid:1.2.840.114350.1.13', source_code='6784',
+            source_code_description='Paraprotein kappa light chain', omop_table='measurement',
+            domain_id='Measurement', status='proposed', origin='import',
+        )
+        codes = lambda **params: {r['source_code'] for r in self.client.get('/api/v1/code-mappings/', params).data}
+        self.assertEqual(codes(search='paraprotein'), {'6784'})
+        self.assertEqual(codes(search='114350'), set())
+        self.assertEqual(codes(search='6784'), {'6784'})
+        self.assertEqual(codes(search='system:114350'), {'6784'})
+        self.assertEqual(codes(search='code:paraprotein'), set())
+
     def test_import_rows_report_no_author(self):
         SourceCodeConceptMapping.objects.create(
             source_vocabulary_id='', source_code='SODIUM',
