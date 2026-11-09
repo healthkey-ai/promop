@@ -22506,6 +22506,7 @@ class CodeMappingApiTest(TestCase):
         self.assertEqual((overall['total'], overall['approved'], overall['proposed'], overall['rejected']),
                          (6, 4, 1, 1))
         # accepted 3, overridden 1, rejected 1: precision 3/5, recall 3/4.
+        self.assertEqual(overall['scored'], 5)
         self.assertAlmostEqual(overall['precision'], 0.6)
         self.assertAlmostEqual(overall['recall'], 0.75)
         self.assertAlmostEqual(overall['f1'], 2 * 3 / (2 * 3 + 2 * 1 + 1))
@@ -22515,6 +22516,7 @@ class CodeMappingApiTest(TestCase):
         self.assertEqual(sections['overall']['80-90']['precision'], 0.0)
         self.assertEqual(sections['overall']['70-80']['approved'], 1)
         self.assertEqual(sections['overall']['below-70']['proposed'], 1)
+        self.assertEqual(sections['overall']['below-70']['scored'], 0)
         self.assertIsNone(sections['overall']['below-70']['precision'])
         # Per surface.
         self.assertEqual(sections['concept2code']['overall']['total'], 3)

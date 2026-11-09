@@ -14407,6 +14407,9 @@ def _decision_accuracy_row(key, label, statuses, outcomes):
         'approved': statuses.get('approved', 0),
         'proposed': statuses.get('proposed', 0),
         'rejected': statuses.get('rejected', 0),
+        # The denominator of the three scores: decisions that began as a
+        # ranker's suggestion and have a first disposition.
+        'scored': scored['reviewed'],
         'precision': scored['precision'], 'recall': scored['recall'], 'f1': scored['f1'],
     }
 
@@ -14421,7 +14424,10 @@ def code_mapping_accuracy_analytics(request):
     ranker had in the destination at the time. Precision, recall and F1 use
     ``suggestion_outcome`` on the same rows, as the accuracy dashboard does:
     accepted is a true positive, overridden or rejected a false positive, and
-    an override is also the miss recall counts. One grouped query.
+    an override is also the miss recall counts; ``scored`` is their
+    denominator, since not every decision began as a suggestion. ``status``
+    is the row's current state and the outcome its first disposition, both
+    read as they stand at the time of the request. One grouped query.
     """
     if not _can_manage_field_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)

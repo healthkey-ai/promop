@@ -7,11 +7,11 @@ const get = vi.fn();
 vi.mock("@/api/axios", () => ({ default: { get: (...args: unknown[]) => get(...args) } }));
 
 const row = (key: string, label: string, overrides: Partial<AccuracySection["rows"][number]> = {}) => ({
-  key, label, total: 0, approved: 0, proposed: 0, rejected: 0, precision: null, recall: null, f1: null, ...overrides,
+  key, label, total: 0, approved: 0, proposed: 0, rejected: 0, scored: 0, precision: null, recall: null, f1: null, ...overrides,
 });
 const sections: AccuracySection[] = [
   { key: "overall", label: "Overall", rows: [
-    row("overall", "Overall", { total: 12, approved: 8, proposed: 3, rejected: 1, precision: 0.875, recall: 1, f1: 0.9333 }),
+    row("overall", "Overall", { total: 12, approved: 8, proposed: 3, rejected: 1, scored: 8, precision: 0.875, recall: 1, f1: 0.9333 }),
     row("90-100", "90–100% confidence", { total: 5, approved: 5, precision: 1, recall: 1, f1: 1 }),
     row("80-90", "80–90%"), row("70-80", "70–80%"), row("below-70", "Below 70%", { total: 1, rejected: 1, precision: 0, recall: 0, f1: 0 }),
   ] },
@@ -29,10 +29,11 @@ describe("MappingAccuracyAnalyticsPage (#2383)", () => {
     const overall = await screen.findByRole("region", { name: "Overall" });
     expect(get).toHaveBeenCalledWith("/v1/code-mappings/accuracy/analytics/");
     const headers = within(overall).getAllByRole("columnheader").map(h => h.textContent);
-    expect(headers).toEqual(["Confidence", "Total", "Approved", "Proposed", "Rejected", "Precision", "Recall", "F1"]);
+    expect(headers).toEqual(["Confidence", "Total", "Approved", "Proposed", "Rejected", "Scored", "Precision", "Recall", "F1"]);
     const first = within(overall).getAllByRole("row")[1];
+    expect(within(first).getByRole("rowheader")).toHaveTextContent("Overall");
     expect(within(first).getAllByRole("cell").map(c => c.textContent))
-      .toEqual(["Overall", "12", "8", "3", "1", "87.5%", "100.0%", "93.3%"]);
+      .toEqual(["12", "8", "3", "1", "8", "87.5%", "100.0%", "93.3%"]);
     expect(within(overall).getByText("Below 70%").closest("tr")).toHaveTextContent("0.0%");
     expect(within(overall).getByText("80–90%").closest("tr")).toHaveTextContent("—");
     for (const label of ["Concept to Code", "Code to Concept", "Patient source codes"]) {
