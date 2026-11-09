@@ -263,6 +263,16 @@ value. Matching fields drop from `user_edited_fields`; stale facts cannot erase
 a pending edit after a projection failure. Dependent calculations run after
 pending values are restored.
 
+### Source pairs and their units
+
+A source pair is one assertion: the number and the unit the reader chose. Once
+the pair is authoritative, derivation keeps both pending — the extractor can
+reproduce the canonical number but not the reader's unit — so a later import
+cannot relabel `120 g/L` as `12 g/dL` in the pair. A full refresh restores a
+pending pair before recompute; it is retired by an explicit canonical write or
+an equivalent canonical import, not by a numerical match alone. This is the
+`_SOURCE_PAIR_FIELDS` rule in `patient_record_service.py`.
+
 ## Frontend Simplification
 
 ### Before (split brain)

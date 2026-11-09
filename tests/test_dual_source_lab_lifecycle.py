@@ -10,10 +10,11 @@ from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
+from django.contrib.contenttypes.models import ContentType
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from omop_core.models import Measurement, PatientRecord
+from omop_core.models import Measurement, PatientRecord, ProvenanceRecord
 from omop_core.services.patient_record_service import refresh_patient_record
 from omop_core.signals import suppress_patient_record_refresh
 from patient_portal.models import Identity, PatientUser
@@ -119,6 +120,11 @@ def test_a_patient_result_sits_beside_the_imported_fact(lab):
     patient = _hemoglobin_rows(lab, SELF_REPORT_TYPE).get()
     assert (patient.value_as_number, patient.unit_source_value) == (12, 'g/dL')
     assert patient.measurement_date == TODAY
+    provenance = ProvenanceRecord.objects.filter(
+        content_type=ContentType.objects.get_for_model(Measurement),
+        object_id=patient.pk, source='PATIENT_SELF',
+    ).values_list('source_user_id', flat=True)
+    assert list(provenance) == [f"{lab['identity'].issuer}|{lab['identity'].sub}"]
 
 
 def test_an_older_import_does_not_erase_a_newer_patient_result(lab):
@@ -133,6 +139,8 @@ def test_an_older_import_does_not_erase_a_newer_patient_result(lab):
 
 
 def test_a_later_same_day_import_does_not_take_over_the_patient_answer(lab):
+    # The pair is still pending, and refresh restores it before recompute. This
+    # is the documented source-pair retention, not a general same-day tie rule.
     _import(lab, 10, 'g/dL', TODAY)
     _patch_pair(lab, 120, 'G/L', TODAY)
     _import(lab, 11, 'g/dL', TODAY)
@@ -155,7 +163,8 @@ def test_a_failed_lab_mapping_keeps_the_answer_pending_then_projects_once(lab):
     assert not _hemoglobin_rows(lab, SELF_REPORT_TYPE).exists()
     assert 'hemoglobin_level' in (record.user_edited_fields or [])
 
-    # Later mapping approval: the same answer projects once, beside nothing.
+    # Mapping availability plus an explicit retry: the same answer projects
+    # once, beside nothing.
     ConceptFactory(
         concept_id=900718, concept_code=LOINC,
         concept_name='Hemoglobin [Mass/volume] in Blood',
@@ -198,3 +207,77 @@ def test_computed_only_verdicts_stay_refused_while_lab_inputs_are_writable(lab):
     # The paired positive control: the lab source input is accepted.
     _patch_pair(lab, 120, 'G/L')
     assert lab['record'].hemoglobin_g_dl == Decimal('12.0')
+
+
+@pytest.mark.parametrize(
+    'representation,value,unit,expected_canonical,expected_pair,expected_unit',
+    [
+        ('loinc', 12.0, 'g/dL', Decimal('12.0'), Decimal('12.00'), 'G/DL'),
+        ('loinc', 120, 'g/L', Decimal('12.0'), Decimal('12.00'), 'G/DL'),
+        ('display', 120, 'g/L', Decimal('12.0'), Decimal('12.00'), 'G/DL'),
+        ('legacy', 120, 'g/L', Decimal('12.0'), Decimal('120.00'), 'G/L'),
+        ('loinc', 12.0, None, Decimal('12.0'), Decimal('12.00'), 'G/DL'),
+    ],
+)
+def test_the_hemoglobin_import_unit_matrix(
+    lab, representation, value, unit, expected_canonical, expected_pair,
+    expected_unit,
+):
+    concept = lab['concept']
+    kwargs = {
+        'person': lab['person'], 'value_as_number': value,
+        'unit_source_value': unit, 'measurement_type_concept_id': EHR_TYPE,
+    }
+    if representation == 'loinc':
+        kwargs.update(measurement_concept=concept, measurement_source_value=LOINC)
+    elif representation == 'display':
+        kwargs.update(measurement_concept_id=0,
+                      measurement_source_value='Hemoglobin [Mass/volume] in Blood')
+    else:
+        kwargs.update(measurement_concept=ConceptFactory(concept_name='hemoglobin'),
+                      measurement_source_value=None)
+    with suppress_patient_record_refresh():
+        MeasurementFactory(**kwargs)
+    refresh_patient_record(lab['person'])
+
+    record = lab['record']
+    record.refresh_from_db()
+    assert record.hemoglobin_g_dl == expected_canonical
+    assert record.hemoglobin_level == expected_pair
+    assert record.hemoglobin_level_units == expected_unit
+
+
+def test_a_ucum_unit_concept_is_used_when_the_source_text_is_absent(lab):
+    with suppress_patient_record_refresh():
+        MeasurementFactory(
+            person=lab['person'], measurement_concept=lab['concept'],
+            measurement_source_value=LOINC, measurement_type_concept_id=EHR_TYPE,
+            value_as_number=120,
+            unit_concept=ConceptFactory(
+                vocabulary=VocabularyFactory(vocabulary_id='UCUM'),
+                concept_code='g/L'),
+        )
+    refresh_patient_record(lab['person'])
+
+    record = lab['record']
+    record.refresh_from_db()
+    assert record.hemoglobin_g_dl == Decimal('12.0')
+
+
+def test_a_newer_unsupported_unit_blocks_the_older_convertible_result(lab):
+    _import(lab, 120, 'g/L', TODAY - timedelta(days=1))
+    _import(lab, 120, 'mg/L', TODAY)
+
+    record = lab['record']
+    record.refresh_from_db()
+    assert record.hemoglobin_g_dl is None
+    assert record.hemoglobin_level is None
+    assert record.hemoglobin_level_units is None
+
+
+def test_an_out_of_range_import_is_not_a_fact(lab):
+    _import(lab, 100000, 'g/L', TODAY)
+
+    record = lab['record']
+    record.refresh_from_db()
+    assert record.hemoglobin_g_dl is None
