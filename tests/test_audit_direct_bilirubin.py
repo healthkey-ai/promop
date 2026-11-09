@@ -5,6 +5,7 @@ from decimal import Decimal
 
 import pytest
 from django.core.management import call_command
+from django.core.management.base import CommandError
 
 from omop_core.models import Measurement, PatientRecord
 from tests.factories import ConceptFactory, MeasurementFactory, PatientRecordFactory
@@ -70,6 +71,7 @@ def test_a_pending_alias_is_reported_without_being_touched():
     assert report['counts']['pending_alias'] == 1
     record.refresh_from_db()
     assert record.serum_bilirubin_level == Decimal('0.70')
+    assert record.user_edited_fields == ['serum_bilirubin_level']
 
 
 def test_it_flags_the_old_raw_unit_projection():
@@ -129,3 +131,60 @@ def test_person_id_scopes_the_audit():
 
     assert report['scanned'] == 1
     assert report['samples']['pair_without_unit'][0]['person_id'] == first.person_id
+
+
+def test_a_pending_clear_is_reported_even_when_every_value_is_empty():
+    record = PatientRecordFactory(user_edited_fields=['serum_bilirubin_level'])
+    _set_pair(record, None, None, None)
+
+    report = _audit()
+
+    assert report['counts']['pending_alias'] == 1
+    record.refresh_from_db()
+    assert record.serum_bilirubin_level is None
+    assert record.serum_bilirubin_level_direct is None
+    assert record.user_edited_fields == ['serum_bilirubin_level']
+
+
+def test_an_older_mg_dl_fact_with_another_number_is_not_flagged():
+    person = PatientRecordFactory().person
+    MeasurementFactory(
+        person=person,
+        measurement_concept=ConceptFactory(concept_code=LOINC),
+        measurement_source_value=LOINC,
+        value_as_number=5,
+        unit_source_value='mg/dL',
+    )
+    _set_pair(PatientRecord.objects.get(person=person),
+              Decimal('10.00'), 'UMOL/L', Decimal('0.58'))
+
+    report = _audit()
+
+    assert 'projection_raw_unit' not in report['counts']
+
+
+def test_the_newest_measurement_decides_the_projection_class():
+    person = PatientRecordFactory().person
+    concept = ConceptFactory(concept_code=LOINC)
+    MeasurementFactory(
+        person=person, measurement_concept=concept,
+        measurement_source_value=LOINC, measurement_date='2024-01-01',
+        value_as_number=10, unit_source_value='mg/dL',
+    )
+    MeasurementFactory(
+        person=person, measurement_concept=concept,
+        measurement_source_value=LOINC, measurement_date='2024-02-01',
+        value_as_number=Decimal('0.58'), unit_source_value='mg/dL',
+    )
+    _set_pair(PatientRecord.objects.get(person=person),
+              Decimal('10.00'), 'UMOL/L', Decimal('0.58'))
+
+    report = _audit()
+
+    # The newest fact carries the converted number, not the old raw one.
+    assert 'projection_raw_unit' not in report['counts']
+
+
+def test_a_negative_limit_is_a_command_error():
+    with pytest.raises(CommandError):
+        call_command('audit_direct_bilirubin', '--limit', '-1')

@@ -19,7 +19,7 @@ import json
 from collections import defaultdict
 from decimal import Decimal, InvalidOperation
 
-from django.core.management.base import BaseCommand
+from django.core.management.base import BaseCommand, CommandError
 from django.db.models import Q
 
 from omop_core.models import Measurement, PatientRecord
@@ -73,6 +73,8 @@ class Command(BaseCommand):
                             help='machine-readable output')
 
     def handle(self, *args, **options):
+        if options['limit'] < 0:
+            raise CommandError('--limit must be zero or a positive integer.')
         sample_size = max(options['sample'], 0)
         records = PatientRecord.objects.only(
             'person_id', 'serum_bilirubin_level_direct',
@@ -83,10 +85,9 @@ class Command(BaseCommand):
             records = records.filter(person_id=options['person_id'])
         if options['limit']:
             records = records[:options['limit']]
-        person_ids = None
-        if options['person_id'] is not None:
-            person_ids = {options['person_id']}
-        latest = _latest_direct_measurements(person_ids)
+        # Bound the Measurement query to the rows this run will actually scan.
+        selected_ids = set(records.values_list('person_id', flat=True))
+        latest = _latest_direct_measurements(selected_ids)
 
         counts = defaultdict(int)
         samples = defaultdict(list)
@@ -111,11 +112,13 @@ class Command(BaseCommand):
             unit = record.serum_bilirubin_level_direct_units
             alias = record.serum_bilirubin_level
             code = units.normalize_unit(unit)
-            if value is None and alias is None and code is None:
-                continue
+            # A pending clear is a stored edit even when every value is empty;
+            # it must be reported before the empty-row shortcut.
             if 'serum_bilirubin_level' in (record.user_edited_fields or []):
                 flag('pending_alias', record,
                      'the unitless mirror still carries a pending edit')
+            if value is None and alias is None and code is None:
+                continue
             if value is not None and not (unit or '').strip():
                 flag('pair_without_unit', record,
                      'no unit; the old reader assumes mg/dL')
@@ -146,8 +149,10 @@ class Command(BaseCommand):
             elif (code == 'UMOL/L' and measured_code == 'MG/DL'
                   and _same_number(measurement['value_as_number'], value)):
                 flag('projection_raw_unit', record,
-                     'latest Measurement keeps the raw number under mg/dL; '
-                     'the old projection likely wrote it')
+                     'latest Measurement %s (%s) keeps the raw number under '
+                     'mg/dL; the old projection likely wrote it'
+                     % (measurement['measurement_id'],
+                        measurement['measurement_date']))
 
         report = {
             'scanned': scanned,
