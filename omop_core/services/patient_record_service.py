@@ -4756,8 +4756,19 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None,
                 measurement.value_as_number, unit_code)
             if (unit_code is None or not recognised
                     or not hemoglobin_canonical_in_range(canonical_value)):
-                # The newest result owns the pair even with an unreadable unit;
-                # explicit Nones stop the curated fallback from restoring it.
+                if representation == 'legacy' and reported_unit is not None:
+                    # A historic concept-name fact keeps the number and unit
+                    # the lab reported, as before (#475): the canonical stays
+                    # unknown rather than reinterpreting an unsupported scale.
+                    data[HEMOGLOBIN_CANONICAL] = None
+                    data[HEMOGLOBIN_PAIR] = Decimal(str(measurement.value_as_number))
+                    data[HEMOGLOBIN_UNIT] = reported_unit
+                    selected_dates[HEMOGLOBIN_PAIR] = measurement.measurement_date
+                    if dates_out is not None:
+                        dates_out[HEMOGLOBIN_PAIR] = measurement.measurement_date
+                    continue
+                # The newest coded/display result owns the pair even with an
+                # unreadable unit; explicit Nones stop the curated fallback.
                 logger.warning(
                     'Hemoglobin projection skipped for person_id=%s: unit=%r',
                     person.person_id, reported_unit,
