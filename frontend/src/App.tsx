@@ -25,6 +25,7 @@ import SourceSystemManagementPage from "@/components/CodeMappings/SourceSystemMa
 import SuggestRunLogPage from "@/components/CodeMappings/SuggestRunLogPage";
 import RelevanceSignalsPage from "@/components/MappingHub/RelevanceSignalsPage";
 import CodeMappingAccuracyPage from "@/components/CodeMappings/CodeMappingAccuracyPage";
+import MappingAccuracyAnalyticsPage from "@/components/CodeMappings/MappingAccuracyAnalyticsPage";
 import MappingHubPage from "@/components/MappingHub/MappingHubPage";
 import DiseaseCategoryPage from "@/components/MappingHub/DiseaseCategoryPage";
 import TherapyMappingPage from "@/components/TherapyMappings/TherapyMappingPage";
@@ -173,6 +174,7 @@ function AppRoutes() {
       <Route path="/code-mappings/source-systems" element={mappingAdminRoute(<SourceSystemManagementPage />)} />
       <Route path="/code-mappings/suggest-runs/:runId" element={mappingAdminRoute(<SuggestRunLogPage />)} />
       <Route path="/code-mappings/accuracy" element={mappingAdminRoute(<CodeMappingAccuracyPage />)} />
+      <Route path="/code-mappings/accuracy/analytics" element={mappingAdminRoute(<MappingAccuracyAnalyticsPage />)} />
       <Route path="/therapy-mappings" element={mappingAdminRoute(<TherapyMappingPage />)} />
       <Route path="/relevance-signals" element={mappingAdminRoute(<RelevanceSignalsPage />)} />
       <Route path="/disease-category-mappings" element={mappingAdminRoute(<DiseaseCategoryPage />)} />
