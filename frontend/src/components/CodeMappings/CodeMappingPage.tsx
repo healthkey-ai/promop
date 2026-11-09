@@ -1027,6 +1027,7 @@ export default function CodeMappingPage() {
         destination_vocabulary_id: row.destination_vocabulary_id,
         omop_table: row.destination_omop_table,
         status: row.status === "approved" ? "proposed" : "approved",
+        decision_surface: "code2concept",
         notes: row.notes,
       };
       const resp = await api.patch(`/v1/code-mappings/${row.mapping_id}/`, payload);
@@ -1738,6 +1739,7 @@ export default function CodeMappingPage() {
       />}
 
       <EditMappingDialog
+        surface="code2concept"
         open={dialogMode !== null}
         onClose={closeDialog}
         mode={dialogMode || "new"}

@@ -2148,6 +2148,25 @@ class SourceCodeConceptMapping(models.Model):
         max_length=20, blank=True, default='', db_index=True,
         help_text='Suggestion model version that last examined this code, whether or not it proposed anything.',
     )
+    # What the curator decided on, and where (#2382). suggestion_confidence
+    # above is live: a later run overwrites it and a moved destination clears
+    # it, so it cannot say what the ranker believed at the moment of the save.
+    # These two are written by every curator save (_upsert_source_code_mapping)
+    # and never by Suggest, so they describe the last decision as it was made.
+    DECISION_SURFACE_CHOICES = [
+        ('code2concept', 'Code to Concept'),
+        ('concept2code', 'Concept to Code'),
+        ('patientcode', 'Patient source codes'),
+    ]
+    decision_surface = models.CharField(
+        max_length=16, choices=DECISION_SURFACE_CHOICES, blank=True, default='',
+        db_default='', db_index=True,
+        help_text='The curation surface the last curator save came from; blank until a curator saves the row.',
+    )
+    decision_confidence = models.FloatField(
+        null=True, blank=True,
+        help_text='Ranker confidence (0-1) in the destination at the moment of the last curator save; null when no ranker had scored it.',
+    )
     destination_vocabulary_id = models.CharField(
         max_length=20, blank=True, default='', db_index=True,
         help_text=(

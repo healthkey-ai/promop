@@ -961,7 +961,7 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
       strategies={dialogStrategies} rankingModel={dialogRanking}
       onStrategiesChange={setDialogStrategies} onRankingModelChange={setDialogRanking}
       onSaved={editorSaved} onDeleted={editorDeleted}
-      defaultDestination={destination} sourceExamples />
+      defaultDestination={destination} sourceExamples surface="concept2code" />
   </section>;
 
   // Render a group of candidates sharing the same normalised description.
