@@ -103,6 +103,29 @@ describe("App role-gated routing", () => {
     renderAt("/code-mappings");
     expect(screen.getByText("CODE_MAPPINGS")).toBeInTheDocument();
   });
+
+  // An analyst curates code mappings and views patients read-only; every
+  // other curation page sends them home (#2398).
+  const analyst = { id: 3, org_accesses: [{ org_slug: 'acme', org_name: 'Acme', role: 'analyst', expires_at: null }] };
+
+  it("allows an analyst on the code mapping page", () => {
+    mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: analyst });
+    renderAt("/code-mappings");
+    expect(screen.getByText("CODE_MAPPINGS")).toBeInTheDocument();
+  });
+
+  it("sends an analyst home from field mappings", () => {
+    mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: analyst });
+    renderAt("/field-mappings");
+    expect(screen.queryByText("FIELD_MAPPINGS")).not.toBeInTheDocument();
+    expect(screen.getByText("PROVIDER_LIST")).toBeInTheDocument();
+  });
+
+  it("lets a doctor keep field mappings", () => {
+    mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: { ...analyst, org_accesses: [{ ...analyst.org_accesses[0], role: 'doctor' }] } });
+    renderAt("/field-mappings");
+    expect(screen.getByText("FIELD_MAPPINGS")).toBeInTheDocument();
+  });
 });
 
 describe("Org-scoped routes", () => {

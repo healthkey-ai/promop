@@ -27,6 +27,7 @@ import RelevanceSignalsPage from "@/components/MappingHub/RelevanceSignalsPage";
 import CodeMappingAccuracyPage from "@/components/CodeMappings/CodeMappingAccuracyPage";
 import MappingAccuracyAnalyticsPage from "@/components/CodeMappings/MappingAccuracyAnalyticsPage";
 import MappingHubPage from "@/components/MappingHub/MappingHubPage";
+import { hasCodeMappingRole, hasCurationRole, isStaffOrOrgAdmin } from "@/utils/roles";
 import DiseaseCategoryPage from "@/components/MappingHub/DiseaseCategoryPage";
 import TherapyMappingPage from "@/components/TherapyMappings/TherapyMappingPage";
 import OrgLogin from "@/components/Auth/OrgLogin";
@@ -106,20 +107,25 @@ function AppRoutes() {
     return element;
   };
 
-  // Mapping curation is available to any professional role (staff, org_admin,
-  // doctor, analyst).  Doctors and analysts can propose; only staff and
-  // org_admin can approve.  The API independently enforces the same policy.
-  const hasProfessionalRole = currentUser?.is_staff || currentUser?.is_org_admin
-    || currentUser?.org_accesses?.some(a => ['org_admin', 'doctor', 'analyst'].includes(a.role ?? ''));
-  const mappingAdminRoute = (element: ReactNode) => {
+  // Curation pages are for staff, org_admin and doctor. The Code Mapping page
+  // is for every professional role, the analyst included: an analyst curates
+  // code mappings and views patients read-only, nothing else (#2398). Doctors
+  // and analysts propose; only staff and org_admin approve. The API
+  // independently enforces the same policy.
+  const curationRoute = (element: ReactNode) => {
     if (!currentUser) return <Navigate to="/login" replace />;
-    if (!hasProfessionalRole) return <Navigate to="/" replace />;
+    if (!hasCurationRole(currentUser)) return <Navigate to="/" replace />;
+    return element;
+  };
+  const codeMappingRoute = (element: ReactNode) => {
+    if (!currentUser) return <Navigate to="/login" replace />;
+    if (!hasCodeMappingRole(currentUser)) return <Navigate to="/" replace />;
     return element;
   };
 
   const orgAdminRoute = (element: ReactNode) => {
     if (!currentUser) return <Navigate to="/login" replace />;
-    if (!(currentUser.is_staff || currentUser.is_org_admin)) return <Navigate to="/" replace />;
+    if (!isStaffOrOrgAdmin(currentUser)) return <Navigate to="/" replace />;
     return element;
   };
 
@@ -168,16 +174,16 @@ function AppRoutes() {
       <Route path="/stats" element={<Navigate to="/org-admin" replace />} />
       <Route path="/service-applications" element={currentUser?.is_staff ? <ServiceApplicationsPage /> : <Navigate to={currentUser ? "/" : "/login"} replace />} />
       <Route path="/org-admin" element={orgAdminRoute(<OrgAdminPage />)} />
-      <Route path="/mappings" element={mappingAdminRoute(<MappingHubPage />)} />
-      <Route path="/field-mappings" element={mappingAdminRoute(<FieldMappingPage />)} />
-      <Route path="/code-mappings" element={mappingAdminRoute(<CodeMappingPage />)} />
-      <Route path="/code-mappings/source-systems" element={mappingAdminRoute(<SourceSystemManagementPage />)} />
-      <Route path="/code-mappings/suggest-runs/:runId" element={mappingAdminRoute(<SuggestRunLogPage />)} />
-      <Route path="/code-mappings/accuracy" element={mappingAdminRoute(<CodeMappingAccuracyPage />)} />
-      <Route path="/code-mappings/accuracy/analytics" element={mappingAdminRoute(<MappingAccuracyAnalyticsPage />)} />
-      <Route path="/therapy-mappings" element={mappingAdminRoute(<TherapyMappingPage />)} />
-      <Route path="/relevance-signals" element={mappingAdminRoute(<RelevanceSignalsPage />)} />
-      <Route path="/disease-category-mappings" element={mappingAdminRoute(<DiseaseCategoryPage />)} />
+      <Route path="/mappings" element={curationRoute(<MappingHubPage />)} />
+      <Route path="/field-mappings" element={curationRoute(<FieldMappingPage />)} />
+      <Route path="/code-mappings" element={codeMappingRoute(<CodeMappingPage />)} />
+      <Route path="/code-mappings/source-systems" element={curationRoute(<SourceSystemManagementPage />)} />
+      <Route path="/code-mappings/suggest-runs/:runId" element={codeMappingRoute(<SuggestRunLogPage />)} />
+      <Route path="/code-mappings/accuracy" element={codeMappingRoute(<CodeMappingAccuracyPage />)} />
+      <Route path="/code-mappings/accuracy/analytics" element={codeMappingRoute(<MappingAccuracyAnalyticsPage />)} />
+      <Route path="/therapy-mappings" element={curationRoute(<TherapyMappingPage />)} />
+      <Route path="/relevance-signals" element={curationRoute(<RelevanceSignalsPage />)} />
+      <Route path="/disease-category-mappings" element={curationRoute(<DiseaseCategoryPage />)} />
       <Route
         path="/profile"
         element={

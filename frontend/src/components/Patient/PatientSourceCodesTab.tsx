@@ -8,6 +8,7 @@ import type {
 } from "../../types/sourceCodes";
 import EditMappingDialog from "../CodeMappings/EditMappingDialog";
 import SourceQuantityCell from "../CodeMappings/SourceQuantityCell";
+import { hasCurationRole, isStaffOrOrgAdmin } from "@/utils/roles";
 import {
   type CodeMappingRow,
   type Reference,
@@ -155,7 +156,7 @@ function SourceCodeTable({
 
 export default function PatientSourceCodesTab({ personId }: Props) {
   const { currentUser } = useAuth();
-  const canApprove = !!(currentUser?.is_staff || currentUser?.is_org_admin);
+  const canApprove = isStaffOrOrgAdmin(currentUser);
   const [data, setData] = useState<SourceCodesResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -371,6 +372,7 @@ export default function PatientSourceCodesTab({ personId }: Props) {
         row={dialogRow}
         reference={reference}
         canApprove={canApprove}
+        canCurate={hasCurationRole(currentUser)}
         strategies={strategies}
         rankingModel={rankingModel}
         onStrategiesChange={setStrategies}
