@@ -13,6 +13,7 @@ from omop_core.models import (
     AxisVariantRefresh, ConceptMappingPriority, FieldConceptMapping, PatientSourceCode,
     SourceCodeConceptMapping, SuggestRun,
 )
+from omop_core.services import concept_lock
 from omop_core.services.concept_to_code import (
     browse_concepts, concept_payload, eligible_sources, source_payload, standard_destinations,
 )
@@ -78,12 +79,13 @@ def concept_to_code_list(request):
     domains = FieldConceptMapping.objects.exclude(status='rejected').filter(
         concept_id__in=standard_destinations().values('pk'),
     ).values('omop_table').annotate(count=Count('concept_id', distinct=True)).order_by('omop_table')
+    locks = concept_lock.locks_for([concept.pk for concept in page], request.user)
     return Response({
         **paging, 'domains': list(domains),
         'results': [{**concept_payload(concept), 'fields': field_map.get(concept.pk, []),
                      'sccm_counts': {key: getattr(concept, key) for key in ('approved', 'proposed', 'rejected')},
                      'seen': concept.seen, 'priority': concept.priority,
-                     'done': concept.done} for concept in page],
+                     'done': concept.done, 'lock': locks.get(concept.pk)} for concept in page],
         'prioritized': ConceptMappingPriority.objects.count(),
     })
 
@@ -133,6 +135,24 @@ def concept_to_code_done(request):
     marked = concept_priority.mark_done(concept, done, request.user)
     return Response({'concept_id': concept.pk, 'done': marked, 'position': None,
                      'prioritized': ConceptMappingPriority.objects.count()})
+
+
+@api_view(['POST', 'DELETE'])
+@permission_classes([IsAuthenticated])
+def concept_to_code_lock(request, concept_id):
+    """Claim a concept (POST) or release it (DELETE) (#2390).
+
+    While one curator holds the concept, others can review but not map it.
+    POST is idempotent for the holder and 423 for anyone else; DELETE is for
+    the holder or staff.
+    """
+    _authorize(request.user)
+    concept = get_object_or_404(standard_destinations(), pk=concept_id)
+    if request.method == 'POST':
+        lock = concept_lock.acquire(concept, request.user)
+        return Response({'concept_id': concept.pk, 'lock': concept_lock.lock_payload(lock, request.user)})
+    concept_lock.release(concept, request.user)
+    return Response({'concept_id': concept.pk, 'lock': None})
 
 
 @api_view(['GET'])
@@ -299,6 +319,8 @@ def concept_to_code_suggest(request):
     if not isinstance(ids, list) or not ids or any(type(value) is not int or value <= 0 for value in ids):
         raise ValidationError({'concept_ids': 'Supply a nonempty list of positive integer concept IDs.'})
     ids = list(dict.fromkeys(ids))
+    for concept_id in ids:
+        concept_lock.check_concept_lock(concept_id, request.user)
     dispatcher = get_dispatcher()
     inline = isinstance(dispatcher, InlineDispatcher)
     max_concepts = 1 if inline else 10
@@ -381,6 +403,7 @@ def concept_to_code_propose(request, concept_id):
     except (TypeError, ValueError):
         raise ValidationError({'run_id': 'Supply the source preview run ID.'})
     concept = get_object_or_404(standard_destinations(), pk=concept_id)
+    concept_lock.check_concept_lock(concept.pk, request.user)
     run = get_object_or_404(SuggestRun, pk=run_id, direction='reverse', state__in=[SuggestRun.SUCCESS, SuggestRun.FAILURE])
     candidate = next((candidate for event in (run.activity or [])
                       if event['concept']['concept_id'] == concept.pk
@@ -429,6 +452,7 @@ def concept_to_code_apply(request, concept_id, mapping_id):
     if not isinstance(request.data, dict):
         raise ValidationError({'detail': 'Supply a JSON object.'})
     concept = get_object_or_404(standard_destinations(), pk=concept_id)
+    concept_lock.check_concept_lock(concept.pk, request.user)
     row = get_object_or_404(SourceCodeConceptMapping.objects.select_for_update(), pk=mapping_id)
     if row.status != 'proposed' or row.origin_system == 'athena':
         return Response({'detail': 'This source is no longer an editable proposal. Refresh before reviewing it.'}, status=409)

@@ -3,7 +3,7 @@ import * as Dialog from '@radix-ui/react-dialog';
 import api from '@/api/axios';
 import { fetchDiseaseCategories } from '@/api/mappingHub';
 import { destinationError } from './destinationSearch';
-import { BarChart3 } from 'lucide-react';
+import { BarChart3, Lock, Unlock } from 'lucide-react';
 import AxisVariantWalkPanel from './AxisVariantWalkPanel';
 import EditMappingDialog from './EditMappingDialog';
 import { AxisVariantFlag, AxisVariantList } from './LoincAxisChips';
@@ -20,7 +20,11 @@ type Concept = {
   priority?: number | null;
   /** Its source codes are mapped; it holds no priority and sorts last (#2388). */
   done?: boolean;
+  /** Who has claimed the concept, and whether that is the viewer (#2390). */
+  lock?: { username: string; locked_at?: string; mine: boolean } | null;
 };
+/** Another curator holds the concept: review only. */
+const lockedByOther = (concept: Concept) => Boolean(concept.lock && !concept.lock.mine);
 type Source = {
   mapping_id: number | null; source_code: string; source_code_description: string;
   source_vocabulary_id: string; occurrence_count: number; status: string;
@@ -170,6 +174,22 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange, initialC
       setError(`Could not change the priority of ${concept.concept_name}. ${destinationError(failure)}`);
     } finally { setMoving(false); }
   };
+  // Lock claims the concept for this curator; others review but cannot map it (#2390).
+  const toggleLock = async (concept: Concept) => {
+    if (moving) return;
+    const locking = !concept.lock;
+    setMoving(true); setError('');
+    try {
+      const { data } = locking
+        ? await api.post<{ lock: Concept['lock'] }>(`/v1/concept-to-code/${concept.concept_id}/lock/`)
+        : await api.delete<{ lock: Concept['lock'] }>(`/v1/concept-to-code/${concept.concept_id}/lock/`);
+      setMoveStatus(locking ? `Locked ${concept.concept_name} for you.` : `Unlocked ${concept.concept_name}.`);
+      setSelected(previous => previous?.concept_id === concept.concept_id ? { ...previous, lock: data.lock } : previous);
+      setRevision(value => value + 1);
+    } catch (failure) {
+      setError(`Could not ${locking ? 'lock' : 'unlock'} ${concept.concept_name}. ${destinationError(failure)}`);
+    } finally { setMoving(false); }
+  };
   // Done means its source codes are mapped: the concept loses its priority,
   // shows "Done" in the Priority column and sorts last (#2388).
   const markDone = async (concept: Concept, done: boolean) => {
@@ -289,6 +309,7 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange, initialC
           <td className="p-3"><button className="text-left font-medium text-slate-950 underline underline-offset-2" disabled={writing}
             aria-haspopup="dialog" aria-expanded={selected?.concept_id === concept.concept_id}
             onClick={event => { selectedTrigger.current = event.currentTarget; setSelected(concept); }}>{concept.concept_name}</button>
+            <LockBadge concept={concept} disabled={writing || moving} onToggle={() => void toggleLock(concept)} />
             <div className="mt-1 text-xs text-slate-500">{concept.vocabulary_id}:{concept.concept_code} · OMOP {concept.concept_id} · {concept.domain_id}</div></td>
           <td className="p-3 text-xs text-slate-600">{concept.fields.length
             ? concept.fields.map(field => <div key={field.field_name}>{field.field_name} <span className="text-slate-400">({field.status})</span></div>) : '—'}</td>
@@ -310,15 +331,35 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange, initialC
           <div>
             <Dialog.Title className="text-lg font-semibold">Source codes for {selected.concept_name}</Dialog.Title>
             <Dialog.Description className="text-sm text-slate-600">Standard {selected.vocabulary_id}:{selected.concept_code} · OMOP {selected.concept_id} · {selected.domain_id}</Dialog.Description>
+            {lockedByOther(selected) && <p role="status" className="mt-1 inline-flex items-center gap-1 text-sm text-amber-800">
+              <Lock size={14} aria-hidden="true" />Locked by {selected.lock?.username}: you can review these source codes but not map them.</p>}
           </div>
           <Dialog.Close className={button} disabled={writing}>Close</Dialog.Close>
         </div>
-        <SourceCoverage key={selected.concept_id} concept={selected} canApprove={canApprove}
+        <SourceCoverage key={selected.concept_id} concept={selected} canApprove={canApprove} readOnly={lockedByOther(selected)}
           onWriting={value => { setWriting(value); onWritingChange?.(value); }} onSaved={() => setRevision(value => value + 1)}
           onEditingChange={setEditing} suggestCache={suggestCache} />
       </Dialog.Content>
     </Dialog.Portal>}
   </Dialog.Root>;
+}
+
+/** The concept's lock: a lock icon with the holder's name when someone holds
+ * it, Unlock for the holder, Lock for anyone else while it is free (#2390). */
+function LockBadge({ concept, disabled, onToggle }: { concept: Concept; disabled: boolean; onToggle: () => void }) {
+  const lock = concept.lock;
+  const small = 'ml-2 inline-flex items-center gap-1 rounded border border-slate-300 px-1.5 py-0.5 text-xs not-italic hover:bg-slate-100 disabled:opacity-40';
+  if (!lock) {
+    return <button type="button" className={`${small} text-slate-600`} disabled={disabled} title="Lock this concept so only you map it"
+      aria-label={`Lock ${concept.concept_name}`} onClick={onToggle}><Lock size={12} aria-hidden="true" />Lock</button>;
+  }
+  if (lock.mine) {
+    return <button type="button" className={`${small} text-emerald-800`} disabled={disabled} title="Unlock this concept"
+      aria-label={`Unlock ${concept.concept_name}`} onClick={onToggle}><Unlock size={12} aria-hidden="true" />{lock.username}</button>;
+  }
+  return <span className="ml-2 inline-flex items-center gap-1 rounded bg-amber-50 px-1.5 py-0.5 text-xs not-italic text-amber-800"
+    title={`Locked by ${lock.username}: review only`} aria-label={`Locked by ${lock.username}`}>
+    <Lock size={12} aria-hidden="true" />{lock.username}</span>;
 }
 
 /** Drag handle, priority number and one-step moves for one concept row; a
@@ -476,8 +517,10 @@ function useSourceGroup(conceptId: number, status: Status, enabled: boolean, que
   return { data, setData, page, setPage, loading, failed, reset };
 }
 
-function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChange, suggestCache }: {
+function SourceCoverage({ concept, canApprove, readOnly = false, onSaved, onWriting, onEditingChange, suggestCache }: {
   concept: Concept; canApprove: boolean; onSaved: () => void; onWriting: (value: boolean) => void;
+  /** Another curator holds the concept (#2390): every write control is off. */
+  readOnly?: boolean;
   onEditingChange?: (value: boolean) => void;
   suggestCache: Map<number, { run: Run | null; previousCandidates: Source[] }>;
 }) {
@@ -859,7 +902,7 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
   };
 
   const openEditor = async (row: Source) => {
-    if (writingRef.current || opening) return;
+    if (writingRef.current || opening || readOnly) return;
     setOpening(true); setError('');
     try {
       let current = reference;
@@ -908,8 +951,8 @@ function SourceCoverage({ concept, canApprove, onSaved, onWriting, onEditingChan
   // The run's controls and the batch selection wait for a run to finish; a
   // write in progress blocks everything. Opening a code to edit it waits only
   // for a write, so a curator works through the list while Suggest searches (#2028).
-  const busy = writing || running;
-  const locked = writing || opening;
+  const busy = writing || running || readOnly;
+  const locked = writing || opening || readOnly;
   const retry = () => { resetView(); setError(''); setRevision(value => value + 1); };
   return <section aria-label={`Source codes for ${concept.concept_name}`} className="space-y-4">
     <div role="group" aria-label="Source code views" className="flex flex-wrap gap-2">

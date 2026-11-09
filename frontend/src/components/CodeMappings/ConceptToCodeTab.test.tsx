@@ -936,6 +936,27 @@ describe('concept priority (#1914)', () => {
     await waitFor(() => expect(post).toHaveBeenCalledWith('/v1/concept-to-code/done/', { concept_id: 2, done: false }));
   });
 
+  it('locks a concept from its row, shows the holder on other rows and keeps a locked concept review-only (#2390)', async () => {
+    list = [named(1, 'Albumin', 1), { ...named(2, 'Bilirubin'), lock: { username: 'lisa@healthtree.org', mine: false } },
+            { ...named(3, 'Calcium'), lock: { username: 'me@healthtree.org', mine: true } }];
+    post.mockImplementation((url: string) => Promise.resolve({ data: url.endsWith('/lock/')
+      ? { concept_id: 1, lock: { username: 'me@healthtree.org', mine: true } } : page([source]) }));
+    render(<ConceptToCodeTab canApprove />);
+    fireEvent.click(await screen.findByRole('button', { name: 'Lock Albumin' }));
+    await waitFor(() => expect(post).toHaveBeenCalledWith('/v1/concept-to-code/1/lock/'));
+    expect(await screen.findByText('Locked Albumin for you.')).toBeInTheDocument();
+    // Another curator's lock is a badge with their name; the holder sees Unlock.
+    expect(screen.getByLabelText('Locked by lisa@healthtree.org')).toHaveTextContent('lisa@healthtree.org');
+    expect(screen.getByRole('button', { name: 'Unlock Calcium' })).toHaveTextContent('me@healthtree.org');
+    // Opening a locked concept is review only: the notice shows and the write controls are off.
+    fireEvent.click(screen.getByRole('button', { name: 'Bilirubin' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(within(dialog).getByRole('status')).toHaveTextContent('Locked by lisa@healthtree.org');
+    await showExisting(dialog);
+    await screen.findByText('SNOMED:S1');
+    expect(within(dialog).getByRole('button', { name: /Approve selected/ })).toBeDisabled();
+  });
+
   it('reports a failed move and keeps the list as it was', async () => {
     post.mockRejectedValue({ response: { status: 403, data: { detail: 'Professional access required.' } } });
     render(<ConceptToCodeTab canApprove />);
