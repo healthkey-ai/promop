@@ -278,9 +278,14 @@ The pair is also the dated target (#2397): a patient-entered lab result carries
 the day it was drawn, not the day it was typed, and the canonical projection is
 that same dated result. The pair is marked `dated` only when its canonical has a
 resolved projection — without a target there is no fact to carry the date, so a
-dated envelope is refused rather than silently stamped with today. The date
-travels with the pair through derivation, so a full refresh keeps the draw date
-instead of re-dating the answer.
+dated envelope is refused rather than silently stamped with today.
+
+The draw date is carried into the canonical projection at save time; it is not
+stored with the pending pair. A skipped projection (a failed best-effort write)
+keeps the value pending but not the date, so a later retry records that answer
+on the day it is projected. And because the pair stays pending until an explicit
+canonical event, an older dated pair remains the record's current answer even
+though its fact is history — the editor must not promise otherwise.
 
 ## Frontend Simplification
 

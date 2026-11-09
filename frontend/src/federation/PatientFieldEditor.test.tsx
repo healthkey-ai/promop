@@ -612,6 +612,21 @@ describe('dated lab results', () => {
     expect(screen.getByRole('status')).toHaveTextContent('stored as history');
   });
 
+  it('does not promise history for a dated source pair', async () => {
+    const { store } = await setup({
+      hemoglobin_level: { label: 'Hemoglobin', writable: true,
+        target: 'patient_record', control: 'number', dated: true,
+        latest_date: '2026-08-01' },
+    }, { hemoglobin_level: 12.5 });
+    render(<PatientFieldEditor store={store} name="hemoglobin_level" />);
+
+    fireEvent.change(screen.getByLabelText('Result date'), { target: { value: '2026-07-01' } });
+
+    const status = screen.getByRole('status');
+    expect(status).toHaveTextContent('stays the current value');
+    expect(status).not.toHaveTextContent('stored as history');
+  });
+
   it('blocks the next dated save when the descriptor refresh failed, until Retry', async () => {
     const fields = { hemoglobin_g_dl: { label: 'Hemoglobin', writable: true,
       target: 'patient_record', control: 'number', dated: true, latest_date: '2026-08-01',

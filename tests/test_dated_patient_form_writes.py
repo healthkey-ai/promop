@@ -427,6 +427,64 @@ def test_a_dated_source_pair_lands_on_the_day_of_the_draw():
     assert fact.unit_source_value == 'g/dL'
 
 
+def test_an_undated_pair_refuses_a_result_date():
+    """No resolved projection means no fact to carry the date (#2397)."""
+    person = _person_with_lab()
+    Concept.objects.filter(concept_code=LOINC).delete()
+
+    with pytest.raises(ValueError, match='does not accept a result date'):
+        apply_patient_form_patch(
+            person,
+            {'hemoglobin_level': {'value': 120, 'date': '2026-07-04'},
+             'hemoglobin_level_units': 'G/L'},
+            allowed_fields={'hemoglobin_level', 'hemoglobin_level_units',
+                            'hemoglobin_g_dl'})
+
+    assert not Measurement.objects.filter(person=person).exists()
+    assert PatientRecord.objects.get(person=person).hemoglobin_level is None
+
+
+def test_an_older_dated_pair_stays_the_current_answer():
+    """The pair is retained pending, so an older draw is still the answer (#2318).
+
+    The fact history shows the older draw; the record keeps the reader's pair
+    until an explicit canonical event, so the editor must not call it history.
+    """
+    person = _person_with_lab()
+    concept = Concept.objects.get(concept_code=LOINC)
+    type_vocab = VocabularyFactory(
+        vocabulary_id='Type Concept', vocabulary_name='Type Concept')
+    ConceptFactory(concept_id=32817, concept_code='EHR', concept_name='EHR',
+                   vocabulary=type_vocab)
+    Measurement.objects.create(
+        measurement_id=next_pk(Measurement, 'measurement_id'), person=person,
+        measurement_concept=concept, measurement_date=date(2026, 8, 1),
+        measurement_type_concept_id=32817, value_as_number=12.0,
+        unit_source_value='g/dL')
+
+    apply_patient_form_patch(
+        person,
+        {'hemoglobin_level': {'value': 140, 'date': '2026-07-01'},
+         'hemoglobin_level_units': 'G/L'},
+        allowed_fields={'hemoglobin_level', 'hemoglobin_level_units',
+                        'hemoglobin_g_dl'})
+
+    record = PatientRecord.objects.get(person=person)
+    assert record.hemoglobin_level == Decimal('140')
+    assert record.hemoglobin_g_dl == Decimal('14.0')
+    assert {'hemoglobin_level', 'hemoglobin_level_units'} <= set(
+        record.user_edited_fields or [])
+
+    refresh_patient_record(person)
+
+    record.refresh_from_db()
+    assert record.hemoglobin_level == Decimal('140')
+    assert record.hemoglobin_g_dl == Decimal('14.0')
+    dates = sorted(Measurement.objects.filter(person=person).values_list(
+        'measurement_date', flat=True))
+    assert dates == [date(2026, 7, 1), date(2026, 8, 1)]
+
+
 def test_a_future_date_on_the_pair_is_refused():
     person = _person_with_lab()
     tomorrow = (date.today() + timedelta(days=1)).isoformat()
