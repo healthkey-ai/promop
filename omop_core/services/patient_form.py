@@ -442,6 +442,21 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
     result = FieldWriteResult()
     record, _ = PatientRecord.objects.get_or_create(person=person)
     record = PatientRecord.objects.select_for_update().get(pk=record.pk)
+    # A direct computed-only assignment is a validation error for the whole
+    # request, before any field is applied (#2135). An unchanged echo of the
+    # current value is not an assignment; the field is simply not an editor.
+    from omop_core.services.write_descriptor import (
+        computed_only_assignments, computed_only_fields,
+    )
+    computed_assignments = computed_only_assignments(changes, record)
+    if computed_assignments:
+        raise ValidationError(computed_assignments)
+    # An unchanged echo of the whole GET representation is not an edit. Drop it
+    # before the writable check so it cannot appear as a rejection beside a
+    # real field in the same request.
+    changes = dict(changes)
+    for field_name in computed_only_fields():
+        changes.pop(field_name, None)
     raw_descriptor = (build_writable_field_descriptor()
                       if descriptor is None else descriptor)
     # An allowed alias may be the only thing the host lists; keep its canonical

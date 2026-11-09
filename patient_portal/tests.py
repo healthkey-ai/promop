@@ -29076,8 +29076,8 @@ class PatientSelfEditClinicalFieldsTest(TestCase):
         )
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
 
-    def test_computed_field_silently_ignored(self):
-        """KIND_COMPUTED fields (e.g. bmi) must be silently ignored, not 405."""
+    def test_computed_field_direct_assignment_is_rejected(self):
+        """#2135: a computed-only field is a 400, not a silent 200."""
         self.patient_record.bmi = None
         self.patient_record.save(update_fields=['bmi'])
         resp = self._client().patch(
@@ -29085,8 +29085,9 @@ class PatientSelfEditClinicalFieldsTest(TestCase):
             {'bmi': '99.9'},
             format='json',
         )
-        # Should be 200, but the bmi value should NOT have been written
-        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
+        self.assertIn('bmi', resp.data)
+        self.assertIn('height', str(resp.data['bmi']))
         self.patient_record.refresh_from_db()
         self.assertIsNone(self.patient_record.bmi)
 

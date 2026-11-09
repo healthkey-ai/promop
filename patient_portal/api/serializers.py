@@ -45,7 +45,9 @@ from omop_core.services.chemistry_units import (
     unit_hint as chemistry_unit_hint,
 )
 from omop_core.services import direct_bilirubin_units
-from omop_core.services.write_descriptor import get_serializer_read_only_fields
+from omop_core.services.write_descriptor import (
+    computed_only_assignments, get_serializer_read_only_fields,
+)
 
 #: Columns that Measurement and Observation validate as one value.
 _VALUE_FIELDS = frozenset({'value_as_number', 'value_as_string'})
@@ -521,6 +523,12 @@ class PatientRecordSerializer(serializers.ModelSerializer):
     def to_internal_value(self, data):
         """Accept the historical misspelling on writes during API migration."""
         data = data.copy() if hasattr(data, 'copy') else dict(data)
+        # A direct computed-only assignment is refused, not silently dropped
+        # (#2135). An unchanged echo of the GET representation is not an
+        # assignment; the message names the source inputs where they exist.
+        computed_assignments = computed_only_assignments(data, self.instance)
+        if computed_assignments:
+            raise serializers.ValidationError(computed_assignments)
         # Hemoglobin's source pair (#2318). Normalise the unit spelling BEFORE
         # field validation: the column's `TextChoices` only accepts the stored
         # code, and a reader may send the display label.

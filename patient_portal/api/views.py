@@ -5728,6 +5728,9 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
             errors = getattr(exc, 'message_dict', None)
             if errors:
                 body['errors'] = errors
+                # The shared-form contract reports per-field refusals here too;
+                # a computed-only assignment is one of them (#2135).
+                body['rejected'] = errors
             return Response(body, status=400)
         if not result.applied:
             return Response({'detail': 'No fields were saved.', 'rejected': result.rejected}, status=400)

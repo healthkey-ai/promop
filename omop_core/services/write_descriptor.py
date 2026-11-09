@@ -15,7 +15,13 @@ Coverage is openly reported: every projection field is classified, including
 computed values, aliases and values authored through a dedicated resource.
 """
 
+from decimal import Decimal, InvalidOperation
+
+from django.core.exceptions import FieldDoesNotExist
+from django.db import models as django_models
 from django.db.models import Q
+
+from rest_framework.fields import BooleanField
 
 from omop_core.models import (
     Concept, ConditionOccurrence, DrugExposure, FieldChoice, Measurement,
@@ -38,6 +44,8 @@ from omop_core.services.blood_count_source_pairs import (
 )
 from omop_core.services.chemistry_units import PAIRS as CHEMISTRY_SOURCE_PAIRS
 from omop_core.services import direct_bilirubin_units
+
+_NULLABLE_BOOLEAN = BooleanField(allow_null=True)
 
 # Every field resolves to exactly one kind. A binary writable/not left a third of
 # the record looking broken — a field is not "unwritable" because it is a unit
@@ -352,6 +360,10 @@ _COMPUTED_INPUTS = {
     'flipi_risk_category': ['flipi_score_options'],
     'patient_age': ['date_of_birth'],
     'bmi': ['height', 'weight'],
+    'meets_crab': [
+        'serum_calcium_mg_dl', 'creatinine_clearance_ml_min',
+        'serum_creatinine_mg_dl', 'hemoglobin_g_dl', 'bone_lesions',
+    ],
     'tnbc_status': [
         'estrogen_receptor_status', 'progesterone_receptor_status', 'her2_status',
     ],
@@ -397,6 +409,86 @@ _COMPUTED_INPUTS = {
     'active_infection_status': [],
     'active_malignancies': [],
 }
+
+def computed_only_fields():
+    """The one computed-only classification (#2135).
+
+    A field belongs here when derivation owns its value; a caller assigning it
+    directly would replace a verdict the next save recomputes. Fields merely
+    populated from OMOP are not computed-only and stay editable.
+    """
+    return frozenset(_COMPUTED_INPUTS)
+
+
+def computed_only_message(field_name):
+    inputs = _COMPUTED_INPUTS.get(field_name) or []
+    if inputs:
+        return (f'{field_name} is computed from ' + ', '.join(inputs)
+                + '; edit those fields instead.')
+    return f'{field_name} is computed by the server from OMOP facts; it is read-only.'
+
+
+def _same_computed_value(field_name, current, submitted):
+    """Compare a requested value to the record without duplicating DRF coercion."""
+    if current is None and submitted is None:
+        return True
+    try:
+        model_field = PatientRecord._meta.get_field(field_name)
+    except FieldDoesNotExist:
+        return current == submitted
+    if isinstance(model_field, django_models.BooleanField):
+        # Use DRF's own field so the vocabulary (including null spellings and
+        # the 0/1-only numeric rule) cannot drift. Invalid input is never an
+        # echo; a changed verdict must always reach the refusal.
+        from rest_framework.exceptions import ValidationError as DrfValidationError
+        unknown = object()
+
+        def coerce(value):
+            try:
+                return _NULLABLE_BOOLEAN.run_validation(value)
+            except (DrfValidationError, TypeError, ValueError):
+                return unknown
+
+        left, right = coerce(current), coerce(submitted)
+        if left is unknown or right is unknown:
+            return False
+        return left == right
+    if isinstance(model_field, django_models.DecimalField):
+        try:
+            quantum = Decimal(1).scaleb(-model_field.decimal_places)
+            return (Decimal(str(current)).quantize(quantum)
+                    == Decimal(str(submitted)).quantize(quantum))
+        except (InvalidOperation, TypeError, ValueError):
+            return False
+    if isinstance(model_field, (django_models.IntegerField, django_models.FloatField)):
+        try:
+            return float(current) == float(submitted)
+        except (TypeError, ValueError):
+            return False
+    return current == submitted
+
+
+def computed_only_assignments(values, record):
+    """Computed-only fields the request actually assigns, with their messages.
+
+    An unchanged echo of the current value is not an assignment: editors PATCH
+    the whole GET representation. A different value (including a clear) is.
+    """
+    if not values:
+        return {}
+    rejected = {}
+    for field_name in computed_only_fields():
+        if field_name not in values:
+            continue
+        submitted = values.get(field_name)
+        if record is None:
+            if submitted in (None, '', [], {}):
+                continue
+        elif _same_computed_value(
+                field_name, getattr(record, field_name, None), submitted):
+            continue
+        rejected[field_name] = computed_only_message(field_name)
+    return rejected
 
 # Current-diagnosis myeloma-related disorders (#5521). These are direct
 # PatientRecord fields; an affirmative answer projects to the reviewed OMOP
