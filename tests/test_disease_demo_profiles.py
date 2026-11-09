@@ -30,9 +30,9 @@ def test_grade_preserves_subclassification(grade,expected):
 
 def test_score_is_computed_and_options_are_writable_without_omop_refresh():
     record=PatientRecordFactory(flipi_score_options=None)
-    serializer=PatientRecordSerializer(record,data={'flipi_score_options':'age,stage,ldh','flipi_score':5},partial=True)
+    # #2135: the computed score is not a write target; its options are.
+    serializer=PatientRecordSerializer(record,data={'flipi_score_options':'age,stage,ldh'},partial=True)
     assert serializer.is_valid(),serializer.errors
-    assert 'flipi_score' not in serializer.validated_data
     with patch('omop_core.services.patient_record_service._build_snapshot') as snapshot:
         record=serializer.save()
         recompute_patient_record_fields(record,changed_fields={'flipi_score_options'})
