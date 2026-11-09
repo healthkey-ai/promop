@@ -22416,6 +22416,95 @@ class CodeMappingApiTest(TestCase):
         self.assertEqual(resp.data['source_code'], 'C90.00')
         self.assertEqual(resp.data['origin'], 'curator')
 
+    # ------------------------------------------------- decision fields (#2382)
+
+    def test_a_save_records_the_surface_and_the_confidence_the_dialog_sends(self):
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.post('/api/v1/code-mappings/', {
+            'source_vocabulary_id': 'ICD10CM',
+            'source_code': 'C90.01',
+            'destination_concept_id': self.standard.concept_id,
+            'omop_table': 'measurement',
+            'decision_surface': 'code2concept',
+            'decision_confidence': 0.87,
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(resp.data['decision_surface'], 'code2concept')
+        self.assertEqual(resp.data['decision_confidence'], 0.87)
+        row = SourceCodeConceptMapping.objects.get(source_code='C90.01')
+        self.assertEqual((row.decision_surface, row.decision_confidence), ('code2concept', 0.87))
+
+    def test_a_save_without_the_key_keeps_the_rows_confidence_while_the_destination_stands(self):
+        """A one-click approve, or a dialog save with no Suggest run, carries
+        no confidence of its own; the ranker's live confidence in the stored
+        destination is what the curator decided on."""
+        SourceCodeConceptMapping.objects.filter(pk=self.mapping.pk).update(suggestion_confidence=0.91)
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.patch(f'/api/v1/code-mappings/{self.mapping.pk}/', {
+            'status': 'approved', 'decision_surface': 'code2concept',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.mapping.refresh_from_db()
+        self.assertEqual(self.mapping.decision_confidence, 0.91)
+        self.assertEqual(self.mapping.decision_surface, 'code2concept')
+        # The live value is untouched: the destination did not move.
+        self.assertEqual(self.mapping.suggestion_confidence, 0.91)
+
+    def test_moving_the_destination_without_a_confidence_records_none(self):
+        SourceCodeConceptMapping.objects.filter(pk=self.mapping.pk).update(suggestion_confidence=0.91)
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.patch(f'/api/v1/code-mappings/{self.mapping.pk}/', {
+            'destination_concept_id': self.standard.concept_id, 'decision_surface': 'code2concept',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.mapping.refresh_from_db()
+        self.assertIsNone(self.mapping.decision_confidence)
+        self.assertIsNone(self.mapping.suggestion_confidence)
+
+    def test_the_dialogs_confidence_for_a_new_destination_is_kept_through_an_override(self):
+        """The curator picked a scored candidate other than the row's live
+        pick: the row's live confidence is cleared, the decision keeps its own."""
+        SourceCodeConceptMapping.objects.filter(pk=self.mapping.pk).update(suggestion_confidence=0.91)
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.patch(f'/api/v1/code-mappings/{self.mapping.pk}/', {
+            'destination_concept_id': self.standard.concept_id,
+            'decision_surface': 'code2concept', 'decision_confidence': 0.4,
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.mapping.refresh_from_db()
+        self.assertEqual(self.mapping.decision_confidence, 0.4)
+        self.assertIsNone(self.mapping.suggestion_confidence)
+
+    def test_a_patient_page_save_is_patientcode_whatever_the_payload_says(self):
+        person = Person.objects.create(
+            person_id=2382001, gender_concept_id=0, year_of_birth=1970,
+            race_concept_id=0, ethnicity_concept_id=0,
+        )
+        PatientRecord.objects.create(person=person)
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.patch(f'/api/v1/code-mappings/{self.mapping.pk}/', {
+            'status': 'approved', 'patient_id': person.person_id,
+            'decision_surface': 'code2concept',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.mapping.refresh_from_db()
+        self.assertEqual(self.mapping.decision_surface, 'patientcode')
+
+    def test_an_unknown_surface_or_an_out_of_range_confidence_is_refused(self):
+        self.client.force_authenticate(user=self.staff)
+        for payload, field in (
+            ({'decision_surface': 'spreadsheet'}, 'decision_surface'),
+            ({'decision_confidence': 1.5}, 'decision_confidence'),
+            ({'decision_confidence': 'high'}, 'decision_confidence'),
+        ):
+            resp = self.client.patch(f'/api/v1/code-mappings/{self.mapping.pk}/', {
+                'status': 'approved', **payload,
+            }, format='json')
+            self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
+            self.assertIn(field, resp.data)
+        self.mapping.refresh_from_db()
+        self.assertEqual(self.mapping.status, 'proposed')
+
     def test_create_of_a_code_mapped_under_another_table_names_that_table(self):
         """#2347: the patient page lists a code under the table its rows sit
         in, so a mapping filed under another table looked unmapped there and

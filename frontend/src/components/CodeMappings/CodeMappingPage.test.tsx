@@ -690,7 +690,8 @@ describe("CodeMappingPage", () => {
       mockGet.mockImplementation((url: string) => url.includes("/suggest-runs/")
         ? Promise.resolve({ data: suggestRun({ activity: [...activity,
           { stage: "candidates", strategy: "semantic", candidates: [semantic] },
-          { stage: "result", suggested: loincHit, candidates: [loincHit, alternative, semantic] },
+          { stage: "result", suggested: loincHit, candidates: [loincHit, alternative, semantic],
+            alternatives: [{ concept_id: loincHit.concept_id, confidence: 0.9 }, { concept_id: 556, confidence: 0.72 }] },
         ] }) }) : originalGet(url));
       const dialog = within(screen.getByRole("dialog"));
       const suggest = dialog.getByRole("button", { name: "Suggest", exact: true });
@@ -709,7 +710,20 @@ describe("CodeMappingPage", () => {
       fireEvent.click(within(section).getByText(/Later semantic candidate/).closest("tr")!);
       expect(dialog.getByLabelText("Destination Concept ID")).toHaveValue(556);
       fireEvent.click(dialog.getByRole("button", { name: "Update Mapping" }));
-      await waitFor(() => expect(mockPatch).toHaveBeenCalledWith("/v1/code-mappings/7/", expect.objectContaining({ destination_concept_id: 556 })));
+      // The decision records this tab and the confidence the run gave the
+      // candidate the curator chose, not the winner's (#2382).
+      await waitFor(() => expect(mockPatch).toHaveBeenCalledWith("/v1/code-mappings/7/", expect.objectContaining({
+        destination_concept_id: 556, decision_surface: "code2concept", decision_confidence: 0.72,
+      })));
+    });
+
+    it("sends no confidence when the destination was not chosen from a Suggest run here", async () => {
+      await openDialog();
+      const dialog = within(screen.getByRole("dialog"));
+      fireEvent.click(dialog.getByRole("button", { name: "Update Mapping" }));
+      await waitFor(() => expect(mockPatch).toHaveBeenCalledWith("/v1/code-mappings/7/", expect.objectContaining({ decision_surface: "code2concept" })));
+      const [, payload] = mockPatch.mock.calls.at(-1) as [string, Record<string, unknown>];
+      expect(payload).not.toHaveProperty("decision_confidence");
     });
 
     it("displays inline individual results and fills the winner when nothing was selected", async () => {

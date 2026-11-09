@@ -38,6 +38,7 @@ def source_payload(row):
         'destination_standard_concept': row.target_concept.standard_concept if row.target_concept else None,
         'domain_id': row.domain_id, 'omop_table': row.omop_table,
         'confidence': row.suggestion_confidence,
+        'decision_confidence': row.decision_confidence, 'decision_surface': row.decision_surface,
         'source_label_norm': row.source_label_norm,
         'units': [e.get('display') or e.get('unit', '') for e in (row.source_unit_evidence or []) if isinstance(e, dict)],
         'based_on': getattr(row, '_source_samples', {}).get('based_on', []),

@@ -7,6 +7,9 @@ import type { SourceEvidence, SourceSystemContext, SourceUnitEvidence } from "./
 
 // ── Row & form types ────────────────────────────────────────────────
 
+/** Where a curator saved a mapping from (#2382). */
+export type MappingSurface = "code2concept" | "concept2code" | "patientcode";
+
 export interface CodeMappingRow {
   mapping_id: number | null;
   domain_id?: string;
@@ -35,6 +38,9 @@ export interface CodeMappingRow {
   notes: string;
   origin: string;
   origin_system: string;
+  /** The surface of the last curator save and the ranker's confidence in its destination (#2382). */
+  decision_surface?: MappingSurface | "";
+  decision_confidence?: number | null;
   suggest_strategy: string;
   suggested_action?: string;
   umls_cui: string;
@@ -393,3 +399,20 @@ export function dominantSourceUnit(units: SourceUnitEvidence[] | undefined): str
 // Re-export the CandidateActivity type from SuggestCandidates for convenience.
 import type { CandidateActivity } from "./SuggestCandidates";
 export type { CandidateActivity };
+
+/**
+ * The confidence a Suggest run in this dialog gave the concept the curator is
+ * saving, or null when the run never scored it (chosen by search, or no ranker).
+ * The ranked/result events list every scored candidate as `alternatives`.
+ */
+export function rankedConfidence(activity: CandidateActivity[], conceptId: string): number | null {
+  const id = Number(conceptId);
+  if (!Number.isFinite(id) || id <= 0) return null;
+  for (let index = activity.length - 1; index >= 0; index -= 1) {
+    const alternatives = activity[index].alternatives;
+    if (!alternatives?.length) continue;
+    const scored = alternatives.find(alt => alt.concept_id === id && typeof alt.confidence === "number");
+    return scored ? scored.confidence : null;
+  }
+  return null;
+}

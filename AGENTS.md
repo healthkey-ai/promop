@@ -1221,6 +1221,26 @@ written too, so the run records that it tried, and counting those would claim
 destinations nobody proposed. `done`/`total` is the separate "how far through"
 number.
 
+### What the curator decided on, and where
+
+`suggestion_confidence` is live: a later run overwrites it and a moved
+destination clears it, so it cannot say what the ranker believed when a curator
+saved the row. Every curator save through `_upsert_source_code_mapping`
+therefore records two more columns (#2382), read by the accuracy analytics:
+
+- `decision_confidence`, the ranker's confidence in the destination being
+  saved. The dialog sends it (`decision_confidence`) when the destination came
+  out of a Suggest run in that dialog, null when the curator chose by search;
+  without the key the row's live confidence stands while the destination is
+  unchanged, else null. The Concept to Code propose endpoint sends the
+  preview candidate's.
+- `decision_surface`: `code2concept` (the Code to Concept tab's dialog,
+  one-click approve and group actions), `concept2code` (the Concept to Code
+  tab and its endpoints), or `patientcode` (any save scoped to a patient,
+  whatever the payload says). Blank means no curator has saved the row.
+
+Suggest never writes either column. Both travel with `copy_reference_data`.
+
 ### Replace re-answers rows, it does not delete them
 
 It used to delete: while the candidate set came from a clinical scan, a deleted

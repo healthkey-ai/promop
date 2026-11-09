@@ -1185,3 +1185,17 @@ def test_auto_propose_never_writes_a_row_another_curator_holds(client, concept, 
     locked.refresh_from_db()
     assert locked.target_concept_id is None
     assert SuggestRun.objects.get(direction='reverse').destinations == 0
+
+
+def test_concept_to_code_saves_record_their_surface_and_the_rankers_confidence(client, concept):
+    """#2382: a decision made on this tab says so, and keeps the confidence the
+    ranker had in the destination when the curator saved it."""
+    row = source('SCORED', target_concept=concept, suggestion_confidence=0.83)
+    assert apply(client, concept, row, status='approved').status_code == 200
+    row.refresh_from_db()
+    assert (row.decision_surface, row.decision_confidence) == ('concept2code', 0.83)
+    # A row the ranker never scored records a decision without a confidence.
+    unscored = source('UNSCORED', target_concept=concept)
+    assert apply(client, concept, unscored).status_code == 200
+    unscored.refresh_from_db()
+    assert (unscored.decision_surface, unscored.decision_confidence) == ('concept2code', None)

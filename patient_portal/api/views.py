@@ -12381,6 +12381,8 @@ def _serialize_code_mapping_row(concept, mapping=None, source_retirement=None,
             'origin_system': mapping.origin_system if mapping else '',
             'suggestion_model_version': mapping.suggestion_model_version if mapping else '',
             'suggest_strategy': mapping.suggest_strategy if mapping else '',
+            'decision_surface': mapping.decision_surface if mapping else '',
+            'decision_confidence': mapping.decision_confidence if mapping else None,
             'umls_cui': mapping.umls_cui if mapping else '',
             'created_by': _mapping_author(mapping),
             # Who signed it off, which survives every later edit -- unlike
@@ -12457,6 +12459,8 @@ def _serialize_code_mapping_row(concept, mapping=None, source_retirement=None,
         'suggestion_model_version': mapping.suggestion_model_version if mapping else '',
         'suggested_action': mapping.suggested_action if mapping else '',
         'suggest_strategy': mapping.suggest_strategy if mapping else '',
+        'decision_surface': mapping.decision_surface if mapping else '',
+        'decision_confidence': mapping.decision_confidence if mapping else None,
         'umls_cui': mapping.umls_cui if mapping else '',
         'created_by': _mapping_author(mapping),
         # Who signed it off, which survives every later edit -- unlike
@@ -12640,6 +12644,54 @@ def _mapping_patient_scope(request):
     if not can_write_patient(request.user, person_id):
         raise PermissionDenied('You cannot update this patient.')
     return person_id
+
+
+_DECISION_SURFACES = {choice for choice, _label in SourceCodeConceptMapping.DECISION_SURFACE_CHOICES}
+
+
+def _decision_surface(data, person_id):
+    """Which curation surface a save came from (#2382).
+
+    The patient page is known by the person it is scoped to, whatever the
+    payload says; the two mapping tabs name themselves in ``decision_surface``
+    (the Concept to Code endpoints and group actions set it server-side). An
+    unknown value is a 400 rather than a quietly blank analytics column; an
+    absent one stays blank, for callers that predate the field.
+    """
+    if person_id is not None or data.get('patient_id') not in (None, ''):
+        return 'patientcode'
+    surface = str(data.get('decision_surface') or '').strip()
+    if surface and surface not in _DECISION_SURFACES:
+        raise serializers.ValidationError({'decision_surface': (
+            f"Unknown surface {surface!r}. Expected one of: {', '.join(sorted(_DECISION_SURFACES))}."
+        )})
+    return surface
+
+
+def _decision_confidence(data, mapping, concept, previous_concept_id):
+    """The ranker's confidence in the destination being saved (#2382).
+
+    The dialog knows it when the destination came out of a Suggest run it
+    ran, and sends it as ``decision_confidence`` (``null`` when the curator
+    chose by search instead). Without that key the row's own live confidence
+    stands, but only while the destination is the one it scored.
+    """
+    if 'decision_confidence' in data:
+        raw = data.get('decision_confidence')
+        if raw in (None, ''):
+            return None
+        try:
+            confidence = float(raw)
+        except (TypeError, ValueError):
+            confidence = None
+        if confidence is None or not 0.0 <= confidence <= 1.0:
+            raise serializers.ValidationError({
+                'decision_confidence': 'Confidence must be a number between 0 and 1.',
+            })
+        return confidence
+    if mapping is None or concept is None or concept.concept_id != previous_concept_id:
+        return None
+    return mapping.suggestion_confidence
 
 
 def _table_label(omop_table):
@@ -12989,6 +13041,13 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None, person_id=Non
         and status_value != 'approved'
     ):
         values['origin_system'] = CURATOR_PROVENANCE
+    # What this decision was made on, and where (#2382). Recorded before the
+    # live confidence below is cleared, so an override still keeps what the
+    # ranker believed about the destination the curator is saving.
+    values['decision_surface'] = _decision_surface(data, person_id)
+    values['decision_confidence'] = _decision_confidence(
+        data, mapping, concept, previous_concept_id,
+    )
     # The ranker's confidence was in the destination it chose, not this one.
     if mapping is not None and concept is not None and concept.concept_id != previous_concept_id:
         values['suggestion_confidence'] = None

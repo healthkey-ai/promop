@@ -42,6 +42,8 @@ import {
   type ConceptResult,
   type DestinationOption,
   type MappingForm,
+  type MappingSurface,
+  rankedConfidence,
   type Reference,
   type RepointResult,
   type SearchScope,
@@ -92,6 +94,12 @@ export interface EditMappingDialogProps {
    * `patientId`, it does not narrow what a save updates.
    */
   sourceExamples?: boolean;
+  /**
+   * Which mapping tab opened the dialog, recorded on the row with each save
+   * (#2382). A dialog with `patientId` is the patient page whatever this says;
+   * the server decides that from the patient.
+   */
+  surface?: MappingSurface;
 }
 
 /** One patient's inventory row for the code, from /concept-to-code/source-examples/. */
@@ -159,6 +167,7 @@ export default function EditMappingDialog({
   onSaved,
   onDeleted,
   onBanner,
+  surface,
   onSourceCodeUpdated,
   defaultDestination,
   sourceExamples = false,
@@ -731,9 +740,18 @@ export default function EditMappingDialog({
     onSourceCodeUpdated?.();
   };
 
+  // A Suggest run in this dialog, for the code itself rather than one of its
+  // axis variants, is the only time the dialog knows what the ranker thought
+  // of the destination being saved. Without one the key is left out and the
+  // server keeps the row's own live confidence while the destination stands.
+  const suggestedHere = individualSuggestion !== null
+    && individualSuggestion.request === dialogRequest.current && !individualSuggestion.axisKey;
+
   const savePayload = () => ({
     ...form,
     ...(patientId ? { patient_id: Number(patientId) } : {}),
+    ...(surface && !patientId ? { decision_surface: surface } : {}),
+    ...(suggestedHere ? { decision_confidence: rankedConfidence(individualSuggestion.activity, form.destination_concept_id) } : {}),
     source_unit: patientId && selectedRow?.source_code_id ? sourceUnit.trim() : form.source_unit,
     // Empty stays empty: never send concept 0 as a destination.
     destination_concept_id: form.destination_concept_id ? Number(form.destination_concept_id) : null,

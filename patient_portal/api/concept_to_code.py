@@ -382,6 +382,8 @@ def concept_to_code_propose(request, concept_id):
            if len(fresh['source_code_description']) > 255 else {}),
         'domain_id': concept.domain_id, 'omop_table': DOMAIN_TO_TABLE[concept.domain_id],
         'status': 'proposed',
+        # The preview's ranker scored this source against this concept (#2382).
+        'decision_surface': 'concept2code', 'decision_confidence': candidate.get('confidence'),
     }, request.user)
     # The preview's ranker judged this source against this concept; without a
     # ranker the candidate carries no confidence and the row keeps none.
@@ -420,7 +422,7 @@ def concept_to_code_apply(request, concept_id, mapping_id):
         raise ValidationError({'status': 'Choose proposed, approved or rejected.'})
     row, repoint = _upsert_source_code_mapping(concept, {
         'status': selected_status, 'domain_id': concept.domain_id, 'omop_table': table,
-        'destination_vocabulary_id': concept.vocabulary_id,
+        'destination_vocabulary_id': concept.vocabulary_id, 'decision_surface': 'concept2code',
     }, request.user, mapping=row)
     return Response({**source_payload(row), 'repoint': repoint})
 
