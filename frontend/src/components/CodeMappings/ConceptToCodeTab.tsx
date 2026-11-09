@@ -18,6 +18,8 @@ type Concept = {
   sccm_counts: { approved: number; proposed: number; rejected: number };
   /** Curator priority (1 = map first), or null when unranked (#1914). */
   priority?: number | null;
+  /** Its source codes are mapped; it holds no priority and sorts last (#2388). */
+  done?: boolean;
 };
 type Source = {
   mapping_id: number | null; source_code: string; source_code_description: string;
@@ -168,6 +170,19 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange, initialC
       setError(`Could not change the priority of ${concept.concept_name}. ${destinationError(failure)}`);
     } finally { setMoving(false); }
   };
+  // Done means its source codes are mapped: the concept loses its priority,
+  // shows "Done" in the Priority column and sorts last (#2388).
+  const markDone = async (concept: Concept, done: boolean) => {
+    if (moving) return;
+    setMoving(true); setError('');
+    try {
+      await api.post('/v1/concept-to-code/done/', { concept_id: concept.concept_id, done });
+      setMoveStatus(done ? `Marked ${concept.concept_name} as Done.` : `Returned ${concept.concept_name} to the queue.`);
+      setRevision(value => value + 1);
+    } catch (failure) {
+      setError(`Could not ${done ? 'mark' : 'un-mark'} ${concept.concept_name} as Done. ${destinationError(failure)}`);
+    } finally { setMoving(false); }
+  };
   // Dropping onto a ranked concept takes its position; onto an unranked one,
   // the end of the priority list.
   const dropOn = (target: Concept) => {
@@ -246,7 +261,8 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange, initialC
       </label>
     </div>
     <p className="text-xs text-slate-500">Ranked concepts are mapped first and come first on every page. Drag a row, or type
-      its priority (1 is first; clear it to unrank). To reach a concept on a later page, show more per page or search for it.</p>
+      its priority (1 is first; clear it to unrank). Click a Priority cell for Done once a concept's codes are mapped; Done
+      concepts drop their number and sort last. To reach a concept on a later page, show more per page or search for it.</p>
     {moveStatus && <p role="status" aria-live="polite" className="text-sm text-slate-700">{moveStatus}</p>}
     {error && <p role="alert" className="text-sm text-rose-700">{error}</p>}
     {loading && <p role="status" className="text-sm text-slate-500">Loading concepts…</p>}
@@ -258,16 +274,18 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange, initialC
           <th className="p-3 text-right">Approved</th><th className="p-3 text-right">Proposed</th><th className="p-3 text-right">Rejected</th>
         </tr></thead>
         <tbody>{data?.results.map(concept => <tr key={concept.concept_id} data-testid={`concept-row-${concept.concept_id}`}
-          draggable={!writing && !moving}
+          draggable={!writing && !moving && !concept.done}
           onDragStart={event => { event.dataTransfer?.setData('text/plain', String(concept.concept_id)); setDragged(concept); }}
           onDragEnd={() => { setDragged(null); setDropTarget(null); }}
           onDragOver={event => { if (dragged) { event.preventDefault(); setDropTarget(concept.concept_id); } }}
           onDragLeave={() => setDropTarget(previous => previous === concept.concept_id ? null : previous)}
           onDrop={event => { event.preventDefault(); dropOn(concept); }}
           className={`border-t border-slate-100 ${selected?.concept_id === concept.concept_id ? 'bg-sky-50' : ''} ${
+            concept.done ? 'italic text-slate-500' : ''} ${
             dropTarget === concept.concept_id && dragged?.concept_id !== concept.concept_id ? 'outline outline-2 outline-sky-500' : ''}`}>
           <td className="p-3 align-top"><PriorityCell concept={concept} lastPosition={lastPosition}
-            disabled={writing || moving} onMove={position => void move(concept, position)} /></td>
+            disabled={writing || moving} onMove={position => void move(concept, position)}
+            onDone={done => void markDone(concept, done)} /></td>
           <td className="p-3"><button className="text-left font-medium text-slate-950 underline underline-offset-2" disabled={writing}
             aria-haspopup="dialog" aria-expanded={selected?.concept_id === concept.concept_id}
             onClick={event => { selectedTrigger.current = event.currentTarget; setSelected(concept); }}>{concept.concept_name}</button>
@@ -303,15 +321,49 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange, initialC
   </Dialog.Root>;
 }
 
-/** Drag handle, priority number and one-step moves for one concept row. */
-function PriorityCell({ concept, lastPosition, disabled, onMove }: {
+/** Drag handle, priority number and one-step moves for one concept row; a
+ * click on the cell itself offers Done, and a Done concept shows that word
+ * in place of a number (#2388). */
+function PriorityCell({ concept, lastPosition, disabled, onMove, onDone }: {
   concept: Concept; lastPosition: number; disabled: boolean; onMove: (position: number | null) => void;
+  onDone: (done: boolean) => void;
 }) {
   const current = concept.priority ?? null;
   const [draft, setDraft] = useState(current === null ? '' : String(current));
   const [shown, setShown] = useState(current);
+  const [menuOpen, setMenuOpen] = useState(false);
   // A reload renumbers rows; show the server's number unless one is being typed.
   if (shown !== current) { setShown(current); setDraft(current === null ? '' : String(current)); }
+  // The number input and the arrows keep their own behaviour; the cell
+  // around them opens the menu.
+  const openMenu = (event: React.MouseEvent<HTMLDivElement>) => {
+    const target = event.target as HTMLElement;
+    if (target.closest('input, button')) return;
+    setMenuOpen(open => !open);
+  };
+  // Escape, or focus leaving the cell, closes the menu; it takes focus on open.
+  const cellProps = {
+    onClick: openMenu,
+    onKeyDown: (event: React.KeyboardEvent<HTMLDivElement>) => { if (event.key === 'Escape') setMenuOpen(false); },
+    onBlur: (event: React.FocusEvent<HTMLDivElement>) => {
+      if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setMenuOpen(false);
+    },
+  };
+  const menu = menuOpen && <div role="menu" aria-label={`Options for ${concept.concept_name}`}
+    className="absolute left-0 top-full z-10 mt-1 rounded border border-slate-300 bg-white py-1 text-sm shadow">
+    <button type="button" role="menuitem" autoFocus className="block w-full px-3 py-1 text-left not-italic hover:bg-slate-100"
+      disabled={disabled} onClick={() => { setMenuOpen(false); onDone(!concept.done); }}>
+      {concept.done ? 'Not done' : 'Done'}
+    </button>
+  </div>;
+  if (concept.done) {
+    return <div className="relative flex items-center gap-1 whitespace-nowrap" {...cellProps}>
+      <button type="button" className="italic text-slate-500 underline-offset-2 hover:underline"
+        aria-haspopup="menu" aria-expanded={menuOpen} aria-label={`${concept.concept_name} is Done; options`}
+        disabled={disabled} onClick={event => { event.stopPropagation(); setMenuOpen(open => !open); }}>Done</button>
+      {menu}
+    </div>;
+  }
   const commit = () => {
     const text = draft.trim();
     if (!text) { if (current !== null) onMove(null); return; }
@@ -320,7 +372,7 @@ function PriorityCell({ concept, lastPosition, disabled, onMove }: {
     onMove(value);
   };
   const small = 'rounded border border-slate-300 px-1.5 text-xs hover:bg-slate-100 disabled:opacity-30';
-  return <div className="flex items-center gap-1 whitespace-nowrap">
+  return <div className="relative flex items-center gap-1 whitespace-nowrap" {...cellProps}>
     <span aria-hidden="true" title="Drag to reorder" className={`select-none text-slate-400 ${disabled ? '' : 'cursor-grab'}`}>⠿</span>
     <input type="number" min={1} inputMode="numeric" aria-label={`Priority for ${concept.concept_name}`}
       className="w-14 rounded border border-slate-300 px-1.5 py-1 text-sm tabular-nums" placeholder="—" value={draft} disabled={disabled}
@@ -330,6 +382,9 @@ function PriorityCell({ concept, lastPosition, disabled, onMove }: {
       disabled={disabled || current === 1} onClick={() => onMove(current === null ? lastPosition + 1 : current - 1)}>↑</button>
     <button type="button" className={small} aria-label={`Move ${concept.concept_name} down`} title="Move down"
       disabled={disabled || current === null || current >= lastPosition} onClick={() => current !== null && onMove(current + 1)}>↓</button>
+    <button type="button" className={small} aria-label={`Options for ${concept.concept_name}`} aria-haspopup="menu" aria-expanded={menuOpen}
+      title="Mark Done" disabled={disabled} onClick={event => { event.stopPropagation(); setMenuOpen(open => !open); }}>⋯</button>
+    {menu}
   </div>;
 }
 

@@ -4431,6 +4431,31 @@ class ConceptMappingPriority(models.Model):
         return f'{self.position}: concept {self.concept_id}'
 
 
+class ConceptMappingDone(models.Model):
+    """A curator has finished mapping this standard concept's source codes (#2388).
+
+    One row per Done concept; marking it unranks the concept, so the priority
+    list stays dense. The Concept to Code list shows Done concepts after every
+    other, in italics, and Suggest's tie-break never sees them (they hold no
+    priority). Reference data: copy_reference_data moves it, matched on the
+    concept's (vocabulary_id, concept_code).
+    """
+    concept = models.OneToOneField(
+        Concept, on_delete=models.CASCADE, related_name='mapping_done',
+    )
+    marked_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='+',
+    )
+    marked_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'concept_mapping_done'
+
+    def __str__(self):
+        return f'done: concept {self.concept_id}'
+
+
 class CustomPatientField(models.Model):
     """Administrator-defined PatientRecord field backed by ``custom_fields``.
 

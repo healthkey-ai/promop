@@ -1341,6 +1341,14 @@ places, both in `retrieval_pool`:
 The UMLS single-concept shortcut ignores priority: a curated equivalence wins
 without a ranking call either way.
 
+A concept whose source codes are all mapped is marked **Done** from its
+Priority cell (`ConceptMappingDone`, `POST concept-to-code/done/`, #2388).
+Done unranks it, and ranking a Done concept un-does it (`concept_priority.move`),
+so the two states are exclusive, the list stays dense and the tie-break never
+prefers a finished concept; the list shows Done concepts after every other, in
+italics, with "Done" where the number was, and "Not done" returns one to the queue.
+It is reference data and travels with `copy_reference_data`.
+
 ### The six LOINC axes decide which candidates are the same test
 
 A LOINC code is defined by component, property, time aspect, system, scale and

@@ -908,6 +908,34 @@ describe('concept priority (#1914)', () => {
       params: expect.objectContaining({ prioritized: '1' }) })));
   });
 
+  it('marks a concept Done from the Priority cell, which then reads Done in italics and offers Not done (#2388)', async () => {
+    list = [named(1, 'Albumin', 1), { ...named(2, 'Bilirubin'), done: true }];
+    render(<ConceptToCodeTab canApprove />);
+    // A click on the cell around the number opens the menu; the number input keeps its own behaviour.
+    const albuminCell = (await screen.findByLabelText('Priority for Albumin')).parentElement!;
+    fireEvent.click(albuminCell);
+    fireEvent.click(within(screen.getByRole('menu', { name: 'Options for Albumin' })).getByRole('menuitem', { name: 'Done' }));
+    await waitFor(() => expect(post).toHaveBeenCalledWith('/v1/concept-to-code/done/', { concept_id: 1, done: true }));
+    expect(await screen.findByText('Marked Albumin as Done.')).toBeInTheDocument();
+
+    // A Done concept: no number, no arrows, "Done" in italics, the row in italics.
+    expect(screen.queryByLabelText('Priority for Bilirubin')).toBeNull();
+    const done = screen.getByRole('button', { name: 'Bilirubin is Done; options' });
+    expect(done).toHaveTextContent('Done');
+    expect(done.className).toContain('italic');
+    expect(screen.getByTestId('concept-row-2').className).toContain('italic');
+    fireEvent.click(done);
+    const notDone = screen.getByRole('menuitem', { name: 'Not done' });
+    expect(notDone).toHaveFocus();
+    // Escape closes the menu without acting; a Done row cannot be dragged.
+    fireEvent.keyDown(notDone, { key: 'Escape' });
+    expect(screen.queryByRole('menuitem', { name: 'Not done' })).toBeNull();
+    expect(screen.getByTestId('concept-row-2')).toHaveAttribute('draggable', 'false');
+    fireEvent.click(done);
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Not done' }));
+    await waitFor(() => expect(post).toHaveBeenCalledWith('/v1/concept-to-code/done/', { concept_id: 2, done: false }));
+  });
+
   it('reports a failed move and keeps the list as it was', async () => {
     post.mockRejectedValue({ response: { status: 403, data: { detail: 'Professional access required.' } } });
     render(<ConceptToCodeTab canApprove />);
