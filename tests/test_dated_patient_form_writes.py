@@ -14,7 +14,9 @@ import pytest
 from omop_core.models import Concept, Measurement, PatientRecord
 from omop_core.services.patient_form import apply_patient_form_patch, patient_form_descriptors
 from omop_core.services.pk import next_pk
-from omop_core.services.patient_record_service import refresh_patient_record
+from omop_core.services.patient_record_service import (
+    recompute_patient_record_fields, refresh_patient_record,
+)
 from tests.factories import ConceptFactory, PatientRecordFactory, PersonFactory, VocabularyFactory
 
 pytestmark = pytest.mark.django_db
@@ -483,6 +485,15 @@ def test_an_older_dated_pair_stays_the_current_answer():
     dates = sorted(Measurement.objects.filter(person=person).values_list(
         'measurement_date', flat=True))
     assert dates == [date(2026, 7, 1), date(2026, 8, 1)]
+
+    # The documented boundary: an explicit canonical event retires the pair,
+    # and the newer imported fact becomes the answer.
+    record.hemoglobin_g_dl = Decimal('12.0')
+    recompute_patient_record_fields(
+        record, changed_fields=('hemoglobin_g_dl',))
+    record.refresh_from_db()
+    assert record.hemoglobin_g_dl == Decimal('12.0')
+    assert record.hemoglobin_level == Decimal('12.00')
 
 
 def test_a_future_date_on_the_pair_is_refused():

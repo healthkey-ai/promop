@@ -383,6 +383,8 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
         {' '}<button type="button" className="underline" onClick={() => void store.reloadDates()}>Retry</button>
       </p>}
       {dated && field.latest_date && resultDate < field.latest_date
+        // A dated row without its own projection is a source pair, retained
+        // until an explicit canonical event; see _SOURCE_PAIR_FIELDS.
         && <p role="status" className="text-xs text-muted-foreground">
           {field.projection
             ? 'Older than the latest recorded result; it will be stored as history, not as the current value.'
