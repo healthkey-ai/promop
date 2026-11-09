@@ -169,6 +169,9 @@ class TestUnmappedFields:
             # explicit pre-existing-conditions answer (#5663/#5665).
             | set(_NEGATED_ALIASES)
             | {'pre_existing_condition_categories', 'meets_lugano'}
+            # The trial catalog's legacy spelling of the cytogenetic summary;
+            # the descriptor carries it as an alias (#2396).
+            | {'cytogenic_markers'}
         )
         assert set(descriptor) == expected
 
