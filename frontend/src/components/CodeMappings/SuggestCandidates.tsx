@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import InlineDestinationPicker from "./InlineDestinationPicker";
 import MintConceptDialog from "./MintConceptDialog";
 import { destinationError, saveMappingDestination } from "./destinationSearch";
@@ -49,6 +49,10 @@ export type CandidateActivity = {
   alternatives?: Alternative[];
   ranking_timings?: Record<string, number>;
   omop_table?: string;
+  /** Observed source units for this code. */
+  source_units?: string[];
+  /** FHIR basedOn display labels for this code. */
+  based_on?: string[];
   /** What the source settles on each LOINC axis (ranked/result events). */
   source_axes?: SourceAxes;
   /** Candidates hidden because they conflict with a settled source axis. */
@@ -60,6 +64,8 @@ export type CandidateActivity = {
 type Props = {
   activity: CandidateActivity[];
   finished: boolean;
+  /** Incremented each Suggest run so stale approval choices are cleared. */
+  generation?: number;
   onSaved?: () => void;
   canApprove?: boolean;
   vocabularies?: { vocabulary_id: string; vocabulary_name: string }[];
@@ -142,12 +148,22 @@ function mergeCandidates(searches: CandidateActivity[], ranked?: CandidateActivi
   return applyAxisOrder([...byId.values()], ranked);
 }
 
-export default function SuggestCandidates({ activity, finished, onSaved, canApprove = false, vocabularies = [], domains = [] }: Props) {
+export default function SuggestCandidates({ activity, finished, generation, onSaved, canApprove = false, vocabularies = [], domains = [] }: Props) {
   const [editing, setEditing] = useState<number | null>(null);
   const [minting, setMinting] = useState<number | null>(null);
   const [needsAttentionOnly, setNeedsAttentionOnly] = useState(false);
   const [saving, setSaving] = useState<number | null>(null);
   const [choices, setChoices] = useState<Record<number, SavedChoice>>({});
+
+  // Clear stale approval choices when a new Suggest run starts, so a
+  // re-suggested mapping_id shows the new candidate instead of the old badge.
+  const prevGeneration = useRef(generation);
+  useEffect(() => {
+    if (generation !== prevGeneration.current) {
+      prevGeneration.current = generation;
+      setChoices({});
+    }
+  }, [generation]);
   const [threshold, setThreshold] = useState("100");
   const [batchRunning, setBatchRunning] = useState(false);
   const [batchProgress, setBatchProgress] = useState<{ done: number; total: number; approved: number } | null>(null);
@@ -323,11 +339,18 @@ export default function SuggestCandidates({ activity, finished, onSaved, canAppr
         const choice = choices[mappingId];
         const canAct = !choice?.approved && !result?.dry_run && (result?.updated || !!choice);
         const canSearch = !choice?.approved && !result?.dry_run && (finished || !!result);
+        const sourceUnits = source.source_units?.length ? source.source_units : undefined;
+        const basedOn = source.based_on?.length ? source.based_on : undefined;
         return <article key={mappingId} className="rounded border border-slate-200 p-3">
           <h3 className="font-medium">
             {source.source_vocabulary_id || "Uncoded"}:{source.source_code}
             {description && <span className="ml-2 font-normal text-slate-600">{description}</span>}
           </h3>
+          {(sourceUnits || basedOn) && <p className="mt-0.5 text-xs text-slate-500">
+            {sourceUnits && <><span className="font-medium text-slate-600">Units:</span> {sourceUnits.join(", ")}</>}
+            {sourceUnits && basedOn && <span className="mx-1.5">·</span>}
+            {basedOn && <><span className="font-medium text-slate-600">BasedOn:</span> {basedOn.join("; ")}</>}
+          </p>}
           <SourceAxesSummary sourceAxes={(result?.source_axes ?? ranked?.source_axes)} />
           <SourceSnomedSummary sourceSnomed={result?.source_snomed ?? ranked?.source_snomed} />
           <AxisExcludedDisclosure excluded={(result?.axis_excluded ?? ranked?.axis_excluded)} />

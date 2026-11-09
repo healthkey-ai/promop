@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useVocabulary } from '@/hooks/useVocabulary';
+import { useCategoryObjects, useAllDiseaseMappings } from '@/hooks/useDiseaseCategories';
 import { useWritableFields } from '@/hooks/useWritableFields';
 import ClinicalField from '../ClinicalField';
 import TreatingInstitutionField from '../TreatingInstitutionField';
@@ -10,7 +11,6 @@ import { today } from '@/api/clinicalFacts';
 import PreexistingConditionsAnswer, { type ConditionsAnswer } from '../PreexistingConditionsAnswer';import {
   COUNTRY_OPTIONS, US_STATES,
   ECOG_OPTIONS, KARNOFSKY_OPTIONS,
-  DISEASE_OPTIONS,
 } from '../patientConstants';
 
 interface Props {
@@ -61,7 +61,28 @@ export default function GeneralTab({
   const { source: ecogSource }        = useVocabulary('ecog-status', 'code');
   const { source: karnofskySource }   = useVocabulary('karnofsky-score', 'code');
   const { source: ethnicitySource }   = useVocabulary('ethnicity', 'title');
-  const { source: diseaseSource }     = useVocabulary('disease', 'title');
+  const { categories }               = useCategoryObjects();
+  const { categoryForDisease, diseasesByCategory } = useAllDiseaseMappings();
+
+  // Derive the selected category from the current disease value.
+  const currentDisease = (formData?.disease as string) ?? '';
+  const derivedCategory = useMemo(
+    () => (currentDisease ? categoryForDisease(currentDisease) : null),
+    [currentDisease, categoryForDisease],
+  );
+  const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
+
+  // Sync the local category state when the derived category becomes available.
+  useEffect(() => {
+    if (derivedCategory && selectedCategory === null) {
+      setSelectedCategory(derivedCategory);
+    }
+  }, [derivedCategory, selectedCategory]);
+
+  const categoryDiseaseOptions = useMemo(
+    () => (selectedCategory ? diseasesByCategory[selectedCategory] ?? [] : []),
+    [selectedCategory, diseasesByCategory],
+  );
 
   const age = formData?.date_of_birth
     ? calculateAge(formData.date_of_birth as string)
@@ -161,8 +182,37 @@ export default function GeneralTab({
           {field('Email', 'email', 'email')}
           {field('Phone Number', 'phone_number', 'text')}
 
-          <div className="sm:col-span-2">
-            {field('Disease', 'disease', 'select', { options: DISEASE_OPTIONS, vocabSource: diseaseSource })}
+          <div className="space-y-1.5 sm:col-start-1">
+            <label className="text-sm font-medium text-portal-text-primary">Disease Category</label>
+            <SelectControl
+              value={selectedCategory ?? ''}
+              options={categories.map((c) => ({ value: c.value, label: c.label }))}
+              onChange={(v: unknown) => {
+                const cat = (v as string) || null;
+                setSelectedCategory(cat);
+                if (cat && currentDisease) {
+                  const newDiseases = diseasesByCategory[cat] ?? [];
+                  if (!newDiseases.some((d: string) => d.toLowerCase() === currentDisease.toLowerCase())) {
+                    onChange('disease', null);
+                  }
+                }
+                if (!cat) {
+                  onChange('disease', null);
+                }
+              }}
+            />
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="text-sm font-medium text-portal-text-primary">Disease</label>
+            <SelectControl
+              value={(formData?.disease as string) ?? ''}
+              options={categoryDiseaseOptions.map((d) => ({ value: d, label: d }))}
+              disabled={!selectedCategory}
+              placeholder={selectedCategory ? 'Select…' : 'Select a category first'}
+              allowClear
+              onChange={(v: unknown) => onChange('disease', (v as string) || null)}
+            />
           </div>
 
           <div className="sm:col-span-2">

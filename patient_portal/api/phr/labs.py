@@ -17,6 +17,7 @@ from typing import Any
 from django.db.models import Q
 
 from omop_core.models import Measurement
+from omop_core.services.canonical_units import is_unproven, measurement_stored_unit
 from omop_core.services.condition_context import measurement_context_filter
 from patient_portal.models import LabMarker
 
@@ -76,7 +77,7 @@ def _number(value: Decimal | None) -> float | int | None:
 
 def flag(row: Measurement) -> str | None:
     value = row.value_as_number
-    if value is None:
+    if value is None or is_unproven(row):
         return None
     if row.range_low is not None and value < row.range_low:
         return 'low'
@@ -88,17 +89,17 @@ def flag(row: Measurement) -> str | None:
 
 
 def result(row: Measurement, source: dict) -> dict[str, Any]:
-    unit = (row.unit_source_value or '').strip() or (
-        row.unit_concept.concept_code if row.unit_concept_id and row.unit_concept else None
-    )
+    # A number whose unit cannot be proven is not shown, nor is its range (#2249).
+    # stored_unit is then None too.
+    shown = not is_unproven(row)
     item = {
         'id': row.pk,
         'date': row.measurement_date.isoformat(),
-        'value': _number(row.value_as_number),
+        'value': _number(row.value_as_number) if shown else None,
         'value_text': (row.value_as_string or '').strip() or None,
-        'unit': unit or None,
+        'unit': (measurement_stored_unit(row) or '').strip() or None,
         'range': {'low': _number(row.range_low), 'high': _number(row.range_high)}
-        if row.range_low is not None or row.range_high is not None
+        if shown and (row.range_low is not None or row.range_high is not None)
         else None,
         'flag': flag(row),
         'source': source,
@@ -109,7 +110,7 @@ def result(row: Measurement, source: dict) -> dict[str, Any]:
 def _brief(row: Measurement) -> dict[str, Any]:
     item = {
         'date': row.measurement_date.isoformat(),
-        'value': _number(row.value_as_number),
+        'value': None if is_unproven(row) else _number(row.value_as_number),
         'value_text': (row.value_as_string or '').strip() or None,
         'flag': flag(row),
     }
@@ -169,15 +170,19 @@ def _test_meta(concept, markers: dict[str, LabMarker]) -> dict[str, Any]:
     return {k: v for k, v in meta.items() if v is not None}
 
 
-def _cancers(person, record) -> list[dict[str, str]]:
-    """The patient's cancers as lab filters: the record's slug for the primary, the name's for the rest."""
+def _cancers(person, record, diagnosed: dict | None = None) -> list[dict[str, str]]:
+    """The patient's cancers as lab filters: the record's slug for the primary, the name's for the rest.
+
+    ``diagnosed`` is the Diagnoses section when the caller already built it;
+    else it is derived here.
+    """
     from omop_core.services.disease_episodes import disease_slug
 
     from .views import diagnoses
 
     out, seen = [], set()
     primary_slug = ((record.disease_slug if record else '') or '').lower()
-    for cancer in diagnoses(person, record)['cancer']:
+    for cancer in (diagnosed if diagnosed is not None else diagnoses(person, record))['cancer']:
         slug = primary_slug if cancer['id'] == 'primary' and primary_slug else (disease_slug(cancer['name']) or '')
         if slug and slug not in seen:
             seen.add(slug)
@@ -189,7 +194,8 @@ def _markers() -> dict[str, LabMarker]:
     return {m.loinc_code: m for m in LabMarker.objects.all()}
 
 
-def labs(person, record) -> dict[str, Any]:
+def labs(person, record, diagnosed: dict | None = None) -> dict[str, Any]:
+    """The latest result per test. ``diagnosed``: the Diagnoses section, when already built."""
     rows = list(_rows(person))
     groups = _grouped(rows)
     latest_rows = [group[0] for group in groups.values()]
@@ -214,7 +220,7 @@ def labs(person, record) -> dict[str, Any]:
     marked = {s for t in tests for s in t['disease_slugs']}
     filters = {
         # A filter for each of the patient's cancers that has marker tests, primary first.
-        'diagnoses': [c for c in _cancers(person, record) if c['slug'] in marked],
+        'diagnoses': [c for c in _cancers(person, record, diagnosed) if c['slug'] in marked],
         'panels': panels,
     }
     return {'tests': tests, 'filters': filters}

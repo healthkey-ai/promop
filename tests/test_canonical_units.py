@@ -6,14 +6,16 @@ import pytest
 from rest_framework.test import APIClient
 
 from omop_core.models import (
-    CanonicalUnitPreference, CanonicalUnitChange, ConceptRelationship,
-    LoincClass, LoincCodeClass, Relationship,
+    CanonicalUnitPreference, CanonicalUnitChange, Concept, ConceptRelationship,
+    LoincClass, LoincCodeClass, Measurement, Relationship,
+    SourceCodeAxisVariant, SourceCodeConceptMapping,
 )
 from omop_core.services.canonical_units import (
     LoincAxes, convert, loinc_axes_for_concepts, normalize, property_for,
+    normalize_measurement_units,
 )
 from patient_portal.models import Identity
-from tests.factories import ConceptFactory, MeasurementFactory, PersonFactory, PatientRecordFactory
+from tests.factories import ConceptFactory, MeasurementFactory, PersonFactory, PatientRecordFactory, VocabularyFactory
 
 
 @pytest.mark.parametrize('value,source,target,prop,expected', [
@@ -347,3 +349,470 @@ def test_summary_and_detail_agree_on_blank_unit_fallback(setup_units):
     summary = client.get(f'/api/v1/lab-results/summary/?person_id={person.pk}').json()['results'][0]['values'][0]['normalized']
     assert detail == summary
     assert Decimal(str(detail['value'])) == 2
+
+
+# ---------------------------------------------------------------------------
+# Write-time unit normalization tests
+# ---------------------------------------------------------------------------
+
+def _ucum_concept(code):
+    """Get-or-create a UCUM concept for a unit code."""
+    return ConceptFactory(
+        vocabulary=VocabularyFactory(vocabulary_id='UCUM'),
+        concept_code=code,
+        concept_name=code,
+        standard_concept='S',
+    )
+
+
+def _sccm(source_code, target_concept, destination_unit_concept=None,
+           omop_table='measurement', status='approved'):
+    """Create a SourceCodeConceptMapping row."""
+    return SourceCodeConceptMapping.objects.create(
+        source_code=source_code,
+        target_concept=target_concept,
+        destination_unit_concept=destination_unit_concept,
+        omop_table=omop_table,
+        status=status,
+    )
+
+
+class TestNormalizeMeasurementUnits:
+    """Tests for the queryset-based normalize_measurement_units helper."""
+
+    def test_converts_values_to_target_unit(self, db):
+        person = PersonFactory()
+        concept = ConceptFactory(concept_code='GLU', concept_name='Glucose')
+        mmol_concept = _ucum_concept('mmol/L')
+        mapping = _sccm('GLUCOSE', concept,
+                         destination_unit_concept=mmol_concept)
+
+        row = MeasurementFactory(
+            person=person,
+            measurement_concept=concept,
+            measurement_source_value='GLUCOSE',
+            value_as_number=Decimal('100'),
+            unit_source_value='umol/L',
+            range_low=Decimal('70'),
+            range_high=Decimal('110'),
+        )
+        qs = Measurement.objects.filter(pk=row.pk)
+        count = normalize_measurement_units(qs, mapping)
+
+        assert count == 1
+        row.refresh_from_db()
+        # umol/L -> mmol/L: divide by 1000
+        assert row.value_as_number == Decimal('0.1')
+        assert row.range_low == Decimal('0.07')
+        assert row.range_high == Decimal('0.11')
+        assert row.unit_concept_id == mmol_concept.concept_id
+        # unit_source_value is NEVER changed
+        assert row.unit_source_value == 'umol/L'
+
+    def test_skips_incompatible_units(self, db):
+        person = PersonFactory()
+        concept = ConceptFactory(concept_code='X', concept_name='X')
+        gdl_concept = _ucum_concept('g/dL')
+        mapping = _sccm('X', concept, destination_unit_concept=gdl_concept)
+
+        row = MeasurementFactory(
+            person=person,
+            measurement_concept=concept,
+            measurement_source_value='X',
+            value_as_number=Decimal('5'),
+            unit_source_value='mmol/L',  # SCnc, incompatible with g/dL (MCnc)
+        )
+        qs = Measurement.objects.filter(pk=row.pk)
+        count = normalize_measurement_units(qs, mapping)
+
+        assert count == 0
+        row.refresh_from_db()
+        assert row.value_as_number == Decimal('5')
+
+    def test_skips_null_values(self, db):
+        person = PersonFactory()
+        concept = ConceptFactory(concept_code='Y', concept_name='Y')
+        mmol_concept = _ucum_concept('mmol/L')
+        mapping = _sccm('Y', concept, destination_unit_concept=mmol_concept)
+
+        row = MeasurementFactory(
+            person=person,
+            measurement_concept=concept,
+            measurement_source_value='Y',
+            value_as_number=None,
+            unit_source_value='umol/L',
+        )
+        qs = Measurement.objects.filter(pk=row.pk)
+        count = normalize_measurement_units(qs, mapping)
+
+        assert count == 0
+        row.refresh_from_db()
+        assert row.value_as_number is None
+
+    def test_skips_when_already_in_target_unit(self, db):
+        person = PersonFactory()
+        concept = ConceptFactory(concept_code='Z', concept_name='Z')
+        mmol_concept = _ucum_concept('mmol/L')
+        mapping = _sccm('Z', concept, destination_unit_concept=mmol_concept)
+
+        row = MeasurementFactory(
+            person=person,
+            measurement_concept=concept,
+            measurement_source_value='Z',
+            value_as_number=Decimal('5'),
+            unit_source_value='mmol/L',
+        )
+        qs = Measurement.objects.filter(pk=row.pk)
+        count = normalize_measurement_units(qs, mapping)
+
+        assert count == 0
+        row.refresh_from_db()
+        # Value unchanged, but unit_concept_id should be set
+        assert row.value_as_number == Decimal('5')
+        assert row.unit_concept_id == mmol_concept.concept_id
+
+    def test_no_target_unit_returns_zero(self, db):
+        person = PersonFactory()
+        concept = ConceptFactory(concept_code='W', concept_name='W')
+        # No destination_unit_concept and no CanonicalUnitPreference
+        mapping = _sccm('W', concept)
+
+        row = MeasurementFactory(
+            person=person,
+            measurement_concept=concept,
+            measurement_source_value='W',
+            value_as_number=Decimal('10'),
+            unit_source_value='mg/dL',
+        )
+        qs = Measurement.objects.filter(pk=row.pk)
+        count = normalize_measurement_units(qs, mapping)
+
+        assert count == 0
+        row.refresh_from_db()
+        assert row.value_as_number == Decimal('10')
+
+    def test_canonical_unit_preference_is_not_a_write_target(self, db):
+        """A preference is a read-time display setting; stored values stay as sent (#2157)."""
+        person = PersonFactory()
+        concept = ConceptFactory(concept_code='PROT', concept_name='Protein')
+        CanonicalUnitPreference.objects.create(
+            concept=concept, unit='g/dL', property='MCnc')
+        mapping = _sccm('PROT', concept)
+
+        row = MeasurementFactory(
+            person=person,
+            measurement_concept=concept,
+            measurement_source_value='PROT',
+            value_as_number=Decimal('40'),
+            unit_source_value='g/L',
+        )
+        qs = Measurement.objects.filter(pk=row.pk)
+        count = normalize_measurement_units(qs, mapping)
+
+        assert count == 0
+        row.refresh_from_db()
+        assert row.value_as_number == Decimal('40')
+
+
+@pytest.mark.skip(reason="cb-v2 excludes write-time normalization (docs/canonical_units_architecture.md)")
+class TestRepointNormalizesUnits:
+    """Integration test: repoint_clinical_rows normalizes Measurement units."""
+
+    def test_repoint_converts_values(self, db):
+        from omop_core.mapping.code_resolution import repoint_clinical_rows
+
+        person = PersonFactory()
+        old_concept = ConceptFactory(concept_code='OLD', concept_name='Old')
+        new_concept = ConceptFactory(concept_code='NEW', concept_name='New')
+        mmol_concept = _ucum_concept('mmol/L')
+        mapping = _sccm('GLUCOSE', new_concept,
+                         destination_unit_concept=mmol_concept)
+
+        row = MeasurementFactory(
+            person=person,
+            measurement_concept=old_concept,
+            measurement_source_value='GLUCOSE',
+            value_as_number=Decimal('500'),
+            unit_source_value='umol/L',
+            range_low=Decimal('300'),
+            range_high=Decimal('600'),
+        )
+
+        result = repoint_clinical_rows(
+            mapping=mapping,
+            old_concept_id=old_concept.concept_id,
+            new_concept_id=new_concept.concept_id,
+        )
+
+        assert result['rows_updated'] == 1
+        assert result.get('rows_normalized', 0) == 1
+
+        row.refresh_from_db()
+        assert row.measurement_concept_id == new_concept.concept_id
+        # umol/L -> mmol/L: divide by 1000
+        assert row.value_as_number == Decimal('0.5')
+        assert row.range_low == Decimal('0.3')
+        assert row.range_high == Decimal('0.6')
+        assert row.unit_source_value == 'umol/L'  # never changed
+
+    def test_repoint_skips_non_measurement_tables(self, db):
+        from omop_core.mapping.code_resolution import repoint_clinical_rows
+        from omop_core.models import ConditionOccurrence
+        from omop_core.services.pk import next_pk
+
+        person = PersonFactory()
+        old_concept = ConceptFactory(concept_code='COLD', concept_name='Cold')
+        new_concept = ConceptFactory(concept_code='CNEW', concept_name='CNew')
+        type_concept = ConceptFactory(concept_code='CTYPE', concept_name='CType')
+
+        pk = next_pk(ConditionOccurrence, 'condition_occurrence_id')
+        ConditionOccurrence.objects.create(
+            condition_occurrence_id=pk,
+            person=person,
+            condition_concept=old_concept,
+            condition_type_concept=type_concept,
+            condition_source_value='HEADACHE',
+            condition_start_date='2024-01-01',
+        )
+
+        mapping = SourceCodeConceptMapping.objects.create(
+            source_code='HEADACHE',
+            target_concept=new_concept,
+            omop_table='condition',
+            status='approved',
+        )
+
+        result = repoint_clinical_rows(
+            mapping=mapping,
+            old_concept_id=old_concept.concept_id,
+            new_concept_id=new_concept.concept_id,
+        )
+        assert result['rows_updated'] == 1
+        assert 'rows_normalized' not in result
+
+
+@pytest.mark.skip(reason="cb-v2 excludes write-time normalization (docs/canonical_units_architecture.md)")
+class TestResolvePersonNormalizesUnits:
+    """Integration test: resolve_person_source_codes normalizes Measurement units."""
+
+    def test_resolve_converts_values(self, db):
+        from omop_core.mapping.code_resolution import resolve_person_source_codes
+
+        person = PersonFactory()
+        target_concept = ConceptFactory(
+            concept_code='TARGET', concept_name='Target')
+        mmol_concept = _ucum_concept('mmol/L')
+
+        _sccm('LAB-X', target_concept,
+               destination_unit_concept=mmol_concept)
+
+        # Row with concept_id=0 (NO_MATCHING_CONCEPT)
+        no_match = ConceptFactory(concept_id=0, concept_code='0',
+                                  concept_name='No matching concept')
+        row = MeasurementFactory(
+            person=person,
+            measurement_concept=no_match,
+            measurement_source_value='LAB-X',
+            value_as_number=Decimal('100'),
+            unit_source_value='umol/L',
+        )
+
+        result = resolve_person_source_codes(person)
+        assert result['resolved'] >= 1
+
+        row.refresh_from_db()
+        assert row.measurement_concept_id == target_concept.concept_id
+        # umol/L -> mmol/L: divide by 1000
+        assert row.value_as_number == Decimal('0.1')
+
+
+@pytest.mark.skip(reason="cb-v2 excludes write-time normalization (docs/canonical_units_architecture.md)")
+class TestVariantAwareNormalization:
+    """Tests that axis variants route unit normalization to the variant's concept."""
+
+    def _loinc_concept(self, code, name, property_name):
+        """Create a LOINC Measurement concept with a Has property relationship."""
+        concept = ConceptFactory(
+            concept_code=code, concept_name=name,
+            vocabulary_id='LOINC', domain_id='Measurement',
+            standard_concept='S',
+        )
+        Relationship.objects.get_or_create(
+            relationship_id='Has property',
+            defaults={
+                'relationship_name': 'Has property',
+                'is_hierarchical': 0,
+                'defines_ancestry': 0,
+                'reverse_relationship_id': '',
+                'relationship_concept_id': 0,
+            },
+        )
+        prop_concept = ConceptFactory(
+            concept_name=property_name,
+            concept_code=f'LP-{property_name.upper().replace(" ", "")}',
+        )
+        ConceptRelationship.objects.create(
+            concept_1=concept,
+            concept_2=prop_concept,
+            relationship_id='Has property',
+            valid_start_date=date(1970, 1, 1),
+            valid_end_date=date(2099, 12, 31),
+        )
+        # Also add quantitative scale
+        Relationship.objects.get_or_create(
+            relationship_id='Has scale type',
+            defaults={
+                'relationship_name': 'Has scale type',
+                'is_hierarchical': 0,
+                'defines_ancestry': 0,
+                'reverse_relationship_id': '',
+                'relationship_concept_id': 0,
+            },
+        )
+        scale_concept = ConceptFactory(
+            concept_name='Quantitative', concept_code='LP-QN-VARIANT',
+        )
+        ConceptRelationship.objects.create(
+            concept_1=concept,
+            concept_2=scale_concept,
+            relationship_id='Has scale type',
+            valid_start_date=date(1970, 1, 1),
+            valid_end_date=date(2099, 12, 31),
+        )
+        return concept
+
+    def test_repoint_variant_does_not_convert(self, db):
+        """A variant has no curated unit, so its rows move but keep their values (#2157).
+
+        Not to the variant LOINC's base unit, and not to the parent mapping's
+        curated unit, which was chosen for the parent's LOINC.
+        """
+        from omop_core.mapping.code_resolution import repoint_clinical_rows
+
+        person = PersonFactory()
+        old_concept = ConceptFactory(concept_code='OLD-V', concept_name='Old')
+        parent_concept = self._loinc_concept(
+            'PARENT-LC', 'Parent [Mass/volume]', 'Mass Concentration')
+        variant_concept = self._loinc_concept(
+            'VARIANT-LC', 'Variant [Moles/volume]', 'Substance Concentration')
+        umol = _ucum_concept('umol/L')
+        mapping = _sccm('GLUCOSE', parent_concept, destination_unit_concept=umol)
+        SourceCodeAxisVariant.objects.create(
+            mapping=mapping,
+            axis_key='property=SCnc|scale_type=Qn',
+            axis_values={'property': 'SCnc', 'scale_type': 'Qn'},
+            units=['mmol/L'],
+            status='approved',
+            target_concept=variant_concept,
+        )
+        row = MeasurementFactory(
+            person=person,
+            measurement_concept=old_concept,
+            measurement_source_value='GLUCOSE',
+            value_as_number=Decimal('5'),
+            unit_source_value='mmol/L',
+        )
+        unit_before = row.unit_concept_id
+
+        result = repoint_clinical_rows(
+            mapping=mapping,
+            old_concept_id=old_concept.concept_id,
+            new_concept_id=variant_concept.concept_id,
+            units=['mmol/L'],
+        )
+
+        assert result['rows_updated'] == 1
+        assert result.get('rows_normalized', 0) == 0
+        row.refresh_from_db()
+        assert row.measurement_concept_id == variant_concept.concept_id
+        assert row.value_as_number == Decimal('5')
+        assert row.unit_concept_id == unit_before
+
+    def test_repoint_without_variant_uses_mapping_destination(self, db):
+        """Non-variant repoint uses the mapping's destination_unit_concept."""
+        from omop_core.mapping.code_resolution import repoint_clinical_rows
+
+        person = PersonFactory()
+        old_concept = ConceptFactory(concept_code='OLD-NV', concept_name='Old')
+        new_concept = ConceptFactory(concept_code='NEW-NV', concept_name='New')
+        # destination_unit_concept is g/dL (MCnc)
+        gdl_concept = _ucum_concept('g/dL')
+        mapping = _sccm('ALB', new_concept,
+                         destination_unit_concept=gdl_concept)
+
+        row = MeasurementFactory(
+            person=person,
+            measurement_concept=old_concept,
+            measurement_source_value='ALB',
+            value_as_number=Decimal('40'),
+            unit_source_value='g/L',
+        )
+
+        result = repoint_clinical_rows(
+            mapping=mapping,
+            old_concept_id=old_concept.concept_id,
+            new_concept_id=new_concept.concept_id,
+        )
+
+        assert result.get('rows_normalized', 0) == 1
+        row.refresh_from_db()
+        # g/L -> g/dL: divide by 10
+        assert row.value_as_number == Decimal('4')
+
+    def test_loinc_property_base_unit_is_not_a_write_target(self, db):
+        """An inferred base unit never rewrites a stored value (#2157)."""
+        person = PersonFactory()
+        concept = self._loinc_concept(
+            'FALLBACK-LC', 'Fallback [Mass/volume]', 'Mass Concentration')
+        mapping = _sccm('FALLBACK', concept)
+
+        row = MeasurementFactory(
+            person=person,
+            measurement_concept=concept,
+            measurement_source_value='FALLBACK',
+            value_as_number=Decimal('2'),
+            unit_source_value='g/dL',
+        )
+        qs = Measurement.objects.filter(pk=row.pk)
+        count = normalize_measurement_units(qs, mapping)
+
+        assert count == 0
+        row.refresh_from_db()
+        assert row.value_as_number == Decimal('2')
+
+
+@pytest.mark.skip(reason="cb-v2 excludes write-time normalization (docs/canonical_units_architecture.md)")
+class TestNormalizationIdempotency:
+    """Calling normalize twice must not double-convert values."""
+
+    def test_second_normalize_is_noop(self, db):
+        """After one normalize, a second call should leave values unchanged."""
+        person = PersonFactory()
+        concept = ConceptFactory(concept_code='IDEM', concept_name='Idempotent')
+        mmol_concept = _ucum_concept('mmol/L')
+        mapping = _sccm('IDEM', concept,
+                         destination_unit_concept=mmol_concept)
+
+        row = MeasurementFactory(
+            person=person,
+            measurement_concept=concept,
+            measurement_source_value='IDEM',
+            value_as_number=Decimal('100'),
+            unit_source_value='umol/L',
+        )
+        qs = Measurement.objects.filter(pk=row.pk)
+
+        # First call: converts umol/L -> mmol/L
+        count1 = normalize_measurement_units(qs, mapping)
+        assert count1 == 1
+        row.refresh_from_db()
+        assert row.value_as_number == Decimal('0.1')
+        assert row.unit_concept_id == mmol_concept.concept_id
+
+        # Second call: should be a no-op (idempotency guard skips rows
+        # whose unit_concept_id already matches target).
+        count2 = normalize_measurement_units(qs, mapping)
+        assert count2 == 0
+        row.refresh_from_db()
+        # Value must NOT have been converted again (0.1 -> 0.0001 would be wrong)
+        assert row.value_as_number == Decimal('0.1')

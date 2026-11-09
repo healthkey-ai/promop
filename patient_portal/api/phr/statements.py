@@ -98,9 +98,10 @@ class MedicationStatementView(_StatementView):
         if status in (S.TOOK, S.NOT_TAKEN) and current:
             return Response({'status': ['This prescription is current: answer "taking" or "not taking".']}, status=400)
         if status == S.STOPPED:
-            previous = S.objects.filter(person=person, subject=self.subject, subject_key=item_id).first()
+            # What the patient said, or took as said for an older prescription (#123).
+            said = (medication_summary_by_key(person, item_id) or {}).get('confirmation') or {}
             own = med['source']['kind'] == 'patient'
-            if not current or not (own or (previous and previous.status in (S.TAKING, S.STOPPED))):
+            if not current or not (own or said.get('status') in (S.TAKING, S.STOPPED)):
                 return Response({'status': ['Only a medication you take can be stopped.']}, status=400)
             if stopped_on is None:
                 return Response({'stopped_on': ['Say when you stopped.']}, status=400)

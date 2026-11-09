@@ -91,7 +91,7 @@ def _build_provenance(
     elif entry.lookup_strategy == "genomics":
         source_rows = _lookup_genomics(person, field_name)
     elif entry.selection_rule == "composite" and entry.constituent_fields:
-        source_rows = _lookup_composite(person, entry)
+        source_rows = _lookup_composite(person, entry, registry)
     else:
         source_rows = _lookup_simple(person, entry)
 
@@ -427,9 +427,15 @@ def _lookup_death(person: Person) -> list[dict]:
         return []
 
 
-def _lookup_composite(person: Person, entry: FieldProvenance) -> list[dict]:
-    """For composite fields, collect source rows from all constituent fields."""
-    registry = get_registry()
+def _lookup_composite(
+    person: Person, entry: FieldProvenance, registry: dict[str, FieldProvenance] | None = None,
+) -> list[dict]:
+    """For composite fields, collect source rows from all constituent fields.
+
+    ``registry`` is the caller's, so one request resolves the lab entries once.
+    """
+    if registry is None:
+        registry = get_registry()
     all_rows: list[dict] = []
     for sub_field in entry.constituent_fields:
         sub_entry = registry.get(sub_field)

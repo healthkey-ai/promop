@@ -7,7 +7,7 @@ is a later phase and is stored beside these rows, never over them.
 from __future__ import annotations
 
 from collections import Counter, OrderedDict
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 from django.utils import timezone
@@ -92,6 +92,11 @@ def _statements(person, subject: str) -> dict[str, PatientStatement]:
     return {s.subject_key: s for s in PatientStatement.objects.filter(person=person, subject=subject)}
 
 
+# Prescriptions from the record wait for the patient to say whether they took
+# them only when given in the last year; older ones count as taken (#123).
+ASK_WITHIN = timedelta(days=365)
+
+
 def _summary(key: str, rows: list[DrugExposure], sources: dict, today: date,
              statement: PatientStatement | None = None, with_statements: bool = True,
              note: PatientStatement | None = None) -> dict[str, Any]:
@@ -111,6 +116,11 @@ def _summary(key: str, rows: list[DrugExposure], sources: dict, today: date,
         if statement.status == PatientStatement.STOPPED and current:
             # Stopped by the patient: no longer current, history intact.
             current, ended = False, statement.stopped_on
+    unanswered = with_statements and source['kind'] == 'record' and statement is None and not in_line
+    if unanswered and latest.drug_exposure_start_date < today - ASK_WITHIN:
+        # Taken unless the patient says otherwise, which they can as usual.
+        confirmation = {'status': PatientStatement.TAKING if current else PatientStatement.TOOK, 'assumed': True}
+        unanswered = False
     item = {
         'id': key,
         'drug_exposure_id': latest.pk,
@@ -123,10 +133,7 @@ def _summary(key: str, rows: list[DrugExposure], sources: dict, today: date,
         'source': source,
         'confirmation': confirmation,
         'my_note': (note.note or None) if with_statements and note is not None else None,
-        # Prescriptions from the record wait for the patient to say whether
-        # they took them.
-        'pending': True if with_statements and source['kind'] == 'record' and statement is None and not in_line
-        else None,
+        'pending': True if unanswered else None,
     }
     return {k: v for k, v in item.items() if v is not None}
 
@@ -154,8 +161,10 @@ def medications(person, record) -> dict[str, Any]:
     notes = _statements(person, PatientStatement.SUBJECT_MEDICATION_NOTE)
     items = [_summary(key, rows, sources, today, statements.get(key), note=notes.get(key))
              for key, rows in groups.items()]
-    # Current first, each group most recently started first (sorts are stable).
-    items.sort(key=lambda m: m['started'], reverse=True)
+    # Current first, each group by its latest prescription, newest first: the
+    # date its card shows (#125). Sorts are stable.
+    latest = {key: rows[0].drug_exposure_start_date for key, rows in groups.items()}
+    items.sort(key=lambda m: latest[m['id']], reverse=True)
     items.sort(key=lambda m: m['status'] != 'current')
     return {'medications': items}
 

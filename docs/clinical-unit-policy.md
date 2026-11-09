@@ -65,12 +65,15 @@ source units, target canonical units, conversion formula, organization-setting
 behavior, and unknown-unit behavior. Add tests for each supported conversion,
 both organization settings where applicable, and a fail-closed unknown-unit case.
 
-## ANC and platelets (#640)
+## ANC, ALC, AMC and platelets (#640, #2282)
 
-[LOINC 751-8](https://loinc.org/751-8) and
-[LOINC 777-3](https://loinc.org/777-3) identify absolute neutrophil and platelet
-counts. Their canonical PatientRecord fields are always `10*3/uL`, numerically
-equal to `10*9/L`, regardless of organization preferences.
+[LOINC 751-8](https://loinc.org/751-8), [731-0](https://loinc.org/731-0),
+[742-7](https://loinc.org/742-7) and [777-3](https://loinc.org/777-3) identify
+absolute neutrophil, lymphocyte, monocyte and platelet counts. Their canonical
+PatientRecord fields are always `10*3/uL`, numerically equal to `10*9/L`,
+regardless of organization preferences. Lymphocyte and monocyte counts joined
+this rule in derivation version 24; before that they took the lab's number
+as-is, so a cells/µL result read 1,000× too high.
 
 | Source scale | Conversion to thousands/µL |
 | --- | --- |
@@ -86,7 +89,9 @@ an absent source unit may use a UCUM unit concept. An explicit unsupported unit
 does not silently fall back to a different scale.
 
 The newest non-erroneous matching result is selected across LOINC, source-code,
-supported source-display and historic concept-name paths. A newer empty result
+supported source-display and historic concept-name paths, including LOINCs a
+curator routed to the field through an approved field mapping or source-code
+alias. A newer empty result
 or one with an unknown unit suppresses older results. Approved scalar mapping
 readback also converts source units. Pending user edits remain preserved.
 

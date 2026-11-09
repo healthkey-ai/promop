@@ -308,3 +308,31 @@ def test_implemented_assertion_fields_are_part_of_read_only_contract():
         'substance_use_details', 'no_geographic_exposure_risk',
         'geographic_exposure_risk_details',
     } <= PATIENT_RECORD_OMOP_MAPPED_FIELDS
+
+
+def _pregnancy_result(value):
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    concept = ConceptFactory(concept_code='2106-3', concept_name='Pregnancy test')
+    MeasurementFactory(
+        person=person, measurement_concept=concept,
+        measurement_source_value='2106-3', measurement_date=date(2026, 2, 3),
+        value_as_string=value,
+    )
+    return refresh_patient_record(person)
+
+
+def test_pregnancy_result_with_a_lab_comment_stores_the_answer_line():
+    """#2250: the 60-character result failed the whole refresh."""
+    record = _pregnancy_result('NEG\nSamples with Specific Gravity <1.010 may result in a fa')
+
+    record.refresh_from_db()
+    assert record.pregnancy_test_result_value == 'NEG'
+    assert record.pregnancy_test_date == date(2026, 2, 3)
+
+
+def test_pregnancy_result_longer_than_the_column_is_cut_to_fit():
+    record = _pregnancy_result(' Negative ' + 'x' * 48 + ' ')
+
+    record.refresh_from_db()
+    assert record.pregnancy_test_result_value == ('Negative ' + 'x' * 48)[:50]

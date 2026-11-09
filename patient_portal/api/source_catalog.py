@@ -9,9 +9,9 @@ from omop_core.services.source_catalog import catalog_response
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def source_catalog(request):
-    from .views import _can_manage_field_mappings
+    from .views import _can_manage_code_mappings
 
-    if not _can_manage_field_mappings(request.user):
+    if not _can_manage_code_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=403)
     vocabulary = request.query_params.get('vocabulary_id', '').strip()
     code = request.query_params.get('code', '').strip()

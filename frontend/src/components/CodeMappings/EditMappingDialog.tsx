@@ -11,6 +11,7 @@
  *   mode / row          -- new or edit, the row being edited
  *   reference           -- domain & vocabulary reference data
  *   canApprove          -- whether the user can set status to Approved
+ *   canCurate           -- whether the user reaches the Source Systems page (#2398)
  *   strategies / rankingModel -- suggest settings from the parent
  *   onSaved / onDeleted -- callbacks after a successful write or delete
  *   onBanner            -- surface informational banners to the parent
@@ -42,6 +43,8 @@ import {
   type ConceptResult,
   type DestinationOption,
   type MappingForm,
+  type MappingSurface,
+  rankedConfidence,
   type Reference,
   type RepointResult,
   type SearchScope,
@@ -76,6 +79,7 @@ export interface EditMappingDialogProps {
   row: CodeMappingRow | null;
   reference: Reference;
   canApprove: boolean;
+  canCurate?: boolean;
   strategies: { umls: boolean; lexical: boolean; vectors: boolean };
   rankingModel: "anthropic" | "jev" | "both";
   onStrategiesChange?: (next: { umls: boolean; lexical: boolean; vectors: boolean }) => void;
@@ -92,6 +96,12 @@ export interface EditMappingDialogProps {
    * `patientId`, it does not narrow what a save updates.
    */
   sourceExamples?: boolean;
+  /**
+   * Which mapping tab opened the dialog, recorded on the row with each save
+   * (#2382). A dialog with `patientId` is the patient page whatever this says;
+   * the server decides that from the patient.
+   */
+  surface?: MappingSurface;
 }
 
 /** One patient's inventory row for the code, from /concept-to-code/source-examples/. */
@@ -110,6 +120,38 @@ type SourceExamplesState =
   | { status: "error"; message: string }
   | { status: "ready"; examples: SourceExample[] };
 
+/** The `existing_mapping` block of a 400 from POST /v1/code-mappings/ (#2347). */
+interface ExistingMappingConflict {
+  id: number;
+  omop_table: string;
+  domain_id: string;
+  status: string;
+  target_concept_name: string;
+}
+
+function existingMappingConflict(detail: unknown): ExistingMappingConflict | null {
+  if (!detail || typeof detail !== "object" || Array.isArray(detail)) return null;
+  const raw = (detail as { existing_mapping?: unknown }).existing_mapping;
+  if (!raw || typeof raw !== "object") return null;
+  const block = raw as Record<string, unknown>;
+  const id = Number(block.id);
+  if (!Number.isFinite(id) || id <= 0) return null;
+  return {
+    id,
+    omop_table: String(block.omop_table ?? ""),
+    domain_id: String(block.domain_id ?? ""),
+    status: String(block.status ?? ""),
+    target_concept_name: String(block.target_concept_name ?? ""),
+  };
+}
+
+/** `drug_exposure` -> `Drug Exposure`. */
+function tableLabel(omopTable: string): string {
+  return omopTable
+    ? omopTable.split("_").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ")
+    : "no table";
+}
+
 // ── Component ───────────────────────────────────────────────────────
 
 export default function EditMappingDialog({
@@ -120,6 +162,7 @@ export default function EditMappingDialog({
   row: selectedRow,
   reference,
   canApprove,
+  canCurate = false,
   strategies,
   rankingModel,
   onStrategiesChange,
@@ -127,6 +170,7 @@ export default function EditMappingDialog({
   onSaved,
   onDeleted,
   onBanner,
+  surface,
   onSourceCodeUpdated,
   defaultDestination,
   sourceExamples = false,
@@ -152,6 +196,9 @@ export default function EditMappingDialog({
   const [searchingConcepts, setSearchingConcepts] = useState(false);
   const [suggestionMessage, setSuggestionMessage] = useState("");
   const [individualSuggestion, setIndividualSuggestion] = useState<{ request: number; activity: CandidateActivity[]; running: boolean; axisKey?: string } | null>(null);
+  // True once the source text or table changed after the last Suggest run
+  // here, so its scores no longer describe the code being saved (#2382).
+  const suggestionStale = useRef(false);
   // LOINC axes (#loinc-axes): the panel's current overrides, sent with Suggest.
   // Keyed by mapping: overrides belong to the code they were made for, and
   // must never ride along with a Suggest for another row or an edited code.
@@ -164,6 +211,13 @@ export default function EditMappingDialog({
   // SNOMED evidence: the panel's current settings, under the same guard.
   const [snomedSettings, setSnomedSettings] = useState<{ mappingId: number; settings: SnomedSettings } | null>(null);
   const [error, setError] = useState("");
+  /**
+   * A create that collided with a mapping already holding this code (#2347).
+   * The patient page lists a code under the clinical table its rows sit in,
+   * so a code whose mapping was filed under another table looks unmapped
+   * there. The server names that mapping; the curator can move it here.
+   */
+  const [existingMapping, setExistingMapping] = useState<ExistingMappingConflict | null>(null);
   const [saving, setSaving] = useState(false);
   const [mintOpen, setMintOpen] = useState(false);
   const [mintUnitOpen, setMintUnitOpen] = useState(false);
@@ -386,6 +440,7 @@ export default function EditMappingDialog({
     setSuggestionMessage("");
     dialogRequest.current += 1;
     setError("");
+    setExistingMapping(null);
     setSearchingConcepts(false);
     setMintOpen(false);
     // Release edit lock.
@@ -401,6 +456,7 @@ export default function EditMappingDialog({
     if (field.startsWith("destination_")) dialogChoice.current = dialogRequest.current;
     if (["source_code", "source_vocabulary_id", "source_code_description", "omop_table"].includes(field)) {
       dialogRequest.current += 1;
+      suggestionStale.current = true;
       setSearchingConcepts(false);
       setError("");
     }
@@ -410,6 +466,7 @@ export default function EditMappingDialog({
   const setDomain = useCallback((domainId: string) => {
     setSuggestionMessage("");
     dialogRequest.current += 1;
+    suggestionStale.current = true;
     setSearchingConcepts(false);
     setError("");
     setForm((prev) => {
@@ -585,6 +642,7 @@ export default function EditMappingDialog({
       void suggestVariants(request);
     }
     dialogChoice.current = null;
+    suggestionStale.current = false;
     setIndividualSuggestion({ request, activity: [], running: true, axisKey });
     setError("");
     setSearchingConcepts(true);
@@ -691,22 +749,60 @@ export default function EditMappingDialog({
     onSourceCodeUpdated?.();
   };
 
+  // A Suggest run in this dialog, for the code itself rather than one of its
+  // axis variants and for the source text as it still reads, is the only time
+  // the dialog knows what the ranker thought of the destination being saved.
+  // Not dialogRequest: that counter also advances on concept-search keystrokes,
+  // which change nothing the ranker scored. Without a run the key is left out
+  // and the server keeps the row's own live confidence while the destination
+  // stands.
+  const suggestedHere = individualSuggestion !== null && !individualSuggestion.axisKey
+    && !suggestionStale.current;
+
+  const savePayload = () => ({
+    ...form,
+    ...(patientId ? { patient_id: Number(patientId) } : {}),
+    // The table this code was listed under on the patient page: rows there
+    // follow the mapping when it is filed under another table (#2393).
+    ...(patientId && selectedRow?.destination_omop_table ? { rows_omop_table: selectedRow.destination_omop_table } : {}),
+    ...(surface && !patientId ? { decision_surface: surface } : {}),
+    ...(suggestedHere ? { decision_confidence: rankedConfidence(individualSuggestion.activity, form.destination_concept_id) } : {}),
+    source_unit: patientId && selectedRow?.source_code_id ? sourceUnit.trim() : form.source_unit,
+    // Empty stays empty: never send concept 0 as a destination.
+    destination_concept_id: form.destination_concept_id ? Number(form.destination_concept_id) : null,
+    target_concept_id: form.destination_concept_id ? Number(form.destination_concept_id) : null,
+    destination_unit_concept_id: form.destination_unit_concept_id
+      ? Number(form.destination_unit_concept_id) : null,
+  });
+
+  const saveFailed = (err: unknown, fallback: string) => {
+    const detail =
+      err && typeof err === "object" && "response" in err
+        ? (err as { response?: { data?: unknown } }).response?.data
+        : undefined;
+    // A refused move (lock, rights) carries no conflict block; keep the offer
+    // so the curator can retry rather than re-submit the form to get it back.
+    const conflict = existingMappingConflict(detail);
+    if (conflict) setExistingMapping(conflict);
+    const message =
+      detail && typeof detail === "object" && !Array.isArray(detail)
+        ? Object.entries(detail as Record<string, unknown>)
+          .filter(([field]) => field !== "existing_mapping")
+          .map(([field, value]) => `${field === "detail" ? "" : `${field}: `}${Array.isArray(value) ? value.join(", ") : String(value)}`)
+          .join(" ")
+        : "";
+    setError(message || fallback);
+    setSaving(false);
+  };
+
   const submitForm = async (event: React.FormEvent) => {
     event.preventDefault();
     setSaving(true);
     setError("");
+    setExistingMapping(null);
     try {
       if (sourceContextDirty) await persistSourceContext();
-      const payload = {
-        ...form,
-        ...(patientId ? { patient_id: Number(patientId) } : {}),
-        source_unit: patientId && selectedRow?.source_code_id ? sourceUnit.trim() : form.source_unit,
-        // Empty stays empty: never send concept 0 as a destination.
-        destination_concept_id: form.destination_concept_id ? Number(form.destination_concept_id) : null,
-        target_concept_id: form.destination_concept_id ? Number(form.destination_concept_id) : null,
-        destination_unit_concept_id: form.destination_unit_concept_id
-          ? Number(form.destination_unit_concept_id) : null,
-      };
+      const payload = savePayload();
       const resp = selectedRow?.mapping_id
         ? await api.patch(`/v1/code-mappings/${selectedRow.mapping_id}/`, payload)
         : await api.post("/v1/code-mappings/", payload);
@@ -715,18 +811,30 @@ export default function EditMappingDialog({
       onSaved(resp.data, repoint);
       closeDialog();
     } catch (err) {
-      const detail =
-        err && typeof err === "object" && "response" in err
-          ? (err as { response?: { data?: { detail?: string } | Record<string, string[]> } }).response?.data
-          : undefined;
-      const message =
-        detail && typeof detail === "object" && !Array.isArray(detail)
-          ? Object.entries(detail).map(([field, value]) => `${field === "detail" ? "" : `${field}: `}${Array.isArray(value) ? value.join(", ") : value}`).join(" ")
-          : "";
-      setError(message || (sourceContextDirty
+      saveFailed(err, sourceContextDirty
         ? "Failed to save source context or code mapping. Please retry."
-        : "Failed to save code mapping."));
-      setSaving(false);
+        : "Failed to save code mapping.");
+    }
+  };
+
+  /**
+   * Re-file the mapping that already holds this code under the table and
+   * domain chosen here, with this form's destination and status. A PATCH of
+   * that row, so the server's own rules (locks, approval rights, rows still
+   * moving) still apply and the patient page then finds it under this table.
+   */
+  const moveExistingMapping = async () => {
+    if (!existingMapping) return;
+    setSaving(true);
+    setError("");
+    try {
+      const resp = await api.patch(`/v1/code-mappings/${existingMapping.id}/`, savePayload());
+      const repoint: RepointResult | null = resp.data?.repoint ?? null;
+      setExistingMapping(null);
+      onSaved(resp.data, repoint);
+      closeDialog();
+    } catch (err) {
+      saveFailed(err, "Failed to move the existing mapping.");
     }
   };
 
@@ -787,6 +895,28 @@ export default function EditMappingDialog({
             {error && (
               <div role="alert" className="mb-4 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
                 {error}
+                {existingMapping
+                  && (canApprove || existingMapping.status !== "approved" || form.status === "approved") && (
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={moveExistingMapping}
+                      disabled={saving}
+                      className="rounded-md border border-red-300 bg-white px-3 py-1 text-xs font-medium text-red-700 hover:bg-red-100 disabled:opacity-50"
+                    >
+                      {existingMapping.omop_table && existingMapping.omop_table !== form.omop_table
+                        ? `Move it from ${tableLabel(existingMapping.omop_table)} to ${tableLabel(form.omop_table)}`
+                        : "Update the existing mapping"}
+                    </button>
+                    <span className="text-xs text-red-600">
+                      Saves this destination and status onto that mapping
+                      {existingMapping.target_concept_name
+                        ? `, replacing ${existingMapping.target_concept_name}` : ""}
+                      {existingMapping.status === "approved" && form.status !== "approved"
+                        ? `, and un-approves it (status becomes ${form.status || "proposed"})` : ""}.
+                    </span>
+                  </div>
+                )}
               </div>
             )}
             {/* -- SOURCE ------------------------------------------------- */}
@@ -847,11 +977,15 @@ export default function EditMappingDialog({
                       {sourceSystemContext && sourceSystemContext.kind !== "none" && (
                         <p title={hospitalContextDetails(sourceSystemContext)}>{hospitalContextText(sourceSystemContext)}</p>
                       )}
-                      <p>Exact FHIR Coding.system: <a href={sourceSystemManagementUrl(form.source_vocabulary_id)}
-                        target="_blank" rel="noopener noreferrer" className="text-sky-700 underline hover:text-sky-900"
-                        title="Open Source Code Systems/Hospitals Management to review and manage facilities associated with this exact source system">
+                      <p>Exact FHIR Coding.system: {canCurate ? (
+                        <a href={sourceSystemManagementUrl(form.source_vocabulary_id)}
+                          target="_blank" rel="noopener noreferrer" className="text-sky-700 underline hover:text-sky-900"
+                          title="Open Source Code Systems/Hospitals Management to review and manage facilities associated with this exact source system">
+                          <code className="break-all">{form.source_vocabulary_id}</code>
+                        </a>
+                      ) : (
                         <code className="break-all">{form.source_vocabulary_id}</code>
-                      </a></p>
+                      )}</p>
                     </div>
                   )}
                 </Field>
@@ -1017,6 +1151,7 @@ export default function EditMappingDialog({
 
               {/* Search sits at the top: picking a concept fills everything below it. */}
               <div className="mb-4">
+                {!defaultDestination && (
                 <div className="mb-2 flex items-end justify-between gap-3">
                   <div className="flex items-center gap-1">
                     <label className="text-sm font-medium text-slate-700" htmlFor="code-mapping-concept-search">
@@ -1063,6 +1198,7 @@ export default function EditMappingDialog({
                   </div>
                   )}
                 </div>
+                )}
                 {variantMessage && <p role="status" data-testid="variant-suggestion" className="text-xs text-slate-700">{variantMessage}</p>}
                 {mode === "edit" && selectedRow?.mapping_id && <LoincAxesPanel
                   key={selectedRow.mapping_id} ref={axesPanel} mappingId={selectedRow.mapping_id} canEdit canApprove={canApprove}
@@ -1091,7 +1227,7 @@ export default function EditMappingDialog({
                     applyConcept(candidate as ConceptResult);
                     setSuggestionMessage("Candidate selected. Save the mapping to keep your choice.");
                   }} />}
-                <div className="flex gap-2">
+                {!defaultDestination && (<><div className="flex gap-2">
                   <div className="relative flex-1">
                     <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={15} />
                     <input
@@ -1184,6 +1320,7 @@ export default function EditMappingDialog({
                     </button>
                   ))}
                 </div>
+                </>)}
               </div>
 
               {/* Destination fields */}

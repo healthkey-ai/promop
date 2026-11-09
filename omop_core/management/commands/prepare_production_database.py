@@ -20,12 +20,19 @@ class Command(BaseCommand):
     help = 'Prepare the production database, bootstrapping migration 0201 when needed'
 
     def add_arguments(self, parser):
-        sources = parser.add_mutually_exclusive_group()
-        sources.add_argument('--gdrive', help='Approved Athena vocabulary folder or ZIP URL')
-        sources.add_argument('--archive', help='Local approved Athena ZIP archive')
-        sources.add_argument('--path', help='Directory containing approved Athena TSV files')
+        # --lfs and --gdrive combine (LFS first, Drive fallback, #2288); the
+        # local sources stand alone.
+        parser.add_argument('--lfs', help='Git LFS repository publishing the Athena ZIP')
+        parser.add_argument('--gdrive', help='Approved Athena vocabulary folder or ZIP URL')
+        local = parser.add_mutually_exclusive_group()
+        local.add_argument('--archive', help='Local approved Athena ZIP archive')
+        local.add_argument('--path', help='Directory containing approved Athena TSV files')
 
     def handle(self, *args, **options):
+        if (options.get('lfs') or options.get('gdrive')) and (
+            options.get('archive') or options.get('path')
+        ):
+            raise CommandError('--lfs/--gdrive cannot be combined with --archive or --path')
         applied = (APP, DEPENDENT_MIGRATION) in MigrationRecorder(
             connection
         ).applied_migrations()
@@ -48,13 +55,13 @@ class Command(BaseCommand):
         missing = required - present
         if missing:
             source = {
-                name: options.get(name) for name in ('gdrive', 'archive', 'path')
+                name: options.get(name) for name in ('lfs', 'gdrive', 'archive', 'path')
                 if options.get(name)
             }
             if not source:
                 raise CommandError(
-                    'Migration 0201 requires missing LOINC concepts; provide one of '
-                    '--gdrive, --archive, or --path.'
+                    'Migration 0201 requires missing LOINC concepts; provide '
+                    '--lfs and/or --gdrive, or one of --archive, --path.'
                 )
             self.stdout.write(
                 f'Loading {len(missing)} migration-required LOINC concepts from Athena...'

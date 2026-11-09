@@ -1144,10 +1144,9 @@ kappa_lambda_ratio                 80517-6    {ratio}         Kappa/Lambda light
 kappa_lambda_ratio                 104546-7   {ratio}         Kappa/Lambda light chains.free [Mass Ratio] in Serum
 clonal_plasma_cells                11118-7    %               Plasma cells/100 cells in Bone marrow
 
-# 33944-8 (kappa) and 33945-5 (lambda) also project, but they are NOT real LOINC
-# codes — they exist only as this app's seeded demo concepts and are kept so
-# demo patients keep rendering. Note that 33944-8 (seeded kappa) and 33944-0
-# (real LOINC lambda) differ by one character and are opposite analytes.
+# The invented demo codes 33944-8 (kappa) and 33945-5 (lambda) were retired by
+# migration 0328, which recoded their rows to 36916-5 and 33944-0; the MM
+# generator emits those real LOINC codes. 36916-5 is kappa, 33944-0 is lambda.
 #
 # UNITS: kappa_flc and lambda_flc are converted to mg/L from the Measurement's
 # unit_source_value (mg/L, mg/dL, mg/100mL, ug/mL, g/L). Labs report FLC in mg/L
@@ -1239,8 +1238,8 @@ OMOP table save / delete
 ```
 1. LOINC concept code (primary)
       Measurement JOIN Concept
-      WHERE concept_code IN _LOINC_LAB_FIELDS
-        AND vocabulary_id = 'LOINC'
+      WHERE concept_code IN resolve_lab_code_fields()   -- approved FieldConceptMapping codes
+        AND vocabulary_id = 'LOINC'                     -- and their approved SCCM aliases
       → populates hemoglobin_g_dl, wbc_count_thousand_per_ul, serum_creatinine_mg_dl, etc.
 
 2. measurement_source_value fallback (when LOINC Concepts are not loaded in Concept table)

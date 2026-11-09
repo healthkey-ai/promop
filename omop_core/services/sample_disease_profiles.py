@@ -174,15 +174,19 @@ def profile_fhir_observation(patient_id, field, value, assessment_date):
     return resource
 
 
-def recover_sample_source_fields(record, rows, disease):
+def recover_sample_source_fields(record, rows, disease, lab_code_fields=None):
     """Repair known legacy generator encodings only inside explicit demo cohorts.
 
     Several historical generators used nonexistent/mismatched LOINC codes.
     Those source keys are compatibility inputs here, never standard mappings.
+    ``lab_code_fields`` is the resolved LOINC routing; a caller looping over
+    records resolves it once and passes it in.
     """
-    from omop_core.services.patient_record_service import _LOINC_LAB_FIELDS
+    from omop_core.services.patient_record_service import resolve_lab_code_fields
     from omop_core.services.cytogenetics import normalise_cytogenetic_markers
     result = read_profile_rows(rows)
+    if lab_code_fields is None:
+        lab_code_fields = resolve_lab_code_fields()
     legacy = {
         'FL': {'44648-4': 'tumor_grade', '21912-1': 'number_of_nodal_sites'},
         'MM': {'57905-2': 'myeloma_type', '69548-6': 'cytogenetic_markers',
@@ -193,8 +197,8 @@ def recover_sample_source_fields(record, rows, disease):
     for row in rows:
         source = getattr(row, 'measurement_source_value', None) or getattr(row, 'observation_source_value', '') or ''
         field = legacy.get(source)
-        if source in _LOINC_LAB_FIELDS:
-            candidate = _LOINC_LAB_FIELDS[source][0]
+        if source in lab_code_fields:
+            candidate = lab_code_fields[source][0]
             if candidate in COMMON_FIELDS: field = candidate
         if source == '21908-9': field = 'stage'
         if source == '21908-9-riss' and disease == 'MM': field = 'stage'
@@ -227,7 +231,13 @@ def recover_sample_source_fields(record, rows, disease):
 
 
 def complete_demo_fhir_bundle(bundle, disease):
-    """Add disease-profile source facts to newly generated bundles, before import."""
+    """Add disease-profile source facts to newly generated bundles, before import.
+
+    Runs inside ``generate_fhir_bundle`` before anything is imported, with no
+    database in reach, so it reads the generators' own code inventory
+    (``_LOINC_LAB_FIELDS``, whose codes they emit) rather than the resolved
+    routing a derivation reader would use.
+    """
     from types import SimpleNamespace
     from omop_core.services.patient_record_service import _LOINC_LAB_FIELDS
     resources = [entry['resource'] for entry in bundle.get('entry', []) if 'resource' in entry]

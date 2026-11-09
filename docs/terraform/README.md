@@ -25,6 +25,11 @@ admin_email                  = "you@example.org"
 athena_vocabulary_gdrive_url = "https://drive.google.com/drive/folders/<folder-id>"
 ```
 
+`athena_vocabulary_lfs_url` defaults to the public
+[omop-vocabularies](https://github.com/healthkey-ai/omop-vocabularies) Git LFS
+repository, which is tried first; the Drive folder is the fallback and may be
+left empty when the repository is enough.
+
 Copy the `.gitignore` from this directory into `~/promop-infra` as well — it
 excludes `terraform.tfstate`, `terraform.tfstate.backup`, and `terraform.tfvars`
 from version control.

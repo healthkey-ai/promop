@@ -15,9 +15,12 @@ from .models import (
     GroupAccess,
     PersonalRepresentative,
 )
+from .services.access import CURATION_ROLES, PROFESSIONAL_ROLES
 
-_READ_ROLES = frozenset({'org_admin', 'doctor', 'analyst'})
-_WRITE_ROLES = frozenset({'org_admin', 'doctor'})
+# One inventory of the role split (#2398): every professional reads a
+# patient, the curation roles write one. The analyst is read-only.
+_READ_ROLES = frozenset(PROFESSIONAL_ROLES)
+_WRITE_ROLES = frozenset(CURATION_ROLES)
 
 
 def _administers_patient(actor_identity, target_person_id: int) -> bool:

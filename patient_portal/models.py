@@ -253,7 +253,12 @@ class PatientInvitation(models.Model):
 
 
 class PatientConsent(models.Model):
-    """Track patient consent for data sharing and clinical trials"""
+    """Legacy one-row-per-type consent flags (data sharing, clinical trial, research).
+
+    Kept for ``/api/v1/consents/`` and the HealthKit data-sharing switch. New
+    consent work uses the versioned, append-only model below (``ConsentPurpose``,
+    ``ConsentEvent`` and friends); see docs/consent-v2.md.
+    """
     patient_user = models.ForeignKey(PatientUser, on_delete=models.CASCADE, related_name='consents')
     consent_type = models.CharField(max_length=50, choices=[
         ('data_sharing', 'Data Sharing'),
@@ -726,3 +731,268 @@ class AiExplanation(models.Model):
 
     def __str__(self):
         return f'{self.person_id} {self.kind}:{self.target_key} ({self.model}, {self.prompt_version})'
+
+
+# ---------------------------------------------------------------------------
+# Consent model v2: purposes and documents as versioned data, decisions as an
+# append-only history, and a ledger that outlives the account.
+# See docs/consent-v2.md.
+# ---------------------------------------------------------------------------
+
+
+class ConsentPurpose(models.Model):
+    """Something a member can agree to: a permission, a contact preference or
+    a declaration. Held as data so that a deployment defines its own set.
+
+    The wording lives in ``ConsentText`` rows, versioned per language. What a
+    member answered is a ``ConsentEvent``; nothing here is ever overwritten.
+    """
+    PERMISSION, CONTACT_PREFERENCE, DECLARATION = 'permission', 'contact_preference', 'declaration'
+    KINDS = [
+        (PERMISSION, 'Permission'), (CONTACT_PREFERENCE, 'Contact preference'),
+        (DECLARATION, 'Declaration'),
+    ]
+    YES_NO, YES_NO_ASK_LATER = 'yes_no', 'yes_no_ask_later'
+    ANSWER_SETS = [(YES_NO, 'Yes or no'), (YES_NO_ASK_LATER, 'Yes, no, or ask me later')]
+
+    key = models.SlugField(max_length=50, unique=True)
+    kind = models.CharField(max_length=20, choices=KINDS, default=PERMISSION)
+    answers = models.CharField(max_length=20, choices=ANSWER_SETS, default=YES_NO)
+    asks_frequency = models.BooleanField(
+        default=False, help_text='A granted answer carries a frequency chosen from frequency_options.',
+    )
+    frequency_options = models.JSONField(
+        default=list, blank=True, help_text='Allowed frequency values, e.g. ["weekly", "monthly"].',
+    )
+    stage = models.CharField(
+        max_length=30, blank=True, default='',
+        help_text='When the app asks it (e.g. "sign_up", "first_profile"); the app decides what each means.',
+    )
+    gated_by_country = models.BooleanField(
+        default=False,
+        help_text='Only available to members whose record country is in enabled_countries.',
+    )
+    enabled_countries = models.JSONField(
+        default=list, blank=True,
+        help_text='Countries where a gated purpose is available, matched case-insensitively to the record.',
+    )
+    sort_order = models.PositiveSmallIntegerField(default=0)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'consent_purpose'
+        ordering = ['sort_order', 'key']
+
+    def __str__(self):
+        return self.key
+
+    def allowed_decisions(self):
+        allowed = [ConsentEvent.GRANTED, ConsentEvent.DECLINED, ConsentEvent.WITHDRAWN]
+        if self.answers == self.YES_NO_ASK_LATER:
+            allowed.append(ConsentEvent.ASK_LATER)
+        return allowed
+
+    def clean(self):
+        for name, limit in (('frequency_options', 30), ('enabled_countries', 10)):
+            value = getattr(self, name)
+            if not isinstance(value, list) or not all(isinstance(v, str) and 0 < len(v) <= limit for v in value):
+                raise ValidationError({name: f'Must be a list of strings of at most {limit} characters.'})
+        if self.asks_frequency and not self.frequency_options:
+            raise ValidationError({'frequency_options': 'A purpose that asks a frequency needs options.'})
+
+    def available_in(self, country) -> bool:
+        if not self.gated_by_country:
+            return True
+        wanted = (country or '').strip().casefold()
+        return bool(wanted) and wanted in {str(c).strip().casefold() for c in self.enabled_countries}
+
+
+class VersionedText(models.Model):
+    """One version of a text in one language. Published versions are never
+    edited: a wording change is a new version."""
+    version = models.CharField(max_length=20)
+    language = models.CharField(max_length=10, default='en')
+    title = models.CharField(max_length=200)
+    body = models.TextField(help_text='The full wording shown to the member (Markdown).')
+    summary = models.TextField(blank=True, default='', help_text='Optional short form, e.g. a checkbox label.')
+    published_at = models.DateTimeField(
+        null=True, blank=True, help_text='Unpublished versions are drafts and are never shown.',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        abstract = True
+
+    @property
+    def is_published(self) -> bool:
+        return self.published_at is not None and self.published_at <= timezone.now()
+
+
+class ConsentText(VersionedText):
+    purpose = models.ForeignKey(ConsentPurpose, on_delete=models.CASCADE, related_name='texts')
+
+    class Meta:
+        db_table = 'consent_text'
+        ordering = ['purpose_id', '-published_at', 'language']
+        constraints = [
+            models.UniqueConstraint(fields=['purpose', 'version', 'language'], name='uq_consent_text_version_lang'),
+        ]
+
+    def __str__(self):
+        return f'{self.purpose_id} v{self.version} [{self.language}]'
+
+
+class LegalDocument(models.Model):
+    """A document the member accepts, such as terms of service or a privacy
+    policy. Versions are ``LegalDocumentVersion`` rows."""
+    key = models.SlugField(max_length=50, unique=True)
+    name = models.CharField(max_length=100)
+    sort_order = models.PositiveSmallIntegerField(default=0)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'legal_document'
+        ordering = ['sort_order', 'key']
+
+    def __str__(self):
+        return self.key
+
+
+class LegalDocumentVersion(VersionedText):
+    document = models.ForeignKey(LegalDocument, on_delete=models.CASCADE, related_name='versions')
+    requires_reacceptance = models.BooleanField(
+        default=True,
+        help_text='A significant change: members who accepted an earlier version must confirm this one.',
+    )
+
+    class Meta:
+        db_table = 'legal_document_version'
+        ordering = ['document_id', '-published_at', 'language']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['document', 'version', 'language'], name='uq_legal_document_version_lang',
+            ),
+        ]
+
+    def __str__(self):
+        return f'{self.document_id} v{self.version} [{self.language}]'
+
+
+class AppendOnlyQuerySet(models.QuerySet):
+    def update(self, **kwargs):
+        raise ValidationError('This history is append-only.')
+
+    def bulk_update(self, *args, **kwargs):
+        raise ValidationError('This history is append-only.')
+
+    def delete(self):
+        raise ValidationError('This history is append-only.')
+
+
+class AppendOnlyModel(models.Model):
+    """Rows are written once. ``save()`` always inserts, and updates and
+    deletes through the model's manager are refused.
+
+    Django's deletion collector works through the base manager, not this
+    queryset, so a cascade from the owning person (or SET_NULL from a deleted
+    identity) still goes through: that is how closing an account removes its
+    events. A database role that can only insert into these tables is the
+    guard below this one.
+    """
+    objects = AppendOnlyQuerySet.as_manager()
+
+    class Meta:
+        abstract = True
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding:
+            raise ValidationError('This history is append-only.')
+        kwargs['force_insert'] = True
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError('This history is append-only.')
+
+
+class ConsentEvent(AppendOnlyModel):
+    """One answer a member gave to a purpose: the grant, refusal, deferral or
+    withdrawal, with the exact text version they saw. The member's current
+    position on a purpose is their latest event for it."""
+    GRANTED, DECLINED, ASK_LATER, WITHDRAWN = 'granted', 'declined', 'ask_later', 'withdrawn'
+    DECISIONS = [
+        (GRANTED, 'Granted'), (DECLINED, 'Declined'),
+        (ASK_LATER, 'Ask me later'), (WITHDRAWN, 'Withdrawn'),
+    ]
+    MEMBER, STAFF, MIGRATION, SYSTEM = 'member', 'staff', 'migration', 'system'
+    SOURCES = [(MEMBER, 'Member'), (STAFF, 'Staff'), (MIGRATION, 'Migration'), (SYSTEM, 'System')]
+
+    person = models.ForeignKey('omop_core.Person', on_delete=models.CASCADE, related_name='consent_events')
+    purpose = models.ForeignKey(ConsentPurpose, on_delete=models.PROTECT, related_name='events')
+    text = models.ForeignKey(ConsentText, on_delete=models.PROTECT, null=True, blank=True, related_name='events')
+    version = models.CharField(max_length=20, help_text='The text version the member answered.')
+    language = models.CharField(max_length=10, default='en')
+    decision = models.CharField(max_length=10, choices=DECISIONS)
+    frequency = models.CharField(max_length=30, blank=True, default='')
+    source = models.CharField(max_length=10, choices=SOURCES, default=MEMBER)
+    recorded_by = models.ForeignKey(Identity, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    recorded_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        db_table = 'consent_event'
+        ordering = ['-recorded_at', '-id']
+        indexes = [models.Index(fields=['person', 'purpose', '-recorded_at'], name='consent_event_person_idx')]
+
+    def __str__(self):
+        return f'{self.person_id} {self.purpose_id} {self.decision} v{self.version} @ {self.recorded_at:%Y-%m-%d}'
+
+
+class DocumentAcceptance(AppendOnlyModel):
+    """Which version of a legal document a member accepted, and when."""
+    person = models.ForeignKey('omop_core.Person', on_delete=models.CASCADE, related_name='document_acceptances')
+    document = models.ForeignKey(LegalDocument, on_delete=models.PROTECT, related_name='acceptances')
+    text = models.ForeignKey(
+        LegalDocumentVersion, on_delete=models.PROTECT, null=True, blank=True, related_name='acceptances',
+    )
+    version = models.CharField(max_length=20)
+    language = models.CharField(max_length=10, default='en')
+    source = models.CharField(max_length=10, choices=ConsentEvent.SOURCES, default=ConsentEvent.MEMBER)
+    recorded_by = models.ForeignKey(Identity, on_delete=models.SET_NULL, null=True, blank=True, related_name='+')
+    accepted_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        db_table = 'document_acceptance'
+        ordering = ['-accepted_at', '-id']
+        indexes = [models.Index(fields=['person', 'document', '-accepted_at'], name='document_acceptance_idx')]
+
+    def __str__(self):
+        return f'{self.person_id} {self.document_id} v{self.version} @ {self.accepted_at:%Y-%m-%d}'
+
+
+class ConsentLedgerEntry(AppendOnlyModel):
+    """The permission history kept after the account is gone.
+
+    Holds the member's email address and what they decided (which purpose or
+    document, which version, when) and nothing else: no foreign key to the
+    account or person, so deleting either leaves this row in place. Written
+    in the same transaction as every ConsentEvent and DocumentAcceptance.
+    """
+    CONSENT, DOCUMENT = 'consent', 'document'
+    KINDS = [(CONSENT, 'Consent'), (DOCUMENT, 'Document acceptance')]
+
+    email = models.EmailField(db_index=True)
+    kind = models.CharField(max_length=10, choices=KINDS)
+    key = models.CharField(max_length=50, help_text='Key of the purpose or document this entry is about.')
+    version = models.CharField(max_length=20)
+    language = models.CharField(max_length=10, default='en')
+    decision = models.CharField(max_length=10, help_text='A ConsentEvent decision, or "accepted" for a document.')
+    frequency = models.CharField(max_length=30, blank=True, default='')
+    recorded_at = models.DateTimeField(default=timezone.now)
+
+    class Meta:
+        db_table = 'consent_ledger_entry'
+        ordering = ['-recorded_at', '-id']
+
+    def __str__(self):
+        return f'{self.email} {self.key} {self.decision} v{self.version} @ {self.recorded_at:%Y-%m-%d}'

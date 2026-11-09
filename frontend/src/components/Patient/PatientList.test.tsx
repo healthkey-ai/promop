@@ -16,23 +16,47 @@ beforeEach(() => {
   localStorage.clear();
 });
 
-it('shows genomics, zero and nonzero therapy counts, and the full name on hover', async () => {
+it('shows unmapped counts last with zero in red and removes Genomics and Disease Status', async () => {
   vi.mocked(api.get).mockResolvedValue({ data: { count: 2, results: [
     { person_id: 1, patient_name: 'Alexandra Catherine Example', disease: 'Breast Cancer',
-      genomics_summary: 'BRCA1 c.68_69delAG (present); TP53 (absent)', therapy_lines_count: 3 },
+      therapy_lines_count: 3, unmapped_source_code_count: 12 },
     { person_id: 2, patient_name: 'Sam Example', disease: 'Follicular Lymphoma',
-      genomics_summary: '', therapy_lines_count: 0 },
+      therapy_lines_count: 0, unmapped_source_code_count: 0 },
   ] } });
   render(<MemoryRouter><PatientList /></MemoryRouter>);
-  expect(await screen.findByRole('columnheader', { name: 'Genomics' })).toBeInTheDocument();
-  expect(screen.getByRole('columnheader', { name: 'Num Lines' })).toBeInTheDocument();
+  const first = (await screen.findByTitle('Alexandra Catherine Example')).closest('tr')!;
+  const second = screen.getByTitle('Sam Example').closest('tr')!;
+  expect(screen.getAllByRole('columnheader').at(-1)).toHaveTextContent('Unmapped Source Codes');
+  expect(screen.queryByRole('columnheader', { name: 'Genomics' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('columnheader', { name: 'Disease Status' })).not.toBeInTheDocument();
+  expect(first.lastElementChild).toHaveTextContent('12');
+  expect(first.lastElementChild).not.toHaveClass('text-red-600');
+  expect(second.lastElementChild).toHaveTextContent('0');
+  expect(second.lastElementChild).toHaveClass('text-red-600');
   expect(screen.getByTitle('Alexandra Catherine Example')).toHaveClass('truncate', 'w-28');
-  expect(screen.getByTitle('BRCA1 c.68_69delAG (present); TP53 (absent)')).toBeInTheDocument();
-  expect(screen.getByText('No genomic data')).toBeInTheDocument();
-  expect(screen.getByRole('cell', { name: '3' })).toBeInTheDocument();
-  expect(screen.getByRole('cell', { name: '0' })).toBeInTheDocument();
-  fireEvent.click(screen.getByTitle('BRCA1 c.68_69delAG (present); TP53 (absent)'));
+  fireEvent.click(first.lastElementChild!);
   expect(navigate).toHaveBeenCalledWith('/patient/1');
+  for (const view of ['foundation', 'analyst']) {
+    fireEvent.change(screen.getByLabelText('Audience view'), { target: { value: view } });
+    expect(screen.queryByRole('columnheader', { name: 'Disease Status' })).not.toBeInTheDocument();
+    expect(screen.getAllByRole('columnheader').at(-1)).toHaveTextContent('Unmapped Source Codes');
+  }
+});
+
+it('sorts unmapped counts on the server and preserves the ordering preference', async () => {
+  vi.mocked(api.get).mockResolvedValue({ data: { count: 30, results: [] } });
+  const { unmount } = render(<MemoryRouter><PatientList /></MemoryRouter>);
+  await screen.findByRole('button', { name: 'Unmapped Source Codes' });
+  fireEvent.click(screen.getByRole('button', { name: /next/i }));
+  await waitFor(() => expect(api.get).toHaveBeenLastCalledWith('/patient-info/', expect.objectContaining({ params: expect.objectContaining({ page: 2 }) })));
+  fireEvent.click(await screen.findByRole('button', { name: 'Unmapped Source Codes' }));
+  await waitFor(() => expect(api.get).toHaveBeenLastCalledWith('/patient-info/', expect.objectContaining({ params: expect.objectContaining({ page: 1, ordering: 'unmapped_source_codes' }) })));
+  fireEvent.click(screen.getByRole('button', { name: /Unmapped Source Codes/ }));
+  await waitFor(() => expect(api.get).toHaveBeenLastCalledWith('/patient-info/', expect.objectContaining({ params: expect.objectContaining({ ordering: '-unmapped_source_codes' }) })));
+  expect(screen.getByRole('columnheader', { name: /Unmapped Source Codes/ })).toHaveAttribute('aria-sort', 'descending');
+  unmount();
+  render(<MemoryRouter><PatientList /></MemoryRouter>);
+  expect(await screen.findByLabelText('Sort by')).toHaveValue('-unmapped_source_codes');
 });
 
 
@@ -52,7 +76,7 @@ it('shows clinical context without inferring active treatment or losing ECOG zer
   expect(screen.getByText('End: Not recorded')).toBeInTheDocument();
   const row = screen.getByTitle('Review Example').closest('tr')!;
   expect(within(row).queryByText(/active treatment/i)).not.toBeInTheDocument();
-  expect(within(row).getByText('Remission')).toBeInTheDocument();
+  expect(within(row).queryByText('Remission')).not.toBeInTheDocument();
   expect(within(row).getAllByText('0')).toHaveLength(2);
 });
 
@@ -140,7 +164,10 @@ it('places Upload immediately after Mappings', async () => {
   expect(screen.queryByRole('button', { name: 'Upload CSV' })).not.toBeInTheDocument();
 });
 
-it.each(['analyst', 'doctor'])('does not show Org Admin to an organization %s', async role => {
+it.each([
+  ['doctor', 'Mappings', true],
+  ['analyst', 'Code Mapping', false],
+])('offers an organization %s "%s" (Upload: %s) and never Org Admin', async (role, mappingsLabel, upload) => {
   mockUseAuth.mockReturnValue({
     currentUser: {
       org_accesses: [{ role, org_name: 'Example', org_slug: 'example', expires_at: null }],
@@ -150,8 +177,9 @@ it.each(['analyst', 'doctor'])('does not show Org Admin to an organization %s', 
 
   render(<MemoryRouter><PatientList /></MemoryRouter>);
 
-  expect(await screen.findByRole('button', { name: 'Mappings' })).toBeInTheDocument();
-  expect(screen.getByRole('button', { name: 'Upload' })).toBeInTheDocument();
+  expect(await screen.findByRole('button', { name: mappingsLabel })).toBeInTheDocument();
+  if (upload) expect(screen.getByRole('button', { name: 'Upload' })).toBeInTheDocument();
+  else expect(screen.queryByRole('button', { name: 'Upload' })).not.toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'Org Admin' })).not.toBeInTheDocument();
 });
 
@@ -207,4 +235,21 @@ it('downloads every matching patient with the list filters when all are selected
     params: expect.objectContaining({ ecog: '0', org: 'all' }), responseType: 'blob',
   })));
   expect(await screen.findByText(/At most 500 patients per export/)).toBeInTheDocument();
+});
+
+it('offers an analyst Code Mapping, not the mapping hub, upload or delete', async () => {
+  mockUseAuth.mockReturnValue({ currentUser: { org_accesses: [{ org_slug: 'acme', org_name: 'Acme', role: 'analyst', expires_at: null }] } });
+  vi.mocked(api.get).mockResolvedValue({ data: { count: 1, results: [
+    { person_id: 1, patient_name: 'Alexandra Catherine Example', disease: 'Breast Cancer' },
+  ] } });
+  render(<MemoryRouter><PatientList /></MemoryRouter>);
+  await screen.findByTitle('Alexandra Catherine Example');
+  fireEvent.click(screen.getByRole('button', { name: 'Code Mapping' }));
+  expect(navigate).toHaveBeenCalledWith('/code-mappings');
+  expect(screen.queryByRole('button', { name: 'Mappings' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Upload' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Org Admin' })).not.toBeInTheDocument();
+  fireEvent.click(screen.getAllByRole('checkbox')[1]);
+  expect(screen.queryByRole('button', { name: /^Delete/ })).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: /Download CSV/ })).toBeInTheDocument();
 });

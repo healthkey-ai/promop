@@ -13,4 +13,4 @@ export CELERY_WORKER_PREFETCH_MULTIPLIER="${CELERY_WORKER_PREFETCH_MULTIPLIER:-1
 # The separate queue is a rollout boundary as well as an operational label:
 # workers from before #1674 consume only Celery's default queue, so they cannot
 # discard the newly introduced task as unregistered while services roll.
-exec celery -A promop worker --loglevel=info --queues=celery,athena
+exec celery -A promop worker --loglevel=info --queues=celery,athena,suggest

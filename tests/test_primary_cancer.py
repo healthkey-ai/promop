@@ -173,3 +173,18 @@ def test_a_long_named_cancer_on_a_current_line_stays_primary():
                             start_date=ago(30))
 
     assert _refreshed(person).disease_slug == disease_slug(long_name)
+
+
+@pytest.mark.parametrize('later', [
+    'Benign neoplasm of soft tissue',
+    'Neoplasm of uncertain behavior of skin',
+    'History of squamous cell carcinoma of skin',
+    'Hypogammaglobulinemia due to multiple myeloma',
+])
+def test_a_later_condition_that_only_names_a_cancer_is_never_the_primary(later):
+    """HealthTree/ht-phr-one#119: a benign growth, a history of a cancer or a
+    complication of one is not a cancer, however recent."""
+    person = _person()
+    _condition(person, MYELOMA, ago(900))
+    _condition(person, later, ago(10))
+    assert _refreshed(person).disease_slug == MYELOMA_SLUG

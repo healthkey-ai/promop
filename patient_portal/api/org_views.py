@@ -959,7 +959,7 @@ class OrgPatientSignupView(APIView):
                     org=org,
                     defaults={
                         'role': signup_role,
-                        'pending_email_verification': has_domain_trust and not org.allows_patient_signup,
+                        'pending_email_verification': True,
                     },
                 )
         except Exception:
@@ -973,17 +973,12 @@ class OrgPatientSignupView(APIView):
         from patient_portal.api.email_verification import send_verification_email
         verification_sent = send_verification_email(identity)
 
-        # Auto-login via session
-        from django.contrib.auth import login
-        login(request, identity, backend='patient_portal.backends.EmailBackend')
-
+        # Do NOT auto-login: the account must verify its email first.
+        # The frontend shows a "check your email" message.
         return Response(
             {
                 'person_id': person.person_id,
-                'redirect_url': f'/org/{slug}/',
-                # Access that depends on the address (a trusted domain) waits for
-                # this; the page tells the user to look for the email.
-                'email_verification_required': has_domain_trust and not org.allows_patient_signup,
+                'email_verification_required': True,
                 'verification_email_sent': verification_sent,
             },
             status=status.HTTP_201_CREATED,

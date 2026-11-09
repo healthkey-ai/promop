@@ -39,8 +39,25 @@ def wbc_to_canonical(
     return None
 
 
+# Absolute cell counts that share one unit rule: the LOINC code each
+# PatientRecord field is derived from, and the legacy cells/µL alias columns
+# that mirror a canonical thousands/µL field (#640, #1567, #2282).
+BLOOD_COUNT_LOINC = {
+    '751-8': 'anc_thousand_per_ul',
+    '777-3': 'platelet_count_thousand_per_ul',
+    '731-0': 'alc_thousand_per_ul',
+    '742-7': 'amc_thousand_per_ul',
+}
+BLOOD_COUNT_FIELDS = frozenset(BLOOD_COUNT_LOINC.values())
+LEGACY_COUNT_ALIASES = {
+    'absolute_neutrophile_count': 'anc_thousand_per_ul',
+    'platelet_count': 'platelet_count_thousand_per_ul',
+    'absolute_lymphocyte_count': 'alc_thousand_per_ul',
+}
+
+
 def blood_count_to_canonical(value, source_unit):
-    """ANC/platelets in 10^3/uL. Unknown scale or invalid counts stay unknown.
+    """ANC/ALC/AMC/platelets in 10^3/uL. Unknown scale or invalid counts stay unknown.
 
     Keep Decimal precision until the destination field applies its declared
     precision. Uppercase G/L is a legacy giga-count spelling; lowercase g/L
@@ -75,14 +92,24 @@ def count_in_cells_per_ul(value):
     return Decimal(str(value)) * 1000 if value is not None else None
 
 
+def count_unit(text, ucum_code):
+    """The source unit text when promop can read it, else the UCUM unit code.
+
+    The ETL sends lab spellings (x10E3/uL, K/cu mm) as received and names the
+    unit they mean in unit_concept (#2248). Text promop reads wins, so a row
+    whose unit_concept promop rewrote on conversion reads as before.
+    """
+    from omop_core.services.canonical_units import is_known_unit
+    stripped = (text or '').strip()
+    if stripped and (is_known_unit(stripped) or blood_count_to_canonical(1, stripped) is not None):
+        return text
+    return ucum_code or text or None
+
+
 def measurement_count_unit(row):
-    """Prefer explicit source units; use a UCUM concept only when text is absent."""
-    if row.unit_source_value and row.unit_source_value.strip():
-        return row.unit_source_value
-    unit = row.unit_concept
-    if unit is not None and unit.vocabulary_id == 'UCUM':
-        return unit.concept_code
-    return None
+    """``count_unit`` for a measurement row."""
+    unit = row.unit_concept if row.unit_concept_id else None
+    return count_unit(row.unit_source_value, unit.concept_code if unit and unit.vocabulary_id == 'UCUM' else None)
 
 
 def blood_count_projection(field, row):
@@ -97,6 +124,11 @@ def blood_count_projection(field, row):
             'absolute_neutrophile_count': count_in_cells_per_ul(value),
             'absolute_neutrophile_count_units': 'CELLS/UL' if value is not None else None,
         }
+    if field == 'alc_thousand_per_ul':
+        # The legacy ALC column carries cells/µL and has no units column (#1567).
+        return {field: value, 'absolute_lymphocyte_count': count_in_cells_per_ul(value)}
+    if field == 'amc_thousand_per_ul':
+        return {field: value}
     # The legacy platelet column is integer-valued. Reporting cells/uL retains
     # fractional thousands and matches the downstream compatibility contract.
     cells = value * 1000 if value is not None else None

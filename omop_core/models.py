@@ -2148,6 +2148,25 @@ class SourceCodeConceptMapping(models.Model):
         max_length=20, blank=True, default='', db_index=True,
         help_text='Suggestion model version that last examined this code, whether or not it proposed anything.',
     )
+    # What the curator decided on, and where (#2382). suggestion_confidence
+    # above is live: a later run overwrites it and a moved destination clears
+    # it, so it cannot say what the ranker believed at the moment of the save.
+    # These two are written by every curator save (_upsert_source_code_mapping)
+    # and never by Suggest, so they describe the last decision as it was made.
+    DECISION_SURFACE_CHOICES = [
+        ('code2concept', 'Code to Concept'),
+        ('concept2code', 'Concept to Code'),
+        ('patientcode', 'Patient source codes'),
+    ]
+    decision_surface = models.CharField(
+        max_length=16, choices=DECISION_SURFACE_CHOICES, blank=True, default='',
+        db_default='', db_index=True,
+        help_text='The curation surface the last curator save came from; blank until a curator saves the row.',
+    )
+    decision_confidence = models.FloatField(
+        null=True, blank=True,
+        help_text='Ranker confidence (0-1) in the destination at the moment of the last curator save; null when no ranker had scored it.',
+    )
     destination_vocabulary_id = models.CharField(
         max_length=20, blank=True, default='', db_index=True,
         help_text=(
@@ -2979,9 +2998,22 @@ class DiseaseCategory(models.TextChoices):
     OTHER = 'Other', 'Other'
 
 
+class DiseaseCategoryChoice(models.Model):
+    """User-manageable disease category choices (replaces the hardcoded enum for validation)."""
+    code = models.CharField(max_length=30, unique=True)
+    label = models.CharField(max_length=120)
+
+    class Meta:
+        db_table = 'disease_category_choice'
+        ordering = ['label']
+
+    def __str__(self):
+        return f'{self.code} — {self.label}'
+
+
 class DiseaseCategoryMapping(models.Model):
     disease_name = models.TextField(unique=True)
-    category = models.CharField(max_length=10, choices=DiseaseCategory.choices)
+    category = models.CharField(max_length=30)
 
     class Meta:
         db_table = 'disease_category_mapping'
@@ -3318,6 +3350,7 @@ class ExplicitNegativeAnswer(models.Model):
 
     def __str__(self):
         return f'Person {self.person_id} {self.field}={self.answer}'
+DATE_PRECISION_CHOICES = [('day', 'Day'), ('month', 'Month'), ('year', 'Year')]
 
 
 class PatientRecord(models.Model):
@@ -3333,7 +3366,7 @@ class PatientRecord(models.Model):
     date_of_birth = models.DateField(null=True, blank=True)
     date_of_birth_precision = models.CharField(
         max_length=5,
-        choices=[('day', 'Day'), ('month', 'Month'), ('year', 'Year')],
+        choices=DATE_PRECISION_CHOICES,
         blank=True, null=True,
         help_text="Precision of date_of_birth: 'day' (full date), 'month' (year+month), 'year' (year only)",
     )
@@ -3402,6 +3435,10 @@ class PatientRecord(models.Model):
     molecular_markers = models.TextField(blank=True, null=True)
     stem_cell_transplant_history = models.JSONField(blank=True, null=True, default=list)
     sct_date = models.DateField(blank=True, null=True)
+    sct_date_precision = models.CharField(
+        max_length=5, choices=DATE_PRECISION_CHOICES, blank=True, null=True,
+        help_text="Precision of sct_date: 'day', 'month', or 'year'",
+    )
     prothrombin_time_uln = models.DecimalField(
         max_digits=10, decimal_places=5, blank=True, null=True,
         validators=[MinValueValidator(Decimal('0.00001'))],
@@ -4019,6 +4056,10 @@ class PatientRecord(models.Model):
     # ConditionOccurrence, or a transformation Observation as fallback).
     transformed_to_dlbcl = models.BooleanField(blank=True, null=True)
     dlbcl_transformation_date = models.DateField(blank=True, null=True)
+    dlbcl_transformation_date_precision = models.CharField(
+        max_length=5, choices=DATE_PRECISION_CHOICES, blank=True, null=True,
+        help_text="Precision of dlbcl_transformation_date: 'day', 'month', or 'year'",
+    )
     post_transformation_outcome = models.TextField(
         blank=True, null=True,
         help_text="Vocabulary: PostTransformationOutcome",
@@ -4057,9 +4098,17 @@ class PatientRecord(models.Model):
 
     # Core clinical fields derived from OMOP ConditionOccurrence
     diagnosis_date = models.DateField(blank=True, null=True, help_text="Date of initial diagnosis (from ConditionOccurrence)")
+    diagnosis_date_precision = models.CharField(
+        max_length=5, choices=DATE_PRECISION_CHOICES, blank=True, null=True,
+        help_text="Precision of diagnosis_date: 'day', 'month', or 'year'",
+    )
     death_date = models.DateField(blank=True, null=True, help_text="Date of death (from OMOP Death)")
     condition_clinical_status = models.CharField(max_length=50, blank=True, null=True, help_text="Clinical status: active/remission/relapse")
     disease_slug = models.CharField(max_length=100, blank=True, null=True, help_text="Machine-readable disease ID e.g. 'multiple-myeloma'")
+    disease_slugs = models.JSONField(
+        blank=True, null=True, default=list,
+        help_text="Every cancer on the record as a disease_slug, primary first (#2182). Derived.",
+    )
     validated = models.BooleanField(blank=True, null=True, help_text="Clinician validation flag")
     validated_by = models.CharField(max_length=100, blank=True, null=True, help_text="Name of clinician who validated")
     validation_date = models.DateField(blank=True, null=True, help_text="Date validated by clinician")
@@ -4525,6 +4574,55 @@ class ConceptMappingPriority(models.Model):
 
     def __str__(self):
         return f'{self.position}: concept {self.concept_id}'
+
+
+class ConceptMappingDone(models.Model):
+    """A curator has finished mapping this standard concept's source codes (#2388).
+
+    One row per Done concept; marking it unranks the concept, so the priority
+    list stays dense. The Concept to Code list shows Done concepts after every
+    other, in italics, and Suggest's tie-break never sees them (they hold no
+    priority). Reference data: copy_reference_data moves it, matched on the
+    concept's (vocabulary_id, concept_code).
+    """
+    concept = models.OneToOneField(
+        Concept, on_delete=models.CASCADE, related_name='mapping_done',
+    )
+    marked_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='+',
+    )
+    marked_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'concept_mapping_done'
+
+    def __str__(self):
+        return f'done: concept {self.concept_id}'
+
+
+class ConceptMappingLock(models.Model):
+    """A curator's claim on a standard concept for Concept to Code work (#2390).
+
+    One lock per concept. Other curators may open the concept and review its
+    source codes; every write for it (propose, apply, Suggest for the concept,
+    a mapping save whose destination it is) is refused while someone else
+    holds it. The holder, or a staff user, releases it. System data: it names
+    this deployment's users and is never copied.
+    """
+    concept = models.OneToOneField(
+        Concept, on_delete=models.CASCADE, related_name='mapping_lock',
+    )
+    locked_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name='+',
+    )
+    locked_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = 'concept_mapping_lock'
+
+    def __str__(self):
+        return f'locked by {self.locked_by_id}: concept {self.concept_id}'
 
 
 class CustomPatientField(models.Model):
@@ -5252,6 +5350,12 @@ class AthenaVocabularySync(models.Model):
     failure_reason = models.TextField(blank=True)
     started_at = models.DateTimeField()
     completed_at = models.DateTimeField(null=True, blank=True)
+    # Touched by the running sync as it logs progress, from its own autocommit
+    # connection so it is visible while the load's transaction is open. A
+    # worker retired mid-load (a rolling deploy) leaves the receipt 'running'
+    # with no heartbeat; the next boot takes it over instead of waiting for
+    # the broker to redeliver (#2288 live test).
+    heartbeat_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         db_table = 'athena_vocabulary_sync'

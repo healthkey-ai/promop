@@ -60,6 +60,7 @@ export interface PatientInfo {
   b_symptom_weight_loss?: boolean | null;
   transformed_to_dlbcl?: boolean;
   dlbcl_transformation_date?: string;
+  dlbcl_transformation_date_precision?: 'day' | 'month' | 'year' | null;
   post_transformation_outcome?: string;
   
   // Multiple Myeloma specific
@@ -77,6 +78,7 @@ export interface PatientInfo {
   mrd_status?: string | null;
   stem_cell_transplant_history?: string[] | null;
   sct_date?: string | null;
+  sct_date_precision?: 'day' | 'month' | 'year' | null;
   sct_eligibility?: string[] | null;
   // Treatment
   prior_therapy?: string;
@@ -290,8 +292,11 @@ export interface PatientInfo {
 
   // HealthTree parity fields
   diagnosis_date?: string | null;
+  diagnosis_date_precision?: 'day' | 'month' | 'year' | null;
   condition_clinical_status?: string | null;
   disease_slug?: string | null;
+  /** Every cancer on the record, primary first (derived, read-only). */
+  disease_slugs?: string[];
   validated?: boolean | null;
   validated_by?: string | null;
   validation_date?: string | null;

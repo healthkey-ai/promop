@@ -181,6 +181,19 @@ def repoint_mapping_rows_task(mapping_id: int) -> dict[str, Any]:
     return {'mapping_id': mapping_id, **run_repoint(mapping_id)}
 
 
+@shared_task(name='omop_core.relocate_mapping_rows', autoretry_for=(Exception,),
+             retry_backoff=60, max_retries=3)
+def relocate_mapping_rows_task(mapping_id: int, from_table: str, to_table: str) -> dict[str, Any]:
+    """Move a code's stored rows to the table its mapping now names (#2386).
+
+    Dispatched by a mapping save that changed the table. Idempotent: a repeat
+    finds no rows left in the old table.
+    """
+    from omop_core.services.relocation_jobs import run_relocation
+
+    return {'mapping_id': mapping_id, **run_relocation(mapping_id, from_table, to_table)}
+
+
 @shared_task(name='omop_core.bulk_resolve_source_codes')
 def bulk_resolve_source_codes_task(run_id: str, person_ids: list[int] | None = None) -> dict[str, Any]:
     """Run a bulk source-code resolution across multiple patients."""
@@ -267,16 +280,23 @@ def sync_athena_vocabulary_task(self, sync_id: int) -> dict[str, Any]:
     from omop_core.models import AthenaVocabularySync
 
     sync = AthenaVocabularySync.objects.get(pk=sync_id)
-    if sync.outcome in ('current', 'applied'):
-        return {'sync_id': sync_id, 'outcome': sync.outcome}
-
-    AthenaVocabularySync.objects.filter(pk=sync_id).update(
+    # Claim only an active receipt. A finished one is done; a receipt the
+    # web boot retired as stale ("Worker lost") has been replaced by a newer
+    # one, and the broker redelivering its message (acks_late, after the
+    # visibility timeout, or an unconsumed message once a worker returns)
+    # must not revive it, rerun the load, or erase its reason. Redelivery
+    # of a receipt still 'running' is the legitimate lost-worker retry.
+    claimed = AthenaVocabularySync.objects.filter(
+        pk=sync_id, outcome__in=('queued', 'running'),
+    ).update(
         outcome='running', started_at=timezone.now(), completed_at=None,
         failure_reason='', task_id=self.request.id or sync.task_id,
     )
+    if not claimed:
+        return {'sync_id': sync_id, 'outcome': sync.outcome, 'skipped': True}
     try:
         call_command(
-            'sync_athena_vocabulary', gdrive=sync.source_url, apply=True,
+            'sync_athena_vocabulary', source=sync.source_url, apply=True,
             sync_id=sync_id,
         )
     except Exception as exc:

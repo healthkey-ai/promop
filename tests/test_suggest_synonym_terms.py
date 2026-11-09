@@ -163,3 +163,33 @@ def test_the_vocabulary_loader_refreshes_the_table():
     command._refresh_suggest_synonym_terms()
     assert SuggestSynonymTerm.objects.count() == 1
     assert '1 added' in command._log.call_args_list[-1].args[0]
+
+
+def test_a_semicolon_joined_synonym_is_one_term_per_part():
+    """Athena ships LOINC related names as one "a; b; c" string (#2355)."""
+    concept = _concept(domain='Measurement', concept_name='Protein.monoclonal [Mass/volume] in Serum')
+    _synonym(concept, 'Chemistry; M Protein; M-spike; Paraprotein;; SPEP ')
+    assert suggest_synonym_terms.refresh() == (5, 0)
+    assert _terms() == {
+        (concept.pk, 'Measurement', 'CHEMISTRY'),
+        (concept.pk, 'Measurement', 'M PROTEIN'),
+        (concept.pk, 'Measurement', 'M-SPIKE'),
+        (concept.pk, 'Measurement', 'PARAPROTEIN'),
+        (concept.pk, 'Measurement', 'SPEP'),
+    }
+    # Idempotent on the split shape, and a whole-string term left by an
+    # earlier refresh is replaced by its parts.
+    assert suggest_synonym_terms.refresh() == (0, 0)
+    SuggestSynonymTerm.objects.create(
+        concept_id=concept.pk, domain_id='Measurement',
+        term='CHEMISTRY; M PROTEIN; M-SPIKE; PARAPROTEIN;; SPEP',
+    )
+    assert suggest_synonym_terms.refresh() == (0, 1)
+
+
+def test_a_short_source_text_reaches_a_concept_through_one_part():
+    """"M SPIKE 1" scored 0.09 against the joined string and was never retrieved."""
+    concept = _concept(domain='Measurement', concept_name='Protein.monoclonal [Mass/volume] in Serum')
+    _synonym(concept, 'Chemistry; Elec; M Protein; M-band; M-spike; Paraprotein; SPEP')
+    suggest_synonym_terms.refresh()
+    assert [c['concept_id'] for c in lexical_candidates('m spike 1', 'Measurement')] == [concept.pk]

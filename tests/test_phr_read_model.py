@@ -319,6 +319,65 @@ def test_a_second_cancer_gets_its_own_entry_after_the_primary():
     assert 'transitions' not in cancer[1]
 
 
+def snomed(code, name):
+    return ConceptFactory(
+        concept_code=code, concept_name=name,
+        vocabulary=VocabularyFactory(vocabulary_id='SNOMED', vocabulary_name='SNOMED'),
+    )
+
+
+def test_only_cancer_diagnoses_are_listed_as_cancer_one_entry_per_disease():
+    """#119, after the reporter's record: a history of a cancer, pain due to it,
+    benign and uncertain growths aren't cancers; SCC of foot is the SCC already listed."""
+    from omop_core.models import ConceptAncestor
+
+    record = PatientRecordFactory(disease='')
+    scc, scc_foot = snomed('402815007', 'Squamous cell carcinoma'), snomed('403895004', 'Squamous cell carcinoma of foot')
+    ConceptAncestor.objects.create(ancestor_concept=scc, descendant_concept=scc_foot,
+                                   min_levels_of_separation=2, max_levels_of_separation=2)
+    condition(record, scc, '2024-11-05')
+    condition(record, scc_foot, '2025-10-27')
+    condition(record, scc_foot, '2026-02-20')
+    condition(record, snomed('254656002', 'Squamous cell carcinoma in situ of skin'), '2024-10-25')
+    condition(record, snomed('429024007', 'History of squamous cell carcinoma of skin'), '2026-02-19')
+    condition(record, snomed('98921000119102', 'Pain due to neoplastic disease'), '2018-05-29',
+              condition_source_value='Cancer associated pain')
+    condition(record, snomed('95087004', 'Neoplasm of uncertain behavior of skin'), '2024-10-25')
+    condition(record, icd10('D48.5', 'Neoplasm of uncertain behavior of skin'), '2025-06-24')
+    condition(record, snomed('92069005', 'Benign neoplasm of soft tissue'), '2026-08-14')
+    condition(record, icd10('D47.2', 'Monoclonal gammopathy'), '2019-06-04')
+
+    data = signed_in(record).get('/api/v1/phr/diagnoses/').data
+
+    # The SCC is listed once, as first diagnosed; the in situ one is a different diagnosis.
+    assert sorted((c['name'], c['date']) for c in data['cancer']) == [
+        ('Monoclonal gammopathy', '2019-06-04'),
+        ('Squamous cell carcinoma', '2024-11-05'),
+        ('Squamous cell carcinoma in situ of skin', '2024-10-25'),
+    ]
+    scc_entry = next(c for c in data['cancer'] if c['name'] == 'Squamous cell carcinoma')
+    assert 'transitions' not in scc_entry
+    assert {c['name'] for c in data['other']} == {
+        'History of squamous cell carcinoma of skin', 'Pain due to neoplastic disease',
+        'Neoplasm of uncertain behavior of skin', 'Benign neoplasm of soft tissue',
+    }
+
+
+def test_a_history_of_the_primary_cancer_is_not_a_step_in_its_transitions():
+    record = PatientRecordFactory(disease='Multiple myeloma', disease_slug='myeloma', diagnosis_date='2010-07-01')
+    condition(record, icd10('C90.00', 'Multiple myeloma'), '2010-07-01')
+    condition(record, snomed('120481000119109', 'History of multiple myeloma'), '2016-08-29')
+    condition(record, snomed('16318001000119107', 'Hypogammaglobulinemia due to multiple myeloma'), '2022-01-10')
+
+    data = signed_in(record).get('/api/v1/phr/diagnoses/').data
+
+    assert [c['name'] for c in data['cancer']] == ['Multiple myeloma']
+    assert not data['cancer'][0].get('transitions')
+    assert {c['name'] for c in data['other']} == {
+        'History of multiple myeloma', 'Hypogammaglobulinemia due to multiple myeloma',
+    }
+
+
 def test_without_a_derived_primary_each_cancer_condition_is_listed():
     record = PatientRecordFactory(disease='')
     condition(record, icd10('C50.911', 'Malignant neoplasm of breast'), '2020-02-02')
@@ -498,6 +557,22 @@ def drug(record, concept, start, end=None, **kwargs):
             person=record.person, drug_concept=concept, drug_exposure_start_date=start,
             drug_exposure_end_date=end, **kwargs,
         )
+
+
+def test_medications_are_ordered_by_their_latest_prescription():
+    """#125: each card shows its latest prescription's date, so that is the order (newest first)."""
+    record = PatientRecordFactory(disease='')
+    early_then_recent = ConceptFactory(concept_name='Immunoglobulin G', concept_code='RX-IGG')
+    drug(record, early_then_recent, '2020-01-01', '2020-01-02')
+    drug(record, early_then_recent, '2026-01-29', '2026-01-30')
+    drug(record, ConceptFactory(concept_name='Cilgavimab', concept_code='RX-CIL'), '2022-09-26', '2022-09-27')
+    drug(record, ConceptFactory(concept_name='Hydrocortisone', concept_code='RX-HYD'), '2024-09-12', '2024-09-13')
+
+    meds = signed_in(record).get('/api/v1/phr/medications/').data['medications']
+
+    assert [(m['name'], m['source']['date']) for m in meds] == [
+        ('Immunoglobulin G', '2026-01-29'), ('Hydrocortisone', '2024-09-12'), ('Cilgavimab', '2022-09-26'),
+    ]
 
 
 def test_medications_group_exposures_per_drug_current_first_with_dose_history():
@@ -811,9 +886,13 @@ from patient_portal.models import PatientStatement  # noqa: E402
 @pytest.fixture
 def meds_patient():
     record = PatientRecordFactory(disease='')
-    future = (timezone.localdate() + timedelta(days=30)).isoformat()
-    current = drug(record, ConceptFactory(concept_name='Acyclovir', concept_code='RX-ACY'), '2025-01-01', future)
-    past = drug(record, ConceptFactory(concept_name='Zoledronic acid', concept_code='RX-ZOL'), '2024-01-01', '2024-06-01')
+    today = timezone.localdate()
+    future = (today + timedelta(days=30)).isoformat()
+    # Both given in the last year, so both are asked about (#123).
+    current = drug(record, ConceptFactory(concept_name='Acyclovir', concept_code='RX-ACY'),
+                   (today - timedelta(days=60)).isoformat(), future)
+    past = drug(record, ConceptFactory(concept_name='Zoledronic acid', concept_code='RX-ZOL'),
+                (today - timedelta(days=200)).isoformat(), (today - timedelta(days=100)).isoformat())
     self_report = ConceptFactory(concept_id=32865, concept_name='Patient self-report', concept_code='OMOP4976879')
     own = drug(record, ConceptFactory(concept_name='Vitamin D3', concept_code='RX-VD3'), '2024-04-03', None,
                drug_type_concept=self_report)
@@ -843,6 +922,33 @@ def test_record_prescriptions_wait_for_confirmation_and_answers_can_be_undone(me
     assert client.delete(f"/api/v1/phr/medications/{ids['past']}/statement/").status_code == 204
     assert med(client, ids['past'])['pending'] is True
     assert not PatientStatement.objects.filter(person=record.person).exists()
+
+
+def test_prescriptions_older_than_a_year_count_as_taken_and_can_be_changed(meds_patient):
+    """#123: only the last year's prescriptions are asked about."""
+    record, client, ids = meds_patient
+    today = timezone.localdate()
+    old_past = drug(record, ConceptFactory(concept_name='Cephalexin', concept_code='RX-CEP'),
+                    (today - timedelta(days=500)).isoformat(), (today - timedelta(days=490)).isoformat())
+    old_open = drug(record, ConceptFactory(concept_name='Levothyroxine', concept_code='RX-LEV'),
+                    (today - timedelta(days=800)).isoformat(), None)
+    past, current = str(old_past.drug_concept_id), str(old_open.drug_concept_id)
+
+    assert 'pending' not in med(client, past)
+    assert med(client, past)['confirmation'] == {'status': 'took', 'assumed': True}
+    assert med(client, current)['confirmation'] == {'status': 'taking', 'assumed': True}
+    assert not PatientStatement.objects.filter(person=record.person).exists()  # nothing is written
+
+    assert say(client, past, status='not_taken').status_code == 200
+    assert med(client, past)['confirmation'] == {'status': 'not_taken'}
+    stopped_on = (today - timedelta(days=10)).isoformat()
+    assert say(client, current, status='stopped', stopped_on=stopped_on).status_code == 200
+    assert med(client, current)['confirmation'] == {'status': 'stopped', 'stopped_on': stopped_on}
+
+    # Prescribed again this year: asked about again.
+    assert client.delete(f'/api/v1/phr/medications/{past}/statement/').status_code == 204
+    drug(record, old_past.drug_concept, (today - timedelta(days=5)).isoformat(), (today - timedelta(days=1)).isoformat())
+    assert med(client, past)['pending'] is True and 'confirmation' not in med(client, past)
 
 
 def test_answers_must_fit_whether_the_prescription_is_current(meds_patient):
@@ -1107,7 +1213,8 @@ def test_a_line_of_therapys_medicines_are_not_prescriptions_to_confirm():
                                   first_line_therapy='VRd', first_line_start_date='2024-03-12',
                                   first_line_end_date='2024-10-14')
     therapy_line(record, 1, '2024-03-12', '2024-10-14', [('Bortezomib', '2024-03-12', '2024-08-26')])
-    prescription = drug(record, ConceptFactory(concept_name='Acyclovir', concept_code='RX-ACY'), '2024-03-18', None)
+    prescription = drug(record, ConceptFactory(concept_name='Acyclovir', concept_code='RX-ACY'),
+                        (timezone.localdate() - timedelta(days=30)).isoformat(), None)
 
     meds = {m['name']: m for m in signed_in(record).get('/api/v1/phr/medications/').data['medications']}
 

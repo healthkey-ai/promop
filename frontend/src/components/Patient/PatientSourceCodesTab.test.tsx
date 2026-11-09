@@ -217,3 +217,32 @@ describe("PatientSourceCodesTab source context correction", () => {
     }
   });
 });
+
+describe("PatientSourceCodesTab mapping filed under another table (#2347)", () => {
+  it("names the table the existing mapping is under and offers to move it here", async () => {
+    const message = "'8716-3' is already mapped (approved -> Blood pressure panel), and that mapping's destination table is Observation, not Measurement. Move the existing mapping to Measurement to use it here, or edit it where it is.";
+    vi.mocked(api.post).mockRejectedValueOnce({
+      response: { data: {
+        source_code: [message],
+        existing_mapping: {
+          id: "555", omop_table: "observation", domain_id: "Observation", status: "approved",
+          target_concept_id: "3004249", target_concept_name: "Blood pressure panel",
+          requested_omop_table: "measurement",
+        },
+      } },
+    });
+    vi.mocked(api.patch).mockResolvedValueOnce({ data: { mapping_id: 555 } } as never);
+    render(<PatientSourceCodesTab personId="48095" />);
+    fireEvent.click(await screen.findByText("Blood Pressure"));
+    fireEvent.submit(screen.getByRole("button", { name: "Save Mapping" }).closest("form")!);
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("destination table is Observation, not Measurement");
+    expect(alert).not.toHaveTextContent("existing_mapping");
+    fireEvent.click(within(alert).getByRole("button", { name: "Move it from Observation to Measurement" }));
+    await waitFor(() => expect(api.patch).toHaveBeenCalledWith(
+      "/v1/code-mappings/555/",
+      expect.objectContaining({ patient_id: 48095, omop_table: "measurement", domain_id: "Measurement", rows_omop_table: "measurement" }),
+    ));
+  });
+});

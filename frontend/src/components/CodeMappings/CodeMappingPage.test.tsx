@@ -1,6 +1,6 @@
 import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
-import { vi, describe, it, expect, beforeEach } from "vitest";
+import { vi, describe, it, expect, beforeEach, afterEach } from "vitest";
 import CodeMappingPage from "./CodeMappingPage";
 import CodeMappingAccuracyPage from "./CodeMappingAccuracyPage";
 import type { SourceSystemContext } from "./SourceEvidencePanel";
@@ -10,6 +10,8 @@ const mockPost = vi.fn();
 const mockPatch = vi.fn();
 const mockDelete = vi.fn();
 
+const mockUseAuth = vi.hoisted(() => vi.fn(() => ({ currentUser: null })));
+vi.mock("@/hooks/useAuth", () => ({ useAuth: () => mockUseAuth() }));
 vi.mock("@/api/axios", () => ({
   default: {
     get: (...args: unknown[]) => mockGet(...args),
@@ -690,7 +692,8 @@ describe("CodeMappingPage", () => {
       mockGet.mockImplementation((url: string) => url.includes("/suggest-runs/")
         ? Promise.resolve({ data: suggestRun({ activity: [...activity,
           { stage: "candidates", strategy: "semantic", candidates: [semantic] },
-          { stage: "result", suggested: loincHit, candidates: [loincHit, alternative, semantic] },
+          { stage: "result", suggested: loincHit, candidates: [loincHit, alternative, semantic],
+            alternatives: [{ concept_id: loincHit.concept_id, confidence: 0.9 }, { concept_id: 556, confidence: 0.72 }] },
         ] }) }) : originalGet(url));
       const dialog = within(screen.getByRole("dialog"));
       const suggest = dialog.getByRole("button", { name: "Suggest", exact: true });
@@ -709,7 +712,36 @@ describe("CodeMappingPage", () => {
       fireEvent.click(within(section).getByText(/Later semantic candidate/).closest("tr")!);
       expect(dialog.getByLabelText("Destination Concept ID")).toHaveValue(556);
       fireEvent.click(dialog.getByRole("button", { name: "Update Mapping" }));
-      await waitFor(() => expect(mockPatch).toHaveBeenCalledWith("/v1/code-mappings/7/", expect.objectContaining({ destination_concept_id: 556 })));
+      // The decision records this tab and the confidence the run gave the
+      // candidate the curator chose, not the winner's (#2382).
+      await waitFor(() => expect(mockPatch).toHaveBeenCalledWith("/v1/code-mappings/7/", expect.objectContaining({
+        destination_concept_id: 556, decision_surface: "code2concept", decision_confidence: 0.72,
+      })));
+    });
+
+    it("keeps the run's confidence through concept-search keystrokes that change nothing it scored", async () => {
+      await openDialog();
+      const activity = [
+        { stage: "result", suggested: loincHit, candidates: [loincHit], alternatives: [{ concept_id: loincHit.concept_id, confidence: 0.9 }] },
+      ];
+      mockPost.mockResolvedValue({ data: suggestRun({ state: "success", activity }) });
+      const dialog = within(screen.getByRole("dialog"));
+      fireEvent.click(dialog.getByRole("button", { name: "Suggest", exact: true }));
+      await waitFor(() => expect(dialog.getByLabelText("Destination Concept ID")).toHaveValue(loincHit.concept_id));
+      fireEvent.change(dialog.getByLabelText("Search destination concepts"), { target: { value: "prot" } });
+      fireEvent.click(dialog.getByRole("button", { name: "Update Mapping" }));
+      await waitFor(() => expect(mockPatch).toHaveBeenCalledWith("/v1/code-mappings/7/", expect.objectContaining({
+        destination_concept_id: loincHit.concept_id, decision_confidence: 0.9,
+      })));
+    });
+
+    it("sends no confidence when the destination was not chosen from a Suggest run here", async () => {
+      await openDialog();
+      const dialog = within(screen.getByRole("dialog"));
+      fireEvent.click(dialog.getByRole("button", { name: "Update Mapping" }));
+      await waitFor(() => expect(mockPatch).toHaveBeenCalledWith("/v1/code-mappings/7/", expect.objectContaining({ decision_surface: "code2concept" })));
+      const [, payload] = mockPatch.mock.calls.at(-1) as [string, Record<string, unknown>];
+      expect(payload).not.toHaveProperty("decision_confidence");
     });
 
     it("displays inline individual results and fills the winner when nothing was selected", async () => {
@@ -1685,6 +1717,7 @@ describe("CodeMappingPage", () => {
         data: { ...suggestRun({ state: "running", total: 4, retrieved: 1, done: 0 }), activity: [{ stage: "candidates", mapping_id: 7, source_code: "LIVE", strategy: "umls", candidates: [{ concept_id: 1, concept_name: "UMLS candidate", concept_code: "A", vocabulary_id: "SNOMED" }] }] },
       });
       mockGet.mockImplementation((url: string) => {
+        if (url.includes("/latest/")) return Promise.resolve({ data: { run_id: null } });
         if (url.startsWith("/v1/code-mappings/suggest-runs/")) {
           return Promise.resolve({
             data: { ...suggestRun({ state: "success", total: 4, done: 4, destinations: 4 }), activity: [{ stage: "candidates", mapping_id: 7, source_code: "LIVE", strategy: "semantic", candidates: [{ concept_id: 2, concept_name: "Semantic candidate", concept_code: "B", vocabulary_id: "SNOMED", vector_distance: 0.25 }] }] },
@@ -1740,6 +1773,7 @@ describe("CodeMappingPage", () => {
       });
       let polls = 0;
       mockGet.mockImplementation((url: string) => {
+        if (url.includes("/latest/")) return Promise.resolve({ data: { run_id: null } });
         if (url.startsWith("/v1/code-mappings/suggest-runs/")) {
           polls += 1;
           if (polls === 1) return Promise.reject(new Error("network blip"));
@@ -2008,6 +2042,8 @@ describe("server mapping pages", () => {
   });
 
   it("shows observed hospital context while retaining the exact Epic system URI", async () => {
+    // The system link opens Source Systems management, a curation page (#2398).
+    mockUseAuth.mockReturnValue({ currentUser: { id: 1, is_staff: true } });
     const oid = "urn:oid:1.2.840.114350.1.13.88.2.7.5.737384.2050";
     const context: SourceSystemContext = {
       kind: "observed", label: "UPMC", names: ["UPMC"], name_count: 1,
@@ -2591,5 +2627,28 @@ describe("CodeMappingPage links", () => {
     await screen.findByRole("table", { name: "Standard concept coverage" });
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
     expect(mockGet.mock.calls.filter(([url]) => url === "/v1/concept-to-code/4567/")).toHaveLength(1);
+  });
+});
+
+describe("curation controls follow the role (#2398)", () => {
+  const grant = (role: string) => ({
+    currentUser: { id: 9, org_accesses: [{ org_slug: "acme", org_name: "Acme", role, expires_at: null }] },
+  });
+  afterEach(() => { mockUseAuth.mockReturnValue({ currentUser: null }); });
+
+  it("hides Upload and Source systems from an analyst", async () => {
+    mockUseAuth.mockReturnValue(grant("analyst"));
+    renderPage([proposedRow]);
+    await screen.findByText("Code Mapping");
+    expect(screen.queryByRole("button", { name: "Upload" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Source systems / hospitals" })).not.toBeInTheDocument();
+  });
+
+  it("shows Upload and Source systems to a doctor", async () => {
+    mockUseAuth.mockReturnValue(grant("doctor"));
+    renderPage([proposedRow]);
+    await screen.findByText("Code Mapping");
+    expect(screen.getByRole("button", { name: "Upload" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Source systems / hospitals" })).toBeInTheDocument();
   });
 });

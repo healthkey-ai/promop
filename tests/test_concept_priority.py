@@ -6,7 +6,7 @@ from rest_framework.test import APIClient
 
 from omop_core.mapping import suggestions as suggest
 from omop_core.mapping.suggestion_context import candidate_context
-from omop_core.models import ConceptMappingPriority, FieldConceptMapping
+from omop_core.models import ConceptMappingDone, ConceptMappingPriority, FieldConceptMapping
 from omop_core.services import concept_priority
 from omop_core.services.reference_transfer import apply_reference, read_reference
 from tests.factories import ConceptFactory
@@ -197,3 +197,72 @@ def test_jev_criteria_tag_prioritized_candidates(settings):
     assert question['criteria'][str(first.pk)].endswith('[curator priority 1]')
     assert 'curator priority' not in question['criteria'][str(second.pk)]
     assert 'never over a better one' in question['instructions']
+
+
+# ── Done (#2388) ───────────────────────────────────────────────────────────
+
+DONE = f'{BASE}done/'
+
+
+def test_marking_done_unranks_and_the_list_shows_done_concepts_last(client):
+    alpha, beta, gamma = field_concepts('Alpha', 'Beta', 'Gamma')
+    concept_priority.move(alpha, 1)
+    concept_priority.move(beta, 2)
+
+    response = client.post(DONE, {'concept_id': alpha.pk, 'done': True}, format='json')
+    assert response.status_code == 200, response.data
+    assert response.data == {'concept_id': alpha.pk, 'done': True, 'position': None, 'prioritized': 1}
+    assert ranked() == [(beta.pk, 1)]
+    assert ConceptMappingDone.objects.get(concept=alpha).marked_by == client.user
+
+    results = client.get(BASE).data['results']
+    assert [(r['concept_id'], r['priority'], r['done']) for r in results] == [
+        (beta.pk, 1, False), (gamma.pk, None, False), (alpha.pk, None, True),
+    ]
+    # Ranked only never shows a Done concept: it holds no priority.
+    assert [r['concept_id'] for r in client.get(BASE, {'prioritized': '1'}).data['results']] == [beta.pk]
+
+    back = client.post(DONE, {'concept_id': alpha.pk, 'done': False}, format='json')
+    assert back.status_code == 200 and back.data['done'] is False
+    assert not ConceptMappingDone.objects.filter(concept=alpha).exists()
+    assert [r['concept_id'] for r in client.get(BASE).data['results']] == [beta.pk, alpha.pk, gamma.pk]
+
+
+@pytest.mark.parametrize('payload', [
+    {'concept_id': 1}, {'concept_id': 1, 'done': 'yes'}, {'concept_id': 'x', 'done': True}, [],
+])
+def test_done_endpoint_validates(client, payload):
+    assert client.post(DONE, payload, format='json').status_code == 400
+
+
+def test_done_endpoint_rejects_nonstandard_concepts_and_non_curators(client, django_user_model):
+    nonstandard = ConceptFactory(standard_concept=None)
+    assert client.post(DONE, {'concept_id': nonstandard.pk, 'done': True}, format='json').status_code == 404
+    patient = APIClient()
+    patient.force_authenticate(django_user_model.objects.create_user(email='patient-done@test.com'))
+    (standard,) = field_concepts('Alpha')
+    assert patient.post(DONE, {'concept_id': standard.pk, 'done': True}, format='json').status_code == 403
+
+
+def test_ranking_a_done_concept_returns_it_to_the_queue():
+    alpha, beta = field_concepts('Alpha', 'Beta')
+    concept_priority.mark_done(alpha, True)
+    assert concept_priority.move(alpha, 1) == 1
+    assert not ConceptMappingDone.objects.filter(concept=alpha).exists()
+    # Unranking does not make a concept Done.
+    concept_priority.move(alpha, None)
+    assert not ConceptMappingDone.objects.filter(concept=alpha).exists()
+
+
+def test_copy_reference_data_carries_done_by_concept_key(django_user_model):
+    (alpha,) = field_concepts('Alpha')
+    marker = django_user_model.objects.create_user(email='done-copier@test.com')
+    concept_priority.mark_done(alpha, True, marker)
+    assert ConceptMappingDone.objects.get(concept=alpha).marked_by == marker
+    payload = read_reference('default')
+    ConceptMappingDone.objects.all().delete()
+
+    stats = apply_reference(payload)
+
+    assert ConceptMappingDone.objects.filter(concept=alpha, marked_by__isnull=True).exists()
+    assert stats.created['ConceptMappingDone'] == 1

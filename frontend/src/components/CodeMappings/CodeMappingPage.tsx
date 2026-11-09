@@ -1,9 +1,11 @@
 import ConceptToCodeTab from "./ConceptToCodeTab";
 import CodeMappingUploadDialog, { type CodeMappingUploadResult } from "./CodeMappingUploadDialog";
 import SourceQuantityCell from "./SourceQuantityCell";
+import { rowMatchesSearch, SEARCH_PLACEHOLDER } from "./mappingSearch";
 import PageTitle from '@/components/Branding/PageTitle';
+import { hasCurationRole, isStaffOrOrgAdmin } from '@/utils/roles';
 import InlineDestinationPicker from "./InlineDestinationPicker";
-import SuggestCandidates from "./SuggestCandidates";
+import SuggestCandidates, { type CandidateActivity } from "./SuggestCandidates";
 import EditMappingDialog from "./EditMappingDialog";
 import ConceptInputDetails from "@/components/UI/ConceptInputDetails";
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -318,7 +320,10 @@ const GLOBAL_ORGANIZATION = "__none__";
 export default function CodeMappingPage() {
   const navigate = useNavigate();
   const { currentUser } = useAuth();
-  const canApprove = !!(currentUser?.is_staff || currentUser?.is_org_admin);
+  const canApprove = isStaffOrOrgAdmin(currentUser);
+  // The CSV upload and the source-system registry are curation, not code
+  // mapping: an analyst reaches neither (#2398), and the API refuses both.
+  const canCurate = hasCurationRole(currentUser);
   // ?direction=reverse&concept=<id>, from the field mapper's {codes} button:
   // open Concept → Source Code on that concept's source codes.
   const [searchParams] = useSearchParams();
@@ -393,6 +398,12 @@ export default function CodeMappingPage() {
   // itself before settling into the banner.
   const [suggestRun, setSuggestRun] = useState<SuggestRunProgress | null>(null);
   const [suggestFlash, setSuggestFlash] = useState(false);
+  // Activity from previous runs on this tab, merged with the current run's live
+  // activity so the candidates panel accumulates across Suggest clicks.
+  const [accumulatedActivity, setAccumulatedActivity] = useState<CandidateActivity[]>([]);
+  // Incremented each run so SuggestCandidates can clear stale approval choices
+  // when a new run re-suggests the same mapping_id with a different concept.
+  const [suggestGeneration, setSuggestGeneration] = useState(0);
   // Which run the page is still interested in. A poll compares against this so
   // a superseded run — or an unmounted page — stops rather than setting state
   // nobody is showing.
@@ -548,6 +559,29 @@ export default function CodeMappingPage() {
   }, [vocabularyTabs]);
 
   const selectedVocabulary = activeVocabulary ?? browse?.selected_source ?? defaultVocabulary;
+
+  // Restore the last successful suggest run's candidates when the page loads
+  // or the vocabulary tab changes, so navigating away and back doesn't lose them.
+  useEffect(() => {
+    if (!selectedVocabulary) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data } = await api.get<{ run_id: string | null; state?: string; activity?: CandidateActivity[] }>(
+          "/v1/code-mappings/suggest-runs/latest/",
+          { params: { source: selectedVocabulary, include_activity: "1" } },
+        );
+        if (cancelled || !data.run_id) return;
+        if (data.state === "success" && data.activity?.length) {
+          setAccumulatedActivity(data.activity);
+        }
+      } catch {
+        // Best-effort restore — a failure here just means the panel starts empty.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [selectedVocabulary]);
+
   const overallTab = selectedVocabulary === OVERALL_TAB;
   // Keep the latest reviewed model visible while a newer model awaits reviews.
   const scopedAccuracy = overallTab
@@ -619,7 +653,7 @@ export default function CodeMappingPage() {
 
   const visibleRows = useMemo(() => {
     if (browse) return rows;
-    const q = searchQuery.trim().toLowerCase();
+    const q = searchQuery.trim();
     return rows.filter((row) => {
       if (seenOnly && !(row.occurrence_count > 0)) return false;
       // A query is an intentional escape hatch from the current tab: a
@@ -628,18 +662,9 @@ export default function CodeMappingPage() {
       // review queue.
       if (!q && selectedVocabulary !== OVERALL_TAB && tabForRow(row) !== selectedVocabulary) return false;
       if (!q) return true;
-      return [
-        row.source_code,
-        row.source_vocabulary_id,
-        row.source_code_description,
-        row.organization_name,
-        row.organization_slug,
-        row.source_system_context?.label,
-        ...(row.source_system_context?.names || []),
-        row.destination_concept_name,
-        row.destination_concept_code,
-        String(row.destination_concept_id),
-      ].some((value) => (value || "").toLowerCase().includes(q));
+      // Same rules as the server's search (#2376): a number is a source
+      // code, and `field:value` searches one field.
+      return rowMatchesSearch(row, q);
     });
   }, [rows, searchQuery, selectedVocabulary, browse, seenOnly]);
 
@@ -710,7 +735,7 @@ export default function CodeMappingPage() {
     void loadGroup(entry, section);
   }, [expandedGroups, loadGroup]);
 
-  const runGroupJob = async (entry: GroupEntry, action: "suggest" | "approve", section: MappingSection) => {
+  const runGroupJob = async (entry: GroupEntry, action: "suggest" | "approve" | "reject", section: MappingSection) => {
     const key = expansionKey(entry, section);
     if (action !== "suggest" && !window.confirm(
       `${action === "approve" ? "Approve" : "Reject"} ${entry.proposed.toLocaleString()} still-proposed code(s) in this label group?`,
@@ -863,6 +888,7 @@ export default function CodeMappingPage() {
     setBanner(null);
     setSuggestFlash(false);
     setSuggestRun(null);
+    setSuggestGeneration(g => g + 1);
     try {
       const activeStrategies = Object.entries(strategies)
         .filter(([, v]) => v)
@@ -884,11 +910,19 @@ export default function CodeMappingPage() {
       setSuggestRun(started);
       const finished = await pollSuggestRun(started);
       if (suggestRunRef.current !== started.run_id) return;
-      setSuggestRun(finished);
+      // Clear the finished run's activity from suggestRun so events are not
+      // duplicated when merged with accumulatedActivity in the render prop.
+      setSuggestRun({ ...finished, activity: [] });
 
       if (finished.state === "failure") {
         setError(finished.error || "The suggest run failed.");
         return;
+      }
+
+      // Accumulate only successful runs so curators don't see candidates from
+      // an incomplete run mixed with good results.
+      if (finished.activity?.length) {
+        setAccumulatedActivity(prev => [...prev, ...finished.activity!]);
       }
       await refreshCurrent.current();
       announceSuggestRun(finished);
@@ -997,6 +1031,7 @@ export default function CodeMappingPage() {
         destination_vocabulary_id: row.destination_vocabulary_id,
         omop_table: row.destination_omop_table,
         status: row.status === "approved" ? "proposed" : "approved",
+        decision_surface: "code2concept",
         notes: row.notes,
       };
       const resp = await api.patch(`/v1/code-mappings/${row.mapping_id}/`, payload);
@@ -1219,7 +1254,13 @@ export default function CodeMappingPage() {
                               Approve {entry.proposed.toLocaleString()}
                             </button>
                           )}
-
+                          {canApprove && (
+                            <button type="button" disabled={groupRunning === cacheKey}
+                              onClick={() => void runGroupJob(entry, "reject", section)}
+                              className="rounded border border-red-300 px-2 py-1 text-xs text-red-800 hover:bg-red-50 disabled:opacity-50">
+                              Reject {entry.proposed.toLocaleString()}
+                            </button>
+                          )}
                         </div>
                       )}
                     </td>
@@ -1298,15 +1339,19 @@ export default function CodeMappingPage() {
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <a href="/code-mappings/source-systems"
-              className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-800 hover:bg-slate-100">
-              Source systems / hospitals
-            </a>
-            <button type="button" onClick={() => setUploadOpen(true)} disabled={!referenceReady}
-              className="inline-flex items-center gap-2 rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-800 hover:bg-slate-100">
-              <Upload size={16} />
-              Upload
-            </button>
+            {canCurate && (
+              <>
+                <a href="/code-mappings/source-systems"
+                  className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-800 hover:bg-slate-100">
+                  Source systems / hospitals
+                </a>
+                <button type="button" onClick={() => setUploadOpen(true)} disabled={!referenceReady}
+                  className="inline-flex items-center gap-2 rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-800 hover:bg-slate-100">
+                  <Upload size={16} />
+                  Upload
+                </button>
+              </>
+            )}
             <button
               onClick={openNewDialog}
               disabled={!referenceReady}
@@ -1347,7 +1392,7 @@ export default function CodeMappingPage() {
                 aria-label="Search mappings"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Search source codes, destination concepts, or OMOP IDs"
+                placeholder={SEARCH_PLACEHOLDER}
                 className="h-10 w-full rounded-md border border-slate-300 bg-white pl-9 pr-3 text-sm text-slate-950 outline-none focus:border-slate-700"
               />
             </label>
@@ -1437,6 +1482,7 @@ export default function CodeMappingPage() {
                   setProvenanceFilter("");
                   setOrganizationFilter("");
                   setExpandedGroups({});
+                  setAccumulatedActivity([]);
                   setActiveVocabulary(tab.vocabulary_id);
                   if (tab.vocabulary_id === OVERALL_TAB) {
                     setUnmappedCollapsed(true);
@@ -1551,9 +1597,11 @@ export default function CodeMappingPage() {
           </section>
         </div>
 
-        {suggestRun && <SuggestCandidates key={suggestRun.run_id}
-          activity={suggestRun.activity ?? []}
-          finished={suggestRun.state === "success" || suggestRun.state === "failure"}
+        {(suggestRun || accumulatedActivity.length > 0) && <SuggestCandidates
+          key="suggest-candidates"
+          activity={[...accumulatedActivity, ...(suggestRun?.activity ?? [])]}
+          finished={!suggestRun || suggestRun.state === "success" || suggestRun.state === "failure"}
+          generation={suggestGeneration}
           canApprove={canApprove} vocabularies={reference.destination_vocabularies}
           domains={reference.domains}
           onSaved={() => { void refreshCurrent.current(); }} />}
@@ -1699,12 +1747,13 @@ export default function CodeMappingPage() {
       />}
 
       <EditMappingDialog
+        surface="code2concept"
         open={dialogMode !== null}
         onClose={closeDialog}
         mode={dialogMode || "new"}
         row={selectedRow}
         reference={reference}
-        canApprove={canApprove}
+        canApprove={canApprove} canCurate={canCurate}
         sourceExamples
         strategies={strategies}
         rankingModel={rankingModel}

@@ -254,12 +254,18 @@ requires a restart).
 ## PatientRecord Derivation from Measurements
 
 After FHIR ingest stores lab values as `Measurement` rows, `refresh_patient_record()` derives
-the PatientRecord lab fields in three lookup tiers:
+the PatientRecord lab fields in three lookup tiers. The LOINC code → field routing of tiers 1
+and 2 is resolved once per refresh by `resolve_lab_code_fields` from the curation tables: the
+approved, concept-resolved `FieldConceptMapping` of each lab field names its canonical code and
+approved global `SourceCodeConceptMapping` LOINC aliases add further codes. `_LOINC_LAB_FIELDS`
+is the checked-in inventory those rows are seeded from (migrations 0240, 0285, 0327) and
+decides a field's codes only while the field has no such mapping, such as on a fresh install
+before Athena is loaded.
 
 | Tier | Mechanism | Example |
 |---|---|---|
-| 1 | `Measurement.measurement_concept.concept_code` in `_LOINC_LAB_FIELDS` | LOINC code on the Concept row |
-| 2 | `Measurement.measurement_source_value` in `_LOINC_LAB_FIELDS` | LOINC code stored as source value at ingest time |
+| 1 | `Measurement.measurement_concept.concept_code` in the resolved routing | LOINC code on the Concept row |
+| 2 | `Measurement.measurement_source_value` in the resolved routing | LOINC code stored as source value at ingest time |
 | 3 | `Measurement.measurement_source_value` in `_SOURCE_VALUE_LAB_FIELDS` | Display name stored as source value (legacy path) |
 
 The most-recent measurement per LOINC code wins. This means PatientRecord always reflects

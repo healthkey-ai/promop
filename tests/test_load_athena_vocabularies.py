@@ -34,6 +34,15 @@ def test_omop_extension_pdl1_measurement_is_in_vocabulary_load_scope():
     )
 
 
+def test_hcpcs_is_in_vocabulary_load_scope():
+    """#2300: HCPCS Level II codes the ETL sends must get names, not bare codes."""
+    assert 'HCPCS' in VOCAB_SCOPE
+    assert _concept_in_scope('HCPCS', 'J9145', 'HCPCS', 'Drug')
+    assert _concept_in_scope('HCPCS', 'G0463', 'HCPCS', 'Procedure')
+    # NDC stays out: 1.3M rows that name none of the package codes seen in ETL data.
+    assert 'NDC' not in VOCAB_SCOPE
+
+
 def test_ciel_spleen_size_measurement_is_in_vocabulary_load_scope():
     """#1000: Athena CIEL 45917997 must be available to field curators."""
     assert 'CIEL' in VOCAB_SCOPE
@@ -145,7 +154,7 @@ def test_archive_source_streams_nested_vocabulary_zip(tmp_path):
 def test_loader_requires_exactly_one_source():
     cmd = Command(stdout=StringIO())
 
-    with pytest.raises(CommandError, match='exactly one of --path, --archive, --bucket, or --gdrive'):
+    with pytest.raises(CommandError, match='exactly one of --path, --archive, --bucket, or --gdrive/--lfs'):
         cmd.handle(
             path='/tmp/vocab',
             archive=None,

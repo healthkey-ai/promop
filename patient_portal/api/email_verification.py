@@ -42,9 +42,21 @@ class ResendVerificationThrottle(UserRateThrottle):
     rate = '3/minute'
 
 
+def _verification_app(identity) -> tuple[str, str]:
+    """Where the account verifies, and what the email calls it: the phr
+    installation it signed up on (family auth), else PROMOP itself."""
+    from family_auth.installations import installation_for
+
+    installation = installation_for(identity)
+    if installation is not None:
+        return installation.url, installation.name
+    return settings.APP_BASE_URL, 'PROMOP'
+
+
 def make_verification_link(identity) -> str:
     token = signing.dumps({'id': identity.pk, 'email': identity.email.lower()}, salt=_SALT)
-    return f"{settings.APP_BASE_URL}/verify-email?token={token}"
+    base, _ = _verification_app(identity)
+    return f"{base.rstrip('/')}/verify-email?token={token}"
 
 
 def send_verification_email(identity) -> bool:
@@ -56,13 +68,14 @@ def send_verification_email(identity) -> bool:
     if not identity.email or identity.has_verified_email:
         return False
     url = make_verification_link(identity)
+    _, app_name = _verification_app(identity)
     body = (
         "Hi,\n\n"
-        "Please confirm this is your email address for PROMOP:\n\n"
+        f"Please confirm this is your email address for {app_name}:\n\n"
         f"  {url}\n\n"
         "Until you do, access that depends on your email address -- such as an "
         "organization that trusts your email domain -- stays switched off.\n\n"
-        "The link expires in 3 days. If you did not create a PROMOP account, ignore "
+        f"The link expires in 3 days. If you did not create a {app_name} account, ignore "
         "this email; the account cannot use your address without this step.\n\n"
         "— The HealthKey team"
     )
@@ -70,7 +83,7 @@ def send_verification_email(identity) -> bool:
         logger.info("Verification email preview\nTo: %s\n\n%s", identity.email, body)
     try:
         return send_mail(
-            "Confirm your email address for PROMOP", body,
+            f"Confirm your email address for {app_name}", body,
             settings.DEFAULT_FROM_EMAIL, [identity.email],
         ) == 1
     except Exception:  # noqa: BLE001 - see docstring
@@ -123,6 +136,15 @@ def verify_email(request):
                 return invalid
             identity.mark_email_verified()
             promote_trusted_domain_grants(identity)
+            # Clear the verification gate on any remaining grants (public-org
+            # signups that promote_trusted_domain_grants does not cover). A
+            # grant from an inactive organization keeps its gate: a suspended
+            # org cannot hand out access through a domain trust.
+            from omop_core.models import GroupAccess
+            GroupAccess.objects.filter(
+                identity=identity, pending_email_verification=True,
+                org__is_active=True,
+            ).update(pending_email_verification=False)
             # The address is proof only now, so this is where an imported
             # patient's record may be joined to their account (#1817).
             outcome = adopt_provisioned_person(identity)

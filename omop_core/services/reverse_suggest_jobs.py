@@ -1,21 +1,23 @@
 """Persist bounded reverse retrieval previews using the existing job dispatcher."""
 import logging
 
+from django.db import transaction
 from django.utils import timezone
 
-from omop_core.models import SuggestRun
+from omop_core.models import SourceCodeConceptMapping, SuggestRun
 from omop_core.mapping.reverse_suggestions import (
     record_declines, reverse_rank_candidate, reverse_retrieval_pool,
 )
 from omop_core.services.concept_to_code import concept_payload, standard_destinations
+from omop_core.services.source_vocabularies import DOMAIN_TO_TABLE, VOCABULARY_OID_ALIASES
 
 logger = logging.getLogger(__name__)
 
 
-def _may_write_variants(mapping, user):
-    """The same rule the variant endpoint applies to its caller: the run's
-    creator must administer the mapping's organization and nobody else may
-    hold its edit lock. Other hospitals' codes are listed, never written."""
+def _may_write(mapping, user):
+    """The same rule the variant and Apply endpoints apply to their caller: the
+    run's creator must administer the mapping's organization and nobody else
+    may hold its edit lock. Other hospitals' codes are listed, never written."""
     from patient_portal.api import views
 
     if user is None or not views._can_administer_code_mapping(user, mapping):
@@ -25,6 +27,83 @@ def _may_write_variants(mapping, user):
     except views.MappingLocked:
         return False
     return True
+
+
+def _auto_propose_candidate(candidate, concept, user):
+    """Propose a high-confidence candidate for *concept* (#2269).
+
+    A candidate is either a vocabulary entry with no mapping row yet, which gets
+    a new proposed row, or a stored proposal (a queue row with no destination,
+    or one an earlier run pointed elsewhere), which is re-pointed at this
+    concept the way the Apply endpoint does (#2272). A stored proposal that
+    already carries a destination is only replaced by a stronger score.
+
+    Returns the candidate with ``mapping_id`` and ``auto_proposed`` set, or
+    the candidate unchanged when nothing was written.
+    """
+    if candidate.get('declined'):
+        return candidate
+    if candidate.get('mapping_id') is not None:
+        return _repoint_proposed_row(candidate, concept, user)
+    return _propose_new_row(candidate, concept, user)
+
+
+def _propose_new_row(candidate, concept, user):
+    from omop_core.mapping.reverse_catalog import refresh_catalog_candidate
+    from patient_portal.api.views import _upsert_source_code_mapping
+
+    fresh = refresh_catalog_candidate(candidate, concept)
+    if fresh is None:
+        return candidate
+    aliases = [fresh['source_vocabulary_id'], *[alias for alias, canonical in VOCABULARY_OID_ALIASES.items()
+                                                 if canonical == fresh['source_vocabulary_id']]]
+    if SourceCodeConceptMapping.objects.filter(
+        source_vocabulary_id__in=aliases, source_code=fresh['source_code'],
+    ).exists():
+        return candidate
+    with transaction.atomic():
+        row, _ = _upsert_source_code_mapping(concept, {
+            'source_vocabulary_id': fresh['source_vocabulary_id'],
+            'source_code': fresh['source_code'],
+            'source_code_description': fresh['source_code_description'][:255],
+            **({'notes': f"Source vocabulary label: {fresh['source_code_description']}"}
+               if len(fresh['source_code_description']) > 255 else {}),
+            'domain_id': concept.domain_id, 'omop_table': DOMAIN_TO_TABLE[concept.domain_id],
+            'status': 'proposed',
+        }, user)
+        _store_confidence(row, candidate)
+    return {**candidate, 'mapping_id': row.pk, 'auto_proposed': True}
+
+
+def _repoint_proposed_row(candidate, concept, user):
+    """Point a stored proposal at *concept*, under the Apply endpoint's rules."""
+    from patient_portal.api.views import _upsert_source_code_mapping
+
+    table = DOMAIN_TO_TABLE[concept.domain_id]
+    with transaction.atomic():
+        row = SourceCodeConceptMapping.objects.select_for_update().filter(pk=candidate['mapping_id']).first()
+        if (row is None or row.status != 'proposed' or row.origin_system == 'athena'
+                or row.target_concept_id == concept.pk
+                or (row.domain_id and row.domain_id != concept.domain_id)
+                or (row.omop_table and row.omop_table != table)
+                or not _may_write(row, user)):
+            return candidate
+        confidence = candidate.get('confidence')
+        if (row.target_concept_id is not None and row.suggestion_confidence is not None
+                and (confidence is None or confidence < row.suggestion_confidence)):
+            return candidate
+        row, _ = _upsert_source_code_mapping(concept, {
+            'status': 'proposed', 'domain_id': concept.domain_id, 'omop_table': table,
+            'destination_vocabulary_id': concept.vocabulary_id,
+        }, user, mapping=row, record_decision=False)
+        _store_confidence(row, candidate)
+    return {**candidate, 'mapping_id': row.pk, 'auto_proposed': True}
+
+
+def _store_confidence(row, candidate):
+    if candidate.get('confidence') is not None:
+        row.suggestion_confidence = candidate['confidence']
+        row.save(update_fields=['suggestion_confidence'])
 
 
 def _with_variant_suggestions(candidate, params, run, budget):
@@ -48,7 +127,7 @@ def _with_variant_suggestions(candidate, params, run, budget):
     mapping = SourceCodeConceptMapping.objects.filter(pk=candidate['mapping_id']).first()
     if mapping is None:
         return candidate
-    if params['ranking_model'] != 'none' and budget['left'] > 0 and _may_write_variants(mapping, run.created_by):
+    if params['ranking_model'] != 'none' and budget['left'] > 0 and _may_write(mapping, run.created_by):
         try:
             results = axis_variants.suggest_destinations(
                 mapping, strategies=params['strategies'], ranking_model=params['ranking_model'],
@@ -66,8 +145,10 @@ def execute_reverse_run(run_id, params):
         return
     run = runs.first()
     budget = {'left': params['limit']}
+    threshold = params.get('auto_propose_threshold')
     events = []
     done = 0
+    proposed = 0
     try:
         for concept_id in params['concept_ids']:
             concept = standard_destinations().get(pk=concept_id)
@@ -75,6 +156,7 @@ def execute_reverse_run(run_id, params):
                 concept, strategies=params['strategies'], limit=params['limit'],
                 include_zero_seen=params['include_zero_seen'],
                 include_declined=params.get('include_declined', False),
+                exclude_keys=params.get('exclude_keys', ()),
                 timeout_ms=params['retrieval_timeout_ms'],
             )
             event = {'concept': concept_payload(concept), 'candidates': candidates}
@@ -82,7 +164,19 @@ def execute_reverse_run(run_id, params):
             runs.update(activity=events, retrieved=len(events))
             for index, candidate in enumerate(candidates):
                 ranked = reverse_rank_candidate(concept, candidate, params['ranking_model'])
-                event['candidates'][index] = _with_variant_suggestions(ranked, params, run, budget)
+                ranked = _with_variant_suggestions(ranked, params, run, budget)
+                # Auto-propose candidates above the confidence threshold (#2269).
+                if (threshold is not None
+                        and isinstance(ranked.get('confidence'), (int, float))
+                        and ranked['confidence'] >= threshold):
+                    try:
+                        ranked = _auto_propose_candidate(ranked, concept, run.created_by)
+                        if ranked.get('auto_proposed'):
+                            proposed += 1
+                    except Exception:
+                        logger.exception('Auto-propose failed for %s/%s',
+                                         ranked.get('source_vocabulary_id'), ranked.get('source_code'))
+                event['candidates'][index] = ranked
                 runs.update(activity=events)
             # What the ranker declined this run is remembered, so the next run
             # for this concept moves on to sources this one did not reach (#2034).
@@ -91,7 +185,7 @@ def execute_reverse_run(run_id, params):
             runs.update(activity=events)
             done += 1
             runs.update(done=done)
-        runs.update(state=SuggestRun.SUCCESS, finished_at=timezone.now())
+        runs.update(state=SuggestRun.SUCCESS, finished_at=timezone.now(), destinations=proposed)
     except Exception:  # retain partial previews, never overwrite source mappings
         logger.exception('Reverse suggestion run failed: %s', run_id)
         runs.update(state=SuggestRun.FAILURE, finished_at=timezone.now(),

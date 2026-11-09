@@ -416,6 +416,7 @@ def test_group_approve_applies_one_destination_to_every_proposed_member(
         mapping.refresh_from_db()
         assert mapping.status == 'approved'
         assert mapping.target_concept_id == destination.pk
+        assert mapping.decision_surface == 'code2concept'  # #2382
 
 
 def test_group_preflight_locks_every_member_or_writes_nothing(group_post_api, django_user_model):

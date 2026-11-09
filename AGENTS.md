@@ -1,13 +1,2094 @@
-# Databases
+# AGENTS.md — instructions for coding agents on promop
 
-The local `.env` holds two Render databases and deliberately **no `DATABASE_URL`**:
+This is the one instruction file for every coding agent that works on this
+repository: Claude Code, Codex, Gemini, Cursor and whatever else people use.
+`CLAUDE.md` is only `@AGENTS.md` plus a short Claude Code section, so Claude
+Code reads this file through the import; other tools read it directly. Edit
+this file, never a copy of it in `CLAUDE.md`. Personal additions that should
+not be committed (how to run tests on your machine, your sandbox URLs) go in
+`CLAUDE.local.md`, which is gitignored and loads alongside `CLAUDE.md`.
 
-- `PROD_DATABASE_URL` is the **production** database (`promop`, `promop-worker`). Read-only: never write to production data; production is loaded from a staging dump, so fix and verify on staging.
-- `STAGING_DATABASE_URL` is the **staging** database (`promop-staging`, `promop-staging-worker`). Use it for migrations, data fixes and investigation.
+## Two databases in `.env`
 
-Django reads only `DATABASE_URL`, so every command sets it: `DATABASE_URL="${STAGING_DATABASE_URL:?}"` for staging, `DATABASE_URL="${PROD_DATABASE_URL:?}"` for production reads. **For local tests, always point `DATABASE_URL` at local PostgreSQL** (`postgresql://postgres@localhost:5433/promop_test`): pytest and `manage.py test` create their test database on whatever server it names, so never run them with it exported at staging or production.
+| `.env` variable | Database | Render services | Use |
+|---|---|---|---|
+| `PROD_DATABASE_URL` | **Production** | `promop`, `promop-worker` (branch `main`) | read-only checks and verification |
+| `STAGING_DATABASE_URL` | **Staging** | `promop-staging`, `promop-staging-worker` (branch `dev`) | migrations, data fixes, investigation |
 
-# Environment conventions
+`.env` deliberately sets **no `DATABASE_URL`** — the one variable Django reads. Every command
+names its database by setting `DATABASE_URL` itself:
+
+| Target | Set |
+|---|---|
+| Local tests | `DATABASE_URL="postgresql://postgres@localhost:5433/promop_test"` |
+| Local development | `DATABASE_URL="postgresql://postgres@localhost:5433/promop_dev"` |
+| Staging | `DATABASE_URL="${STAGING_DATABASE_URL:?}"` |
+| Production (read-only) | `DATABASE_URL="${PROD_DATABASE_URL:?}"` |
+
+A command that forgets fails safe: without `DEBUG=True`, settings refuse to load ("DATABASE_URL
+must be set"); with it, Django falls back to a local SQLite file. **Run local tests only with
+`DATABASE_URL` pointing at local PostgreSQL** — never leave it exported at staging or production
+in a shell you test from, because pytest and `manage.py test` create their test database on
+whatever server it names. Never write to production data — production is loaded from a staging
+dump, so fix and verify on staging; schema changes reach production only through deploys
+(`start.sh` migrates). Details: [Database Selection Rule](#database-selection-rule).
+
+---
+
+## Write Architecture: PatientRecord First
+
+**Read [`docs/patient-record-first-writes.md`](docs/patient-record-first-writes.md)
+before changing anything that writes patient data.** It is the architecture
+document for interactive edits, and the rules below assume it.
+
+- **A UI edit is written to `PatientRecord` first.** The value lands on the
+  record immediately and is tracked in `user_edited_fields`.
+- **It then feeds forward into the OMOP tables** as a side effect, through the
+  field's descriptor projection (`project_single_value`), when the field has a
+  built-in recipe or an approved `FieldConceptMapping`.
+- **There is no immediate re-derive back into `PatientRecord`.** Direct UI saves
+  do not call `refresh_patient_record()`; the record already holds the value.
+  A later sync or derivation pass may round-trip OMOP facts back into the
+  record, and `user_edited_fields` is what keeps a pending edit from being
+  overwritten when it does.
+- **Ingest goes the other way.** The ETL, FHIR sync and bulk OMOP endpoints
+  write OMOP facts and derive the record from them. See
+  [FHIR Upload Architecture](#fhir-upload-architecture) below.
+- **Lab derivation routes through the mapping tables.** Which LOINC code feeds
+  which `PatientRecord` lab field is read from the approved, concept-resolved
+  `FieldConceptMapping` per field plus its approved `SourceCodeConceptMapping`
+  LOINC aliases (`resolve_lab_code_fields` in `patient_record_service.py`),
+  once per refresh, by every lab reader: the extractor, the FLC pairing, the
+  SLiM scan, the blood-count selection and the provenance registry.
+  `_LOINC_LAB_FIELDS` in that module is the inventory those rows are seeded
+  from (migrations 0240, 0285, 0327) and decides only for a field with no such
+  mapping, so adding a lab field means adding it there **and** to
+  `omop_core/data/field_curation_v1.json`: a fresh install seeds the row from
+  the fixture (with no concept for a row whose concept is not loaded yet,
+  since migrations run before the full vocabulary loads;
+  `load_athena_vocabularies` resolves the seeded rows' concepts at the end of
+  every successful load -- a scheduled sync whose archive adds nothing does not
+  keep it -- and `manage.py resolve_field_concept_mappings` does it for an
+  instance that loaded earlier; on a populated instance follow it with
+  `backfill_patient_records --all`), while an existing instance
+  (0240 is one-shot) derives it from the table until a curator approves it,
+  `copy_reference_data` brings it over, or a later migration approves it as
+  0327 does. A new alias code is an approved SCCM row, not a table entry. The
+  FHIR bundle generators read the table directly: they run before import with
+  no database in reach. See
+  [field_concept_mapping_architecture.md](docs/field_concept_mapping_architecture.md#lab-derivation-reads-the-mapping-tables).
+
+---
+
+## Project Overview
+
+### Staging deployment
+
+Use Render staging for investigation and verification: service `promop-staging`
+in Oregon at https://promop-staging.onrender.com, deployed from `dev`. Cloud Run
+access is not a genomics delivery gate. Preserve the existing Cloud Run resource
+and integration identifiers in `.github/workflows/deploy-staging.yml` and
+`Dockerfile.gcp`.
+Use `STAGING_DATABASE_URL` from `.env` for Render staging database access; the Render
+staging web and worker processes call that same database `DATABASE_URL`. See
+[Two databases in `.env`](#two-databases-in-env).
+Never put the database connection string or credentials in Git or tool output.
+`render.yaml` declares both production and staging; staging has its own worker
+and broker. A Blueprint sync applies infrastructure settings; a code-only
+redeploy does not. See `docs/render-staging-celery.md`.
+
+**promop** is a Django + React application that:
+- Stores clinical oncology patient data in an OMOP CDM–aligned PostgreSQL schema
+- Exposes a DRF REST API consumed by a React TypeScript frontend
+- Loads patient data as OMOP rows through the bulk OMOP endpoints, written by a
+  separate ETL project that reads FHIR itself; promop's own FHIR R4 Bundle
+  upload is **optional** and is not on that path
+- Generates synthetic FHIR patient data for testing via a Django management command
+- Deploys to Render (backend) with PostgreSQL
+
+**Key tech:**
+- Backend: Django 5.x, Django REST Framework, PostgreSQL (psycopg[binary] 3.x)
+- Frontend: React 18, TypeScript, Tailwind CSS
+- Data: OMOP CDM v5.4, FHIR R4
+
+---
+
+## Stack File Map
+
+| Concern | File(s) |
+|---|---|
+| OMOP data model | `omop_core/models.py` — `PatientRecord`, `Person`, `PersonLanguageSkill` |
+| DB migrations | `omop_core/migrations/` — use standard Django ORM migrations (`makemigrations`) |
+| DRF serializers | `patient_portal/api/serializers.py` — `PatientRecordSerializer` (uses `fields = '__all__'`) |
+| Backend API views | `patient_portal/api/views.py` — `PatientRecordViewSet`, FHIR upload handler |
+| API URL routing | `patient_portal/api/urls.py` (legacy) and `patient_portal/api/v1_urls.py` (current) |
+| TypeScript types | `frontend/src/types/patient.ts` — `PatientInfo` interface |
+| React UI tabs | `frontend/src/components/PatientInfo/` — `GeneralTab.tsx`, `LabsTab.tsx`, `MultipleMyelomaTab.tsx`, `FollicularLymphomaTab.tsx` |
+| Patient detail page | `frontend/src/components/Patient/PatientDetail.tsx` |
+| API client | `frontend/src/utils/api.ts` and `frontend/src/api/axios.ts` |
+| FHIR bundle generator | `omop_core/management/commands/generate_fhir_bundle.py` — `--disease breast-cancer\|mm\|fl` |
+| FHIR bundle importer | `omop_core/management/commands/import_fhir_bundle.py` |
+| FHIR upload handler | `patient_portal/api/views.py` — `upload_fhir_bundle` function/view |
+| SCT sample data seeder | `omop_core/management/commands/populate_sct_sample_data.py` |
+| SCT migration audit | `omop_core/management/commands/audit_sct_history.py` |
+| Retired mapping destinations audit | `omop_core/management/commands/audit_retired_mapping_destinations.py` — read-only, exits 1 when any are found |
+| Backend tests | `omop_core/tests.py`, `patient_portal/tests.py` |
+| React tests | `frontend/src/App.test.tsx`, `frontend/src/components/**/*.test.tsx` |
+
+---
+
+## API URL Versioning
+
+The patient record endpoint exists at two paths with different stability guarantees:
+
+| Path | Status | Use |
+|---|---|---|
+| `/api/patient-info/` | **Legacy — do not use for new work** | Retained for backwards compatibility with the federation host app (`ht-phr`) and the existing React frontend. Wire-format response keys (`patient_info`, `patient_info_id`) are also frozen. |
+| `/api/v1/patient-records/` | **Current — use for all new integrations** | New clients and any existing clients migrating off the legacy path should use this prefix. |
+
+Both paths route to `PatientRecordViewSet` and return identical data. The only difference is the URL prefix. The legacy path will remain functional until all consumers have migrated.
+
+**Rule:** New endpoints, filters, and actions go on `v1_urls.py` only. Do not extend the legacy `urls.py` registration.
+
+---
+
+## Rule: Adding a New Patient Attribute
+
+When adding any new field to `PatientRecord`, you **must** touch layers 1, 2, 3,
+5, 7 and 8 below. Do not skip any of them.
+
+Layers 4 and 9 are the built-in FHIR uploader and its synthetic-bundle
+generator. **They are optional.** Production data is loaded as OMOP rows by a
+separate ETL project that reads FHIR itself, through the bulk OMOP endpoints,
+and never through `upload_fhir_bundle`. Touch 4 and 9 only when the field should
+also be populated by that uploader (for example, for the synthetic test data).
+A field a patient enters in the UI is written to `PatientRecord` first and fed
+forward into OMOP, so it needs no FHIR mapping at all; see
+[Write Architecture: PatientRecord First](#write-architecture-patientrecord-first).
+
+### 1. Django Model (`omop_core/models.py`)
+
+Add the field to the `PatientRecord` class with `blank=True, null=True` unless there is a specific reason for it to be required.
+
+```python
+# Example
+new_field = models.TextField(blank=True, null=True, help_text="Description of the field")
+```
+
+### 2. Database Migration (`omop_core/migrations/`)
+
+Use standard Django migrations generated by `makemigrations`:
+
+```bash
+.venv/bin/python manage.py makemigrations omop_core
+```
+
+Then apply to the staging DB before committing, naming it explicitly:
+```bash
+DATABASE_URL="${STAGING_DATABASE_URL:?STAGING_DATABASE_URL is not set}" \
+  .venv/bin/python manage.py migrate
+```
+
+<a id="secret-key-on-a-shared-database"></a>
+Settings will not load without `SECRET_KEY` either. This command leaves it to
+`.env` — deliberately, because against a shared database it has to be **the
+deployment's** key. `.env` holds two deployments' DSNs but one `SECRET_KEY`, so it
+can be right for at most one of them: confirm it belongs to the deployment you are
+writing to. `AUDIT_HMAC_KEY` and
+`EXPORT_SIGNING_KEY` fall back to `SECRET_KEY` when unset, so a placeholder writes
+audit rows and export signatures the deployed service cannot verify, and
+`SECRET_KEY="$SECRET_KEY"` is worse than useless: the shell expands it to empty
+before Django starts, and `load_dotenv()` does not override a variable that is
+already set, so the command fails for exactly the people whose `.env` would have
+worked. If your `.env` has no `SECRET_KEY`, export the deployment's before running.
+Against a throwaway local database, `DEBUG=True` skips the guard and overrides
+nothing — that is the form the test commands above use.
+
+`start.sh` runs `scripts/prepare-deployment.sh`, which migrates, on every Render deploy, so migrations pushed to `main` are auto-applied in production.
+
+### 3. DRF Serializer (`patient_portal/api/serializers.py`)
+
+`PatientRecordSerializer` uses `fields = '__all__'`, so new model fields are **automatically included** in the API response. However:
+
+- If the field needs **custom serialization** (e.g., computed values, nested data), add an explicit `SerializerMethodField`.
+- If the field needs **write validation**, add it to `extra_kwargs`.
+
+### 4. FHIR Upload Loader (`patient_portal/api/views.py` → `upload_fhir_bundle`) — optional
+
+This is the function that parses FHIR Bundles posted to promop's own upload
+endpoint. That endpoint is optional: the ETL that loads production data does not
+use it. Add a mapping here only when the new field should also be populated by
+this uploader; without one, the field is simply not populated from bundles
+posted to it.
+
+**Step A — Declare an initializer** at the top of the patient-processing block (so the variable always exists even if no matching FHIR resource is found):
+
+```python
+# Near the top of the patient block, alongside other initializations:
+new_field_value = None
+```
+
+**Step B — Add LOINC/code mapping** in the observation-parsing loop:
+
+```python
+# In the for obs in observations: loop:
+loinc_code = next(
+    (c.get('code') for c in obs.get('code', {}).get('coding', [])
+     if c.get('system') == 'http://loinc.org'),
+    None
+)
+# ...existing elif chain...
+elif loinc_code == 'XXXXX-X':  # Replace with the actual LOINC code
+    new_field_value = (
+        obs.get('valueQuantity', {}).get('value')
+        or obs.get('valueString')
+        or obs.get('valueCodeableConcept', {}).get('text')
+    )
+```
+
+**Step C — Pass the value to `PatientRecord.objects.create()`** (or the `.save()` update block):
+
+```python
+PatientRecord.objects.create(
+    person=person,
+    # ...existing fields...
+    new_field=new_field_value,
+)
+```
+
+> **Note:** The FHIR upload loader is ~1375 lines. Search for the comment block that matches the clinical category of the new field (e.g., `# --- Biomarkers ---`, `# --- Labs ---`, `# --- Therapy ---`) to find the right place to insert steps A–C.
+
+### 5. Backend API ViewSet (`patient_portal/api/views.py` → `PatientRecordViewSet`)
+
+If the field needs special filtering, ordering, or search, add it to `filterset_fields`, `search_fields`, or `ordering_fields` in the viewset.
+
+### 7. TypeScript Type (`frontend/src/types/patient.ts`)
+
+Add the field to the `PatientInfo` interface. All fields are optional (`?`):
+
+```typescript
+// In the appropriate section of the PatientInfo interface:
+new_field?: string;         // for TextField / CharField
+new_field?: number;         // for IntegerField / FloatField / DecimalField
+new_field?: boolean;        // for BooleanField
+new_field?: string | null;  // for nullable fields
+```
+
+### 8. React UI (`frontend/src/components/PatientInfo/`)
+
+Add the field to the appropriate tab component. Choose the tab that matches the field's clinical category:
+
+| Category | Component |
+|---|---|
+| Demographics, vitals, disease stage, ECOG/Karnofsky | `GeneralTab.tsx` |
+| Labs, blood counts, chemistry, biomarkers | `LabsTab.tsx` |
+| Myeloma-specific fields | `MultipleMyelomaTab.tsx` |
+| Lymphoma-specific fields | `FollicularLymphomaTab.tsx` |
+| CLL-specific fields | Add a `CLLTab.tsx` if needed |
+| Breast cancer fields | Add a `BreastCancerTab.tsx` if needed |
+| Behavior, lifestyle, socioeconomic | Add a `BehaviorTab.tsx` if needed |
+
+Use the existing `FormField` and `Input`/`Select` UI primitives:
+
+```tsx
+// Text / number input:
+<FormField label="New Field Label" htmlFor="new_field">
+  <Input
+    id="new_field"
+    value={patient.new_field ?? ''}
+    onChange={(e) => onUpdate({ new_field: e.target.value })}
+  />
+</FormField>
+
+// Select / enum:
+<FormField label="New Field Label" htmlFor="new_field">
+  <Select
+    id="new_field"
+    value={patient.new_field ?? ''}
+    onChange={(e) => onUpdate({ new_field: e.target.value })}
+    options={[
+      { value: 'option1', label: 'Option 1' },
+      { value: 'option2', label: 'Option 2' },
+    ]}
+  />
+</FormField>
+```
+
+Register the new tab in `frontend/src/components/Layout/TabBar.tsx` if a new tab is created. Wire the tab into `frontend/src/components/Patient/PatientDetail.tsx`.
+
+### 9. FHIR Bundle Generator (`omop_core/management/commands/generate_fhir_bundle.py`) — optional
+
+Only when layer 4 was done: add synthetic data generation for the new field. The generator creates FHIR Observation, Condition, or extension resources. Pick the right FHIR resource type:
+
+- **Lab value / measurement** → FHIR `Observation` with a LOINC code
+- **Clinical status / boolean** → FHIR `Observation` with a SNOMED code or extension
+- **Demographic / free text** → FHIR `Patient` extension or `Observation`
+
+```python
+# Example: add an Observation for a new lab value
+def _generate_new_field_observation(self, patient_id: str, encounter_id: str) -> dict:
+    return {
+        "resourceType": "Observation",
+        "id": str(uuid.uuid4()),
+        "status": "final",
+        "category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "laboratory"}]}],
+        "code": {
+            "coding": [{"system": "http://loinc.org", "code": "XXXXX-X", "display": "New Field Display Name"}],
+            "text": "New Field Display Name"
+        },
+        "subject": {"reference": f"Patient/{patient_id}"},
+        "encounter": {"reference": f"Encounter/{encounter_id}"},
+        "valueQuantity": {
+            "value": round(random.uniform(min_val, max_val), 1),
+            "unit": "units",
+            "system": "http://unitsofmeasure.org",
+            "code": "unit_code"
+        }
+    }
+```
+
+Call the new generator method from the main patient generation loop and add it to the bundle entries list.
+
+---
+
+## Rule: Tests for Every New Attribute
+
+For each new attribute, create tests that cover the model, the API and the
+React UI. Add the FHIR upload test only when layer 4 was done. Add tests to the
+relevant test files.
+
+### Backend Tests (`omop_core/tests.py` and `patient_portal/tests.py`)
+
+```python
+from django.test import TestCase
+from rest_framework.test import APITestCase, APIClient
+from rest_framework import status
+from django.contrib.auth.models import User
+from omop_core.models import PatientRecord, Person
+
+class NewFieldModelTest(TestCase):
+    """Test that new_field exists in DB and model"""
+
+    def setUp(self):
+        self.person = Person.objects.create(person_id=9999)
+        self.patient = PatientRecord.objects.create(
+            person=self.person,
+            new_field="test_value"
+        )
+
+    def test_new_field_saved_to_db(self):
+        """Verify new_field is persisted to and retrieved from DB"""
+        p = PatientRecord.objects.get(person_id=9999)
+        self.assertEqual(p.new_field, "test_value")
+
+    def test_new_field_nullable(self):
+        """Verify new_field can be null"""
+        self.person2 = Person.objects.create(person_id=9998)
+        p = PatientRecord.objects.create(person=self.person2)
+        self.assertIsNone(p.new_field)
+
+
+class NewFieldAPITest(APITestCase):
+    """Test that new_field is exposed via the REST API"""
+
+    def setUp(self):
+        self.user = User.objects.create_user(username='testuser', password='testpass')
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+        self.person = Person.objects.create(person_id=9997)
+        self.patient = PatientRecord.objects.create(
+            person=self.person,
+            new_field="api_test_value"
+        )
+
+    def test_new_field_in_api_response(self):
+        """Verify new_field appears in GET /api/patients/{id}/"""
+        response = self.client.get(f'/api/patients/{self.patient.id}/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn('new_field', response.data)
+        self.assertEqual(response.data['new_field'], "api_test_value")
+
+    def test_new_field_writable_via_api(self):
+        """Verify new_field can be updated via PATCH"""
+        response = self.client.patch(
+            f'/api/patients/{self.patient.id}/',
+            {'new_field': 'updated_value'},
+            format='json'
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.patient.refresh_from_db()
+        self.assertEqual(self.patient.new_field, 'updated_value')
+
+    def test_fhir_upload_populates_new_field(self):
+        """Verify FHIR bundle upload correctly maps to new_field"""
+        # Construct a minimal FHIR bundle containing a resource that maps to new_field
+        fhir_bundle = {
+            "resourceType": "Bundle",
+            "type": "collection",
+            "entry": [
+                {
+                    "resource": {
+                        "resourceType": "Patient",
+                        "id": "test-patient-1",
+                        "name": [{"family": "Test", "given": ["Patient"]}],
+                        "gender": "female",
+                        "birthDate": "1970-01-01"
+                    }
+                },
+                {
+                    "resource": {
+                        "resourceType": "Observation",
+                        "status": "final",
+                        "code": {
+                            "coding": [{"system": "http://loinc.org", "code": "XXXXX-X"}]
+                        },
+                        "subject": {"reference": "Patient/test-patient-1"},
+                        "valueQuantity": {"value": 42.0, "unit": "units"}
+                    }
+                }
+            ]
+        }
+        response = self.client.post(
+            '/api/fhir/upload/',
+            fhir_bundle,
+            format='json'
+        )
+        self.assertIn(response.status_code, [200, 201])
+        # Verify the field was stored
+        patient = PatientRecord.objects.filter(
+            person__family_name='Test'
+        ).first()
+        self.assertIsNotNone(patient)
+        self.assertEqual(patient.new_field, 42.0)
+```
+
+### React / Frontend Tests
+
+Create or add to a test file alongside the component, e.g., `frontend/src/components/PatientInfo/LabsTab.test.tsx`:
+
+```tsx
+import React from 'react';
+import { render, screen, fireEvent } from '@testing-library/react';
+import LabsTab from './LabsTab';
+import { PatientInfo } from '../../types/patient';
+
+const mockPatient: PatientInfo = {
+  id: 1,
+  new_field: 42,
+};
+
+describe('LabsTab - new_field', () => {
+  it('renders new_field value', () => {
+    render(<LabsTab patient={mockPatient} onUpdate={jest.fn()} />);
+    expect(screen.getByDisplayValue('42')).toBeInTheDocument();
+  });
+
+  it('calls onUpdate when new_field changes', () => {
+    const onUpdate = jest.fn();
+    render(<LabsTab patient={mockPatient} onUpdate={onUpdate} />);
+    const input = screen.getByLabelText(/new field label/i);
+    fireEvent.change(input, { target: { value: '55' } });
+    expect(onUpdate).toHaveBeenCalledWith(expect.objectContaining({ new_field: '55' }));
+  });
+});
+```
+
+### Running Tests
+
+`promop/settings.py` enforces the production configuration when `DEBUG` is not
+true, so passing only `DATABASE_URL` exits before the suite starts — under the
+Django runner with this exact error:
+
+```
+django.core.exceptions.ImproperlyConfigured: Missing required production settings:
+  - SECRET_KEY must be set to a strong random value (current value is the insecure default)
+```
+
+`DEBUG=True` skips that guard and is what CI uses. A real `SECRET_KEY` satisfies
+it instead, but only for `manage.py`: the host checks are skipped for management
+commands and not under pytest, so that route additionally needs `ALLOWED_HOSTS`
+and `CORS_ALLOWED_ORIGINS`. `DEBUG=True` is the simpler of the two, and the
+commands below use it. Worth knowing because the suite does not *fail* without
+it, it does not *start*, so the error reads like a broken environment rather
+than a missing variable.
+
+```bash
+# Backend tests, Django runner — omop_core + patient_portal
+DATABASE_URL="postgresql://postgres@localhost:5433/promop_test" DEBUG=True \
+  .venv/bin/python manage.py test omop_core patient_portal --verbosity=2 --noinput
+
+# Backend tests, pytest — the tests/ package
+DATABASE_URL="postgresql://postgres@localhost:5433/promop_test" DEBUG=True \
+  .venv/bin/python -m pytest -q
+
+# Frontend tests (install deps first if needed: cd frontend && npm ci)
+cd frontend && npm test -- --run
+```
+
+**There are two backend suites, and CI runs both.** Django's test runner
+discovers only `omop_core.tests` and `patient_portal.tests`; the `tests/`
+package is pytest-based and is invisible to it. CI runs them as isolated
+parallel jobs, and the required `Backend tests` check passes only when both do.
+The commands above are for running a suite, or part of one, locally — see the
+rule below for when that is called for.
+
+### Rule: Feature Branch + PR for Every Code Change
+
+**Never commit directly to `dev` or `main`.** All fixes, enhancements, and refactors must go on a feature branch and land via a pull request.
+
+1. File a GitHub issue describing the work item
+2. `git checkout -b <descriptive-branch-name>` before writing any code
+3. Commit the work on the feature branch
+4. Run the targeted tests for the change (see below)
+5. Open a PR targeting `dev`
+6. Perform a code review on the PR. **Stop and present the review to the user before merging** — the user must read the review and approve the merge.
+   - **Exception — small, local, low-risk fixes** (typos, docstring updates, single-line bug fixes, config tweaks): these may proceed all the way through to a merge into `dev` without waiting for user review, provided the code review found no unfixable issues.
+7. **After the PR merges into `dev` successfully, delete the feature branch.** Prefer `gh pr merge --delete-branch`, which removes the remote branch as part of the merge. Then delete the local copy (`git branch -d <branch>`) and remove any worktree created for it (`git worktree remove <path>`). Do not leave merged feature branches lingering locally or on the remote.
+
+### Rule: Unfinished Means Draft, Not a Title Prefix
+
+**A PR that is not ready goes in GitHub's draft state** — `gh pr create --draft`,
+or `gh pr ready --undo <number>`. Draft disables the merge button with no
+override, which is stronger than any branch protection. A `[WIP]` prefix is
+plain text: #1608, #1609 and #1654 all carried one, none were drafts, and all
+three merged into `dev` anyway.
+
+The `Merge readiness` check fails on such a title, and on a `do-not-merge`,
+`wip` or `draft` label. It re-runs on `edited`/`labeled`, so clearing the marker
+clears the failure without a push. `wip` and `draft` must be followed by a
+delimiter or end the title, or "Wipe stale staging data" and "Drafting
+instructions" would block the queue; the cost is that a bare "wip fix the thing"
+passes. Requiring it is one context on ruleset 8217318, which covers `dev`
+through `~DEFAULT_BRANCH`.
+
+### Rule: Targeted Tests Before a Push, CI for the Full Suites
+
+**GitHub CI is the gate for the full suites. Do not run the full Django or
+pytest suite locally before a push.** CI runs both in parallel on every PR and
+they are required checks, so a local full run repeats it serially — about 7
+minutes against `promop_test`, which every local session shares, so two
+sessions testing at once void each other's results.
+
+Before pushing a change to code, tests, configuration, dependencies or runtime
+data, run only:
+
+- **The tests the change touches** — the test files you added or edited, and
+  the ones covering the modules you changed:
+  ```bash
+  DATABASE_URL="postgresql://postgres@localhost:5433/promop_test" DEBUG=True \
+    .venv/bin/python -m pytest -q tests/test_mapping_browse.py
+  DATABASE_URL="postgresql://postgres@localhost:5433/promop_test" DEBUG=True \
+    .venv/bin/python manage.py test patient_portal.tests.SomeTestCase --noinput
+  ```
+- **For frontend changes:** the affected component tests, plus `npm run lint`
+  and `npm run build` (see "Frontend Lint" below — neither `tsc` nor the tests
+  catch what lint does).
+
+Do not push if any of those fail. Then **wait for CI to pass before merging**;
+a red required check blocks the merge, and a failure there is fixed on the
+branch and re-pushed, not reproduced first with a local full run.
+
+Run a full suite locally only when CI cannot answer the question: reproducing a
+CI failure that a targeted run does not show, or working on the test
+infrastructure itself. Check `pgrep -fl "pytest|manage.py test"` first, run the
+two suites sequentially, and run each once.
+
+Documentation-only changes follow the exception under [Documentation-only
+changes](#documentation-only-changes) below: review content, links and
+`git diff --check`; application suites are not required.
+
+**Local PostgreSQL setup** (one-time, postgresql@18 via Homebrew, port 5433):
+
+The local server must be **PostgreSQL 18 with pgvector**, not the postgresql@14
+this project used before. Two requirements force it:
+
+* **pgvector.** `omop_core.models.ConceptEmbedding` declares a `vector(384)`
+  column, and the pytest suite runs `--no-migrations` — the test database is
+  built by reflecting model state, so `CREATE TABLE concept_embedding` runs
+  before any fixture and fails with `type "vector" does not exist` on a server
+  without the extension. That is a collection-time error on *every* pytest test,
+  not a few. Homebrew's `pgvector` bottle builds only for postgresql@17 and @18,
+  so @14 cannot have it.
+* **CI parity.** CI's Postgres service is `pgvector/pgvector:0.8.6-pg18`,
+  matching the local PostgreSQL major version and providing pgvector. A local
+  server without pgvector fails tests that CI passes.
+
+Port **5433**, because Postgres.app's PostgreSQL 14 commonly holds 5432 on this
+machine. Nothing needs 5432 — set `DATABASE_URL` to 5433 everywhere locally.
+
+```bash
+brew install postgresql@18 pgvector
+echo "port = 5433" >> /opt/homebrew/var/postgresql@18/postgresql.conf
+brew services start postgresql@18
+
+export PATH="/opt/homebrew/opt/postgresql@18/bin:$PATH"
+
+# Create postgres role and databases (run once)
+psql -p 5433 -d postgres \
+  -c "CREATE ROLE postgres WITH SUPERUSER CREATEDB CREATEROLE LOGIN;"
+psql -p 5433 -U postgres -d postgres \
+  -c "CREATE DATABASE promop_test OWNER postgres;" \
+  -c "CREATE DATABASE promop_dev OWNER postgres;"
+
+# Enable pg_trgm AND vector on template1 — REQUIRED by the pytest suite.
+# pytest runs with --no-migrations, so each test database is cloned from
+# template1 and built by reflecting model state: concept's GIN trigram index and
+# concept_embedding's vector(384) column are both created during CREATE TABLE,
+# before any fixture could enable an extension. On template1 every clone already
+# has them. Without pg_trgm: `operator class "gin_trgm_ops" does not exist`.
+# Without vector: `type "vector" does not exist`.
+psql -p 5433 -U postgres -d template1 \
+  -c "CREATE EXTENSION IF NOT EXISTS pg_trgm" \
+  -c "CREATE EXTENSION IF NOT EXISTS vector"
+
+# Apply migrations
+DATABASE_URL="postgresql://postgres@localhost:5433/promop_test" DEBUG=True \
+  .venv/bin/python manage.py migrate --noinput
+
+# Connect (use @18 bin directly — the system psql binary has an OpenSSL crash
+# on this machine)
+psql -p 5433 -U postgres -d promop_test
+```
+
+**Python 3.12 is also required.** `prolog` (the `prolog_surveys` app) declares
+`requires-python >=3.12`, as do the pinned numpy/scipy builds, so a 3.11 venv
+silently installs neither and Django fails at startup with
+`ModuleNotFoundError: No module named 'prolog_surveys'`. CI uses 3.12.
+
+```bash
+brew install python@3.12
+/opt/homebrew/opt/python@3.12/bin/python3.12 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+```
+
+---
+
+## Roles and what each reaches
+
+`GroupAccess.role` has four values. The helpers in `omop_core/services/access.py`
+and `omop_core/authorization.py` decide the reach; the frontend mirrors them in
+`frontend/src/utils/roles.ts` for what the UI offers, and never decides alone.
+
+| Role | Reaches |
+|---|---|
+| `org_admin` (a grant, or an admin path through an org or domain trust) | everything for its orgs: approves mappings, administers access, uploads |
+| `doctor` | every curation page (`has_curation_access`), patient writes (`can_write_patient`), proposes and rejects mappings |
+| `analyst` | the Code Mapping page only -- both tabs, the dialog, Suggest, Lock, Done, priority, axis variants, the accuracy pages (`has_professional_access`, `_can_manage_code_mappings`) -- and the patient list and detail **read-only**: the patients of a public demo org (the signup path that hands out the role) or of a group the grant names; an org-level grant at an ordinary org lists nothing, as for a doctor (`PatientRecordViewSet.get_queryset`). PRism analytics is a separate app that shares the identity table. Nothing else (#2398). |
+| `patient` | their own record; never another patient's (see `PatientRecordIsolationTest`) |
+
+An analyst is refused with 403 on field mappings and their synonyms, choices and
+custom fields, therapy and disease-category reference writes, relevance signals,
+source-system management, the CSV code-mapping upload, the mapping hub and every
+patient write; the UI hides those routes and controls. An organization
+trust makes a doctor or org_admin at the trusted org an admin of the granting
+org; it gives an analyst nothing, not even a read of the granting org's patients
+(`get_admin_access_paths`). A **domain** trust is different and unchanged
+(#1454): a trusted-domain self-signup is promoted to analyst once the address is
+verified, and that promotion is how the user reaches the trusting org at all, so
+a trusted-domain analyst is the admin the trust makes them. Approval stays with
+staff and org_admin (`_can_approve_mappings`) for every role. Gate a new
+curation endpoint with `_can_manage_field_mappings` unless it belongs on the Code
+Mapping page, where `_can_manage_code_mappings` admits the analyst too.
+`AnalystRoleScopeTest` in `patient_portal/tests.py` holds the role to this.
+
+---
+
+## Rule: Tests for Every New Feature
+
+**Every new feature must have tests written and run before the work is considered complete.**
+
+- Write tests immediately after implementing the feature — not as a follow-up.
+- Tests must be run against local PostgreSQL (see Running Tests above).
+- The feature is not done until the tests pass.
+
+**What to test for a new API endpoint or middleware:**
+- The happy path (correct input → expected output/status)
+- All relevant HTTP methods (GET, POST, PATCH, DELETE) if applicable
+- Authentication/authorization edge cases (unauthenticated, wrong scope, etc.)
+- Failure cases (invalid input, missing resource, etc.)
+- That the feature does NOT fire when it shouldn't (e.g., read-only requests for write-only logic)
+
+**Test placement:**
+- Backend feature tests → `patient_portal/tests.py` (or `omop_core/tests.py` for model-level logic)
+- New test classes should inherit the appropriate base (`_SmartBase` for OAuth-authenticated tests, `TestCase` for pure model/logic tests)
+
+---
+
+## SCT Fields — Multiple Myeloma (PR #115)
+
+Three fields were added to `PatientRecord` for stem cell transplant tracking:
+
+| Field | Type | Vocabulary |
+|---|---|---|
+| `stem_cell_transplant_history` | `JSONField` (string list) | `StemCellTransplant` — 3 values: `autologous SCT`, `allogeneic SCT`, `tandem SCT` |
+| `sct_date` | `DateField` | — (free date, validated: no future dates) |
+| `sct_eligibility` | `JSONField` (string list) | `SctEligibility` — 4 values: `eligible/ineligible for autologous/allogeneic SCT` |
+
+### Vocabulary tables
+
+Both vocabularies live in `omop_core/models.py` as `VocabularyLookup` subclasses and are served via the `/api/vocabularies/` endpoint:
+
+- `/api/vocabularies/stem-cell-transplant/` — `StemCellTransplant`
+- `/api/vocabularies/sct-eligibility/` — `SctEligibility`
+
+### FHIR extensions (MM bundle)
+
+The MM FHIR generator (`generate_fhir_bundle --disease mm`) emits three extensions on the `Patient` resource. The upload handler (`views.py`) reads them back:
+
+| Extension URL suffix | Maps to field |
+|---|---|
+| `mm-sct-history` | `stem_cell_transplant_history` (comma-joined → split on ingest) |
+| `mm-sct-date` | `sct_date` (ISO date string, future dates silently dropped on ingest) |
+| `mm-sct-eligibility` | `sct_eligibility` (comma-joined → split on ingest) |
+
+On ingest, both comma-split lists are filtered against the live vocabulary tables before storing — unrecognized tokens are discarded.
+
+### Serializer validation
+
+`PatientRecordSerializer` enforces two rules:
+
+- `validate_sct_date` — rejects future dates with HTTP 400
+- `validate_sct_eligibility` — rejects contradictory pairs (e.g. `eligible` + `ineligible` for the same transplant type)
+
+### Seeding sample data
+
+These need `SECRET_KEY` as well, from `.env` or exported — the DSN is yours to
+supply and this command writes, so the key has to be the one belonging to whatever
+it points at. Add `DEBUG=True` instead only when that is a throwaway local database.
+See [above](#secret-key-on-a-shared-database).
+
+```bash
+# Seed random SCT data onto MM PatientRecord rows that have no SCT data yet
+DATABASE_URL="..." python manage.py populate_sct_sample_data
+
+# Overwrite existing values
+DATABASE_URL="..." python manage.py populate_sct_sample_data --overwrite
+```
+
+---
+
+## Rule: Data Migration Safety (Vocabulary Remapping)
+
+When a migration remaps or truncates a controlled-vocabulary JSONField, follow this checklist **before** applying to any database that has real data.
+
+### 1. Audit first
+
+Run the audit command against the target database to surface any values that the migration does not recognise:
+
+`SECRET_KEY` comes from `.env` here too, and it must be staging's: this runs
+against real data. See [above](#secret-key-on-a-shared-database).
+
+```bash
+# Staging — named explicitly
+DATABASE_URL="${STAGING_DATABASE_URL:?STAGING_DATABASE_URL is not set}" \
+  python manage.py audit_sct_history
+```
+
+The audit only reads, so it can run against production the same way with
+`DATABASE_URL="${PROD_DATABASE_URL:?}"`.
+
+The command exits with code 1 if unrecognized values are found. Resolve them before proceeding — either add a mapping to `_OLD_TO_NEW_SCT` in the migration, or accept that the values will be preserved as-is.
+
+### 2. Write a migration that preserves, not silently drops
+
+The bug pattern to avoid:
+
+```python
+# BAD — treats "maps to None" and "not in dict" identically; silently drops unknown values
+mapped = _OLD_TO_NEW_SCT.get(v)
+if mapped and mapped not in new:
+    new.append(mapped)
+```
+
+The correct pattern:
+
+```python
+# GOOD — distinguishes intentional None from "key not present"
+if v not in _OLD_TO_NEW_SCT:
+    # Preserve unrecognized string; it will be logged.
+    if v not in new:
+        new.append(v)
+    continue
+mapped = _OLD_TO_NEW_SCT[v]
+if mapped is not None and mapped not in new:   # None = intentionally cleared
+    new.append(mapped)
+```
+
+Always log unrecognized values at `WARNING` level (not `ERROR`, not silently) and `bulk_update` rather than sequential `save()`.
+
+### 3. Make replace/truncate operations targeted, not `.all().delete()`
+
+```python
+# BAD — destroys any rows added after the migration ran if replayed
+Model.objects.all().delete()
+for code, title in NEW_VALUES:
+    Model.objects.get_or_create(code=code, defaults={'title': title})
+
+# GOOD — deletes only old rows not in the new set; safe on replay
+Model.objects.exclude(code__in={code for code, _ in NEW_VALUES}).delete()
+for code, title in NEW_VALUES:
+    Model.objects.get_or_create(code=code, defaults={'title': title})
+```
+
+### 4. Document irreversible reverse migrations
+
+When the original values cannot be reconstructed, say so explicitly:
+
+```python
+def reverse_migrate_foo(apps, schema_editor):
+    # Original values cannot be recovered after remapping.
+    # Rolling back this migration leaves the JSONField in its new-vocabulary state,
+    # inconsistent with the restored vocabulary table. Manual correction is required.
+    pass
+```
+
+### 5. Order of operations for vocabulary truncation
+
+Always remap existing data rows **before** truncating the vocabulary table:
+
+```python
+operations = [
+    migrations.RunPython(seed_new_vocabulary, reverse_seed),       # 1. add new vocab rows
+    migrations.RunPython(remap_existing_data, reverse_noop),       # 2. remap PatientRecord rows
+    migrations.RunPython(replace_old_vocabulary, reverse_restore), # 3. truncate old vocab
+]
+```
+
+---
+
+## Migration Conventions
+
+- **Use `makemigrations`** — let Django generate migration files; don't write them by hand.
+- **Apply to staging DB before pushing**: run `migrate` against `promop_dev` to verify before committing.
+- **Never apply schema changes manually** to the DB — always go through migrations so Django's state stays in sync.
+- **Production migrations run automatically** — `start.sh` calls `scripts/prepare-deployment.sh`, which migrates, on every Render deploy.
+- **Rebase on `dev` before creating any migration.** Two feature branches that both
+  create a migration off the same base will produce conflicting sequence numbers when
+  both merge. Before running `makemigrations`, always:
+  ```bash
+  git fetch origin dev && git rebase origin/dev
+  ```
+  This ensures the new migration gets the next available sequence number. CI runs a
+  conflict check on every push to `dev`, so a missed conflict is caught immediately
+  after merge, but prevention is better than cleanup.
+
+---
+
+## Frontend Lint: fetching in an effect
+
+`npm run lint` runs with `react-hooks/set-state-in-effect`, which **errors** (not
+warns) on this shape:
+
+```tsx
+const load = useCallback(async () => { setLoading(true); /* ... */ }, []);
+useEffect(() => {
+  load();          // error: Avoid calling setState() directly within an effect
+}, [load]);
+```
+
+The rule traces into the callback, so moving the `setState` calls after the
+first `await` does **not** satisfy it. Wrap the call instead:
+
+```tsx
+useEffect(() => {
+  (async () => {
+    await load();
+  })();
+}, [load]);
+```
+
+This has broken `dev` twice (fixed in #630 and again after #634). A red `dev`
+turns **every open PR red**, because the same job runs on each one — so it costs
+far more than the one file it appears in.
+
+Run `npm run lint` before pushing frontend changes; `tsc --noEmit` and the test
+suite both pass on the offending shape, so neither catches it. CI's job is
+"Frontend lint **& build**" — run `npm run build` too.
+
+## DB / Model Sync Check
+
+To audit whether the DB and model are in sync at any time:
+
+It only reads. Point it at staging (`$STAGING_DATABASE_URL`) or production
+(`$PROD_DATABASE_URL`) explicitly. See [above](#secret-key-on-a-shared-database).
+
+```bash
+DATABASE_URL="$STAGING_DATABASE_URL" \
+  .venv/bin/python manage.py shell -c "
+from django.db import connection
+from omop_core.models import PatientRecord
+cursor = connection.cursor()
+cursor.execute(\"SELECT column_name FROM information_schema.columns WHERE table_name='patient_record' ORDER BY column_name\")
+db_cols = set(r[0] for r in cursor.fetchall())
+model_cols = set(f.column for f in PatientRecord._meta.get_fields() if hasattr(f, 'column'))
+print('MISSING from DB:', sorted(model_cols - db_cols))
+print('EXTRA in DB:', sorted(db_cols - model_cols))
+"
+```
+
+Expected output: `MISSING from DB: []` and `EXTRA in DB: []`.
+
+---
+
+## Module Federation (GCP Cloud Run)
+
+promop serves as a Module Federation **remote** (`labs_results_remote`) consumed by the ht-phr host app. There are two Dockerfiles with different build targets:
+
+| File | Build command | Output dir | Purpose |
+|------|--------------|------------|---------|
+| `Dockerfile` | `npm run build` | `frontend/build/` | Local dev — standalone SPA |
+| `Dockerfile.gcp` | `npm run build:remote` | `frontend/dist/remote/` | Cloud Run — federation remote (`remoteEntry.js`) |
+
+**`WHITENOISE_ROOT`** controls which directory WhiteNoise serves at the root URL. It is set via environment variable in each Dockerfile:
+- `Dockerfile`: `WHITENOISE_ROOT=/app/frontend/build`
+- `Dockerfile.gcp`: `WHITENOISE_ROOT=/app/frontend/dist/remote`
+
+When unset, `settings.py` auto-detects by checking `frontend/dist/remote` first, then `frontend/build`.
+
+**Do not** change `Dockerfile`'s build command to `build:remote` or `Dockerfile.gcp`'s to `build` — they serve different purposes. The deploy workflow (`deploy-staging.yml`) uses `-f Dockerfile.gcp`.
+
+If `remoteEntry.js` returns 500 on staging, check that `WHITENOISE_ROOT` points at `frontend/dist/remote` in `Dockerfile.gcp`.
+
+---
+
+## Copying Data Between Instances
+
+Every model is one of three kinds, listed in `omop_core/services/instance_data.py`.
+`tests/test_instance_data.py` fails when a new model has no kind.
+
+| Kind | What | Moved by |
+|---|---|---|
+| system | accounts, tokens, sessions, tenancy, audit, caches | never copied |
+| reference | what is needed to import patients: mappings, lookups, therapy reference, HealthKey concepts | `copy_reference_data` |
+| patient | what is known about one person | `copy_patient` |
+
+Both commands **write to `DATABASE_URL`**. Always name the target explicitly —
+`DATABASE_URL="$STAGING_DATABASE_URL"` for staging, or a local database — and never production. See [above](#secret-key-on-a-shared-database) for `SECRET_KEY`.
+
+```bash
+SOURCE_DATABASE_URL="postgresql://..." .venv/bin/python manage.py copy_reference_data --dry-run
+SOURCE_DATABASE_URL="postgresql://..." .venv/bin/python manage.py copy_patient 12345 --org healthtree --dry-run
+SOURCE_DATABASE_URL="postgresql://..." .venv/bin/python manage.py copy_patient --filter-org-id 26 --org healthtree
+```
+
+Both write to `DATABASE_URL` and open the source read-only. `copy_reference_data`
+runs in one transaction; `copy_patient` uses one transaction per patient.
+Copy reference data before patients: concepts and therapy regimens resolve by code.
+
+### copy_reference_data
+
+Rows match on a natural key (`code`, `slug`, `(source_vocabulary_id, source_code)`),
+never on the source pk, and are overwritten from the source. Links travel as
+the related row's natural key. Concepts travel as `(vocabulary_id, concept_code)`:
+Athena ids agree across instances, HealthKey-minted ids do not. A concept not
+loaded here is cleared and reported.
+
+Reference data with a release loader is not copied: Athena vocabularies
+(`load_athena_vocabularies`), UMLS, LOINC classes and survey definitions. Only
+HealthKey-minted concepts are copied, under this instance's own ids.
+
+`--prune` deletes field and code mappings the source lacks. It never deletes
+lookups or therapy reference rows, because patient data can point at them.
+
+Code mappings steer ingest (`resolve_source_code`), so copying an approved row
+changes what a later import resolves to. `occurrence_count`, `first_seen` and
+`last_seen` stay local. `reviewer` / `created_by` / `updated_by` are cleared:
+the same Identity id is a different person on another instance.
+
+The field-mapping tables go through `field_curation_transfer`, whose payload is
+also the `dump_field_curation` fixture format. Keep that payload stable.
+
+### copy_patient
+
+Patients are selected on the source by ids, `--filter-*` flags, or both, which
+narrows the ids. Filters combine with AND. A run needs at least one id or filter,
+so it cannot copy every patient by accident. `--filter-org-id` is the org id on
+the source. A failed patient is reported, the rest continue, and the command
+exits non-zero.
+
+Every row gets a new id. Foreign keys, plain integer references
+(`visit_detail_id`, `episode_id`) and polymorphic ones (`EpisodeEvent.event_id`,
+`measurement_event_id`, resolved through the field concept named `table.column`)
+follow the copied rows. A missing concept becomes 0 where required, else null.
+
+- Every id comes from this database, `person_id` included: a source id belongs
+  to the source instance, where the same number is a different patient. The copy
+  is recorded as a `ProvenanceRecord` (`source='copy_patient'`), so copying the
+  same patient twice needs `--replace`, which refuses when system data (a login,
+  a FHIR connection, an invitation) points at the person here.
+- An address that already exists here is reused; only a new one is inserted.
+- `PatientRecord` is copied and re-derived, so user edits survive and derived
+  therapy ids follow this instance's reference data. It joins `--org`.
+- Stored document files are not copied; those rows are skipped and reported.
+- Source timestamps are kept, including `auto_now` ones. Revision authors are
+  source Identity ids, so they are cleared, except `system`.
+- Only some OMOP tables have a pk sequence. Tables without one allocate above
+  `MAX(pk)` under a table lock.
+
+---
+
+## Code Mapping Suggest
+
+Suggest proposes a destination concept for queue rows that have none. Two rules
+decide what it touches and how long it takes.
+
+### It reads the tab, not the clinical tables
+
+The candidate set is `suggestable_mappings()`: every `proposed` row on the tab
+with **no destination yet**, whatever its provenance. A row with nothing in the
+destination column has nothing that could be overwritten — an
+`open-wearables-seed` or `hk-labs` row waiting for a concept is exactly what
+Suggest is for, and staging has 69 of them (67 + 2).
+
+Provenance decides only what **Replace** may re-answer. A row that already has a
+destination is revisited only with `resuggest`, and then only if its
+`origin_system` is empty or begins with `suggest` — meaning nothing but a
+previous Suggest run ever set it. An `HT-One`, `HT-FHIR` or `athena` destination
+was asserted by an importer that knew more than the source text does (75,257 of
+staging's 85,318 rows), so re-deriving it would spend a model call to make the
+answer worse. In practice the ICD-10 and RxNorm tabs return nothing, because
+every row on them already has an importer's destination.
+
+Rows are ordered **untried, then gaps before replacements, then by
+occurrence**:
+
+1. **Untried before tried**, by the current `suggestion_model_version`. This is
+   the primary key *always*, because anything above it starves the queue. A
+   declined code keeps no destination, so it stays eligible and, being
+   high-occurrence, retakes the front of the very next run — on the staging
+   sample *every* code in the top slots was declined, so they would never free
+   up. Putting "no destination" above it has the same failure in the replacing
+   case: a run would spend its whole budget re-trying declined gaps and never
+   reach a replacement. Untried-first means every run advances; declined codes
+   come round again once the tab is drained.
+2. **No destination before has one**, within untried and within tried alike. An
+   empty destination is a gap, a replaceable one is an improvement, and the gap
+   is worth the model call first. Without Replace nothing has a destination, so
+   this key is constant.
+3. **Occurrence**, because that is the order a curator should meet codes in.
+
+### The limit counts codes, not codes per table
+
+A tab maps to one or more clinical tables — the Uncoded tab maps to all five —
+but that is only where the rows live. Each queue row carries its own
+`omop_table`, so rows are selected, ordered and limited **once, together**.
+
+Selecting per table applied the limit to each, so the Uncoded tab could evaluate
+5× the ceiling it was given, and the ordering above would only hold within a
+table rather than across the run.
+
+It used to derive the queue instead, by grouping a whole clinical table on
+`concept_id = 0` and subtracting every existing mapping. That cost 4-7s per
+table per request and, once ingest began queueing every code it met, returned
+**zero** rows on both tabs with a real backlog. `manage.py
+enqueue_unmapped_source_codes` still does that scan, as the batch job it is: it
+creates empty queue rows with blank provenance, which is exactly the state
+Suggest looks for. So the split is **enqueue, then suggest**.
+
+### Three retrieval paths, then Anthropic or Jev chooses the winner
+
+```
+UMLS CUI bridge ──► exactly one standard concept? ──► done, no ranking call
+       │ no
+       ▼
+   ┌────────────────┐
+   │  In parallel:   │
+   │  Lexical trigram │──► best N by trigram similarity
+   │  Vector cosine   │──► best N by embedding distance
+   └────────────────┘
+       │
+       ▼  merge (union, enrich overlaps with both scores)
+       │
+       ▼
+Anthropic or Jev ─► picks one from the merged pool with confidence levels, or declines
+```
+
+UMLS, lexical, and vectors are **three independent retrieval paths** that
+contribute candidates to one merged pool. `semantic_candidates()` does a full
+cosine similarity search against the `ConceptEmbedding` table — it is real
+retrieval, not reranking. Lexical and vector results are often mostly disjoint
+because trigram similarity and embedding cosine are different signals.
+`vector_rerank()` exists in the code but is unused in the default pipeline.
+
+`rank_candidates_dispatch()` routes the merged pool to the configured ranking
+model: **Anthropic** (Claude, the default), **Jev** (Typesafe API), or
+**both** (concurrent, highest confidence wins). The ranker scores each candidate
+with a qualitative confidence level (high / medium / low, mapped to numeric
+values) and either picks a winner or declines. A declined code stays in the
+queue for the next run.
+
+### Source Metadata is ranker context, nothing more
+
+A description is often missing or generic: the ETL may send "Vitals" for a code
+that is clearly specific, and Epic adds LOINC `8716-3` "Vital signs" to every
+vital sign. The Source Metadata the mapping dialog shows (usually the FHIR
+resource that carried the code) says what it really is, so both rankers get
+that JSON **in full, de-identified**, as `source_metadata` beside the
+description (#1782, #1786, #1791). The dialog sends its row's metadata with
+suggest-one, falling back to this table's SCCM row; batch runs use each queue
+row's own. Retrieval never reads it and no other patient's data is consulted.
+
+`omop_core/mapping/source_metadata.py::deidentify` removes, at any depth, by
+key *and* by shape — FHIR carries identity under many names, such as an
+extension's `valueIdentifier` or a `collector` reference: every Reference,
+Identifier, HumanName, Address, ContactPoint, Annotation and Attachment, any
+Patient/Practitioner/RelatedPerson resource, `id`, `meta`, `fullUrl`, the
+narrative, `valueString`/`valueMarkdown`, and every date or time field
+(case-insensitively). `code.text`, coding displays, Quantity and CodeableConcept
+values stay — they are the point. Over 20,000 characters it trims lists and
+strings, then keeps only the coded fields; it never drops the code.
+
+Where the time goes, per code:
+
+| Stage | Cost |
+|---|---|
+| lexical trigram retrieval | ~0.15s for a domain-scoped code, serial (was ~2.5s and **67%** before #1467 — see below) |
+| vector cosine retrieval | ~0.3s (query embedding ~25ms + cosine search) |
+| ranking call (Anthropic or Jev) | ~3.5s each, but concurrent (`RANK_CONCURRENCY`) and only for codes UMLS did not settle |
+| embedding model load | ~5s, **once per gunicorn worker**, on its first Suggest |
+
+### Retrieval is scoped by index, not by filter
+
+Trigram similarity is a *lossy* index operation: the GIN index returns every row
+that shares enough three-letter fragments with the source text, and Postgres
+then computes an exact similarity for each. On the whole-table indexes that was
+30,000-235,000 rows per code, scored and almost all discarded — by the domain and
+standard filters for names, by the join to `concept` for synonyms. Both whole-table
+indexes were being *used*; the cost was the recheck, so no plan fix could help.
+
+So the rows that can be an answer get indexes of their own (#1467):
+
+| Path | Index | Holds |
+|---|---|---|
+| names | `ix_concept_trgm_<domain>` — 5 partial GIN indexes on `concept` | standard, active concepts in that domain |
+| synonyms | `ix_suggest_syn_<domain>` — 5 partial GIN indexes on `suggest_synonym_term` | the uppercased synonyms of those same concepts |
+
+`suggest_synonym_term` exists because `concept_synonym` has no domain or standing
+of its own — those live on `concept` — and a partial index cannot look across a
+join. It is derived, never edited: `services.suggest_synonym_terms.refresh()`
+deletes what stopped being eligible, then inserts what is missing (that order:
+a concept that changed domain would otherwise collide with its own old row).
+`load_athena_vocabularies` runs it after every full load; migration `0246`
+backfilled instances that already had a vocabulary, and
+`manage.py refresh_suggest_synonym_terms` runs it by hand.
+
+One `concept_synonym` row is **one term per semicolon-separated part**, not one
+term (#2355). Athena ships LOINC's related names as a single string
+("Chemistry; M Protein; M-band; M-spike; Paraprotein; SPEP; …"), and trigram
+similarity of a short source text against that whole string is near zero —
+"M SPIKE 1" scored 0.09 against it, so the one LOINC that means an M-spike was
+never retrieved, while its part "M-SPIKE" scores 0.8. An instance refreshed
+before the split holds the joined strings until the next refresh replaces them
+with their parts (about 2.3M parts from 104k joined rows on HealthTree).
+
+Measured on staging over the same 28 real queue rows, synonym retrieval went
+**32.1s → 2.8s** with identical results on all 28; name retrieval for a
+procedure description went from ~1-3s to 25-75ms.
+
+Three rules that keep it honest:
+
+- **The index predicates are the query's filters, literally.** The planner only
+  picks a partial index it can prove applies. Change `standard_concept='S',
+  invalid_reason IS NULL, domain_id=…` in `lexical_candidates` and the indexes
+  silently stop being used.
+- **An unbuilt table falls back to whole synonyms.** `is_populated(domain)`
+  is false for a test database or a never-refreshed instance, and for a search
+  with no domain (ICD-10 searches all of them); retrieval then reads
+  `concept_synonym` directly — slow, every synonym, but scored as the whole
+  string, so without the per-part split below.
+- **`lexical_candidates` still re-checks standing on `concept`.** A term that went
+  stale since the last refresh can cost a shortlist slot; it can never put a
+  retired concept in front of the ranker.
+
+Drug names need an additional narrowing step because a source such as
+"ASPIRIN 81 MG ORAL TABLET" shares dose and form words with many RxNorm names
+in the same domain. `source_text.narrowing_text` searches on ingredient words
+and falls back to the full source text when that finds no names. Narrowing can
+change the candidate set; `tests/test_lexical_narrowing.py` covers its recall
+trade-offs.
+
+Cost: ~135 MB for the concept indexes and ~660 MB for the table and its indexes
+on a fully loaded instance.
+
+### The run is queued, and how big it may be depends on that
+
+At ~3.5s per code a tab's backlog does not fit in a request, so `POST
+/v1/code-mappings/suggest/` returns **202** with a run id and the page polls
+`GET /v1/code-mappings/suggest-runs/<id>/`. Progress lives on a `SuggestRun`
+row rather than in Celery's task metadata: the counts must survive a worker
+restart, the poll can land on any gunicorn worker, and the inline dispatcher has
+no result backend to write into.
+
+`omop_core/services/suggest_jobs.py` picks how it runs, on the same rule as
+`derivation_jobs.py` — Celery when `CELERY_BROKER_URL` is set, inline otherwise
+— and **the ceiling depends on which**:
+
+| Dispatcher | Ceiling | Bounded by |
+|---|---|---|
+| `CeleryDispatcher` | `QUEUED_MAX_CODES = 50` | `CELERY_TASK_TIME_LIMIT` (900s) |
+| `InlineDispatcher` | `INLINE_MAX_CODES = 5` | the request, under `start.sh`'s bare gunicorn (30s default) |
+
+That split is not a nicety. `render.yaml` leaves `CELERY_BROKER_URL`
+dashboard-managed on the web service (`sync: false`), so a deployment that has
+not pasted the Redis URL in yet **falls back to inline** — and 50 codes inline is
+~125s of serial retrieval and a 502, the exact failure this design removes.
+Batches measured at 3/9.5s, 5/24.1s, 8/28.7s, 10/38.3s.
+
+The ceiling is a budget for the whole run, not per clinical table: a source
+vocabulary can map to five tables, and a per-table limit would let one run
+attempt five times its own ceiling.
+
+The ceilings were set when retrieval cost ~2.5s a code. #1467 cut that by an
+order of magnitude for domain-scoped codes, so they can be revisited — but
+re-measure inline batches first; drug codes and ICD-10 (no domain) did not get
+cheaper.
+
+### What the curator is shown
+
+The headline number is **new destinations written** (`SuggestRun.destinations`)
+— what the run achieved. Not "rows written": a code the ranker declined is
+written too, so the run records that it tried, and counting those would claim
+destinations nobody proposed. `done`/`total` is the separate "how far through"
+number.
+
+### What the curator decided on, and where
+
+`suggestion_confidence` is live: a later run overwrites it and a moved
+destination clears it, so it cannot say what the ranker believed when a curator
+saved the row. Every curator save through `_upsert_source_code_mapping`
+therefore records two more columns (#2382), read by the accuracy analytics:
+
+- `decision_confidence`, the ranker's confidence in the destination being
+  saved. The dialog sends it (`decision_confidence`) when the destination came
+  out of a Suggest run in that dialog for the source text as it still reads
+  (`rankedConfidence`: the higher score when both rankers scored the concept,
+  as the candidate table shows), null when that run never scored it. Null or
+  no key keeps the row's live confidence while the destination is unchanged;
+  a moved destination without a score records none. The Concept to Code
+  propose endpoint sends the preview candidate's.
+- `decision_surface`: `code2concept` (the Code to Concept tab's dialog,
+  one-click approve and group actions), `concept2code` (the Concept to Code
+  tab and its endpoints), or `patientcode` (any save scoped to a patient,
+  whatever the payload says). Blank means no curator has saved the row, or a
+  machine moved its destination since.
+
+The Mapping Accuracy Analytics page (`/code-mappings/accuracy/analytics`,
+linked from the top of the Concept to Code tab, #2383) reads them: one table
+per surface plus Overall, rows for every decision and for the 90–100, 80–90,
+70–80 and below-70 confidence bands, columns for total, approved, proposed and
+rejected counts (the rows' current status), a Scored count (decisions that
+began as a ranker suggestion) and the precision, recall and F1 the accuracy
+dashboard computes from `suggestion_outcome` over those. The surface and band
+describe the last curator save, the outcome the first disposition, the status
+the row now; a reverse-Suggest re-point since the save shows as Proposed. A
+decision no ranker scored counts in the Overall row only; a row with a blank surface is not a
+curator decision and is not counted. One grouped query
+(`code_mapping_accuracy_analytics`).
+
+Suggest never writes either column: reverse Suggest's auto-propose goes
+through the same writer with `record_decision=False`. A machine write that
+moves a destination outside the writer (a code-mapping upload, Athena
+destination recovery) clears both, as it clears `suggestion_confidence`. Both
+travel with `copy_reference_data`.
+
+### A code's rows follow its mapping to another table
+
+A curator who changes a mapping's Domain re-files it under another clinical
+table (the move offer from #2347, or the dialog's Domain field). The rows
+ingest wrote for that code stayed in the old table, so the patient page --
+which lists a code under the table its rows sit in -- kept showing it as
+Unmapped there with no mapping that could ever match (#2386). Now a save that
+changes `omop_table` **between measurement and observation** relocates the
+code's stored rows (`omop_core/mapping/table_relocation.py`); the response's
+`relocation` reports what happened.
+
+- Only those two tables. They share the fact shape and nothing points at
+  their rows by id but provenance and ownership. A drug exposure composes a
+  therapy line (`TherapyLineExposure` cascades), a procedure anchors an
+  imaging document, an episode event names a row by bare id: a move between
+  any other pair keeps the rows where they are and `relocation.skipped` says
+  so.
+- A patient-scoped save moves that patient's rows in the request, so the
+  Source Codes tab reflects it at once. It also carries the table the code
+  was listed under (`rows_omop_table`): a mapping created or saved under
+  another table -- an Observation-domain concept chosen for measurement rows
+  -- moves that patient's rows into the mapping's table even though the
+  mapping itself never changed table (#2393). That holds for a reject too:
+  the mapping names the table, and a rejection left under another table is
+  invisible there. An unknown `rows_omop_table` is a 400. A save from a mapping tab, and a
+  code-mapping upload that re-files a code, move every patient's rows after
+  commit (`relocation_jobs`; Celery when a broker is set, inline otherwise).
+  Each batch of 500 rows commits on its own, so a task killed at its time
+  limit resumes on retry. `manage.py relocate_mapping_rows <ids> --from-table
+  <table>` moves what a lost task left behind.
+- A row is copied column by column: the core both tables share (person, date,
+  datetime, type concept, source value and source concept) plus every column
+  both carry under the same name **and shape** (value, unit, qualifier,
+  provider, visit, erroneous flag), under a new id from the destination's
+  sequence. A measurement's operator and range are dropped. Its
+  `ProvenanceRecord` follows it in one statement per batch, a measurement's
+  `MeasurementOwnership` goes, the old row is deleted, and the patient's
+  record is marked stale as a re-point does.
+- The code matches by itself; the import description matches only rows at a
+  concept this mapping named (its destination, the concepts it is moving
+  off, concept 0), the re-point's rule, so "Glucose" does not drag another
+  producer's rows or a hand-corrected one across.
+- The rows keep the concept they had. Putting them on the destination is the
+  re-point's job -- it also normalizes units, routes axis variants and
+  collapses duplicates -- so the concepts moved join
+  `deferred_repoint_concept_ids`; an approval's re-point runs after the move
+  (the move dispatches it again), and a patient-scoped approval leaves it to
+  Generate OMOP as before. An organization-scoped mapping moves only rows its
+  hospital wrote.
+- The per-patient inventory (`PatientSourceCode`) is re-filed under the new
+  table, merging into a row the patient already has there.
+
+### Replace re-answers rows, it does not delete them
+
+It used to delete: while the candidate set came from a clinical scan, a deleted
+row would be found again and recreated. Now that Suggest reads the tab, a
+deleted row is a code that has left the queue for good, taking its
+`occurrence_count` and `first_seen` with it.
+
+### Vectors alone are not enough
+
+Vectors retrieve by semantic similarity but the ranking model needs at least
+one candidate with a code and name to evaluate. A run with neither UMLS nor
+Lexical would report "no candidate concept" for every code. The API rejects
+that combination and the checkbox disables itself.
+
+### Curator priority is a tie-breaker, not evidence
+
+Curators rank concepts on the Concept to Code tab (`ConceptMappingPriority`,
+one global list, positions 1..N kept dense by
+`services.concept_priority.move` under a table lock). The list shows ranked
+concepts first on every page and filter. Suggest uses the ranking in two
+places, both in `retrieval_pool`:
+
+- **Retained, never added.** `priority_lexical_candidates` scores only the
+  prioritized concepts in the code's domain at the same `MIN_TRIGRAM_SCORE`, so
+  a ranked concept the best-N cut dropped comes back (`priority_retained`). A
+  concept retrieval does not match is not added.
+- **Marked for the ranker.** Every prioritized candidate carries
+  `curator_priority`. Both prompts (Anthropic's system prompt, Jev's
+  instructions and criteria tag) say to use it only between equally good
+  matches. A winner that is prioritized gets "Curator priority N." on its note.
+
+The UMLS single-concept shortcut ignores priority: a curated equivalence wins
+without a ranking call either way.
+
+A concept whose source codes are all mapped is marked **Done** from its
+Priority cell (`ConceptMappingDone`, `POST concept-to-code/done/`, #2388).
+Done unranks it, and ranking a Done concept un-does it (`concept_priority.move`),
+so the two states are exclusive, the list stays dense and the tie-break never
+prefers a finished concept; the list shows Done concepts after every other, in
+italics, with "Done" where the number was, and "Not done" returns one to the queue.
+It is reference data and travels with `copy_reference_data`.
+
+A curator claims a concept with **Lock** on its row (`ConceptMappingLock`,
+`POST`/`DELETE concept-to-code/<id>/lock/`, #2390). Other curators see a lock
+icon with the holder's name, may open the concept and review its source codes,
+and get 423 on every write for it: propose, apply, Suggest for the concept,
+and any mapping save whose destination it is (`concept_lock.check_concept_lock`
+in `_upsert_source_code_mapping`). The holder sees Unlock; staff may unlock
+too. Explicit and unexpiring, unlike the mapping dialog's per-row edit lock.
+System data, never copied.
+
+### The six LOINC axes decide which candidates are the same test
+
+A LOINC code is defined by component, property, time aspect, system, scale and
+method; two tests that differ on any one get different codes. For a source in
+the Measurement or Observation domain, Suggest (`omop_core/mapping/loinc_axes.py`)
+settles the source's axes, then:
+
+- **adds** the LOINC codes whose axes agree, when the component is known
+  (retrieval label `axes`),
+- **drops** every candidate that conflicts with a settled axis, before the
+  ranker sees it, and reports them as `axis_excluded`,
+- **orders** the rest by axes matched, then by compatible axes (`Ser` against
+  `Ser/Plas`), and sends both sides' axes to Anthropic and Jev.
+
+Source axes come from, strongest first: a curator's entry
+(`SourceCodeConceptMapping.loinc_axes`; `null` clears an inferred axis, `''` on
+`method_type` means methodless), the source code itself when it is LOINC, a
+LOINC coding in the resource's `code.coding`, then the metadata -- a UCUM unit
+names a property, `valueQuantity` names scale `Qn`, an exact specimen display
+names a system. A unit that fits several properties (`%` is a mass, number,
+volume or other fraction; `U/L` is catalytic or arbitrary concentration)
+settles the property to that **set**: the properties of the LOINC codes that
+give the unit as an example unit, read from the loaded `LoincCodeClass` table
+(`loinc_axes.loaded_unit_properties`, cached per process) with
+`AMBIGUOUS_UNIT_PROPERTIES` as the fallback. A candidate with any of them is
+eligible; a mass concentration for a `%` is excluded. Sets are sorted, so
+`U/L` and `IU/L` are one variant, keyed `property=ACnc,CCnc|scale_type=Qn`;
+a row stored under the older `unit=%` key is re-keyed on refresh. A set reads
+"any of …" in the dialog and "one of …" to the rankers. Free-text method and `effectivePeriod` are hints only: a wrong
+constraint hides the right answer. Inference reads the metadata *as stored*,
+because de-identification drops `specimen` (a Reference).
+
+The candidate side is `LoincCodeClass`, which holds all six axes from
+`Loinc.csv`. A load that predates those columns counts as stale at the same
+version (`loinc_release._axes_missing`), so the next `sync_loinc_release`
+reloads it.
+
+### SNOMED destinations: hierarchy, attributes and subsumption
+
+SNOMED has no fixed six-part name; a concept is its hierarchy (the semantic
+tag -- in OMOP `concept_class_id`) plus defining attributes that differ by
+hierarchy ("Has finding site", "Has asso morph", "Has method", ... in
+`concept_relationship`), and Athena records "Has status" Defined/Primitive.
+`omop_core/mapping/snomed_attributes.py` judges SNOMED candidates for the
+Condition, Procedure, Observation and Measurement domains against the
+source's **reference concept** -- what the source means at least: a curator's
+choice (`SourceCodeConceptMapping.snomed_attributes`), the source code itself
+when it is standard SNOMED, else its "Maps to" SNOMED target (ICD-10-CM).
+
+Because SNOMED has subsumption, the rule is not LOINC's "any mismatch is
+wrong":
+
+| Candidate vs reference | Outcome |
+|---|---|
+| the same concept | eligible, first |
+| an ancestor | eligible, ranked lower per level |
+| a descendant | held back as `more_specific` -- needs curator evidence |
+| another hierarchy, a contradicting attribute or side, or outside the reference's lineage (a sibling) | excluded as `conflict` |
+
+A primitive concept's missing attribute is *unknown*, never a conflict.
+Laterality lives on body structures; `"Side"` means *lateralisable* and is
+not a side. Athena often maps a lateral code to an unlateralised concept
+(M17.11 "right knee" -> "Osteoarthritis of knee"), so laterality is also read
+from the source text: a one-level child that differs by exactly that side
+counts as the reference, and a concept that cannot carry the side is kept but
+flagged `laterality_not_captured`. Retrieval adds the reference and its
+ancestors up to three levels (label `hierarchy`).
+
+### One source code, several LOINCs: axis variants
+
+A hospital code reported in mg/dL and mmol/L is two LOINC tests.
+`omop_core/mapping/axis_variants.py` groups a code's units -- stored
+Measurement rows, the imported inventory, per-patient source codes -- by the
+axes they imply. Two or more groups set `axis_variant_count` (the queue's blue
+"n axis values") and become `SourceCodeAxisVariant` rows, each with its own
+destination.
+
+Ingest routes by **unit**, the one per-record value every path has: the lookup
+API (an entry with `source_unit` whose variant is approved comes back keyed
+`vocab|code|unit`) and FHIR sync both take the variant's concept; every other
+record takes the mapping's. Approving a variant re-points only stored rows in
+its units (`repoint_clinical_rows(units=...)`). Specimen variation is reported
+but cannot be routed.
+
+Counts refresh after each source-code upload for codes seen in two or more
+units, and in bulk with `manage.py refresh_axis_variants`. The bulk walk is a
+worker job, never a migration step: `--queue` (or migration `0303`) records an
+`AxisVariantRefresh` request that `omop_core.refresh_axis_variants` performs.
+Migrations 0300 and 0301 ran it inline and could not finish inside the Cloud
+Run migrate job's hour on the HealthTree instance (#2021).
+
+The stored unit evidence (`SourceCodeConceptMapping.source_unit_evidence`) is
+the instance's own: `--rebuild-evidence` (or migration `0307`) sets
+`rebuild_evidence` on the request and the walk first rewrites every code's
+units from the source codes on its loaded patients and the stored Measurement
+rows (`axis_variants.rebuild_unit_evidence`, entries with `source:
+"patient-data"`; a text term's own recorded units, which name no source, are
+kept), then refreshes the variants, deleting one the evidence no longer
+shows unless a curator decided it. Before the walk, a rebuild also sets every
+mapped code's Seen count (`occurrence_count`) in one statement
+(`axis_variants.rebuild_seen_counts`) to the sum of its per-patient rows for
+its table, per vocabulary and code, so the order-system and result-system
+codings of one test no longer share the extract's number (#2121); a code
+with no patient rows here keeps its count, and the extract's label-group
+figure is cleared on the rows rebuilt. Each per-patient source-code upload
+runs the same pass for the codes it wrote and removed, and the lookup
+endpoint's sighting (`resolve_source_code_variant(provisional=True)`) adds one
+only while the code has no per-patient rows here, reading the rows once they
+exist (#2123): a lookup is one ask per code per batch, so that count is
+provisional; a per-record caller such as FHIR sync always adds one. The walk resumes after its stored `cursor`, not
+an offset, because the key set shrinks as codes are rebuilt. Once an instance
+has completed a rebuild, a seed or inventory load writes no unit evidence
+over existing rows and does not raise the Seen count of a code that has
+per-patient rows here (`axis_variants.rebuilt_seen_keys`; the
+`import_healthtree_seen_counts` snapshot skips them too). The hospital code seed used to carry the inventory's
+label-level counts on every code with the label (#2041).
+A curator asks for the walk again after loading patients from the panel on
+the Concept to Code tab (`POST concept-to-code/axis-variant-walk/`, #2050),
+which also shows how many patients have source codes since the last walk
+began. A rebuild counts the axis evidence it meets (`axis_evidence.Summary`,
+stored on the request) so the panel can show whether any axis beyond property
+and scale is ever settled or varies across patients (#2051).
+
+### Concept embeddings
+
+`semantic_candidates()` searches the `ConceptEmbedding` table by cosine
+distance. Any standard concept without an embedding is invisible to vector
+retrieval.
+
+`manage.py build_concept_embeddings` embeds every standard concept (1,523,060
+rows, ~2.8 hours on first run). It is **resumable** — it skips already-embedded
+concepts, so an incremental run after a vocabulary load only embeds the new
+concepts.
+
+After a successful `load_athena_vocabularies` (including `--concepts-only`),
+`load_mappings`, `sync_athena_mappings`, `load_umls_release`, `sync_umls_release`,
+or any `import_*crossmap*` command,
+`build_concept_embeddings` is dispatched automatically. With `CELERY_BROKER_URL`
+configured, `omop_core.build_concept_embeddings` runs on a Celery worker;
+without it, the command runs inline. Dispatch is deferred until commit and
+nested mapping loads dispatch only once, after the outer load succeeds.
+Dry runs and failed loads do not dispatch. Workers need sentence-transformers
+and access to `BAAI/bge-small-en-v1.5`. `--skip-suggest-embeddings` (or
+`--skip-embeddings`) on a loader suppresses the build for that load and its
+nested loaders.
+
+`manage.py precompute_suggest_embeddings` is a lighter alternative that embeds
+only concepts the suggest queue can currently retrieve. It is available for
+diagnostics (`--measure`) but is no longer auto-dispatched, because vector
+retrieval needs all standard concepts embedded, not just the queue's candidates.
+
+---
+
+## Code Mapping Lookup — Unit Conversion
+
+`POST /api/v1/code-mappings/lookup/` accepts optional unit fields per code entry
+and returns a `unit_conversion` block on resolved mappings when `source_unit` is
+provided.
+
+### Request fields (per entry in `codes`)
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `source_unit` | string | no | UCUM unit code from the source system |
+| `quantity` | number | no | Representative quantity value to convert |
+
+### Response: `unit_conversion` (nested in each resolved mapping)
+
+```json
+{
+  "source_unit": "mg/dL",
+  "destination_unit": "mmol/L",
+  "destination_unit_concept_id": 8753,
+  "destination_unit_source": "mapping",
+  "source_quantity": 100.0,
+  "converted_quantity": "5.551",
+  "property_code": "SCnc",
+  "match_type": "convertible"
+}
+```
+
+| Field | Values |
+|---|---|
+| `destination_unit_source` | `"mapping"` (from `destination_unit_concept` on the SCCM row) or `"property"` (LOINC property fallback to base unit) |
+| `match_type` | `"exact"` (same unit), `"convertible"` (same property group), `"incompatible"` (different groups), `null` (no destination unit) |
+
+The key is backward compatible: callers that omit `source_unit` and `quantity` see
+no `unit_conversion` key in the response. Unresolved codes never get the block.
+
+### Implementation
+
+- `omop_core/services/canonical_units.py` — `resolve_mapping_conversion()` computes the conversion using existing `convert()` and `UNIT_GROUPS`
+- `patient_portal/api/views.py` — `code_mapping_lookup()` batch-fetches `destination_unit_concept` and attaches the block
+- Tests: `patient_portal.tests.CodeMappingLookupUnitConversionTest` (9 cases)
+
+### Write-time conversion of stored rows
+
+The bulk measurement write, repoint and resolve convert a stored
+`value_as_number` and its range **only** to an approved mapping's curated
+`destination_unit_concept` (#2157), in `canonical_units.normalize_measurement_units`.
+`unit_source_value` keeps the unit the value was sent in; `unit_concept` names
+the unit it is stored in.
+
+- **No inferred target.** The `"property"` base-unit fallback above is for the
+  lookup response only. Written to a row, g/L and /L do not fit the column:
+  246 10\*3/uL is 2.46e11 /L (overflow), 2 ng/mL is 0.000002 g/L (stored as 0).
+  A `CanonicalUnitPreference` is a read-time display setting, never a write target.
+- **Axis variants are not converted.** A variant has no curated unit, and the
+  mapping's was chosen for the mapping's LOINC. Rows in a variant's units stay as sent.
+- **Exact or not at all.** When the converted value or either range bound
+  does not fit `Decimal(15, 5)` exactly, the row keeps its numbers *and* its
+  `unit_concept`: converting one without the other would mislabel the value.
+- **Reads prove the unit (#2249).** A UCUM `unit_concept` that names a different,
+  convertible unit from `unit_source_value` is only a hint of conversion.
+  `canonical_units.stored_unit` / `value_in_source_unit` let the number in
+  `value_source_value` decide: equal to the stored value, it is in the source unit;
+  equal to its conversion, in `unit_concept`'s. Anything else is unknown and is
+  not read, nor are older results of the same test; the lab-results and PHR labs
+  APIs label a value with its stored unit and show no number, range or flag for
+  an unknown one (`is_unproven`). Conversion writes the number
+  as sent into `value_source_value` when it is empty, so its rows stay provable.
+- **The ETL cleans units, promop reads only valid ones (#2248).** The ETL keeps
+  `unit_source_value` as received and puts the UCUM unit it means in
+  `unit_concept`. Blood counts (WBC, ANC, ALC, AMC, platelets;
+  `clinical_units.count_unit`) read the text when
+  promop knows it, else that concept. promop keeps no table of lab spellings.
+  Rows whose text promop can't read are never converted on write.
+
+---
+
+## Deployment
+
+- **`start.sh`** runs `scripts/prepare-deployment.sh` on every deploy, which migrates — so migrations pushed to `main` are auto-applied on next Render deploy. Cloud Run runs the same script as a release-phase job (#1628).
+- **Push to `main`** triggers deploy (once Render GitHub App access is granted in dashboard).
+- **Admin credentials**: set via `ADMIN_EMAIL` / `ADMIN_PASSWORD` env vars on Render (no hardcoded default)
+- **Hostnames and connection strings**: do not commit them — this is a public repo. Service URLs and database hostnames live in `.env` and the Render/GCP dashboards.
+
+<a id="render-api-access"></a>
+### Render API access (staging and production)
+
+Both environments are reachable from a local session through the Render REST API, with
+`RENDER_API_KEY` from `.env`. Use it — not the dashboard — to set the environment variables a new
+feature needs, to redeploy, and to run one-off commands. Look services up by name; do not commit
+service IDs, and never print a secret value: pipe it from `.env` into the request body.
+
+| Service | Branch | Gets variables from |
+|---|---|---|
+| `promop-staging` | `dev` | set directly |
+| `promop-staging-worker` | `dev` | `fromService: promop-staging` in `render.yaml`, but the worker holds its own **copy**, refreshed only by a Blueprint sync — set it directly too |
+| `promop` | `main` | set directly |
+| `promop-worker` | `main` | set directly — `render.yaml` does not link prod worker variables to the web service |
+
+A variable a worker needs (anything Celery tasks read, e.g. `ANTHROPIC_API_KEY` for queued
+Suggest runs) must be set on the worker as well as the web service.
+
+```bash
+set -a; . ./.env; set +a
+API=https://api.render.com/v1
+A=(-H "Authorization: Bearer $RENDER_API_KEY" -H "Content-Type: application/json")
+sid() { curl -s "${A[@]}" "$API/services?name=$1&limit=5" | jq -r --arg n "$1" '.[].service | select(.name==$n) | .id'; }
+
+# Set a variable (value read from .env, never echoed). 200 = set.
+jq -n --arg v "$ANTHROPIC_API_KEY" '{value: $v}' |
+  curl -s -o /dev/null -w '%{http_code}\n' -X PUT "${A[@]}" \
+    "$API/services/$(sid promop-worker)/env-vars/ANTHROPIC_API_KEY" --data @-
+
+# Setting a variable does not redeploy. Deploy the branch's current commit. 201 = started.
+curl -s -X POST "${A[@]}" "$API/services/$(sid promop-worker)/deploys" -d '{}' | jq -r '.id + " " + .status'
+
+# Poll a deploy until it is live (or *_failed / canceled).
+curl -s "${A[@]}" "$API/services/$(sid promop-worker)/deploys/<deploy-id>" | jq -r .status
+
+# One-off command against an environment's own database and settings (read-only checks).
+jq -n --arg c "python manage.py audit_sct_history" '{startCommand: $c}' |
+  curl -s -X POST "${A[@]}" "$API/services/$(sid promop)/jobs" --data @-
+```
+
+A redeploy ships the branch's **current** commit, so redeploying `promop`/`promop-worker` releases
+whatever is on `main`. A Blueprint sync is still what applies `render.yaml` infrastructure changes.
+
+## Database Selection Rule
+
+**Use local PostgreSQL for development and tests. Use Render databases only for migrations and sync checks.**
+
+| Purpose | DATABASE_URL |
+|---|---|
+| Running tests | `postgresql://postgres@localhost:5433/promop_test` |
+| Local development (manual testing, sync uploads, shell exploration) | `postgresql://postgres@localhost:5433/promop_dev` |
+| Staging migrations, writes and sync checks | `$STAGING_DATABASE_URL` |
+| Production read-only checks | `$PROD_DATABASE_URL` |
+
+`.env` holds `STAGING_DATABASE_URL` (Render staging) and `PROD_DATABASE_URL` (Render production)
+and **no `DATABASE_URL`**, so nothing reaches a remote database unless a command names it — see
+[Two databases in `.env`](#two-databases-in-env). Set `DATABASE_URL` on every command, and use
+`${VAR:?}` so a missing variable fails instead of expanding to empty.
+
+Production is for reading and verification only. Never write to production data from here —
+production is loaded from a staging dump, so fix and verify on staging. Production's *services*
+(env vars, deploys) are managed through the Render API: see [Render API access](#render-api-access).
+
+Never use remote databases for running tests — use local PostgreSQL to match CI. Never write
+test data into `promop_dev` — use `promop_test` for automated tests.
+
+---
+
+## FHIR Upload Architecture
+
+promop's own FHIR upload endpoint is **optional**. Production data is loaded by a
+separate ETL project that reads FHIR itself and writes OMOP rows through the
+bulk OMOP endpoints below; it never calls this endpoint. The endpoint remains
+for the synthetic bundles `generate_fhir_bundle` produces and for ad hoc loads.
+Either way the direction is the same, OMOP first and then derive, which is the
+opposite of an interactive edit; see
+[Write Architecture: PatientRecord First](#write-architecture-patientrecord-first).
+
+The FHIR upload endpoint in `patient_portal/api/views.py` (`upload_fhir_bundle`):
+
+1. Parses the FHIR Bundle entries by `resourceType`
+2. Creates a `Person` record from `Patient` resources
+3. Iterates `Observation` resources → writes each to the OMOP `Measurement` table (LOINC concept lookup, falls back to `measurement_source_value`)
+4. Iterates `Condition` resources → writes to `ConditionOccurrence`
+5. Iterates `MedicationRequest`/`MedicationStatement` → writes to `DrugExposure`, `Episode`, `EpisodeEvent`
+6. After all OMOP writes, `refresh_patient_record` is called once to rebuild the `PatientRecord` read model from OMOP data
+
+**`PatientRecord` is never written to directly during FHIR upload.** All clinical data goes into OMOP tables; `PatientRecord` is derived automatically via the `post_save` signal chain.
+
+---
+
+## Deferring the PatientRecord Derivation
+
+Every clinical write re-derives the whole `PatientRecord`, and derivation cost
+grows with the rows the person already holds. On a bulk loaded patient that is
+12-32s per row level write.
+
+`?skip_refresh=true` suppresses it, on the bulk POST and on the row level
+`PATCH` and `DELETE` of the five clinical endpoints. Opt-in: without it every
+verb still derives, because existing callers depend on that.
+
+A client that defers must derive afterwards:
+
+```
+POST /api/v1/patient-records/{person_id}/refresh/
+  202 {"person_id": 123, "task_id": "..."}
+
+GET /api/v1/derivation-status/{task_id}/
+  200 {"task_id": "...", "state": "PENDING|STARTED|SUCCESS|FAILURE", "error": null}
+```
+
+Both are admin or service-token only.
+
+`202`, not `200`: the derivation is queued on Celery and the record is not
+rebuilt yet when the POST returns. Poll the status endpoint for the outcome.
+`state` is Celery's own, and a derivation that fails reports `FAILURE` with the
+error rather than a success over a stale record — the signal path in
+`omop_core/signals.py` swallows failures, this does not.
+
+Result state lives in the Redis result backend and expires after
+`CELERY_RESULT_EXPIRES` (default 24h). An id past that, or one that was never
+issued, reads as `PENDING`, which is also what Celery reports for an id it has
+never seen.
+
+### Running the derivation
+
+`omop_core/services/derivation_jobs.py` picks how:
+
+| `CELERY_BROKER_URL` | Dispatcher | Behaviour |
+|---|---|---|
+| set | `CeleryDispatcher` | enqueues on transaction commit, worker derives |
+| empty | `InlineDispatcher` | derives in the request, before the `202` |
+
+There is deliberately no separate setting for the choice: a dispatcher that can
+disagree with the broker leaves every job queued with nothing consuming it.
+Inline is what a developer machine with no Redis gets — the wire contract is
+the same, so a client needs one path either way. Inline lets a failing
+derivation propagate instead of recording it, because the caller is still
+holding the request, so an id is only ever issued for a derivation that
+already succeeded. That is why the id itself (`inline-<signed uuid>`) is the
+completion record: a registry would be process-local, and under several
+gunicorn workers the poll would land on a process that never saw the POST. It
+is signed with SECRET_KEY so only an id the deployment issued reads SUCCESS,
+and it verifies on any worker.
+Because it holds the request, it caps the derivation with a 25s
+`statement_timeout` — the queued path gets that bound from
+`CELERY_TASK_TIME_LIMIT` instead.
+
+Tests swap in `FakeDispatcher` through `use_dispatcher(...)`; nothing needs to
+patch Celery or run it eager.
+
+Run a worker with:
+
+```bash
+celery -A promop worker --loglevel=info
+```
+
+The task is idempotent — derivation clears and rebuilds every field — so a
+duplicate call is extra load, not a correctness problem. That is why nothing
+deduplicates, and why `CELERY_TASK_ACKS_LATE` is safe.
+
+`CELERY_BROKER_VISIBILITY_TIMEOUT` (default 1800) must stay above
+`CELERY_TASK_TIME_LIMIT` (default 900) or Redis decides a still-running task
+was lost and hands the same job to a second worker.
+
+Only `refresh/` is async. The signal path and the bulk write still derive
+inline.
+
+---
+
+## Bulk OMOP Row Writes
+
+The five OMOP clinical CRUD endpoints (`conditions`, `drug-exposures`, `measurements`,
+`observations`, `procedures`) accept a **JSON array** on POST for callers that have
+already parsed FHIR into OMOP rows. Single-dict POSTs are unchanged.
+
+Contract: `201` with `{"created": N, "updated": M, "unattributed_matches": K, "ids": [...]}`, one id per
+request row in request order. One transaction, all-or-nothing. One batch is one
+person (mixed-person → 400). Server assigns PKs via `next_pk_batch`
+(client-supplied PKs → 400). Per-index validation errors. Max 1,000 rows
+(`OMOP_BULK_MAX_ROWS`) → 413. Provenance comes from the `X-Provenance-Source` /
+`X-Provenance-User-Id` headers and applies to the whole batch; no source means no
+`ProvenanceRecord`, matching the single-row path.
+
+**The write is idempotent by default** (issue #454). Rows are upserted on the
+event identity in `_UPSERT_KEYS`, the same identity
+`fhir/sync.py::_upsert_clinical` uses — so an ETL re-run, a retry after a read
+timeout, or a re-parse converges instead of duplicating. Semantics per key:
+event already present → left in place, its concept updated when it changed and
+any stacked historical duplicates collapsed onto the earliest row; otherwise
+inserted. Repeats within one batch collapse to a single row (last occurrence
+wins). Only the concept column is rewritten on a matched row — every other
+column is left as stored, so a re-run cannot quietly overwrite a corrected
+value. Only inserted rows get a `ProvenanceRecord`. `?upsert=false` restores
+append-only writes.
+
+| Model | Event identity |
+|---|---|
+| ConditionOccurrence, DrugExposure, ProcedureOccurrence | `(source_value, date)` |
+| Measurement | `(source_value, date, datetime, value_as_number)` |
+| Observation | `(source_value, date, datetime, value_as_number, value_as_string, value_source_value)` |
+
+Measurement and Observation diverge on purpose: a patient legitimately has
+several distinct results for one analyte on one day, so `(source_value, date)`
+alone would delete real results instead of deduping a re-run.
+
+The concept column stays outside every key, which lets a vocabulary load upgrade
+a stored row in place instead of stranding a duplicate beside it. The same rule
+picks which value columns may join a key: only raw ones. `value_as_concept` is
+re-resolved by a vocabulary load just like `observation_concept`, so keying on
+it would strand the duplicate the design prevents. `value_source_value` is the
+raw text behind that resolution, so it separates two coded answers safely.
+
+A batch that trips a database constraint returns **409** with the driver's first
+error line, not 500. The whole batch rolled back, so the caller can retry, and a
+500 reads as "the service is down". A value the database refuses after
+validation (`DataError`, e.g. `numeric field overflow`) returns **400** with
+that first line, on the single-row, bulk create and bulk update writes: the
+same request fails the same way, so it is not a retry (#2101).
+
+A row with no `source_value` or no date has no identity and is always inserted.
+
+### Source hospital (`X-Provenance-Organization-ID`, #1690)
+
+One ETL credential reads several hospitals, and a hospital-scoped mapping only
+repoints rows whose provenance names that hospital. The five clinical endpoints
+on `/api/v1/` take the hospital as a header; the legacy `/api/` registration
+ignores it. Validation is shared with `code-mappings/lookup/`'s body
+`organization_id` (`patient_portal/api/provenance_org.py`).
+
+- **Validated before any write.** 400 for a malformed, empty, unknown or
+  inactive id, or for a header without a source (`X-Provenance-Source`, or
+  `source` in a single-dict body). 403 when it differs from an org-bound
+  credential's organization, or when the caller is neither a machine credential
+  nor staff.
+- **Attribution, not access.** It is stored on `ProvenanceRecord.organization`.
+  Authorization follows the credential, and `PatientRecord.organization` is
+  never changed.
+- **Hospital-aware matching.** With the header, existing rows are classed by
+  the non-null organizations on their provenance
+  (`omop_core/services/provenance_attribution.py`):
+
+  | Class | Outcome |
+  |---|---|
+  | own (exactly this hospital) | matched as above |
+  | unattributed | left as stored; each input position counts in `unattributed_matches` |
+  | foreign (another hospital, or two) | never touched; the event is inserted when only these hold the key |
+
+  A replay does not add attribution to historical rows. Without the header,
+  matching is unchanged, so ETL sends the header on every write.
+- **Duplicates collapse only within one attribution**, everywhere rows are
+  collapsed: this upsert, `fhir/sync.py`, and `repoint_clinical_rows`. Two
+  hospitals' rows for one event are two facts.
+- **A row's hospital is set once.** `_record_provenance` never replaces a stored
+  organization, and an update that names a second hospital gets 409. The check
+  runs with the clinical row locked, before it is read.
+- **Scoped repoint needs exclusive attribution**: a row naming two hospitals
+  stays where it is.
+
+Three things to know before touching this code:
+
+- **`bulk_create` does not fire `post_save`**, so the `omop_core/signals.py` receivers
+  that rebuild `PatientRecord` do not run. The bulk path calls `refresh_patient_record`
+  explicitly, once per batch. Any new bulk write path must do the same, or it will land
+  rows that the read model never reflects.
+- **Query count must stay flat in batch size.** DRF resolves FKs with a per-row
+  `queryset.get(pk=...)`; `_prefetch_bulk_related` collapses that to one query per FK
+  column. The upsert match is one superset `SELECT` for the whole batch, not the
+  per-key query `_upsert_clinical` can afford on a small FHIR compartment.
+  `BulkOmopWriteTest` and `BulkOmopUpsertTest` assert this with
+  `CaptureQueriesContext` at two batch sizes — treat a failure there as a real
+  regression, not a flaky threshold.
+- **The collapse path deletes rows, and `post_delete` receivers are live.** The
+  whole write block runs inside `suppress_patient_record_refresh()`; without it a
+  batch that collapses duplicates fires one refresh per deleted row.
+
+---
+
+## Bulk OMOP Row Deletes
+
+The five clinical endpoints delete in batches, on `/api/v1/` only:
+
+```
+POST /api/v1/measurements/bulk_delete/     {"ids": [10605646, 10605649, ...]}
+  200 {"deleted": 2, "missing": []}
+```
+
+Ids come from a prior read, so there is no matching logic server-side. One
+transaction, all-or-nothing. One batch is one person (mixed-person → 400).
+Max 5,000 ids (`OMOP_BULK_DELETE_MAX_IDS`) → 413. `?skip_refresh=true` defers
+the derivation, admin-gated as on the row level `DELETE`.
+
+**Ids that name no row come back in `missing` rather than failing the batch.**
+A retry after a read timeout, or a re-run of an applied batch, has to converge.
+Rows the caller cannot reach are reported the same way, so the endpoint cannot
+be used to tell an absent id from somebody else's.
+
+`POST`, not `DELETE`, because a `DELETE` with a body gets stripped by
+intermediaries. That makes the permission class matter: the viewsets use
+`PatientCrudPermission`, which grants a session patient `POST` but denies them
+`DELETE`, so the action overrides it with `EtlDeletePermission`: the base
+`ScopedTokenPermission`, which evaluated on a `POST` reproduces the `DELETE`
+rule, plus the `system/etl.delete` service scope that the row level `DELETE`
+also accepts (#1947). `system/etl.write` reaches neither. Per-person write
+access is `_authorize_person_write`, shared with the bulk create path.
+
+Three things that are easy to get wrong:
+
+- **Scoping is `_visible_clinical_rows`, not `get_queryset()`.** That queryset
+  carries the tenancy filter *and* hides `is_erroneous` rows. Only the first
+  half is wanted here, since a row flagged in error is one a reconciliation
+  most wants to drop.
+- **The lookup is locked inside the transaction.** Without `select_for_update`
+  a concurrent row level `PATCH` could move a row to another person between the
+  authorization and the delete.
+- **`queryset.delete()` fires `post_delete`**, unlike `bulk_create`. The delete
+  runs inside `suppress_patient_record_refresh()` with one explicit
+  `refresh_patient_record` after it. Without the suppression a 40-row batch
+  costs 40 derivations.
+
+`ProvenanceRecord` and `MeasurementOwnership` rows for the deleted ids go too.
+Neither has a database cascade: provenance points through a `GenericForeignKey`,
+and ownership holds a bare `measurement_id`. Ids are never reused
+(`next_pk` only advances its sequence), so the risk is orphan rows rather than
+mis-attribution. `EpisodeEvent` is deliberately left alone: its `event_id` is
+ambiguous without the field concept, and deleting by id alone would take out
+links belonging to another domain.
+
+---
+
+## Bulk OMOP Row Updates
+
+Updates are ~3% of the migration's volume, so this is the smallest of the three
+batch entrances. A correction pass still paid one request per row:
+
+```
+PATCH /api/v1/measurements/bulk_update/   [{"measurement_id": 106, "value_as_number": 7.5}, ...]
+  200 {"updated": 1, "missing": []}
+```
+
+Partial per row, through the same serializer and the same `partial=True` as the
+row level `PATCH`. One transaction, one person, one refresh, ids reported in
+`missing`, `409` on a constraint, per-index validation errors. Max 1,000 rows
+(`OMOP_BULK_MAX_ROWS`) → 413. Same locking and same scoping as the delete path.
+
+Rules specific to updates:
+
+- **`person` is rejected in the payload.** Moving a row to another person breaks
+  both the batch's single authorization and its single refresh. Use the row
+  level `PATCH` for that.
+- **Duplicate ids are rejected, not last-wins.** Two partial patches of one row
+  in one batch have no defined order.
+- **Rows carrying only an id are not counted and get no provenance.** They wrote
+  nothing.
+- **Errors are re-indexed onto the request rows.** Validation runs over matched
+  rows only, so an id that matched nothing would otherwise shift every error
+  after it onto the wrong row.
+
+Permissions are the viewset's own, because `PATCH` is open to session patients
+at the row level. `_authorize_person_write` on the batch's person is the guard,
+and `_visible_clinical_rows` builds the reachable set from the same access
+grants the row level path honours: self, verified representative, professional
+through `GroupAccess`.
+
+Writes are grouped by patched column set, one `bulk_update` per distinct shape.
+A single call takes one column list for every instance, so an ungrouped batch
+would write a column back onto rows whose payload never carried it, clobbering
+a concurrent change.
+
+**Each row is validated by its own serializer, bound to its instance.** That is
+what keeps the batch honest about partial writes: a serializer with no instance
+cannot tell a column the caller omitted from one it set to null. The FK caches
+are resolved once for the batch (`_bulk_fk_caches`) and shared across the row
+serializers, so the query count stays flat in batch size.
+
+### The partial-write trap behind it
+
+`MeasurementSerializer.validate` and `ObservationSerializer.validate` assigned
+`value_as_number` and `value_as_string` unconditionally, reading them out of
+`attrs` where a partial update had never put them. So a `PATCH` of an unrelated
+field wrote `None` over the row value. That was live on the row level `PATCH`,
+and `bulk_update` would have amplified it to a thousand rows a request.
+
+Both serializers now decide by what the write carries:
+
+| The write carries | Value columns |
+|---|---|
+| nothing, source is not an assertion code | untouched |
+| nothing, source becomes an assertion code | stored values coerced, both written |
+| one value column, source is not an assertion code | only that column written |
+| either value column, source is an assertion code | both written, coerced |
+
+An explicitly supplied value is never mixed with the stored sibling.
+`coerce_assertion_value` gives `value_as_string` precedence, so feeding the
+stored string back in would let it beat a patch that sets the number, and
+setting an assertion from 1 to 0 would silently stay true.
+
+---
+
+## Therapy-Line Import
+
+The OMOP row endpoints never write an `Episode`, so an ETL writes lines of
+therapy separately, once per person (#1969):
+
+```
+POST /api/v1/therapy-lines/bulk_upsert/
+  {"person": 16813, "lines": [{"line_number": 3, "start_date": "2021-07-15",
+                               "ongoing": true, "regimen": "Dara-CyPd",
+                               "outcome": "stringent complete response"}]}
+  200 {"person_id": 16813, "created": 1, "updated": 0,
+       "lines": [{"line_number": 3, "episode_id": ..., "created": true,
+                  "regimen_concept_id": ..., "regimen_match": "unmatched"}]}
+```
+
+Code: `patient_portal/api/therapy_line_import.py`, which calls
+`episode_service.author_therapy_lines`.
+
+- **Permission.** `EtlWritePermission` plus `_authorize_person_write`, as on the
+  bulk row writes. The editor's `POST /v1/therapy-lines/` refuses
+  `system/etl.write` on purpose: it is a patient's write.
+- **Upsert per line** on (person, cancer, `line_number`) through the editor's own
+  writer. Omitted fields are left as stored. `end_date: null`, `ongoing: true`
+  and `outcome: null` clear. Lines the request does not name are untouched, and
+  so is any composition (drug exposures) a line already has. Assertions are
+  recorded with `source='import'`.
+- **Regimen labels are never guessed.** A label resolves through the curated
+  `TherapyRegimen` code/title, then an exact HemOnc regimen name (not a synonym:
+  "R" is lenalidomide in myeloma and rituximab in lymphoma), else it is
+  quarantined under HK-Regimen with a `RegimenMappingGap` (`therapy-lines-api`).
+  The label is always the line's name. `regimen_concept_id` overrides the label,
+  and must be a live HemOnc or HK-Regimen regimen (400 otherwise).
+- **Outcomes** match the disease's catalog case-insensitively and are stored in
+  its spelling. An unknown outcome is a 400.
+- **One transaction, one derivation.** A refused line fails the batch (400,
+  naming the line). `?skip_refresh=true` defers the derivation, as on the bulk
+  row writes.
+
+---
+
+## FHIR Bundle Generator Architecture
+
+`omop_core/management/commands/generate_fhir_bundle.py`:
+
+- Each clinical concept is a separate method (e.g., `_generate_labs`, `_generate_biomarkers`, `_generate_therapy_lines`)
+- Add a new method for the new field's FHIR resource, or extend an existing method
+- Call the new method in `_generate_patient_bundle()` and append results to `entries`
+- Use realistic random ranges appropriate for the clinical domain (e.g., normal vs. pathological ranges)
+
+Run generator:
+```bash
+.venv/bin/python manage.py generate_fhir_bundle --count 100 --output data/breast_cancer_fhir_bundle.json
+```
+
+---
+
+## Repository conventions
+
+### Environment conventions
 
 - Staging always means Render: https://promop-staging.onrender.com.
 - The staging web service is `promop-staging`; its worker is `promop-staging-worker`.
@@ -17,17 +2098,17 @@ Django reads only `DATABASE_URL`, so every command sets it: `DATABASE_URL="${STA
 - `STAGING_DATABASE_URL` identifies Render staging; verify it matches the active Render web and worker configuration before database operations.
 - See `docs/render-staging-celery.md` for Render staging configuration and verification.
 
-# Pull request reviews
+### Pull request reviews
 
 - There is no team review process. Do not request team reviewers (including `healthkey`) or configure required team-review rules.
 - Request individual reviewers as directed by the user. Lars Burgess is `@larsburgess` on GitHub.
 - Merging to `dev` does not require review approval. Individual review requests are optional; required CI checks must still pass.
 
-# Pull request labels
+### Pull request labels
 
 - When an issue has a security-related label, apply the same label to its pull request.
 
-## Documentation-only changes
+#### Documentation-only changes
 
 - Documentation-only changes do not require application CI or local application
   test suites before push or merge. Review the content and check links and
@@ -55,7 +2136,7 @@ Django reads only `DATABASE_URL`, so every command sets it: `DATABASE_URL="${STA
 - Unrecognized paths, an unavailable diff, or detector failure retain normal CI.
   GitHub-managed CodeQL scanning is separate from the application CI workflow.
 
-## Backend CI scope
+#### Backend CI scope
 
 - Frontend-only changes (including recognized frontend assets/configuration and
   accompanying documentation) skip the backend suites. Backend, dependency,
@@ -65,9 +2146,10 @@ Django reads only `DATABASE_URL`, so every command sets it: `DATABASE_URL="${STA
 - CI is the gate for the full suites. Before a push, run only the tests the
   change touches (plus `npm run lint` and `npm run build` for frontend work);
   do not run the full Django or pytest suite locally. Wait for the required
-  checks before merging. See "Targeted Tests Before a Push" in `CLAUDE.md`.
+  checks before merging. See [Targeted Tests Before a Push, CI for the Full
+  Suites](#rule-targeted-tests-before-a-push-ci-for-the-full-suites) above.
 
-## Migration conflicts
+#### Migration conflicts
 
 Two branches that each add an `omop_core` migration off the same base are each
 green on their own, but once both merge, `dev` has two leaf migrations. Django
@@ -107,7 +2189,7 @@ so a stale green check does not catch it.
   migrations, merge one, then rebase the next onto the new `dev`, check it, and
   let CI pass before merging it.
 
-## Documentation naming and ownership
+#### Documentation naming and ownership
 
 - Use `_architecture.md` for implemented architecture and `_plan.md` for future
   work, delivery status, dependencies and acceptance gates.

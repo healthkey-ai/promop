@@ -13,9 +13,11 @@ from omop_core.models import (
     AxisVariantRefresh, ConceptMappingPriority, FieldConceptMapping, PatientSourceCode,
     SourceCodeConceptMapping, SuggestRun,
 )
+from omop_core.services import concept_lock
 from omop_core.services.concept_to_code import (
     browse_concepts, concept_payload, eligible_sources, source_payload, standard_destinations,
 )
+from omop_core.services.mapping_samples import attach_source_samples
 from omop_core.services.source_vocabularies import DOMAIN_TO_TABLE, VOCABULARY_OID_ALIASES
 from omop_core.services.suggest_jobs import get_dispatcher, InlineDispatcher
 
@@ -26,8 +28,8 @@ CONCEPT_PAGE_SIZES = (50, 100, 250, 500)
 
 
 def _authorize(user):
-    from patient_portal.api.views import _can_manage_field_mappings
-    if not _can_manage_field_mappings(user):
+    from patient_portal.api.views import _can_manage_code_mappings
+    if not _can_manage_code_mappings(user):
         raise PermissionDenied('Professional access required.')
 
 
@@ -77,11 +79,13 @@ def concept_to_code_list(request):
     domains = FieldConceptMapping.objects.exclude(status='rejected').filter(
         concept_id__in=standard_destinations().values('pk'),
     ).values('omop_table').annotate(count=Count('concept_id', distinct=True)).order_by('omop_table')
+    locks = concept_lock.locks_for([concept.pk for concept in page], request.user)
     return Response({
         **paging, 'domains': list(domains),
         'results': [{**concept_payload(concept), 'fields': field_map.get(concept.pk, []),
                      'sccm_counts': {key: getattr(concept, key) for key in ('approved', 'proposed', 'rejected')},
-                     'seen': concept.seen, 'priority': concept.priority} for concept in page],
+                     'seen': concept.seen, 'priority': concept.priority,
+                     'done': concept.done, 'lock': locks.get(concept.pk)} for concept in page],
         'prioritized': ConceptMappingPriority.objects.count(),
     })
 
@@ -108,6 +112,47 @@ def concept_to_code_priority(request):
     placed = concept_priority.move(concept, position, request.user)
     return Response({'concept_id': concept.pk, 'position': placed,
                      'prioritized': ConceptMappingPriority.objects.count()})
+
+
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def concept_to_code_done(request):
+    """Mark one concept Done, or return it to the queue (#2388).
+
+    Done unranks the concept; the list then shows it last, in italics.
+    """
+    from omop_core.services import concept_priority
+    _authorize(request.user)
+    data = request.data
+    if not isinstance(data, dict):
+        raise ValidationError({'detail': 'Supply a JSON object.'})
+    concept_id, done = data.get('concept_id'), data.get('done')
+    if type(concept_id) is not int or concept_id <= 0:
+        raise ValidationError({'concept_id': 'Supply a positive integer concept ID.'})
+    if type(done) is not bool:
+        raise ValidationError({'done': 'Supply true to mark the concept Done, false to return it to the queue.'})
+    concept = get_object_or_404(standard_destinations(), pk=concept_id)
+    marked = concept_priority.mark_done(concept, done, request.user)
+    return Response({'concept_id': concept.pk, 'done': marked, 'position': None,
+                     'prioritized': ConceptMappingPriority.objects.count()})
+
+
+@api_view(['POST', 'DELETE'])
+@permission_classes([IsAuthenticated])
+def concept_to_code_lock(request, concept_id):
+    """Claim a concept (POST) or release it (DELETE) (#2390).
+
+    While one curator holds the concept, others can review but not map it.
+    POST is idempotent for the holder and 423 for anyone else; DELETE is for
+    the holder or staff.
+    """
+    _authorize(request.user)
+    concept = get_object_or_404(standard_destinations(), pk=concept_id)
+    if request.method == 'POST':
+        lock = concept_lock.acquire(concept, request.user)
+        return Response({'concept_id': concept.pk, 'lock': concept_lock.lock_payload(lock, request.user)})
+    concept_lock.release(concept, request.user)
+    return Response({'concept_id': concept.pk, 'lock': None})
 
 
 @api_view(['GET'])
@@ -153,6 +198,7 @@ def concept_to_code_detail(request, concept_id):
                         else confidence.asc(nulls_last=True))
     page, paging = _paginate(rows.select_related('target_concept').prefetch_related('axis_variants__target_concept')
                              .order_by(*ordering), request.query_params)
+    attach_source_samples(page)
     return Response({**paging, **counts, 'status_counts': status_counts, 'concept': concept_payload(concept),
                      'results': [source_payload(row) for row in page]})
 
@@ -273,6 +319,8 @@ def concept_to_code_suggest(request):
     if not isinstance(ids, list) or not ids or any(type(value) is not int or value <= 0 for value in ids):
         raise ValidationError({'concept_ids': 'Supply a nonempty list of positive integer concept IDs.'})
     ids = list(dict.fromkeys(ids))
+    for concept_id in ids:
+        concept_lock.check_concept_lock(concept_id, request.user)
     dispatcher = get_dispatcher()
     inline = isinstance(dispatcher, InlineDispatcher)
     max_concepts = 1 if inline else 10
@@ -292,6 +340,19 @@ def concept_to_code_suggest(request):
     include_declined = data.get('include_declined', False)
     if type(include_declined) is not bool:
         raise ValidationError({'include_declined': 'Supply a boolean.'})
+    exclude_keys = data.get('exclude_keys', [])
+    if not isinstance(exclude_keys, list) or any(
+        not isinstance(pair, list) or len(pair) != 2
+        or not isinstance(pair[0], str) or not isinstance(pair[1], str)
+        for pair in exclude_keys
+    ):
+        raise ValidationError({'exclude_keys': 'Supply a list of [vocabulary_id, code] pairs.'})
+    exclude_keys = [tuple(pair) for pair in exclude_keys]
+    auto_propose_threshold = data.get('auto_propose_threshold', None)
+    if auto_propose_threshold is not None:
+        if not isinstance(auto_propose_threshold, (int, float)) or not 0 <= auto_propose_threshold <= 1:
+            raise ValidationError({'auto_propose_threshold': 'Supply a number between 0 and 1, or null to disable.'})
+        auto_propose_threshold = float(auto_propose_threshold)
     limit = data.get('limit', 10)
     if type(limit) is not int or not 1 <= limit <= 100:
         raise ValidationError({'limit': 'Choose a whole number from 1 to 100.'})
@@ -300,6 +361,7 @@ def concept_to_code_suggest(request):
     limit = min(limit, max(1, ceiling // len(ids)))
     params = dict(direction='reverse', concept_ids=ids, strategies=strategies, limit=limit,
                   include_zero_seen=include_zero, include_declined=include_declined, ranking_model=ranking_model,
+                  exclude_keys=exclude_keys, auto_propose_threshold=auto_propose_threshold,
                   retrieval_timeout_ms=8000 if inline else 30000)
     with transaction.atomic():
         run = SuggestRun.objects.create(
@@ -313,8 +375,8 @@ def concept_to_code_suggest(request):
 
 def _run_payload(run):
     return {'run_id': str(run.pk), 'state': run.state, 'total': run.total,
-            'done': run.done, 'error': run.error, 'selection': run.selection,
-            'activity': run.activity or []}
+            'done': run.done, 'destinations': run.destinations, 'error': run.error,
+            'selection': run.selection, 'activity': run.activity or []}
 
 
 @api_view(['GET'])
@@ -341,6 +403,7 @@ def concept_to_code_propose(request, concept_id):
     except (TypeError, ValueError):
         raise ValidationError({'run_id': 'Supply the source preview run ID.'})
     concept = get_object_or_404(standard_destinations(), pk=concept_id)
+    concept_lock.check_concept_lock(concept.pk, request.user)
     run = get_object_or_404(SuggestRun, pk=run_id, direction='reverse', state__in=[SuggestRun.SUCCESS, SuggestRun.FAILURE])
     candidate = next((candidate for event in (run.activity or [])
                       if event['concept']['concept_id'] == concept.pk
@@ -366,6 +429,8 @@ def concept_to_code_propose(request, concept_id):
            if len(fresh['source_code_description']) > 255 else {}),
         'domain_id': concept.domain_id, 'omop_table': DOMAIN_TO_TABLE[concept.domain_id],
         'status': 'proposed',
+        # The preview's ranker scored this source against this concept (#2382).
+        'decision_surface': 'concept2code', 'decision_confidence': candidate.get('confidence'),
     }, request.user)
     # The preview's ranker judged this source against this concept; without a
     # ranker the candidate carries no confidence and the row keeps none.
@@ -387,6 +452,7 @@ def concept_to_code_apply(request, concept_id, mapping_id):
     if not isinstance(request.data, dict):
         raise ValidationError({'detail': 'Supply a JSON object.'})
     concept = get_object_or_404(standard_destinations(), pk=concept_id)
+    concept_lock.check_concept_lock(concept.pk, request.user)
     row = get_object_or_404(SourceCodeConceptMapping.objects.select_for_update(), pk=mapping_id)
     if row.status != 'proposed' or row.origin_system == 'athena':
         return Response({'detail': 'This source is no longer an editable proposal. Refresh before reviewing it.'}, status=409)
@@ -400,11 +466,11 @@ def concept_to_code_apply(request, concept_id, mapping_id):
     if (row.domain_id and row.domain_id != concept.domain_id) or (row.omop_table and row.omop_table != table):
         raise ValidationError({'detail': 'Source and destination domains disagree. Review this source in the full editor.'})
     selected_status = request.data.get('status', 'proposed')
-    if selected_status not in ('proposed', 'approved'):
-        raise ValidationError({'status': 'Choose proposed or approved.'})
+    if selected_status not in ('proposed', 'approved', 'rejected'):
+        raise ValidationError({'status': 'Choose proposed, approved or rejected.'})
     row, repoint = _upsert_source_code_mapping(concept, {
         'status': selected_status, 'domain_id': concept.domain_id, 'omop_table': table,
-        'destination_vocabulary_id': concept.vocabulary_id,
+        'destination_vocabulary_id': concept.vocabulary_id, 'decision_surface': 'concept2code',
     }, request.user, mapping=row)
     return Response({**source_payload(row), 'repoint': repoint})
 
