@@ -48,6 +48,12 @@ async function selectConcept(canApprove = true) {
 }
 
 describe('concept-first curation', () => {
+  it('links to the mapping accuracy analytics page from the top of the tab (#2383)', async () => {
+    render(<ConceptToCodeTab canApprove />);
+    const link = await screen.findByRole('link', { name: 'Mapping accuracy analytics' });
+    expect(link).toHaveAttribute('href', '/code-mappings/accuracy/analytics');
+  });
+
   it('opens a dialog immediately from a long concept list and shows source loading errors inside it', async () => {
     const concepts = Array.from({ length: 50 }, (_, index) => ({
       ...concept, concept_id: 123 + index, concept_name: index ? `Concept ${index}` : concept.concept_name,

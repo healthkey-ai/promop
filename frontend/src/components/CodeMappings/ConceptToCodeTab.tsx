@@ -3,6 +3,7 @@ import * as Dialog from '@radix-ui/react-dialog';
 import api from '@/api/axios';
 import { fetchDiseaseCategories } from '@/api/mappingHub';
 import { destinationError } from './destinationSearch';
+import { BarChart3 } from 'lucide-react';
 import AxisVariantWalkPanel from './AxisVariantWalkPanel';
 import EditMappingDialog from './EditMappingDialog';
 import { AxisVariantFlag, AxisVariantList } from './LoincAxisChips';
@@ -209,6 +210,11 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange, initialC
       <div>
         <h2 className="text-lg font-semibold text-slate-950">Source-code coverage</h2>
         <p className="mt-1 text-sm text-slate-600">Choose a standard concept, then review the source codes that should map to it.</p>
+        {/* How well the ranker's confidence predicts curator decisions, per surface (#2383). */}
+        <a href="/code-mappings/accuracy/analytics"
+          className="mt-2 inline-flex items-center gap-1.5 text-sm font-medium text-slate-700 underline hover:text-slate-950">
+          <BarChart3 size={16} aria-hidden="true" />Mapping accuracy analytics
+        </a>
       </div>
       {/* The walk that keeps unit counts and axis variants current after new
           patients are loaded, and what it found of the other axes (#2050, #2051). */}

@@ -22475,6 +22475,62 @@ class CodeMappingApiTest(TestCase):
         self.assertEqual(self.mapping.decision_confidence, 0.4)
         self.assertIsNone(self.mapping.suggestion_confidence)
 
+    # ---------------------------------------------- accuracy analytics (#2383)
+
+    def test_accuracy_analytics_sections_rows_and_scores(self):
+        """One table per surface plus Overall; rows by the ranker's confidence
+        band at decision time; unscored decisions count in Overall only."""
+        def decided(code, surface, confidence, status_value, outcome=''):
+            return SourceCodeConceptMapping.objects.create(
+                source_vocabulary_id='ICD10CM', source_code=code, target_concept=self.standard,
+                omop_table='measurement', status=status_value, decision_surface=surface,
+                decision_confidence=confidence, suggestion_outcome=outcome,
+            )
+        decided('A1', 'concept2code', 0.95, 'approved', 'accepted')
+        decided('A2', 'concept2code', 0.9, 'approved', 'accepted')      # band edge: 90-100
+        decided('A3', 'concept2code', 0.85, 'rejected', 'rejected')
+        decided('A4', 'code2concept', 0.75, 'approved', 'overridden')
+        decided('A5', 'code2concept', 0.2, 'proposed')
+        decided('A6', 'patientcode', None, 'approved', 'accepted')      # unscored: Overall only
+        decided('A7', '', 0.99, 'approved', 'accepted')                 # no curator save: excluded
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.get('/api/v1/code-mappings/accuracy/analytics/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        sections = {s['key']: {r['key']: r for r in s['rows']} for s in resp.data['sections']}
+        self.assertEqual([s['key'] for s in resp.data['sections']],
+                         ['overall', 'concept2code', 'code2concept', 'patientcode'])
+        self.assertEqual([r['key'] for r in resp.data['sections'][0]['rows']],
+                         ['overall', '90-100', '80-90', '70-80', 'below-70'])
+        # self.mapping (proposed, no surface) and A7 are not curator decisions.
+        overall = sections['overall']['overall']
+        self.assertEqual((overall['total'], overall['approved'], overall['proposed'], overall['rejected']),
+                         (6, 4, 1, 1))
+        # accepted 3, overridden 1, rejected 1: precision 3/5, recall 3/4.
+        self.assertAlmostEqual(overall['precision'], 0.6)
+        self.assertAlmostEqual(overall['recall'], 0.75)
+        self.assertAlmostEqual(overall['f1'], 2 * 3 / (2 * 3 + 2 * 1 + 1))
+        top = sections['overall']['90-100']
+        self.assertEqual((top['total'], top['approved'], top['precision'], top['recall'], top['f1']), (2, 2, 1.0, 1.0, 1.0))
+        self.assertEqual(sections['overall']['80-90']['rejected'], 1)
+        self.assertEqual(sections['overall']['80-90']['precision'], 0.0)
+        self.assertEqual(sections['overall']['70-80']['approved'], 1)
+        self.assertEqual(sections['overall']['below-70']['proposed'], 1)
+        self.assertIsNone(sections['overall']['below-70']['precision'])
+        # Per surface.
+        self.assertEqual(sections['concept2code']['overall']['total'], 3)
+        self.assertEqual(sections['code2concept']['overall']['total'], 2)
+        patient = sections['patientcode']
+        self.assertEqual(patient['overall']['total'], 1)
+        self.assertEqual(sum(patient[band]['total'] for band in ('90-100', '80-90', '70-80', 'below-70')), 0)
+
+    def test_accuracy_analytics_needs_a_professional_role(self):
+        self.client.force_authenticate(user=self.non_staff)
+        resp = self.client.get('/api/v1/code-mappings/accuracy/analytics/')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.client.force_authenticate(user=None)
+        self.assertEqual(self.client.get('/api/v1/code-mappings/accuracy/analytics/').status_code,
+                         status.HTTP_401_UNAUTHORIZED)
+
     def test_an_explicit_null_keeps_the_rows_confidence_while_the_destination_stands(self):
         """The dialog's run did not score the stored destination (UMLS settled
         it, or the rankers declined): the live score is still the ranker's

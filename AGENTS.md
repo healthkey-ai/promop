@@ -1242,6 +1242,16 @@ therefore records two more columns (#2382), read by the accuracy analytics:
   whatever the payload says). Blank means no curator has saved the row, or a
   machine moved its destination since.
 
+The Mapping Accuracy Analytics page (`/code-mappings/accuracy/analytics`,
+linked from the top of the Concept to Code tab, #2383) reads them: one table
+per surface plus Overall, rows for every decision and for the 90–100, 80–90,
+70–80 and below-70 confidence bands, columns for total, approved, proposed and
+rejected counts and the precision, recall and F1 the accuracy dashboard
+computes from `suggestion_outcome` on the same rows. A decision no ranker
+scored counts in the Overall row only; a row with a blank surface is not a
+curator decision and is not counted. One grouped query
+(`code_mapping_accuracy_analytics`).
+
 Suggest never writes either column: reverse Suggest's auto-propose goes
 through the same writer with `record_decision=False`. A machine write that
 moves a destination outside the writer (a code-mapping upload, Athena

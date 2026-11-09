@@ -14370,6 +14370,93 @@ def code_mapping_accuracy_dashboard(request):
     })
 
 
+# Confidence bands the Mapping Accuracy Analytics page reports (#2383), in
+# display order after the Overall row. A decision no ranker scored
+# (decision_confidence null) counts in the Overall row only.
+DECISION_CONFIDENCE_BANDS = (
+    ('90-100', '90–100% confidence'),
+    ('80-90', '80–90%'),
+    ('70-80', '70–80%'),
+    ('below-70', 'Below 70%'),
+)
+DECISION_SURFACE_SECTIONS = (
+    ('overall', 'Overall'),
+    ('concept2code', 'Concept to Code'),
+    ('code2concept', 'Code to Concept'),
+    ('patientcode', 'Patient source codes'),
+)
+
+
+def _decision_band_case():
+    return Case(
+        When(decision_confidence__isnull=True, then=Value('')),
+        When(decision_confidence__gte=0.9, then=Value('90-100')),
+        When(decision_confidence__gte=0.8, then=Value('80-90')),
+        When(decision_confidence__gte=0.7, then=Value('70-80')),
+        default=Value('below-70'), output_field=CharField(),
+    )
+
+
+def _decision_accuracy_row(key, label, statuses, outcomes):
+    """One analytics row: the curator's statuses, and the ranker's record on
+    the same mappings scored as the accuracy dashboard scores a model."""
+    scored = _suggestion_accuracy_from_counts(outcomes)
+    return {
+        'key': key, 'label': label,
+        'total': sum(statuses.values()),
+        'approved': statuses.get('approved', 0),
+        'proposed': statuses.get('proposed', 0),
+        'rejected': statuses.get('rejected', 0),
+        'precision': scored['precision'], 'recall': scored['recall'], 'f1': scored['f1'],
+    }
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def code_mapping_accuracy_analytics(request):
+    """Curator decisions by surface and by the ranker's confidence (#2383).
+
+    Reads the decision columns (#2382): every mapping a curator has saved,
+    sectioned by the surface of that save and banded by the confidence the
+    ranker had in the destination at the time. Precision, recall and F1 use
+    ``suggestion_outcome`` on the same rows, as the accuracy dashboard does:
+    accepted is a true positive, overridden or rejected a false positive, and
+    an override is also the miss recall counts. One grouped query.
+    """
+    if not _can_manage_field_mappings(request.user):
+        return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
+    from collections import Counter
+
+    def empty():
+        return {key: {'statuses': Counter(), 'outcomes': Counter()}
+                for key in ('overall', *[band for band, _label in DECISION_CONFIDENCE_BANDS])}
+    sections = {surface: empty() for surface, _label in DECISION_SURFACE_SECTIONS}
+    groups = (
+        SourceCodeConceptMapping.objects.exclude(decision_surface='').order_by()
+        .annotate(band=_decision_band_case())
+        .values('decision_surface', 'band', 'status', 'suggestion_outcome')
+        .annotate(total=Count('id'))
+    )
+    for group in groups:
+        for section in (sections['overall'], sections.get(group['decision_surface'])):
+            if section is None:
+                continue
+            rows = [section['overall']] + ([section[group['band']]] if group['band'] else [])
+            for row in rows:
+                row['statuses'][group['status']] += group['total']
+                if group['suggestion_outcome']:
+                    row['outcomes'][group['suggestion_outcome']] += group['total']
+    labels = dict(DECISION_CONFIDENCE_BANDS)
+    return Response({'sections': [
+        {
+            'key': surface, 'label': label,
+            'rows': [_decision_accuracy_row(key, labels.get(key, 'Overall'), rows['statuses'], rows['outcomes'])
+                     for key, rows in sections[surface].items()],
+        }
+        for surface, label in DECISION_SURFACE_SECTIONS
+    ]})
+
+
 # HK-* vocabulary -> the clinical table whose concept-0 rows it curates. The
 # inverse of _QUARANTINE_TARGETS, which the resolver keys the other way.
 def _table_for_hk_vocabulary(vocabulary_id):
