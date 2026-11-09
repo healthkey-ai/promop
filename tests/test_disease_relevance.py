@@ -228,6 +228,11 @@ def test_signal_rights_follow_the_mapping_page_roles(django_user_model, role, ca
     api.force_authenticate(user)
 
     queue = api.get(SIGNALS, {'status': 'all'})
+    if role == 'analyst':
+        # Relevance signals are a curation page an analyst does not reach (#2398).
+        assert queue.status_code == 403
+        assert api.patch(f'{SIGNALS}{proposed.id}/', {'status': 'rejected'}, format='json').status_code == 403
+        return
     assert queue.status_code == 200
     assert queue.data['permissions'] == {'can_accept': can_accept, 'can_reject': can_reject}
 

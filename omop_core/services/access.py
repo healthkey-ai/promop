@@ -156,16 +156,24 @@ def get_admin_access_paths(user):
     paths = []
     professional = {}
     org_grants = [grant for grant in active if grant.org_id]
+    # An organization trust makes a professional at the trusted org an admin
+    # of the granting org. Only the curation roles carry that far: an analyst
+    # is a code-mapping curator and a read-only viewer at their own org, and
+    # would otherwise write the granting org's patients and approve its
+    # mappings through the trust (#2398). Patient-only grants never did.
+    trust_expanding = {}
     for grant in org_grants:
         if grant.role == 'org_admin':
             paths.append({'org': grant.org, 'source': 'org_grant',
                           'expires_at': grant.expires_at})
         if grant.role != 'patient':
             professional[grant.org_id] = grant
+        if grant.role in CURATION_ROLES:
+            trust_expanding[grant.org_id] = grant
     for trust in OrgTrust.objects.filter(
-        trusted_org_id__in=professional, granting_org__is_active=True,
+        trusted_org_id__in=trust_expanding, granting_org__is_active=True,
     ).select_related('granting_org', 'trusted_org').order_by('id'):
-        grant = professional[trust.trusted_org_id]
+        grant = trust_expanding[trust.trusted_org_id]
         paths.append({
             'org': trust.granting_org, 'source': 'organization_trust',
             'source_org_name': trust.trusted_org.name,
@@ -219,18 +227,43 @@ def has_explicit_org_admin_access(user, slug: str) -> bool:
     ).exists()
 
 
-def has_professional_access(user) -> bool:
-    """Return True when the user holds any professional role (org_admin, doctor, analyst).
+PROFESSIONAL_ROLES = ('org_admin', 'doctor', 'analyst')
+"""Every non-patient role: who may read patients and curate code mappings."""
 
-    Used to gate access to mapping curation pages — any professional can
-    propose mappings, but only org admins and staff can approve them.
-    """
+CURATION_ROLES = ('org_admin', 'doctor')
+"""The roles with the full curation reach: field, therapy and disease-category
+mappings, relevance signals, source systems, the mapping hub, and admin
+authority through an organization trust. An analyst is deliberately absent
+(#2398): the role is a code-mapping curator and a read-only patient viewer."""
+
+
+def _has_active_role(user, roles) -> bool:
     if getattr(user, 'is_staff', False):
         return True
     now = timezone.now()
     return GroupAccess.objects.filter(
         identity=user,
-        role__in=('org_admin', 'doctor', 'analyst'),
+        role__in=roles,
     ).filter(
         Q(expires_at__isnull=True) | Q(expires_at__gt=now),
     ).exists()
+
+
+def has_professional_access(user) -> bool:
+    """Return True when the user holds any professional role (org_admin, doctor, analyst).
+
+    Gates the Code Mapping page, which every professional may propose on
+    (approval is staff and org_admin only), and the patient list and detail
+    reads. For every other curation page use ``has_curation_access``.
+    """
+    return _has_active_role(user, PROFESSIONAL_ROLES)
+
+
+def has_curation_access(user) -> bool:
+    """Return True when the user is staff, an org_admin or a doctor.
+
+    Everything a professional reaches beyond Code Mapping and patient reads:
+    field mappings, therapy and disease-category reference, relevance
+    signals, source systems, the mapping hub. An analyst gets False (#2398).
+    """
+    return _has_active_role(user, CURATION_ROLES)

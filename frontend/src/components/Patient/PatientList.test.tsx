@@ -164,7 +164,10 @@ it('places Upload immediately after Mappings', async () => {
   expect(screen.queryByRole('button', { name: 'Upload CSV' })).not.toBeInTheDocument();
 });
 
-it.each(['analyst', 'doctor'])('does not show Org Admin to an organization %s', async role => {
+it.each([
+  ['doctor', 'Mappings', true],
+  ['analyst', 'Code Mapping', false],
+])('does not show Org Admin to an organization %s', async (role, mappingsLabel, upload) => {
   mockUseAuth.mockReturnValue({
     currentUser: {
       org_accesses: [{ role, org_name: 'Example', org_slug: 'example', expires_at: null }],
@@ -174,8 +177,8 @@ it.each(['analyst', 'doctor'])('does not show Org Admin to an organization %s', 
 
   render(<MemoryRouter><PatientList /></MemoryRouter>);
 
-  expect(await screen.findByRole('button', { name: 'Mappings' })).toBeInTheDocument();
-  expect(screen.getByRole('button', { name: 'Upload' })).toBeInTheDocument();
+  expect(await screen.findByRole('button', { name: mappingsLabel })).toBeInTheDocument();
+  expect(!!screen.queryByRole('button', { name: 'Upload' })).toBe(upload);
   expect(screen.queryByRole('button', { name: 'Org Admin' })).not.toBeInTheDocument();
 });
 
@@ -231,4 +234,21 @@ it('downloads every matching patient with the list filters when all are selected
     params: expect.objectContaining({ ecog: '0', org: 'all' }), responseType: 'blob',
   })));
   expect(await screen.findByText(/At most 500 patients per export/)).toBeInTheDocument();
+});
+
+it('offers an analyst Code Mapping, not the mapping hub, upload or delete', async () => {
+  mockUseAuth.mockReturnValue({ currentUser: { org_accesses: [{ org_slug: 'acme', org_name: 'Acme', role: 'analyst', expires_at: null }] } });
+  vi.mocked(api.get).mockResolvedValue({ data: { count: 1, results: [
+    { person_id: 1, patient_name: 'Alexandra Catherine Example', disease: 'Breast Cancer' },
+  ] } });
+  render(<MemoryRouter><PatientList /></MemoryRouter>);
+  await screen.findByTitle('Alexandra Catherine Example');
+  fireEvent.click(screen.getByRole('button', { name: 'Code Mapping' }));
+  expect(navigate).toHaveBeenCalledWith('/code-mappings');
+  expect(screen.queryByRole('button', { name: 'Mappings' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Upload' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Org Admin' })).not.toBeInTheDocument();
+  fireEvent.click(screen.getAllByRole('checkbox')[1]);
+  expect(screen.queryByRole('button', { name: /^Delete/ })).not.toBeInTheDocument();
+  expect(screen.getByRole('button', { name: /Download CSV/ })).toBeInTheDocument();
 });

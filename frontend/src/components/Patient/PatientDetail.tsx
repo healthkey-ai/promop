@@ -27,6 +27,7 @@ import PatientSourceCodesTab from "./PatientSourceCodesTab";
 import { confirmRecord } from "@/api/clinicalFacts";
 import { mayBeUnitedStates } from "@/lib/usZip";
 import { FieldMappingLinksProvider } from "@/components/PatientInfo/fieldMappingLinks";
+import { isReadOnlyAnalyst } from "@/utils/roles";
 
 type SaveStatus = "idle" | "pending" | "saving" | "saved" | "error";
 
@@ -322,6 +323,9 @@ export default function PatientDetail({
   const params = useParams<{ personId: string }>();
   const personId = personIdOverride ?? params.personId;
   const navigate = useNavigate();
+  // An analyst views a record read-only (#2398): the API refuses the PATCH,
+  // so nothing here is offered for editing and no autosave is scheduled.
+  const readOnly = !patientMode && isReadOnlyAnalyst(user);
 
   const [loading, setLoading] = useState(true);
   const [fetchError, setFetchError] = useState<string | null>(null);
@@ -591,6 +595,7 @@ export default function PatientDetail({
 
    
   const scheduleAutoSave = useCallback((info: Record<string, unknown>, name: string) => {
+    if (readOnly) return;
     pendingDataRef.current = { info, name };
     if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
     setSaveStatus("pending");
@@ -598,7 +603,7 @@ export default function PatientDetail({
       autoSaveTimerRef.current = null;
       doSave();
     }, 2000);
-  }, [doSave]);
+  }, [doSave, readOnly]);
 
    
   // Re-read the record from the server. Used where an edit lands somewhere the
@@ -847,7 +852,12 @@ export default function PatientDetail({
             <div className="shrink-0">
               <SaveStatusIndicator status={saveStatus} onRetry={doSave} />
             </div>
-            {!patientMode && (
+            {readOnly && (
+              <span className="inline-flex shrink-0 items-center rounded-full border border-border bg-[#f5f7fa] px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-muted-foreground">
+                Read-only
+              </span>
+            )}
+            {!patientMode && !readOnly && (
               <div className="flex shrink-0 items-center gap-2">
                 <button
                   onClick={handleInvite}
@@ -910,7 +920,9 @@ export default function PatientDetail({
                 <p className="mt-1 text-sm text-muted-foreground">{tabDescriptions[activeTab]}</p>
               </div>
 
-              <div key={activeTab} className="animate-tab-in px-8 pb-10">
+              {/* A disabled fieldset disables every native control inside it,
+                  so one wrapper makes the whole record read-only. */}
+              <fieldset key={activeTab} disabled={readOnly} className="m-0 min-w-0 animate-tab-in border-0 p-0 px-8 pb-10">
                 {activeTab === 0 && (
                   <>
                     {patientMode && (
@@ -980,7 +992,7 @@ export default function PatientDetail({
                 {surveysIdx >= 0 && activeTab === surveysIdx && <PatientSurveys user={user ?? null} />}
                 {sourceCodesIdx >= 0 && activeTab === sourceCodesIdx && personId && <PatientSourceCodesTab personId={personId} />}
                 {omopIdx >= 0 && activeTab === omopIdx && personId && <PatientOmopTab personId={personId} />}
-              </div>
+              </fieldset>
             </div>
           </>
         )}

@@ -3,6 +3,7 @@ import CodeMappingUploadDialog, { type CodeMappingUploadResult } from "./CodeMap
 import SourceQuantityCell from "./SourceQuantityCell";
 import { rowMatchesSearch, SEARCH_PLACEHOLDER } from "./mappingSearch";
 import PageTitle from '@/components/Branding/PageTitle';
+import { hasCurationRole } from '@/utils/roles';
 import InlineDestinationPicker from "./InlineDestinationPicker";
 import SuggestCandidates, { type CandidateActivity } from "./SuggestCandidates";
 import EditMappingDialog from "./EditMappingDialog";
@@ -320,6 +321,9 @@ export default function CodeMappingPage() {
   const navigate = useNavigate();
   const { currentUser } = useAuth();
   const canApprove = !!(currentUser?.is_staff || currentUser?.is_org_admin);
+  // The CSV upload and the source-system registry are curation, not code
+  // mapping: an analyst reaches neither (#2398), and the API refuses both.
+  const canCurate = hasCurationRole(currentUser);
   // ?direction=reverse&concept=<id>, from the field mapper's {codes} button:
   // open Concept → Source Code on that concept's source codes.
   const [searchParams] = useSearchParams();
@@ -1335,15 +1339,19 @@ export default function CodeMappingPage() {
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <a href="/code-mappings/source-systems"
-              className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-800 hover:bg-slate-100">
-              Source systems / hospitals
-            </a>
-            <button type="button" onClick={() => setUploadOpen(true)} disabled={!referenceReady}
-              className="inline-flex items-center gap-2 rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-800 hover:bg-slate-100">
-              <Upload size={16} />
-              Upload
-            </button>
+            {canCurate && (
+              <>
+                <a href="/code-mappings/source-systems"
+                  className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-800 hover:bg-slate-100">
+                  Source systems / hospitals
+                </a>
+                <button type="button" onClick={() => setUploadOpen(true)} disabled={!referenceReady}
+                  className="inline-flex items-center gap-2 rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-800 hover:bg-slate-100">
+                  <Upload size={16} />
+                  Upload
+                </button>
+              </>
+            )}
             <button
               onClick={openNewDialog}
               disabled={!referenceReady}

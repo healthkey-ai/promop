@@ -63,9 +63,9 @@ class MintInput(serializers.Serializer):
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def mint_destination(request):
-    from .views import _can_manage_field_mappings, _concept_name_search_filter, _serialize_concept
+    from .views import _can_manage_code_mappings, _concept_name_search_filter, _serialize_concept
 
-    if not _can_manage_field_mappings(request.user):
+    if not _can_manage_code_mappings(request.user):
         return Response({'detail': 'Mapping curator access required.'}, status=403)
     inputs = MintInput(data=request.data)
     inputs.is_valid(raise_exception=True)

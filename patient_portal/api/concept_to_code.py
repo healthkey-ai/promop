@@ -28,8 +28,8 @@ CONCEPT_PAGE_SIZES = (50, 100, 250, 500)
 
 
 def _authorize(user):
-    from patient_portal.api.views import _can_manage_field_mappings
-    if not _can_manage_field_mappings(user):
+    from patient_portal.api.views import _can_manage_code_mappings
+    if not _can_manage_code_mappings(user):
         raise PermissionDenied('Professional access required.')
 
 
