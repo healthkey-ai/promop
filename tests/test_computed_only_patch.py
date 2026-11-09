@@ -150,3 +150,44 @@ def test_the_shared_form_ignores_an_unchanged_echo_beside_a_real_edit(client):
     assert 'meets_crab' not in response.data['write']['rejected']
     assert 'bmi' not in response.data['write']['rejected']
     assert 'weight' in response.data['write']['applied']
+
+
+@pytest.mark.parametrize('submitted', ['on', 't', 'y', '1', 'yes', 'TRUE'])
+def test_boolean_spellings_of_a_changed_verdict_are_still_refused(client, submitted):
+    record = _record()
+    record.meets_crab = False
+    record.save(update_fields=['meets_crab'])
+
+    response = client.patch(
+        NATIVE, {'meets_crab': submitted, 'disease': 'CLL'}, format='json')
+
+    assert response.status_code == 400, (submitted, response.data)
+    record.refresh_from_db()
+    assert record.meets_crab is False
+    assert record.disease != 'CLL'
+
+
+@pytest.mark.parametrize('submitted', ['on', 't', 'y', 'bogus'])
+def test_the_shared_form_refuses_boolean_spellings_too(client, submitted):
+    record = _record()
+    record.meets_crab = False
+    record.save(update_fields=['meets_crab'])
+
+    response = client.patch(
+        FORM, {'meets_crab': submitted, 'disease': 'CLL'}, format='json',
+        HTTP_X_PATIENT_FORM='1')
+
+    assert response.status_code == 400, (submitted, response.data)
+    record.refresh_from_db()
+    assert record.meets_crab is False
+    assert record.disease != 'CLL'
+
+
+def test_an_equivalent_boolean_echo_is_still_allowed(client):
+    record = _record()
+    record.meets_crab = True
+    record.save(update_fields=['meets_crab'])
+
+    response = client.patch(NATIVE, {'meets_crab': 'on'}, format='json')
+
+    assert response.status_code == 200, response.data

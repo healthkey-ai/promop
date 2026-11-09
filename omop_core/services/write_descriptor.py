@@ -433,15 +433,30 @@ def _same_computed_value(field_name, current, submitted):
     except FieldDoesNotExist:
         return current == submitted
     if isinstance(model_field, django_models.BooleanField):
+        # Match DRF's BooleanField vocabulary, and treat anything else as an
+        # unknown value rather than as False: a changed verdict must never look
+        # like an unchanged echo and slip through.
+        unknown = object()
+
         def coerce(value):
             if isinstance(value, bool):
                 return value
-            if isinstance(value, str):
-                return value.strip().casefold() in {'true', '1', 'yes'}
+            if value is None:
+                return None
             if isinstance(value, (int, float)):
                 return bool(value)
-            return value
-        return coerce(current) == coerce(submitted)
+            if isinstance(value, str):
+                text = value.strip().casefold()
+                if text in {'true', '1', 'yes', 'on', 't', 'y'}:
+                    return True
+                if text in {'false', '0', 'no', 'off', 'f', 'n', ''}:
+                    return False
+            return unknown
+
+        left, right = coerce(current), coerce(submitted)
+        if left is unknown or right is unknown:
+            return False
+        return left == right
     if isinstance(model_field, django_models.DecimalField):
         try:
             quantum = Decimal(1).scaleb(-model_field.decimal_places)
