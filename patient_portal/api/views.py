@@ -12661,8 +12661,9 @@ def _existing_mapping_conflict(existing, requested_table):
     )
     filed = _table_label(existing.omop_table)
     requested = _table_label(requested_table)
+    verb = 'is already mapped' if existing.target_concept_id else 'is already in the queue, unmapped'
     message = (
-        f"'{existing.source_code}' is already mapped ({existing.status}{destination}), "
+        f"'{existing.source_code}' {verb} ({existing.status}{destination}), "
         f"and that mapping's destination table is {filed}"
     )
     if requested_table and requested_table != existing.omop_table:
@@ -12857,13 +12858,23 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None, person_id=Non
     previous_concept_id = mapping.target_concept_id if mapping else None
     pending_repoints = list(mapping.pending_repoint_concept_ids) if mapping else []
     deferred_repoints = list(mapping.deferred_repoint_concept_ids) if mapping else []
-    if (pending_repoints or deferred_repoints) and (
+    identity_moved = mapping is not None and (
         source_vocabulary_id != mapping.source_vocabulary_id
         or source_code != mapping.source_code
         or (organization.pk if organization else None) != mapping.organization_id
-        or domain_id != mapping.domain_id
-        or (omop_table and omop_table != mapping.omop_table)
-    ):
+    )
+    table_moved = mapping is not None and (
+        domain_id != mapping.domain_id
+        or bool(omop_table and omop_table != mapping.omop_table)
+    )
+    # A background job is re-pointing rows in the mapping's table right now, so
+    # neither the source identity nor the table may change under it. Rows only
+    # *waiting* for Generate OMOP (a patient-page approval always leaves the
+    # unresolved concept 0 here) are found by this source code in whatever table
+    # the mapping names at that time, so moving the table is allowed -- it is
+    # how a mapping filed under the wrong table is put where its rows are
+    # (#2347). Changing the code itself would orphan them either way.
+    if (pending_repoints and (identity_moved or table_moved)) or (deferred_repoints and identity_moved):
         raise serializers.ValidationError({'detail': (
             'This source has clinical rows still moving to its destination, in a '
             'background job or waiting for Generate OMOP. Change its source '

@@ -22478,6 +22478,49 @@ class CodeMappingApiTest(TestCase):
         self.assertEqual(self.mapping.status, 'approved')
         self.assertEqual(self.mapping.target_concept_id, self.standard.concept_id)
 
+    def test_a_mapping_waiting_for_generate_omop_can_still_change_table(self):
+        """A patient-page approval leaves the unresolved concept in
+        deferred_repoint_concept_ids until Generate OMOP runs; the move offered
+        for #2347 must not be refused by it. A changed code still is, and so
+        is any change while a background job is re-pointing."""
+        SourceCodeConceptMapping.objects.filter(pk=self.mapping.pk).update(
+            status='approved', deferred_repoint_concept_ids=[0],
+        )
+        self.client.force_authenticate(user=self.staff)
+        move = {'domain_id': 'Observation', 'omop_table': 'observation', 'status': 'approved',
+                'destination_concept_id': self.standard.concept_id}
+        resp = self.client.patch(f'/api/v1/code-mappings/{self.mapping.pk}/', move, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.mapping.refresh_from_db()
+        self.assertEqual(self.mapping.omop_table, 'observation')
+        self.assertIn(0, self.mapping.deferred_repoint_concept_ids)
+
+        resp = self.client.patch(f'/api/v1/code-mappings/{self.mapping.pk}/',
+                                 {**move, 'source_code': 'M-PROTEIN, SERUM (RENAMED)'}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('still moving', str(resp.data['detail']))
+
+        SourceCodeConceptMapping.objects.filter(pk=self.mapping.pk).update(
+            pending_repoint_concept_ids=[self.minted.concept_id],
+        )
+        resp = self.client.patch(f'/api/v1/code-mappings/{self.mapping.pk}/',
+                                 {**move, 'domain_id': 'Measurement', 'omop_table': 'measurement'},
+                                 format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('still moving', str(resp.data['detail']))
+
+    def test_conflict_with_a_destination_less_queue_row_does_not_call_it_mapped(self):
+        SourceCodeConceptMapping.objects.filter(pk=self.mapping.pk).update(target_concept=None)
+        self.client.force_authenticate(user=self.staff)
+        resp = self.client.post('/api/v1/code-mappings/', {
+            'source_vocabulary_id': '',
+            'source_code': 'M-PROTEIN, SERUM',
+            'destination_concept_id': self.standard.concept_id,
+            'omop_table': 'observation',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
+        self.assertIn('is already in the queue, unmapped (proposed)', str(resp.data['source_code']))
+
     def test_create_rejects_unknown_destination_concept(self):
         self.client.force_authenticate(user=self.staff)
         resp = self.client.post('/api/v1/code-mappings/', {

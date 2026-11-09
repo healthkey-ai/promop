@@ -747,8 +747,10 @@ export default function EditMappingDialog({
       err && typeof err === "object" && "response" in err
         ? (err as { response?: { data?: unknown } }).response?.data
         : undefined;
+    // A refused move (lock, rights) carries no conflict block; keep the offer
+    // so the curator can retry rather than re-submit the form to get it back.
     const conflict = existingMappingConflict(detail);
-    setExistingMapping(conflict);
+    if (conflict) setExistingMapping(conflict);
     const message =
       detail && typeof detail === "object" && !Array.isArray(detail)
         ? Object.entries(detail as Record<string, unknown>)
@@ -860,7 +862,8 @@ export default function EditMappingDialog({
             {error && (
               <div role="alert" className="mb-4 rounded-md border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
                 {error}
-                {existingMapping && (
+                {existingMapping
+                  && (canApprove || existingMapping.status !== "approved" || form.status === "approved") && (
                   <div className="mt-2 flex flex-wrap items-center gap-2">
                     <button
                       type="button"
@@ -875,7 +878,9 @@ export default function EditMappingDialog({
                     <span className="text-xs text-red-600">
                       Saves this destination and status onto that mapping
                       {existingMapping.target_concept_name
-                        ? `, replacing ${existingMapping.target_concept_name}` : ""}.
+                        ? `, replacing ${existingMapping.target_concept_name}` : ""}
+                      {existingMapping.status === "approved" && form.status !== "approved"
+                        ? `, and un-approves it (status becomes ${form.status || "proposed"})` : ""}.
                     </span>
                   </div>
                 )}

@@ -30,7 +30,7 @@ _INSERT_MISSING = """
     SELECT DISTINCT s.concept_id, c.domain_id, UPPER(BTRIM(part))
     FROM concept_synonym s
     JOIN concept c ON c.concept_id = s.concept_id
-    CROSS JOIN LATERAL regexp_split_to_table(s.concept_synonym_name, ';') AS part
+    CROSS JOIN LATERAL string_to_table(s.concept_synonym_name, ';') AS part
     WHERE c.standard_concept = 'S'
       AND c.invalid_reason IS NULL
       AND c.domain_id = ANY(%(domains)s)
@@ -48,7 +48,7 @@ _DELETE_STALE = """
         SELECT 1
         FROM concept c
         JOIN concept_synonym s ON s.concept_id = c.concept_id
-        CROSS JOIN LATERAL regexp_split_to_table(s.concept_synonym_name, ';') AS part
+        CROSS JOIN LATERAL string_to_table(s.concept_synonym_name, ';') AS part
         WHERE c.concept_id = t.concept_id
           AND c.domain_id = t.domain_id
           AND UPPER(BTRIM(part)) = t.term

@@ -1161,10 +1161,11 @@ Three rules that keep it honest:
   picks a partial index it can prove applies. Change `standard_concept='S',
   invalid_reason IS NULL, domain_id=…` in `lexical_candidates` and the indexes
   silently stop being used.
-- **An unbuilt table falls back, it does not return less.** `is_populated(domain)`
+- **An unbuilt table falls back to whole synonyms.** `is_populated(domain)`
   is false for a test database or a never-refreshed instance, and for a search
   with no domain (ICD-10 searches all of them); retrieval then reads
-  `concept_synonym` directly — slow, complete.
+  `concept_synonym` directly — slow, every synonym, but scored as the whole
+  string, so without the per-part split below.
 - **`lexical_candidates` still re-checks standing on `concept`.** A term that went
   stale since the last refresh can cost a shortlist slot; it can never put a
   retired concept in front of the ranker.

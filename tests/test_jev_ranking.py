@@ -289,3 +289,23 @@ class TestDualRankerFallbackIsNotAVerdict:
         )
         assert chosen['concept_id'] == 100
         assert 'Ranking model unavailable' in note
+
+    def test_an_anthropic_decline_beats_the_jev_fallback(self):
+        a_alts = [{'concept_id': 100, 'concept_name': 'Hemoglobin A1c', 'confidence': 0.05, 'ranker': 'anthropic'}]
+        chosen, note, _, _ = self._both(
+            (None, 'No suitable concept. Nothing fits.', a_alts),
+            (_candidates()[0], self.FALLBACK_NOTE.replace(
+                'Anthropic rejected the configured API key (HTTP 401)', 'JEV_API_KEY is not configured'), None),
+        )
+        assert chosen is None
+        assert note == 'No suitable concept. Nothing fits. (Jev unavailable: JEV_API_KEY is not configured)'
+
+    def test_the_fallback_stands_when_the_other_ranker_crashed(self):
+        """A crash is neither a pick nor a decline, so it cannot outrank the stand-in."""
+        with patch('omop_core.mapping.suggestions.rank_candidates',
+                   return_value=(_candidates()[0], self.FALLBACK_NOTE, None)), \
+             patch('omop_core.mapping.suggestions.rank_candidates_jev', side_effect=RuntimeError('boom')):
+            chosen, note, _, _ = rank_candidates_dispatch(
+                'M Spike 1', _candidates(), 'm spike 1', ranking_model='both')
+        assert chosen['concept_id'] == 100
+        assert 'Ranking model unavailable' in note
