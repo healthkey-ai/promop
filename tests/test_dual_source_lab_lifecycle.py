@@ -116,7 +116,9 @@ def test_a_patient_result_sits_beside_the_imported_fact(lab):
 
     imported.refresh_from_db()
     assert (imported.value_as_number, imported.unit_source_value,
-            imported.measurement_type_concept_id) == (10, 'g/dL', EHR_TYPE)
+            imported.measurement_type_concept_id,
+            imported.measurement_date, imported.measurement_source_value) == (
+        10, 'g/dL', EHR_TYPE, TODAY, LOINC)
     patient = _hemoglobin_rows(lab, SELF_REPORT_TYPE).get()
     assert (patient.value_as_number, patient.unit_source_value) == (12, 'g/dL')
     assert patient.measurement_date == TODAY
@@ -275,9 +277,13 @@ def test_a_newer_unsupported_unit_blocks_the_older_convertible_result(lab):
     assert record.hemoglobin_level_units is None
 
 
-def test_an_out_of_range_import_is_not_a_fact(lab):
-    _import(lab, 100000, 'g/L', TODAY)
+def test_an_out_of_range_import_leaves_no_canonical_read_model(lab):
+    imported = _import(lab, 100000, 'g/L', TODAY)
 
     record = lab['record']
     record.refresh_from_db()
     assert record.hemoglobin_g_dl is None
+    # The OMOP fact is still the import's own record; only the canonical
+    # read-model refuses a value the column cannot hold.
+    imported.refresh_from_db()
+    assert imported.value_as_number == 100000
