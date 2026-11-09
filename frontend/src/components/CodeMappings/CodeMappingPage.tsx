@@ -1,6 +1,7 @@
 import ConceptToCodeTab from "./ConceptToCodeTab";
 import CodeMappingUploadDialog, { type CodeMappingUploadResult } from "./CodeMappingUploadDialog";
 import SourceQuantityCell from "./SourceQuantityCell";
+import { rowMatchesSearch, SEARCH_PLACEHOLDER } from "./mappingSearch";
 import PageTitle from '@/components/Branding/PageTitle';
 import InlineDestinationPicker from "./InlineDestinationPicker";
 import SuggestCandidates, { type CandidateActivity } from "./SuggestCandidates";
@@ -648,7 +649,7 @@ export default function CodeMappingPage() {
 
   const visibleRows = useMemo(() => {
     if (browse) return rows;
-    const q = searchQuery.trim().toLowerCase();
+    const q = searchQuery.trim();
     return rows.filter((row) => {
       if (seenOnly && !(row.occurrence_count > 0)) return false;
       // A query is an intentional escape hatch from the current tab: a
@@ -657,18 +658,9 @@ export default function CodeMappingPage() {
       // review queue.
       if (!q && selectedVocabulary !== OVERALL_TAB && tabForRow(row) !== selectedVocabulary) return false;
       if (!q) return true;
-      return [
-        row.source_code,
-        row.source_vocabulary_id,
-        row.source_code_description,
-        row.organization_name,
-        row.organization_slug,
-        row.source_system_context?.label,
-        ...(row.source_system_context?.names || []),
-        row.destination_concept_name,
-        row.destination_concept_code,
-        String(row.destination_concept_id),
-      ].some((value) => (value || "").toLowerCase().includes(q));
+      // Same rules as the server's search (#2376): a number is a source
+      // code, and `field:value` searches one field.
+      return rowMatchesSearch(row, q);
     });
   }, [rows, searchQuery, selectedVocabulary, browse, seenOnly]);
 
@@ -1391,7 +1383,7 @@ export default function CodeMappingPage() {
                 aria-label="Search mappings"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Search source codes, destination concepts, or OMOP IDs"
+                placeholder={SEARCH_PLACEHOLDER}
                 className="h-10 w-full rounded-md border border-slate-300 bg-white pl-9 pr-3 text-sm text-slate-950 outline-none focus:border-slate-700"
               />
             </label>

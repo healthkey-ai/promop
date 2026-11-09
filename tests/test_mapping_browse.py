@@ -398,24 +398,54 @@ def test_aliases_global_search_rejected_and_sections(browse):
     assert browse(source='').data['results'] == []
 
 
-def test_digit_search_matches_source_code_substring_and_concept_id(browse):
-    """An all-digit search used to raise FieldError (icontains on the
-    target_concept foreign key) and the page showed "Failed to load code
-    mappings" (#2371). It finds a source code containing the digits and a
-    row whose destination concept has exactly that id, and nothing else."""
-    concept = ConceptFactory(concept_id=3004061, concept_name='Hemoglobin')
+OID = 'urn:oid:1.2.840.114350.1.13.300.2.7.5.737384.162'
+
+
+def test_digit_search_matches_only_the_source_code(browse):
+    """A number is a source code (#2376). It used to match the digits of an
+    Epic OID vocabulary, so every row of that code system came back, and
+    before #2371 it raised FieldError on the concept id foreign key."""
+    concept = ConceptFactory(concept_id=3004061, concept_name='Hemoglobin 114350')
     row('LAB-3004061-A', source_vocabulary_id='LOINC')
     row('OTHER', source_vocabulary_id='LOINC', target_concept=concept, status='approved')
     row('30040', source_vocabulary_id='LOINC')
-    row('UNRELATED', source_vocabulary_id='LOINC')
+    row('6784', source_vocabulary_id=OID, source_code_description='Protein 3004061')
+    row('X', source_vocabulary_id=OID)
 
-    data = browse(source='LOINC', search='3004061').data
+    data = browse(source='__overall__', search='3004061').data
+    assert {r['source_code'] for r in data['results']} == {'LAB-3004061-A'}
+    assert [r['source_code'] for r in browse(source='__overall__', search='114350').data['results']] == []
 
-    assert {r['source_code'] for r in data['results']} == {'LAB-3004061-A', 'OTHER'}
     # Too big for an integer column; thousands of digits int() refuses;
     # isdigit() but not int(). Each used to be, or would be, a 500.
     for odd in ('9' * 12, '9' * 5000, '\u00b2', '\u2460'):
         assert browse(source='LOINC', search=odd).data['results'] == []
+
+
+@pytest.mark.parametrize(('search', 'expected'), [
+    ('code:6784', {'6784'}),
+    ('Source_Code_Value: 6784 ', {'6784'}),
+    ('source_code:prot', set()),
+    ('description:prot', {'6784'}),
+    ('system:114350', {'6784', 'X'}),
+    ('vocabulary:loinc', {'OTHER'}),
+    ('concept:hemo', {'OTHER'}),
+    ('concept_code:HGB', {'OTHER'}),
+    ('concept_id:3004061', {'OTHER'}),
+    ('concept_id:300406', set()),
+    ('concept_id:abc', set()),
+    ('org:hospital', {'X'}),
+    ('urn:oid:1.2.840', {'6784', 'X'}),   # not a field: plain text
+    ('code:', set()),                      # empty value: plain text "code:"
+])
+def test_fielded_search_restricts_to_one_field(browse, search, expected):
+    from omop_core.models import Organization
+    concept = ConceptFactory(concept_id=3004061, concept_name='Hemoglobin', concept_code='HGB-1')
+    row('6784', source_vocabulary_id=OID, source_code_description='Protein')
+    row('X', source_vocabulary_id=OID, organization=Organization.objects.create(name='Hospital A', slug='hospital-a'))
+    row('OTHER', source_vocabulary_id='LOINC', target_concept=concept, status='approved')
+
+    assert {r['source_code'] for r in browse(source='__overall__', search=search).data['results']} == expected
 
 
 def test_duplicates_include_off_page_and_rejected_members(browse):
