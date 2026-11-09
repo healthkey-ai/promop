@@ -21,6 +21,8 @@ from django.core.exceptions import FieldDoesNotExist
 from django.db import models as django_models
 from django.db.models import Q
 
+from rest_framework.fields import BooleanField
+
 from omop_core.models import (
     Concept, ConditionOccurrence, DrugExposure, FieldChoice, Measurement,
     Observation, PatientRecord, PreExistingConditionCategory, ProcedureOccurrence,
@@ -42,6 +44,8 @@ from omop_core.services.blood_count_source_pairs import (
 )
 from omop_core.services.chemistry_units import PAIRS as CHEMISTRY_SOURCE_PAIRS
 from omop_core.services import direct_bilirubin_units
+
+_NULLABLE_BOOLEAN = BooleanField(allow_null=True)
 
 # Every field resolves to exactly one kind. A binary writable/not left a third of
 # the record looking broken — a field is not "unwritable" because it is a unit
@@ -433,25 +437,17 @@ def _same_computed_value(field_name, current, submitted):
     except FieldDoesNotExist:
         return current == submitted
     if isinstance(model_field, django_models.BooleanField):
-        # Match DRF's BooleanField vocabulary, and treat anything else as an
-        # unknown value rather than as False: a changed verdict must never look
-        # like an unchanged echo and slip through.
+        # Use DRF's own field so the vocabulary (including null spellings and
+        # the 0/1-only numeric rule) cannot drift. Invalid input is never an
+        # echo; a changed verdict must always reach the refusal.
+        from rest_framework.exceptions import ValidationError as DrfValidationError
         unknown = object()
 
         def coerce(value):
-            if isinstance(value, bool):
-                return value
-            if value is None:
-                return None
-            if isinstance(value, (int, float)):
-                return bool(value)
-            if isinstance(value, str):
-                text = value.strip().casefold()
-                if text in {'true', '1', 'yes', 'on', 't', 'y'}:
-                    return True
-                if text in {'false', '0', 'no', 'off', 'f', 'n', ''}:
-                    return False
-            return unknown
+            try:
+                return _NULLABLE_BOOLEAN.run_validation(value)
+            except (DrfValidationError, TypeError, ValueError):
+                return unknown
 
         left, right = coerce(current), coerce(submitted)
         if left is unknown or right is unknown:

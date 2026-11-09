@@ -152,7 +152,7 @@ def test_the_shared_form_ignores_an_unchanged_echo_beside_a_real_edit(client):
     assert 'weight' in response.data['write']['applied']
 
 
-@pytest.mark.parametrize('submitted', ['on', 't', 'y', '1', 'yes', 'TRUE'])
+@pytest.mark.parametrize('submitted', ['on', 't', 'y', '1', 'yes', 'TRUE', '', 2])
 def test_boolean_spellings_of_a_changed_verdict_are_still_refused(client, submitted):
     record = _record()
     record.meets_crab = False
@@ -167,7 +167,7 @@ def test_boolean_spellings_of_a_changed_verdict_are_still_refused(client, submit
     assert record.disease != 'CLL'
 
 
-@pytest.mark.parametrize('submitted', ['on', 't', 'y', 'bogus'])
+@pytest.mark.parametrize('submitted', ['on', 't', 'y', 'bogus', '', 2])
 def test_the_shared_form_refuses_boolean_spellings_too(client, submitted):
     record = _record()
     record.meets_crab = False
@@ -191,3 +191,19 @@ def test_an_equivalent_boolean_echo_is_still_allowed(client):
     response = client.patch(NATIVE, {'meets_crab': 'on'}, format='json')
 
     assert response.status_code == 200, response.data
+
+
+def test_a_null_echo_of_an_empty_verdict_is_allowed_on_both_routes(client):
+    for submitted in ('null', ''):
+        response = client.patch(NATIVE, {'meets_crab': submitted}, format='json')
+        assert response.status_code == 200, (submitted, response.data)
+
+    for submitted in ('null', '', None):
+        response = client.patch(
+            FORM, {'meets_crab': submitted}, format='json',
+            HTTP_X_PATIENT_FORM='1')
+        # A pure no-op may be answered as "no fields were saved"; what matters
+        # is that it is not refused as a forged assignment.
+        assert response.status_code in (200, 400), (submitted, response.data)
+        if response.status_code == 400:
+            assert 'computed from' not in str(response.data)
