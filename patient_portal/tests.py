@@ -23786,6 +23786,38 @@ class CodeMappingRepointTest(RunsRepointJobsMixin, TestCase):
         self.assertEqual(again.status_code, status.HTTP_200_OK, again.data)
         self.assertIsNone(again.data['relocation'])
 
+    def test_rows_follow_even_when_the_mapping_came_from_a_third_table(self):
+        """The mapping was misfiled under Condition, the rows sit in measurement,
+        and the curator picks an Observation-domain concept: the table change
+        from Condition cannot move anything, but the rows still follow."""
+        Domain.objects.get_or_create(domain_id='Condition', defaults={'domain_name': 'Condition', 'domain_concept_id': 19})
+        observation_domain, _ = Domain.objects.get_or_create(
+            domain_id='Observation', defaults={'domain_name': 'Observation', 'domain_concept_id': 27})
+        alcohol = Concept.objects.create(
+            concept_id=3027199, concept_name='Alcohol use inventory', domain=observation_domain,
+            vocabulary=self.loinc_vocab, concept_class=self.concept_class, standard_concept='S',
+            concept_code='74013-4', valid_start_date=date(1970, 1, 1), valid_end_date=date(2099, 12, 31),
+        )
+        mapping = SourceCodeConceptMapping.objects.create(
+            source_vocabulary_id='', source_code='History of Alcohol Use', target_concept=self.minted,
+            domain_id='Condition', omop_table='condition', status='proposed', origin='import', origin_system='hk-labs',
+        )
+        row = self._measurement(8892102, 0, date(2026, 8, 12), None, source_value='History of Alcohol Use')
+        resp = self.client.patch(f'/api/v1/code-mappings/{mapping.id}/', {
+            'patient_id': self.person.person_id, 'domain_id': 'Observation', 'omop_table': 'observation',
+            'rows_omop_table': 'measurement', 'destination_concept_id': alcohol.concept_id, 'status': 'proposed',
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
+        self.assertEqual((resp.data['relocation']['from_table'], resp.data['relocation']['rows_relocated']), ('measurement', 1))
+        self.assertFalse(Measurement.objects.filter(pk=row.pk).exists())
+        self.assertTrue(Observation.objects.filter(person=self.person, observation_source_value='History of Alcohol Use').exists())
+        # An unknown rows table is a 400, not a sensible-looking skip.
+        bad = self.client.patch(f'/api/v1/code-mappings/{mapping.id}/', {
+            'patient_id': self.person.person_id, 'rows_omop_table': 'labs', 'status': 'proposed',
+        }, format='json')
+        self.assertEqual(bad.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('rows_omop_table', bad.data)
+
     def test_a_tab_save_that_changes_the_table_moves_every_patients_rows_after_commit(self):
         mapping, row, _provenance, _inventory = self._misfiled_folate()
         other = Person.objects.create(

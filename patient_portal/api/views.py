@@ -13208,7 +13208,18 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None, person_id=Non
     # rows, say -- leaves the code Unmapped there and its Proposed group empty
     # (#2393), so that patient's rows follow the mapping too.
     rows_table = normalize_omop_table(data.get('rows_omop_table')) if person_id is not None else ''
-    if mapping.relocation is None and rows_table and new_table and rows_table != new_table:
+    if rows_table and rows_table not in CLINICAL_TABLES:
+        raise serializers.ValidationError({'rows_omop_table': (
+            f"Unknown OMOP table {rows_table!r}. Expected one of: {', '.join(sorted(CLINICAL_TABLES))}."
+        )})
+    # Gate on what the block above moved, not on whether it recorded anything:
+    # a mapping misfiled under a third table records a skip there while the
+    # rows, listed elsewhere, still have to follow.
+    moved_from = previous_table if (
+        table_moved and previous_table and new_table and previous_table != new_table
+        and relocatable(previous_table, new_table)
+    ) else ''
+    if rows_table and new_table and rows_table != new_table and rows_table != moved_from:
         if not relocatable(rows_table, new_table):
             mapping.relocation = {
                 'queued': False, 'from_table': rows_table, 'to_table': new_table,
