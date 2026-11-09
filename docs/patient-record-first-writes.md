@@ -283,9 +283,10 @@ dated envelope is refused rather than silently stamped with today.
 The draw date is carried into the canonical projection at save time; it is not
 stored with the pending pair. A projection skipped by its savepoint or by a
 missing type concept keeps the value pending but not the date, so a later retry
-records that answer on the day it is projected. And because the pair stays pending until an explicit
-canonical event, an older dated pair remains the record's current answer even
-though its fact is history — the editor must not promise otherwise.
+records that answer on the day it is projected. And because the pair stays
+pending until an explicit canonical event, an older dated pair remains the
+record's current answer even though its fact is history — the editor must not
+promise otherwise.
 
 ## Frontend Simplification
 
