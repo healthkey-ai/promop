@@ -75,18 +75,21 @@ function TherapyRowEditor({
   }, [open]);
 
   return (
-    <span className="inline-flex items-center">
-      <button
-        type="button"
-        aria-label={`Edit ${label}`}
-        title={`Edit ${label}`}
-        onClick={() => onOpenChange(true)}
-        className="rounded p-1 text-muted-foreground hover:text-foreground"
-      >
-        <Pencil className="h-4 w-4" strokeWidth={1.67} />
-      </button>
-      <Dialog.Root modal={false} open={open} onOpenChange={onOpenChange}>
-        <Dialog.Portal>
+    <Dialog.Root modal={false} open={open} onOpenChange={onOpenChange}>
+      <span className="inline-flex items-center">
+        {/* A real trigger, so Radix returns focus here when the panel closes. */}
+        <Dialog.Trigger asChild>
+          <button
+            type="button"
+            aria-label={`Edit ${label}`}
+            title={`Edit ${label}`}
+            className="rounded p-1 text-muted-foreground hover:text-foreground"
+          >
+            <Pencil className="h-4 w-4" strokeWidth={1.67} />
+          </button>
+        </Dialog.Trigger>
+      </span>
+      <Dialog.Portal>
           {/* Below the nested line editor (z-50): that dialog portals to the
               body and must sit above this panel, not behind it. */}
           <Dialog.Overlay className="fixed inset-0 z-40 bg-black/40" />
@@ -123,9 +126,8 @@ function TherapyRowEditor({
               />
             ) : null}
           </Dialog.Content>
-        </Dialog.Portal>
-      </Dialog.Root>
-    </span>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }
 
