@@ -3,7 +3,8 @@ import * as Dialog from '@radix-ui/react-dialog';
 import api from '@/api/axios';
 import { fetchDiseaseCategories } from '@/api/mappingHub';
 import { destinationError } from './destinationSearch';
-import { BarChart3, Lock, Unlock } from 'lucide-react';
+import { BarChart3, Lock, StickyNote, Unlock } from 'lucide-react';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/shadcn/popover';
 import AxisVariantWalkPanel from './AxisVariantWalkPanel';
 import EditMappingDialog from './EditMappingDialog';
 import { AxisVariantFlag, AxisVariantList } from './LoincAxisChips';
@@ -22,7 +23,11 @@ type Concept = {
   done?: boolean;
   /** Who has claimed the concept, and whether that is the viewer (#2390). */
   lock?: { username: string; locked_at?: string; mine: boolean } | null;
+  /** The curators' shared note about the concept, when one is written (#2411). */
+  note?: ConceptNote | null;
 };
+type ConceptNote = { text: string; updated_by?: string; updated_at?: string };
+const NOTE_MAX_LENGTH = 4000;
 /** Another curator holds the concept: review only. */
 const lockedByOther = (concept: Concept) => Boolean(concept.lock && !concept.lock.mine);
 type Source = {
@@ -190,6 +195,15 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange, initialC
       setError(`Could not ${locking ? 'lock' : 'unlock'} ${concept.concept_name}. ${destinationError(failure)}`);
     } finally { setMoving(false); }
   };
+  // A saved note changes only its own row, at once. The reload that follows
+  // replaces any list request that began before the save and would bring the
+  // old note back (#2411).
+  const noteSaved = (concept: Concept, note: ConceptNote | null) => {
+    setData(previous => previous && { ...previous, results: previous.results.map(
+      row => row.concept_id === concept.concept_id ? { ...row, note } : row) });
+    setRevision(value => value + 1);
+    setMoveStatus(note ? `Saved the note for ${concept.concept_name}.` : `Cleared the note for ${concept.concept_name}.`);
+  };
   // Done means its source codes are mapped: the concept loses its priority,
   // shows "Done" in the Priority column and sorts last (#2388).
   const markDone = async (concept: Concept, done: boolean) => {
@@ -309,6 +323,7 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange, initialC
           <td className="p-3"><button className="text-left font-medium text-slate-950 underline underline-offset-2" disabled={writing}
             aria-haspopup="dialog" aria-expanded={selected?.concept_id === concept.concept_id}
             onClick={event => { selectedTrigger.current = event.currentTarget; setSelected(concept); }}>{concept.concept_name}</button>
+            <NoteBadge concept={concept} onSaved={note => noteSaved(concept, note)} />
             <LockBadge concept={concept} disabled={writing || moving} onToggle={() => void toggleLock(concept)} />
             <div className="mt-1 text-xs text-slate-500">{concept.vocabulary_id}:{concept.concept_code} · OMOP {concept.concept_id} · {concept.domain_id}</div></td>
           <td className="p-3 text-xs text-slate-600">{concept.fields.length
@@ -342,6 +357,76 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange, initialC
       </Dialog.Content>
     </Dialog.Portal>}
   </Dialog.Root>;
+}
+
+/** The concept's note: an outlined icon while there is none, a filled one
+ * showing the text on hover once there is. Clicking opens a small popup to
+ * write, change or clear it. Another curator's lock does not stop an edit: a
+ * note is commentary, not a mapping write (#2411). */
+function NoteBadge({ concept, onSaved }: { concept: Concept; onSaved: (note: ConceptNote | null) => void }) {
+  const note = concept.note ?? null;
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [failure, setFailure] = useState('');
+  // Each opening starts from the stored note; a save in flight keeps the popup up.
+  const change = (next: boolean) => {
+    if (saving) return;
+    if (next) { setDraft(note?.text ?? ''); setFailure(''); }
+    setOpen(next);
+  };
+  const unchanged = draft.trim() === (note?.text ?? '');
+  // The shortcut comes here too, so the guard is here and not only on the button.
+  const save = async () => {
+    if (saving || unchanged) return;
+    setSaving(true); setFailure('');
+    try {
+      const { data } = await api.put<{ note: ConceptNote | null }>(
+        `/v1/concept-to-code/${concept.concept_id}/note/`, { note: draft });
+      setOpen(false);
+      onSaved(data.note ?? null);
+    } catch (error) {
+      const data = (error as { response?: { data?: { note?: string; detail?: string } } })?.response?.data;
+      setFailure(`Could not save the note. ${data?.note || data?.detail || 'Try again.'}`);
+    } finally { setSaving(false); }
+  };
+  // A copied note has no author here; it still has a date.
+  const saved = note?.updated_at ? new Date(note.updated_at).toLocaleDateString() : '';
+  const byline = note && (note.updated_by ? `Last saved by ${[note.updated_by, saved].filter(Boolean).join(', ')}`
+    : saved && `Last saved ${saved}`);
+  // The popup is drawn outside the table, but React still sends its events up
+  // to the row, which is a drag source and a drop target for priority.
+  const keepFromRow = (event: React.DragEvent) => event.stopPropagation();
+  return <Popover open={open} onOpenChange={change}>
+    <PopoverTrigger asChild>
+      <button type="button" data-has-note={note ? 'true' : 'false'}
+        className={`ml-2 inline-flex items-center rounded border px-1 py-0.5 align-middle not-italic hover:bg-slate-100 ${
+          note ? 'border-amber-300 bg-amber-50 text-amber-700' : 'border-slate-300 text-slate-500'}`}
+        title={note ? note.text : 'Add a note about this concept'}
+        aria-label={`${note ? 'Edit the note' : 'Add a note'} for ${concept.concept_name}`}>
+        <StickyNote size={12} aria-hidden="true" className={note ? 'fill-amber-200' : ''} />
+      </button>
+    </PopoverTrigger>
+    <PopoverContent align="start" aria-label={`Note for ${concept.concept_name}`} className="w-80 bg-white p-3 not-italic text-slate-900"
+      onDragStart={keepFromRow} onDragOver={keepFromRow} onDragLeave={keepFromRow} onDrop={keepFromRow} onDragEnd={keepFromRow}>
+      <form onSubmit={event => { event.preventDefault(); void save(); }}>
+        <label htmlFor={`concept-note-${concept.concept_id}`} className="mb-1 block text-xs font-medium text-slate-700">
+          Note for {concept.concept_name}</label>
+        <textarea id={`concept-note-${concept.concept_id}`} rows={4} maxLength={NOTE_MAX_LENGTH} value={draft} disabled={saving}
+          className="w-full rounded border border-slate-300 px-2 py-1 text-sm" placeholder="What should curators know about this concept?"
+          onChange={event => setDraft(event.target.value)}
+          onKeyDown={event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); void save(); } }} />
+        {byline && <p className="mt-1 text-xs text-slate-500">{byline}</p>}
+        {failure && <p role="alert" className="mt-1 text-xs text-rose-700">{failure}</p>}
+        <div className="mt-2 flex items-center justify-end gap-2">
+          <button type="button" className="rounded border border-slate-300 px-2 py-1 text-xs hover:bg-slate-100 disabled:opacity-40"
+            disabled={saving} onClick={() => change(false)}>Cancel</button>
+          <button type="submit" className="rounded bg-slate-900 px-2 py-1 text-xs text-white hover:bg-slate-700 disabled:opacity-40"
+            disabled={saving || unchanged}>{saving ? 'Saving…' : draft.trim() || !note ? 'Save' : 'Clear note'}</button>
+        </div>
+      </form>
+    </PopoverContent>
+  </Popover>;
 }
 
 /** The concept's lock: a lock icon with the holder's name when someone holds

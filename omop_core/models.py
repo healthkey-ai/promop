@@ -4480,6 +4480,34 @@ class ConceptMappingLock(models.Model):
         return f'locked by {self.locked_by_id}: concept {self.concept_id}'
 
 
+class ConceptMappingNote(models.Model):
+    """A curator's note about a standard concept on Concept to Code (#2411).
+
+    One shared note per concept: why it is parked, what to check before
+    mapping it. Clearing the note deletes the row. Commentary, not a mapping
+    write, so another curator's lock does not stop an edit. Reference data:
+    copy_reference_data moves it, matched on the concept's
+    (vocabulary_id, concept_code).
+    """
+    MAX_LENGTH = 4000
+
+    concept = models.OneToOneField(
+        Concept, on_delete=models.CASCADE, related_name='mapping_note',
+    )
+    text = models.TextField()
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='+',
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'concept_mapping_note'
+
+    def __str__(self):
+        return f'note: concept {self.concept_id}'
+
+
 class CustomPatientField(models.Model):
     """Administrator-defined PatientRecord field backed by ``custom_fields``.
 
