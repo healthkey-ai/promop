@@ -11,19 +11,17 @@
 //   const { mount } = await import("<promop>/widget/promop-patient-info.js");
 //   const dispose = mount(el, { apiBase: "/api/v1/federation", token, readOnly: false });
 import { StrictMode } from "react";
-import { createPortal } from 'react-dom';
 import { createRoot, type Root } from "react-dom/client";
 
 import { PatientInfo } from "./PatientInfo";
 import { PatientFormContext } from "./PatientFormContext";
 import { injectStyles } from "./injectStyles";
 import { patientFormRuntime, retainPatientFormRuntime, type PatientFormConnection } from './patientFormRuntime';
+import FieldSlots from './FieldSlots';
 import { __resetWritableFieldsCache } from '@/hooks/useWritableFields';
-import PatientFieldEditor from './PatientFieldEditor';
 import TherapyLinesPanel from './TherapyLinesPanel';
 import GenomicsFindingsModal from './GenomicsFindingsModal';
 import type { PatientFormResult } from './patientFormStore';
-import { hasNewSaveError } from './saveErrors';
 
 export interface MountOptions extends PatientFormConnection {
   /** Base the form calls: `${apiBase}/patient-info/me/`, and the clinical helpers'
@@ -92,25 +90,13 @@ export function mountFields(el: HTMLElement, opts: MountOptions = {}): () => voi
   if (!container) throw new Error('Patient field editor requires a data-promop-form container.');
   const slots = [...container.querySelectorAll<HTMLElement>('[data-promop-field]')];
   const release = retainPatientFormRuntime(opts);
-  const stopUpdates = opts.onPatientUpdated ? runtime.store.onUpdated(opts.onPatientUpdated) : () => {};
-  let lastErrors = runtime.store.getSnapshot().errors;
-  const stopErrors = runtime.store.subscribe(() => {
-    const errors = runtime.store.getSnapshot().errors;
-    if (hasNewSaveError(lastErrors, errors)) opts.onSaveError?.();
-    lastErrors = errors;
-  });
-  subscriptions.set(el, () => { stopUpdates(); stopErrors(); release(); });
-  void runtime.store.load();
+  subscriptions.set(el, release);
   const root = createRoot(el);
   roots.set(el, root);
-  root.render(<StrictMode>{slots.map((slot, index) => createPortal(
-    <PatientFieldEditor store={runtime.store} name={slot.dataset.promopField!}
-      label={slot.dataset.promopLabel}
-      readOnly={opts.readOnly ?? true} infoHref={opts.infoHref} compact />,
-    slot, String(index),
-  ))}</StrictMode>);
+  root.render(<StrictMode><FieldSlots runtime={runtime} opts={opts} slots={slots} /></StrictMode>);
   return () => unmount(el);
 }
+
 
 /** The therapy-line editor only: a host with a modal (trial details) mounts
  * this instead of the whole patient form. Same store, same editor as the

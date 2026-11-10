@@ -27,6 +27,14 @@ const REFUSED_SAVE_ERROR = 'The server refused this value. Your last saved value
 const UNCONFIRMED_SAVE_ERROR =
   'The server did not confirm this save. The record was reloaded; check the value.';
 
+/** An edit queued on a store whose client switched to another person. */
+const RETIRED_SAVE_ERROR =
+  'Not sent: the signed-in patient changed before this edit was saved.';
+
+/** An edit made on a store that no longer belongs to the signed-in patient. */
+const RETIRED_EDIT_ERROR =
+  'Not saved: this form no longer belongs to the signed-in patient. Reload to edit.';
+
 /** Statuses that say "try again later", not "this value is wrong". */
 const TRANSIENT_STATUSES = new Set([401, 408, 429]);
 
@@ -67,6 +75,10 @@ export interface PatientFormSnapshot {
   datesStale?: boolean;
   /** This build cannot honour the record contract; no write may be sent. */
   contractError?: string;
+  /** The client now answers for a different patient than this store holds.
+   *  The store never adopts the new person (its queue belongs to the old one);
+   *  the caller starts a fresh store instead. */
+  identityChanged?: boolean;
 }
 export interface PatientFormResult {
   patient_info: Record<string, unknown>;
@@ -99,6 +111,8 @@ export class PatientFormStore {
   private flight = false;
   private loading?: Promise<void>;
   private readRevision = 0;
+  /** This store's client now speaks for someone else; see `retire()`. */
+  private retired = false;
 
   constructor(private client: AxiosInstance, private base: string) {}
 
@@ -208,7 +222,14 @@ export class PatientFormStore {
         const personId = Number(values.person_id ?? values.person);
         if (!personId) throw new Error('No linked patient record.');
         if (this.snapshot.personId && this.snapshot.personId !== personId) {
-          throw new Error('The linked patient changed. Start a new patient context.');
+          if (revision === this.readRevision) {
+            this.publish({ loading: false, writable: false, identityChanged: true,
+              error: 'The linked patient changed. Start a new patient context.' });
+          }
+          // The client now answers for another person, so nothing queued
+          // here may go out through it any more.
+          this.retire();
+          return;
         }
         const response = await this.client.get<Record<string, unknown>>(`${this.base}/v1/patient-records/writable-fields/`, {
           params: { person_id: personId },
@@ -229,8 +250,9 @@ export class PatientFormStore {
         );
         if (revision !== this.readRevision) return;
         this.publish({ values, fields, personId, loading: false, datesStale: false,
-          errors: this.withoutStaleErrors(), contractError: undefined,
-          writable: data.write_enabled !== false, error: undefined });
+          errors: this.withoutStaleErrors(), contractError: undefined, identityChanged: false,
+          // A retired store never offers edits again, whatever the server says.
+          writable: !this.retired && data.write_enabled !== false, error: undefined });
       } catch (error) {
         // The record read answers 404 when no patient is linked to the account.
         // That is a state the reader can act on, not a transient failure, so it
@@ -261,7 +283,42 @@ export class PatientFormStore {
     this.timer = setTimeout(() => { void this.flush(); }, 500);
   };
 
+  /**
+   * Stop this store for good: its client now authenticates someone else (the
+   * host switched sign-in or impersonation on a reused axios instance, or a
+   * load found another person). Unsent edits are not dispatched through the
+   * new credentials; they move to `failed` with a reason, so nothing is
+   * silently claimed as saved. A request already in flight settles as usual.
+   * A plain unmount does NOT retire a store: its queue still drains then.
+   */
+  /** True once `retire()` ran. Caches evict such a store on lookup. */
+  get isRetired() { return this.retired; }
+
+  retire = () => {
+    if (this.retired) return;
+    this.retired = true;
+    clearTimeout(this.timer);
+    const pending = { ...this.snapshot.pending };
+    const failed = { ...this.snapshot.failed };
+    const errors = { ...this.snapshot.errors };
+    for (const [name, value] of Object.entries(this.queue)) {
+      delete pending[name];
+      failed[name] = value;
+      errors[name] = RETIRED_SAVE_ERROR;
+    }
+    this.queue = {};
+    this.publish({ pending, failed, errors, writable: false });
+  };
+
+  /** An edit offered to a retired store is refused visibly, never dropped. */
+  private refuseRetired(names: string[]) {
+    const errors = { ...this.snapshot.errors };
+    for (const name of names) errors[name] = RETIRED_EDIT_ERROR;
+    this.publish({ errors });
+  }
+
   enqueue = (name: string, value: unknown) => {
+    if (this.retired) { this.refuseRetired([name]); return; }
     const field = this.snapshot.fields[name];
     if (!this.snapshot.writable || !field?.writable || field.target !== 'patient_record') return;
     // A dated edit carries its correction target. After a failed descriptor
@@ -282,6 +339,7 @@ export class PatientFormStore {
    * the reader chose. The server converts to the canonical unit; the client
    * never does. */
   enqueuePair = (name: string, value: unknown, unitField: string, unit: string): boolean => {
+    if (this.retired) { this.refuseRetired([name, unitField]); return false; }
     const field = this.snapshot.fields[name];
     const unitDescriptor = this.snapshot.fields[unitField];
     if (!this.snapshot.writable || !field?.writable || field.target !== 'patient_record') return false;
@@ -301,7 +359,7 @@ export class PatientFormStore {
    * waits while the result dates are stale, keeping its draft.
    */
   retryFailed = (names?: string[]) => {
-    if (!this.snapshot.writable) return;
+    if (this.retired || !this.snapshot.writable) return;
     const failed = { ...this.snapshot.failed };
     const fields = this.snapshot.fields;
     const chosen = new Set(names ?? Object.keys(failed));
@@ -441,12 +499,14 @@ export class PatientFormStore {
 
   flush = async (): Promise<void> => {
     clearTimeout(this.timer);
+    if (this.retired) return;
     if (this.flight || !Object.keys(this.queue).length || !this.snapshot.personId) return;
     // Never dispatch ahead of a date refresh: its outcome decides whether a
     // queued dated edit still has a valid correction target (#5608).
     for (;;) {
       await this.settleDateRefresh();
-      if (this.flight || !Object.keys(this.queue).length || !this.snapshot.personId) return;
+      if (this.retired || this.flight || !Object.keys(this.queue).length
+        || !this.snapshot.personId) return;
       // No await between this check and taking the batch below, so a refresh
       // cannot start in the gap and be overtaken by the dispatch.
       if (!this.datesRefresh) break;

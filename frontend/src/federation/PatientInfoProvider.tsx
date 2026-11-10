@@ -1,4 +1,4 @@
-import { useEffect, useMemo, type ReactNode } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { AxiosInstance } from "axios";
 import { PatientInfoContext } from "./PatientInfoContext";
@@ -7,8 +7,9 @@ import { __resetWritableFieldsCache } from "@/hooks/useWritableFields";
 import type { LabsThemeTokens } from "./types";
 import { injectStyles } from "./injectStyles";
 import { assertLabsTokens } from "./assertLabsTokens";
-import { PatientFormContext } from './PatientFormContext';
-import { patientFormForClient } from './patientFormRuntime';
+import { PatientFormContext, PatientFormRenewContext } from './PatientFormContext';
+import { patientFormForClient, patientFormStoreId, renewPatientFormForClient } from './patientFormRuntime';
+import type { PatientFormStore } from './patientFormStore';
 
 injectStyles();
 assertLabsTokens();
@@ -19,6 +20,8 @@ interface PatientInfoProviderProps {
   queryClient?: QueryClient;
   theme?: Partial<LabsThemeTokens>;
   className?: string;
+  /** Patient/account context inside the client; see PatientInfoProps. */
+  connectionKey?: string;
   children: ReactNode;
 }
 
@@ -49,6 +52,7 @@ export function PatientInfoProvider({
   queryClient: externalQC,
   theme,
   className,
+  connectionKey = "",
   children,
 }: PatientInfoProviderProps) {
   // Point the OMOP write helpers at the host's client, and do it during render
@@ -84,7 +88,33 @@ export function PatientInfoProvider({
   );
 
   const qc = externalQC ?? internalQC;
-  const store = useMemo(() => patientFormForClient(apiClient, apiBasePath), [apiClient, apiBasePath]);
+  // Keyed by client, base and the host's connection key. A renewal after the
+  // linked patient changed bumps `renewals`, which re-reads the cache entry
+  // that renewPatientFormForClient replaced.
+  const [renewals, setRenewals] = useState(0);
+  const store = useMemo(
+    () => {
+      void renewals; // a renewal replaced the cache entry; read it again
+      return patientFormForClient(apiClient, apiBasePath, connectionKey);
+    },
+    [apiClient, apiBasePath, connectionKey, renewals],
+  );
+  const renew = useCallback(() => {
+    renewPatientFormForClient(apiClient, apiBasePath, connectionKey, store);
+    setRenewals((count) => count + 1);
+  }, [apiClient, apiBasePath, connectionKey, store]);
+  // A different store on the same client and base means the identity inside
+  // that client changed (a new connectionKey, or a renewal). The previous
+  // store must not drain its queue through the new credentials. A plain
+  // unmount does not get here, so navigation still lets a queue drain.
+  const previous = useRef<{ client: AxiosInstance; base: string; store: PatientFormStore } | null>(null);
+  useEffect(() => {
+    const prior = previous.current;
+    if (prior && prior.store !== store && prior.client === apiClient && prior.base === apiBasePath) {
+      prior.store.retire();
+    }
+    previous.current = { client: apiClient, base: apiBasePath, store };
+  }, [apiClient, apiBasePath, store]);
   useEffect(() => { void store.load(); }, [store]);
   useEffect(() => {
     let previous: unknown;
@@ -104,7 +134,9 @@ export function PatientInfoProvider({
   const content = (
     <PatientInfoContext.Provider value={{ apiClient, apiBasePath }}>
       <PatientFormContext.Provider value={store}>
-      {children}
+      <PatientFormRenewContext.Provider value={renew}>
+      <Fragment key={patientFormStoreId(store)}>{children}</Fragment>
+      </PatientFormRenewContext.Provider>
       </PatientFormContext.Provider>
     </PatientInfoContext.Provider>
   );

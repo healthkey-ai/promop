@@ -88,3 +88,18 @@ describe('therapy lines editor', () => {
     expect(screen.getByText(/counts as a minimum/i)).toBeInTheDocument();
   });
 });
+
+describe('a retired store', () => {
+  it('does not offer authoring after a Retry or post-authoring reload', async () => {
+    const { store } = await setup({ therapy_lines_count: '0', lines_of_therapy: [] });
+    render(<TherapyLinesPanel store={store} readOnly={false} />);
+    expect(screen.getByRole('button', { name: /Add therapy line/i })).toBeInTheDocument();
+
+    // The host switched identity on this client; then the panel reloads.
+    store.retire();
+    await store.load();
+
+    await waitFor(() => expect(screen.queryByRole('button', { name: /Add therapy line/i }))
+      .not.toBeInTheDocument());
+  });
+});

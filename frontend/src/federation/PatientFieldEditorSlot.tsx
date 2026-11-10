@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef } from 'react';
 
 import PatientFieldEditor from './PatientFieldEditor';
-import { editorIdentity, useEditorSession, type EditorConnection } from './editorSession';
+import { PatientFormRenewContext } from './PatientFormContext';
+import { patientFormStoreId } from './patientFormRuntime';
+import { editorIdentity, useRenewableEditorSession, type EditorConnection } from './editorSession';
 
 export interface PatientFieldEditorSlotProps extends EditorConnection {
   /** The name the trial row carries: a canonical descriptor key or one of its
@@ -42,7 +44,7 @@ export default function PatientFieldEditorSlot({
   compact = false,
   onChanged,
 }: PatientFieldEditorSlotProps) {
-  const store = useEditorSession({ apiClient, apiBasePath, connectionKey });
+  const { store, renew } = useRenewableEditorSession({ apiClient, apiBasePath, connectionKey });
   // The store acknowledges a write only after the server answers; a hard
   // failure never reaches its `updated` listeners. `onUpdated` keeps the
   // host's callback until the queue drains, so a save that outlives this row
@@ -62,8 +64,10 @@ export default function PatientFieldEditorSlot({
   useEffect(() => store.onUpdated(listener), [store, listener]);
   // A new connection is a new patient context. A dated draft or a chosen unit
   // belongs to the old one and must not be committed into the new store.
-  const identity = editorIdentity({ apiClient, apiBasePath, connectionKey });
+  // A renewed store is a new patient context too.
+  const identity = `${editorIdentity({ apiClient, apiBasePath, connectionKey })}#${patientFormStoreId(store)}`;
   return (
+    <PatientFormRenewContext.Provider value={renew}>
     <PatientFieldEditor
       key={identity}
       store={store}
@@ -73,5 +77,6 @@ export default function PatientFieldEditorSlot({
       labelIncludesUnit={labelIncludesUnit}
       compact={compact}
     />
+    </PatientFormRenewContext.Provider>
   );
 }

@@ -323,6 +323,57 @@ describe('save failures are classified by what the server said', () => {
   });
 });
 
+describe('a retired store', () => {
+  it('moves unsent edits to failed and sends nothing more', async () => {
+    const { store, patch } = setup();
+    await store.load();
+    store.enqueue('weight', 80);
+
+    store.retire();
+    expect(store.getSnapshot().errors.weight).toMatch(/patient changed/);
+    await vi.advanceTimersByTimeAsync(2_000);
+    store.enqueue('weight', 90);
+    store.retryFailed();
+    await store.flush();
+
+    expect(patch).not.toHaveBeenCalled();
+    expect(store.getSnapshot().pending).toEqual({});
+    expect(store.getSnapshot().failed).toEqual({ weight: 80 });
+    // A later edit on the retired store is refused visibly, not dropped.
+    expect(store.getSnapshot().errors.weight).toMatch(/no longer belongs/);
+  });
+
+  it('never looks writable again, even after a load the server answers', async () => {
+    const { store, patch } = setup();
+    await store.load();
+    store.retire();
+    await store.load();
+
+    expect(store.getSnapshot().writable).toBe(false);
+    store.enqueue('weight', 80);
+    expect(store.getSnapshot().errors.weight).toMatch(/no longer belongs to the signed-in patient/);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(patch).not.toHaveBeenCalled();
+  });
+
+  it('retires itself when a load finds another person', async () => {
+    let person = 12;
+    const get = vi.fn(async (url: string) => ({ data: url.includes('writable-fields') ? fields
+      : { patient_info: { person_id: person, weight: 60 }, write_enabled: true } }));
+    const patch = vi.fn();
+    const store = new PatientFormStore({ get, patch } as unknown as AxiosInstance, '/api');
+    await store.load();
+    store.enqueue('weight', 80);
+    person = 13;
+    await store.load();
+    await vi.advanceTimersByTimeAsync(2_000);
+
+    expect(store.getSnapshot().identityChanged).toBe(true);
+    expect(patch).not.toHaveBeenCalled();
+    expect(store.getSnapshot().failed).toEqual({ weight: 80 });
+  });
+});
+
 describe('load failures', () => {
   function failing(failure: (url: string) => unknown) {
     const get = vi.fn(async (url: string) => {

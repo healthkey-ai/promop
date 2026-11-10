@@ -1,8 +1,8 @@
-import { useEffect, useState } from 'react';
+import { useContext, useEffect, useState } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { Pencil } from 'lucide-react';
 import Field from '@/components/PatientInfo/Field';
-import { usePatientFormSnapshot } from './PatientFormContext';
+import { PatientFormRenewContext, usePatientFormSnapshot } from './PatientFormContext';
 import type { FormFieldDescriptor, PatientFormStore } from './patientFormStore';
 
 interface Props {
@@ -98,6 +98,7 @@ function inspectInputs(
  * metadata and values come only from PROMOP, never the host's trial uoptions. */
 export default function PatientFieldEditor({ store, name, readOnly, infoHref, ancestors = [], compact, label: callerLabel, labelIncludesUnit = false, options: tabOptions }: Props) {
   const state = usePatientFormSnapshot(store);
+  const renew = useContext(PatientFormRenewContext);
   const [open, setOpen] = useState(false);
   const [resultDateOverride, setResultDateOverride] = useState<string | null>(null);
   const [valueDraft, setValueDraft] = useState<{ set: boolean; value: unknown }>(
@@ -133,7 +134,12 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
     }
   }, [initialDated, unitDraft, initialValue]);
   if (state.loading) return <span role="status">Loading patient value…</span>;
-  if (state.error) return <div role="alert">{state.error} <button onClick={() => void store.load()}>Retry</button></div>;
+  // The client now speaks for another patient: Retry starts a fresh store
+  // through the host's renewal when there is one; reloading this store would
+  // only meet the same identity guard again.
+  if (state.error) return <div role="alert">{state.error} <button onClick={() => {
+    if (state.identityChanged && renew) renew(); else void store.load();
+  }}>Retry</button></div>;
   const canonical = store.resolve(name);
   const field = canonical ? state.fields[canonical] : undefined;
   if (!canonical || !field) return <div className="text-xs text-muted-foreground">

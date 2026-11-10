@@ -1,7 +1,7 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useContext } from 'react';
 import { AlertCircle } from 'lucide-react';
 import { PatientInfoProvider } from './PatientInfoProvider';
-import { PatientFormReadOnlyContext, usePatientFormStore, usePatientFormSnapshot } from './PatientFormContext';
+import { PatientFormReadOnlyContext, PatientFormRenewContext, usePatientFormStore, usePatientFormSnapshot } from './PatientFormContext';
 import type { PatientInfoProps } from './patientInfoTypes';
 import GeneralTab from '@/components/PatientInfo/tabs/GeneralTab';
 import DiseaseTab from '@/components/PatientInfo/tabs/DiseaseTab';
@@ -16,6 +16,7 @@ import { federatedTabKeys, tabIndexFor } from './tabOrder';
 function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading = true }: Pick<PatientInfoProps,
   'readOnly' | 'federated' | 'onPatientUpdated' | 'showHeading'>) {
   const store = usePatientFormStore()!;
+  const renew = useContext(PatientFormRenewContext);
   const state = usePatientFormSnapshot(store);
   // A failed draft stays on screen over the saved value until it is retried
   // or edited again, the way dev kept the typed values after "Save failed".
@@ -72,8 +73,12 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
 
   if (state.loading) return <div role="status">Loading patient information…</div>;
   if (state.error) return <div role="alert" className="rounded-2xl bg-background p-8 text-center">
-    <AlertCircle className="mx-auto mb-3 h-10 w-10 text-red-400" /><p>{state.error}</p>
-    <button onClick={() => void store.load()}>Retry</button></div>;
+    <AlertCircle className="mx-auto mb-3 h-10 w-10 text-red-400" />
+    {/* The client now speaks for another patient. This store keeps the old
+        patient's record and queue; Retry starts a fresh store for the new one. */}
+    <p>{state.identityChanged && renew
+      ? 'The linked patient changed. Retry to load the current patient.' : state.error}</p>
+    <button onClick={() => { if (state.identityChanged && renew) renew(); else void store.load(); }}>Retry</button></div>;
   return <div className="space-y-4">
     <div className="flex items-center justify-between">
       {showHeading && <h1 className="text-lg font-medium text-foreground/70">Health Profile</h1>}
@@ -135,8 +140,8 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
   </div>;
 }
 
-export function PatientInfo({ apiClient, apiBasePath, queryClient, className, theme, ...props }: PatientInfoProps) {
+export function PatientInfo({ apiClient, apiBasePath, queryClient, className, theme, connectionKey, ...props }: PatientInfoProps) {
   return <PatientInfoProvider apiClient={apiClient} apiBasePath={apiBasePath} queryClient={queryClient}
-    className={className} theme={theme}><PatientInfoInner {...props} /></PatientInfoProvider>;
+    className={className} theme={theme} connectionKey={connectionKey}><PatientInfoInner {...props} /></PatientInfoProvider>;
 }
 export default PatientInfo;

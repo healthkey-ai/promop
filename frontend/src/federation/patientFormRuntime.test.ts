@@ -1,5 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest';
-import { patientFormRuntime, retainPatientFormRuntime } from './patientFormRuntime';
+import axios from 'axios';
+import { patientFormForClient, patientFormRuntime, retainPatientFormRuntime } from './patientFormRuntime';
 
 afterEach(() => { vi.useRealTimers(); });
 
@@ -40,4 +41,14 @@ it('retires an idle detached context but never a pending queue before it drains'
   expect(runtime.store.getSnapshot().values.weight).toBe(80);
   await vi.advanceTimersByTimeAsync(30_000);
   expect(patientFormRuntime(context)).not.toBe(runtime);
+});
+
+it('never hands out a retired store again', () => {
+  const client = axios.create();
+  const original = patientFormForClient(client, '/api');
+  original.retire();
+
+  const next = patientFormForClient(client, '/api');
+  expect(next).not.toBe(original);
+  expect(next.isRetired).toBe(false);
 });

@@ -18,6 +18,11 @@ export interface PatientInfoProps {
    *  screen does not show two. */
   showHeading?: boolean;
   onPatientUpdated?: (data: PatientFormResult) => unknown;
+  /** The host's patient/account context (an impersonation id, a session
+   *  revision; no clinical data). A host that keeps one axios instance across
+   *  a sign-in or impersonation change passes a new key, and the form starts
+   *  a fresh store instead of the previous patient's. */
+  connectionKey?: string;
 }
 
 export interface PatientInfoData {

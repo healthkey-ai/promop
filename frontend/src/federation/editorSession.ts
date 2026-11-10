@@ -1,9 +1,9 @@
-import { useEffect, useMemo } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { AxiosInstance } from 'axios';
 
 import { __resetWritableFieldsCache } from '@/hooks/useWritableFields';
 import { injectStyles } from './injectStyles';
-import { patientFormForClient } from './patientFormRuntime';
+import { patientFormForClient, renewPatientFormForClient } from './patientFormRuntime';
 import type { PatientFormStore } from './patientFormStore';
 
 // The React exports do not go through PatientInfoProvider, which is where the
@@ -91,12 +91,31 @@ export function editorIdentity(connection: EditorConnection): string {
  * unmounting one cannot leave a helper pointed at the wrong host.
  */
 export function useEditorSession(connection: EditorConnection): PatientFormStore {
+  return useRenewableEditorSession(connection).store;
+}
+
+/**
+ * The session store plus `renew`: start a fresh store when this one found the
+ * client speaking for another patient (`identityChanged`). Retrying `load()`
+ * on the old store would only meet the same identity guard again.
+ */
+export function useRenewableEditorSession(connection: EditorConnection): {
+  store: PatientFormStore; renew: () => void;
+} {
   const { apiClient, connectionKey } = connection;
   const base = editorBasePath(connection);
+  const [renewals, setRenewals] = useState(0);
   const store = useMemo(
-    () => patientFormForClient(apiClient, base, connectionKey ?? ''),
-    [apiClient, base, connectionKey],
+    () => {
+      void renewals; // a renewal replaced the cache entry; read it again
+      return patientFormForClient(apiClient, base, connectionKey ?? '');
+    },
+    [apiClient, base, connectionKey, renewals],
   );
+  const renew = useCallback(() => {
+    renewPatientFormForClient(apiClient, base, connectionKey ?? '', store);
+    setRenewals((count) => count + 1);
+  }, [apiClient, base, connectionKey, store]);
   useEffect(() => {
     // The writability descriptor is cached per deployment, not per client. A
     // host that mounted the full form elsewhere may have cached another
@@ -105,5 +124,5 @@ export function useEditorSession(connection: EditorConnection): PatientFormStore
     void store.load();
     return () => { __resetWritableFieldsCache(); };
   }, [store]);
-  return store;
+  return { store, renew };
 }

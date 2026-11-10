@@ -3,6 +3,8 @@ import type { PatientFormStore } from './patientFormStore';
 
 export const PatientFormContext = createContext<PatientFormStore | null>(null);
 export const PatientFormReadOnlyContext = createContext(false);
+/** Start a fresh store when the linked patient changed under the same client. */
+export const PatientFormRenewContext = createContext<(() => void) | null>(null);
 export const usePatientFormStore = () => useContext(PatientFormContext);
 /** The form is shown without edits: a read-only mount or a caller without write
  *  access. Controls that write must honour it; controls that only navigate or

@@ -10,10 +10,23 @@ export interface PatientFormConnection {
   sessionKey?: string;
 }
 interface Runtime {
-  client: AxiosInstance; queryClient: QueryClient; store: PatientFormStore;
+  client: AxiosInstance; queryClient: QueryClient;
+  /** The connection's current store. A getter, so a renewal (the linked
+   *  patient changed) is what mount helpers and retirement see next. */
+  readonly store: PatientFormStore;
   references: number; retirement?: ReturnType<typeof setTimeout>; watchIdle?: () => void;
 }
 const widgets = new Map<string, Runtime>();
+
+/** A React key per store, so a fresh store remounts an editor's local state
+ *  (dated drafts, open dialogs) instead of carrying it to the next patient. */
+const storeIds = new WeakMap<PatientFormStore, number>();
+let nextStoreId = 0;
+export function patientFormStoreId(store: PatientFormStore): number {
+  let id = storeIds.get(store);
+  if (id === undefined) { id = ++nextStoreId; storeIds.set(store, id); }
+  return id;
+}
 const clients = new WeakMap<AxiosInstance, Map<string, PatientFormStore>>();
 
 export function patientFormForClient(client: AxiosInstance, base = '', sessionKey = '') {
@@ -25,8 +38,47 @@ export function patientFormForClient(client: AxiosInstance, base = '', sessionKe
   // through the new credentials.
   const key = `${base}\u0000${sessionKey}`;
   let store = stores.get(key);
-  if (!store) { store = new PatientFormStore(client, base); stores.set(key, store); }
+  // A retired store answers for a client that moved on to someone else; it is
+  // never handed out again. Every cache reads through here (the provider, the
+  // editor session, the widget runtime's `store`, renewals), so evicting on
+  // lookup keeps all of them off it.
+  if (store?.isRetired) { stores.delete(key); store = undefined; }
+  if (!store) {
+    // A new connection key on the same client and base means the host
+    // switched sign-in or impersonation on that client. A store under an
+    // earlier key would drain its queue through the new credentials; retire
+    // it. The default key ('') is left alone: hosts that do not pass keys
+    // may legitimately mount keyed and unkeyed views side by side.
+    if (sessionKey) {
+      for (const [otherKey, other] of stores) {
+        const [otherBase, otherSession] = otherKey.split('\u0000');
+        if (otherBase === base && otherSession && otherSession !== sessionKey) {
+          other.retire();
+          stores.delete(otherKey);
+        }
+      }
+    }
+    store = new PatientFormStore(client, base);
+    stores.set(key, store);
+  }
   return store;
+}
+
+/**
+ * Replace the store for this connection with a fresh one, but only if it is
+ * still `stale`: the store a caller saw answer for another patient. The old
+ * store is not reused or retargeted; it keeps its own patient and queue. A
+ * concurrent renewal that already replaced it wins, so two callers end up on
+ * the same fresh store.
+ */
+export function renewPatientFormForClient(
+  client: AxiosInstance, base: string, sessionKey: string, stale: PatientFormStore,
+): PatientFormStore {
+  const stores = clients.get(client);
+  const key = `${base}\u0000${sessionKey}`;
+  if (stores?.get(key) === stale) stores.delete(key);
+  stale.retire();
+  return patientFormForClient(client, base, sessionKey);
 }
 
 /** Credentials are captured, never changed on a queue that still has edits.
@@ -40,7 +92,10 @@ export function patientFormRuntime(connection: PatientFormConnection): Runtime {
       ...(connection.token ? { Authorization: `Token ${connection.token}` } : {}),
       ...(connection.impToken ? { 'X-Imp-Token': connection.impToken } : {}),
     } });
-    runtime = { client, queryClient: new QueryClient(), store: patientFormForClient(client, apiBase), references: 0 };
+    runtime = {
+      client, queryClient: new QueryClient(), references: 0,
+      get store() { return patientFormForClient(client, apiBase); },
+    };
     widgets.set(key, runtime);
   }
   return runtime;
