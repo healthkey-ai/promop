@@ -21,6 +21,9 @@ export interface PromopFieldBindings {
   ready: boolean;
   /** Whether PROMOP can resolve this trial-row name to a descriptor key. */
   canResolve: (name: string) => boolean;
+  /** The descriptor entry a trial-row name resolves to (canonical key or a
+   *  declared binding), for callers that need its `kind`. */
+  entryFor: (name: string) => Record<string, unknown> | undefined;
 }
 
 /**
@@ -80,16 +83,26 @@ export function usePromopFieldBindings(
     ? answer.descriptor
     : null;
   const resolvable = useMemo(() => {
-    const names = new Set<string>();
-    for (const [name, entry] of Object.entries(current ?? {})) {
-      names.add(name);
-      for (const alias of entry.bindings ?? []) names.add(alias);
+    const entries = new Map<string, Record<string, unknown>>();
+    // Same precedence as `PatientFormStore.resolve()`: a canonical key wins
+    // over a binding, and the first entry declaring a binding wins over a
+    // later one. One pass would let a later binding overwrite a canonical key
+    // and route the row to a different kind than the editor resolves.
+    const declared = Object.entries(current ?? {});
+    for (const [name, entry] of declared) {
+      entries.set(name, entry as Record<string, unknown>);
     }
-    return names;
+    for (const [, entry] of declared) {
+      for (const alias of entry.bindings ?? []) {
+        if (!entries.has(alias)) entries.set(alias, entry as Record<string, unknown>);
+      }
+    }
+    return entries;
   }, [current]);
 
   return {
     ready: current !== null,
     canResolve: (name: string) => resolvable.has(name),
+    entryFor: (name: string) => resolvable.get(name),
   };
 }

@@ -160,10 +160,30 @@ describe('the PROMOP editors for a host that shares the React tree', () => {
     expect(result.current.canResolve('heightAtTrial')).toBe(true);
     expect(result.current.canResolve('meetsSLIM')).toBe(true);
     expect(result.current.canResolve('therapy_types')).toBe(false);
+    expect(result.current.entryFor('heightAtTrial')?.control).toBe('number');
     expect(host.get).toHaveBeenCalledWith(
       '/fed/v1/patient-records/writable-fields/',
       expect.objectContaining({ headers: { 'X-Patient-Form': '1' } }),
     );
+  });
+
+  it('prefers a canonical key over a later binding and keeps the first binding', async () => {
+    const fields = {
+      // `noHiv` is a real field; `other` also claims it as a binding. The
+      // store resolves the canonical first, so the adapter must too.
+      noHiv: { kind: 'negated' },
+      other: { kind: 'direct', label: 'Other', bindings: ['noHiv', 'shared'] },
+      third: { kind: 'direct', label: 'Third', bindings: ['shared'] },
+    };
+    const host = hostClient({ fields });
+    const { result } = renderHook(() =>
+      usePromopFieldBindings({ apiClient: host.client, apiBasePath: '' }),
+    );
+
+    await waitFor(() => expect(result.current.ready).toBe(true));
+    expect(result.current.entryFor('noHiv')?.kind).toBe('negated');
+    // Two entries declare `shared`; the first one wins, as in the store.
+    expect(result.current.entryFor('shared')?.label).toBe('Other');
   });
 
   it('falls back to the host editor when the descriptor cannot be read', async () => {

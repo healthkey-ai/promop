@@ -190,6 +190,11 @@ export default function TrialEditors({
       // Genomics has its own dialog, opened by `renderGenomicsEditor`.
       if (isGenomicsTrialRow(field)) return null;
       if (!bindings.ready || !bindings.canResolve(field)) return null;
+      // Attestations and inverted yes/no rows carry their own dialog, snapshot
+      // and polarity; EXACT wires those itself (#750, #5663). A field slot here
+      // would draw a read-only note or a plain select and suppress that door.
+      const kind = bindings.entryFor(field)?.kind;
+      if (kind === 'explicit-answer' || kind === 'negated') return null;
       return (
         <PatientFieldEditorSlot
           key={`field:${field}`}

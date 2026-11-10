@@ -33,6 +33,21 @@ function hostClient() {
       unit: 'kg',
       bindings: ['weightAtTrial'],
     },
+    pre_existing_condition_categories: {
+      kind: 'explicit-answer',
+      writable: false,
+      answerable: true,
+      endpoint: 'preexisting-conditions-answer',
+      actions: ['confirm_none', 'withdraw'],
+      action_labels: { confirm_none: 'No pre-existing conditions', withdraw: 'Withdraw answer' },
+      bindings: ['preExistingConditionsExcluded'],
+    },
+    hiv_status: {
+      kind: 'negated',
+      writable: false,
+      canonical: 'hiv_status',
+      bindings: ['noHiv'],
+    },
     genetic_mutations: { writable: true, target: 'genomics' },
   };
   const get = vi.fn(async (url: string) => {
@@ -76,6 +91,15 @@ function renderAdapter(onChanged?: () => void) {
           <div data-testid="therapy-two">
             {slots.renderFieldEditor({ field: 'therapyLinesCount', label: 'Therapy Lines Count' })}
           </div>
+          <div data-testid="explicit">
+            {slots.renderFieldEditor({
+              field: 'preExistingConditionsExcluded',
+              label: 'Pre Existing Conditions Excluded',
+            })}
+          </div>
+          <div data-testid="negated">
+            {slots.renderFieldEditor({ field: 'noHiv', label: 'No HIV' })}
+          </div>
           <div data-testid="unknown">
             {slots.renderFieldEditor({ field: 'notInTheDescriptor', label: 'Unknown Row' })}
           </div>
@@ -112,6 +136,10 @@ describe('the shared trial editor adapter', () => {
     expect(screen.getByRole('button', { name: 'Edit Prior Therapy' })).toBeInTheDocument();
     // A row PROMOP cannot resolve renders nothing, so EXACT keeps its editor.
     expect(screen.getByTestId('unknown')).toBeEmptyDOMElement();
+    // Attestations and negated rows keep EXACT's own dialog: a field slot here
+    // would replace it with a read-only note or a plain select.
+    expect(screen.getByTestId('explicit')).toBeEmptyDOMElement();
+    expect(screen.getByTestId('negated')).toBeEmptyDOMElement();
     // The scalar slot owns the value; the therapy pencil does not.
     expect(screen.getByTestId('owns-scalar')).toHaveTextContent('true');
     expect(screen.getByTestId('owns-therapy')).toHaveTextContent('false');
