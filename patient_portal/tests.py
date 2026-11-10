@@ -27431,6 +27431,7 @@ class MappingApprovalRoleTest(TestCase):
             'status': 'approved',
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(resp.data['detail'], 'Mapping curator access required.')
         mapping.refresh_from_db()
         self.assertEqual(mapping.status, 'proposed')
         mapping.delete()
@@ -27450,6 +27451,7 @@ class MappingApprovalRoleTest(TestCase):
             'status': 'proposed',
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(resp.data['detail'], 'Mapping curator access required.')
         mapping.refresh_from_db()
         self.assertEqual(mapping.status, 'approved')
         mapping.delete()
@@ -27507,7 +27509,8 @@ class MappingApprovalRoleTest(TestCase):
         resp = self.client.patch(f'/api/v1/code-mappings/{mapping.pk}/', {
             'status': 'approved',
         }, format='json')
-        self.assertIn(resp.status_code, [status.HTTP_400_BAD_REQUEST, status.HTTP_403_FORBIDDEN])
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(resp.data['detail'], 'Mapping curator access required.')
         mapping.refresh_from_db()
         self.assertEqual(mapping.status, 'proposed')
         mapping.delete()
@@ -27529,7 +27532,8 @@ class MappingApprovalRoleTest(TestCase):
         resp = self.client.patch(f'/api/v1/code-mappings/{mapping.pk}/', {
             'status': 'proposed',
         }, format='json')
-        self.assertIn(resp.status_code, [status.HTTP_400_BAD_REQUEST, status.HTTP_403_FORBIDDEN])
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(resp.data['detail'], 'Mapping curator access required.')
         mapping.refresh_from_db()
         self.assertEqual(mapping.status, 'approved')
         mapping.delete()
@@ -27552,6 +27556,55 @@ class MappingApprovalRoleTest(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
         self.assertTrue(SourceCodeConceptMapping.objects.filter(pk=mapping.pk).exists())
         mapping.delete()
+
+    # ---- Analyst passes the write gate and stops at the approval gate ----
+
+    def _approval_refused(self, resp):
+        # The field-mapping view refuses with 403; the code-mapping serializer
+        # with 400. Either way the message names the approval gate.
+        self.assertIn(resp.status_code, (status.HTTP_400_BAD_REQUEST, status.HTTP_403_FORBIDDEN), resp.data)
+        self.assertIn('org admin', str(resp.data).lower(), resp.data)
+
+    def test_analyst_cannot_approve_unapprove_or_delete_approved_field_mapping(self):
+        """A doctor is refused at the write gate before approval is ever
+        considered; the analyst is the caller who reaches it (#2416)."""
+        proposed = FieldConceptMapping.objects.create(
+            field_name='ecog_performance_status', concept=self.concept,
+            concept_code=self.concept.concept_code,
+            vocabulary_id=self.concept.vocabulary.vocabulary_id, status='proposed',
+        )
+        approved = FieldConceptMapping.objects.create(
+            field_name='bmi', concept=self.concept, concept_code=self.concept.concept_code,
+            vocabulary_id=self.concept.vocabulary.vocabulary_id, status='approved',
+        )
+        self.client.force_authenticate(user=self.analyst)
+        self._approval_refused(self.client.patch(
+            f'/api/v1/field-mappings/{proposed.pk}/', {'status': 'approved'}, format='json'))
+        self._approval_refused(self.client.patch(
+            f'/api/v1/field-mappings/{approved.pk}/', {'status': 'proposed'}, format='json'))
+        self._approval_refused(self.client.delete(f'/api/v1/field-mappings/{approved.pk}/'))
+        proposed.refresh_from_db(); approved.refresh_from_db()
+        self.assertEqual((proposed.status, approved.status), ('proposed', 'approved'))
+        proposed.delete(); approved.delete()
+
+    def test_analyst_cannot_approve_unapprove_or_delete_approved_code_mapping(self):
+        def row(code, row_status):
+            return SourceCodeConceptMapping.objects.create(
+                source_vocabulary_id='', source_code=code, source_code_description='x',
+                target_concept=self.concept, destination_vocabulary_id='HK-Labs',
+                omop_table='measurement', status=row_status, origin='import',
+            )
+        proposed = row('ANALYST-APPROVE', 'proposed')
+        approved = row('ANALYST-UNAPPROVE', 'approved')
+        self.client.force_authenticate(user=self.analyst)
+        self._approval_refused(self.client.patch(
+            f'/api/v1/code-mappings/{proposed.pk}/', {'status': 'approved'}, format='json'))
+        self._approval_refused(self.client.patch(
+            f'/api/v1/code-mappings/{approved.pk}/', {'status': 'proposed'}, format='json'))
+        self._approval_refused(self.client.delete(f'/api/v1/code-mappings/{approved.pk}/'))
+        proposed.refresh_from_db(); approved.refresh_from_db()
+        self.assertEqual((proposed.status, approved.status), ('proposed', 'approved'))
+        proposed.delete(); approved.delete()
 
     # ---- Staff CAN approve field mapping ----
 
@@ -33680,8 +33733,12 @@ class AnalystRoleScopeTest(TestCase):
             self.assertEqual(self.client.get(url).status_code, status.HTTP_200_OK, url)
         self.assertEqual(self.client.get('/api/v1/relevance/signals/').data['permissions'],
                          {'can_accept': False, 'can_reject': True})
-        resp = self.client.post('/api/v1/field-choices/', {'field_name': 'ecog_score', 'value': 'x'}, format='json')
-        self.assertNotEqual(resp.status_code, status.HTTP_403_FORBIDDEN, resp.data)
+        resp = self.client.post('/api/v1/field-choices/', {
+            'field_name': 'disease', 'display': 'Analyst choice', 'sort_order': 0,
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(self.client.delete(f"/api/v1/field-choices/{resp.data['id']}/").status_code,
+                         status.HTTP_204_NO_CONTENT)
         # The upload is a write the analyst may make; an empty one is a 400, not a 403.
         resp = self.client.post('/api/v1/code-mappings/upload/', {}, format='multipart')
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)

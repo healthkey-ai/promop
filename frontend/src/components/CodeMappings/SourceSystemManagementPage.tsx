@@ -2,6 +2,8 @@ import PageTitle from "@/components/Branding/PageTitle";
 import api from "@/api/axios";
 import { useEffect, useState, type FormEvent } from "react";
 import { Link, useSearchParams } from "react-router-dom";
+import { useAuth } from "@/hooks/useAuth";
+import { canWriteMappings } from "@/utils/roles";
 
 interface Association {
   id: number;
@@ -41,8 +43,8 @@ interface RegistryResponse {
   } | null;
 }
 
-function SystemRow({ group, open, onToggle, onMutate }: {
-  group: SystemGroup; open: boolean; onToggle: () => void; onMutate: () => void;
+function SystemRow({ group, open, onToggle, onMutate, canWrite }: {
+  group: SystemGroup; open: boolean; onToggle: () => void; onMutate: () => void; canWrite: boolean;
 }) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -111,16 +113,16 @@ function SystemRow({ group, open, onToggle, onMutate }: {
           <td className="px-2 py-2 text-xs">{row.provenance}</td>
           <td className="px-2 py-2 text-xs">
             <span className="block capitalize" title={row.reviewed_by ? `Reviewed by ${row.reviewed_by}` : undefined}>{row.review_status}</span>
-            {row.review_status !== "confirmed" && <button type="button" disabled={saving}
+            {canWrite && row.review_status !== "confirmed" && <button type="button" disabled={saving}
               onClick={() => void review(row.id, "confirmed")} className="mr-2 text-sky-700 underline disabled:opacity-50">Confirm</button>}
-            {row.review_status !== "rejected" && <button type="button" disabled={saving}
+            {canWrite && row.review_status !== "rejected" && <button type="button" disabled={saving}
               onClick={() => void review(row.id, "rejected")} className="text-red-700 underline disabled:opacity-50">Reject</button>}
           </td>
         </tr>)}</tbody>
       </table> : <p className="rounded border border-amber-200 bg-amber-50 p-3 text-sm text-slate-700">
         Source codes exist under this system, but no observed facility association is recorded. Check the seed import status and per-code evidence above.
       </p>}
-      <form onSubmit={(event) => void addFacility(event)} className="mt-3 flex flex-wrap items-end gap-2 rounded border border-slate-200 p-3">
+      {canWrite && <form onSubmit={(event) => void addFacility(event)} className="mt-3 flex flex-wrap items-end gap-2 rounded border border-slate-200 p-3">
         <label className="text-xs font-medium text-slate-700">Facility name
           <input name="facility_name" required maxLength={255} className="mt-1 block rounded border border-slate-300 px-2 py-1 text-sm" />
         </label>
@@ -128,13 +130,17 @@ function SystemRow({ group, open, onToggle, onMutate }: {
           <input name="facility_id" maxLength={255} className="mt-1 block rounded border border-slate-300 px-2 py-1 text-sm" />
         </label>
         <button type="submit" disabled={saving} className="rounded bg-sky-800 px-3 py-1.5 text-sm text-white disabled:opacity-50">Add facility association</button>
-      </form>
+      </form>}
     </td></tr>}
   </>;
 }
 
 export default function SourceSystemManagementPage() {
   const [searchParams, setSearchParams] = useSearchParams();
+  const { currentUser } = useAuth();
+  // Facility review and association are `_can_manage_mappings` writes: a
+  // doctor without the analyst grant reads the registry only (#2416).
+  const canWrite = canWriteMappings(currentUser);
   const [refresh, setRefresh] = useState(0);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const system = searchParams.get("system") || "";
@@ -192,6 +198,9 @@ export default function SourceSystemManagementPage() {
     <p className="mt-2 max-w-4xl text-sm text-slate-600">
       Manage observed and curator-confirmed facility associations for each exact source-system ID (the FHIR Coding.system URI for imported codes). Multiple hospitals may use one system. Confirming an association records a curator decision, not verified Organization ownership, and never changes the source code or its OMOP mapping.
     </p>
+    {!canWrite && (
+      <p role="status" className="mt-2 text-sm text-slate-600">Read-only: mapping codes needs the analyst role.</p>
+    )}
 
     <form key={`${system}|${facility}`} onSubmit={applyFilters} className="mt-5 grid gap-3 rounded-md border border-slate-200 bg-white p-4 md:grid-cols-[2fr_1fr_auto] md:items-end">
       <label className="text-sm font-medium text-slate-700">Exact source code system
@@ -245,7 +254,7 @@ export default function SourceSystemManagementPage() {
             onToggle={() => setExpanded((current) => ({ ...current,
               [group.source_vocabulary_id]: !(current[group.source_vocabulary_id] ?? system === group.source_vocabulary_id),
             }))}
-            onMutate={() => setRefresh((value) => value + 1)} />)}</tbody>
+            onMutate={() => setRefresh((value) => value + 1)} canWrite={canWrite} />)}</tbody>
         </table>
       </div>}
       {data.total > data.page_size && <div className="mt-4 flex items-center justify-between text-sm">

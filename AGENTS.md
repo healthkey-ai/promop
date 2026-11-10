@@ -667,7 +667,7 @@ brew install python@3.12
 
 `GroupAccess.role` has four values, and **roles are additive**: a user holds one
 `GroupAccess` row per role at an org (unique on identity, org and role since
-migration 0333, #2416), each row adds its own reach, and no role implies
+migration 0335, #2416), each row adds its own reach, and no role implies
 another. Inviting an existing member with a second role adds a row; revoking a
 row removes that role. The helpers in `omop_core/services/access.py` and
 `omop_core/authorization.py` decide the reach; the frontend mirrors them in

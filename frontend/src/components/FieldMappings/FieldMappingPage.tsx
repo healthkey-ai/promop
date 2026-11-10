@@ -10,7 +10,7 @@ import { FieldChoiceEditor } from "./FieldChoiceEditor";
 import { FormulaEditDialog } from "./FormulaEditDialog";
 import { DerivationInfoDialog } from "./DerivationInfoDialog";
 import { AddCustomFieldDialog } from "@/components/PatientInfo/CustomPatientFields";
-import { isStaffOrOrgAdmin } from "@/utils/roles";
+import { canWriteMappings, isStaffOrOrgAdmin } from "@/utils/roles";
 
 interface FieldDescriptor {
   field_name: string;
@@ -130,6 +130,9 @@ export default function FieldMappingPage() {
   const navigate = useNavigate();
   const { currentUser } = useAuth();
   const canApprove = isStaffOrOrgAdmin(currentUser);
+  // A doctor without the analyst grant reads every mapping but writes none
+  // (#2416): the API answers 403 on every write, so the page offers none.
+  const canWrite = canWriteMappings(currentUser);
   const [descriptors, setDescriptors] = useState<FieldDescriptor[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -167,12 +170,13 @@ export default function FieldMappingPage() {
           setError(`${wanted} has no field concept mapping entry.`);
         } else {
           setActiveTab(field.tab);
-          if (field.mappable) {
+          if (field.mappable && canWrite) {
             setSelectedField(field);
             setDialogOpen(true);
           } else {
-            // Nothing to assign; show the row where it lives. Unmappable rows
-            // are mostly computed, whose section starts collapsed.
+            // Nothing to assign (or nobody who may assign it); show the row
+            // where it lives. Unmappable rows are mostly computed, whose
+            // section starts collapsed.
             setSearchQuery(field.field_name);
             setCollapsedSections((previous) => {
               const next = new Set(previous);
@@ -187,7 +191,7 @@ export default function FieldMappingPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [canWrite]);
 
   useEffect(() => {
     (async () => {
@@ -283,7 +287,7 @@ export default function FieldMappingPage() {
   };
 
   const handleCellClick = (field: FieldDescriptor) => {
-    if (!field.mappable) return;
+    if (!field.mappable || !canWrite) return;
     setSelectedField(field);
     setDialogOpen(true);
   };
@@ -359,7 +363,7 @@ export default function FieldMappingPage() {
     }
     return (
       <span className="text-xs text-gray-400 group-hover:text-gray-500">
-        click to map
+        {canWrite ? "click to map" : "unmapped"}
       </span>
     );
   };
@@ -393,12 +397,8 @@ export default function FieldMappingPage() {
   /** Render inline synonyms. */
   const renderSynonyms = (f: FieldDescriptor) => {
     const syns = batchSynonyms[f.field_name] || [];
-    return (
-      <button
-        onClick={() => setSynonymDialogField(f.field_name)}
-        className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-gray-600 hover:bg-gray-100"
-        title="Manage synonyms"
-      >
+    const content = (
+      <>
         <BookOpen size={12} />
         {syns.length > 0 ? (
           <span className="max-w-[150px] truncate text-gray-500">
@@ -408,6 +408,22 @@ export default function FieldMappingPage() {
         ) : (
           <span className="text-gray-400">none</span>
         )}
+      </>
+    );
+    if (!canWrite) {
+      return (
+        <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-xs text-gray-600">
+          {content}
+        </span>
+      );
+    }
+    return (
+      <button
+        onClick={() => setSynonymDialogField(f.field_name)}
+        className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-xs text-gray-600 hover:bg-gray-100"
+        title="Manage synonyms"
+      >
+        {content}
       </button>
     );
   };
@@ -432,7 +448,9 @@ export default function FieldMappingPage() {
           </tr>
         </thead>
         <tbody className="divide-y divide-gray-100">
-          {fields.map((f) => (
+          {fields.map((f) => {
+            const clickable = f.mappable && canWrite;
+            return (
             <tr key={f.field_name} className="group hover:bg-gray-50/50">
               <td className="px-3 py-2 text-xs whitespace-nowrap" title={f.mapping?.provenance || undefined}>
                 {provenanceLabel(f.mapping)}
@@ -440,7 +458,7 @@ export default function FieldMappingPage() {
               <td className="px-3 py-2 font-mono text-xs">{f.field_name}</td>
               <td className="px-3 py-2">
                 <div className="flex items-center gap-1.5">
-                  {f.mappable && (
+                  {clickable && (
                     <button
                       onClick={() => handleConfirm(f)}
                       className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border ${
@@ -452,7 +470,7 @@ export default function FieldMappingPage() {
                       }`}
                       title={
                         !canApprove
-                          ? "Only org admins and staff can approve mappings. Doctors and analysts may propose mappings for review."
+                          ? "Only org admins and staff can approve mappings. Analysts may propose mappings for review."
                           : f.mapping?.status === "approved" ? "Mark mapping as proposed" : "Approve mapping"
                       }
                       disabled={(!f.mapping && !f.suggestion) || (!canApprove && f.mapping?.status !== "approved")}
@@ -460,18 +478,19 @@ export default function FieldMappingPage() {
                       {f.mapping?.status === "approved" && <Check size={10} />}
                     </button>
                   )}
-                  <button
-                    onClick={() => f.mappable && handleCellClick(f)}
-                    className={`inline-flex items-center gap-1 ${f.mappable ? "cursor-pointer hover:text-primary hover:underline" : ""}`}
-                    disabled={!f.mappable}
-                    title={f.mappable ? "Click to assign or edit concept" : undefined}
-                  >
-                    {renderConceptCell(f)}
-                    {f.mappable && (
+                  {clickable ? (
+                    <button
+                      onClick={() => handleCellClick(f)}
+                      className="inline-flex cursor-pointer items-center gap-1 hover:text-primary hover:underline"
+                      title="Click to assign or edit concept"
+                    >
+                      {renderConceptCell(f)}
                       <Pencil size={10} className="opacity-0 group-hover:opacity-100 text-gray-400" />
-                    )}
-                  </button>
-                  {f.mapping && (
+                    </button>
+                  ) : (
+                    <span className="inline-flex items-center gap-1">{renderConceptCell(f)}</span>
+                  )}
+                  {canWrite && f.mapping && (
                     <button
                       onClick={() => handleDeleteMapping(f.mapping!.id)}
                       className="ml-1 rounded p-0.5 text-gray-400 hover:bg-red-50 hover:text-red-500"
@@ -483,30 +502,27 @@ export default function FieldMappingPage() {
                 </div>
               </td>
               <td className="px-3 py-2">
-                <button
-                  onClick={() => f.mappable && handleCellClick(f)}
-                  className={`${f.mappable ? "cursor-pointer hover:text-primary" : ""}`}
-                  disabled={!f.mappable}
-                >
-                  {renderCodingCell(f)}
-                </button>
+                {clickable ? (
+                  <button onClick={() => handleCellClick(f)} className="cursor-pointer hover:text-primary">
+                    {renderCodingCell(f)}
+                  </button>
+                ) : (
+                  renderCodingCell(f)
+                )}
               </td>
               <td className="px-3 py-2">
-                {f.locked_table ? (
-                  renderTableCell(f)
-                ) : (
-                  <button
-                    onClick={() => f.mappable && handleCellClick(f)}
-                    className={`${f.mappable ? "cursor-pointer hover:text-primary" : ""}`}
-                    disabled={!f.mappable}
-                  >
+                {clickable && !f.locked_table ? (
+                  <button onClick={() => handleCellClick(f)} className="cursor-pointer hover:text-primary">
                     {renderTableCell(f)}
                   </button>
+                ) : (
+                  renderTableCell(f)
                 )}
               </td>
               <td className="px-3 py-2">{renderSynonyms(f)}</td>
             </tr>
-          ))}
+            );
+          })}
         </tbody>
       </table>
     </div>
@@ -548,21 +564,27 @@ export default function FieldMappingPage() {
                     <td className="px-3 py-2 text-xs">{f.field_type}</td>
                     <td className="px-3 py-2 text-xs">
                       {f.formula ? (
-                        <button
-                          onClick={() => setFormulaEditorField(f)}
-                          className="not-italic hover:text-primary hover:underline"
-                        >
-                          <span className="font-mono">{f.formula.expression}</span>
-                        </button>
+                        canWrite ? (
+                          <button
+                            onClick={() => setFormulaEditorField(f)}
+                            className="not-italic hover:text-primary hover:underline"
+                          >
+                            <span className="font-mono">{f.formula.expression}</span>
+                          </button>
+                        ) : (
+                          <span className="font-mono not-italic">{f.formula.expression}</span>
+                        )
                       ) : f.explanation ? (
                         <span className="not-italic text-gray-500">{f.explanation}</span>
-                      ) : (
+                      ) : canWrite ? (
                         <button
                           onClick={() => setFormulaEditorField(f)}
                           className="not-italic hover:text-primary hover:underline"
                         >
                           <span className="text-gray-400">none</span>
                         </button>
+                      ) : (
+                        <span className="not-italic text-gray-400">none</span>
                       )}
                     </td>
                     <td className="px-3 py-2 text-xs">
@@ -634,13 +656,19 @@ export default function FieldMappingPage() {
           Back
         </button>
         <PageTitle className="text-xl font-semibold">Field Concept Mappings</PageTitle>
-        <button
-          onClick={() => setAddFieldDialogOpen(true)}
-          className="ml-auto inline-flex items-center gap-1 rounded border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50"
-        >
-          <Plus size={15} /> Add field
-        </button>
+        {canWrite && (
+          <button
+            onClick={() => setAddFieldDialogOpen(true)}
+            className="ml-auto inline-flex items-center gap-1 rounded border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50"
+          >
+            <Plus size={15} /> Add field
+          </button>
+        )}
       </div>
+
+      {!canWrite && (
+        <p role="status" className="mb-4 text-sm text-gray-600">Read-only: mapping codes needs the analyst role.</p>
+      )}
 
       {/* Tab bar */}
       <div className="mb-4 flex gap-0 overflow-x-auto border-b border-gray-200">
@@ -694,15 +722,17 @@ export default function FieldMappingPage() {
         <span className="rounded-full bg-amber-100 px-2.5 py-1 text-xs font-medium text-amber-800">
           Unmapped Fields: {activeTabUnmapped}
         </span>
-        <button
-          type="button"
-          onClick={handleSuggestCurrentTab}
-          disabled={activeTabUnmapped === 0}
-          className="inline-flex items-center gap-2 rounded border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-        >
-          <Sparkles size={15} />
-          Suggest
-        </button>
+        {canWrite && (
+          <button
+            type="button"
+            onClick={handleSuggestCurrentTab}
+            disabled={activeTabUnmapped === 0}
+            className="inline-flex items-center gap-2 rounded border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+          >
+            <Sparkles size={15} />
+            Suggest
+          </button>
+        )}
       </div>
 
       {/* Filter bar */}
@@ -781,7 +811,7 @@ export default function FieldMappingPage() {
       )}
 
       {/* Concept Assign Dialog */}
-      {dialogOpen && selectedField && (
+      {dialogOpen && selectedField && canWrite && (
         <ConceptAssignDialog
           fieldName={selectedField.field_name}
           fieldType={selectedField.field_type}
@@ -813,7 +843,7 @@ export default function FieldMappingPage() {
         />
       )}
 
-      {addFieldDialogOpen && (
+      {addFieldDialogOpen && canWrite && (
         <AddCustomFieldDialog
           tab={activeTab}
           onClose={() => setAddFieldDialogOpen(false)}
@@ -822,7 +852,7 @@ export default function FieldMappingPage() {
       )}
 
       {/* Synonym Dialog */}
-      {synonymDialogField && (
+      {synonymDialogField && canWrite && (
         <SynonymDialog
           fieldName={synonymDialogField}
           onClose={() => {
@@ -834,7 +864,7 @@ export default function FieldMappingPage() {
       )}
 
       {/* Field Choice Editor */}
-      {choiceEditorField && (
+      {choiceEditorField && canWrite && (
         <FieldChoiceEditor
           fieldName={choiceEditorField.field_name}
           onClose={() => {
@@ -845,7 +875,7 @@ export default function FieldMappingPage() {
       )}
 
       {/* Formula Edit Dialog */}
-      {formulaEditorField && (
+      {formulaEditorField && canWrite && (
         <FormulaEditDialog
           fieldName={formulaEditorField.field_name}
           fieldType={formulaEditorField.field_type}

@@ -12,8 +12,14 @@ import {
   type TherapyRegimenItem, type TherapyComponentItem, type TherapyClassItem,
   type DiseaseTherapyRegimenItem,
 } from '@/api/mappingHub';
+import { useAuth } from '@/hooks/useAuth';
+import { isStaffOrOrgAdmin } from '@/utils/roles';
 
 type Tab = 'regimen-component' | 'component-class' | 'disease-regimen';
+
+/** Therapy reference writes are org_admin-only on the API
+ *  (`_require_mapping_admin`); every other professional reads (#2416). */
+interface TabProps { canEdit: boolean }
 
 function useDebouncedValue(value: string, delay = 300): string {
   const [debounced, setDebounced] = useState(value);
@@ -28,7 +34,7 @@ function useDebouncedValue(value: string, delay = 300): string {
 // Regimen-Component Tab
 // ---------------------------------------------------------------------------
 
-function RegimenComponentTab() {
+function RegimenComponentTab({ canEdit }: TabProps) {
   const [regimens, setRegimens] = useState<TherapyRegimenItem[]>([]);
   const [search, setSearch] = useState('');
   const debouncedSearch = useDebouncedValue(search);
@@ -147,15 +153,17 @@ function RegimenComponentTab() {
             onChange={(e) => setSearch(e.target.value)}
           />
         </div>
-        <button
-          onClick={() => setShowAddRegimen(!showAddRegimen)}
-          className="flex items-center gap-1.5 rounded-md border border-input px-3 py-1.5 text-sm hover:bg-accent"
-        >
-          <Plus size={14} /> Add Regimen
-        </button>
+        {canEdit && (
+          <button
+            onClick={() => setShowAddRegimen(!showAddRegimen)}
+            className="flex items-center gap-1.5 rounded-md border border-input px-3 py-1.5 text-sm hover:bg-accent"
+          >
+            <Plus size={14} /> Add Regimen
+          </button>
+        )}
       </div>
 
-      {showAddRegimen && (
+      {showAddRegimen && canEdit && (
         <div className="mb-4 rounded-md border border-border bg-muted/30 p-4 flex items-end gap-3">
           <label className="flex flex-col gap-1 text-sm flex-1">
             Code
@@ -190,13 +198,15 @@ function RegimenComponentTab() {
                   <span className="text-xs text-muted-foreground">({reg.code})</span>
                   {reg.concept_id && <span className="text-xs text-muted-foreground">HemOnc:{reg.concept_id}</span>}
                 </div>
-                <button
-                  onClick={(e) => { e.stopPropagation(); handleDeleteRegimen(reg.code); }}
-                  className="text-muted-foreground hover:text-destructive p-1"
-                  aria-label={`Delete ${reg.title}`}
-                >
-                  <Trash2 size={13} />
-                </button>
+                {canEdit && (
+                  <button
+                    onClick={(e) => { e.stopPropagation(); handleDeleteRegimen(reg.code); }}
+                    className="text-muted-foreground hover:text-destructive p-1"
+                    aria-label={`Delete ${reg.title}`}
+                  >
+                    <Trash2 size={13} />
+                  </button>
+                )}
               </div>
 
               {expanded === reg.code && (
@@ -219,13 +229,15 @@ function RegimenComponentTab() {
                                   </span>
                                 ) : null}
                               </div>
-                              <button
-                                onClick={() => handleRemoveComponent(reg.code, comp.code)}
-                                className="text-muted-foreground hover:text-destructive"
-                                aria-label={`Remove ${comp.title}`}
-                              >
-                                <X size={13} />
-                              </button>
+                              {canEdit && (
+                                <button
+                                  onClick={() => handleRemoveComponent(reg.code, comp.code)}
+                                  className="text-muted-foreground hover:text-destructive"
+                                  aria-label={`Remove ${comp.title}`}
+                                >
+                                  <X size={13} />
+                                </button>
+                              )}
                             </div>
                           ))}
                         </div>
@@ -233,7 +245,7 @@ function RegimenComponentTab() {
                         <div className="text-sm text-muted-foreground mb-3">No components assigned.</div>
                       )}
 
-                      {availableComponents.length > 0 && (
+                      {canEdit && availableComponents.length > 0 && (
                         <select
                           className="h-8 rounded-md border border-input bg-background px-2 text-sm"
                           value=""
@@ -272,7 +284,7 @@ function ConceptStatusBadge({ comp }: { comp: TherapyComponentItem }) {
   return null;
 }
 
-function InlineConceptEditor({ comp, onSaved }: { comp: TherapyComponentItem; onSaved: () => void }) {
+function InlineConceptEditor({ comp, onSaved, canEdit }: { comp: TherapyComponentItem; onSaved: () => void; canEdit: boolean }) {
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState(String(comp.concept_id ?? ''));
   const [saving, setSaving] = useState(false);
@@ -300,6 +312,14 @@ function InlineConceptEditor({ comp, onSaved }: { comp: TherapyComponentItem; on
       setSaving(false);
     }
   }, [comp.code, value, onSaved]);
+
+  if (!canEdit) {
+    return (
+      <span className="text-xs text-muted-foreground">
+        {comp.concept_id ? `HemOnc:${comp.concept_id}` : 'No concept'}
+      </span>
+    );
+  }
 
   if (!editing) {
     return (
@@ -332,7 +352,7 @@ function InlineConceptEditor({ comp, onSaved }: { comp: TherapyComponentItem; on
   );
 }
 
-function ComponentClassTab() {
+function ComponentClassTab({ canEdit }: TabProps) {
   const [components, setComponents] = useState<TherapyComponentItem[]>([]);
   const [allClasses, setAllClasses] = useState<TherapyClassItem[]>([]);
   const [search, setSearch] = useState('');
@@ -431,21 +451,25 @@ function ComponentClassTab() {
             onChange={(e) => setSearch(e.target.value)}
           />
         </div>
-        <button
-          onClick={() => setShowAddComponent(!showAddComponent)}
-          className="flex items-center gap-1.5 rounded-md border border-input px-3 py-1.5 text-sm hover:bg-accent"
-        >
-          <Plus size={14} /> Add Component
-        </button>
-        <button
-          onClick={() => setShowAddClass(!showAddClass)}
-          className="flex items-center gap-1.5 rounded-md border border-input px-3 py-1.5 text-sm hover:bg-accent"
-        >
-          <Plus size={14} /> Add Class
-        </button>
+        {canEdit && (
+          <>
+            <button
+              onClick={() => setShowAddComponent(!showAddComponent)}
+              className="flex items-center gap-1.5 rounded-md border border-input px-3 py-1.5 text-sm hover:bg-accent"
+            >
+              <Plus size={14} /> Add Component
+            </button>
+            <button
+              onClick={() => setShowAddClass(!showAddClass)}
+              className="flex items-center gap-1.5 rounded-md border border-input px-3 py-1.5 text-sm hover:bg-accent"
+            >
+              <Plus size={14} /> Add Class
+            </button>
+          </>
+        )}
       </div>
 
-      {showAddComponent && (
+      {showAddComponent && canEdit && (
         <div className="mb-4 rounded-md border border-border bg-muted/30 p-4 flex items-end gap-3">
           <label className="flex flex-col gap-1 text-sm flex-1">
             Code
@@ -464,7 +488,7 @@ function ComponentClassTab() {
         </div>
       )}
 
-      {showAddClass && (
+      {showAddClass && canEdit && (
         <div className="mb-4 rounded-md border border-border bg-muted/30 p-4 flex items-end gap-3">
           <label className="flex flex-col gap-1 text-sm flex-1">
             Code
@@ -497,22 +521,24 @@ function ComponentClassTab() {
                 <div className="flex items-center gap-2 flex-wrap">
                   <span className="font-medium text-sm">{comp.title}</span>
                   <span className="text-xs text-muted-foreground">({comp.code})</span>
-                  <InlineConceptEditor comp={comp} onSaved={loadData} />
+                  <InlineConceptEditor comp={comp} onSaved={loadData} canEdit={canEdit} />
                   <ConceptStatusBadge comp={comp} />
                   {compClasses.map(cl => (
                     <span key={cl.code} className="inline-flex items-center gap-1 rounded-full bg-blue-50 px-2 py-0.5 text-xs text-blue-700">
                       {cl.title}
-                      <button
-                        onClick={() => handleRemoveClass(comp.code, cl.code)}
-                        className="hover:text-destructive"
-                        aria-label={`Remove class ${cl.title}`}
-                      >
-                        <X size={11} />
-                      </button>
+                      {canEdit && (
+                        <button
+                          onClick={() => handleRemoveClass(comp.code, cl.code)}
+                          className="hover:text-destructive"
+                          aria-label={`Remove class ${cl.title}`}
+                        >
+                          <X size={11} />
+                        </button>
+                      )}
                     </span>
                   ))}
                 </div>
-                {availableClasses.length > 0 && (
+                {canEdit && availableClasses.length > 0 && (
                   <select
                     className="h-7 rounded border border-input bg-background px-1.5 text-xs"
                     value=""
@@ -537,7 +563,7 @@ function ComponentClassTab() {
 // Disease-Round-Regimen Tab
 // ---------------------------------------------------------------------------
 
-function DiseaseRegimenTab() {
+function DiseaseRegimenTab({ canEdit }: TabProps) {
   const [items, setItems] = useState<DiseaseTherapyRegimenItem[]>([]);
   const [regimens, setRegimens] = useState<TherapyRegimenItem[]>([]);
   const [showAdd, setShowAdd] = useState(false);
@@ -598,16 +624,18 @@ function DiseaseRegimenTab() {
         </div>
       )}
 
-      <div className="mb-4 flex items-center gap-3">
-        <button
-          onClick={() => setShowAdd(!showAdd)}
-          className="flex items-center gap-1.5 rounded-md border border-input px-3 py-1.5 text-sm hover:bg-accent"
-        >
-          <Plus size={14} /> Add Association
-        </button>
-      </div>
+      {canEdit && (
+        <div className="mb-4 flex items-center gap-3">
+          <button
+            onClick={() => setShowAdd(!showAdd)}
+            className="flex items-center gap-1.5 rounded-md border border-input px-3 py-1.5 text-sm hover:bg-accent"
+          >
+            <Plus size={14} /> Add Association
+          </button>
+        </div>
+      )}
 
-      {showAdd && (
+      {showAdd && canEdit && (
         <div className="mb-4 rounded-md border border-border bg-muted/30 p-4 flex items-end gap-3">
           <label className="flex flex-col gap-1 text-sm flex-1">
             Disease Code
@@ -638,12 +666,12 @@ function DiseaseRegimenTab() {
               <th className="px-4 py-2 text-left font-medium text-muted-foreground">Disease</th>
               <th className="px-4 py-2 text-left font-medium text-muted-foreground">Round</th>
               <th className="px-4 py-2 text-left font-medium text-muted-foreground">Regimen</th>
-              <th className="px-4 py-2 w-10"></th>
+              {canEdit && <th className="px-4 py-2 w-10"></th>}
             </tr>
           </thead>
           <tbody>
             {items.length === 0 ? (
-              <tr><td colSpan={4} className="px-4 py-4 text-center text-muted-foreground">No associations found.</td></tr>
+              <tr><td colSpan={canEdit ? 4 : 3} className="px-4 py-4 text-center text-muted-foreground">No associations found.</td></tr>
             ) : (
               items.map((item) => (
                 <tr key={item.id} className="border-b border-border last:border-b-0 hover:bg-muted/30">
@@ -656,15 +684,17 @@ function DiseaseRegimenTab() {
                   <td className="px-4 py-2">
                     {item.regimen_title ?? item.regimen_code}
                   </td>
-                  <td className="px-4 py-2">
-                    <button
-                      onClick={() => handleRemove(item.id)}
-                      className="text-muted-foreground hover:text-destructive p-1"
-                      aria-label="Remove association"
-                    >
-                      <Trash2 size={13} />
-                    </button>
-                  </td>
+                  {canEdit && (
+                    <td className="px-4 py-2">
+                      <button
+                        onClick={() => handleRemove(item.id)}
+                        className="text-muted-foreground hover:text-destructive p-1"
+                        aria-label="Remove association"
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    </td>
+                  )}
                 </tr>
               ))
             )}
@@ -681,6 +711,8 @@ function DiseaseRegimenTab() {
 
 export default function TherapyMappingPage() {
   const navigate = useNavigate();
+  const { currentUser } = useAuth();
+  const canEdit = isStaffOrOrgAdmin(currentUser);
   const [activeTab, setActiveTab] = useState<Tab>('regimen-component');
 
   const tabs: Array<{ key: Tab; label: string }> = [
@@ -702,6 +734,10 @@ export default function TherapyMappingPage() {
         <PageTitle className="text-2xl font-bold text-foreground">Therapy Mapping</PageTitle>
       </div>
 
+      {!canEdit && (
+        <p role="status" className="mb-4 text-sm text-muted-foreground">Read-only: editing reference data needs the org admin role.</p>
+      )}
+
       <div className="mb-6 flex gap-1 border-b border-border">
         {tabs.map(tab => (
           <button
@@ -718,9 +754,9 @@ export default function TherapyMappingPage() {
         ))}
       </div>
 
-      {activeTab === 'regimen-component' && <RegimenComponentTab />}
-      {activeTab === 'component-class' && <ComponentClassTab />}
-      {activeTab === 'disease-regimen' && <DiseaseRegimenTab />}
+      {activeTab === 'regimen-component' && <RegimenComponentTab canEdit={canEdit} />}
+      {activeTab === 'component-class' && <ComponentClassTab canEdit={canEdit} />}
+      {activeTab === 'disease-regimen' && <DiseaseRegimenTab canEdit={canEdit} />}
     </div>
   );
 }

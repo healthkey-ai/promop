@@ -567,8 +567,9 @@ export default function CodeMappingPage() {
 
   // Restore the last successful suggest run's candidates when the page loads
   // or the vocabulary tab changes, so navigating away and back doesn't lose them.
+  // A reader gets no panel: its buttons are writes (#2416).
   useEffect(() => {
-    if (!selectedVocabulary) return;
+    if (!selectedVocabulary || !canWrite) return;
     let cancelled = false;
     (async () => {
       try {
@@ -585,7 +586,7 @@ export default function CodeMappingPage() {
       }
     })();
     return () => { cancelled = true; };
-  }, [selectedVocabulary]);
+  }, [selectedVocabulary, canWrite]);
 
   const overallTab = selectedVocabulary === OVERALL_TAB;
   // Keep the latest reviewed model visible while a newer model awaits reviews.
@@ -626,6 +627,12 @@ export default function CodeMappingPage() {
   }, [rows, overallTab, selectedVocabulary, browse, asyncDuplicates]);
 
   const revealDuplicate = async (row: CodeMappingRow | DuplicateSummary) => {
+    // A reader opens no dialog: scroll to the row instead (#2416).
+    if (!canWrite) {
+      if ('summary' in row) return;
+      setNavigationTarget({ id: mappingRowId(row) });
+      return;
+    }
     if ('summary' in row) {
       const sequence = ++duplicateLoadSequence.current;
       setLoadingDuplicate(row.mapping_id);

@@ -2722,6 +2722,35 @@ describe("write controls follow the role (#2416)", () => {
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
+  it("restores the last Suggest run's candidates for a writer and not for a reader", async () => {
+    const latest = {
+      run_id: "restored", state: "success",
+      activity: [{ stage: "candidates", mapping_id: proposedRow.mapping_id, source_code: proposedRow.source_code, strategy: "umls",
+        candidates: [{ concept_id: 1, concept_name: "Restored candidate", concept_code: "A", vocabulary_id: "SNOMED" }] }],
+    };
+    const renderWithLatest = () => {
+      mockGet.mockReset();
+      mockGet.mockImplementation((url: string) => {
+        if (url.includes("/latest/")) return Promise.resolve({ data: latest });
+        if (url === "/v1/code-mappings/") return Promise.resolve({ data: [proposedRow] });
+        if (url === "/v1/code-mappings/reference/") return Promise.resolve({ data: reference });
+        return Promise.resolve({ data: {} });
+      });
+      return render(<MemoryRouter initialEntries={["/code-mappings?direction=forward"]}><CodeMappingPage /></MemoryRouter>);
+    };
+    mockUseAuth.mockReturnValue(grant("analyst"));
+    renderWithLatest();
+    expect(await screen.findByRole("region", { name: "Suggestion candidates" })).toBeInTheDocument();
+    cleanup();
+
+    mockUseAuth.mockReturnValue(grant("doctor"));
+    renderWithLatest();
+    await screen.findAllByText(proposedRow.source_code);
+    expect(screen.getByText("Read-only: mapping codes needs the analyst role.")).toBeInTheDocument();
+    expect(mockGet.mock.calls.some(([url]) => String(url).includes("/latest/"))).toBe(false);
+    expect(screen.queryByRole("region", { name: "Suggestion candidates" })).not.toBeInTheDocument();
+  });
+
   it("shows Upload and Source systems to an org admin", async () => {
     mockUseAuth.mockReturnValue({ currentUser: { id: 9, is_org_admin: true, org_accesses: [] } });
     renderPage([proposedRow]);

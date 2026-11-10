@@ -8,7 +8,7 @@ import type {
 } from "../../types/sourceCodes";
 import EditMappingDialog from "../CodeMappings/EditMappingDialog";
 import SourceQuantityCell from "../CodeMappings/SourceQuantityCell";
-import { isStaffOrOrgAdmin } from "@/utils/roles";
+import { canWriteMappings, isStaffOrOrgAdmin } from "@/utils/roles";
 import {
   type CodeMappingRow,
   type Reference,
@@ -96,7 +96,8 @@ function SourceCodeTable({
   onRowClick,
 }: {
   rows: PatientSourceCode[];
-  onRowClick: (sc: PatientSourceCode) => void;
+  /** Absent for a reader: the row opens nothing (#2416). */
+  onRowClick?: (sc: PatientSourceCode) => void;
 }) {
   return (
     <div className="overflow-x-auto rounded-md border">
@@ -115,8 +116,8 @@ function SourceCodeTable({
           {rows.map((sc, i) => (
             <tr
               key={`${sc.omop_table}-${sc.source_value}-${i}`}
-              className="cursor-pointer hover:bg-muted/30"
-              onClick={() => onRowClick(sc)}
+              className={onRowClick ? "cursor-pointer hover:bg-muted/30" : undefined}
+              onClick={onRowClick ? () => onRowClick(sc) : undefined}
             >
               <td className="px-3 py-2">
                 <div className="font-mono text-xs">{sc.source_value}</div>
@@ -157,6 +158,7 @@ function SourceCodeTable({
 export default function PatientSourceCodesTab({ personId }: Props) {
   const { currentUser } = useAuth();
   const canApprove = isStaffOrOrgAdmin(currentUser);
+  const canWrite = canWriteMappings(currentUser);
   const [data, setData] = useState<SourceCodesResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -312,6 +314,12 @@ export default function PatientSourceCodesTab({ personId }: Props) {
         </div>
       </div>
 
+      {!canWrite && (
+        <p role="status" className="text-sm text-muted-foreground">
+          Read-only: mapping codes needs the analyst role.
+        </p>
+      )}
+
       {/* Save banner */}
       {banner && (
         <div className="rounded-md border border-sky-200 bg-sky-50 p-3 text-sm text-sky-800">
@@ -341,7 +349,7 @@ export default function PatientSourceCodesTab({ personId }: Props) {
               <div className="mt-1">
                 <SourceCodeTable
                   rows={expanded[key] ? rows : rows.slice(0, SECTION_ROW_LIMIT)}
-                  onRowClick={handleRowClick}
+                  onRowClick={canWrite ? handleRowClick : undefined}
                 />
                 {!expanded[key] && rows.length > SECTION_ROW_LIMIT && (
                   <button

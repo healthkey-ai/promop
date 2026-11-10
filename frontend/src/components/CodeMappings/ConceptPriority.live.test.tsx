@@ -35,7 +35,7 @@ describeLive('concept priority against a live backend', () => {
   beforeAll(() => { api.defaults.headers.common.Authorization = `Bearer ${LIVE_TOKEN}`; });
 
   it('ranks by typed number and by drag, and reads the new order back', async () => {
-    render(<ConceptToCodeTab canApprove />);
+    render(<ConceptToCodeTab canWrite canApprove />);
     fireEvent.change(await screen.findByRole('textbox', { name: 'Search standard concepts' }), { target: { value: SEARCH } });
     await waitFor(() => expect(order()).toEqual([`${SEARCH} Alpha`, `${SEARCH} Beta`, `${SEARCH} Gamma`]), { timeout: 10000 });
 

@@ -17,7 +17,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
-        ("omop_core", "0332_concept_mapping_note"),
+        ("omop_core", "0334_sccm_curator_note"),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 
