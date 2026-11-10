@@ -37,6 +37,12 @@ def fields(descriptor):
             if not name.startswith('__')}
 
 
+def test_the_schema_version_is_pinned():
+    # Independent of the envelope: a bump is a deliberate contract change, so
+    # this literal moves in the same commit as the clients that understand it.
+    assert DESCRIPTOR_SCHEMA_VERSION == 1
+
+
 def test_the_envelope_pins_the_schema_version(descriptor):
     assert descriptor[DESCRIPTOR_META_KEY] == {
         'schema_version': DESCRIPTOR_SCHEMA_VERSION,

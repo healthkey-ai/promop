@@ -50,6 +50,7 @@ Four independent dimensions. Do not collapse them into one `kind`.
 | kind | canonical value | editor |
 | --- | --- | --- |
 | `direct` | PatientRecord column | scalar / select / multiselect / date |
+| `editable` | a mapped OMOP fact | scalar / select / multiselect / date |
 | `profile` | Person attribute (gender, race, ethnicity, address) | select / address |
 | `alias` | mirrors `canonical` | the canonical's editor |
 | `computed` | derived by code, `inputs` name the sources | subform over the inputs |
@@ -58,11 +59,24 @@ Four independent dimensions. Do not collapse them into one `kind`.
 | `authored` | Episode/EpisodeEvent, genomics, therapy lines | the resource's own editor |
 | `unmapped` | none | read-only, with a reason and owner |
 
+`computed` and `unmapped` entries may still carry `target`/`projection`
+metadata describing where a value comes from. Those keys are provenance, not
+permission: only `writable` (and `answerable`, for an attestation) permits a
+write.
+
 ### Operation — `writable` vs `answerable`
 
-- `writable: true` permits a PatientRecord PATCH. It implies `target` and,
-  for clinical facts, `projection` metadata; those fields are `PATCH
-  /api/v1/patient-records/<person_id>/`.
+- `writable: true` permits a write and always names `target`. The route is
+  the target, not a guess:
+
+  | `target` | write path |
+  | --- | --- |
+  | `patient_record` | `PATCH /api/v1/patient-records/<person_id>/` |
+  | `genomics` | the findings endpoints (list diff), never a field PATCH |
+
+  `projection` is optional even for `patient_record`: it is present when the
+  write projects into a clinical table, and absent for a direct column with no
+  approved mapping yet. A client must not treat its absence as read-only.
 - `answerable: true` permits the explicit-answer actions **and nothing else**.
   Such an entry is `writable: false`; its write is its own `endpoint`. A
   client must never PATCH an `answerable` field.
@@ -114,10 +128,15 @@ re-normalise it; `store.load()` alone is not a host notification.
 
 | write | authoritative read | host action |
 | --- | --- | --- |
-| `PATCH /api/v1/patient-records/<person_id>/` | `GET /api/v1/patient-info/me/` | re-read, normalize, invalidate the trial list/detail |
-| explicit answer endpoint (`preexisting-conditions-answer`, `negative-answer`) | the answer's own GET plus `patient-info/me` | re-read, invalidate |
+| `PATCH /api/v1/patient-records/<person_id>/` | `GET {base}/patient-info/me/` for the signed-in patient, or `GET /api/v1/patient-records/<person_id>/` when the host edits someone else | re-read, normalize, invalidate the trial list/detail |
+| explicit answer endpoint (`preexisting-conditions-answer`, `negative-answer`) | the answer's own GET plus the record read above | re-read, invalidate |
 | therapy line / episode endpoints | the record projection and the episode list | re-read, invalidate |
 | genomics findings endpoints | the findings list | re-read, invalidate |
+
+`{base}` is where the host mounts the API (`/api`, or the host's federation
+prefix). The shared-form client sends `X-Patient-Form: 1` and asks
+`{base}/patient-info/me/`; `me` is the signed-in patient and is not a
+substitute for reading a different `<person_id>`.
 
 A successful PATCH response proves the batch was accepted, not that every
 field was applied: `write.applied` and `write.rejected` are per field, and a
