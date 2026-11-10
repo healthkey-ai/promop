@@ -39,7 +39,9 @@ keyed by client + base + optional `connectionKey`. A host whose single axios
 instance survives a sign-in or impersonation change must provide a new client
 (or at least a new key): a new key starts a new queue immediately, while a
 batch already queued still drains through the client it captured and therefore
-through whatever credentials that client now sends. `PatientFieldEditorSlot.onChanged` fires after the server
+through whatever credentials that client now sends. The editor subtree is
+keyed by the connection, so a dated draft or an open therapy-line dialog is
+remounted instead of surviving into the new patient's context. `PatientFieldEditorSlot.onChanged` fires after the server
 acknowledges a save; `TherapyLinesEditor.onChanged` and
 `GenomicsEditor.onChanged` fire after their own mutations, so the host can
 invalidate its trial queries.

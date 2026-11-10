@@ -1,7 +1,7 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 
 import PatientFieldEditor from './PatientFieldEditor';
-import { useEditorSession, type EditorConnection } from './editorSession';
+import { editorIdentity, useEditorSession, type EditorConnection } from './editorSession';
 
 export interface PatientFieldEditorSlotProps extends EditorConnection {
   /** The name the trial row carries: a canonical descriptor key or one of its
@@ -47,12 +47,23 @@ export default function PatientFieldEditorSlot({
   // failure never reaches its `updated` listeners. `onUpdated` keeps the
   // host's callback until the queue drains, so a save that outlives this row
   // still invalidates.
+  //
+  // The subscription is per store, and the latest callback is read through a
+  // ref. Keying it on `onChanged` would leave the old listener registered until
+  // the queue drains (the store retires it then) and add a second one, so an
+  // inline callback from the host would invalidate a batch twice.
+  const changed = useRef(onChanged);
+  useEffect(() => { changed.current = onChanged; }, [onChanged]);
   useEffect(
-    () => (onChanged ? store.onUpdated(() => onChanged()) : undefined),
-    [store, onChanged],
+    () => store.onUpdated(() => { changed.current?.(); }),
+    [store],
   );
+  // A new connection is a new patient context. A dated draft or a chosen unit
+  // belongs to the old one and must not be committed into the new store.
+  const identity = editorIdentity({ apiClient, apiBasePath, connectionKey });
   return (
     <PatientFieldEditor
+      key={identity}
       store={store}
       name={name}
       readOnly={readOnly}

@@ -1,4 +1,4 @@
-import { act, render, renderHook, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import type { AxiosInstance } from 'axios';
 
@@ -198,6 +198,26 @@ describe('the PROMOP editors for a host that shares the React tree', () => {
     await waitFor(() => expect(result.current.ready).toBe(true));
   });
 
+  it('remounts the editor subtree when the connection changes', async () => {
+    const host = hostClient();
+    const { rerender } = render(
+      <TherapyLinesEditor apiClient={host.client} apiBasePath="" readOnly={false} connectionKey="a" />,
+    );
+    await screen.findByText(/Line 1:/);
+    fireEvent.click(screen.getByRole('button', { name: 'Add therapy line' }));
+    expect(screen.getByRole('dialog', { name: 'Record a line of therapy' })).toBeInTheDocument();
+
+    // Same patient form, new identity: an open dialog still holds the old
+    // patient's episode, so it must not survive.
+    rerender(
+      <TherapyLinesEditor apiClient={host.client} apiBasePath="" readOnly={false} connectionKey="b" />,
+    );
+    // Wait for the NEW store to finish loading: while it loads the panel
+    // renders its status line, which would hide a surviving dialog too.
+    await screen.findByText(/Line 1:/);
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
   it('notifies the host after an acknowledged field save', async () => {
     const host = hostClient();
     const onChanged = vi.fn();
@@ -224,6 +244,43 @@ describe('the PROMOP editors for a host that shares the React tree', () => {
       expect.objectContaining({ headers: { 'X-Patient-Form': '1' } }),
     );
     expect(onChanged).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not multiply notifications when the host passes a new callback', async () => {
+    const host = hostClient();
+    const first = vi.fn();
+    const second = vi.fn();
+    const { rerender } = render(
+      <PatientFieldEditorSlot
+        apiClient={host.client}
+        apiBasePath=""
+        name="height"
+        label="Height"
+        readOnly={false}
+        onChanged={first}
+      />,
+    );
+    await screen.findByRole('spinbutton', { name: 'Height' });
+    const store = patientFormForClient(host.client, '');
+
+    // Queue a batch, then hand over a fresh inline callback while it is still
+    // pending: the store keeps the old listener until the queue drains, so a
+    // subscription keyed on the callback would deliver one invalidation twice.
+    await act(async () => { store.enqueue('height', 180); });
+    rerender(
+      <PatientFieldEditorSlot
+        apiClient={host.client}
+        apiBasePath=""
+        name="height"
+        label="Height"
+        readOnly={false}
+        onChanged={second}
+      />,
+    );
+    await act(async () => { await store.flush(); });
+
+    expect(first).not.toHaveBeenCalled();
+    expect(second).toHaveBeenCalledTimes(1);
   });
 
   it('stays quiet when the server refuses the field write', async () => {

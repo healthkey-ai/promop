@@ -1,7 +1,12 @@
 import { useMemo } from 'react';
 
 import TherapyLinesPanel from './TherapyLinesPanel';
-import { editorBasePath, useEditorSession, type EditorConnection } from './editorSession';
+import {
+  editorBasePath,
+  editorIdentity,
+  useEditorSession,
+  type EditorConnection,
+} from './editorSession';
 
 export interface TherapyLinesEditorProps extends EditorConnection {
   /** The host's write gate. Read-only still lists the recorded lines. */
@@ -30,6 +35,9 @@ export default function TherapyLinesEditor({
   onChanged,
 }: TherapyLinesEditorProps) {
   const store = useEditorSession({ apiClient, apiBasePath, connectionKey });
+  // A new connection is a new patient context: an open line dialog would still
+  // hold the previous patient's episode. Keyed so React remounts it.
+  const identity = editorIdentity({ apiClient, apiBasePath, connectionKey });
   // Stable identity: the panel keys its catalog callbacks on it, and a new
   // object each render would re-run their effects on every render.
   const connection = useMemo(
@@ -38,6 +46,7 @@ export default function TherapyLinesEditor({
   );
   return (
     <TherapyLinesPanel
+      key={identity}
       store={store}
       readOnly={readOnly}
       onChanged={onChanged}

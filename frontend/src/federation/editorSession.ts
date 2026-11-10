@@ -46,6 +46,27 @@ export function editorBasePath(connection: EditorConnection): string {
   return (connection.apiBasePath ?? '').replace(/\/+$/, '');
 }
 
+const clientIds = new WeakMap<AxiosInstance, number>();
+let nextClientId = 0;
+
+/**
+ * A stable identity for one connection, for a React `key`.
+ *
+ * Editors keep local state the store does not own: a dated lab draft, an open
+ * therapy-line dialog carrying the previous patient's episode. Changing the
+ * connection must therefore remount them, not only swap the store underneath.
+ * The axios instance gets a process-local id (it cannot be stringified), and
+ * the base and `connectionKey` complete the tuple.
+ */
+export function editorIdentity(connection: EditorConnection): string {
+  let id = clientIds.get(connection.apiClient);
+  if (id === undefined) {
+    id = ++nextClientId;
+    clientIds.set(connection.apiClient, id);
+  }
+  return `${id}:${editorBasePath(connection)}:${connection.connectionKey ?? ''}`;
+}
+
 /**
  * The patient-form store for one connection, loaded on mount.
  *

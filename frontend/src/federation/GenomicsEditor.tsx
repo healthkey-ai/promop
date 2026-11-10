@@ -1,7 +1,12 @@
 import { useMemo } from 'react';
 
 import GenomicsFindingsModal from './GenomicsFindingsModal';
-import { editorBasePath, useEditorSession, type EditorConnection } from './editorSession';
+import {
+  editorBasePath,
+  editorIdentity,
+  useEditorSession,
+  type EditorConnection,
+} from './editorSession';
 
 export interface GenomicsEditorProps extends EditorConnection {
   /** The host's write gate; the dialog still opens to show the findings. */
@@ -31,11 +36,13 @@ export default function GenomicsEditor({
   onChanged,
 }: GenomicsEditorProps) {
   const store = useEditorSession({ apiClient, apiBasePath, connectionKey });
+  const identity = editorIdentity({ apiClient, apiBasePath, connectionKey });
   const base = editorBasePath({ apiClient, apiBasePath });
   // Stable identity: the editor stores this callback and compares it.
   const changed = useMemo(() => onChanged ?? (() => {}), [onChanged]);
   return (
     <GenomicsFindingsModal
+      key={identity}
       store={store}
       client={apiClient}
       apiBase={base}
