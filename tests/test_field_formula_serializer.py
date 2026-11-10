@@ -41,3 +41,18 @@ def test_a_computed_field_can_still_be_activated():
     serializer = FieldFormulaSerializer(formula, data={'is_active': True}, partial=True)
 
     assert serializer.is_valid(), serializer.errors
+
+
+@pytest.mark.parametrize('field_name', [
+    'no_pregnancy_or_lactation_status', 'no_active_infection_status', 'no_other_active_malignancies',
+])
+def test_every_field_the_check_covers_is_a_400_not_a_500(field_name):
+    """field_formula_explicit_answer_inactive covers three fields; the
+    serializer refused only the two derived negatives, so pregnancy reached
+    the database and raised IntegrityError."""
+    formula = FieldFormula.objects.create(field_name=field_name, formula='true', is_active=False)
+
+    serializer = FieldFormulaSerializer(formula, data={'is_active': True}, partial=True)
+
+    assert not serializer.is_valid()
+    assert 'field_name' in serializer.errors

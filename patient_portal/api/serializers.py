@@ -2167,8 +2167,12 @@ class FieldFormulaSerializer(serializers.ModelSerializer):
 
     @staticmethod
     def _assert_computable(field_name):
-        from omop_core.models import ExplicitNegativeAnswer
-        if field_name in ExplicitNegativeAnswer.ANSWER_FIELDS:
+        # The authored-answer set, not just the two derived negatives: the
+        # field_formula_explicit_answer_inactive CHECK also covers pregnancy,
+        # so activating its formula raised IntegrityError (a 500) instead of
+        # this 400 (#2418 regression review).
+        from omop_core.services.authored_answers import is_authored_answer_field
+        if is_authored_answer_field(field_name):
             raise serializers.ValidationError({
                 'field_name': 'This field is an explicit answer; a formula cannot be active.',
             })
