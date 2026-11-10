@@ -18,15 +18,15 @@ from django.core.management.base import CommandError
 from omop_core.management.embedding_command import EmbeddingLoadCommand
 from django.apps import apps
 from django.db import connection, transaction
-from django.db.models import Count
+from django.db.models import CASCADE, Count
 import requests
 
 import logging
 
-from omop_core.services import vocabulary_source
+from omop_core.services import concept_priority, vocabulary_source
 from omop_core.services.vocabulary_source import DEFAULT_LFS_URL, LOINC_ZIP_RE, sha256_file
 from omop_core.models import (
-    Vocabulary, Domain, ConceptClass, Concept,
+    Vocabulary, Domain, ConceptClass, Concept, ConceptMappingPriority,
     Relationship, ConceptRelationship, ConceptAncestor, CdmSource,
     VocabularyVersionHistory, record_vocabulary_version_history,
     VocabularyRelease,
@@ -936,6 +936,22 @@ class Command(EmbeddingLoadCommand):
                     and field.related_model is Concept
                 ):
                     references.append((model, field))
+        # A one-to-one row that cascades is about its concept: a curator's
+        # note, rank, Done mark or lock, a concept's embedding. The raw DELETE
+        # below runs no Django cascade, so they are removed here, or the
+        # foreign key refuses the replacement at commit.
+        tables = set(connection.introspection.table_names())
+        owned = [
+            (model, field)
+            for model in apps.get_models()
+            for field in model._meta.get_fields()
+            if not field.auto_created
+            and getattr(field, 'one_to_one', False)
+            and field.related_model is Concept
+            and field.remote_field.on_delete is CASCADE
+            # concept_embedding does not exist on a server without pgvector.
+            and model._meta.db_table in tables
+        ]
 
         with connection.cursor() as cur:
             cur.execute(f'SELECT COUNT(*) FROM ({stale_sql}) stale', params)
@@ -958,8 +974,19 @@ class Command(EmbeddingLoadCommand):
                         f'UPDATE {table} SET {column} = {value} '
                         f'WHERE {column} IN ({stale_sql})', params
                     )
+            unranked = 0
+            for model, field in owned:
+                cur.execute(
+                    f'DELETE FROM {qn(model._meta.db_table)} '
+                    f'WHERE {qn(field.column)} IN ({stale_sql})', params
+                )
+                if model is ConceptMappingPriority:
+                    unranked = cur.rowcount
             cur.execute(f'DELETE FROM concept WHERE concept_id IN ({stale_sql})', params)
             cur.execute(f'DROP TABLE {_INCOMING_CONCEPT_TABLE}')
+        if unranked:
+            # Positions stay 1..N with no gaps (#1914).
+            concept_priority.renumber()
         self._log(
             f'  --replace: removed {stale_count:,} stale Athena concept(s); '
             'patient-owned rows were retained.'

@@ -215,3 +215,44 @@ def test_replace_removes_stale_concepts_without_removing_patients():
         measurement_id=measurement.measurement_id
     ).exists()
     assert not type(stale).objects.filter(concept_id=stale.concept_id).exists()
+
+
+@pytest.mark.django_db
+def test_replace_drops_curation_rows_kept_on_a_stale_concept():
+    """A note, rank, Done mark or lock is about its concept and goes with it.
+
+    Each is a one-to-one row that cascades in Django; the raw DELETE runs no
+    cascade, so the foreign key refused the whole replacement.
+    """
+    from django.contrib.auth import get_user_model
+    from omop_core.models import (
+        ConceptMappingDone, ConceptMappingLock, ConceptMappingNote, ConceptMappingPriority,
+    )
+    stale, done, kept = (
+        ConceptFactory(concept_id=998_101 + index, concept_code=f'STALE-{index}') for index in range(3)
+    )
+    first, last = ConceptFactory(concept_id=999_101), ConceptFactory(concept_id=999_102)
+    user = get_user_model().objects.create_user(email='stale-curator@test.com')
+    ConceptMappingPriority.objects.create(concept=first, position=1)
+    ConceptMappingPriority.objects.create(concept=stale, position=2)
+    ConceptMappingPriority.objects.create(concept=last, position=3)
+    ConceptMappingNote.objects.create(concept=stale, text='Parked')
+    ConceptMappingLock.objects.create(concept=stale, locked_by=user)
+    ConceptMappingDone.objects.create(concept=done)
+    ConceptMappingNote.objects.create(concept=first, text='Stays')
+    cmd = Command(stdout=StringIO())
+    cmd._replace_tracking = True
+    cmd._create_incoming_concept_table()
+    cmd._record_incoming_concept_ids([first.pk, last.pk])
+    cmd._seed_concept_zero()
+
+    cmd._remove_stale_concepts()
+
+    assert not type(stale).objects.filter(pk__in=[stale.pk, done.pk, kept.pk]).exists()
+    assert list(ConceptMappingNote.objects.values_list('concept_id', 'text')) == [(first.pk, 'Stays')]
+    assert not ConceptMappingLock.objects.exists()
+    assert not ConceptMappingDone.objects.exists()
+    # The priority list closes the gap the removed concept left.
+    assert list(ConceptMappingPriority.objects.order_by('position').values_list('concept_id', 'position')) == [
+        (first.pk, 1), (last.pk, 2),
+    ]
