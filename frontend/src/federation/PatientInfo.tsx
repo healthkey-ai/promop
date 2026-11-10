@@ -97,13 +97,23 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
           // Therapy mutations bypass the store's queue: reload the record and
           // tell the host, or its trial matches keep the old therapy history.
           onRecordRefreshed={() => {
-            void store.load().then(() => store.announceUpdated());
+            // Hold the host listeners until the reload/notification lands: the
+            // reader can leave the tab while it runs.
+            store.beginBypassWrite();
+            void store.load()
+              .then(() => store.announceUpdated())
+              .finally(() => store.endBypassWrite());
           }} />}
         {tabKey === 'labs' && <LabsTab formData={editedInfo} onChange={handleFieldChange} />}
         {tabKey === 'behavior' && <BehaviorTab formData={editedInfo} onChange={handleFieldChange} />}
         {tabKey === 'wearable' && <WearableTab formData={editedInfo} onChange={handleFieldChange} />}
         {tabKey === 'genomics' && <GenomicsTab formData={editedInfo} readOnly={readOnly}
-          onChanged={() => { void store.load().then(() => store.announceUpdated()); }} />}
+          onChanged={() => {
+            store.beginBypassWrite();
+            void store.load()
+              .then(() => store.announceUpdated())
+              .finally(() => store.endBypassWrite());
+          }} />}
         {tabKey === 'history' && <ClinicalSummaryTab formData={editedInfo} onNavigateToLabs={() => setActiveTab(tabKeys.indexOf('labs'))} />}
       </fieldset>
     </div>

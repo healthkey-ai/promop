@@ -580,6 +580,19 @@ describe('dated lab results', () => {
       .toEqual({ hemoglobin_g_dl: { value: 13, date: '2026-07-15' } });
   });
 
+  it('asks for a date even when the edited pair has no projected fact', async () => {
+    const { store } = await setup({
+      hemoglobin_g_dl: { label: 'Hemoglobin', writable: true, target: 'patient_record',
+        control: 'number', dated: true, user_edited: true },
+    }, { hemoglobin_g_dl: 12.5 });
+    render(<PatientFieldEditor store={store} name="hemoglobin_g_dl" />);
+
+    // No `latest_date` to fall back to: the old code would have used today.
+    expect(screen.getByLabelText('Result date')).toHaveValue('');
+    fireEvent.change(screen.getByRole('spinbutton'), { target: { value: '13' } });
+    expect(screen.getByRole('button', { name: 'Save result' })).toBeDisabled();
+  });
+
   it('does not save a dated value before the pair is committed', async () => {
     const { store, patch } = await setup({
       hemoglobin_g_dl: { label: 'Hemoglobin', writable: true, target: 'patient_record',

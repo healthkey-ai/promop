@@ -516,3 +516,22 @@ def test_a_future_date_on_the_pair_is_refused():
                             'hemoglobin_g_dl'})
 
     assert not Measurement.objects.filter(person=person).exists()
+
+
+def test_an_edited_pair_without_a_projected_fact_still_asks_for_the_date():
+    """A retained pair may have no Measurement of its own.
+
+    The flag must not depend on `latest_date`: otherwise the editor silently
+    falls back to today's date for the next correction.
+    """
+    person = _person_with_lab()
+    record = PatientRecord.objects.get(person=person)
+    record.hemoglobin_level = Decimal('140')
+    record.user_edited_fields = ['hemoglobin_level']
+    record.save()
+
+    descriptors = patient_form_descriptors(
+        build_writable_field_descriptor(), record=record)
+
+    assert descriptors['hemoglobin_level'].get('user_edited') is True
+    assert 'latest_date' not in descriptors['hemoglobin_level']

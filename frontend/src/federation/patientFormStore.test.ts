@@ -185,6 +185,40 @@ describe('shared patient-form queue', () => {
     expect(state.writable).toBe(false);
     expect(state.fields).toEqual({});
   });
+  it('refuses a pending batch when the descriptor version changes on refresh', async () => {
+    let version = 1;
+    const get = vi.fn(async (url: string) => ({ data: url.includes('writable-fields') ? {
+      __descriptor__: { schema_version: version },
+      weight: { writable: true, target: 'patient_record' },
+    } : { patient_info: { person_id: 12, weight: 60 }, write_enabled: true } }));
+    const patch = vi.fn(async () => ({ data: { patient_info: {}, write: { applied: [] } } }));
+    const store = new PatientFormStore({ get, patch } as unknown as AxiosInstance, '/api');
+    await store.load();
+    store.enqueue('weight', 90);
+
+    version = 2;
+    await store.load();
+    await vi.advanceTimersByTimeAsync(600);
+
+    expect(patch).not.toHaveBeenCalled();
+    expect(store.getSnapshot().error).toMatch(/too old/i);
+    expect(store.getSnapshot().errors.weight).toMatch(/too old/i);
+    expect(store.getSnapshot().pending).toEqual({});
+  });
+  it('keeps the host listener through a bypass write after unmount', async () => {
+    const { store } = setup();
+    await store.load();
+    const updated = vi.fn();
+    const detach = store.onUpdated(updated);
+
+    store.beginBypassWrite();
+    detach(); // the tab unmounted while the bypass write was running
+    store.announceUpdated();
+    store.endBypassWrite();
+    await vi.runAllTimersAsync();
+
+    expect(updated).toHaveBeenCalledOnce();
+  });
   it('announces a write that bypassed the queue', async () => {
     // Attestations, therapy lines and genomics findings never enter the PATCH
     // queue. The host still has to invalidate its own queries after one.
@@ -615,6 +649,40 @@ describe('shared patient-form queue', () => {
     expect(state.error).toMatch(/too old/i);
     expect(state.writable).toBe(false);
     expect(state.fields).toEqual({});
+  });
+  it('refuses a pending batch when the descriptor version changes on refresh', async () => {
+    let version = 1;
+    const get = vi.fn(async (url: string) => ({ data: url.includes('writable-fields') ? {
+      __descriptor__: { schema_version: version },
+      weight: { writable: true, target: 'patient_record' },
+    } : { patient_info: { person_id: 12, weight: 60 }, write_enabled: true } }));
+    const patch = vi.fn(async () => ({ data: { patient_info: {}, write: { applied: [] } } }));
+    const store = new PatientFormStore({ get, patch } as unknown as AxiosInstance, '/api');
+    await store.load();
+    store.enqueue('weight', 90);
+
+    version = 2;
+    await store.load();
+    await vi.advanceTimersByTimeAsync(600);
+
+    expect(patch).not.toHaveBeenCalled();
+    expect(store.getSnapshot().error).toMatch(/too old/i);
+    expect(store.getSnapshot().errors.weight).toMatch(/too old/i);
+    expect(store.getSnapshot().pending).toEqual({});
+  });
+  it('keeps the host listener through a bypass write after unmount', async () => {
+    const { store } = setup();
+    await store.load();
+    const updated = vi.fn();
+    const detach = store.onUpdated(updated);
+
+    store.beginBypassWrite();
+    detach(); // the tab unmounted while the bypass write was running
+    store.announceUpdated();
+    store.endBypassWrite();
+    await vi.runAllTimersAsync();
+
+    expect(updated).toHaveBeenCalledOnce();
   });
   it('announces a write that bypassed the queue', async () => {
     // Attestations, therapy lines and genomics findings never enter the PATCH

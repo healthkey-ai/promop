@@ -41,6 +41,8 @@ export interface PatientFormSnapshot {
   error?: string;
   /** A post-save descriptor refresh failed, so `latest_date` may be stale. */
   datesStale?: boolean;
+  /** This build cannot honour the record contract; no write may be sent. */
+  contractError?: string;
 }
 export interface PatientFormResult {
   patient_info: Record<string, unknown>;
@@ -61,6 +63,10 @@ export class PatientFormStore {
    *  runs. */
   private updated = new Map<(result: PatientFormResult) => unknown, number>();
   private updatedGeneration = 0;
+  /** A bypass write (attestation/therapy/genomics) is in flight. Listeners are
+   *  retained until it lands, because the notification comes after the request
+   *  and the screen may already be gone. */
+  private bypasses = 0;
   private queue: Record<string, unknown> = {};
   private revisions: Record<string, number> = {};
   private revision = 0;
@@ -84,7 +90,8 @@ export class PatientFormStore {
       // The host's invalidation must still run when navigation removed its
       // root while a save/follow-up is pending. Retire it only after draining.
       const removeWhenIdle = () => {
-        if (this.flight || Object.keys(this.snapshot.pending).length) return false;
+        if (this.flight || this.bypasses > 0
+            || Object.keys(this.snapshot.pending).length) return false;
         // Only the registration this cleanup belongs to may remove it: a
         // replay that re-registered the same function owns the live entry.
         if (this.updated.get(listener) === token) this.updated.delete(listener);
@@ -109,6 +116,14 @@ export class PatientFormStore {
   applyServerValues(values: Record<string, unknown>) {
     ++this.explicitRevision;
     this.publish({ values: { ...this.snapshot.values, ...values } });
+  }
+  /** Hold the host's listeners while a write outside the PATCH queue runs. */
+  beginBypassWrite() {
+    this.bypasses += 1;
+  }
+  endBypassWrite() {
+    this.bypasses = Math.max(0, this.bypasses - 1);
+    if (this.bypasses === 0) this.publish({});
   }
   /** Tell the host's `onUpdated` listeners that a write bypassed the PATCH
    *  queue: an explicit attestation, a therapy line or a genomics finding.
@@ -173,7 +188,8 @@ export class PatientFormStore {
         if (parsed.error) {
           if (revision === this.readRevision) {
             this.publish({ values, personId, fields: {}, loading: false,
-              datesStale: false, writable: false, error: parsed.error });
+              datesStale: false, writable: false, contractError: parsed.error,
+              error: parsed.error });
           }
           return;
         }
@@ -183,7 +199,7 @@ export class PatientFormStore {
         );
         if (revision !== this.readRevision) return;
         this.publish({ values, fields, personId, loading: false, datesStale: false,
-          errors: this.withoutStaleErrors(),
+          errors: this.withoutStaleErrors(), contractError: undefined,
           writable: data.write_enabled !== false, error: undefined });
       } catch {
         if (revision === this.readRevision) this.publish({ loading: false, writable: false,
@@ -248,12 +264,24 @@ export class PatientFormStore {
     const attempt = ++this.reloadSequence;
     const current = () => readRevision === this.readRevision && attempt === this.reloadSequence;
     try {
-      const { data } = await this.client.get<Record<string, FormFieldDescriptor>>(
+      const { data } = await this.client.get<Record<string, unknown>>(
         `${this.base}/v1/patient-records/writable-fields/`,
         { params: { person_id: personId }, headers: { 'X-Patient-Form': '1' } });
-      const fields = await this.enrichFields({ ...data }, this.snapshot.values);
+      const parsed = parseWritableDescriptor(data);
+      if (parsed.error) {
+        if (current()) {
+          this.publish({ fields: {}, writable: false, datesStale: false,
+            contractError: parsed.error, error: parsed.error });
+        }
+        return false;
+      }
+      const fields = await this.enrichFields(
+        { ...parsed.fields } as unknown as Record<string, FormFieldDescriptor>,
+        this.snapshot.values,
+      );
       if (current()) {
-        this.publish({ fields, datesStale: false, errors: this.withoutStaleErrors() });
+        this.publish({ fields, datesStale: false, contractError: undefined,
+          errors: this.withoutStaleErrors() });
       }
       return true;
     } catch {
@@ -328,6 +356,21 @@ export class PatientFormStore {
       // No await between this check and taking the batch below, so a refresh
       // cannot start in the gap and be overtaken by the dispatch.
       if (!this.datesRefresh) break;
+    }
+    if (this.snapshot.contractError) {
+      // The record contract changed under this build. Sending the queue would
+      // write under old semantics; reject it with the same sentence the screen
+      // shows instead.
+      const rejected = this.snapshot.contractError;
+      const pending = { ...this.snapshot.pending };
+      const errors = { ...this.snapshot.errors };
+      for (const name of Object.keys(this.queue)) {
+        delete pending[name];
+        errors[name] = rejected;
+      }
+      this.queue = {};
+      this.publish({ pending, errors });
+      return;
     }
     const batch = this.queue;
     const revisions = { ...this.revisions };

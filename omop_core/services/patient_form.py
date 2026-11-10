@@ -347,14 +347,17 @@ def _attach_latest_fact_dates(record, entries):
         for row in rows:
             for name in observation_concepts[row['observation_concept_id']]:
                 latest[name] = row['latest']
-    edited = set(getattr(record, 'user_edited_fields', None) or [])
     for name, value in latest.items():
         entries[name]['latest_date'] = value.isoformat()
-        if name in edited:
-            # The reader's pair may be older than the newest fact. The editor
-            # must ask for the correction date instead of defaulting to
-            # `latest_date` and filing the edit on a different result.
-            entries[name]['user_edited'] = True
+    edited = set(getattr(record, 'user_edited_fields', None) or [])
+    for name in edited:
+        entry = entries.get(name)
+        if entry is not None and entry.get('dated'):
+            # The reader's pair may be older than the newest fact — or have no
+            # projected fact at all. Either way the editor must ask for the
+            # correction date instead of defaulting to `latest_date` (or today)
+            # and filing the edit on a different result.
+            entry['user_edited'] = True
 
 
 def patient_form_descriptors(descriptor=None, *, readable_fields=None, writable=True,
