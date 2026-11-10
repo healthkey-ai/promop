@@ -27,6 +27,44 @@ _CONCEPTS = (
 )
 
 
+def _refuse_identity_conflicts(Concept, concept_id, concept_code):
+    """Stop with a named conflict before the INSERT, not an opaque IntegrityError.
+
+    Runtime minting (``omop_core.services.pk.next_pk``) draws local concept ids
+    from a sequence at or above ``MAX(concept_id)``; the highest seeded local id
+    before this migration is 2100007856. A database that minted roughly 44
+    concepts before 0327 runs can already hold this fixed id under an unrelated
+    concept. The id is a contract (EXACT addresses the marker by it), so neither
+    renumbering the occupant nor taking another id is safe to do silently: a
+    collision is a deployment blocker that an operator resolves deliberately.
+
+    Pre-deploy, read-only:
+        SELECT concept_id, vocabulary_id, concept_code, concept_name
+        FROM concept
+        WHERE concept_id = 2100007900
+           OR (vocabulary_id = 'HK-Genomics'
+               AND concept_code = 'HK-MARKER:BCMA-EXPRESSION');
+    Safe when it returns nothing, or exactly the BCMA marker under 2100007900.
+    """
+    occupant = Concept.objects.filter(pk=concept_id).first()
+    if occupant is not None and (
+            occupant.vocabulary_id, occupant.concept_code) != ('HK-Genomics', concept_code):
+        raise RuntimeError(
+            f'concept_id {concept_id} is reserved for HK-Genomics {concept_code} but is '
+            f'already used by {occupant.vocabulary_id} {occupant.concept_code!r} '
+            f'({occupant.concept_name!r}). Resolve the collision before migrating; '
+            'see the pre-deploy check in this migration.'
+        )
+    same_code = (Concept.objects.filter(vocabulary_id='HK-Genomics', concept_code=concept_code)
+                 .exclude(pk=concept_id).first())
+    if same_code is not None:
+        raise RuntimeError(
+            f'HK-Genomics {concept_code} already exists under concept_id '
+            f'{same_code.concept_id}, not the reserved {concept_id}. Resolve it before '
+            'migrating; see the pre-deploy check in this migration.'
+        )
+
+
 def seed_bcma_marker(apps, schema_editor):
     Vocabulary = apps.get_model('omop_core', 'Vocabulary')
     Domain = apps.get_model('omop_core', 'Domain')
@@ -52,6 +90,7 @@ def seed_bcma_marker(apps, schema_editor):
     )
 
     for concept_id, concept_code, concept_name in _CONCEPTS:
+        _refuse_identity_conflicts(Concept, concept_id, concept_code)
         concept, created = Concept.objects.get_or_create(
             vocabulary_id='HK-Genomics',
             concept_code=concept_code,
