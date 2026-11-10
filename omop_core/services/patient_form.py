@@ -418,7 +418,12 @@ def patient_form_descriptors(descriptor=None, *, readable_fields=None, writable=
         if (projection and not projection.get('best_effort')
                 and entry.get('value_kind') == 'json'):
             unsupported = 'This field requires its dedicated structured-data editor.'
-        if entry.get('kind') == 'editable' and not projection and 'concept_id' not in entry:
+        # An entry that names its own endpoint (genetic_mutations -> the
+        # genomics API) HAS that dedicated editor: `writable` tells the host to
+        # offer it. The shared-form PATCH still refuses it, because its target
+        # is not patient_record (apply_patient_form_patch).
+        if (entry.get('kind') == 'editable' and not projection
+                and 'concept_id' not in entry and not entry.get('endpoint')):
             unsupported = 'This field requires its dedicated structured-data editor.'
         if record is not None and name in ('height', 'weight'):
             unit = getattr(record, f'{name}_units')
@@ -1265,6 +1270,35 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
     effective_death = direct.get('death_date', record.death_date)
     if effective_death and dob and effective_death < dob:
         raise ValueError('death_date: Death date cannot precede date of birth.')
+    # PatientRecordSerializer's transformation rules, which the shared form
+    # skipped: field.clean() is model validation only. Judged on the effective
+    # record, and only when this request touches one of the three fields, so an
+    # unrelated autosave is not blocked by a stored inconsistency.
+    for name, label in (('dlbcl_transformation_date', 'DLBCL transformation date'),
+                        ('sct_date', 'SCT date')):
+        value = direct.get(name)
+        if value is not None and value > timezone.localdate():
+            raise ValueError(f'{name}: {label} cannot be in the future.')
+    outcome = direct.get('post_transformation_outcome')
+    if outcome:
+        from omop_core.models import PostTransformationOutcome
+        allowed = set(PostTransformationOutcome.objects.values_list('title', flat=True))
+        if outcome not in allowed:
+            raise ValueError(
+                f'post_transformation_outcome: Unrecognized value {outcome!r}. '
+                f'Allowed: {sorted(allowed)}')
+    transformation_fields = ('transformed_to_dlbcl', 'dlbcl_transformation_date',
+                             'post_transformation_outcome')
+    if any(name in direct for name in transformation_fields):
+        effective = {name: direct.get(name, getattr(record, name))
+                     for name in transformation_fields}
+        if not effective['transformed_to_dlbcl'] and (
+                effective['dlbcl_transformation_date']
+                or effective['post_transformation_outcome']):
+            touched = next(name for name in transformation_fields if name in direct)
+            raise ValueError(
+                f'{touched}: dlbcl_transformation_date and post_transformation_outcome '
+                'require transformed_to_dlbcl to be true.')
     if birth_changes:
         for name, value in person_birth_values(dob, precision).items():
             setattr(person, name, value)

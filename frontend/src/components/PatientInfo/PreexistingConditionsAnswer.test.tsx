@@ -1,6 +1,8 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import PreexistingConditionsAnswer from './PreexistingConditionsAnswer';
+import { PatientFormContext } from '@/federation/PatientFormContext';
+import type { PatientFormStore } from '@/federation/patientFormStore';
 
 const post = vi.fn();
 const get = vi.fn();
@@ -101,5 +103,25 @@ describe('explicit pre-existing-conditions answers', () => {
     editor(true, [], true);
     expect(screen.getByRole('button', { name: 'Confirm no pre-existing conditions' })).toBeDisabled();
     expect(screen.getByLabelText('Infections')).toBeDisabled();
+  });
+
+  it.each([
+    ['success', () => post.mockResolvedValue({ data: { no_pre_existing_conditions: true, preexisting_conditions: [] } })],
+    ['failure', () => post.mockRejectedValue({ response: { status: 500 } })],
+  ])('releases the bypass-write hold after a %s', async (_, arrange) => {
+    arrange();
+    const holds = { count: 0 };
+    const store = {
+      beginBypassWrite: vi.fn(() => { holds.count += 1; }),
+      endBypassWrite: vi.fn(() => { holds.count -= 1; }),
+    } as unknown as PatientFormStore;
+    render(<PatientFormContext.Provider value={store}>
+      <PreexistingConditionsAnswer personId={42} flag={true} categories={[]}
+        readOnly={false} onSaved={vi.fn()} />
+    </PatientFormContext.Provider>);
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm no pre-existing conditions' }));
+    await waitFor(() => expect(store.endBypassWrite).toHaveBeenCalledTimes(1));
+    expect(store.beginBypassWrite).toHaveBeenCalledTimes(1);
+    expect(holds.count).toBe(0);
   });
 });

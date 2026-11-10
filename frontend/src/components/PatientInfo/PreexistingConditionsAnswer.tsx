@@ -69,6 +69,7 @@ export default function PreexistingConditionsAnswer({
       setError(status === 409 ? 'This answer changed. Reload before confirming.'
         : 'Could not verify whether the answer was saved. Reload before retrying.');
     } finally {
+      store?.endBypassWrite();
       setBusy(false);
     }
   };

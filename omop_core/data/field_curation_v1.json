@@ -3137,7 +3137,7 @@
       "unit": "",
       "omop_table": "observation",
       "source_value": "",
-      "value_kind": "string",
+      "value_kind": "boolean",
       "type_concept_id": null,
       "value_vocabulary": "",
       "multiple": false,
@@ -8174,7 +8174,7 @@
     {
       "field_name": "no_pregnancy_or_lactation_status",
       "formula": "@not(pregnancy_test_result)",
-      "is_active": true
+      "is_active": false
     },
     {
       "field_name": "validated",

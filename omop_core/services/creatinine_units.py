@@ -46,7 +46,8 @@ def normalize_unit(value):
     """The stored code for a unit code or display label, or None if unknown."""
     if value is None:
         return None
-    text = str(value).strip()
+    # Both micro signs (U+00B5, U+03BC) spell umol/L, as in chemistry_units.
+    text = str(value).strip().replace('\u00b5', 'u').replace('\u03bc', 'u')
     if not text:
         return None
     return _SPELLINGS.get(text.casefold())

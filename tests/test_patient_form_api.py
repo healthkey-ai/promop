@@ -519,3 +519,52 @@ def test_native_patch_keeps_a_pinned_answer_pending_like_the_shared_form():
     assert Observation.objects.filter(
         person=record.person, observation_concept_id=4149022, is_erroneous=False,
     ).count() == 1
+
+
+def test_shared_form_offers_genomics_editor_but_never_writes_it_through_the_form():
+    """`genetic_mutations` has its own endpoint, so it is writable for the host's
+    Genomics editor; the shared-form PATCH still refuses it."""
+    record = PatientRecordFactory()
+    client = _client()
+    shared = client.get('/api/v1/patient-records/writable-fields/', {'person_id': record.person_id},
+                        HTTP_X_PATIENT_FORM='1').data
+    assert shared['genetic_mutations']['writable'] is True
+    assert shared['genetic_mutations']['endpoint'].endswith('/genomics/')
+    response = client.patch(f'/api/v1/patient-records/{record.person_id}/',
+                            {'genetic_mutations': [{'gene': 'TP53'}]}, format='json',
+                            HTTP_X_PATIENT_FORM='1')
+    assert response.status_code == 400, response.data
+    assert 'genetic_mutations' in response.data['rejected']
+
+
+def test_shared_form_enforces_the_native_transformation_rules():
+    """field.clean() is model validation only; the serializer's future-date and
+    flag rules must hold on the shared-form path too."""
+    from datetime import timedelta
+    record = PatientRecordFactory(transformed_to_dlbcl=False, dlbcl_transformation_date=None,
+                                  post_transformation_outcome=None)
+    client = _client()
+    url = f'/api/v1/patient-records/{record.person_id}/'
+    past = (timezone.localdate() - timedelta(days=30)).isoformat()
+    future = (timezone.localdate() + timedelta(days=30)).isoformat()
+
+    without_flag = client.patch(url, {'dlbcl_transformation_date': past}, format='json',
+                                HTTP_X_PATIENT_FORM='1')
+    assert without_flag.status_code == 400, without_flag.data
+    in_future = client.patch(url, {'transformed_to_dlbcl': True, 'dlbcl_transformation_date': future},
+                             format='json', HTTP_X_PATIENT_FORM='1')
+    assert in_future.status_code == 400, in_future.data
+    record.refresh_from_db()
+    assert record.dlbcl_transformation_date is None
+
+    valid = client.patch(url, {'transformed_to_dlbcl': True, 'dlbcl_transformation_date': past},
+                         format='json', HTTP_X_PATIENT_FORM='1')
+    assert valid.status_code == 200, valid.data
+    record.refresh_from_db()
+    assert record.dlbcl_transformation_date.isoformat() == past
+
+    unknown = client.patch(url, {'post_transformation_outcome': 'zzz-not-an-outcome'},
+                           format='json', HTTP_X_PATIENT_FORM='1')
+    assert unknown.status_code == 400, unknown.data
+    record.refresh_from_db()
+    assert record.post_transformation_outcome is None

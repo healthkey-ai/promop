@@ -194,7 +194,15 @@ class Command(BaseCommand):
         if options['output']:
             directory = os.path.dirname(os.path.abspath(options['output']))
             os.makedirs(directory, exist_ok=True)
-            with open(options['output'], 'w', encoding='utf-8') as handle:
+            # Person ids and their categories: owner-only, like the repair
+            # command's backup. O_EXCL also closes the exists-check race above.
+            try:
+                fd = os.open(options['output'], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            except FileExistsError as exc:
+                raise CommandError(
+                    f'{options["output"]} already exists; refusing to overwrite an audit '
+                    'manifest.') from exc
+            with os.fdopen(fd, 'w', encoding='utf-8') as handle:
                 json.dump(payload, handle, indent=2, sort_keys=True)
                 handle.write('\n')
             self.stdout.write(self.style.SUCCESS(

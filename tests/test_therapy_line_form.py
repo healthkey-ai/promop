@@ -329,3 +329,25 @@ def test_options_offer_the_value_the_column_holds(patient):
     options = build_writable_field_descriptor()['later_therapy']['options']
 
     assert {'value': 'VRd', 'code': 'vrd', 'label': 'VRd'} in options
+
+
+@pytest.mark.parametrize('bad_date', ['2026-02-30', 'not-a-date'])
+def test_an_invalid_line_date_is_a_field_error_not_a_500(patient, bad_date):
+    """An impossible date made `parse_date` raise inside the echo comparison
+    (500), and a malformed one read as an unchanged echo of a null date."""
+    user = get_user_model().objects.create_superuser(
+        email=f'provider-{bad_date}@example.com', password='x')
+    client = APIClient()
+    client.force_authenticate(user=user)
+
+    response = client.patch(
+        f'/api/v1/patient-records/{patient.pk}/',
+        {'second_line_therapy': 'vrd', 'second_line_date': bad_date},
+        format='json',
+    )
+
+    assert response.status_code == 400, response.content
+    assert not _lines(patient, 2).exists()
+    _, result = apply_patient_form_patch(patient, {'later_therapy': 'vrd', 'later_date': bad_date})
+    assert 'not a valid date' in result.rejected['later_date']
+    assert not _lines(patient, 3).exists()

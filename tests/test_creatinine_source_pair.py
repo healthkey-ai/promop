@@ -309,3 +309,9 @@ def test_the_ordinary_alias_follows_the_pair():
     assert record.serum_creatinine_level == Decimal('176.84')
     assert record.serum_creatinine_level_units == 'UMOL/L'
     assert record.creatinine_mg_dl == Decimal('2.00')
+
+
+@pytest.mark.parametrize('unit', ['µmol/L', 'μmol/L', 'umol/L', 'UMOL/L'])
+def test_both_micro_signs_spell_umol_per_litre(unit):
+    from omop_core.services.creatinine_units import canonical_from_pair
+    assert canonical_from_pair(88.42, unit) == (True, Decimal('1.00'))

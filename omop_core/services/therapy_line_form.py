@@ -74,6 +74,21 @@ def _regimen_concept_id(value):
     return row.concept_id if row is not None else None
 
 
+def _line_date(value):
+    """A submitted line date as a ``date``, or None when it is not one.
+
+    ``parse_date`` returns None for a malformed string but raises ValueError
+    for a well-formed impossible one ('2026-02-30'); both are the same thing
+    to the form: not a date, never an uncaught 500.
+    """
+    if isinstance(value, date):
+        return value
+    try:
+        return parse_date(str(value or ''))
+    except ValueError:
+        return None
+
+
 def _same_line_value(name, value, current, disease=None):
     """Whether a submitted line value is the record's own value echoed back.
 
@@ -86,9 +101,12 @@ def _same_line_value(name, value, current, disease=None):
         return True
     part = THERAPY_LINE_FORM_FIELDS[name][1]
     if part == 'start_date':
-        parsed = value if isinstance(value, date) else parse_date(str(value or ''))
-        existing = current if isinstance(current, date) else parse_date(str(current or ''))
-        return parsed == existing
+        parsed = _line_date(value)
+        if parsed is None and value not in (None, ''):
+            # Not a date at all: an instruction to reject, not an echo of a
+            # null stored date. author_lines_from_form refuses it.
+            return False
+        return parsed == _line_date(current)
     if part == 'outcome':
         aliases = _outcome_aliases(disease)
         return aliases.get(value, value) == aliases.get(current, current)
@@ -198,8 +216,10 @@ def author_lines_from_form(person, changes, *, disease=None):
 
         if refusal is None and 'start_date' in parts:
             name, value = parts['start_date']
-            start = value if isinstance(value, date) else parse_date(str(value or ''))
-            if start is None:
+            start = _line_date(value)
+            if start is None and value not in (None, ''):
+                refusal = (names, MESSAGES['start_date_invalid'])
+            elif start is None:
                 refusal = (names, MESSAGES['start_date_required'])
             elif start > date.today():
                 refusal = (names, MESSAGES['future_line'])

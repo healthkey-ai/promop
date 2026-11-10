@@ -29,6 +29,7 @@ MESSAGES = {
     'vocabulary_lost': 'The treatment-regimen vocabulary disappeared during authoring.',
     'end_before_start': 'end_date cannot precede start_date.',
     'start_date_required': 'A therapy line requires a known start_date; no date is fabricated.',
+    'start_date_invalid': 'start_date is not a valid date; use YYYY-MM-DD.',
     'future_line': 'A future therapy line is planned, not received treatment.',
     'unknown_regimen': 'Unknown regimen concept_id.',
     'regimen_clear_requires_assertion': (
@@ -60,6 +61,7 @@ FIELDS = {
     'second_cancer_vocabulary': 'disease',
     'end_before_start': 'end_date',
     'start_date_required': 'start_date',
+    'start_date_invalid': 'start_date',
     'future_line': 'start_date',
     'unknown_regimen': 'regimen_concept_id',
     'regimen_clear_requires_assertion': 'regimen_concept_id',

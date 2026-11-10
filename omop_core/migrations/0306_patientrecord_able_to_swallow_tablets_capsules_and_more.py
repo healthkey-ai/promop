@@ -2,8 +2,8 @@
 """Add the three versioned clinical source-input columns.
 
 The same three fields were also added by ``0310_cb_clinical_input_sources`` on
-the ``cb-v2`` branch, and both files are already applied in different
-environments (``0306`` on ``dev``, ``0310`` on ``cb-v2``). Neither file can be
+the ``dev`` branch, and both files are already applied in different
+environments (``0306`` on ``cb-v2``, ``0310`` on ``dev``). Neither file can be
 deleted, so this one creates the columns only where they are missing; ``0310``
 is a no-op for the same reason. See the note there.
 """

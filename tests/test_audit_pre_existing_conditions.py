@@ -205,3 +205,29 @@ def test_fail_on_gates_a_classification(tmp_path):
     with pytest.raises(CommandError, match='unattributed_true'):
         call_command('audit_pre_existing_conditions', '--fail-on',
                      'unattributed_true', stdout=open('/dev/null', 'w'))
+
+
+def test_the_manifest_is_owner_only(tmp_path):
+    """It lists person ids and their categories, like the repair backup."""
+    _record(flag=True)
+    path = tmp_path / 'manifest.json'
+    _audit(path)
+    assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_a_manifest_that_appears_mid_run_is_refused_cleanly(tmp_path, monkeypatch):
+    """The exists check and the exclusive create race; losing it is a CommandError."""
+    import os
+    _record(flag=True)
+    path = tmp_path / 'manifest.json'
+    real_open = os.open
+
+    def racing_open(target, flags, *args):
+        if str(target) == str(path):
+            path.write_text('{}')
+        return real_open(target, flags, *args)
+
+    monkeypatch.setattr(os, 'open', racing_open)
+    with pytest.raises(CommandError, match='already exists'):
+        call_command('audit_pre_existing_conditions', '--output', str(path), stdout=StringIO())
+    assert path.read_text() == '{}'
