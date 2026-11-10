@@ -83,16 +83,27 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
       <fieldset className="min-w-0" disabled={readOnly || !state.writable}>
         {tabKey === 'general' && <GeneralTab showCoordinates={!federated} patientMode={federated}
           conditionsReadOnly={readOnly}
-          onConditionsSaved={(answer) => store.applyServerValues({ ...answer })}
+          onConditionsSaved={(answer) => {
+            store.applyServerValues({ ...answer });
+            // The attestation endpoint bypasses the save queue, so the host's
+            // `onUpdated` listeners would never hear about it.
+            store.announceUpdated();
+          }}
           formData={editedInfo} onChange={handleFieldChange} editedName={editedName}
           onNameChange={(value) => handleFieldChange('patient_name', value)} onZipcodeChange={handleZipcodeChange} />}
         {tabKey === 'disease' && <DiseaseTab formData={editedInfo} onChange={handleFieldChange} diseaseType={diseaseType} />}
         {tabKey === 'treatment' && <TreatmentTab formData={editedInfo} onChange={handleFieldChange}
-          diseaseType={diseaseType} readOnly={readOnly} onRecordRefreshed={() => { void store.load(); }} />}
+          diseaseType={diseaseType} readOnly={readOnly}
+          // Therapy mutations bypass the store's queue: reload the record and
+          // tell the host, or its trial matches keep the old therapy history.
+          onRecordRefreshed={() => {
+            void store.load().then(() => store.announceUpdated());
+          }} />}
         {tabKey === 'labs' && <LabsTab formData={editedInfo} onChange={handleFieldChange} />}
         {tabKey === 'behavior' && <BehaviorTab formData={editedInfo} onChange={handleFieldChange} />}
         {tabKey === 'wearable' && <WearableTab formData={editedInfo} onChange={handleFieldChange} />}
-        {tabKey === 'genomics' && <GenomicsTab formData={editedInfo} readOnly={readOnly} />}
+        {tabKey === 'genomics' && <GenomicsTab formData={editedInfo} readOnly={readOnly}
+          onChanged={() => { void store.load().then(() => store.announceUpdated()); }} />}
         {tabKey === 'history' && <ClinicalSummaryTab formData={editedInfo} onNavigateToLabs={() => setActiveTab(tabKeys.indexOf('labs'))} />}
       </fieldset>
     </div>

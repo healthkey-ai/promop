@@ -13,6 +13,7 @@ import pytest
 
 from omop_core.models import Concept, Measurement, PatientRecord
 from omop_core.services.patient_form import apply_patient_form_patch, patient_form_descriptors
+from omop_core.services.write_descriptor import build_writable_field_descriptor
 from omop_core.services.pk import next_pk
 from omop_core.services.patient_record_service import (
     recompute_patient_record_fields, refresh_patient_record,
@@ -485,6 +486,12 @@ def test_an_older_dated_pair_stays_the_current_answer():
     dates = sorted(Measurement.objects.filter(person=person).values_list(
         'measurement_date', flat=True))
     assert dates == [date(2026, 7, 1), date(2026, 8, 1)]
+
+    descriptors = patient_form_descriptors(
+        build_writable_field_descriptor(), record=PatientRecord.objects.get(person=person))
+    assert descriptors['hemoglobin_level'].get('user_edited') is True
+    # The canonical is a read-only normalised view; the editor writes the pair.
+    assert descriptors['weight'].get('user_edited') is not True
 
     # The documented boundary: an explicit canonical event retires the pair,
     # and the newer imported fact becomes the answer.

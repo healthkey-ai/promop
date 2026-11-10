@@ -171,6 +171,34 @@ describe('shared patient-form queue', () => {
     expect(second.patch).not.toHaveBeenCalled();
     expect(second.store.getSnapshot().values.weight).toBe(60);
   });
+  it('refuses a descriptor version this build does not understand', async () => {
+    const get = vi.fn(async (url: string) => ({ data: url.includes('writable-fields') ? {
+      __descriptor__: { schema_version: 2 },
+      weight: { writable: true, target: 'patient_record' },
+    } : { patient_info: { person_id: 12, weight: 60 }, write_enabled: true } }));
+    const store = new PatientFormStore({ get } as unknown as AxiosInstance, '/api');
+
+    await store.load();
+
+    const state = store.getSnapshot();
+    expect(state.error).toMatch(/too old/i);
+    expect(state.writable).toBe(false);
+    expect(state.fields).toEqual({});
+  });
+  it('announces a write that bypassed the queue', async () => {
+    // Attestations, therapy lines and genomics findings never enter the PATCH
+    // queue. The host still has to invalidate its own queries after one.
+    const { store } = setup();
+    await store.load();
+    const updated = vi.fn();
+    const detach = store.onUpdated(updated);
+
+    store.announceUpdated();
+    await vi.runAllTimersAsync();
+    expect(updated).toHaveBeenCalledOnce();
+    expect(updated.mock.calls[0][0].patient_info.person_id).toBe(12);
+    detach();
+  });
   it('still invalidates the host after its root unmounts during a save', async () => {
     const { store } = setup();
     await store.load();
@@ -573,6 +601,34 @@ describe('shared patient-form queue', () => {
     expect(first.patch).toHaveBeenCalledOnce();
     expect(second.patch).not.toHaveBeenCalled();
     expect(second.store.getSnapshot().values.weight).toBe(60);
+  });
+  it('refuses a descriptor version this build does not understand', async () => {
+    const get = vi.fn(async (url: string) => ({ data: url.includes('writable-fields') ? {
+      __descriptor__: { schema_version: 2 },
+      weight: { writable: true, target: 'patient_record' },
+    } : { patient_info: { person_id: 12, weight: 60 }, write_enabled: true } }));
+    const store = new PatientFormStore({ get } as unknown as AxiosInstance, '/api');
+
+    await store.load();
+
+    const state = store.getSnapshot();
+    expect(state.error).toMatch(/too old/i);
+    expect(state.writable).toBe(false);
+    expect(state.fields).toEqual({});
+  });
+  it('announces a write that bypassed the queue', async () => {
+    // Attestations, therapy lines and genomics findings never enter the PATCH
+    // queue. The host still has to invalidate its own queries after one.
+    const { store } = setup();
+    await store.load();
+    const updated = vi.fn();
+    const detach = store.onUpdated(updated);
+
+    store.announceUpdated();
+    await vi.runAllTimersAsync();
+    expect(updated).toHaveBeenCalledOnce();
+    expect(updated.mock.calls[0][0].patient_info.person_id).toBe(12);
+    detach();
   });
   it('still invalidates the host after its root unmounts during a save', async () => {
     const { store } = setup();

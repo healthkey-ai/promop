@@ -88,15 +88,24 @@ def test_the_migration_resolves_existing_contradictions_and_keeps_the_old_value(
         'omop_core.migrations.0305_patientrecord_pre_existing_flag_guard')
     contradictory = PatientRecordFactory(
         preexisting_conditions=['infections'], no_pre_existing_conditions=True)
+    # Legacy JSON forms the CHECK also refuses; testing only a non-empty list
+    # would leave these to block the migration on a real database.
+    blank_string = PatientRecordFactory(
+        preexisting_conditions=[''], no_pre_existing_conditions=True)
+    json_null_item = PatientRecordFactory(
+        preexisting_conditions=[None], no_pre_existing_conditions=True)
+    json_object = PatientRecordFactory(
+        preexisting_conditions={'legacy': True}, no_pre_existing_conditions=True)
     consistent = PatientRecordFactory(
         preexisting_conditions=[], no_pre_existing_conditions=True)
 
     migration.resolve_conflicts(
         django_apps, types.SimpleNamespace(connection=connection))
 
-    contradictory.refresh_from_db()
+    for record in (contradictory, blank_string, json_null_item, json_object):
+        record.refresh_from_db()
+        assert record.no_pre_existing_conditions is None, record.preexisting_conditions
     consistent.refresh_from_db()
-    assert contradictory.no_pre_existing_conditions is None
     assert consistent.no_pre_existing_conditions is True
     revision = RecordRevision.objects.get(
         patient_record=contradictory, field='no_pre_existing_conditions')

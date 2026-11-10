@@ -5942,12 +5942,11 @@ def _apply_active_field_formulas(patient_info: PatientRecord) -> set[str]:
     # active formula row, but the evaluator skips them defensively so an older
     # schema or a stale object cannot overwrite an attestation or a
     # self-assessment.
-    explicit_answer_fields = {
-        'no_active_infection_status', 'no_other_active_malignancies',
-        'no_pregnancy_or_lactation_status',
-    }
+    from omop_core.services.authored_answers import (
+        AUTHORED_ANSWER_FORMULA_FIELDS,
+    )
     for field_formula in FieldFormula.objects.filter(is_active=True).order_by('field_name'):
-        if field_formula.field_name in explicit_answer_fields:
+        if field_formula.field_name in AUTHORED_ANSWER_FORMULA_FIELDS:
             continue
         if field_formula.field_name in overrides:
             continue

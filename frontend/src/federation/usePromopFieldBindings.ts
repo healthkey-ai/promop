@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import type { AxiosInstance } from 'axios';
 
 import { editorBasePath, type EditorConnection } from './editorSession';
+import { parseWritableDescriptor } from './descriptorVersion';
 
 /** One descriptor entry, as far as bindings matter here. */
 interface DescriptorEntry {
@@ -63,7 +64,19 @@ export function usePromopFieldBindings(
         signal: controller.signal,
       })
       .then((response) => {
-        if (alive) setAnswer({ client: apiClient, base, key, descriptor: response.data ?? {} });
+        // A version this build does not understand is not permission to write:
+        // report no resolvable rows so the host falls back to EXACT's editors.
+        const parsed = parseWritableDescriptor(response.data);
+        if (alive) {
+          setAnswer({
+            client: apiClient,
+            base,
+            key,
+            descriptor: parsed.error
+              ? {}
+              : parsed.fields as Record<string, DescriptorEntry>,
+          });
+        }
       })
       .catch((error: { name?: string }) => {
         // A failed descriptor must fall back to the host's editor, never to

@@ -347,8 +347,14 @@ def _attach_latest_fact_dates(record, entries):
         for row in rows:
             for name in observation_concepts[row['observation_concept_id']]:
                 latest[name] = row['latest']
+    edited = set(getattr(record, 'user_edited_fields', None) or [])
     for name, value in latest.items():
         entries[name]['latest_date'] = value.isoformat()
+        if name in edited:
+            # The reader's pair may be older than the newest fact. The editor
+            # must ask for the correction date instead of defaulting to
+            # `latest_date` and filing the edit on a different result.
+            entries[name]['user_edited'] = True
 
 
 def patient_form_descriptors(descriptor=None, *, readable_fields=None, writable=True,
@@ -920,6 +926,18 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
             (explicit_unit and requested_code != stored_code)
             or stored_missing
         )
+        if canonical_entry.get('read_only_for_caller'):
+            # A read-only canonical refuses the pair as a whole: the recompute
+            # would otherwise write it from the pending source and bypass the
+            # caller restriction, exactly as the hemoglobin/creatinine pairs
+            # already guard.
+            reason = (canonical_entry.get('reason')
+                      or 'Editing is not available for this caller.')
+            for field in (source, unit_field):
+                if field:
+                    changes.pop(field, None)
+                    result.rejected[field] = reason
+            continue
         if not source_allowed:
             reason = (source_entry.get('reason')
                       or 'Editing is not available for this caller.')

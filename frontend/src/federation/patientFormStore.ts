@@ -1,6 +1,7 @@
 import type { AxiosInstance } from 'axios';
 import type { FieldDescriptor } from '@/hooks/useWritableFields';
 import { diseaseToDiseaseCode } from '@/api/therapyContext';
+import { parseWritableDescriptor } from './descriptorVersion';
 
 /**
  * A dated edit is `{value, date}`: the pair is one clinical assertion, so a
@@ -18,6 +19,9 @@ export interface FormFieldDescriptor extends FieldDescriptor {
   label?: string;
   control?: 'text' | 'number' | 'date' | 'boolean' | 'select' | 'multiselect' | 'email';
   bindings?: string[];
+  /** The reader already edited this value, so it may not be the newest fact on
+   *  the record; the editor asks for the correction date explicitly. */
+  user_edited?: boolean;
   compatibility_reason?: string;
   options_source?: 'therapy_regimens';
   /** Why a writable picker has no choices; never leave a blank panel unexplained. */
@@ -106,6 +110,20 @@ export class PatientFormStore {
     ++this.explicitRevision;
     this.publish({ values: { ...this.snapshot.values, ...values } });
   }
+  /** Tell the host's `onUpdated` listeners that a write bypassed the PATCH
+   *  queue: an explicit attestation, a therapy line or a genomics finding.
+   *  Those paths call `store.load()` for the screen, but the queue never runs,
+   *  so without this the host keeps its stale eligibility/cache. */
+  announceUpdated() {
+    const data: PatientFormResult = {
+      patient_info: { ...this.snapshot.values },
+      write: { applied: [] },
+    };
+    void Promise.allSettled(
+      [...this.updated.keys()].map((listener) =>
+        Promise.resolve().then(() => listener(data))),
+    );
+  }
   /** Fetch the host's planned-therapy choices for the current context. */
   private enrichFields = async (
     fields: Record<string, FormFieldDescriptor>,
@@ -147,11 +165,22 @@ export class PatientFormStore {
         if (this.snapshot.personId && this.snapshot.personId !== personId) {
           throw new Error('The linked patient changed. Start a new patient context.');
         }
-        const response = await this.client.get<Record<string, FormFieldDescriptor>>(`${this.base}/v1/patient-records/writable-fields/`, {
+        const response = await this.client.get<Record<string, unknown>>(`${this.base}/v1/patient-records/writable-fields/`, {
           params: { person_id: personId },
           headers: { 'X-Patient-Form': '1' },
         });
-        const fields = await this.enrichFields({ ...response.data }, values);
+        const parsed = parseWritableDescriptor(response.data);
+        if (parsed.error) {
+          if (revision === this.readRevision) {
+            this.publish({ values, personId, fields: {}, loading: false,
+              datesStale: false, writable: false, error: parsed.error });
+          }
+          return;
+        }
+        const fields = await this.enrichFields(
+          parsed.fields as unknown as Record<string, FormFieldDescriptor>,
+          values,
+        );
         if (revision !== this.readRevision) return;
         this.publish({ values, fields, personId, loading: false, datesStale: false,
           errors: this.withoutStaleErrors(),
