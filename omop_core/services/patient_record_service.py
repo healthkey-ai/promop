@@ -6322,6 +6322,30 @@ class LanguageSkillError(ValueError):
     """A language-skills payload the caller must fix."""
 
 
+def sync_language_columns(person, patient_info=None):
+    """Re-derive the eight flattened language columns and the display string.
+
+    A language edit writes PersonLanguageSkill rows, not PatientRecord columns,
+    and the flattened columns are what the trial matcher reads. Without this
+    the rows are correct and the record still says "not asked" until the next
+    full derivation, which is a silently stale answer in the direction that
+    loses a patient's own fact.
+    """
+    rows = list(person.language_skills.select_related('language_concept').all())
+    summary = person.get_language_skills_summary(rows)
+    values = _flatten_language_capabilities(
+        person.get_language_capabilities_by_code(rows))
+    values['languages_skills'] = (
+        format_language_skills(summary) if summary else None
+    )
+    if patient_info is None:
+        patient_info = PatientRecord.objects.get(person=person)
+    for field, value in values.items():
+        setattr(patient_info, field, value)
+    patient_info.save(update_fields=list(values))
+    return patient_info
+
+
 def set_language_skills(person, skills_by_alias):
     """Replace a person's capabilities for each language named.
 
