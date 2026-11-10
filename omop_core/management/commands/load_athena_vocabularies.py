@@ -934,26 +934,32 @@ class Command(EmbeddingLoadCommand):
                     not field.auto_created
                     and getattr(field, 'many_to_one', False)
                     and field.related_model is Concept
+                    and field.remote_field.on_delete is not CASCADE
                 ):
                     references.append((model, field))
-        # A one-to-one row that cascades is about its concept: a curator's
-        # note, rank, Done mark or lock, a concept's embedding. The raw DELETE
-        # below runs no Django cascade, so they are removed here, or the
-        # foreign key refuses the replacement at commit.
+        # A row that cascades is about its concept and means nothing without
+        # it: a curator's note, rank, Done mark or lock, a concept's embedding,
+        # a source code Suggest declined for it. The raw DELETE below runs no
+        # Django cascade, so they are removed here. Left alone, a one-to-one
+        # row's foreign key refuses the replacement; pointed at concept 0, two
+        # concepts' declines of one source code collide on their unique key.
         tables = set(connection.introspection.table_names())
         owned = [
             (model, field)
             for model in apps.get_models()
             for field in model._meta.get_fields()
             if not field.auto_created
-            and getattr(field, 'one_to_one', False)
+            and (getattr(field, 'one_to_one', False) or getattr(field, 'many_to_one', False))
             and field.related_model is Concept
             and field.remote_field.on_delete is CASCADE
             # concept_embedding does not exist on a server without pgvector.
             and model._meta.db_table in tables
         ]
 
-        with connection.cursor() as cur:
+        # One transaction: the concept delete can still be refused (a unit
+        # preference protects its concept), and the notes, ranks and links
+        # detached before it must then come back with it.
+        with transaction.atomic(), connection.cursor() as cur:
             cur.execute(f'SELECT COUNT(*) FROM ({stale_sql}) stale', params)
             stale_count = cur.fetchone()[0]
             if not stale_count:
@@ -984,9 +990,9 @@ class Command(EmbeddingLoadCommand):
                     unranked = cur.rowcount
             cur.execute(f'DELETE FROM concept WHERE concept_id IN ({stale_sql})', params)
             cur.execute(f'DROP TABLE {_INCOMING_CONCEPT_TABLE}')
-        if unranked:
-            # Positions stay 1..N with no gaps (#1914).
-            concept_priority.renumber()
+            if unranked:
+                # Positions stay 1..N with no gaps (#1914).
+                concept_priority.renumber()
         self._log(
             f'  --replace: removed {stale_count:,} stale Athena concept(s); '
             'patient-owned rows were retained.'

@@ -227,8 +227,9 @@ def test_replace_drops_curation_rows_kept_on_a_stale_concept():
     from django.contrib.auth import get_user_model
     from omop_core.models import (
         ConceptMappingDone, ConceptMappingLock, ConceptMappingNote, ConceptMappingPriority,
+        ReverseSuggestDecline,
     )
-    stale, done, kept = (
+    stale, done, plain = (
         ConceptFactory(concept_id=998_101 + index, concept_code=f'STALE-{index}') for index in range(3)
     )
     first, last = ConceptFactory(concept_id=999_101), ConceptFactory(concept_id=999_102)
@@ -240,6 +241,12 @@ def test_replace_drops_curation_rows_kept_on_a_stale_concept():
     ConceptMappingLock.objects.create(concept=stale, locked_by=user)
     ConceptMappingDone.objects.create(concept=done)
     ConceptMappingNote.objects.create(concept=first, text='Stays')
+    # Two removed concepts declined the same source code: moved to concept 0
+    # they would collide on the decline's unique key.
+    for concept in (stale, done, first):
+        ReverseSuggestDecline.objects.create(
+            concept=concept, source_vocabulary_id='SNOMED', source_code='S1', ranking_model='jev',
+        )
     cmd = Command(stdout=StringIO())
     cmd._replace_tracking = True
     cmd._create_incoming_concept_table()
@@ -248,11 +255,40 @@ def test_replace_drops_curation_rows_kept_on_a_stale_concept():
 
     cmd._remove_stale_concepts()
 
-    assert not type(stale).objects.filter(pk__in=[stale.pk, done.pk, kept.pk]).exists()
+    assert not type(stale).objects.filter(pk__in=[stale.pk, done.pk, plain.pk]).exists()
     assert list(ConceptMappingNote.objects.values_list('concept_id', 'text')) == [(first.pk, 'Stays')]
     assert not ConceptMappingLock.objects.exists()
     assert not ConceptMappingDone.objects.exists()
+    assert list(ReverseSuggestDecline.objects.values_list('concept_id', flat=True)) == [first.pk]
     # The priority list closes the gap the removed concept left.
     assert list(ConceptMappingPriority.objects.order_by('position').values_list('concept_id', 'position')) == [
         (first.pk, 1), (last.pk, 2),
     ]
+
+
+@pytest.mark.django_db(transaction=True)
+def test_a_refused_replacement_keeps_what_it_had_detached():
+    """A unit preference protects its concept; the refusal undoes the whole removal."""
+    from django.db import IntegrityError
+    from omop_core.models import CanonicalUnitPreference, ConceptMappingNote, ConceptMappingPriority
+    protected = ConceptFactory(concept_id=998_201, concept_code='STALE-PROTECTED')
+    noted = ConceptFactory(concept_id=998_202, concept_code='STALE-NOTED')
+    live = ConceptFactory(concept_id=999_201)
+    CanonicalUnitPreference.objects.create(concept=protected, unit='g/dL', property='MCnc')
+    ConceptMappingNote.objects.create(concept=noted, text='Parked')
+    ConceptMappingPriority.objects.create(concept=noted, position=1)
+    measurement = MeasurementFactory(measurement_concept=noted)
+    cmd = Command(stdout=StringIO())
+    cmd._replace_tracking = True
+    cmd._create_incoming_concept_table()
+    cmd._record_incoming_concept_ids([live.pk])
+    cmd._seed_concept_zero()
+
+    with pytest.raises(IntegrityError):
+        cmd._remove_stale_concepts()
+
+    assert type(noted).objects.filter(pk__in=[protected.pk, noted.pk]).count() == 2
+    assert ConceptMappingNote.objects.filter(concept=noted).exists()
+    assert ConceptMappingPriority.objects.filter(concept=noted, position=1).exists()
+    measurement.refresh_from_db()
+    assert measurement.measurement_concept_id == noted.pk
