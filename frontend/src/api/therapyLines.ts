@@ -1,5 +1,26 @@
+import type { AxiosInstance } from 'axios';
+
 import { clinicalClient, clinicalUrl } from '@/api/clinicalTransport';
 import type { TherapyRegimen } from '@/types/therapy';
+
+/** Which connection the therapy helpers talk through.
+ *
+ * The standalone app leaves this out and uses the module-level transport, which
+ * its provider owns. A federated host passes its own authenticated client and
+ * base path instead: two mounted editors can then never inherit each other's
+ * connection, which a single module-level transport cannot promise.
+ */
+export interface TherapyConnection {
+  client: AxiosInstance;
+  /** Prefix before `/v1/…`; `""` when the client's baseURL ends at the API root. */
+  basePath?: string;
+}
+
+function target(path: string, connection?: TherapyConnection) {
+  if (!connection) return { client: clinicalClient(), url: clinicalUrl(path) };
+  const base = (connection.basePath ?? '').replace(/\/+$/, '');
+  return { client: connection.client, url: `${base}${path}` };
+}
 
 export interface DrugConcept {
   concept_id: number;
@@ -62,8 +83,12 @@ export interface EditableTherapyLine {
 
 export interface TherapyOutcomeChoice { code: string; value: string; label: string }
 
-export async function listTherapyOutcomes(disease?: string): Promise<TherapyOutcomeChoice[]> {
-  const response = await clinicalClient().get(clinicalUrl('/v1/therapy-outcomes/'), { params: { disease } });
+export async function listTherapyOutcomes(
+  disease?: string,
+  connection?: TherapyConnection,
+): Promise<TherapyOutcomeChoice[]> {
+  const { client, url } = target('/v1/therapy-outcomes/', connection);
+  const response = await client.get(url, { params: { disease } });
   return response.data;
 }
 
@@ -85,11 +110,15 @@ export const DISCONTINUATION_REASON_CHOICES: Array<{ value: string; label: strin
 ];
 
 /** Ingredients only: a line is the drugs given, not their branded pack sizes. */
-export async function searchDrugConcepts(query: string): Promise<DrugConcept[]> {
+export async function searchDrugConcepts(
+  query: string,
+  connection?: TherapyConnection,
+): Promise<DrugConcept[]> {
   // The server rejects shorter queries — a trigram is 3 characters, so anything
   // less cannot use the index and would seq-scan the concept table.
   if (query.trim().length < 3) return [];
-  const resp = await clinicalClient().get(clinicalUrl('/v1/concepts/search/'), {
+  const { client, url } = target('/v1/concepts/search/', connection);
+  const resp = await client.get(url, {
     params: {
       q: query.trim(),
       vocabulary_id: 'RxNorm',
@@ -106,12 +135,14 @@ export async function searchTherapyRegimens(
   query: string,
   disease?: string,
   round?: string,
+  connection?: TherapyConnection,
 ): Promise<TherapyRegimen[]> {
   if (query.trim().length < 2) return [];
   const params: Record<string, string> = { search: query.trim() };
   if (disease) params.disease = disease;
   if (round) params.round = round;
-  const resp = await clinicalClient().get(clinicalUrl('/v1/therapy-regimens/'), { params });
+  const { client, url } = target('/v1/therapy-regimens/', connection);
+  const resp = await client.get(url, { params });
   return (resp.data ?? []) as TherapyRegimen[];
 }
 
@@ -119,43 +150,51 @@ export async function searchTherapyRegimens(
 export async function listTherapyRegimens(
   disease: string,
   round?: string,
+  connection?: TherapyConnection,
 ): Promise<TherapyRegimen[]> {
   const params: Record<string, string> = { disease };
   if (round) params.round = round;
-  const resp = await clinicalClient().get(clinicalUrl('/v1/therapy-regimens/'), { params });
+  const { client, url } = target('/v1/therapy-regimens/', connection);
+  const resp = await client.get(url, { params });
   return (resp.data ?? []) as TherapyRegimen[];
 }
 
 /** Fetch a single regimen with its component drugs and their classes. */
-export async function getTherapyRegimenDetail(code: string): Promise<TherapyRegimen> {
-  const resp = await clinicalClient().get(clinicalUrl(`/v1/therapy-regimens/${code}/`));
+export async function getTherapyRegimenDetail(
+  code: string,
+  connection?: TherapyConnection,
+): Promise<TherapyRegimen> {
+  const { client, url } = target(`/v1/therapy-regimens/${code}/`, connection);
+  const resp = await client.get(url);
   return resp.data as TherapyRegimen;
 }
 
 export async function authorTherapyLine(
   payload: TherapyLinePayload,
+  connection?: TherapyConnection,
 ): Promise<TherapyLineResult> {
-  const resp = await clinicalClient().post(
-    clinicalUrl('/v1/therapy-lines/'),
-    payload,
-  );
+  const { client, url } = target('/v1/therapy-lines/', connection);
+  const resp = await client.post(url, payload);
   return resp.data as TherapyLineResult;
 }
 
 export async function updateTherapyLine(
   episodeId: number,
   payload: TherapyLinePayload,
+  connection?: TherapyConnection,
 ): Promise<TherapyLineResult> {
-  const resp = await clinicalClient().patch(
-    clinicalUrl(`/v1/therapy-lines/${episodeId}/`),
-    payload,
-  );
+  const { client, url } = target(`/v1/therapy-lines/${episodeId}/`, connection);
+  const resp = await client.patch(url, payload);
   return resp.data as TherapyLineResult;
 }
 
 /** Withdraw the claim that this line happened (not the same as clearing its drugs). */
-export async function retractTherapyLine(episodeId: number): Promise<TherapyLineResult> {
-  const resp = await clinicalClient().delete(clinicalUrl(`/v1/therapy-lines/${episodeId}/`));
+export async function retractTherapyLine(
+  episodeId: number,
+  connection?: TherapyConnection,
+): Promise<TherapyLineResult> {
+  const { client, url } = target(`/v1/therapy-lines/${episodeId}/`, connection);
+  const resp = await client.delete(url);
   return resp.data as TherapyLineResult;
 }
 
@@ -163,8 +202,10 @@ export async function retractTherapyLine(episodeId: number): Promise<TherapyLine
 export async function setTherapyHistoryCompleteness(
   personId: number,
   complete: boolean,
+  connection?: TherapyConnection,
 ): Promise<{ therapy_history_complete: boolean | null; patient_info: Record<string, unknown> }> {
-  const resp = await clinicalClient().post(clinicalUrl('/v1/therapy-history/completeness/'), {
+  const { client, url } = target('/v1/therapy-history/completeness/', connection);
+  const resp = await client.post(url, {
     person: personId,
     complete,
   });

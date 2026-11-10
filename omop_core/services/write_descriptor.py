@@ -66,6 +66,18 @@ KIND_UNMAPPED = 'unmapped'      # no write path yet — grouped by WHY, not lump
 KIND_AUTHORED = 'authored'      # written by authoring a different resource entirely
 KIND_DIRECT = 'direct'          # write to PatientRecord; no OMOP fact required yet
 
+#: Bumped only when a client-visible MEANING changes: a new kind, a renamed
+#: capability key, different `writable`/`answerable` semantics, or a new write
+#: or readback path. Adding a field, an option or a binding does NOT bump it.
+#: A client that does not know this version must not guess: see
+#: docs/writable-field-descriptor.md.
+DESCRIPTOR_SCHEMA_VERSION = 1
+
+#: Reserved key for the descriptor's own envelope. It is not a field: clients
+#: look fields up by name, so it never collides with one, and iterators must
+#: skip keys beginning with `__`.
+DESCRIPTOR_META_KEY = '__descriptor__'
+
 # Athena Cancer Modifier: Dimension of Largest Lymph Node.  Unlike the generic
 # Size Tumor LOINC, this is the specific standard concept for the CLL field.
 CONCEPT_LARGEST_LYMPH_NODE_DIMENSION = 36769292
@@ -326,6 +338,17 @@ _WEARABLE_METRIC = {
     'basal_energy_per_day_30d': 'basal_energy',
     'body_mass_avg_30d': 'body_mass',
 }
+
+#: `inputs` that name a RESOURCE, not a PatientRecord field.
+#:
+#: A computed value may be built from an authored resource — therapy lines come
+#: from Episode/EpisodeEvent, language skills from PersonLanguageSkill — or from
+#: a wearable metric the device pipeline owns. They are still inputs a UI can
+#: offer (by opening that resource's editor), so the contract test accepts them;
+#: everything else an `inputs` list names must resolve to a descriptor entry.
+DESCRIPTOR_RESOURCE_INPUTS = frozenset(
+    {'Episode', 'EpisodeEvent', 'PersonLanguageSkill'} | set(_WEARABLE_METRIC.values())
+)
 
 
 # field → the field it mirrors. Writing an alias directly would collide with its
@@ -1506,13 +1529,14 @@ def build_writable_field_descriptor():
         'target': 'patient_record',
         'endpoint': 'preexisting-conditions-answer',
         'actions': ['confirm_none', 'set_categories', 'withdraw'],
-        # The dialog draws a button per labelled action; an action without a
-        # label is an incomplete contract, so it drew none and the row read
-        # "not available in this view".
+        # Every offered action needs its label: a client that refuses to
+        # invent clinical wording drops an unlabelled action, so an incomplete
+        # set turns into an empty dialog (exact#750 follow-up, #2396).
         'action_labels': {
-            'confirm_none': 'I have none of these conditions',
-            'set_categories': 'Save selected conditions',
-            'withdraw': 'Withdraw this answer',
+            'confirm_none': 'No pre-existing conditions',
+            'set_categories': 'Save these conditions',
+            'withdraw': 'Withdraw answer',
+
         },
         'value_kind': 'string',
         'multiple': True,
@@ -1915,5 +1939,13 @@ def build_writable_field_descriptor():
         entry = descriptor.get(field)
         if entry is not None and entry.get('writable'):
             entry['overridable'] = True
+
+    # The envelope goes last so no field block can overwrite it. It is a dict
+    # like any entry, but it is not one: `kind` is absent on purpose, and the
+    # form enrichment skips reserved keys.
+    descriptor[DESCRIPTOR_META_KEY] = {
+        'schema_version': DESCRIPTOR_SCHEMA_VERSION,
+        'documentation': 'docs/writable-field-descriptor.md',
+    }
 
     return descriptor

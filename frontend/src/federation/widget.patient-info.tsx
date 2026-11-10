@@ -1,6 +1,7 @@
 // Self-contained "widget" build of the PatientInfo form for hosts that CANNOT share a
-// single React tree with this remote — specifically CB's `ui.v2`, whose React is 18
-// while this remote runs React 19. The Module-Federation remote (vite.remote.config.ts)
+// single React tree with this remote. The DOM path is legacy for the trial editors:
+// hosts on the same React major use the React exports (`./editors`), which take the
+// host's authenticated client instead of a token. The Module-Federation remote (vite.remote.config.ts)
 // shares React as a singleton; this build BUNDLES its own React 19 + axios and exposes
 // an imperative, framework-agnostic mount(el, opts)/unmount(el) the host calls with
 // plain values (a token + an apiBase), never a React reference. Isolated by
