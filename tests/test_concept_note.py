@@ -88,7 +88,7 @@ def test_another_curators_lock_does_not_block_a_note(alice, bob, concept):
     assert row(alice, concept)['note']['text'] == 'Ask Alice before mapping this.'
 
 
-@pytest.mark.parametrize('payload', [{}, {'note': None}, {'note': 7}, {'note': ['a']}, ['a'],
+@pytest.mark.parametrize('payload', [{}, {'note': None}, {'note': 7}, {'note': ['a']}, ['a'], {'note': 'a\x00b'},
                                      {'note': 'x' * (ConceptMappingNote.MAX_LENGTH + 1)}])
 def test_note_endpoint_validates(alice, concept, payload):
     response = alice.put(f'{BASE}{concept.pk}/note/', payload, format='json')

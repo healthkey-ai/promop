@@ -989,12 +989,17 @@ describe('concept priority (#1914)', () => {
     await user.click(add);
     const again = await screen.findByLabelText('Note for Albumin', { selector: 'textarea' });
     expect(again).toHaveValue('');
+    // Nothing to save yet: the button is off and the shortcut does nothing.
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+    await user.keyboard('{Control>}{Enter}{/Control}');
+    expect(put).not.toHaveBeenCalled();
     await user.type(again, 'Parked until the LOINC reload');
     await user.click(screen.getByRole('button', { name: 'Save' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('Could not save the note. Professional access required.');
     expect(again).toHaveValue('Parked until the LOINC reload');
 
-    // Saving closes the popup and fills the icon without reloading the list.
+    // Saving closes the popup and fills the icon.
+    list = [{ ...list[0], note: { text: 'Parked until the LOINC reload', updated_by: 'me@healthtree.org' } }, list[1]];
     put.mockResolvedValueOnce({ data: { concept_id: 1, note: { text: 'Parked until the LOINC reload', updated_by: 'me@healthtree.org' } } });
     await user.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(put).toHaveBeenLastCalledWith('/v1/concept-to-code/1/note/', { note: 'Parked until the LOINC reload' }));
@@ -1002,7 +1007,17 @@ describe('concept priority (#1914)', () => {
     expect(edit).toHaveAttribute('title', 'Parked until the LOINC reload');
     expect(screen.getByText('Saved the note for Albumin.')).toBeInTheDocument();
 
+    // A drag inside the popup is not a drag of the row: it never reaches the priority list.
+    await user.click(edit);
+    const open = await screen.findByLabelText('Note for Albumin', { selector: 'textarea' });
+    expect(screen.getByText('Last saved by me@healthtree.org')).toBeInTheDocument();
+    fireEvent.dragStart(open);
+    fireEvent.drop(screen.getByTestId('concept-row-2'));
+    expect(moved()).toEqual([]);
+    await user.keyboard('{Escape}');
+
     // Emptying the note clears it.
+    list = [{ ...list[0], note: null }, list[1]];
     put.mockResolvedValueOnce({ data: { concept_id: 1, note: null } });
     await user.click(edit);
     await user.clear(await screen.findByLabelText('Note for Albumin', { selector: 'textarea' }));

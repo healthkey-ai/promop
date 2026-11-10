@@ -195,10 +195,13 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange, initialC
       setError(`Could not ${locking ? 'lock' : 'unlock'} ${concept.concept_name}. ${destinationError(failure)}`);
     } finally { setMoving(false); }
   };
-  // A saved note changes only its own row; nothing else in the list moves (#2411).
+  // A saved note changes only its own row, at once. The reload that follows
+  // replaces any list request that began before the save and would bring the
+  // old note back (#2411).
   const noteSaved = (concept: Concept, note: ConceptNote | null) => {
     setData(previous => previous && { ...previous, results: previous.results.map(
       row => row.concept_id === concept.concept_id ? { ...row, note } : row) });
+    setRevision(value => value + 1);
     setMoveStatus(note ? `Saved the note for ${concept.concept_name}.` : `Cleared the note for ${concept.concept_name}.`);
   };
   // Done means its source codes are mapped: the concept loses its priority,
@@ -372,8 +375,10 @@ function NoteBadge({ concept, onSaved }: { concept: Concept; onSaved: (note: Con
     if (next) { setDraft(note?.text ?? ''); setFailure(''); }
     setOpen(next);
   };
+  const unchanged = draft.trim() === (note?.text ?? '');
+  // The shortcut comes here too, so the guard is here and not only on the button.
   const save = async () => {
-    if (saving) return;
+    if (saving || unchanged) return;
     setSaving(true); setFailure('');
     try {
       const { data } = await api.put<{ note: ConceptNote | null }>(
@@ -385,8 +390,13 @@ function NoteBadge({ concept, onSaved }: { concept: Concept; onSaved: (note: Con
       setFailure(`Could not save the note. ${data?.note || data?.detail || 'Try again.'}`);
     } finally { setSaving(false); }
   };
-  const unchanged = draft.trim() === (note?.text ?? '');
-  const byline = note && [note.updated_by, note.updated_at && new Date(note.updated_at).toLocaleDateString()].filter(Boolean).join(', ');
+  // A copied note has no author here; it still has a date.
+  const saved = note?.updated_at ? new Date(note.updated_at).toLocaleDateString() : '';
+  const byline = note && (note.updated_by ? `Last saved by ${[note.updated_by, saved].filter(Boolean).join(', ')}`
+    : saved && `Last saved ${saved}`);
+  // The popup is drawn outside the table, but React still sends its events up
+  // to the row, which is a drag source and a drop target for priority.
+  const keepFromRow = (event: React.DragEvent) => event.stopPropagation();
   return <Popover open={open} onOpenChange={change}>
     <PopoverTrigger asChild>
       <button type="button" data-has-note={note ? 'true' : 'false'}
@@ -397,7 +407,8 @@ function NoteBadge({ concept, onSaved }: { concept: Concept; onSaved: (note: Con
         <StickyNote size={12} aria-hidden="true" className={note ? 'fill-amber-200' : ''} />
       </button>
     </PopoverTrigger>
-    <PopoverContent align="start" aria-label={`Note for ${concept.concept_name}`} className="w-80 bg-white p-3 not-italic text-slate-900">
+    <PopoverContent align="start" aria-label={`Note for ${concept.concept_name}`} className="w-80 bg-white p-3 not-italic text-slate-900"
+      onDragStart={keepFromRow} onDragOver={keepFromRow} onDragLeave={keepFromRow} onDrop={keepFromRow} onDragEnd={keepFromRow}>
       <form onSubmit={event => { event.preventDefault(); void save(); }}>
         <label htmlFor={`concept-note-${concept.concept_id}`} className="mb-1 block text-xs font-medium text-slate-700">
           Note for {concept.concept_name}</label>
@@ -405,7 +416,7 @@ function NoteBadge({ concept, onSaved }: { concept: Concept; onSaved: (note: Con
           className="w-full rounded border border-slate-300 px-2 py-1 text-sm" placeholder="What should curators know about this concept?"
           onChange={event => setDraft(event.target.value)}
           onKeyDown={event => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) { event.preventDefault(); void save(); } }} />
-        {byline && <p className="mt-1 text-xs text-slate-500">Last saved by {byline}</p>}
+        {byline && <p className="mt-1 text-xs text-slate-500">{byline}</p>}
         {failure && <p role="alert" className="mt-1 text-xs text-rose-700">{failure}</p>}
         <div className="mt-2 flex items-center justify-end gap-2">
           <button type="button" className="rounded border border-slate-300 px-2 py-1 text-xs hover:bg-slate-100 disabled:opacity-40"

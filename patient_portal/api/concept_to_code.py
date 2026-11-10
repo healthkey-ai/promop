@@ -187,6 +187,8 @@ def concept_to_code_note(request, concept_id):
         if not isinstance(data, dict) or not isinstance(data.get('note'), str):
             raise ValidationError({'note': 'Supply the note as text; blank clears it.'})
         text = data['note'].strip()
+        if '\x00' in text:
+            raise ValidationError({'note': 'The note holds a character that cannot be stored.'})
         if len(text) > ConceptMappingNote.MAX_LENGTH:
             raise ValidationError({'note': f'Keep the note to {ConceptMappingNote.MAX_LENGTH} characters or fewer.'})
     if not text:
