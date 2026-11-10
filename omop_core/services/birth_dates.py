@@ -8,8 +8,12 @@ def normalize_birth_date(person, changes):
     """Return the date/precision pair, preserving omitted precision from Person.
 
     January/day 1 are read-model placeholders for partial dates, not assertions
-    that those components are known. An explicit precision change is required
-    to promote a partial date to a full date.
+    that those components are known. Without an explicit precision, a date in
+    the placeholder shape of the stored precision (Jan 1 for a year, day 1 for
+    a month) keeps it: that is how a partial date is edited. A date carrying
+    components beyond it is a full date, as it was in dev: callers that never
+    send the precision (the API, the record page until its select changes)
+    otherwise had 1985-03-15 cut to 1985-01-01 (#2418 regression review).
     """
     if 'date_of_birth_precision' in changes:
         precision = changes['date_of_birth_precision'] or 'day'
@@ -30,6 +34,10 @@ def normalize_birth_date(person, changes):
             dob = date(person.year_of_birth, 1, 1)
     else:
         dob = None
+    if 'date_of_birth_precision' not in changes and 'date_of_birth' in changes and dob:
+        if (precision == 'year' and (dob.month, dob.day) != (1, 1)) or (
+                precision == 'month' and dob.day != 1):
+            precision = 'day'
     if dob and precision == 'year':
         dob = dob.replace(month=1, day=1)
     elif dob and precision == 'month':

@@ -43,7 +43,7 @@ def test_org_admin_can_edit_profile_without_reverse_derivation(setup, access):
     assert descriptor.status_code == 200
     payload = {'email': 'corrected@example.test', 'phone_number': '555-0100',
                # Promoting a year-only DOB to a full date is explicit.
-               'date_of_birth': '1985-03-15', 'date_of_birth_precision': 'day', 'gender': 'Female',
+               'date_of_birth': '1985-03-15', 'gender': 'Female',
                'race': 'Asian', 'ethnicity': 'Not Hispanic or Latino',
                'city': 'Portland', 'region': 'OR', 'country': 'United States',
                'postal_code': '97201', 'facility_name': 'Example clinic'}
