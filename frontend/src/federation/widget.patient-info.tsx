@@ -23,6 +23,7 @@ import PatientFieldEditor from './PatientFieldEditor';
 import TherapyLinesPanel from './TherapyLinesPanel';
 import GenomicsFindingsModal from './GenomicsFindingsModal';
 import type { PatientFormResult } from './patientFormStore';
+import { hasNewSaveError } from './saveErrors';
 
 export interface MountOptions extends PatientFormConnection {
   /** Base the form calls: `${apiBase}/patient-info/me/`, and the clinical helpers'
@@ -95,7 +96,7 @@ export function mountFields(el: HTMLElement, opts: MountOptions = {}): () => voi
   let lastErrors = runtime.store.getSnapshot().errors;
   const stopErrors = runtime.store.subscribe(() => {
     const errors = runtime.store.getSnapshot().errors;
-    if (errors !== lastErrors && Object.keys(errors).length) opts.onSaveError?.();
+    if (hasNewSaveError(lastErrors, errors)) opts.onSaveError?.();
     lastErrors = errors;
   });
   subscriptions.set(el, () => { stopUpdates(); stopErrors(); release(); });
