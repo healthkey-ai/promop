@@ -129,6 +129,38 @@ def test_me_returns_phr_shaped_user_and_promop_accepts_the_token_as_the_same_ide
     assert Identity.objects.filter(email="dana@example.com").count() == 1
 
 
+def _link_patient(identity, person_id, given=None, family=None):
+    from omop_core.models import Person
+    from patient_portal.models import PatientUser
+
+    person = Person.objects.create(person_id=person_id, given_name=given, family_name=family)
+    PatientUser.objects.create(identity=identity, person=person)
+    return person
+
+
+def test_me_names_a_patient_account_after_its_patient_record(account):
+    """phr's header shows /me's name. For a patient that is the name on their
+    record (what the Health Profile edits), not the account's display name,
+    which can be anything an admin typed (on staging: "Random")."""
+    account.name = "Random"
+    account.save(update_fields=["name"])
+    _link_patient(account, 991_001, given="Dann Alysia", family="Rempel")
+    client = APIClient()
+    client.credentials(HTTP_AUTHORIZATION=f"Bearer {_login(APIClient()).data['access']}")
+
+    me = client.get(f"{BASE}/me/")
+    assert (me.data["first_name"], me.data["last_name"]) == ("Dann Alysia", "Rempel")
+
+
+def test_me_falls_back_to_the_account_name_when_the_record_has_none(account):
+    _link_patient(account, 991_002, given="  ", family=None)
+    client = APIClient()
+    client.credentials(HTTP_AUTHORIZATION=f"Bearer {_login(APIClient()).data['access']}")
+
+    me = client.get(f"{BASE}/me/")
+    assert (me.data["first_name"], me.data["last_name"]) == ("Dana", "Scully")
+
+
 def test_roles_come_from_staff_and_the_medical_records_group(account):
     from django.contrib.auth.models import Group
 

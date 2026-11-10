@@ -69,6 +69,25 @@ def _encode(payload: dict) -> str:
 
 
 def _names(identity) -> tuple[str, str]:
+    """The name phr shows for the account (its header reads /me).
+
+    For a patient that is the name on their record, Person's given and family
+    names, which the Health Profile edits and every other phr page shows. The
+    account's own `name` is a display label that can be anything an admin
+    typed, so it is only the fallback, for staff and for a record with no name.
+    """
+    from patient_portal.models import PatientUser
+
+    person = (
+        PatientUser.objects.filter(identity=identity)
+        .values("person__given_name", "person__family_name")
+        .first()
+    )
+    if person:
+        given = (person["person__given_name"] or "").strip()
+        family = (person["person__family_name"] or "").strip()
+        if given or family:
+            return given, family
     first, _, last = (identity.name or "").strip().partition(" ")
     return first, last.strip()
 
