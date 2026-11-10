@@ -64,7 +64,9 @@ export function editorIdentity(connection: EditorConnection): string {
     id = ++nextClientId;
     clientIds.set(connection.apiClient, id);
   }
-  return `${id}:${editorBasePath(connection)}:${connection.connectionKey ?? ''}`;
+  // JSON, not separators: `("/api", "tenant:x")` and `("/api:tenant", "x")`
+  // must not collapse into one key and leave the old state in place.
+  return JSON.stringify([id, editorBasePath(connection), connection.connectionKey ?? '']);
 }
 
 /**

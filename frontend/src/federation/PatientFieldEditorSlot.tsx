@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 
 import PatientFieldEditor from './PatientFieldEditor';
 import { editorIdentity, useEditorSession, type EditorConnection } from './editorSession';
@@ -54,10 +54,12 @@ export default function PatientFieldEditorSlot({
   // inline callback from the host would invalidate a batch twice.
   const changed = useRef(onChanged);
   useEffect(() => { changed.current = onChanged; }, [onChanged]);
-  useEffect(
-    () => store.onUpdated(() => { changed.current?.(); }),
-    [store],
-  );
+  // One stable listener per store. StrictMode replays setup → cleanup → setup;
+  // while a batch is pending the cleanup defers its removal, so a fresh
+  // closure would be registered a second time and notify twice. A Set holds
+  // this one reference once.
+  const listener = useMemo(() => () => { changed.current?.(); }, []);
+  useEffect(() => store.onUpdated(listener), [store, listener]);
   // A new connection is a new patient context. A dated draft or a chosen unit
   // belongs to the old one and must not be committed into the new store.
   const identity = editorIdentity({ apiClient, apiBasePath, connectionKey });

@@ -1,3 +1,4 @@
+import { StrictMode } from 'react';
 import { act, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import type { AxiosInstance } from 'axios';
@@ -6,6 +7,7 @@ import { clinicalClient } from '@/api/clinicalTransport';
 import GenomicsEditor from './GenomicsEditor';
 import PatientFieldEditorSlot from './PatientFieldEditorSlot';
 import TherapyLinesEditor from './TherapyLinesEditor';
+import { editorIdentity } from './editorSession';
 import { patientFormForClient } from './patientFormRuntime';
 import { usePromopFieldBindings } from './usePromopFieldBindings';
 
@@ -281,6 +283,41 @@ describe('the PROMOP editors for a host that shares the React tree', () => {
 
     expect(first).not.toHaveBeenCalled();
     expect(second).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps identity keys distinct for colliding base and key text', () => {
+    const host = hostClient();
+    // ":" used to join the parts, so these two different stores produced one
+    // React key and kept the old patient's drafts in place.
+    expect(editorIdentity({ apiClient: host.client, apiBasePath: '/api', connectionKey: 'tenant:x' }))
+      .not.toBe(editorIdentity({ apiClient: host.client, apiBasePath: '/api:tenant', connectionKey: 'x' }));
+  });
+
+  it('notifies once under StrictMode when a batch was already pending', async () => {
+    const host = hostClient();
+    const onChanged = vi.fn();
+    // Queue a batch BEFORE the slot mounts, so StrictMode's setup → cleanup →
+    // setup finds listeners it cannot remove yet. The store refuses an edit
+    // until it has loaded (writable is only known from the server).
+    const store = patientFormForClient(host.client, '');
+    await act(async () => { await store.load(); store.enqueue('height', 180); });
+
+    render(
+      <StrictMode>
+        <PatientFieldEditorSlot
+          apiClient={host.client}
+          apiBasePath=""
+          name="height"
+          label="Height"
+          readOnly={false}
+          onChanged={onChanged}
+        />
+      </StrictMode>,
+    );
+    await screen.findByRole('spinbutton', { name: 'Height' });
+    await act(async () => { await store.flush(); });
+
+    expect(onChanged).toHaveBeenCalledTimes(1);
   });
 
   it('stays quiet when the server refuses the field write', async () => {
