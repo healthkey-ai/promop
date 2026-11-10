@@ -24,6 +24,22 @@ async function setup(patient: Record<string, unknown>, writeEnabled = true) {
 }
 
 describe('therapy lines editor', () => {
+  it('starts authoring at the first missing line, not the derived count', async () => {
+    // An imported history can carry a non-zero count with no line rows. The
+    // authoring dialog must open at line 1 and load first-line regimens, not
+    // count the aggregate and start at 2 (#1969 follow-up).
+    const { store } = await setup({
+      therapy_lines_count: '1',
+      lines_of_therapy: [],
+    });
+
+    render(<TherapyLinesPanel store={store} readOnly={false} />);
+    fireEvent.click(screen.getByRole('button', { name: /Add therapy line/i }));
+
+    const input = await screen.findByRole('spinbutton', { name: 'Line number' });
+    expect(input).toHaveValue(1);
+  });
+
   it('lists the recorded lines with their date range', async () => {
     const { store } = await setup({
       therapy_lines_count: '2',

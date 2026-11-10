@@ -6,7 +6,9 @@ concept assignments and which still need one.
 """
 from __future__ import annotations
 
-from omop_core.models import CustomPatientField, PatientRecord, FieldConceptMapping, FieldChoice, FieldFormula
+from omop_core.models import (
+    UNPLACED_TAB, CustomPatientField, PatientRecord, FieldConceptMapping, FieldChoice, FieldFormula,
+)
 from omop_core.services.mappings import (
     LAB_FIELD_TO_LOINC,
     LAB_FIELD_ALIAS_TO_CANONICAL,
@@ -21,6 +23,11 @@ from omop_core.services.patient_record_service import (
     PATIENT_RECORD_OMOP_MAPPED_FIELDS,
     _LAB_FIELD_ALIASES,
 )
+from omop_core.services import direct_bilirubin_units
+from omop_core.services.blood_count_source_pairs import PAIRS as COUNT_SOURCE_PAIRS
+from omop_core.services.chemistry_units import PAIRS as CHEMISTRY_SOURCE_PAIRS
+from omop_core.services.creatinine_units import PAIR_FIELD as CREATININE_PAIR
+from omop_core.services.hemoglobin_units import PAIR_FIELD as HEMOGLOBIN_PAIR
 from omop_core.services.provenance_registry import get_registry
 from omop_core.services.formula_evaluator import validate_formula
 
@@ -185,6 +192,17 @@ for aliases in _LAB_FIELD_ALIASES.values():
 # extractor derives, routed through the curation tables — those 18 recovered
 # attributions from #596/#607). A field inventory, not a code route.
 _LOINC_EDITABLE_FIELDS = frozenset(LAB_FIELD_TO_LOINC.keys()) | LAB_FIELDS
+
+# The source half of a lab pair is a clinical INPUT the reader edits: the
+# normalised canonical is derived from it (#2318). The derivation alias map
+# also lists them, so classifying by that map alone called them `alias` and
+# dropped them from disease relevance — the placement work already counts
+# them as common clinical fields.
+_SOURCE_PAIR_INPUT_FIELDS = frozenset(
+    {HEMOGLOBIN_PAIR, CREATININE_PAIR, direct_bilirubin_units.PAIR_FIELD}
+    | set(COUNT_SOURCE_PAIRS)
+    | {spec['value'] for spec in CHEMISTRY_SOURCE_PAIRS.values()}
+)
 
 
 def _get_field_type_label(field) -> str:
@@ -379,11 +397,14 @@ _TAB_BEHAVIOR = frozenset({
 
 
 def _classify_tab(field_name: str) -> str:
-    """Return the clinical-tab label for a PatientRecord field.
+    """Return the tab the code places a built-in PatientRecord field on.
 
-    Internal fields are excluded from the API entirely (no tab).
-    Wearable _30d fields are computed — they go to 'other' and render
-    in the Computed section at the bottom of each tab.
+    Internal fields are excluded from the API entirely (no tab). A field no
+    list names is unplaced (``omop``): it keeps its mapping and derivation,
+    but no tab renders a control for it, so its facts show only as raw rows
+    on the patient's OMOP tab (#2328); ``blood_type``, ``red_blood_cell_count``
+    and ``pod24`` are such fields. A curator's ``FieldConceptMapping.tab``
+    overrides this; see :func:`resolve_tab`.
     """
     if field_name == 'genetic_mutations' or field_name.startswith('genomics_'):
         return 'genomics'
@@ -405,7 +426,23 @@ def _classify_tab(field_name: str) -> str:
     )
     if any(kw in field_name for kw in therapy_keywords):
         return 'treatment'
-    return 'other'
+    return UNPLACED_TAB
+
+
+def resolve_tab(field_name: str, mapping=None, custom=None) -> str:
+    """The tab a field renders on: the curator's placement first, then code.
+
+    A placed field renders last on its tab, on its own row; placement is one
+    value, not a layout. ``mapping`` is the field's ``FieldConceptMapping``
+    (its ``tab`` wins when set), ``custom`` its ``CustomPatientField`` (whose
+    own ``tab`` is what its dialog chose). A built-in field with neither falls
+    back to :func:`_classify_tab`.
+    """
+    if mapping is not None and mapping.tab:
+        return mapping.tab
+    if custom is not None:
+        return custom.tab or UNPLACED_TAB
+    return _classify_tab(field_name)
 
 
 def _classify_field(field_name: str) -> str:
@@ -419,6 +456,8 @@ def _classify_field(field_name: str) -> str:
     if field_name in _LOCATION_FIELDS:
         return 'location'
     if field_name in _LOINC_EDITABLE_FIELDS:
+        return 'editable'
+    if field_name in _SOURCE_PAIR_INPUT_FIELDS:
         return 'editable'
     if field_name in _ALL_ALIASES:
         return 'alias'
@@ -642,6 +681,7 @@ def get_all_field_descriptors() -> list[dict]:
                 'reviewer': mapping.reviewer.username if mapping.reviewer else None,
                 'reviewed_at': mapping.reviewed_at.isoformat() if mapping.reviewed_at else None,
                 'notes': mapping.notes,
+                'tab': mapping.tab,
             }
 
         formula = formulas_by_field.get(name)
@@ -663,7 +703,7 @@ def get_all_field_descriptors() -> list[dict]:
             'field_name': name,
             'field_type': _get_field_type_label(f),
             'category': category,
-            'tab': _classify_tab(name),
+            'tab': resolve_tab(name, mapping=mappings_by_field.get(name)),
             'provenance': prov_dict,
             'mapping': mapping_dict,
             'suggestion': suggestion,
@@ -700,7 +740,7 @@ def get_all_field_descriptors() -> list[dict]:
             'field_name': custom.field_name,
             'field_type': custom.field_type,
             'category': 'computed' if custom.mode == 'computed' else 'needs-concept-set',
-            'tab': custom.tab,
+            'tab': resolve_tab(custom.field_name, mapping=mapping, custom=custom),
             'provenance': None,
             'mapping': {
                 'id': mapping.id,
@@ -715,6 +755,7 @@ def get_all_field_descriptors() -> list[dict]:
                 'reviewer': mapping.reviewer.username if mapping.reviewer else None,
                 'reviewed_at': mapping.reviewed_at.isoformat() if mapping.reviewed_at else None,
                 'notes': mapping.notes,
+                'tab': mapping.tab,
             },
             'suggestion': None,
             'suggest_query': _suggest_query(custom.field_name),

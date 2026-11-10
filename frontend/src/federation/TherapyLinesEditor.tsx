@@ -1,5 +1,6 @@
 import { useMemo } from 'react';
 
+import { PatientFormContext } from './PatientFormContext';
 import TherapyLinesPanel from './TherapyLinesPanel';
 import {
   editorBasePath,
@@ -45,12 +46,16 @@ export default function TherapyLinesEditor({
     [apiClient, apiBasePath],
   );
   return (
-    <TherapyLinesPanel
-      key={identity}
-      store={store}
-      readOnly={readOnly}
-      onChanged={onChanged}
-      connection={connection}
-    />
+    // The dialog reads the store from context to hold the host listeners
+    // while it authors a line outside the save queue.
+    <PatientFormContext.Provider value={store}>
+      <TherapyLinesPanel
+        key={identity}
+        store={store}
+        readOnly={readOnly}
+        onChanged={onChanged}
+        connection={connection}
+      />
+    </PatientFormContext.Provider>
   );
 }

@@ -78,7 +78,14 @@ _MAPPING_FIELDS = (
     'vocabulary_id', 'concept_code', 'unit', 'omop_table', 'source_value',
     'value_kind', 'type_concept_id', 'value_vocabulary', 'multiple',
     'status', 'reviewed_at', 'notes',
+    'tab',
 )
+# Columns a payload written before they existed may omit. Provenance reads as
+# blank: attribution does not cross instances. A placement is curation the
+# target owns, so an absent ``tab`` is not carried: blank on create, left
+# alone on update (the committed fixture predates the column, #2328).
+_OPTIONAL_MAPPING_FIELDS = frozenset({'provenance', 'tab'})
+_NOT_CARRIED_WHEN_ABSENT = frozenset({'tab'})
 _CUSTOM_FIELD_FIELDS = ('display_name', 'tab', 'field_type', 'mode')
 
 # Excludes id, the concept FKs (re-resolved), the user FKs (cleared), the auto
@@ -410,7 +417,7 @@ def _resolve_concept(row: dict, stats: TransferStats) -> Concept | None:
 def _apply_mappings(rows: list[dict], stats: TransferStats) -> None:
     existing = {m.field_name: m for m in FieldConceptMapping.objects.all()}
     for row in rows:
-        values = {name: row.get(name, '') if name == 'provenance' else row[name]
+        values = {name: row.get(name, '') if name in _OPTIONAL_MAPPING_FIELDS else row[name]
                   for name in _MAPPING_FIELDS}
         values['concept'] = _resolve_concept(row, stats)
         # Attribution does not cross instances, see module docstring.
@@ -421,6 +428,8 @@ def _apply_mappings(rows: list[dict], stats: TransferStats) -> None:
             FieldConceptMapping.objects.create(field_name=row['field_name'], **values)
             stats._bump(stats.created, 'mappings')
             continue
+        for name in _NOT_CARRIED_WHEN_ABSENT - set(row):
+            values.pop(name)
         for name, value in values.items():
             setattr(mapping, name, value)
         mapping.save(update_fields=[*values, 'updated_at'])
@@ -482,14 +491,14 @@ def _apply_choices(rows: list[dict], stats: TransferStats) -> None:
 
 
 def _apply_formulas(rows: list[dict], stats: TransferStats) -> None:
-    from omop_core.models import ExplicitNegativeAnswer
+    from omop_core.services.authored_answers import is_authored_answer_field
     existing = {f.field_name: f for f in FieldFormula.objects.all()}
     for row in rows:
         is_active = row['is_active']
-        if row['field_name'] in ExplicitNegativeAnswer.ANSWER_FIELDS and is_active:
+        if is_authored_answer_field(row['field_name']) and is_active:
             stats.warn(
-                f"formula {row['field_name']}: explicit-answer fields cannot be active; "
-                'stored inactive'
+                f"formula {row['field_name']}: authored-answer fields cannot be "
+                'active; stored inactive'
             )
             is_active = False
         formula = existing.get(row['field_name'])

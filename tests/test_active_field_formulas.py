@@ -73,8 +73,12 @@ def test_a_deactivated_pre_existing_formula_leaves_the_flag_unknown():
     assert record.no_pre_existing_conditions is None
 
 
-def test_the_same_formula_active_reproduces_the_defect():
-    """Guards the regression above: the expression it replaced did assert "none"."""
+def test_an_active_answer_formula_cannot_reproduce_the_defect():
+    """The evaluator skips authored answers even when a row is left active.
+
+    The database constraint and the import guard also refuse it, but an older
+    schema or a stale object must not turn "never assessed" into "none".
+    """
     record = PatientRecordFactory(preexisting_conditions=[], no_pre_existing_conditions=None)
     formula = FieldFormula.objects.create(
         field_name='no_pre_existing_conditions',
@@ -82,10 +86,10 @@ def test_the_same_formula_active_reproduces_the_defect():
         is_active=True,
     )
 
-    assert recompute_formula_field(formula) >= 1
+    assert recompute_formula_field(formula) == 0
 
     record.refresh_from_db()
-    assert record.no_pre_existing_conditions is True
+    assert record.no_pre_existing_conditions is None
 
 
 def test_the_shipped_migration_deactivates_the_formula():

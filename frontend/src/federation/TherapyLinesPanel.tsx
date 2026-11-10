@@ -42,9 +42,15 @@ export default function TherapyLinesPanel({ store, readOnly = false, onChanged, 
   const lines = Array.isArray(state.values.lines_of_therapy)
     ? (state.values.lines_of_therapy as EditableTherapyLine[])
     : [];
-  const rawCount = String(state.values.therapy_lines_count ?? '');
-  const count = rawCount === '3+' ? 3 : (parseInt(rawCount) || 0);
-  const nextLine = Math.max(count, ...lines.map((line) => line.line)) + 1;
+  // The authoring line counts the lines the record actually carries, not the
+  // derived `therapy_lines_count`: an imported patient can have a non-zero
+  // count with no line rows, and counting the aggregate would open "Record a
+  // line" at 2 and load second-line regimens for the first recorded line
+  // (#1969 follow-up). The planned-regimen catalog still uses the aggregate;
+  // that lives in `TreatmentTab`.
+  const lastRecordedLine = lines.reduce(
+    (max, line) => Math.max(max, Number(line.line) || 0), 0);
+  const nextLine = lastRecordedLine + 1;
   const diseaseCode = diseaseToDiseaseCode(state.values.disease);
   const complete = state.values.therapy_history_complete === true;
   const editable = !readOnly && state.writable && personId !== null;
@@ -59,6 +65,7 @@ export default function TherapyLinesPanel({ store, readOnly = false, onChanged, 
   const retract = async (line: EditableTherapyLine) => {
     if (typeof line.episode_id !== 'number') return;
     setBusy(true); setError('');
+    store.beginBypassWrite();
     try {
       await retractTherapyLine(line.episode_id, connection);
       await store.load();
@@ -66,6 +73,7 @@ export default function TherapyLinesPanel({ store, readOnly = false, onChanged, 
     } catch {
       setError('Could not remove that line. Try again.');
     } finally {
+      store.endBypassWrite();
       setBusy(false);
     }
   };
@@ -73,6 +81,7 @@ export default function TherapyLinesPanel({ store, readOnly = false, onChanged, 
   const setComplete = async (next: boolean) => {
     if (personId === null) return;
     setBusy(true); setError('');
+    store.beginBypassWrite();
     try {
       await setTherapyHistoryCompleteness(personId, next, connection);
       await store.load();
@@ -80,6 +89,7 @@ export default function TherapyLinesPanel({ store, readOnly = false, onChanged, 
     } catch {
       setError('Could not update whether this history is complete.');
     } finally {
+      store.endBypassWrite();
       setBusy(false);
     }
   };

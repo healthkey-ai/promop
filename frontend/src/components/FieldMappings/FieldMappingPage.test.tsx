@@ -308,6 +308,27 @@ describe("FieldMappingPage", () => {
     expect(screen.queryByText("hemoglobin_g_dl")).not.toBeInTheDocument();
   });
 
+  it("lists an unplaced field under OMOP (unplaced), not on General (#2328)", async () => {
+    mockGet.mockImplementation((url: string) => {
+      if (url === "/v1/field-mappings/") {
+        return Promise.resolve({ data: [
+          ...MOCK_DESCRIPTORS,
+          { ...MOCK_DESCRIPTORS[0], field_name: "red_blood_cell_count", tab: "omop", suggestion: null },
+        ] });
+      }
+      return Promise.resolve({ data: [] });
+    });
+    renderPage();
+    await waitFor(() => {
+      expect(screen.getByText("Field Concept Mappings")).toBeInTheDocument();
+    });
+    expect(screen.queryByText("red_blood_cell_count")).not.toBeInTheDocument();
+    const unplaced = screen.getByRole("button", { name: /OMOP \(unplaced\)/ });
+    expect(unplaced).toHaveTextContent("(1)");
+    fireEvent.click(unplaced);
+    expect(screen.getByText("red_blood_cell_count")).toBeInTheDocument();
+  });
+
   it("does not render an Other tab or Unit Fields category", async () => {
     renderPage();
     await waitFor(() => {
@@ -353,13 +374,12 @@ describe("FieldMappingPage", () => {
     expect(screen.queryByText("pack_years")).not.toBeInTheDocument();
   });
 
-  it("does not show Internal or Wearables tabs", async () => {
+  it("does not show an Internal tab", async () => {
     renderPage();
     await waitFor(() => {
       expect(screen.getByText("Field Concept Mappings")).toBeInTheDocument();
     });
     expect(screen.queryByText("Internal")).not.toBeInTheDocument();
-    expect(screen.queryByText("Wearables")).not.toBeInTheDocument();
   });
 
   it("renders computed fields at bottom in read-only section", async () => {

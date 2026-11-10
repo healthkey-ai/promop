@@ -10,7 +10,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from omop_core.models import (
-    AxisVariantRefresh, ConceptMappingPriority, FieldConceptMapping, PatientSourceCode,
+    AxisVariantRefresh, ConceptMappingNote, ConceptMappingPriority, FieldConceptMapping, PatientSourceCode,
     SourceCodeConceptMapping, SuggestRun,
 )
 from omop_core.services import concept_lock
@@ -80,12 +80,14 @@ def concept_to_code_list(request):
         concept_id__in=standard_destinations().values('pk'),
     ).values('omop_table').annotate(count=Count('concept_id', distinct=True)).order_by('omop_table')
     locks = concept_lock.locks_for([concept.pk for concept in page], request.user)
+    notes = _notes_for([concept.pk for concept in page])
     return Response({
         **paging, 'domains': list(domains),
         'results': [{**concept_payload(concept), 'fields': field_map.get(concept.pk, []),
                      'sccm_counts': {key: getattr(concept, key) for key in ('approved', 'proposed', 'rejected')},
                      'seen': concept.seen, 'priority': concept.priority,
-                     'done': concept.done, 'lock': locks.get(concept.pk)} for concept in page],
+                     'done': concept.done, 'lock': locks.get(concept.pk),
+                     'note': notes.get(concept.pk)} for concept in page],
         'prioritized': ConceptMappingPriority.objects.count(),
     })
 
@@ -153,6 +155,49 @@ def concept_to_code_lock(request, concept_id):
         return Response({'concept_id': concept.pk, 'lock': concept_lock.lock_payload(lock, request.user)})
     concept_lock.release(concept, request.user)
     return Response({'concept_id': concept.pk, 'lock': None})
+
+
+def _note_payload(note):
+    """What a row shows: the note, who last wrote it and when."""
+    if note is None:
+        return None
+    return {'text': note.text, 'updated_by': concept_lock.user_display(note.updated_by),
+            'updated_at': note.updated_at}
+
+
+def _notes_for(concept_ids):
+    """{concept_id: payload} for the concepts of one page, in one query."""
+    rows = ConceptMappingNote.objects.filter(concept_id__in=concept_ids).select_related('updated_by')
+    return {note.concept_id: _note_payload(note) for note in rows}
+
+
+@api_view(['PUT', 'DELETE'])
+@permission_classes([IsAuthenticated])
+def concept_to_code_note(request, concept_id):
+    """Save a concept's note (PUT), or clear it (DELETE, or PUT of a blank note) (#2411).
+
+    One shared note per concept; the last save wins. A note is commentary,
+    not a mapping write, so another curator's lock does not refuse it.
+    """
+    _authorize(request.user)
+    concept = get_object_or_404(standard_destinations(), pk=concept_id)
+    text = ''
+    if request.method == 'PUT':
+        data = request.data
+        if not isinstance(data, dict) or not isinstance(data.get('note'), str):
+            raise ValidationError({'note': 'Supply the note as text; blank clears it.'})
+        text = data['note'].strip()
+        if '\x00' in text:
+            raise ValidationError({'note': 'The note holds a character that cannot be stored.'})
+        if len(text) > ConceptMappingNote.MAX_LENGTH:
+            raise ValidationError({'note': f'Keep the note to {ConceptMappingNote.MAX_LENGTH} characters or fewer.'})
+    if not text:
+        ConceptMappingNote.objects.filter(concept=concept).delete()
+        return Response({'concept_id': concept.pk, 'note': None})
+    note, _ = ConceptMappingNote.objects.update_or_create(
+        concept=concept, defaults={'text': text, 'updated_by': request.user},
+    )
+    return Response({'concept_id': concept.pk, 'note': _note_payload(note)})
 
 
 @api_view(['GET'])

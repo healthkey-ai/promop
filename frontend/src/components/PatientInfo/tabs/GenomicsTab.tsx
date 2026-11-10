@@ -2,9 +2,11 @@ import { usePatientFormStore } from '@/federation/PatientFormContext';
 import PatientFieldEditor from '@/federation/PatientFieldEditor';
 import GenomicsFindings from '../GenomicsFindings';
 
-export default function GenomicsTab({ formData, readOnly = false }: {
+export default function GenomicsTab({ formData, readOnly = false, onChanged }: {
   formData: Record<string, unknown>;
   readOnly?: boolean;
+  /** Called after a finding is written; the dialog bypasses the save queue. */
+  onChanged?: () => void;
 }) {
   const personId = (formData.person_id ?? formData.person) as number | undefined;
   const store = usePatientFormStore();
@@ -14,6 +16,7 @@ export default function GenomicsTab({ formData, readOnly = false }: {
     {store && <div className="rounded-md border p-4">
       <PatientFieldEditor store={store} name="tp53_disruption" label="TP53 Disruption" />
     </div>}
-    <GenomicsFindings personId={personId} disease={disease} readOnly={readOnly} />
+    <GenomicsFindings personId={personId} disease={disease} readOnly={readOnly}
+      onChanged={onChanged} />
   </section>;
 }

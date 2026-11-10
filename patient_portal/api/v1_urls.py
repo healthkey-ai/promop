@@ -9,7 +9,7 @@ from .version import version_view
 from .concept_to_code import (
     concept_to_code_list, concept_to_code_detail, concept_to_code_suggest,
     concept_to_code_run, concept_to_code_apply, concept_to_code_propose,
-    concept_to_code_source_examples, concept_to_code_priority, concept_to_code_done, concept_to_code_lock, concept_to_code_estimate,
+    concept_to_code_source_examples, concept_to_code_priority, concept_to_code_done, concept_to_code_lock, concept_to_code_note, concept_to_code_estimate,
     concept_to_code_axis_variant_walk,
 )
 from rest_framework.routers import DefaultRouter
@@ -192,6 +192,7 @@ urlpatterns = [
     path('concept-to-code/priority/', concept_to_code_priority, name='v1-concept-to-code-priority'),
     path('concept-to-code/done/', concept_to_code_done, name='v1-concept-to-code-done'),
     path('concept-to-code/<int:concept_id>/lock/', concept_to_code_lock, name='v1-concept-to-code-lock'),
+    path('concept-to-code/<int:concept_id>/note/', concept_to_code_note, name='v1-concept-to-code-note'),
     path('concept-to-code/axis-variant-walk/', concept_to_code_axis_variant_walk, name='v1-concept-to-code-axis-variant-walk'),
     path('concept-to-code/source-examples/', concept_to_code_source_examples, name='v1-concept-to-code-source-examples'),
     path('concept-to-code/<int:concept_id>/', concept_to_code_detail, name='v1-concept-to-code-detail'),

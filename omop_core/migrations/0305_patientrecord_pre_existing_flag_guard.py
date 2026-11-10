@@ -17,10 +17,14 @@ CONSTRAINT = 'patientrecord_no_pre_existing_flag_needs_empty_list'
 ACTOR = 'migration:1988'
 
 
-def _has_categories(value):
-    return isinstance(value, list) and any(
-        isinstance(item, str) and item.strip() for item in value
-    )
+def _conflicts_with_the_constraint(value):
+    """The exact predicate the CHECK uses below.
+
+    It permits NULL, `[]` and JSON null and refuses every other value. Testing
+    only "a list with a non-blank string" would leave `{}`, `[""]`, `[null]`
+    and other legacy JSON forms to block the constraint on an existing row.
+    """
+    return value is not None and value != []
 
 
 def resolve_conflicts(apps, schema_editor):
@@ -35,7 +39,7 @@ def resolve_conflicts(apps, schema_editor):
     revisions = []
     resolved = []
     for record in candidates.iterator():
-        if not _has_categories(record.preexisting_conditions):
+        if not _conflicts_with_the_constraint(record.preexisting_conditions):
             continue
         resolved.append(record.pk)
         revisions.append(RecordRevision(

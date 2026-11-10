@@ -246,9 +246,14 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
   const gated = Boolean(field.compatibility_reason);
   const pendingDate = pending && typeof pending === 'object' && !Array.isArray(pending)
       && 'date' in pending ? (pending as { date?: unknown }).date : undefined;
+  // A value the reader already edited may not be the newest fact on the
+  // record: forcing the newest date as the correction target would file the
+  // correction on the wrong clinical day. Such a row asks for the date
+  // explicitly instead of guessing.
+  const needsExplicitDate = field.user_edited === true;
   const resultDate = resultDateOverride
     ?? (typeof pendingDate === 'string' ? pendingDate : undefined)
-    ?? field.latest_date ?? todayIso();
+    ?? (needsExplicitDate ? '' : field.latest_date ?? todayIso());
   // The correction target comes from the server. If the post-save refresh
   // failed, `latest_date` is the pre-save date and saving against it would
   // record the result on the wrong clinical day, so the pair waits for a
@@ -261,7 +266,7 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
   const datedDirty = dated && (valueDraft.set || resultDateOverride !== null
     || unitDraft !== null);
   const commitDated = () => {
-    if (datesStale) return;
+    if (datesStale || !resultDate) return;
     const datedEdit = { value: datedValue, date: resultDate };
     if (showUnitPicker && unitFieldName) {
       // The number, its date and the unit are one result. Saving the value
@@ -369,11 +374,9 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
           Result date
         </label>
         <input id={`${canonical}-result-date`} type="date" value={resultDate} max={todayIso()}
-          onChange={(event) => {
-            setResultDateOverride(event.target.value || todayIso());
-          }}
+          onChange={(event) => setResultDateOverride(event.target.value)}
           className="rounded-md border border-input px-2 py-1 text-xs" />
-        <button type="button" disabled={!datedDirty || datesStale} onClick={commitDated}
+        <button type="button" disabled={!datedDirty || datesStale || !resultDate} onClick={commitDated}
           className="rounded-md border border-input px-2 py-1 text-xs disabled:opacity-50">
           Save result
         </button>
@@ -382,7 +385,7 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
         The latest result date could not be refreshed, so the correction target may be out of date.
         {' '}<button type="button" className="underline" onClick={() => void store.reloadDates()}>Retry</button>
       </p>}
-      {dated && field.latest_date && resultDate < field.latest_date
+      {dated && field.latest_date && resultDate && resultDate < field.latest_date
         // A dated row without its own projection is a source pair, retained
         // until an explicit canonical event; see _SOURCE_PAIR_FIELDS.
         && <p role="status" className="text-xs text-muted-foreground">

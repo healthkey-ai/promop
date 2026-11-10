@@ -13,6 +13,7 @@ import pytest
 
 from omop_core.models import Concept, Measurement, PatientRecord
 from omop_core.services.patient_form import apply_patient_form_patch, patient_form_descriptors
+from omop_core.services.write_descriptor import build_writable_field_descriptor
 from omop_core.services.pk import next_pk
 from omop_core.services.patient_record_service import (
     recompute_patient_record_fields, refresh_patient_record,
@@ -486,6 +487,12 @@ def test_an_older_dated_pair_stays_the_current_answer():
         'measurement_date', flat=True))
     assert dates == [date(2026, 7, 1), date(2026, 8, 1)]
 
+    descriptors = patient_form_descriptors(
+        build_writable_field_descriptor(), record=PatientRecord.objects.get(person=person))
+    assert descriptors['hemoglobin_level'].get('user_edited') is True
+    # The canonical is a read-only normalised view; the editor writes the pair.
+    assert descriptors['weight'].get('user_edited') is not True
+
     # The documented boundary: an explicit canonical event retires the pair,
     # and the newer imported fact becomes the answer.
     record.hemoglobin_g_dl = Decimal('12.0')
@@ -509,3 +516,22 @@ def test_a_future_date_on_the_pair_is_refused():
                             'hemoglobin_g_dl'})
 
     assert not Measurement.objects.filter(person=person).exists()
+
+
+def test_an_edited_pair_without_a_projected_fact_still_asks_for_the_date():
+    """A retained pair may have no Measurement of its own.
+
+    The flag must not depend on `latest_date`: otherwise the editor silently
+    falls back to today's date for the next correction.
+    """
+    person = _person_with_lab()
+    record = PatientRecord.objects.get(person=person)
+    record.hemoglobin_level = Decimal('140')
+    record.user_edited_fields = ['hemoglobin_level']
+    record.save()
+
+    descriptors = patient_form_descriptors(
+        build_writable_field_descriptor(), record=record)
+
+    assert descriptors['hemoglobin_level'].get('user_edited') is True
+    assert 'latest_date' not in descriptors['hemoglobin_level']

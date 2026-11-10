@@ -288,6 +288,34 @@ def test_a_caller_read_only_count_unit_can_be_used_as_stored(api):
     assert float(refreshed.anc_thousand_per_ul) == 1.6
 
 
+def test_a_caller_read_only_canonical_refuses_the_whole_pair(api):
+    from omop_core.services.patient_form import apply_patient_form_patch
+
+    record = _record()
+    record.absolute_neutrophile_count = 1550
+    record.absolute_neutrophile_count_units = 'CELLS/UL'
+    record.anc_thousand_per_ul = Decimal('1.55')
+    record.user_edited_fields = []
+    record.save()
+    descriptor = build_writable_field_descriptor()
+    descriptor['anc_thousand_per_ul'].update(
+        read_only_for_caller=True, reason='Read-only for this caller.',
+    )
+
+    saved, result = apply_patient_form_patch(
+        record.person, {'absolute_neutrophile_count': 1600},
+        descriptor=descriptor,
+    )
+
+    assert 'absolute_neutrophile_count' in result.rejected
+    assert 'absolute_neutrophile_count_units' in result.rejected
+    assert not result.applied
+    assert not Measurement.objects.filter(person=record.person).exists()
+    saved.refresh_from_db()
+    assert float(saved.absolute_neutrophile_count) == 1550
+    assert float(saved.anc_thousand_per_ul) == 1.55
+
+
 def test_the_precision_rollback_refuses_lossy_values():
     from importlib import import_module
 
