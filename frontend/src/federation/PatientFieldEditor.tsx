@@ -232,6 +232,10 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
     ?? (unitFieldName ? state.errors[unitFieldName] : undefined);
   const pairPending = canonical in state.pending
     || Boolean(unitFieldName && unitFieldName in state.pending);
+  // A field the record would accept, shown in a read-only mount or to a caller
+  // without write access, is not derived: it is only locked here. It keeps the
+  // descriptor's own explanation if it has one and otherwise claims nothing.
+  const lockedByView = directWrite && (readOnly || !state.writable);
   // A dated input commits only through its own "Save result" pair, so the
   // dialog must not promise that every edit saves itself.
   // The gate reason used to be reachable inside the dialog. Rows that lose the
@@ -239,7 +243,8 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
   const reason = inputsUnavailable || (inputs.length > 0 && !editPath)
     ? ['This value is derived from data that is not editable in this view.',
       field.compatibility_reason].filter(Boolean).join(' ')
-    : field.compatibility_reason ?? field.reason ?? 'Derived value; edit the source inputs.';
+    : field.compatibility_reason ?? field.reason
+      ?? (lockedByView ? undefined : 'Derived value; edit the source inputs.');
   // A compatibility gate withholds the RESULT, not the clinical facts it is
   // computed from. Editing an input never writes the verdict; the result remains
   // read-only and is recalculated by PROMOP.
@@ -395,8 +400,8 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
         </p>}
     </>
       : <><div>{!compact && <span className="text-sm font-medium">{label}: </span>}{formatted}</div>
-        <p className="text-xs text-muted-foreground">{reason} {infoHref && <a href={infoHref}>Open Your Info</a>} {field.retryable &&
-          <button type="button" className="underline" onClick={() => void store.load()}>Retry</button>}</p></>}
+        {(reason || infoHref || field.retryable) && <p className="text-xs text-muted-foreground">{reason} {infoHref && <a href={infoHref}>Open Your Info</a>} {field.retryable &&
+          <button type="button" className="underline" onClick={() => void store.load()}>Retry</button>}</p>}</>}
     {field.options_note && <p role="status" className="text-xs text-muted-foreground">{field.options_note}</p>}
     {!showUnitPicker && !labelIncludesUnit && (field.unit ?? field.projection?.unit)
       && <span className="text-xs text-muted-foreground">{field.unit ?? field.projection?.unit}</span>}

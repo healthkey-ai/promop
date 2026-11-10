@@ -324,6 +324,38 @@ describe('computed patient field input dialogs', () => {
   });
 });
 
+describe('read-only views do not call a stored field derived', () => {
+  it.each(['readOnly', 'unwritableStore'] as const)('shows a writable field plainly in a %s view', async (mode) => {
+    const { store } = await setup({}, {}, mode !== 'unwritableStore');
+    const { container } = render(
+      <PatientFieldEditor store={store} name="weight" readOnly={mode === 'readOnly'} />);
+
+    expect(container.querySelector('[data-field="weight"] > div')?.textContent).toBe('Weight: 60');
+    expect(container).not.toHaveTextContent(/derived/i);
+    expect(screen.queryByRole('spinbutton')).not.toBeInTheDocument();
+  });
+
+  it('keeps the descriptor reason for a field locked in a read-only view', async () => {
+    const { store } = await setup({
+      weight: { writable: true, target: 'patient_record', control: 'number', label: 'Weight',
+        reason: 'Recorded by the care team.' },
+    });
+    render(<PatientFieldEditor store={store} name="weight" readOnly />);
+
+    expect(screen.getByText('Recorded by the care team.')).toBeVisible();
+    expect(screen.queryByText(/derived/i)).not.toBeInTheDocument();
+  });
+
+  it('still explains a field the record does not accept', async () => {
+    const { store } = await setup({
+      ldh_upper_limit_normal: { writable: false, label: 'LDH ULN' },
+    });
+    render(<PatientFieldEditor store={store} name="ldh_upper_limit_normal" readOnly />);
+
+    expect(screen.getByText('Derived value; edit the source inputs.')).toBeVisible();
+  });
+});
+
 describe('negated trial questions (#5663)', () => {
   const hivStatus = {
     label: 'HIV Positive', writable: true, target: 'patient_record',
