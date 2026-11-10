@@ -6,6 +6,7 @@ import {
   listTherapyOutcomes, type TherapyOutcomeChoice, THERAPY_INTENT_CHOICES, DISCONTINUATION_REASON_CHOICES,
   searchTherapyRegimens, listTherapyRegimens, getTherapyRegimenDetail,
   type DrugConcept, type EditableTherapyLine, type TherapyLineDrug,
+  type TherapyConnection,
 } from '@/api/therapyLines';
 import type { TherapyRegimen } from '@/types/therapy';
 
@@ -20,6 +21,9 @@ interface Props {
   onClose: () => void;
   /** Receives the re-derived record so the tab updates without a refetch. */
   onAuthored: (patientInfo: Record<string, unknown>) => void;
+  /** Which connection the catalogs and the write talk through. Omitted, the
+   *  module-level clinical transport the standalone app owns. */
+  connection?: TherapyConnection;
 }
 
 type SelectedDrug = DrugConcept & TherapyLineDrug & { class_names?: string[] };
@@ -51,6 +55,7 @@ export default function TherapyLineDialog({
   diseaseCode,
   onClose,
   onAuthored,
+  connection,
 }: Props) {
   const episodeId = typeof line?.episode_id === 'number' ? line.episode_id : null;
   const editing = episodeId !== null;
@@ -82,13 +87,13 @@ export default function TherapyLineDialog({
 
   useEffect(() => {
     let active = true;
-    listTherapyOutcomes(diseaseCode).then((items) => {
+    listTherapyOutcomes(diseaseCode, connection).then((items) => {
       if (active) setOutcomes(items);
     }).catch(() => {
       if (active) setOutcomeError('Could not load outcomes. Close and reopen to retry.');
     }).finally(() => { if (active) setLoadingOutcomes(false); });
     return () => { active = false; };
-  }, [diseaseCode]);
+  }, [diseaseCode, connection]);
 
   // Regimen picker state
   const [selectedRegimen, setSelectedRegimen] = useState<TherapyRegimen | null>(null);
@@ -142,7 +147,7 @@ export default function TherapyLineDialog({
     }
     setLoadingAvailable(true);
     try {
-      const regimens = await listTherapyRegimens(disease, r);
+      const regimens = await listTherapyRegimens(disease, r, connection);
       setAvailableRegimens(regimens);
       restoreLineRegimen(regimens);
     } catch {
@@ -152,7 +157,7 @@ export default function TherapyLineDialog({
     } finally {
       setLoadingAvailable(false);
     }
-  }, [restoreLineRegimen]);
+  }, [restoreLineRegimen, connection]);
 
   useEffect(() => {
     (async () => {
@@ -174,13 +179,13 @@ export default function TherapyLineDialog({
     setRegimenSearching(true);
     try {
       // In search mode, search all regimens (no disease/round filter).
-      setRegimenResults(await searchTherapyRegimens(q));
+      setRegimenResults(await searchTherapyRegimens(q, undefined, undefined, connection));
     } catch {
       setRegimenResults([]);
     } finally {
       setRegimenSearching(false);
     }
-  }, []);
+  }, [connection]);
 
   const selectRegimen = useCallback(async (regimen: TherapyRegimen) => {
     setRegimenQuery('');
@@ -188,7 +193,7 @@ export default function TherapyLineDialog({
     setSelectedRegimen(regimen);
     setLoadingRegimen(true);
     try {
-      const detail = await getTherapyRegimenDetail(regimen.code);
+      const detail = await getTherapyRegimenDetail(regimen.code, connection);
       // Map components to DrugConcept entries for the drug list
       const componentDrugs: SelectedDrug[] = (detail.components ?? [])
         .filter((c) => c.concept_id)
@@ -207,7 +212,7 @@ export default function TherapyLineDialog({
     } finally {
       setLoadingRegimen(false);
     }
-  }, []);
+  }, [connection]);
 
   // Clearing the regimen dissociates the label but keeps any drugs the user
   // may have added or modified — a clinician selecting a regimen to pre-fill
@@ -226,13 +231,13 @@ export default function TherapyLineDialog({
     }
     setSearching(true);
     try {
-      setResults(await searchDrugConcepts(q));
+      setResults(await searchDrugConcepts(q, connection));
     } catch {
       setResults([]);
     } finally {
       setSearching(false);
     }
-  }, []);
+  }, [connection]);
 
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
@@ -306,8 +311,8 @@ export default function TherapyLineDialog({
         ...(knownComposition ? {} : { composition_unknown: true }),
       };
       const result = episodeId !== null
-        ? await updateTherapyLine(episodeId, payload)
-        : await authorTherapyLine(payload);
+        ? await updateTherapyLine(episodeId, payload, connection)
+        : await authorTherapyLine(payload, connection);
       onAuthored(result.patient_info);
       onClose();
     } catch (err: unknown) {

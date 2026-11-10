@@ -39,6 +39,14 @@ export default defineConfig(({ mode }) => {
           // Framework-agnostic mounts for non-React hosts (HealthTree ONE).
           "./LabResultsBridge": "./src/federation/LabResultsBridge.tsx",
           "./PatientInfoBridge": "./src/federation/PatientInfoBridge.tsx",
+          // React editors for hosts that share this React tree (ht-phr): the
+          // host hands over its own authenticated client, not a token, so the
+          // Firebase Bearer interceptor and the connection-scoped identity are
+          // the same ones the rest of the host uses.
+          "./TherapyLinesEditor": "./src/federation/TherapyLinesEditor.tsx",
+          "./GenomicsEditor": "./src/federation/GenomicsEditor.tsx",
+          "./PatientFieldEditorSlot": "./src/federation/PatientFieldEditorSlot.tsx",
+          "./usePromopFieldBindings": "./src/federation/usePromopFieldBindings.ts",
           "./types": "./src/federation/types.ts",
         },
         shared: {

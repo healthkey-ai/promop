@@ -57,7 +57,9 @@ describe('therapy lines editor', () => {
     render(<TherapyLinesPanel store={store} onChanged={onChanged} />);
     fireEvent.click(screen.getByLabelText('Treatment history is complete'));
 
-    await waitFor(() => expect(completeTherapyHistory).toHaveBeenCalledWith(12, true));
+    // No explicit connection: the standalone treatment tab leaves the helper on
+    // the module-level transport the app owns.
+    await waitFor(() => expect(completeTherapyHistory).toHaveBeenCalledWith(12, true, undefined));
     await waitFor(() => expect(onChanged).toHaveBeenCalled());
   });
 
