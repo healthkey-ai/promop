@@ -182,6 +182,31 @@ describe('PatientDetail save — the edit, not the record', () => {
     expect(body).toMatchObject({ anc_thousand_per_ul: 5.5 });
   });
 
+  it('saves a normalised canonical lab through the PatientRecord PATCH (#2425)', async () => {
+    const normalised = {
+      ...DESCRIPTORS,
+      hemoglobin_g_dl: {
+        kind: 'computed', writable: false, target: 'patient_record', value_kind: 'number',
+        inputs: ['hemoglobin_level'], normalised_read_model: true,
+      },
+    };
+    (api.get as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
+      if (url.includes('writable-fields')) return Promise.resolve({ data: normalised });
+      if (url.includes('/patient-info/')) {
+        return Promise.resolve({
+          data: { patient_info: { ...PATIENT }, user: null, patient_name: PATIENT.patient_name },
+        });
+      }
+      return Promise.resolve({ data: [] });
+    });
+    await renderAndLoad();
+    await openLabsTab();
+    await editAndSave('12.5', '9.5');
+
+    await waitFor(() => expect(api.patch).toHaveBeenCalled());
+    expect(patchBody()).toMatchObject({ hemoglobin_g_dl: 9.5 });
+  });
+
   it('never sends an alias in the PATCH', async () => {
     await renderAndLoad();
     await openLabsTab();

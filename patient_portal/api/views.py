@@ -6004,7 +6004,11 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
         )
         return Response({
             field: (
-                entry if not (entry.get('writable') or entry.get('answerable'))
+                # A normalised read-model is not `writable`, but the standalone
+                # editor offers it (a canonical write is honoured, #2425), so it
+                # needs the caller restriction too.
+                entry if not (entry.get('writable') or entry.get('answerable')
+                              or entry.get('normalised_read_model'))
                 else {
                     **entry,
                     'writable': False,

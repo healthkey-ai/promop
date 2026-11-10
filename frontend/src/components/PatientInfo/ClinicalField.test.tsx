@@ -97,6 +97,33 @@ describe('ClinicalField federated editor', () => {
 });
 
 describe('ClinicalField writability', () => {
+  it('edits a normalised canonical lab without the form store (#2425)', () => {
+    const canonical = {
+      kind: 'computed', writable: false, target: 'patient_record', inputs: ['hemoglobin_level'],
+      normalised_read_model: true, reason: 'Normalised from hemoglobin_level.',
+    } as unknown as FieldDescriptor;
+    render(
+      <ClinicalField label="Hemoglobin (g/dL)" name="hemoglobin_g_dl" type="number" value={12}
+        descriptor={canonical} onChange={vi.fn()} />,
+    );
+
+    expect(screen.getByDisplayValue('12')).not.toBeDisabled();
+    expect(screen.queryByTestId('reason-hemoglobin_g_dl')).not.toBeInTheDocument();
+  });
+
+  it('keeps a normalised canonical read-only for a caller without write access', () => {
+    const canonical = {
+      kind: 'computed', writable: false, target: 'patient_record', normalised_read_model: true,
+      read_only_for_caller: true, reason: 'You have read-only access to this patient record.',
+    } as unknown as FieldDescriptor;
+    render(
+      <ClinicalField label="Hemoglobin (g/dL)" name="hemoglobin_g_dl" type="number" value={12}
+        descriptor={canonical} onChange={vi.fn()} />,
+    );
+
+    expect(screen.getByDisplayValue('12')).toBeDisabled();
+  });
+
   it('renders read-only with the reason when the server refuses the field', () => {
     const computed = {
       kind: 'computed', writable: false, inputs: ['height', 'weight'],

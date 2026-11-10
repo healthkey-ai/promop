@@ -3,7 +3,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { ArrowLeft, Check, AlertCircle, ChevronDown, ShieldCheck } from "lucide-react";
 import api from "@/api/axios";
-import { fetchWritableFields, LIFECYCLE, type FieldDescriptors } from "@/hooks/useWritableFields";
+import { editableWithoutFormStore, fetchWritableFields, LIFECYCLE, type FieldDescriptors } from "@/hooks/useWritableFields";
 // Profile fields now write through PatientRecord PATCH alongside clinical fields.
 import type { User } from "@/hooks/useAuth";
 import DeleteAccountDialog from "./DeleteAccountDialog";
@@ -489,7 +489,7 @@ export default function PatientDetail({
         if (f === 'no_pre_existing_conditions' || f === 'preexisting_conditions') continue;
         if (LIFECYCLE.has(f) || v === baseline[f]) continue;
         const desc = descriptors[f];
-        if (desc?.writable && desc.target === 'patient_record') {
+        if (editableWithoutFormStore(desc) && desc?.target === 'patient_record') {
           patchFields[f] = v;
         } else if (!(f in descriptors)) {
           // Unknown to the descriptor (e.g. custom fields) — PATCH them too.
@@ -515,7 +515,7 @@ export default function PatientDetail({
       // must not remain an unsaved overlay across later server refreshes.
       for (const field of dirtyFieldsRef.current) {
         const descriptor = descriptors[field];
-        if (descriptor && (!descriptor.writable || descriptor.target !== 'patient_record')
+        if (descriptor && (!editableWithoutFormStore(descriptor) || descriptor.target !== 'patient_record')
             && pendingDataRef.current?.info[field] === info[field]) {
           dirtyFieldsRef.current.delete(field);
         }

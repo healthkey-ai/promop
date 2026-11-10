@@ -85,6 +85,11 @@ export interface FieldDescriptor {
   /** Set when the field is mapped but this caller may not edit this patient —
    *  read-only for who is asking, rather than read-only in principle. */
   read_only_for_caller?: boolean;
+  /** A canonical value this PR derives from a value + unit source pair
+   *  (`hemoglobin_g_dl` from `hemoglobin_level`). Not `writable`: the form store
+   *  edits the pair. The server still honours a canonical write, so a view
+   *  without the store edits the canonical instead (#2425). */
+  normalised_read_model?: boolean;
   /** authored: what to write instead, since no single fact backs this field. */
   authored_via?: {
     target?: string;
@@ -96,6 +101,15 @@ export interface FieldDescriptor {
 }
 
 export type FieldDescriptors = Record<string, FieldDescriptor>;
+
+/** Whether a view WITHOUT the patient form store may edit this field through
+ *  the native PatientRecord PATCH. One predicate for rendering, saving and
+ *  dirty-state cleanup, so they cannot disagree. */
+export function editableWithoutFormStore(descriptor?: FieldDescriptor): boolean {
+  if (!descriptor || descriptor.read_only_for_caller) return false;
+  return !!descriptor.writable
+    || (!!descriptor.normalised_read_model && descriptor.target === 'patient_record');
+}
 
 /**
  * Columns the record keeps for itself, which no editor may send.

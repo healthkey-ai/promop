@@ -2,7 +2,7 @@ import { useContext, useState } from 'react';
 import Field from './Field';
 import { today } from '@/api/clinicalFacts';
 import type { VocabSource } from '@/hooks/useVocabulary';
-import type { FieldDescriptor } from '@/hooks/useWritableFields';
+import { editableWithoutFormStore, type FieldDescriptor } from '@/hooks/useWritableFields';
 import { PatientFormReadOnlyContext, usePatientFormStore } from '@/federation/PatientFormContext';
 import PatientFieldEditor from '@/federation/PatientFieldEditor';
 
@@ -67,7 +67,8 @@ export default function ClinicalField({
 }: Props) {
   const store = usePatientFormStore();
   const formReadOnly = useContext(PatientFormReadOnlyContext);
-  const writable = !!descriptor?.writable;
+  // Only the store-less path reads this; the store branch below renders its own editor.
+  const writable = editableWithoutFormStore(descriptor);
   // The server says which booleans are three-valued (Yes / No / Unknown, with
   // Unknown an answer of its own, #5521); the federated editor reads the same
   // flag, so a tab never has to repeat the list.
