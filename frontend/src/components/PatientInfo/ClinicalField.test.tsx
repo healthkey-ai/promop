@@ -94,6 +94,19 @@ describe('ClinicalField federated editor', () => {
       name: 'hemoglobin_g_dl', label: 'Hemoglobin (g/dL)', labelIncludesUnit: true,
     }));
   });
+
+  it('forwards the tab choices for a descriptor without options', () => {
+    render(
+      <PatientFormContext.Provider value={{} as never}>
+        <ClinicalField label="Post-Transformation Outcome" name="post_transformation_outcome"
+          type="select" value="" options={['Complete response', 'Progression']} onChange={vi.fn()} />
+      </PatientFormContext.Provider>,
+    );
+
+    expect(federatedEditorProps).toHaveBeenCalledWith(expect.objectContaining({
+      name: 'post_transformation_outcome', options: ['Complete response', 'Progression'],
+    }));
+  });
 });
 
 describe('ClinicalField writability', () => {

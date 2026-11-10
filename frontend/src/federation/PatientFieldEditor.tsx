@@ -16,6 +16,11 @@ interface Props {
   /** The caller owns a reviewed label that already carries this field's unit.
    * Do not append the descriptor unit beside it: one unit, one source (#5704). */
   labelIncludesUnit?: boolean;
+  /** The tab's own choices for a select. They apply only when the descriptor
+   * carries no options of its own and would otherwise render a free-text box;
+   * curated descriptor options always win, and a typed number, date or
+   * boolean is never turned into a list of strings. */
+  options?: string[];
 }
 
 /** Today in the browser's zone, not UTC: a result date is a local calendar day. */
@@ -91,7 +96,7 @@ function inspectInputs(
 
 /** CB's computed → source-input dialog, with recursive drill-in. Medical
  * metadata and values come only from PROMOP, never the host's trial uoptions. */
-export default function PatientFieldEditor({ store, name, readOnly, infoHref, ancestors = [], compact, label: callerLabel, labelIncludesUnit = false }: Props) {
+export default function PatientFieldEditor({ store, name, readOnly, infoHref, ancestors = [], compact, label: callerLabel, labelIncludesUnit = false, options: tabOptions }: Props) {
   const state = usePatientFormSnapshot(store);
   const [open, setOpen] = useState(false);
   const [resultDateOverride, setResultDateOverride] = useState<string | null>(null);
@@ -300,10 +305,12 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
     : typeof value === 'boolean'
       ? (value ? field.answer_labels?.true ?? 'Yes' : field.answer_labels?.false ?? 'No')
     : typeof value === 'object' ? JSON.stringify(value) : String(value);
-  const control = field.multiple ? 'multiselect' : field.options?.length
-    ? 'select'
-    : field.control ?? (field.value_kind === 'number' ? 'number'
-      : field.value_kind === 'boolean' ? 'boolean' : field.value_kind === 'date' ? 'date' : 'text');
+  const ownControl = field.control ?? (field.value_kind === 'number' ? 'number'
+    : field.value_kind === 'boolean' ? 'boolean' : field.value_kind === 'date' ? 'date' : 'text');
+  const choices = field.options?.length ? field.options
+    : tabOptions?.length && (field.multiple || ownControl === 'text' || ownControl === 'select')
+      ? tabOptions : [];
+  const control = field.multiple ? 'multiselect' : choices.length ? 'select' : ownControl;
   const onChangeValue = (name: string, next: unknown) => {
     if (dated) { setValueDraft({ set: true, value: next }); return; }
     if (showUnitPicker && unitFieldName) {
@@ -317,7 +324,7 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
   };
   const controlNode = <Field label={compact ? '' : label} ariaLabel={label}
     name={canonical} type={control}
-    value={dated ? datedValue : value} options={field.options ?? []}
+    value={dated ? datedValue : value} options={choices}
     triState={field.tri_state === true} answerLabels={field.answer_labels}
     precision={precision}
     onChange={onChangeValue} />;

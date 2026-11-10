@@ -356,6 +356,55 @@ describe('read-only views do not call a stored field derived', () => {
   });
 });
 
+describe('tab choices for a descriptor without options', () => {
+  it('renders a select from the tab choices instead of free text', async () => {
+    const user = userEvent.setup();
+    const { store, patch } = await setup({
+      post_transformation_outcome: { writable: true, target: 'patient_record',
+        value_kind: 'string', label: 'Post-Transformation Outcome' },
+    });
+    render(<PatientFieldEditor store={store} name="post_transformation_outcome"
+      label="Post-Transformation Outcome" options={['Complete response', 'Progression']} />);
+
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+    await user.click(screen.getByRole('combobox'));
+    await user.click(screen.getByRole('option', { name: 'Progression' }));
+    await act(async () => { await store.flush(); });
+    expect(patch.mock.calls.at(-1)?.[1]).toEqual({ post_transformation_outcome: 'Progression' });
+  });
+
+  it('prefers the descriptor options', async () => {
+    const user = userEvent.setup();
+    const { store } = await setup({
+      smoking_status: { writable: true, target: 'patient_record', label: 'Smoking',
+        options: [{ value: 'Never smoker' }] },
+    });
+    render(<PatientFieldEditor store={store} name="smoking_status" options={['Local only']} />);
+
+    await user.click(screen.getByRole('combobox'));
+    expect(screen.getByRole('option', { name: 'Never smoker' })).toBeInTheDocument();
+    expect(screen.queryByRole('option', { name: 'Local only' })).not.toBeInTheDocument();
+  });
+
+  it('keeps a typed boolean or number control', async () => {
+    const user = userEvent.setup();
+    const { store, patch } = await setup({
+      bulky_disease: { writable: true, target: 'patient_record', value_kind: 'boolean', label: 'Bulky' },
+    });
+    render(<>
+      <PatientFieldEditor store={store} name="bulky_disease" options={['Yes', 'No']} />
+      <PatientFieldEditor store={store} name="weight" options={['Yes', 'No']} />
+    </>);
+
+    expect(screen.getByRole('spinbutton', { name: 'Weight' })).toBeInTheDocument();
+    await user.click(screen.getByRole('combobox'));
+    await user.click(screen.getByRole('option', { name: 'Yes' }));
+    await act(async () => { await store.flush(); });
+    // The boolean column receives a boolean, not the tab's "Yes" string.
+    expect(patch.mock.calls.at(-1)?.[1]).toEqual({ bulky_disease: true });
+  });
+});
+
 describe('a failed save', () => {
   it('keeps the draft in the field and retries it from the row', async () => {
     const { store, patch } = await setup();
