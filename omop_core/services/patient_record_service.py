@@ -35,7 +35,7 @@ from omop_core.services.mappings import (
 from omop_core.services.clinical_units import (
     BLOOD_COUNT_FIELDS,
     canonical_wbc_unit, flc_to_canonical, wbc_to_canonical, blood_count_projection,
-    count_in_cells_per_ul, measurement_count_unit,
+    count_in_cells_per_ul, measurement_count_unit, measurement_creatinine_mg_dl,
 )
 from omop_core.services.lot_regimens import (
     get_regimen_concept_id,
@@ -69,7 +69,7 @@ def _usable_concept_name(concept) -> str | None:
 
 # Bump this whenever aggregation or computation logic changes in any section
 # extractor or in _compute_derived_fields.  See DERIVATION_CHANGELOG.md.
-DERIVATION_VERSION = 26
+DERIVATION_VERSION = 27
 
 # These PatientRecord columns are projections of PersonLanguageSkill, never
 # independent edits. Older PATCH requests could mark them as user-edited and
@@ -4304,6 +4304,22 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
 
     loinc_ms = [m for m in measurements if m.value_as_number is not None]
     wbc_projection_blocked = False
+    # Serum creatinine arrives in mg/dL or umol/L (#2438). The newest result
+    # owns the field: if its unit cannot be read, the field stays unknown and
+    # no older result, coded or display-name, stands in for it.
+    creatinine_blocked = False
+
+    def _creatinine_mg_dl(m):
+        nonlocal creatinine_blocked
+        value = measurement_creatinine_mg_dl(m)
+        if value is None:
+            creatinine_blocked = True
+            logger.warning(
+                'serum_creatinine_mg_dl skipped for person_id=%s: unit_source_value=%r '
+                'is not convertible to mg/dL', person.person_id, m.unit_source_value,
+            )
+        return value
+
     for m in loinc_ms:
         code = _measurement_code(m)
         if code not in code_fields:
@@ -4314,6 +4330,12 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
         if field in BLOOD_COUNT_FIELDS:
             # Owned by the blood count projection above, which reads the
             # unit; the raw cast here would land the lab's own scale.
+            continue
+        if field == 'serum_creatinine_mg_dl':
+            if field not in data and not creatinine_blocked:
+                creatinine = _creatinine_mg_dl(m)
+                if creatinine is not None:
+                    data[field] = cast(creatinine)
             continue
         canonical_value = None
         if code == '6690-2':
@@ -4347,9 +4369,16 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
                 continue
             if field in data or field in _FLC_FIELDS or field in BLOOD_COUNT_FIELDS:
                 continue
+            if field == 'serum_creatinine_mg_dl' and creatinine_blocked:
+                continue
             for m in snapshot.meas_by_source.get(source_value, ()):
                 if m.value_as_number is not None:
-                    data[field] = float(m.value_as_number)
+                    if field == 'serum_creatinine_mg_dl':
+                        creatinine = _creatinine_mg_dl(m)
+                        if creatinine is not None:
+                            data[field] = float(creatinine)
+                    else:
+                        data[field] = float(m.value_as_number)
                     break
 
     # --- Copy canonical values to legacy aliases (issue #471) ---
