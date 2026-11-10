@@ -111,3 +111,57 @@ def test_audit_finds_a_source_only_genomic_measurement():
     assert 'measurements=1' in text
     assert 'Struck by' in text
     assert 'none' not in text
+
+
+def _mutation_row(person, source_value, gene, value_source_value=None):
+    question = Concept.objects.filter(concept_code='36908-2').first() or ConceptFactory(
+        concept_id=45876022, concept_code='36908-2', concept_name='Gene mutations tested for')
+    origin = Concept.objects.filter(pk=255395001).first() or ConceptFactory(
+        concept_id=255395001, concept_code='255395001', concept_name='Origins')
+    struck = Concept.objects.filter(pk=30166007).first() or ConceptFactory(
+        concept_id=30166007, concept_code='30166007', concept_name='Struck by')
+    return MeasurementFactory(
+        person=person, measurement_concept=question, measurement_source_value=source_value,
+        qualifier_source_value=gene, value_as_string='c.68_69delAG',
+        qualifier_concept=origin, value_as_concept=struck,
+        value_source_value=value_source_value,
+    )
+
+
+def test_legacy_cb_profile_rows_keep_their_origin_and_interpretation():
+    """#2428: rows the previous CB-profile writer stored with SNOMED codes in
+    the id columns must still read as the finding the patient recorded."""
+    from omop_core.services.patient_record_service import _get_genetic_mutations
+    person = PersonFactory()
+    _mutation_row(person, 'cb-profile:genetic-mutation', 'BRCA1')
+
+    [finding] = _get_genetic_mutations(person)['genetic_mutations']
+
+    assert finding['origin'] == 'germline'
+    assert finding['interpretation'] == 'pathogenic'
+
+
+def test_the_legacy_ids_mean_nothing_on_a_fact_that_writer_did_not_author():
+    """The same integers on an imported fact are real concepts ("Origins",
+    "Struck by"), not an origin or interpretation."""
+    from omop_core.services.patient_record_service import _get_genetic_mutations
+    person = PersonFactory()
+    _mutation_row(person, '36908-2', 'BRCA2')
+
+    [finding] = _get_genetic_mutations(person)['genetic_mutations']
+
+    assert 'origin' not in finding
+    assert 'interpretation' not in finding
+
+
+def test_the_earlier_promop_record_writer_rows_are_legacy_too():
+    """2feb62c0..9034cc0b wrote the same ids under the generic question, marked
+    by value_source_value rather than measurement_source_value."""
+    from omop_core.services.patient_record_service import _get_genetic_mutations
+    person = PersonFactory()
+    _mutation_row(person, '36908-2', 'BRCA2', value_source_value='promop-genetic-mutation:BRCA2')
+
+    [finding] = _get_genetic_mutations(person)['genetic_mutations']
+
+    assert finding['origin'] == 'germline'
+    assert finding['interpretation'] == 'pathogenic'

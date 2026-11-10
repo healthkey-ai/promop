@@ -5217,11 +5217,7 @@ def _get_genetic_mutations(person: Person, snapshot: OmopSnapshot = None) -> dic
     if 'projection' in snapshot.genomics_cache:
         return snapshot.genomics_cache['projection']
 
-    from omop_core.services.genomic_concepts import (
-        MUTATION_INTERPRETATION_CONCEPTS, MUTATION_ORIGIN_CONCEPTS,
-    )
-    origin_concepts = MUTATION_ORIGIN_CONCEPTS
-    interpretation_concepts = MUTATION_INTERPRETATION_CONCEPTS
+    from omop_core.services.genomic_concepts import interpretation_for, origin_for
 
     mutations = []
     from omop_core.models import FieldConceptMapping
@@ -5269,11 +5265,13 @@ def _get_genetic_mutations(person: Person, snapshot: OmopSnapshot = None) -> dic
         if marker:
             mutation_data['marker_key'] = marker['key']
 
-        if measurement.qualifier_concept and measurement.qualifier_concept.concept_id in origin_concepts:
-            mutation_data['origin'] = origin_concepts[measurement.qualifier_concept.concept_id]
+        origin = origin_for(measurement)
+        if origin:
+            mutation_data['origin'] = origin
 
-        if measurement.value_as_concept and measurement.value_as_concept.concept_id in interpretation_concepts:
-            mutation_data['interpretation'] = interpretation_concepts[measurement.value_as_concept.concept_id]
+        interpretation = interpretation_for(measurement)
+        if interpretation:
+            mutation_data['interpretation'] = interpretation
 
         if measurement.qualifier_source_value and code not in ('36908-2', '81252-9') and not marker:
             mutation_data['assay_method'] = measurement.qualifier_source_value
