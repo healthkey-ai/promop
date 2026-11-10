@@ -50,7 +50,8 @@ Four independent dimensions. Do not collapse them into one `kind`.
 | kind | canonical value | editor |
 | --- | --- | --- |
 | `direct` | PatientRecord column | scalar / select / multiselect / date |
-| `editable` | a mapped OMOP fact | scalar / select / multiselect / date |
+| `editable` | a mapped OMOP fact | scalar / select / multiselect / date; the structured `genomics_*` recipes use the findings editor |
+| `selectable` | a value carried with its source (a unit) | choice beside `qualifies`; never written alone |
 | `profile` | Person attribute (gender, race, ethnicity, address) | select / address |
 | `alias` | mirrors `canonical` | the canonical's editor |
 | `computed` | derived by code, `inputs` name the sources | subform over the inputs |
@@ -72,7 +73,7 @@ write.
   | `target` | write path |
   | --- | --- |
   | `patient_record` | `PATCH /api/v1/patient-records/<person_id>/` |
-  | `genomics` | the findings endpoints (list diff), never a field PATCH |
+  | `genomics` | the findings endpoints (list diff), never a field PATCH; `genetic_mutations` and the `genomics_*` recipes are the entries that use it |
 
   `projection` is optional even for `patient_record`: it is present when the
   write projects into a clinical table, and absent for a direct column with no
