@@ -116,3 +116,47 @@ def test_the_migration_resolves_existing_contradictions_and_keeps_the_old_value(
 def test_the_formula_for_the_flag_is_not_active():
     assert not FieldFormula.objects.filter(
         field_name='no_pre_existing_conditions', is_active=True).exists()
+
+
+@pytest.mark.parametrize('categories', [[''], ['  '], [None]])
+def test_a_value_the_check_refuses_is_a_validation_error_not_a_500(categories):
+    """#2433: the predicate is the 0305 CHECK's, so anything the database would
+    refuse beside True is refused here first as a 400."""
+    record = PatientRecordFactory(preexisting_conditions=None,
+                                  no_pre_existing_conditions=None)
+
+    serializer = PatientRecordSerializer(
+        record, data={'no_pre_existing_conditions': True,
+                      'preexisting_conditions': categories}, partial=True)
+
+    assert not serializer.is_valid()
+    assert 'no_pre_existing_conditions' in serializer.errors
+
+
+@pytest.mark.parametrize('categories', [None, []])
+def test_the_values_the_check_permits_still_validate(categories):
+    record = PatientRecordFactory(preexisting_conditions=None,
+                                  no_pre_existing_conditions=None)
+
+    serializer = PatientRecordSerializer(
+        record, data={'no_pre_existing_conditions': True,
+                      'preexisting_conditions': categories}, partial=True)
+
+    assert serializer.is_valid(), serializer.errors
+
+
+def test_a_junk_list_withdraws_the_attestation_with_the_flag():
+    """The derivation guard nulls the flag for [""]; the attestation that backed
+    it must go too, or it claims an answer the record no longer carries."""
+    from django.utils import timezone
+    from omop_core.models import PreexistingConditionsAttestation
+    record = PatientRecordFactory(preexisting_conditions=[''], no_pre_existing_conditions=None)
+    PreexistingConditionsAttestation.objects.create(
+        person=record.person, confirmed_at=timezone.now(), source='patient-explicit')
+    record.no_pre_existing_conditions = True  # as an import would hand it over
+
+    recompute_patient_record_fields(record)
+
+    record.refresh_from_db()
+    assert record.no_pre_existing_conditions is None
+    assert not PreexistingConditionsAttestation.objects.filter(person=record.person).exists()

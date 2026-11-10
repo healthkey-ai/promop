@@ -30,8 +30,14 @@ def condition_categories(value):
 
 
 def contradicts_no_pre_existing_conditions(flag, categories):
-    """True when an explicit "none" answer coexists with recorded categories."""
-    return flag is True and bool(condition_categories(categories))
+    """True when an explicit "none" answer coexists with a category value.
+
+    The same predicate as the 0305 CHECK, which permits only NULL, `[]` and
+    JSON null beside True. A narrower test (distinct non-blank codes only) let
+    `[""]`, `{}` or a bare string through validation to an IntegrityError: a
+    500 where the client should get a 400 and choose.
+    """
+    return flag is True and categories is not None and categories != []
 
 
 def _record_for(person):
@@ -93,8 +99,11 @@ def supersede_no_preexisting_conditions(record):
 
     Called from the projection because a category can arrive through a path that
     does not go through the answer's own writer (admin, import, direct SQL).
+    Any value the guard treats as a contradiction withdraws it, junk lists
+    (`[""]`) included: the guard nulls the flag for those, and an attestation
+    left behind would claim an answer the record no longer carries.
     """
-    if condition_categories(record.preexisting_conditions):
+    if record.preexisting_conditions not in (None, []):
         PreexistingConditionsAttestation.objects.filter(
             person_id=record.person_id).delete()
 
