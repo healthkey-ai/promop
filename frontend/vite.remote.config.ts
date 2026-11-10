@@ -47,6 +47,10 @@ export default defineConfig(({ mode }) => {
           "./GenomicsEditor": "./src/federation/GenomicsEditor.tsx",
           "./PatientFieldEditorSlot": "./src/federation/PatientFieldEditorSlot.tsx",
           "./usePromopFieldBindings": "./src/federation/usePromopFieldBindings.ts",
+          // One module for all of the above: a host cannot tell a failed
+          // remote's `{ default: () => null }` stub from a real editor one
+          // expose at a time. `PROMOP_EDITORS_API` is the marker.
+          "./editors": "./src/federation/editors.ts",
           "./types": "./src/federation/types.ts",
         },
         shared: {
