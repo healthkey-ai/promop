@@ -84,10 +84,17 @@ export function usePromopFieldBindings(
     : null;
   const resolvable = useMemo(() => {
     const entries = new Map<string, Record<string, unknown>>();
-    for (const [name, entry] of Object.entries(current ?? {})) {
+    // Same precedence as `PatientFormStore.resolve()`: a canonical key wins
+    // over a binding, and the first entry declaring a binding wins over a
+    // later one. One pass would let a later binding overwrite a canonical key
+    // and route the row to a different kind than the editor resolves.
+    const declared = Object.entries(current ?? {});
+    for (const [name, entry] of declared) {
       entries.set(name, entry as Record<string, unknown>);
+    }
+    for (const [, entry] of declared) {
       for (const alias of entry.bindings ?? []) {
-        entries.set(alias, entry as Record<string, unknown>);
+        if (!entries.has(alias)) entries.set(alias, entry as Record<string, unknown>);
       }
     }
     return entries;
