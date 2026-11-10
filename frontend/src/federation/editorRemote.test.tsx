@@ -318,6 +318,10 @@ describe('the PROMOP editors for a host that shares the React tree', () => {
     await act(async () => { await store.flush(); });
 
     expect(onChanged).toHaveBeenCalledTimes(1);
+    // The deferred cleanup from the discarded setup must not retire the live
+    // listener once the queue drains: the next save still reaches the host.
+    await act(async () => { store.enqueue('height', 181); await store.flush(); });
+    expect(onChanged).toHaveBeenCalledTimes(2);
   });
 
   it('stays quiet when the server refuses the field write', async () => {

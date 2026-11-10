@@ -51,7 +51,12 @@ export class PatientFormStore {
     values: {}, fields: {}, pending: {}, errors: {}, loading: true, saving: false, writable: false,
   };
   private listeners = new Set<() => void>();
-  private updated = new Set<(result: PatientFormResult) => unknown>();
+  /** Listener -> the registration that owns it. A later registration with the
+   *  same function (StrictMode replay) supersedes the earlier one, so the
+   *  earlier cleanup cannot delete the live subscription when it eventually
+   *  runs. */
+  private updated = new Map<(result: PatientFormResult) => unknown, number>();
+  private updatedGeneration = 0;
   private queue: Record<string, unknown> = {};
   private revisions: Record<string, number> = {};
   private revision = 0;
@@ -69,13 +74,16 @@ export class PatientFormStore {
     return () => { this.listeners.delete(listener); };
   };
   onUpdated(listener: (result: PatientFormResult) => unknown) {
-    this.updated.add(listener);
+    const token = ++this.updatedGeneration;
+    this.updated.set(listener, token);
     return () => {
       // The host's invalidation must still run when navigation removed its
       // root while a save/follow-up is pending. Retire it only after draining.
       const removeWhenIdle = () => {
         if (this.flight || Object.keys(this.snapshot.pending).length) return false;
-        this.updated.delete(listener);
+        // Only the registration this cleanup belongs to may remove it: a
+        // replay that re-registered the same function owns the live entry.
+        if (this.updated.get(listener) === token) this.updated.delete(listener);
         return true;
       };
       if (!removeWhenIdle()) {
@@ -364,7 +372,8 @@ export class PatientFormStore {
         if (!data.write.applied.includes(name)) batchErrors[name] = data.write.rejected?.[name]
           ?? 'This field was not saved. It may require a different editing workflow.';
       }
-      await Promise.allSettled([...this.updated].map((listener) => Promise.resolve().then(() => listener(data))));
+      await Promise.allSettled([...this.updated.keys()]
+        .map((listener) => Promise.resolve().then(() => listener(data))));
     } catch (error) {
       const rejected = (error as { response?: { data?: { rejected?: Record<string, string> } } })
         ?.response?.data?.rejected;
