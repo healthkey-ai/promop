@@ -15625,6 +15625,37 @@ class OrgPatientSignupTest(TestCase):
         self.assertTrue(user['email_verified'])
         self.assertEqual(client.get('/api/v1/patient-records/77801/').status_code, 200)
 
+    def test_verification_after_a_doctor_invitation_drops_the_pending_row(self):
+        """Signup at a trusted-domain org, accept a doctor invitation there, then
+        follow the verification link: the pending patient row has nothing to
+        become (the doctor row exists), so it is dropped, not duplicated (#2416)."""
+        from omop_core.models import OrgTrust
+        from patient_portal.api.email_verification import promote_trusted_domain_grants
+        private_org = self._private_org_with_patients()
+        OrgTrust.objects.create(granting_org=private_org, trusted_domain='private-clinic.com')
+        resp = APIClient().post('/api/v1/orgs/private-clinic/patient-signup/', {
+            'email': 'late@private-clinic.com', 'password': 'Str0ng!Pass99',
+        })
+        self.assertEqual(resp.status_code, 201)
+        identity = Identity.objects.get(email='late@private-clinic.com')
+        admin = Identity.objects.create_user(email='late-admin@private-clinic.com', is_staff=True)
+        token = _secrets.token_hex(32)
+        OrgInvitation.objects.create(
+            org=private_org, email=identity.email, role='doctor', token=token,
+            invited_by=admin, expires_at=timezone.now() + timedelta(days=1),
+        )
+        resp = APIClient().post('/api/orgs/confirm-invitation/', {'token': token, 'password': 'Str0ng!Pass99'})
+        self.assertEqual(resp.status_code, 200, resp.data)
+        identity.refresh_from_db()
+        self.assertTrue(identity.has_verified_email)
+        self.assertEqual(
+            list(GroupAccess.objects.filter(identity=identity, org=private_org).values_list('role', flat=True)),
+            ['doctor'],
+        )
+        self.assertFalse(GroupAccess.objects.filter(identity=identity, pending_email_verification=True).exists())
+        # A later promotion (the signup's own link, a password reset) is a no-op.
+        self.assertEqual(promote_trusted_domain_grants(identity), 0)
+
     def test_signup_invitation_only_gets_patient_role(self):
         """An invitation alone does not make a self-signup an analyst.
 
@@ -16817,9 +16848,8 @@ class ClinicalSessionAuthorizationTest(TestCase):
 
         client = self._client(self.analyst)
         list_resp = client.get('/api/observations/', {'person_id': pid})
-        self.assertIn(list_resp.status_code, (status.HTTP_200_OK, status.HTTP_403_FORBIDDEN))
-        if list_resp.status_code == status.HTTP_200_OK:
-            self.assertEqual(list_resp.data, [])
+        self.assertEqual(list_resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(list_resp.data, [])
 
         create_resp = client.post(
             '/api/observations/',
@@ -16982,7 +17012,7 @@ class AnalystWriteGateTest(TestCase):
         # The analyst no longer reads the patient either (#2416), so the
         # refusal reads as "not found" rather than "read-only".
         self.assertTrue(
-            any('read-only' in e or 'not found' in e.lower() for e in resp.data['errors']),
+            any('not found' in e.lower() for e in resp.data['errors']),
             resp.data['errors'],
         )
         self.assertTrue(
@@ -17011,7 +17041,7 @@ class AnalystWriteGateTest(TestCase):
         )
 
         # 404 since #2416: the analyst cannot even see the person.
-        self.assertIn(resp.status_code, (status.HTTP_403_FORBIDDEN, status.HTTP_404_NOT_FOUND))
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
         self.person.refresh_from_db()
         self.assertEqual(self.person.given_name, 'Original')
 
@@ -33582,25 +33612,34 @@ class AnalystRoleScopeTest(TestCase):
             observation_date=date(2024, 1, 1), observation_type_concept_id=0,
         )
         resp = self.client.get('/api/v1/observations/', {'person_id': pid})
-        self.assertIn(resp.status_code, (status.HTTP_200_OK, status.HTTP_403_FORBIDDEN, status.HTTP_404_NOT_FOUND))
-        if resp.status_code == status.HTTP_200_OK:
-            self.assertEqual(self._rows(resp), [])
-        self.assertIn(self.client.get(f'/api/v1/patient-records/{pid}/source-codes/').status_code,
-                      (status.HTTP_403_FORBIDDEN, status.HTTP_404_NOT_FOUND))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(self._rows(resp), [])
+        self.assertEqual(self.client.get(f'/api/v1/patient-records/{pid}/source-codes/').status_code,
+                         status.HTTP_404_NOT_FOUND)
+
+    def test_break_glass_is_refused(self):
+        resp = self.client.post('/api/v1/break-glass/',
+                                {'person_id': self.person.person_id, 'reason': 'audit'}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN, resp.data)
+        doctor = _make_user('glass-doctor@test.com')
+        GroupAccess.objects.create(identity=doctor, org=self.org, role='doctor')
+        self.client.force_authenticate(user=doctor)
+        resp = self.client.post('/api/v1/break-glass/',
+                                {'person_id': self.person.person_id, 'reason': 'audit'}, format='json')
+        self.assertNotEqual(resp.status_code, status.HTTP_403_FORBIDDEN, resp.data)
 
     def test_patient_write_is_refused(self):
         resp = self.client.patch(
             f'/api/patient-info/{self.person.person_id}/', {'ecog_performance_status': 1}, format='json',
         )
-        self.assertIn(resp.status_code, (status.HTTP_403_FORBIDDEN, status.HTTP_404_NOT_FOUND))
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
         self.record.refresh_from_db()
         self.assertIsNone(self.record.ecog_performance_status)
 
     def test_aggregated_org_stats_show_no_org(self):
         resp = self.client.get('/api/stats/org-disease/')
-        self.assertIn(resp.status_code, (status.HTTP_200_OK, status.HTTP_403_FORBIDDEN))
-        if resp.status_code == status.HTTP_200_OK:
-            self.assertNotIn('analyst-org', {o['org_slug'] for o in resp.data})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertNotIn('analyst-org', {o['org_slug'] for o in resp.data})
 
     # -- denied curation -----------------------------------------------------
 
@@ -33658,12 +33697,17 @@ class AnalystRoleScopeTest(TestCase):
     def test_organization_trust_does_not_make_an_analyst_an_admin(self):
         from omop_core.services.access import get_admin_orgs
         granting = _make_org('Granting Org', 'granting-org')
+        plain = _make_org('Plain Clinic', 'plain-clinic')
         OrgTrust.objects.create(granting_org=granting, trusted_org=self.org)
+        OrgTrust.objects.create(granting_org=granting, trusted_org=plain)
         self.assertNotIn(granting, get_admin_orgs(self.analyst))
         resp = self.client.get('/api/user/')
         self.assertFalse(resp.data['user']['is_org_admin'])
+        analyst_at_plain = _make_user('plain-analyst@test.com')
+        GroupAccess.objects.create(identity=analyst_at_plain, org=plain, role='analyst')
+        self.assertNotIn(granting, get_admin_orgs(analyst_at_plain))
         doctor = _make_user('trusted-doctor@test.com')
-        GroupAccess.objects.create(identity=doctor, org=self.org, role='doctor')
+        GroupAccess.objects.create(identity=doctor, org=plain, role='doctor')
         self.assertIn(granting, get_admin_orgs(doctor))
 
     def test_domain_trust_does_not_make_an_analyst_only_account_an_admin(self):
@@ -33680,7 +33724,37 @@ class AnalystRoleScopeTest(TestCase):
         nobody = _make_user('nobody@test.com')
         nobody.mark_email_verified()
         self.assertIn(granting, get_admin_orgs(nobody))
+        plain = _make_org('Plain Clinic', 'plain-clinic')
         doctor = _make_user('domain-doctor@test.com')
         doctor.mark_email_verified()
-        GroupAccess.objects.create(identity=doctor, org=self.org, role='doctor')
+        GroupAccess.objects.create(identity=doctor, org=plain, role='doctor')
         self.assertIn(granting, get_admin_orgs(doctor))
+
+    def test_an_expired_or_revoked_analyst_grant_is_not_no_grant(self):
+        """The domain trust's no-grant branch is for accounts that never held a
+        grant; losing an analyst grant must not turn into admin authority."""
+        from omop_core.services.access import get_admin_orgs
+        granting = _make_org('Domain Org', 'domain-org')
+        OrgTrust.objects.create(granting_org=granting, trusted_domain='test.com')
+        self.analyst.mark_email_verified()
+        grant = GroupAccess.objects.get(identity=self.analyst)
+        grant.expires_at = timezone.now() - timedelta(seconds=1)
+        grant.save(update_fields=['expires_at'])
+        self.assertNotIn(granting, get_admin_orgs(self.analyst))
+
+    def test_a_demo_org_grant_expands_no_organization_trust(self):
+        """A self-signup grant at a public demo org is a sandbox credential: a
+        doctor there is an admin of no org that trusts the demo org. A domain
+        trust is about the verified address and still applies (#1454, #2416)."""
+        from omop_core.services.access import get_admin_orgs
+        granting = _make_org('Trusting Org', 'trusting-org')
+        OrgTrust.objects.create(granting_org=granting, trusted_org=self.org)
+        demo_doctor = _make_user('demo-doctor@test.com')
+        demo_doctor.mark_email_verified()
+        GroupAccess.objects.create(identity=demo_doctor, org=self.org, role='doctor')
+        self.assertNotIn(granting, get_admin_orgs(demo_doctor))
+        self.client.force_authenticate(user=demo_doctor)
+        self.assertFalse(self.client.get('/api/user/').data['user']['is_org_admin'])
+        domain_org = _make_org('Domain Org', 'domain-org')
+        OrgTrust.objects.create(granting_org=domain_org, trusted_domain='test.com')
+        self.assertEqual(set(get_admin_orgs(demo_doctor)), {domain_org})

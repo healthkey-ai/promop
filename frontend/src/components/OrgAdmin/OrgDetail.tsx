@@ -369,7 +369,10 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
       setAccessGrants(prev => prev.map(g => g.id === grantId ? res.data : g));
     } catch (err) {
       console.error('Failed to update access grant:', err);
-      setAccessError('Failed to update access grant. Please try again.');
+      // A 409 says the user already holds that role in another row (#2416);
+      // the server's sentence is the instruction, not "try again".
+      const serverMessage = (err as { response?: { data?: { error?: string } } })?.response?.data?.error;
+      setAccessError(serverMessage ?? 'Failed to update access grant. Please try again.');
       fetchAll();
     }
   };

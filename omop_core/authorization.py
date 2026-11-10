@@ -24,7 +24,8 @@ from .services.access import CURATION_ROLES, PROFESSIONAL_ROLES
 _READ_ROLES = frozenset(CURATION_ROLES)
 _WRITE_ROLES = frozenset(CURATION_ROLES)
 assert 'analyst' not in _READ_ROLES, 'an analyst never reads patient data (#2416)'
-assert not set(PROFESSIONAL_ROLES) - _READ_ROLES - {'analyst'}
+assert not set(PROFESSIONAL_ROLES) - _READ_ROLES - {'analyst'}, (
+    'a professional role that is neither a reader nor the analyst has no reach')
 
 
 def _administers_patient(actor_identity, target_person_id: int) -> bool:
@@ -89,8 +90,8 @@ def can_access_patient(actor_identity, target_person_id: int) -> bool:
 def can_write_patient(actor_identity, target_person_id: int) -> bool:
     """Return True if the actor may write (create/update/delete) patient data.
 
-    Analysts have read-only access unless separately granted admin authority.
-    Doctors and org_admins, including scoped trust admins, may write.
+    Doctors and org_admins, including scoped trust admins, may write; since
+    #2416 that is the same set that may read, an analyst holding neither.
     Self-access and personal representatives can always write their own data.
     """
     from patient_portal.models import PatientUser

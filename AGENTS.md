@@ -688,12 +688,15 @@ the CSV code-mapping upload, the mapping hub and every patient read or write;
 the UI opens an analyst-only account on Code Mapping and hides the patient
 pages. A trust of either kind makes a `doctor` or `org_admin` at the trusted
 org or domain an admin of the granting org, and still does so for a verified
-account with no grant at all (a federated login, or a trusted-domain
+account that has never held a grant (a federated login, or a trusted-domain
 self-signup once verified); it gives an account whose grants are all `analyst`
-or `patient` nothing (`get_admin_access_paths`). A self-signup at a public demo
-org, and a verified trusted-domain self-signup (#1454), are granted `doctor`
-rather than the former `analyst`, because that signup exists to browse
-patients; grants made before #2416 are left as they are. Approval stays with
+or `patient`, or have expired or been revoked, nothing. A grant at a public demo
+org (`allows_patient_signup`) is a sandbox credential that expands no
+**organization** trust; a **domain** trust is about the verified address and
+still applies to it (`get_admin_access_paths`). A self-signup at a public demo org, and a verified
+trusted-domain self-signup (#1454), are granted `doctor` rather than the former
+`analyst`, because that signup exists to browse patients; grants made before
+#2416 are left as they are. Approval stays with
 staff and org_admin (`_can_approve_mappings`) for every role. Gate a new
 curation endpoint with `_can_manage_field_mappings` unless it belongs on the
 Code Mapping page, where `_can_manage_code_mappings` admits the analyst.

@@ -9,7 +9,7 @@ import { PaginationControls } from "@/components/labs/PaginationControls";
 import { useLocalPagination } from "@/lib/pagination";
 
 import { loadPreferences, REVIEW_FILTER_DEFAULTS, VIEW_COLUMNS, type PatientView, type ReviewFilters } from './patientListViews';
-import { hasCodeMappingRole, hasCurationRole, isStaffOrOrgAdmin } from '@/utils/roles';
+import { hasCurationRole, isStaffOrOrgAdmin } from '@/utils/roles';
 
 interface Patient {
   person_id: number;
@@ -321,10 +321,10 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
   const isAllSelected =
     patients.length > 0 &&
     (selectAllMode || visibleSelectedCount === patients.length);
-  // Roles are additive (#2416): a curator reaches the mapping hub; a user
-  // who only also holds the analyst grant reaches the Code Mapping page.
+  // Every professional who reaches this list is a curator (an analyst-only
+  // account is routed to Code Mapping before it mounts, #2416), so the hub
+  // is the one mapping entry point here.
   const canCurate = hasCurationRole(currentUser);
-  const canMapCodes = hasCodeMappingRole(currentUser);
   const canAdministerOrganizations = isStaffOrOrgAdmin(currentUser);
 
   const handleLogout = () => {
@@ -364,13 +364,13 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
               </button>
             </>
           )}
-          {(canCurate || canMapCodes) && (
+          {canCurate && (
             <button
-              onClick={() => navigate(canCurate ? "/mappings" : "/code-mappings")}
+              onClick={() => navigate("/mappings")}
               className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
             >
               <Globe size={16} />
-              {canCurate ? "Mappings" : "Code Mapping"}
+              Mappings
             </button>
           )}
           {canCurate && (

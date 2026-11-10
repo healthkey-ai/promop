@@ -18,7 +18,7 @@ import secrets
 from django.conf import settings
 from django.core.mail import send_mail
 from django.core.validators import URLValidator
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Count, F, Q
 from django.core.exceptions import ValidationError
 from django.utils import timezone
@@ -296,19 +296,16 @@ def _grant_org_access(identity, org, role, granted_by, redirect_url=''):
     existing row of the same role only has its redirect site refreshed.
     """
     normalized_redirect_url = _normalize_redirect_url(role, redirect_url)
-    existing = GroupAccess.objects.filter(identity=identity, org=org, role=role).first()
-    if existing:
-        if existing.redirect_url != normalized_redirect_url:
-            existing.redirect_url = normalized_redirect_url
-            existing.save(update_fields=['redirect_url'])
-        return existing
-    return GroupAccess.objects.create(
-        identity=identity,
-        org=org,
-        role=role,
-        redirect_url=normalized_redirect_url,
-        granted_by=granted_by,
+    # get_or_create, so two concurrent grants of one role converge on one row
+    # instead of the loser raising on uq_identity_org_role.
+    grant, created = GroupAccess.objects.get_or_create(
+        identity=identity, org=org, role=role,
+        defaults={'redirect_url': normalized_redirect_url, 'granted_by': granted_by},
     )
+    if not created and grant.redirect_url != normalized_redirect_url:
+        grant.redirect_url = normalized_redirect_url
+        grant.save(update_fields=['redirect_url'])
+    return grant
 
 
 # ---------------------------------------------------------------------------
@@ -585,6 +582,18 @@ def confirm_invitation(request):
         ]
         grant = grants[0]
 
+        # The token proved the address, so the invitee's own signup rows no
+        # longer wait on verification: a trusted-domain signup is promoted (or,
+        # now that the invited role exists beside it, dropped -- #2416), and
+        # any remaining gate is cleared, as verify_email does.
+        from patient_portal.api.email_verification import promote_trusted_domain_grants
+        for target in grant_targets:
+            if target.has_verified_email:
+                promote_trusted_domain_grants(target)
+                GroupAccess.objects.filter(
+                    identity=target, pending_email_verification=True,
+                ).update(pending_email_verification=False)
+
         # For patient invites, create the PatientUser link
         if invitation.role == 'patient':
             existing_pu = PatientUser.objects.filter(identity=identity).first()
@@ -763,7 +772,16 @@ class OrgAccessDetailView(APIView):
             changed_identity.append('is_premium')
 
         if changed_grant:
-            grant.save(update_fields=changed_grant)
+            try:
+                with transaction.atomic():
+                    grant.save(update_fields=changed_grant)
+            except IntegrityError:
+                # Lost a race with a grant of the same role made meanwhile.
+                return Response(
+                    {'error': f"This user already holds the {grant.role} role here; "
+                              "revoke this grant instead."},
+                    status=status.HTTP_409_CONFLICT,
+                )
         if changed_identity:
             grant.identity.save(update_fields=changed_identity)
 

@@ -333,3 +333,30 @@ describe('OrgDetail access administration permissions', () => {
     expect(screen.queryByRole('button', { name: /send invite/i })).not.toBeInTheDocument();
   });
 });
+
+describe("role change into a role the user already holds (#2416)", () => {
+  it("shows the server's instruction instead of a generic retry message", async () => {
+    setupMocks();
+    mockGet.mockImplementation((url: string) => {
+      if (url.includes("/orgs/acme/access/")) return Promise.resolve({ data: [
+        { id: 7, email: "both@test.com", name: "", is_premium: false, org_slug: "acme", group_name: null,
+          role: "doctor", redirect_url: null, expires_at: null, granted_at: "2024-01-01" },
+      ] });
+      if (url.includes("/orgs/acme/trusts/") || url.includes("/orgs/acme/invitations/")) return Promise.resolve({ data: [] });
+      if (url.includes("/orgs/acme/vocabulary/")) return Promise.resolve({ data: VOCABULARY_DATA });
+      if (url.includes("/orgs/acme/")) return Promise.resolve({ data: ORG_DATA });
+      return Promise.resolve({ data: [] });
+    });
+    mockPatch.mockRejectedValueOnce({ response: { status: 409, data: {
+      error: "This user already holds the analyst role here; revoke this grant instead.",
+    } } });
+    renderOrgDetail();
+    await waitFor(() => { expect(screen.getByText("Acme Clinic")).toBeInTheDocument(); });
+    fireEvent.click(screen.getByText("Access Grants"));
+    // The invite form's role select also reads "Doctor"; the grant row's is in the table.
+    const select = (await screen.findAllByDisplayValue("Doctor")).find((el) => el.closest("table"));
+    expect(select).toBeDefined();
+    fireEvent.change(select!, { target: { value: "analyst" } });
+    expect(await screen.findByText(/already holds the analyst role here; revoke this grant instead/)).toBeInTheDocument();
+  });
+});

@@ -154,9 +154,8 @@ def get_admin_access_paths(user):
     get_admin_orgs rather than expanded to one row per organization.
     """
     now = timezone.now()
-    active = list(GroupAccess.objects.filter(identity=user).filter(
-        Q(expires_at__isnull=True) | Q(expires_at__gt=now),
-    ).select_related('org'))
+    held = list(GroupAccess.objects.filter(identity=user).select_related('org'))
+    active = [g for g in held if g.expires_at is None or g.expires_at > now]
     paths = []
     org_grants = [grant for grant in active if grant.org_id]
     # An organization trust makes a professional at the trusted org an admin
@@ -168,7 +167,9 @@ def get_admin_access_paths(user):
         if grant.role == 'org_admin':
             paths.append({'org': grant.org, 'source': 'org_grant',
                           'expires_at': grant.expires_at})
-        if grant.role in CURATION_ROLES:
+        # A self-signup grant at a public demo org is a sandbox credential:
+        # no other org inherits an admin from it (#2416).
+        if grant.role in CURATION_ROLES and not grant.org.allows_patient_signup:
             trust_expanding[grant.org_id] = grant
     for trust in OrgTrust.objects.filter(
         trusted_org_id__in=trust_expanding, granting_org__is_active=True,
@@ -181,15 +182,18 @@ def get_admin_access_paths(user):
             'expires_at': grant.expires_at,
         })
     # A domain trust makes a verified address at the domain an admin of the
-    # granting org, for an account with a curation-role grant or with no grant
-    # at all (a federated login, or a trusted-domain self-signup once verified:
-    # #1454 promotes that signup to doctor). An account whose grants are all
-    # patient or analyst gets nothing from it: neither role reads patients, and
-    # a domain is not a reason to start (#2416). Verified only -- see
-    # get_accessible_orgs.
+    # granting org, for an account with a curation-role grant anywhere (the
+    # address is the credential here, so a demo-org signup counts -- that is
+    # the #1454 path) or with no grant at all (a federated login, or a
+    # trusted-domain self-signup once verified, which #1454 promotes to
+    # doctor). An account whose grants are all patient or analyst gets
+    # nothing from it: neither role reads patients, and a domain is not a
+    # reason to start (#2416). "No grant" means never held one: an analyst
+    # grant that expired or was revoked must not turn into admin authority.
+    # Verified only -- see get_accessible_orgs.
     domain = getattr(user, 'verified_email_domain', '')
     curation_grant = any(grant.role in CURATION_ROLES for grant in active)
-    if domain and (curation_grant or not active):
+    if domain and (curation_grant or not held):
         for trust in OrgTrust.objects.filter(
             trusted_domain__iexact=domain, granting_org__is_active=True,
         ).select_related('granting_org').order_by('id'):
@@ -261,17 +265,6 @@ def _has_active_role(user, roles) -> bool:
     ).filter(
         Q(expires_at__isnull=True) | Q(expires_at__gt=now),
     ).exists()
-
-
-def has_professional_access(user) -> bool:
-    """Return True when the user holds any professional role (org_admin, doctor, analyst).
-
-    A classifier, not a gate: it tells a professional from a patient. Patient
-    reads are ``can_access_patient`` and ``get_visible_orgs`` (curation roles
-    only); the Code Mapping page is ``has_code_mapping_access``; every other
-    curation page is ``has_curation_access``.
-    """
-    return _has_active_role(user, PROFESSIONAL_ROLES)
 
 
 def has_code_mapping_access(user) -> bool:

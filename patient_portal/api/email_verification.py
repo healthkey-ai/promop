@@ -105,13 +105,24 @@ def promote_trusted_domain_grants(identity) -> int:
     domain = identity.verified_email_domain
     if not domain:
         return 0
-    trusting = OrgTrust.objects.filter(
+    trusting = list(OrgTrust.objects.filter(
         trusted_domain__iexact=domain, granting_org__is_active=True,
-    ).values_list('granting_org_id', flat=True)
-    return GroupAccess.objects.filter(
+    ).values_list('granting_org_id', flat=True))
+    pending = GroupAccess.objects.filter(
         identity=identity, role='patient', pending_email_verification=True,
-        org_id__in=list(trusting),
-    ).update(role='doctor', pending_email_verification=False)
+        org_id__in=trusting,
+    )
+    # Roles are one row each (#2416). Where the account already holds a
+    # doctor row at the org -- it accepted a doctor invitation before
+    # following the link -- the pending row has nothing to become, so it is
+    # dropped rather than updated into a duplicate.
+    already_doctor = set(GroupAccess.objects.filter(
+        identity=identity, role='doctor', org_id__in=trusting,
+    ).values_list('org_id', flat=True))
+    pending.filter(org_id__in=already_doctor).delete()
+    return pending.exclude(org_id__in=already_doctor).update(
+        role='doctor', pending_email_verification=False,
+    )
 
 
 @csrf_exempt

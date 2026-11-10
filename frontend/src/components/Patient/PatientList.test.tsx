@@ -236,4 +236,3 @@ it('downloads every matching patient with the list filters when all are selected
   })));
   expect(await screen.findByText(/At most 500 patients per export/)).toBeInTheDocument();
 });
-

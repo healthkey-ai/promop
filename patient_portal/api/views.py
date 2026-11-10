@@ -124,7 +124,7 @@ from omop_core.mapping.therapy import (
 )
 from omop_core.services.concept_cache import concept_by_id as _cc_by_id, concept_by_loinc as _cc_by_loinc, concept_by_name_ilike as _cc_by_name, concept_by_vocab as _cc_by_vocab
 from omop_core.services.access import (
-    PROFESSIONAL_ROLES, get_visible_orgs, build_trusting_map, get_admin_orgs,
+    CODE_MAPPING_ROLES, PROFESSIONAL_ROLES, get_visible_orgs, build_trusting_map, get_admin_orgs,
     has_org_admin_access, has_code_mapping_access, has_curation_access,
 )
 from datetime import date as _date, datetime, timedelta
@@ -947,8 +947,10 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             admin_org_ids = list(get_admin_orgs(self.request.user).values_list('id', flat=True))
 
             # An analyst grant lists nothing (#2416): the role is code
-            # mapping and PRism analytics, never a patient's data.
-            reading_grants = active_grants.exclude(role='analyst')
+            # mapping and PRism analytics, never a patient's data. The patient
+            # role is deliberately kept here: at a public demo org a
+            # self-signed-up patient browses the org's sample patients.
+            reading_grants = active_grants.exclude(role__in=CODE_MAPPING_ROLES)
 
             # Public demo orgs: patients can browse all org patients.
             # Only direct org grants are checked — no trust expansion,
@@ -1208,7 +1210,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
             if not can_write_patient(request.user, person.person_id):
                 return Response(
-                    {'error': 'Analysts have read-only access. Contact a doctor or org admin to update patient data.'},
+                    {'error': 'You have read-only access to this patient. Contact a doctor or org admin to update patient data.'},
                     status=status.HTTP_403_FORBIDDEN,
                 )
 
@@ -5194,16 +5196,16 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         if not can_access_patient(request.user, person_id):
                             errors.append("Person not found.")
                             continue
-                        # can_access_patient grants the analyst role, which is read-only
-                        # (omop_core.authorization: 'analyst' is in _READ_ROLES, not
-                        # _WRITE_ROLES) — so the read predicate alone would let an analyst
-                        # delete patients. The read-denial above stays a "not found" so the
-                        # endpoint is not an existence oracle; here the caller demonstrably
-                        # can read the patient, so hiding existence buys nothing and an
-                        # explicit reason is more useful than a false "not found".
+                        # The read predicate alone once let an analyst (then a
+                        # reader, never a writer) delete patients, so the write
+                        # predicate is checked on its own. The read-denial above
+                        # stays a "not found" so the endpoint is not an existence
+                        # oracle; here the caller demonstrably can read the
+                        # patient, so hiding existence buys nothing and an explicit
+                        # reason is more useful than a false "not found".
                         if not can_write_patient(request.user, person_id):
                             errors.append(
-                                "Analysts have read-only access. Contact a doctor or org admin to delete patient data."
+                                "You have read-only access to this patient. Contact a doctor or org admin to delete patient data."
                             )
                             continue
                     with transaction.atomic():
@@ -5734,8 +5736,8 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
         could be written by someone permitted to write them.
 
         That distinction matters because a field being mapped is not the same as
-        the reader being allowed to edit it. Analysts have read-only access to
-        every patient, and a caller may have no access to a given person at all —
+        the reader being allowed to edit it. A caller may read a patient without
+        being allowed to write them, or have no access to a given person at all —
         so a descriptor that reported those fields writable would put a typeable
         box in front of someone whose every save is refused. The point of asking
         before rendering is to be told the truth for the person doing the
@@ -6676,7 +6678,7 @@ class PersonViewSet(viewsets.GenericViewSet):
                     return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
                 if not can_write_patient(request.user, person.person_id):
                     return Response(
-                        {'detail': 'Analysts have read-only access. Contact a doctor or org admin to update patient data.'},
+                        {'detail': 'You have read-only access to this patient. Contact a doctor or org admin to update patient data.'},
                         status=status.HTTP_403_FORBIDDEN,
                     )
 
@@ -9176,12 +9178,11 @@ class EpisodeEventViewSet(viewsets.ModelViewSet):
                 if episode is None or not can_access_patient(self.request.user, episode.person_id):
                     raise PermissionDenied('Access denied.')
                 # Creating an episode event is a clinical write, and can_access_patient
-                # is only the read predicate — the analyst role satisfies it but is not
-                # in _WRITE_ROLES. Without this an analyst could append treatment-line
-                # events to any episode they are allowed to read.
+                # is only the read predicate. Without the write check a reader could
+                # append treatment-line events to any episode they are allowed to read.
                 if not can_write_patient(self.request.user, episode.person_id):
                     raise PermissionDenied(
-                        'Analysts have read-only access. Contact a doctor or org admin to update patient data.'
+                        'You have read-only access to this patient. Contact a doctor or org admin to update patient data.'
                     )
         serializer.save()
 
