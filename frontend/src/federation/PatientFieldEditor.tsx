@@ -297,20 +297,36 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
     setValueDraft({ set: false, value: undefined });
     setResultDateOverride(null);
   };
-  // A reviewed answer pair answers the row's own question: a read-only "No"
-  // beside "HIV Positive" is a different sentence than "No HIV" (#5601).
-  const formatted = value == null || value === '' ? 'Unknown'
-    : precision === 'year' ? String(value).slice(0, 4)
-    : precision === 'month' ? String(value).slice(0, 7)
-    : typeof value === 'boolean'
-      ? (value ? field.answer_labels?.true ?? 'Yes' : field.answer_labels?.false ?? 'No')
-    : typeof value === 'object' ? JSON.stringify(value) : String(value);
   const ownControl = field.control ?? (field.value_kind === 'number' ? 'number'
     : field.value_kind === 'boolean' ? 'boolean' : field.value_kind === 'date' ? 'date' : 'text');
   const choices = field.options?.length ? field.options
     : tabOptions?.length && (field.multiple || ownControl === 'text' || ownControl === 'select')
       ? tabOptions : [];
   const control = field.multiple ? 'multiselect' : choices.length ? 'select' : ownControl;
+  // A read-only list reads as its answers, by label, not as serialised JSON:
+  // ["autologous SCT", "tandem SCT"] and "autologous SCT,tandem SCT" both
+  // show "autologous SCT, tandem SCT".
+  const optionLabel = (item: unknown) => {
+    const choice = (choices as Array<string | { value: unknown; label?: string }>).find((option) =>
+      String(typeof option === 'string' ? option : option.value) === String(item));
+    return choice && typeof choice === 'object' && choice.label ? choice.label : String(item);
+  };
+  // Only a list of plain answers is listed; a list of records (objects) keeps
+  // the serialised form rather than printing "[object Object]".
+  const primitive = (item: unknown) => item == null
+    || ['string', 'number', 'boolean'].includes(typeof item);
+  const listed = Array.isArray(value) && value.every(primitive) ? value
+    : field.multiple && typeof value === 'string' ? value.split(',') : undefined;
+  const items = listed?.map((item) => String(item).trim()).filter(Boolean);
+  // A reviewed answer pair answers the row's own question: a read-only "No"
+  // beside "HIV Positive" is a different sentence than "No HIV" (#5601).
+  const formatted = value == null || value === '' || (items && !items.length) ? 'Unknown'
+    : items ? items.map(optionLabel).join(', ')
+    : precision === 'year' ? String(value).slice(0, 4)
+    : precision === 'month' ? String(value).slice(0, 7)
+    : typeof value === 'boolean'
+      ? (value ? field.answer_labels?.true ?? 'Yes' : field.answer_labels?.false ?? 'No')
+    : typeof value === 'object' ? JSON.stringify(value) : String(value);
   const onChangeValue = (name: string, next: unknown) => {
     if (dated) { setValueDraft({ set: true, value: next }); return; }
     if (showUnitPicker && unitFieldName) {

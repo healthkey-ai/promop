@@ -405,6 +405,42 @@ describe('tab choices for a descriptor without options', () => {
   });
 });
 
+describe('read-only multiple answers', () => {
+  it('lists an array value by its labels instead of JSON', async () => {
+    const { store } = await setup({
+      planned_therapies: { writable: false, label: 'Planned therapies', multiple: true,
+        reason: 'Read-only.', options: [{ value: 'r_chop', label: 'R-CHOP' }] },
+    }, { planned_therapies: ['r_chop', 'Local regimen'] });
+    const { container } = render(<PatientFieldEditor store={store} name="planned_therapies" />);
+
+    expect(container.querySelector('[data-field="planned_therapies"] > div')?.textContent)
+      .toBe('Planned therapies: R-CHOP, Local regimen');
+    expect(container).not.toHaveTextContent('[');
+  });
+
+  it('keeps a list of records serialised instead of [object Object]', async () => {
+    const { store } = await setup({
+      lines_of_therapy: { writable: false, label: 'Lines', reason: 'Read-only.' },
+    }, { lines_of_therapy: [{ line: 1, regimen: 'R-CHOP' }] });
+    const { container } = render(<PatientFieldEditor store={store} name="lines_of_therapy" />);
+
+    expect(container).not.toHaveTextContent('[object Object]');
+    expect(container).toHaveTextContent('R-CHOP');
+  });
+
+  it('splits a comma-joined multiple answer', async () => {
+    const { store } = await setup({
+      stem_cell_transplant_history: { writable: true, target: 'patient_record', multiple: true,
+        label: 'SCT history' },
+    }, { stem_cell_transplant_history: 'autologous SCT,tandem SCT' });
+    const { container } = render(
+      <PatientFieldEditor store={store} name="stem_cell_transplant_history" readOnly />);
+
+    expect(container.querySelector('[data-field="stem_cell_transplant_history"] > div')?.textContent)
+      .toBe('SCT history: autologous SCT, tandem SCT');
+  });
+});
+
 describe('a failed save', () => {
   it('keeps the draft in the field and retries it from the row', async () => {
     const { store, patch } = await setup();
