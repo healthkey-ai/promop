@@ -73,6 +73,8 @@ CANONICAL_LIMIT = Decimal('999.9')
 #: Stored unit code spellings, with the micro sign folded to `u`.
 _SPELLINGS = {
     'g/dl': 'G/DL', 'g/l': 'G/L',
+    # Unambiguous lab spellings of g/dL and mg/dL seen in imports.
+    'gm/dl': 'G/DL', 'g/100ml': 'G/DL', 'mg/100ml': 'MG/DL',
     'mg/dl': 'MG/DL',
     'mmol/l': 'MMOL/L',
     'umol/l': 'UMOL/L',

@@ -62,6 +62,7 @@ from omop_core.services.creatinine_units import (
     UNIT_FIELD as CREATININE_UNIT,
     canonical_from_pair as creatinine_canonical_from_pair,
     canonical_in_range as creatinine_canonical_in_range,
+    normalize_unit as creatinine_normalize_unit,
 )
 from omop_core.services.blood_count_source_pairs import (
     PAIRS as _COUNT_SOURCE_PAIRS,
@@ -97,17 +98,8 @@ _CHEMISTRY_SELECTED_FIELDS = _CHEMISTRY_CANONICAL_FIELDS | {_DIRECT_PAIR_FIELD}
 _UNIT_PAIR_SELECTED_FIELDS = _CHEMISTRY_SELECTED_FIELDS | {HEMOGLOBIN_CANONICAL}
 
 
-def _chemistry_reported_unit(measurement):
-    """The unit a chemistry import names, or None when it names none.
-
-    An explicit source text wins; a UCUM unit concept is the fallback. A
-    concept in another vocabulary is still an explicit unit the converter does
-    not know, so its code is returned rather than dropped: the caller must
-    block the field instead of reading the number as the canonical scale.
-    """
-    text = (measurement.unit_source_value or '').strip()
-    if text:
-        return text
+def _concept_unit_code(measurement):
+    """The unit concept's code, 'unknown' for a dangling one, None for none."""
     if measurement.unit_concept_id is None:
         return None
     try:
@@ -119,6 +111,44 @@ def _chemistry_reported_unit(measurement):
     if concept is None:
         return 'unknown'
     return concept.concept_code or 'unknown'
+
+
+def _resolve_reported_unit(measurement, normalize, default):
+    """``(reported_unit, unit_code)`` for a lab row, preferring a readable unit.
+
+    The source text wins when the converter reads it. A spelling it does not
+    read ("gm/dL", a lab's local form) defers to the unit concept, where the
+    ETL puts the cleaned UCUM unit (#2248): dropping a 13.2 g/dL hemoglobin
+    because its text said "gm/dL" lost real results (#2418 regression review).
+    With neither, the field's default unit applies; an unreadable unit gives
+    ``unit_code=None`` and the caller blocks the field.
+    """
+    from omop_core.services.canonical_units import is_known_unit, unit_code
+    text = (measurement.unit_source_value or '').strip()
+    concept_unit = _concept_unit_code(measurement)
+    if not text and concept_unit is None:
+        return None, default
+    if text:
+        # The lab's own spelling, then the UCUM unit it names ("gm/dL").
+        code = normalize(text)
+        if code is None:
+            code = normalize(unit_code(text))
+        if code is not None or concept_unit is None:
+            return text, code
+        # Invariant: when the text names a unit promop knows, the snapshot
+        # holds value_as_number in THAT unit (#2249 restores proven
+        # conversions; a cross-property pair is left as sent). The concept then
+        # does not describe the number, so a known text the converter cannot
+        # read blocks the field: mg/L calcium is not mg/dL, mmol/L hemoglobin
+        # is not g/dL. Only a text promop cannot read at all defers to the
+        # concept, where the ETL puts the cleaned UCUM unit (#2248).
+        if unit_code(text) != unit_code(concept_unit) and is_known_unit(text):
+            return text, None
+    code = normalize(concept_unit)
+    if code is None and text:
+        # Neither is readable: keep the lab's own text as the reported unit.
+        return text, None
+    return concept_unit, code
 
 #: The columns of a declared source pair. They are one assertion, so a
 #: canonical match in the default unit must not acknowledge them independently.
@@ -4653,8 +4683,11 @@ def _get_mm_specific_data(person: Person, snapshot: OmopSnapshot = None) -> dict
             # one old or SI result CRAB for good (#2430). An unreadable newest
             # unit is no renal evidence, not a reason to fall back to older.
             newest = sorted(creatinine_rows, key=_fact_recency_key, reverse=True)[0]
-            recognised, creatinine = creatinine_canonical_from_pair(
-                newest.value_as_number, _chemistry_reported_unit(newest) or 'mg/dL')
+            reported_unit, unit_code = _resolve_reported_unit(
+                newest, creatinine_normalize_unit, 'MG/DL')
+            recognised, creatinine = (
+                creatinine_canonical_from_pair(newest.value_as_number, unit_code)
+                if unit_code is not None else (False, None))
             crab_renal = bool(recognised and creatinine is not None and creatinine > 2)
         else:
             crab_renal = False
@@ -5005,9 +5038,8 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None,
             chemistry_winners[field] = (measurement, representation)
     for field, (measurement, representation) in chemistry_winners.items():
         if field == HEMOGLOBIN_CANONICAL:
-            reported_unit = _chemistry_reported_unit(measurement)
-            unit_code = (HEMOGLOBIN_DEFAULT_UNIT if reported_unit is None
-                         else normalize_hemoglobin_unit(reported_unit))
+            reported_unit, unit_code = _resolve_reported_unit(
+                measurement, normalize_hemoglobin_unit, HEMOGLOBIN_DEFAULT_UNIT)
             recognised, canonical_value = hemoglobin_canonical_from_pair(
                 measurement.value_as_number, unit_code)
             if (unit_code is None or not recognised
@@ -5048,10 +5080,9 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None,
                 dates_out[HEMOGLOBIN_PAIR] = measurement.measurement_date
             continue
         if field == _DIRECT_PAIR_FIELD:
-            reported_unit = _chemistry_reported_unit(measurement)
-            unit_code = (direct_bilirubin_units.DEFAULT_UNIT
-                         if reported_unit is None
-                         else direct_bilirubin_units.normalize_unit(reported_unit))
+            reported_unit, unit_code = _resolve_reported_unit(
+                measurement, direct_bilirubin_units.normalize_unit,
+                direct_bilirubin_units.DEFAULT_UNIT)
             recognised, pair_value = direct_bilirubin_units.pair_value(
                 measurement.value_as_number)
             alias_recognised, alias_value = direct_bilirubin_units.alias_from_pair(
@@ -5078,9 +5109,9 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None,
                 dates_out[_DIRECT_ALIAS_FIELD] = measurement.measurement_date
             continue
         spec = _CHEMISTRY_PAIRS[field]
-        reported_unit = _chemistry_reported_unit(measurement)
-        unit_code = (spec['canonical_unit'] if reported_unit is None
-                     else normalize_chemistry_unit(field, reported_unit))
+        reported_unit, unit_code = _resolve_reported_unit(
+            measurement, lambda unit, field=field: normalize_chemistry_unit(field, unit),
+            spec['canonical_unit'])
         recognised, canonical_value = chemistry_canonical_from_pair(
             field, measurement.value_as_number, unit_code)
         if (unit_code is None or not recognised

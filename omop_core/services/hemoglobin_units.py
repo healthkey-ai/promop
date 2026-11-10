@@ -31,6 +31,8 @@ _SPELLINGS = {
     for code, label in (('G/DL', 'g/dL'), ('G/L', 'g/L'))
     for spelling in (code, label)
 }
+# Unambiguous lab spellings of g/dL seen in imports.
+_SPELLINGS.update({'gm/dl': 'G/DL', 'g/100ml': 'G/DL'})
 
 
 def normalize_unit(value):
