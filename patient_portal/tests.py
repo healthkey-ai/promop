@@ -25480,10 +25480,16 @@ class WritableFieldsPerCallerTest(TestCase):
         self.assertEqual(resp.status_code, 200, resp.data)
         return resp.data
 
+    @staticmethod
+    def _fields(data):
+        """The field entries; `__descriptor__` is the versioned envelope."""
+        return {name: entry for name, entry in data.items()
+                if not name.startswith('__')}
+
     def test_a_permitted_caller_sees_the_writable_fields(self):
         data = self._descriptor(self.staff, '?person_id=770101')
         self.assertTrue(
-            any(entry['writable'] for entry in data.values()),
+            any(entry['writable'] for entry in self._fields(data).values()),
             'a caller who may write should be offered something to write',
         )
 
@@ -25495,7 +25501,7 @@ class WritableFieldsPerCallerTest(TestCase):
         """
         data = self._descriptor(self.reader, '?person_id=770101')
 
-        offered = [f for f, e in data.items() if e['writable']]
+        offered = [f for f, e in self._fields(data).items() if e['writable']]
         self.assertEqual(offered, [], f'offered to a read-only caller: {offered[:5]}')
 
     def test_the_fields_are_still_described_so_the_ui_can_explain_itself(self):
@@ -25506,7 +25512,7 @@ class WritableFieldsPerCallerTest(TestCase):
 
         self.assertEqual(set(reader_view), set(writer_view))
         blocked = next(
-            f for f, e in writer_view.items() if e['writable']
+            f for f, e in self._fields(writer_view).items() if e['writable']
         )
         self.assertTrue(reader_view[blocked]['read_only_for_caller'])
         self.assertIn('read-only access', reader_view[blocked]['reason'])
@@ -25533,7 +25539,9 @@ class WritableFieldsPerCallerTest(TestCase):
         # The old behaviour, kept: "which fields could be written by someone
         # permitted to write them" is a real question, asked by tooling.
         data = self._descriptor(self.reader)
-        self.assertTrue(any(entry['writable'] for entry in data.values()))
+        self.assertTrue(
+            any(entry['writable'] for entry in self._fields(data).values())
+        )
 
     def test_a_non_numeric_person_id_is_refused(self):
         client = APIClient()

@@ -58,6 +58,14 @@ def test_the_envelope_is_not_a_field(descriptor):
     assert DESCRIPTOR_META_KEY not in fields(descriptor)
 
 
+def test_every_field_entry_carries_the_core_keys(descriptor):
+    # The envelope is the only entry without them; that is what makes it safe
+    # for a client to treat everything else uniformly.
+    for name, entry in fields(descriptor).items():
+        assert 'kind' in entry, name
+        assert 'writable' in entry, name
+
+
 def test_the_document_the_envelope_points_at_exists(descriptor):
     path = settings.BASE_DIR / descriptor[DESCRIPTOR_META_KEY]['documentation']
     assert path.is_file(), f'{path} is missing; the envelope points at it'
