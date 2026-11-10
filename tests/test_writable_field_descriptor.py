@@ -20,6 +20,15 @@ from tests.factories import ConceptFactory, DomainFactory, VocabularyFactory
 pytestmark = pytest.mark.django_db
 
 
+def descriptor_fields():
+    """The field entries, without the versioned envelope (#2396)."""
+    return {
+        name: entry
+        for name, entry in build_writable_field_descriptor().items()
+        if not name.startswith('__')
+    }
+
+
 def _load_loinc(code, concept_id=None):
     VocabularyFactory(vocabulary_id='LOINC')
     return ConceptFactory(
@@ -160,7 +169,8 @@ class TestUnmappedFields:
         # explicitly rather than discovered -- and stating the sum here keeps the
         # descriptor's contents exact instead of merely "at least".
         from omop_core.services.write_descriptor import (
-            _NEGATED_ALIASES, _SERIALIZER_ALIASES, _SERIALIZER_COMPUTED,
+            DESCRIPTOR_META_KEY, _NEGATED_ALIASES, _SERIALIZER_ALIASES,
+            _SERIALIZER_COMPUTED,
         )
         expected = (
             (PATIENT_RECORD_OMOP_MAPPED_FIELDS - lifecycle)
@@ -172,6 +182,8 @@ class TestUnmappedFields:
             # The trial catalog's legacy spelling of the cytogenetic summary;
             # the descriptor carries it as an alias (#2396).
             | {'cytogenic_markers'}
+            # Not a field: the versioned envelope (#2396).
+            | {DESCRIPTOR_META_KEY}
         )
         assert set(descriptor) == expected
 
@@ -243,7 +255,7 @@ class TestKinds:
 
     def test_every_field_carries_a_reason_when_not_writable(self):
         """A UI must always be able to say why a box is not typeable."""
-        for field, entry in build_writable_field_descriptor().items():
+        for field, entry in descriptor_fields().items():
             if not entry['writable']:
                 assert entry.get('reason'), field
 
@@ -253,7 +265,7 @@ class TestKinds:
                    # Not columns: an inverted view of another field, and an
                    # answer with its own endpoint and snapshot (#5663/#5665).
                    'negated', 'explicit-answer'}
-        for field, entry in build_writable_field_descriptor().items():
+        for field, entry in descriptor_fields().items():
             assert entry['kind'] in allowed, (field, entry['kind'])
 
 
@@ -442,11 +454,11 @@ class TestEveryFieldIsCategorised:
     """
 
     def test_no_field_is_left_uncategorised(self):
-        for field, entry in build_writable_field_descriptor().items():
+        for field, entry in descriptor_fields().items():
             assert entry['kind'] is not None, field
 
     def test_an_unmapped_field_says_which_group_it_is_in(self):
-        d = build_writable_field_descriptor()
+        d = descriptor_fields()
         for field, entry in d.items():
             if entry['kind'] == 'unmapped':
                 assert entry.get('group'), field
@@ -509,7 +521,7 @@ class TestProfileFields:
 
     def test_no_direct_field_is_falsely_read_only(self):
         direct = {
-            field: entry for field, entry in build_writable_field_descriptor().items()
+            field: entry for field, entry in descriptor_fields().items()
             if entry['kind'] == 'direct' and not entry.get('curated')
         }
 
