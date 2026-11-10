@@ -7,13 +7,16 @@ result is stored as history rather than promoted to the current value
 (docs/clinical-event-time-policy.md).
 """
 from datetime import date, timedelta
+from decimal import Decimal
 
 import pytest
 
 from omop_core.models import Concept, Measurement, PatientRecord
 from omop_core.services.patient_form import apply_patient_form_patch, patient_form_descriptors
 from omop_core.services.pk import next_pk
-from omop_core.services.patient_record_service import refresh_patient_record
+from omop_core.services.patient_record_service import (
+    recompute_patient_record_fields, refresh_patient_record,
+)
 from tests.factories import ConceptFactory, PatientRecordFactory, PersonFactory, VocabularyFactory
 
 pytestmark = pytest.mark.django_db
@@ -346,3 +349,163 @@ def test_an_older_dated_correction_is_transient_until_refresh():
     assert august.value_as_number == 14.0
     refreshed = refresh_patient_record(person)
     assert float(refreshed.hemoglobin_g_dl) == 14.0
+
+
+def test_every_source_pair_value_is_dated_when_its_canonical_is():
+    """The pair is the editable half of a dated result (#2397).
+
+    A patient records the number and unit their lab used; the date belongs to
+    the same result as the canonical read-model it derives.
+    """
+    from omop_core.services import direct_bilirubin_units
+    from omop_core.services.blood_count_source_pairs import PAIRS as COUNT_PAIRS
+    from omop_core.services.chemistry_units import PAIRS as CHEMISTRY_PAIRS
+    from omop_core.services.write_descriptor import (
+        LAB_FIELD_TO_LOINC, build_writable_field_descriptor)
+
+    _person_with_lab()
+
+    pairs = {
+        'hemoglobin_level': 'hemoglobin_g_dl',
+        'serum_creatinine_level': 'serum_creatinine_mg_dl',
+        **{spec['value']: canonical for canonical, spec in CHEMISTRY_PAIRS.items()},
+        **{source: spec['canonical'] for source, spec in COUNT_PAIRS.items()},
+    }
+    # A dated canonical needs a resolved projection, so seed the LOINC rows the
+    # descriptor resolves. The fixture already has hemoglobin's 718-7.
+    seeded = {Concept.objects.get(concept_code=LOINC).concept_code}
+    for field in (*pairs.values(), direct_bilirubin_units.PAIR_FIELD):
+        code = LAB_FIELD_TO_LOINC[field][0]
+        if code in seeded:
+            continue
+        ConceptFactory(concept_code=code, concept_name=field)
+        seeded.add(code)
+
+    descriptor = build_writable_field_descriptor()
+    assert pairs
+    undated = [
+        f'{pair} (canonical {canonical})' for pair, canonical in pairs.items()
+        if descriptor[pair].get('dated') is not True
+        or descriptor[canonical].get('dated') is not True
+    ]
+    assert not undated, undated
+    assert descriptor[direct_bilirubin_units.PAIR_FIELD].get('dated') is True
+
+
+def test_the_pair_names_the_latest_recorded_date_for_its_canonical():
+    person = _person_with_lab()
+    concept = Concept.objects.get(concept_code=LOINC)
+    Measurement.objects.create(
+        measurement_id=next_pk(Measurement, 'measurement_id'), person=person,
+        measurement_concept=concept, measurement_date=date(2026, 8, 1),
+        measurement_type_concept_id=32865, value_as_number=12.5,
+        unit_source_value='g/dL')
+    record = PatientRecord.objects.get(person=person)
+
+    entry = patient_form_descriptors(
+        readable_fields={'hemoglobin_level'}, record=record)['hemoglobin_level']
+
+    assert entry['dated'] is True
+    assert entry['latest_date'] == '2026-08-01'
+
+
+def test_a_dated_source_pair_lands_on_the_day_of_the_draw():
+    person = _person_with_lab()
+
+    apply_patient_form_patch(
+        person,
+        {'hemoglobin_level': {'value': 120, 'date': '2026-07-04'},
+         'hemoglobin_level_units': 'G/L'},
+        allowed_fields={'hemoglobin_level', 'hemoglobin_level_units',
+                        'hemoglobin_g_dl'})
+
+    record = PatientRecord.objects.get(person=person)
+    assert record.hemoglobin_level == Decimal('120')
+    assert record.hemoglobin_level_units == 'G/L'
+    assert record.hemoglobin_g_dl == Decimal('12.0')
+    fact = _fact(person)
+    assert fact.measurement_date == date(2026, 7, 4)
+    assert float(fact.value_as_number) == 12.0
+    assert fact.unit_source_value == 'g/dL'
+
+
+def test_an_undated_pair_refuses_a_result_date():
+    """No resolved projection means no fact to carry the date (#2397)."""
+    person = _person_with_lab()
+    Concept.objects.filter(concept_code=LOINC).delete()
+
+    with pytest.raises(ValueError, match='does not accept a result date'):
+        apply_patient_form_patch(
+            person,
+            {'hemoglobin_level': {'value': 120, 'date': '2026-07-04'},
+             'hemoglobin_level_units': 'G/L'},
+            allowed_fields={'hemoglobin_level', 'hemoglobin_level_units',
+                            'hemoglobin_g_dl'})
+
+    assert not Measurement.objects.filter(person=person).exists()
+    assert PatientRecord.objects.get(person=person).hemoglobin_level is None
+
+
+def test_an_older_dated_pair_stays_the_current_answer():
+    """The pair is retained pending, so an older draw is still the answer (#2318).
+
+    The fact history shows the older draw; the record keeps the reader's pair
+    until an explicit canonical event, so the editor must not call it history.
+    """
+    person = _person_with_lab()
+    concept = Concept.objects.get(concept_code=LOINC)
+    type_vocab = VocabularyFactory(
+        vocabulary_id='Type Concept', vocabulary_name='Type Concept')
+    ConceptFactory(concept_id=32817, concept_code='EHR', concept_name='EHR',
+                   vocabulary=type_vocab)
+    Measurement.objects.create(
+        measurement_id=next_pk(Measurement, 'measurement_id'), person=person,
+        measurement_concept=concept, measurement_date=date(2026, 8, 1),
+        measurement_type_concept_id=32817, value_as_number=12.0,
+        unit_source_value='g/dL')
+
+    apply_patient_form_patch(
+        person,
+        {'hemoglobin_level': {'value': 140, 'date': '2026-07-01'},
+         'hemoglobin_level_units': 'G/L'},
+        allowed_fields={'hemoglobin_level', 'hemoglobin_level_units',
+                        'hemoglobin_g_dl'})
+
+    record = PatientRecord.objects.get(person=person)
+    assert record.hemoglobin_level == Decimal('140')
+    assert record.hemoglobin_g_dl == Decimal('14.0')
+    assert {'hemoglobin_level', 'hemoglobin_level_units'} <= set(
+        record.user_edited_fields or [])
+
+    refresh_patient_record(person)
+
+    record.refresh_from_db()
+    assert record.hemoglobin_level == Decimal('140')
+    assert record.hemoglobin_g_dl == Decimal('14.0')
+    dates = sorted(Measurement.objects.filter(person=person).values_list(
+        'measurement_date', flat=True))
+    assert dates == [date(2026, 7, 1), date(2026, 8, 1)]
+
+    # The documented boundary: an explicit canonical event retires the pair,
+    # and the newer imported fact becomes the answer.
+    record.hemoglobin_g_dl = Decimal('12.0')
+    recompute_patient_record_fields(
+        record, changed_fields=('hemoglobin_g_dl',))
+    record.refresh_from_db()
+    assert record.hemoglobin_g_dl == Decimal('12.0')
+    assert record.hemoglobin_level == Decimal('12.00')
+
+
+def test_a_future_date_on_the_pair_is_refused():
+    person = _person_with_lab()
+    tomorrow = (date.today() + timedelta(days=1)).isoformat()
+
+    with pytest.raises(ValueError, match='future'):
+        apply_patient_form_patch(
+            person,
+            {'hemoglobin_level': {'value': 120, 'date': tomorrow},
+             'hemoglobin_level_units': 'G/L'},
+            allowed_fields={'hemoglobin_level', 'hemoglobin_level_units',
+                            'hemoglobin_g_dl'})
+
+    assert not Measurement.objects.filter(person=person).exists()

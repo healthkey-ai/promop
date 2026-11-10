@@ -70,9 +70,11 @@ def _import(lab, value, unit, when, type_id=EHR_TYPE):
 
 
 def _patch_pair(lab, value, unit, when=None):
-    # The pair descriptor is not dated yet; a plain edit lands today. `when`
-    # documents the clinical day the test is reasoning about.
+    # The pair is a dated source pair (#2397): a supplied draw date lands on
+    # the projected result, a plain edit lands today.
     data = {'hemoglobin_level': value, 'hemoglobin_level_units': unit}
+    if when is not None:
+        data['hemoglobin_level'] = {'value': value, 'date': when.isoformat()}
     response = lab['client'].patch(
         f"/api/v1/patient-records/{lab['person'].person_id}/", data,
         format='json', HTTP_X_PATIENT_FORM='1',
@@ -155,9 +157,10 @@ def test_a_later_same_day_import_does_not_take_over_the_patient_answer(lab):
 
 
 def test_a_failed_lab_mapping_keeps_the_answer_pending_then_projects_once(lab):
-    # Remove the LOINC concept so the canonical has no projection target.
+    # Remove the LOINC concept so the canonical has no projection target. The
+    # pair is then undated too: there is no result row to carry the date.
     lab['concept'].delete()
-    _patch_pair(lab, 120, 'G/L', TODAY)
+    _patch_pair(lab, 120, 'G/L')
 
     record = lab['record']
     assert record.hemoglobin_level == Decimal('120.00')
@@ -174,7 +177,7 @@ def test_a_failed_lab_mapping_keeps_the_answer_pending_then_projects_once(lab):
         domain=DomainFactory(domain_id='Measurement'),
         concept_class=ConceptClassFactory(concept_class_id='Lab Test'),
     )
-    _patch_pair(lab, 120, 'G/L', TODAY)
+    _patch_pair(lab, 120, 'G/L')
 
     patient = _hemoglobin_rows(lab, SELF_REPORT_TYPE)
     assert patient.count() == 1
@@ -287,3 +290,23 @@ def test_an_out_of_range_import_leaves_no_canonical_read_model(lab):
     # read-model refuses a value the column cannot hold.
     imported.refresh_from_db()
     assert imported.value_as_number == 100000
+
+
+def test_a_dated_pair_keeps_the_draw_date_through_the_refresh(lab):
+    draw = TODAY - timedelta(days=3)
+    _patch_pair(lab, 120, 'G/L', draw)
+
+    record = lab['record']
+    assert record.hemoglobin_level == Decimal('120.00')
+    assert record.hemoglobin_level_units == 'G/L'
+    assert record.hemoglobin_g_dl == Decimal('12.0')
+    patient = _hemoglobin_rows(lab, SELF_REPORT_TYPE).get()
+    assert patient.measurement_date == draw
+
+    # A full refresh restores the pending pair and keeps the same draw date,
+    # rather than re-dating the answer to the refresh day.
+    refresh_patient_record(lab['person'])
+    record.refresh_from_db()
+    assert record.hemoglobin_level == Decimal('120.00')
+    assert record.hemoglobin_g_dl == Decimal('12.0')
+    assert _hemoglobin_rows(lab, SELF_REPORT_TYPE).get().measurement_date == draw
