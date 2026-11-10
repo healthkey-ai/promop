@@ -446,12 +446,36 @@ def project_single_value(person, field_name, value, projection, *, acknowledge_e
                 if acknowledge_existing and patient_user_id:
                     _record_patient_provenance(instance, patient_user_id)
                 return acknowledge_existing
+            if (existing and target == 'measurement' and today != timezone.localdate()
+                    and not _projection_owned(instance)):
+                # A dated correction never rewrites a past result this
+                # projector did not write (an EHR/FHIR import, a lab feed): that
+                # destroyed the source value and its unit (#2431). The result it
+                # corrects is retired as erroneous, its value and unit intact
+                # for audit, so no reader counts it any more (all-history CRAB
+                # extrema included); the correction is a new row. Our own row is
+                # still corrected in place, so repeated edits and typo fixes do
+                # not pile up. Today's edit keeps dev's same-day behaviour
+                # (test_patient_record_edit_history).
+                model.objects.filter(pk=instance.pk).update(is_erroneous=True)
+                correction = model(**{
+                    pk_field: next_pk(model, pk_field), 'person': person,
+                    concept_field: concept_id, src_field: source_value,
+                    date_field: today, type_field: fact_type, **scope,
+                })
+                for field in answer_fields:
+                    setattr(correction, field, getattr(instance, field))
+                instance = correction
+                existing = False
             if scope and any(value is not None for value in scope.values()):
                 setattr(instance, f'{target}_datetime', timezone.now())
             instance._skip_patient_record_refresh = True
             instance.save()
             if patient_user_id:
-                _record_patient_provenance(instance, patient_user_id)
+                _record_patient_provenance(instance, patient_user_id,
+                                           owned=not existing and target == 'measurement')
+            elif not existing and target == 'measurement':
+                _record_projection_provenance(instance)
         return True
     except Exception:
         logger.warning('OMOP value projection failed; edit remains pending')
@@ -515,13 +539,49 @@ def patient_self_report_type():
     return None
 
 
-def _record_patient_provenance(instance, patient_user_id):
+#: modification_reason on the provenance row this projector writes for a
+#: Measurement it inserted on someone's behalf. It is the ownership marker that
+#: lets a later edit correct that row in place (#2431).
+PROJECTION_PROVENANCE_REASON = 'promop record edit'
+
+
+def _projection_owned(instance):
+    """Whether this projector wrote the fact (patient or on-behalf edit)."""
+    from django.contrib.contenttypes.models import ContentType
+    from omop_core.models import ProvenanceRecord
+
+    # The reason, not the source, is the marker: imports and patient lab
+    # uploads write PATIENT_SELF too, and those rows are not ours to rewrite.
+    return ProvenanceRecord.objects.filter(
+        content_type=ContentType.objects.get_for_model(type(instance)), object_id=instance.pk,
+        source__in=('PATIENT_SELF', 'ADMIN_CORRECTION'),
+        modification_reason=PROJECTION_PROVENANCE_REASON,
+    ).exists()
+
+
+def _record_projection_provenance(instance):
+    from django.contrib.contenttypes.models import ContentType
+    from omop_core.models import ProvenanceRecord
+
+    ProvenanceRecord.objects.get_or_create(
+        content_type=ContentType.objects.get_for_model(type(instance)), object_id=instance.pk,
+        source='ADMIN_CORRECTION', modification_reason=PROJECTION_PROVENANCE_REASON,
+        defaults={'target_patient_id': str(instance.person_id)},
+    )
+
+
+def _record_patient_provenance(instance, patient_user_id, owned=False):
+    """Record the patient as the author. ``owned`` marks a row this projector
+    inserted, so a later edit may correct it in place; an acknowledged or
+    pre-existing row is never claimed."""
     from django.contrib.contenttypes.models import ContentType
     from omop_core.models import ProvenanceRecord
 
     ProvenanceRecord.objects.get_or_create(
         content_type=ContentType.objects.get_for_model(type(instance)), object_id=instance.pk,
         source='PATIENT_SELF', source_user_id=patient_user_id,
+        defaults={'modification_reason': PROJECTION_PROVENANCE_REASON if owned else None,
+                  'target_patient_id': str(instance.person_id)},
     )
 
 
