@@ -772,7 +772,7 @@ describe('dated lab results', () => {
     expect(patch).not.toHaveBeenCalled();
   });
 
-  it('warns that an older result becomes history', async () => {
+  it('does not promise that an older projected result stays out of the current value', async () => {
     const { store } = await setup({
       hemoglobin_g_dl: { label: 'Hemoglobin', writable: true, target: 'patient_record',
         control: 'number', dated: true, latest_date: '2026-08-01',
@@ -782,7 +782,10 @@ describe('dated lab results', () => {
 
     fireEvent.change(screen.getByLabelText('Result date'), { target: { value: '2026-07-01' } });
 
-    expect(screen.getByRole('status')).toHaveTextContent('stored as history');
+    const status = screen.getByRole('status');
+    expect(status).toHaveTextContent('may show as the current value');
+    expect(status).toHaveTextContent('newer result then becomes current again');
+    expect(status).not.toHaveTextContent(/not as the current value/);
   });
 
   it('does not promise history for a dated source pair', async () => {

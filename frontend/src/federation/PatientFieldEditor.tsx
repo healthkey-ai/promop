@@ -222,7 +222,7 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
     ?? (unitFieldName ? state.fields[unitFieldName].unit_options : undefined) ?? [];
   // A dated fact is edited with its clinical date. The latest recorded date is
   // the correction target; a new entry defaults to today, and an older choice
-  // says plainly that it becomes history rather than the current value.
+  // says what happens to the current value.
   const dated = writable && field.dated === true;
   const pendingUnit = unitFieldName && hasDraft(unitFieldName)
     ? draftOf(unitFieldName) : undefined;
@@ -425,7 +425,10 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
         // until an explicit canonical event; see _SOURCE_PAIR_FIELDS.
         && <p role="status" className="text-xs text-muted-foreground">
           {field.projection
-            ? 'Older than the latest recorded result; it will be stored as history, not as the current value.'
+            // PatientRecord-first: the shared write sets the record to this
+            // value now, and only the next rebuild from the dated facts puts
+            // the newer result back (tests/test_dated_patient_form_writes.py).
+            ? 'Older than the latest recorded result. It is saved with this date and may show as the current value until the record is next rebuilt from your results; the newer result then becomes current again.'
             : 'Older than the latest recorded result; your answer stays the current value and is recorded with this result date.'}
         </p>}
     </>
