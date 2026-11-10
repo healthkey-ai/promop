@@ -172,8 +172,8 @@ describe('the PROMOP editors for a host that shares the React tree', () => {
       // `noHiv` is a real field; `other` also claims it as a binding. The
       // store resolves the canonical first, so the adapter must too.
       noHiv: { kind: 'negated' },
-      other: { kind: 'direct', bindings: ['noHiv', 'shared'] },
-      third: { kind: 'direct', bindings: ['shared'] },
+      other: { kind: 'direct', label: 'Other', bindings: ['noHiv', 'shared'] },
+      third: { kind: 'direct', label: 'Third', bindings: ['shared'] },
     };
     const host = hostClient({ fields });
     const { result } = renderHook(() =>
@@ -183,7 +183,7 @@ describe('the PROMOP editors for a host that shares the React tree', () => {
     await waitFor(() => expect(result.current.ready).toBe(true));
     expect(result.current.entryFor('noHiv')?.kind).toBe('negated');
     // Two entries declare `shared`; the first one wins, as in the store.
-    expect(result.current.entryFor('shared')?.kind).toBe('direct');
+    expect(result.current.entryFor('shared')?.label).toBe('Other');
   });
 
   it('falls back to the host editor when the descriptor cannot be read', async () => {
