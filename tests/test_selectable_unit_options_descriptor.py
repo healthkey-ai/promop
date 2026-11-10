@@ -10,8 +10,8 @@ advertising `mg/dL` for a column whose code is `MG/DL` (and `lbs` for `lb`) hand
 the client a choice that fails validation. `label` stays the curated display.
 
 One pair is a known gap: the RBC column only stores `CELLS/UL` and `CELLS/L`
-while the curated table advertises millions/µL, which needs new enum codes and a
-migration. The strict xfail below records that instead of hiding it.
+while the curated table lists millions/µL, which needs new enum codes and a
+migration. Until then the descriptor advertises no RBC unit list at all.
 """
 import pytest
 
@@ -56,11 +56,9 @@ EXPECTED = {
         {'value': '10*3/uL', 'label': '10*3/uL'},
         {'value': '10*9/L', 'label': '10*9/L'},
     ],
-    # The known gap: valid display strings, but not codes this column stores.
-    'red_blood_cell_count_units': [
-        {'value': '10*6/uL', 'label': '10*6/uL'},
-        {'value': '10*12/L', 'label': '10*12/L'},
-    ],
+    # The known gap: the curated 10*6/uL and 10*12/L are not codes this column
+    # stores, so no list is advertised until the codes and migration land.
+    'red_blood_cell_count_units': None,
     'weight_units': [
         {'value': 'kg', 'label': 'kg'},
         {'value': 'lb', 'label': 'lb'},
@@ -113,14 +111,14 @@ def test_a_selectable_unit_field_lists_the_curated_choices(field, qualifies):
     entry = build_writable_field_descriptor()[field]
 
     assert entry['qualifies'] == qualifies
-    assert entry['unit_options'] == EXPECTED[field]
+    assert entry.get('unit_options') == EXPECTED[field]
 
 
 @pytest.mark.parametrize('field,qualifies', PAIRS)
 def test_the_field_it_qualifies_lists_the_same_choices(field, qualifies):
     descriptor = build_writable_field_descriptor()
 
-    assert descriptor[qualifies]['unit_options'] == descriptor[field]['unit_options']
+    assert descriptor[qualifies].get('unit_options') == descriptor[field].get('unit_options')
 
 
 @pytest.mark.parametrize('field,qualifies', [
@@ -136,18 +134,13 @@ def test_every_advertised_value_is_a_code_the_column_stores(field, qualifies):
     assert all(option['label'] for option in options)
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        'RBC advertises millions/uL but the column only stores CELLS/UL and '
-        'CELLS/L; adding the scales needs enum codes and a migration (#2318 '
-        'follow-up). Remove this marker when that lands.'
-    ),
-)
-def test_red_blood_cell_units_are_codes_the_column_stores():
-    options = build_writable_field_descriptor()[KNOWN_GAP]['unit_options']
+def test_red_blood_cells_advertise_no_unit_the_column_cannot_store():
+    """Withheld rather than wrong: a picker value the write side refuses is
+    worse than no picker (#2318 follow-up adds the codes and the migration)."""
+    descriptor = build_writable_field_descriptor()
 
-    assert {option['value'] for option in options} <= stored_codes(KNOWN_GAP)
+    assert 'unit_options' not in descriptor[KNOWN_GAP]
+    assert 'unit_options' not in descriptor['red_blood_cell_count']
 
 
 def test_a_field_without_a_unit_list_carries_none():

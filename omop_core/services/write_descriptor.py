@@ -1939,6 +1939,28 @@ def build_writable_field_descriptor():
         if entry is not None and entry.get('writable'):
             entry['overridable'] = True
 
+    # A unit choice the column cannot store is worse than no picker: a client
+    # that sends it is refused. Keep only stored codes; a pair left with none
+    # (RBC: curated 10*6/uL and 10*12/L, column stores CELLS/UL and CELLS/L)
+    # advertises no list until its codes and migration land.
+    record_fields = {field.name: field for field in PatientRecord._meta.fields}
+    for units_field, entry in list(descriptor.items()):
+        if not units_field.endswith('_units') or 'unit_options' not in entry:
+            continue
+        column = record_fields.get(units_field)
+        if column is None or not column.choices:
+            continue
+        stored = {code for code, _label in column.choices}
+        kept = [option for option in entry['unit_options'] if option['value'] in stored]
+        qualified = descriptor.get(entry.get('qualifies') or '')
+        for target in (entry, qualified):
+            if target is None or 'unit_options' not in target:
+                continue
+            if kept:
+                target['unit_options'] = kept
+            else:
+                del target['unit_options']
+
     # The envelope goes last so no field block can overwrite it. It is a dict
     # like any entry, but it is not one: `kind` is absent on purpose, and the
     # form enrichment skips reserved keys.
