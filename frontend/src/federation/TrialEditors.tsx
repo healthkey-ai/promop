@@ -1,8 +1,9 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import type { AxiosInstance } from 'axios';
-import { Pencil } from 'lucide-react';
+import { Pencil, X } from 'lucide-react';
 
+import { useEditorSession } from './editorSession';
 import GenomicsEditor from './GenomicsEditor';
 import PatientFieldEditorSlot from './PatientFieldEditorSlot';
 import TherapyLinesEditor from './TherapyLinesEditor';
@@ -83,13 +84,28 @@ function TherapyRowEditor({
       </button>
       <Dialog.Root modal={false} open={open} onOpenChange={setOpen}>
         <Dialog.Portal>
-          <Dialog.Overlay className="fixed inset-0 z-[60] bg-black/40" />
+          {/* Below the nested line editor (z-50): that dialog portals to the
+              body and must sit above this panel, not behind it. */}
+          <Dialog.Overlay className="fixed inset-0 z-40 bg-black/40" />
           <Dialog.Content
-            className="promop-root fixed left-1/2 top-1/2 z-[61] max-h-[85vh] w-[min(42rem,calc(100%-2rem))] -translate-x-1/2 -translate-y-1/2 space-y-4 overflow-y-auto rounded-xl bg-background p-6 shadow-xl"
+            className="promop-root fixed left-1/2 top-1/2 z-[41] max-h-[85vh] w-[min(42rem,calc(100%-2rem))] -translate-x-1/2 -translate-y-1/2 space-y-4 overflow-y-auto rounded-xl bg-background p-6 shadow-xl"
             onInteractOutside={(event) => event.preventDefault()}
             onEscapeKeyDown={(event) => event.preventDefault()}
           >
-            <Dialog.Title className="font-semibold">{label}</Dialog.Title>
+            <div className="flex items-start justify-between gap-3">
+              <Dialog.Title className="font-semibold">{label}</Dialog.Title>
+              {/* Escape and outside clicks are the nested editor's; without a
+                  close control this panel would have no way out. */}
+              <Dialog.Close asChild>
+                <button
+                  type="button"
+                  aria-label="Close therapy editor"
+                  className="rounded p-1 text-muted-foreground hover:text-foreground"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </Dialog.Close>
+            </div>
             <Dialog.Description className="text-sm text-muted-foreground">
               Recorded therapy lines. Adding or changing a line updates this
               value automatically.
@@ -137,6 +153,16 @@ export default function TrialEditors({
   );
   const connection: TrialEditorsConnection = { apiClient, apiBasePath, connectionKey };
 
+  // One notification for a scalar save, not one per mounted row. Every scalar
+  // slot shares this store, so a listener inside each slot would fire N times
+  // for one acknowledged batch. Therapy and genomics mutations bypass the store
+  // and keep their own `onChanged`.
+  const store = useEditorSession({ apiClient, apiBasePath, connectionKey });
+  const changed = useRef(onChanged);
+  useEffect(() => { changed.current = onChanged; }, [onChanged]);
+  const listener = useMemo(() => () => { changed.current?.(); }, []);
+  useEffect(() => store.onUpdated(listener), [store, listener]);
+
   const slots: TrialEditorSlots = {
     renderFieldEditor: ({ field, label }) => {
       if (isTherapyTrialRow(field)) {
@@ -163,7 +189,6 @@ export default function TrialEditors({
           label={label}
           readOnly={readOnly}
           compact
-          onChanged={onChanged}
         />
       );
     },

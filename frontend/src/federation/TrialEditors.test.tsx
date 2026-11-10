@@ -14,6 +14,7 @@ function hostClient() {
       { line: 1, episode_id: 11, regimen: 'VRd', start_date: '2024-01-01' },
     ],
     height: 170,
+    weight: 60,
   };
   const fields = {
     height: {
@@ -23,6 +24,14 @@ function hostClient() {
       label: 'Height',
       unit: 'cm',
       bindings: ['heightAtTrial'],
+    },
+    weight: {
+      writable: true,
+      target: 'patient_record',
+      control: 'number',
+      label: 'Weight',
+      unit: 'kg',
+      bindings: ['weightAtTrial'],
     },
     genetic_mutations: { writable: true, target: 'genomics' },
   };
@@ -57,6 +66,9 @@ function renderAdapter(onChanged?: () => void) {
         <div>
           <div data-testid="scalar">
             {slots.renderFieldEditor({ field: 'heightAtTrial', label: 'Height' })}
+          </div>
+          <div data-testid="scalar-two">
+            {slots.renderFieldEditor({ field: 'weightAtTrial', label: 'Weight' })}
           </div>
           <div data-testid="therapy">
             {slots.renderFieldEditor({ field: 'priorTherapy', label: 'Prior Therapy' })}
@@ -100,6 +112,8 @@ describe('the shared trial editor adapter', () => {
     // The scalar slot owns the value; the therapy pencil does not.
     expect(screen.getByTestId('owns-scalar')).toHaveTextContent('true');
     expect(screen.getByTestId('owns-therapy')).toHaveTextContent('false');
+    // A second scalar row is a second editor against the same store.
+    expect(screen.getByRole('spinbutton', { name: 'Weight' })).toHaveValue(60);
   });
 
   it('opens the therapy-line editor in a non-modal dialog', async () => {
@@ -108,6 +122,17 @@ describe('the shared trial editor adapter', () => {
 
     expect(screen.getByRole('dialog')).toBeInTheDocument();
     expect(await screen.findByText(/Line 1:/)).toBeInTheDocument();
+  });
+
+  it('closes the therapy panel from a visible control', async () => {
+    renderAdapter();
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit Prior Therapy' }));
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close therapy editor' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    // The scroll lock is released with it.
+    expect(document.body.style.overflow).not.toBe('hidden');
   });
 
   it('mounts the genomics dialog with the findings editor', async () => {
@@ -128,6 +153,8 @@ describe('the shared trial editor adapter', () => {
     const store = patientFormForClient(host.client, '');
     await act(async () => { store.enqueue('height', 180); await store.flush(); });
 
+    // Two scalar rows share the store; one acknowledged batch is one
+    // notification, not one per row.
     expect(onChanged).toHaveBeenCalledTimes(1);
     await waitFor(() => expect(host.patch).toHaveBeenCalled());
   });
