@@ -27,7 +27,12 @@ interface ChartPoint {
 }
 
 export function LabTrendChart({ values, unit }: Props) {
-  const numeric = values.filter((r) => r.value != null && r.unit === unit) as Array<LabResultValue & { value: number }>;
+  // A missing unit and an empty one are the same unit: callers pass
+  // `latest?.unit ?? ""`, while a unitless value (respiratory rate from an EHR
+  // import) carries null, so a strict comparison dropped every point.
+  const numeric = values.filter(
+    (r) => r.value != null && (r.unit ?? "") === (unit ?? ""),
+  ) as Array<LabResultValue & { value: number }>;
   if (numeric.length === 0) {
     return (
       <EmptyState
