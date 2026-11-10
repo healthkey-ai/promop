@@ -309,6 +309,16 @@ describe('federated PatientInfo save', () => {
     expect(patches[0][1]).toEqual({ email: 'b.howell@example.org' });
   });
 
+  it('says no record is linked when the record read answers 404', async () => {
+    (client.get as ReturnType<typeof vi.fn>).mockImplementation(() =>
+      Promise.reject({ response: { status: 404, data: { error: 'Patient information not found' } } }));
+
+    render(<PatientInfo apiClient={client} apiBasePath="/api" queryClient={qc} />);
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('No patient record linked to this account.');
+    expect(screen.queryByText(/Could not load the patient record/)).not.toBeInTheDocument();
+  });
+
   it('attempts nothing when the descriptor cannot be fetched', async () => {
     (client.get as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
       if (url.includes('writable-fields')) return Promise.reject(new Error('offline'));

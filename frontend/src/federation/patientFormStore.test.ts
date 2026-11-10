@@ -70,6 +70,39 @@ describe('planned-therapy options from a host catalog', () => {
   });
 });
 
+describe('load failures', () => {
+  function failing(failure: (url: string) => unknown) {
+    const get = vi.fn(async (url: string) => {
+      const error = failure(url);
+      if (error) throw error;
+      return { data: url.includes('writable-fields') ? fields
+        : { patient_info: { person_id: 12, weight: 60 }, write_enabled: true } };
+    });
+    return new PatientFormStore({ get, patch: vi.fn() } as unknown as AxiosInstance, '/api');
+  }
+  const notFound = { response: { status: 404 } };
+
+  it('says no record is linked when the record read answers 404', async () => {
+    const store = failing((url) => url.includes('patient-info/me') && notFound);
+    await store.load();
+    expect(store.getSnapshot().error).toBe('No patient record linked to this account.');
+    expect(store.getSnapshot().writable).toBe(false);
+  });
+
+  it('keeps the generic message for other failures, including a descriptor 404', async () => {
+    for (const failure of [
+      (url: string) => url.includes('patient-info/me') && { response: { status: 500 } },
+      (url: string) => url.includes('patient-info/me') && new Error('offline'),
+      (url: string) => url.includes('writable-fields') && notFound,
+    ]) {
+      const store = failing(failure);
+      await store.load();
+      expect(store.getSnapshot().error)
+        .toBe('Could not load the patient record and field permissions. Please retry.');
+    }
+  });
+});
+
 describe('shared patient-form queue', () => {
   it('loads caller/patient-specific descriptors and fails closed for unsupported writes', async () => {
     const { store, get, patch } = setup();

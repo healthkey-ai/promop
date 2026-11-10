@@ -12,6 +12,13 @@ function isDatedEdit(value: unknown): value is { value: unknown; date: string } 
     && 'date' in (value as Record<string, unknown>);
 }
 
+const MISSING_RECORD_ERROR = 'No patient record linked to this account.';
+
+/** An HTTP 404 answer, as axios reports it. */
+function isNotFound(error: unknown): boolean {
+  return (error as { response?: { status?: number } } | null)?.response?.status === 404;
+}
+
 const STALE_DATES_ERROR =
   'The result dates could not be refreshed. Retry before saving so this result lands on the right day.';
 
@@ -172,8 +179,12 @@ export class PatientFormStore {
     if (this.loading) return this.loading;
     const revision = ++this.readRevision;
     this.loading = (async () => {
+      // Only the record read's 404 means "no linked record"; a 404 from the
+      // descriptor request is a different failure.
+      let readingRecord = true;
       try {
         const { data } = await this.client.get(`${this.base}/patient-info/me/`);
+        readingRecord = false;
         const values = { ...data.patient_info, patient_name: data.patient_name };
         const personId = Number(values.person_id ?? values.person);
         if (!personId) throw new Error('No linked patient record.');
@@ -201,9 +212,13 @@ export class PatientFormStore {
         this.publish({ values, fields, personId, loading: false, datesStale: false,
           errors: this.withoutStaleErrors(), contractError: undefined,
           writable: data.write_enabled !== false, error: undefined });
-      } catch {
+      } catch (error) {
+        // The record read answers 404 when no patient is linked to the account.
+        // That is a state the reader can act on, not a transient failure, so it
+        // keeps its own sentence; everything else stays generic.
         if (revision === this.readRevision) this.publish({ loading: false, writable: false,
-          error: 'Could not load the patient record and field permissions. Please retry.' });
+          error: readingRecord && isNotFound(error) ? MISSING_RECORD_ERROR
+            : 'Could not load the patient record and field permissions. Please retry.' });
       } finally { this.loading = undefined; }
     })();
     return this.loading;
