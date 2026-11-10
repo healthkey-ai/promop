@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
+import { cleanup, render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { vi, describe, it, expect, beforeEach, afterEach } from "vitest";
 import CodeMappingPage from "./CodeMappingPage";
@@ -743,6 +743,33 @@ describe("CodeMappingPage", () => {
       await waitFor(() => expect(mockPatch).toHaveBeenCalledWith("/v1/code-mappings/7/", expect.objectContaining({ decision_surface: "code2concept" })));
       const [, payload] = mockPatch.mock.calls.at(-1) as [string, Record<string, unknown>];
       expect(payload).not.toHaveProperty("decision_confidence");
+    });
+
+    it("sends the note only when the curator changed it, against the stored one (#2423)", async () => {
+      // The list's copy is stale: the stored note has moved on since it loaded.
+      const open = async () => {
+        renderPage();
+        const listed = mockGet.getMockImplementation()!;
+        mockGet.mockImplementation((url: string, ...rest: unknown[]) => url === "/v1/code-mappings/7/"
+          ? Promise.resolve({ data: { ...proposedRow, notes: "high confidence: stored since." } })
+          : listed(url, ...rest));
+        const cell = await screen.findByText("M-PROTEIN, SERUM", { selector: '[data-testid=source-code]' });
+        fireEvent.click(cell.closest("tr")!);
+        const dialog = within(await screen.findByRole("dialog"));
+        await waitFor(() => expect(dialog.getByLabelText("Notes")).toHaveValue("high confidence: stored since."));
+        return dialog;
+      };
+      const dialog = await open();
+      fireEvent.click(dialog.getByRole("button", { name: "Update Mapping" }));
+      await waitFor(() => expect(mockPatch).toHaveBeenCalled());
+      expect((mockPatch.mock.calls.at(-1) as [string, Record<string, unknown>])[1].notes).toBeUndefined();
+
+      cleanup();
+      mockPatch.mockClear();
+      const reopened = await open();
+      fireEvent.change(reopened.getByLabelText("Notes"), { target: { value: "Ask the lab." } });
+      fireEvent.click(reopened.getByRole("button", { name: "Update Mapping" }));
+      await waitFor(() => expect(mockPatch).toHaveBeenCalledWith("/v1/code-mappings/7/", expect.objectContaining({ notes: "Ask the lab." })));
     });
 
     it("displays inline individual results and fills the winner when nothing was selected", async () => {

@@ -156,6 +156,36 @@ def test_a_machine_write_through_the_curator_writer_is_not_a_curator_note(curato
     }, curator, record_decision=False)
     assert mapping.notes and mapping.curator_note_at is None
 
+    # ... and one that replaces a curator's text takes the mark off with it.
+    marked = noted('MARKED')
+    _upsert_source_code_mapping(marked.target_concept, {'notes': 'Source vocabulary label: Glucose'},
+                                curator, mapping=marked, record_decision=False)
+    marked.refresh_from_db()
+    assert (marked.notes, marked.curator_note_at) == ('Source vocabulary label: Glucose', None)
+
+
+def test_the_mark_travels_with_the_note_between_instances():
+    from omop_core.services.field_curation_transfer import apply_payload, read_payload
+
+    mapping = noted('TRAVEL', text='Reviewed against three charts.')
+    stamped = mapping.curator_note_at
+    payload = read_payload('default')
+    [entry] = [e for e in payload['code_mappings'] if e['source_code'] == 'TRAVEL']
+
+    # Here the same code holds a machine's note and no mark.
+    SourceCodeConceptMapping.objects.filter(pk=mapping.pk).update(
+        notes='high confidence: same test.', curator_note_at=None)
+    apply_payload(payload)
+    mapping.refresh_from_db()
+    assert (mapping.notes, mapping.curator_note_at) == ('Reviewed against three charts.', stamped)
+
+    # A payload written before the mark replaces the text and leaves none.
+    del entry['curator_note_at']
+    entry['notes'] = 'medium confidence: close.'
+    apply_payload(payload)
+    mapping.refresh_from_db()
+    assert (mapping.notes, mapping.curator_note_at) == ('medium confidence: close.', None)
+
 
 @pytest.mark.parametrize(('note', 'by_curator', 'marked'), [
     ('Reviewed three patient examples for this code.', True, True),
@@ -167,6 +197,15 @@ def test_a_machine_write_through_the_curator_writer_is_not_a_curator_note(curato
     ('No candidate concept found by any enabled strategy.', True, False),
     ('Athena recovery snapshot 2026-05-01', True, False),
     ('Unambiguous extractor alias for albumin.', True, False),
+    ('Athena destination recovery (2026-06-01): restored.', True, False),
+    ('STCM reconciliation 2026-04: kept.', True, False),
+    ('Narrative/result metadata label; proposed for curator-confirmed rejection.', True, False),
+    ('This mapping is already supplied by Athena.', True, False),
+    ('Curator priority 3.', True, False),
+    ('unknown confidence (Jev unknown)', True, False),
+    ('Ranking failed; no destination proposed.', True, False),
+    ('Lexical match only (score 0.52).', True, False),
+    ('Athena SCCM reconciliation (0259): kept.', True, False),
     ('  \n ', True, False),
     # Nobody but a machine has ever written this row.
     ('Check with the lab.', False, False),

@@ -199,6 +199,11 @@ export default function EditMappingDialog({
   // True once the source text or table changed after the last Suggest run
   // here, so its scores no longer describe the code being saved (#2382).
   const suggestionStale = useRef(false);
+  // The note as the dialog opened with it. A save sends the note only when
+  // the curator changed it: the row this form was built from may be stale or
+  // carry no note at all (the patient page's rows), and sending that back
+  // would overwrite the stored note and claim a curator wrote it (#2423).
+  const openedNotes = useRef("");
   // LOINC axes (#loinc-axes): the panel's current overrides, sent with Suggest.
   // Keyed by mapping: overrides belong to the code they were made for, and
   // must never ride along with a Suggest for another row or an edited code.
@@ -316,13 +321,17 @@ export default function EditMappingDialog({
         // source identity (code, vocabulary, domain, table) even though no
         // mapping exists yet.  Pre-populate those fields so the curator does
         // not have to re-type them.
-        setForm(withDefaultDestination(selectedRow ? buildEditForm(selectedRow, reference) : { ...emptyForm }));
+        const opened = withDefaultDestination(selectedRow ? buildEditForm(selectedRow, reference) : { ...emptyForm });
+        openedNotes.current = opened.notes;
+        setForm(opened);
         setSearchVocabulary("");
         setSearchScope(DEFAULT_SEARCH_SCOPE);
         setConceptSearchQuery("");
         setConceptResults([]);
       } else if (selectedRow) {
-        setForm(withDefaultDestination(buildEditForm(selectedRow, reference)));
+        const opened = withDefaultDestination(buildEditForm(selectedRow, reference));
+        openedNotes.current = opened.notes;
+        setForm(opened);
         setSearchVocabulary(
           reference.destination_vocabularies.some((v) => v.vocabulary_id === selectedRow.destination_vocabulary_id)
             ? selectedRow.destination_vocabulary_id || ""
@@ -403,6 +412,15 @@ export default function EditMappingDialog({
         setDestinationOptions(data.destination_options || []);
         const evidence = data.source_evidence || null;
         setSourceEvidence(evidence);
+        // The stored note is the one to show and to compare a save against:
+        // the row this dialog opened from may be stale, or have none (a
+        // patient page row). A note already being typed is left alone.
+        const stored = data.notes;
+        const openedWith = openedNotes.current;
+        if (typeof stored === "string" && stored !== openedWith) {
+          openedNotes.current = stored;
+          setForm((prev) => prev.notes === openedWith ? { ...prev, notes: stored } : prev);
+        }
         // Auto-populate source_unit from evidence when the form has none
         // (e.g. opened from Code Mapping browse, where the list omits units).
         const dominant = dominantSourceUnit(evidence?.units);
@@ -761,6 +779,7 @@ export default function EditMappingDialog({
 
   const savePayload = () => ({
     ...form,
+    notes: form.notes !== openedNotes.current ? form.notes : undefined,
     ...(patientId ? { patient_id: Number(patientId) } : {}),
     // The table this code was listed under on the patient page: rows there
     // follow the mapping when it is filed under another table (#2393).

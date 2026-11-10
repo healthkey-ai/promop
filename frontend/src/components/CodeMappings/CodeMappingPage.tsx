@@ -1038,7 +1038,6 @@ export default function CodeMappingPage() {
         omop_table: row.destination_omop_table,
         status: row.status === "approved" ? "proposed" : "approved",
         decision_surface: "code2concept",
-        notes: row.notes,
       };
       const resp = await api.patch(`/v1/code-mappings/${row.mapping_id}/`, payload);
       const repoint: RepointResult | null = resp.data?.repoint ?? null;
@@ -1742,7 +1741,9 @@ export default function CodeMappingPage() {
               <span className="font-normal text-slate-500">({browse?.pages[section]?.total ?? sectionRows.length}{browse?.rollup ? " groups" : ""})</span>
             </button>
             <DownloadMenu rows={sectionRows} section={section} />
-            {!collapsed && renderTable(sectionRows, `No ${section.toLowerCase()} mappings in this vocabulary.`, section)}
+            {!collapsed && renderTable(sectionRows, withNotes
+              ? `No ${section.toLowerCase()} mappings with a curator note here. Uncheck "with notes" to see every code.`
+              : `No ${section.toLowerCase()} mappings in this vocabulary.`, section)}
           </section>;
         })}
       </div>

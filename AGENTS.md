@@ -1299,8 +1299,9 @@ mapping dialog sends it back on every save. `curator_note_at` (#2423) records
 that a curator changed the text: the dialog's save stamps it when the note it
 sends differs from the stored one, and clears it when the note is emptied. A
 machine credential, and every machine write through
-`_upsert_source_code_mapping` (`curator_note=False`, the default), leaves it
-alone. Migration `0334` marked the existing notes of curator-saved rows that do
+`_upsert_source_code_mapping` (`curator_note=False`, the default), never sets
+it, and takes it off when it replaces the text. It travels with the note in
+`copy_reference_data`. Migration `0334` marked the existing notes of curator-saved rows that do
 not begin like a machine-written note.
 
 `with_notes=1` narrows to rows with a mark and a note that is not blank

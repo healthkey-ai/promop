@@ -13127,10 +13127,11 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None, person_id=Non
         values['notes'] = str(data.get('notes') or '').strip()
         # The dialog sends the note back on every save, so only a changed
         # text is the curator's; an unchanged machine note stays a machine's.
+        # A machine that replaces the text takes the mark off with it.
         if not values['notes']:
             values['curator_note_at'] = None
-        elif curator_note and values['notes'] != (mapping.notes.strip() if mapping else ''):
-            values['curator_note_at'] = timezone.now()
+        elif values['notes'] != (mapping.notes.strip() if mapping else ''):
+            values['curator_note_at'] = timezone.now() if curator_note else None
     if 'destination_unit_concept_id' in data:
         raw_unit_id = data.get('destination_unit_concept_id')
         if raw_unit_id in (None, '', 0):

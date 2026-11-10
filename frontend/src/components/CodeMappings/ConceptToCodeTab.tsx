@@ -896,6 +896,9 @@ function SourceCoverage({ concept, canApprove, readOnly = false, onSaved, onWrit
     // start() fires and patched is cleared.
     setPreviousCandidates(previous => previous.map(item => sourceKey(item) === key
       ? (replace ? updated as Source : { ...item, ...updated }) : item));
+    // ... and the copy the next run's carried-over candidates are rebuilt from.
+    const seen = seenRef.current.get(key);
+    if (seen) seenRef.current.set(key, replace ? updated as Source : { ...seen, ...updated });
   };
 
   // One click approves: a suggested source with no mapping yet is proposed from
