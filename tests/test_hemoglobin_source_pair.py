@@ -774,3 +774,12 @@ def test_a_pending_canonical_clear_wins_over_a_stale_source_pair():
     record.refresh_from_db()
     assert record.hemoglobin_g_dl is None
     assert record.hemoglobin_level is None
+
+
+@pytest.mark.parametrize('value, in_range', [(-0.1, False), (0, True), (12.3, True)])
+def test_a_negative_hemoglobin_is_out_of_range(value, in_range):
+    """#2433: a negative concentration satisfied every '< N g/dL' threshold."""
+    from omop_core.services.hemoglobin_units import canonical_from_pair, canonical_in_range
+    recognised, canonical = canonical_from_pair(value, 'g/dL')
+    assert recognised
+    assert canonical_in_range(canonical) is in_range

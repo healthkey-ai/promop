@@ -10,11 +10,17 @@ This is the count counterpart of `hemoglobin_units`: one place owns the unit
 spellings and the factor, and the serializer, derivation and both form writers
 use it.
 """
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 from omop_core.services.clinical_units import blood_count_to_canonical
 
 #: source field -> canonical field, stored unit column and display unit.
+#: The canonical columns are `DecimalField(max_digits=8, decimal_places=3)`
+#: (0328). A larger count raised on save: a 500 from the form, the serializer
+#: or a recompute, instead of a refused value.
+CANONICAL_QUANTUM = Decimal('0.001')
+CANONICAL_LIMIT = Decimal('99999.999')
+
 PAIRS = {
     'absolute_neutrophile_count': {
         'canonical': 'anc_thousand_per_ul',
@@ -113,6 +119,8 @@ def canonical_from_source(source, value, unit=None):
         return False, None
     canonical = blood_count_to_canonical(value, code)
     if canonical is None:
+        return False, None
+    if canonical.quantize(CANONICAL_QUANTUM, rounding=ROUND_HALF_UP) > CANONICAL_LIMIT:
         return False, None
     return True, canonical
 

@@ -78,10 +78,14 @@ def canonical_from_pair(value, unit):
 
 
 def canonical_in_range(value):
-    """Whether a canonical value fits the `hemoglobin_g_dl` column."""
+    """Whether a canonical value fits the `hemoglobin_g_dl` column.
+
+    A concentration is never negative; creatinine and chemistry already refuse
+    one, and a negative Hb would satisfy every "< N g/dL" anaemia threshold.
+    """
     if value is None:
         return True
-    return -CANONICAL_LIMIT <= value <= CANONICAL_LIMIT
+    return 0 <= value <= CANONICAL_LIMIT
 
 
 def same_number(left, right):

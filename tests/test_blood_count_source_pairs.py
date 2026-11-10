@@ -404,3 +404,29 @@ def test_a_pending_canonical_clear_wins_over_a_stale_count_pair():
 
     record.refresh_from_db()
     assert record.anc_thousand_per_ul is None
+
+
+def test_a_count_whose_canonical_overflows_the_column_is_refused(api):
+    """#2433: thousands/µL is DecimalField(8,3); a larger value raised on save."""
+    record = _record()
+    response = api.patch(
+        f'/api/patient-info/{record.person.person_id}/',
+        {'absolute_neutrophile_count': 150000,
+         'absolute_neutrophile_count_units': '10*3/uL'},
+        format='json',
+    )
+
+    assert response.status_code == 400, response.data
+    record.refresh_from_db()
+    assert record.anc_thousand_per_ul is None
+
+
+@pytest.mark.parametrize('value, unit, recognised', [
+    (99999.999, '10*3/uL', True),
+    (99999.9995, '10*3/uL', False),
+    (100000, '10*3/uL', False),
+    (-1, 'cells/uL', False),
+])
+def test_canonical_from_source_refuses_what_the_column_cannot_hold(value, unit, recognised):
+    from omop_core.services.blood_count_source_pairs import canonical_from_source
+    assert canonical_from_source('absolute_neutrophile_count', value, unit)[0] is recognised
