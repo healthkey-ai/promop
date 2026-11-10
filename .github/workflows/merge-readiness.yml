@@ -10,7 +10,7 @@ permissions:
 jobs:
   merge_readiness:
     name: Merge readiness
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       # Via env, not interpolation: a PR title would otherwise run as shell.
       - env:
