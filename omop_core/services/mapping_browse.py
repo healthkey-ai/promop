@@ -195,6 +195,23 @@ def _seen_only(params):
     return value == '1'
 
 
+def _with_notes(params):
+    value = params.get('with_notes') or '0'
+    if value not in ('0', '1'):
+        raise ValidationError({'with_notes': 'Use 1 for codes with a curator note or 0 for all codes.'})
+    return value == '1'
+
+
+# A note a curator wrote and that still says something. Suggest's rationale
+# and an importer's receipt sit in the same column and are not notes.
+HAS_CURATOR_NOTE = Q(curator_note_at__isnull=False, notes__regex=r'\S')
+
+
+def apply_notes(queryset, params):
+    """Opt in to only the codes a curator has left a note on (#2423)."""
+    return queryset.filter(HAS_CURATOR_NOTE) if _with_notes(params) else queryset
+
+
 def apply_seen(queryset, params):
     """The page opts into Seen > 0; other API clients retain their full catalog."""
     return queryset.filter(occurrence_count__gt=0) if _seen_only(params) else queryset
@@ -224,6 +241,7 @@ def visible_rows(mappings, params, section=None):
     rows = apply_search(mappings, tab_queryset(mappings, source), search)
     rows = apply_provenance(rows, (params.get('provenance') or '').strip())
     rows = apply_organization(rows, (params.get('organization') or '').strip())
+    rows = apply_notes(rows, params)
     if section is not None:
         return _apply_seen_for_section(rows, params, section)
     return apply_seen(rows, params)
@@ -380,7 +398,9 @@ def browse_mappings(mappings, params, serialize):
     # warning into a puzzle.
     filtered = apply_provenance(filtered, provenance)
     filtered = apply_organization(filtered, organization)
-    if search or provenance or organization:
+    with_notes = _with_notes(params)
+    filtered = apply_notes(filtered, params)
+    if search or provenance or organization or with_notes:
         _unmapped_filter = ~_Q_ATHENA & ~Q(status__in=['approved', 'rejected'])
         if seen_only:
             _unmapped_filter = _unmapped_filter & Q(occurrence_count__gt=0)

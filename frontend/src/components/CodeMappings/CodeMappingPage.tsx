@@ -13,6 +13,7 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import { ArrowLeft, ChevronDown, ChevronRight, Download, Pencil, Plus, Search, Sparkles, Upload } from "lucide-react";
 import api from "@/api/axios";
 import { useAuth } from "@/hooks/useAuth";
+import { CuratorNoteMark } from "./CuratorNoteMark";
 import { AxisVariantFlag, AxisVariantList } from "./LoincAxisChips";
 import {
   type CodeMappingRow,
@@ -373,6 +374,8 @@ export default function CodeMappingPage() {
   const [organizationFilter, setOrganizationFilter] = useState("");
   const [rollup, setRollup] = useState(true);
   const [seenOnly, setSeenOnly] = useState(true);
+  // Only the codes a curator has left a note on (#2423).
+  const [withNotes, setWithNotes] = useState(false);
   // key -> members, or null while the fetch is in flight.
   const [expandedGroups, setExpandedGroups] = useState<Record<string, CodeMappingRow[] | null>>({});
   const [groupRunning, setGroupRunning] = useState<string | null>(null);
@@ -434,6 +437,7 @@ export default function CodeMappingPage() {
     if (provenanceFilter) params.provenance = provenanceFilter;
     if (organizationFilter) params.organization = organizationFilter;
     if (rollup) params.rollup = 1;
+    if (withNotes) params.with_notes = "1";
     sectionNames.forEach((section, index) => {
       params[`page_${index}`] = pages[section] || 1;
       const sort = sectionSorts[section];
@@ -468,7 +472,7 @@ export default function CodeMappingPage() {
     } finally {
       if (sequence === loadSequence.current) setLoading(false);
     }
-  }, [activeVocabulary, debouncedSearch, pages, sectionSorts, provenanceFilter, organizationFilter, rollup, seenOnly, direction,
+  }, [activeVocabulary, debouncedSearch, pages, sectionSorts, provenanceFilter, organizationFilter, rollup, seenOnly, withNotes, direction,
     unmappedCollapsed, proposedCollapsed, approvedCollapsed]);
 
   const refreshCurrent = useRef(fetchAll);
@@ -707,6 +711,7 @@ export default function CodeMappingPage() {
         params: {
           label: groupKey(entry), section, queue_sections: "1",
           seen_only: seenOnly ? "1" : "0",
+          ...(withNotes ? { with_notes: "1" } : {}),
           // The server picks the default tab until one is clicked, so sending
           // activeVocabulary would fetch across every vocabulary on first load.
           ...(selectedVocabulary !== null ? { source: selectedVocabulary } : {}),
@@ -724,7 +729,7 @@ export default function CodeMappingPage() {
       setExpandedGroups(({ [cacheKey]: _failed, ...rest }) => rest);
       setError("Could not load the codes in that group.");
     }
-  }, [selectedVocabulary, debouncedSearch, provenanceFilter, organizationFilter, seenOnly]);
+  }, [selectedVocabulary, debouncedSearch, provenanceFilter, organizationFilter, seenOnly, withNotes]);
 
   const toggleGroup = useCallback((entry: GroupEntry, section: MappingSection) => {
     const cacheKey = expansionKey(entry, section);
@@ -748,6 +753,7 @@ export default function CodeMappingPage() {
         label: groupKey(entry), source: selectedVocabulary,
         section, queue_sections: "1",
         seen_only: seenOnly ? "1" : "0",
+        ...(withNotes ? { with_notes: "1" } : {}),
         ...(provenanceFilter ? { provenance: provenanceFilter } : {}),
         ...(organizationFilter ? { organization: organizationFilter } : {}),
         ...(action === "suggest" ? {
@@ -1032,7 +1038,6 @@ export default function CodeMappingPage() {
         omop_table: row.destination_omop_table,
         status: row.status === "approved" ? "proposed" : "approved",
         decision_surface: "code2concept",
-        notes: row.notes,
       };
       const resp = await api.patch(`/v1/code-mappings/${row.mapping_id}/`, payload);
       const repoint: RepointResult | null = resp.data?.repoint ?? null;
@@ -1080,7 +1085,7 @@ export default function CodeMappingPage() {
       const canSortGroup = column === "occurrence_count" || column === "source_code_description";
       const sortable = groupEntries === null || canSortGroup;
       return (
-      <th className="px-4 py-3 font-semibold" aria-label={column === "occurrence_count" ? label : undefined}
+      <th className="px-4 py-3 font-semibold" aria-label={column === "occurrence_count" || column === "source_code" ? label : undefined}
         aria-sort={!sortable || sort?.column !== column ? "none" : sort.descending ? "descending" : "ascending"}>
         {column === "occurrence_count" && <label className="mb-1 flex items-center gap-1 whitespace-nowrap text-xs font-normal normal-case tracking-normal">
           <input type="checkbox" checked={seenOnly}
@@ -1088,6 +1093,13 @@ export default function CodeMappingPage() {
             title="Filter all source tabs and sections to codes with Seen > 0"
             onChange={(event) => { setPages({}); setExpandedGroups({}); setSeenOnly(event.target.checked); }} />
           &gt; 0 only
+        </label>}
+        {column === "source_code" && <label className="mb-1 flex items-center gap-1 whitespace-nowrap text-xs font-normal normal-case tracking-normal">
+          <input type="checkbox" checked={withNotes}
+            aria-label={`${section}: only codes with a curator note`}
+            title="Filter all source tabs and sections to codes a curator has left a note on"
+            onChange={(event) => { setPages({}); setExpandedGroups({}); setWithNotes(event.target.checked); }} />
+          with notes
         </label>}
         {sortable ? (
           <button type="button" title={`Sort ${section} by ${label}`} className="inline-flex items-center gap-1 hover:underline focus:outline-2"
@@ -1126,7 +1138,8 @@ export default function CodeMappingPage() {
           >
             <td className="px-4 py-3">
               {row.locked_by_username && <span title={`Locked by ${row.locked_by_username}`} className="mr-1 text-amber-500">&#128274;</span>}
-              <div className="font-mono text-xs text-slate-900"><span data-testid="source-code">{row.source_code}</span><AxisVariantFlag count={row.axis_variant_count} /></div>
+              <div className="font-mono text-xs text-slate-900"><span data-testid="source-code">{row.source_code}</span><AxisVariantFlag count={row.axis_variant_count} />
+                {row.has_curator_note && <CuratorNoteMark note={row.notes} />}</div>
               {row.source_code_description && <div className="text-xs text-slate-700">{row.source_code_description}</div>}
               {row.source_vocabulary_id && <div className="text-xs text-slate-500">{systemLabel(row)}</div>}
             </td>
@@ -1728,7 +1741,9 @@ export default function CodeMappingPage() {
               <span className="font-normal text-slate-500">({browse?.pages[section]?.total ?? sectionRows.length}{browse?.rollup ? " groups" : ""})</span>
             </button>
             <DownloadMenu rows={sectionRows} section={section} />
-            {!collapsed && renderTable(sectionRows, `No ${section.toLowerCase()} mappings in this vocabulary.`, section)}
+            {!collapsed && renderTable(sectionRows, withNotes
+              ? `No ${section.toLowerCase()} mappings with a curator note here. Uncheck "with notes" to see every code.`
+              : `No ${section.toLowerCase()} mappings in this vocabulary.`, section)}
           </section>;
         })}
       </div>

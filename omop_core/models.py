@@ -2191,6 +2191,12 @@ class SourceCodeConceptMapping(models.Model):
     source = models.CharField(max_length=50, blank=True, default='HealthKey', db_index=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='proposed')
     notes = models.TextField(blank=True, default='')
+    # Notes is one field that Suggest, importers and curators all write, and
+    # the mapping dialog sends it back on every save. This is when a curator
+    # last changed the text themselves; null means the text is a machine's
+    # (or empty). The list's "with notes" filter and sticky-note marker read
+    # it (#2423).
+    curator_note_at = models.DateTimeField(null=True, blank=True)
 
     # ── Provenance: who proposed this and how often it has been seen ─────
     # An SME reviewing the queue needs to know whether a row is a machine's
@@ -2327,6 +2333,9 @@ class SourceCodeConceptMapping(models.Model):
             models.Index(fields=['destination_vocabulary_id', 'status'], name='ix_sccm_dest_status'),
             GinIndex(OpClass(Upper('source_code_description'), name='gin_trgm_ops'),
                      name='ix_sccm_desc_upper_trgm'),
+            # Curator notes are a handful of rows in a large catalog.
+            models.Index(fields=['curator_note_at'], name='ix_sccm_curator_note',
+                         condition=Q(curator_note_at__isnull=False)),
         ]
         constraints = [
             # Blank source systems stay distinct from each other: Postgres treats
