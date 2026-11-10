@@ -276,6 +276,10 @@ Location. See [PatientRecord-first writes](patient-record-first-writes.md)
 for same-day updates, clears, pending-edit acknowledgement, and approval backfill.
 
 Consult `GET /api/v1/patient-records/writable-fields/` before building an editor.
+The response carries a versioned envelope (`__descriptor__`, `schema_version`), and
+the capability semantics — `kind`, `writable` vs `answerable`, `inputs`, the
+readback path for each write — are in
+[writable-field-descriptor.md](writable-field-descriptor.md).
 Computed and other serializer read-only inputs are generally ignored; a successful
 response alone does not establish that such a field changed. Specific retired or
 structured fields can explicitly reject changes, including legacy genomic summaries.

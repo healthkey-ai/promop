@@ -219,7 +219,9 @@ def collect_descriptor_options(tables):
     permitted = {'kind', 'writable', 'target', 'projection_target', 'person_field', 'payload_field',
                  'value_kind', 'multiple', 'canonical', 'curated', 'projection', 'options'}
     records = {name: {k: v for k, v in descriptor.items() if k in permitted}
-               for name, descriptor in descriptors.items()}
+               for name, descriptor in descriptors.items()
+               # The versioned envelope is not a field.
+               if not name.startswith('__')}
     rows = []
     for field, descriptor in records.items():
         for option in descriptor.get('options', []):

@@ -359,7 +359,11 @@ def patient_form_descriptors(descriptor=None, *, readable_fields=None, writable=
     result = {}
     descriptor = dict(descriptor)
     descriptor['patient_name'] = {'kind': 'direct', 'writable': True, 'target': 'patient_record', 'value_kind': 'string'}
-    names = set(descriptor) | set(FORM_INPUTS)
+    # `__descriptor__` is the envelope, not a field: it carries the schema
+    # version and documentation pointer. Enriching it would invent a label and
+    # a control for it.
+    names = {name for name in set(descriptor) | set(FORM_INPUTS)
+             if not name.startswith('__')}
     if readable_fields is not None:
         # Synthetic blocked computed nodes may expose input navigation, never
         # model data withheld by the embedding host.

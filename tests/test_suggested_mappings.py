@@ -31,7 +31,7 @@ class TestASuggestionCannotActOnItsOwn:
         # field's classification can change, and this is not a test about which.
         subject = next(
             f for f, e in sorted(build_writable_field_descriptor().items())
-            if e['kind'] == 'unmapped'
+            if not f.startswith('__') and e['kind'] == 'unmapped'
         )
         FieldConceptMapping.objects.create(
             field_name=subject,
