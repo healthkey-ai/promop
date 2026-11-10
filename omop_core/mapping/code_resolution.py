@@ -671,6 +671,13 @@ def _resolve_source_code(*, source_code, omop_table, source_vocabulary_id,
     # 'Maps to' standard target; with none it stays with a curator, as a
     # non-standard hit already does on the promotion path (#2300).
     concept = _direct_concept(source_vocabulary_id, source_code)
+    if (concept is not None and not source_vocabulary_id
+            and concept.domain_id != _DOMAIN_FOR_TABLE.get(table)):
+        # No code system was sent, so the match is by code text alone and an
+        # in-house code can collide with a real one: HCPCS modifier 'SG' is a
+        # standard Observation, and a drug code 'SG' must not land on it.
+        # Only a hit in the table's own domain is evidence; else a curator.
+        concept = None
     if concept is not None:
         if concept.standard_concept == 'S' and not concept.invalid_reason:
             return concept, _effective_direct_mapping(
