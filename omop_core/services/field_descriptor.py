@@ -23,6 +23,11 @@ from omop_core.services.patient_record_service import (
     PATIENT_RECORD_OMOP_MAPPED_FIELDS,
     _LAB_FIELD_ALIASES,
 )
+from omop_core.services import direct_bilirubin_units
+from omop_core.services.blood_count_source_pairs import PAIRS as COUNT_SOURCE_PAIRS
+from omop_core.services.chemistry_units import PAIRS as CHEMISTRY_SOURCE_PAIRS
+from omop_core.services.creatinine_units import PAIR_FIELD as CREATININE_PAIR
+from omop_core.services.hemoglobin_units import PAIR_FIELD as HEMOGLOBIN_PAIR
 from omop_core.services.provenance_registry import get_registry
 from omop_core.services.formula_evaluator import validate_formula
 
@@ -187,6 +192,17 @@ for aliases in _LAB_FIELD_ALIASES.values():
 # extractor derives, routed through the curation tables — those 18 recovered
 # attributions from #596/#607). A field inventory, not a code route.
 _LOINC_EDITABLE_FIELDS = frozenset(LAB_FIELD_TO_LOINC.keys()) | LAB_FIELDS
+
+# The source half of a lab pair is a clinical INPUT the reader edits: the
+# normalised canonical is derived from it (#2318). The derivation alias map
+# also lists them, so classifying by that map alone called them `alias` and
+# dropped them from disease relevance — the placement work already counts
+# them as common clinical fields.
+_SOURCE_PAIR_INPUT_FIELDS = frozenset(
+    {HEMOGLOBIN_PAIR, CREATININE_PAIR, direct_bilirubin_units.PAIR_FIELD}
+    | set(COUNT_SOURCE_PAIRS)
+    | {spec['value'] for spec in CHEMISTRY_SOURCE_PAIRS.values()}
+)
 
 
 def _get_field_type_label(field) -> str:
@@ -440,6 +456,8 @@ def _classify_field(field_name: str) -> str:
     if field_name in _LOCATION_FIELDS:
         return 'location'
     if field_name in _LOINC_EDITABLE_FIELDS:
+        return 'editable'
+    if field_name in _SOURCE_PAIR_INPUT_FIELDS:
         return 'editable'
     if field_name in _ALL_ALIASES:
         return 'alias'
