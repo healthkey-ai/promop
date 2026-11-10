@@ -583,3 +583,37 @@ def test_shared_form_descriptor_keeps_the_schema_version_envelope():
                            (reader, {'person_id': record.person_id})):
         data = client.get(url, params, HTTP_X_PATIENT_FORM='1').data
         assert data['__descriptor__']['schema_version'] == DESCRIPTOR_SCHEMA_VERSION, params
+
+
+def test_org_client_gets_no_record_data_for_a_patient_it_cannot_read():
+    """#2433: an org client may write a NULL-org record (it passes
+    _caller_may_write_patient) but retrieve() 404s it, so the shared descriptor
+    must not carry that patient's data (here: the stored height unit)."""
+    from datetime import timedelta
+    from oauth2_provider.models import AccessToken, Application
+    from omop_core.models import ApplicationOrganization, Organization
+    org = Organization.objects.create(name='Scoped clinic')
+    owner = Identity.objects.create_user(email='scoped-app-owner@example.test')
+    app = Application.objects.create(
+        name='Scoped service', client_id='test-scoped-form-service',
+        client_type=Application.CLIENT_CONFIDENTIAL,
+        authorization_grant_type=Application.GRANT_CLIENT_CREDENTIALS, user=owner)
+    ApplicationOrganization.objects.create(application=app, organization=org)
+    token = AccessToken.objects.create(
+        application=app, user=None, token='test-scoped-form-token',
+        scope='patient/*.read patient/*.write', expires=timezone.now() + timedelta(hours=1))
+    unowned = PatientRecordFactory(organization=None, height=70, height_units='in')
+    url = '/api/v1/patient-records/writable-fields/'
+
+    staff = _client().get(url, {'person_id': unowned.person_id}, HTTP_X_PATIENT_FORM='1').data
+    assert staff['height']['unit'] == 'in'
+
+    client = APIClient()
+    client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.token}')
+    assert client.get(f'/api/v1/patient-records/{unowned.person_id}/').status_code == 404
+    scoped = client.get(url, {'person_id': unowned.person_id}, HTTP_X_PATIENT_FORM='1')
+    assert scoped.status_code == 200, scoped.data
+    assert scoped.data['height'].get('unit') != 'in'
+    # Its PATCH 404s, so nothing may claim to be writable either.
+    assert not any(entry.get('writable') for name, entry in scoped.data.items()
+                   if not name.startswith('__'))

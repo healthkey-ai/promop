@@ -5972,9 +5972,17 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        if _caller_may_write_patient(request, person_id):
+        record = (PatientRecord.objects.filter(person_id=person_id).first()
+                  if shared_form else None)
+        org = None if is_service_token(request) else get_request_org(request)
+        # An org client passes _caller_may_write_patient for an unowned
+        # (NULL-org) record, but the shared-form PATCH resolves the patient
+        # like retrieve() and 404s it. Describe it read-only, without this
+        # patient's data (fact dates, edit markers, stored units).
+        unreadable = (shared_form and record is not None and org is not None
+                      and record.organization != org)
+        if not unreadable and _caller_may_write_patient(request, person_id):
             if shared_form:
-                record = PatientRecord.objects.filter(person_id=person_id).first()
                 descriptor = shared(descriptor, record=record)
                 if not getattr(request.user, 'is_staff', False):
                     for field in self._STAFF_ONLY_FIELDS:
