@@ -109,7 +109,7 @@ def test_descriptor_carries_the_toxicity_scale_and_overridable_flags(editor):
     assert [option['value'] for option in descriptors['toxicity_grade']['options']] == [
         0, 1, 2, 3, 4,
     ]
-    for field in ('treatment_refractory_status', 'progression', 'stem_cell_transplant_history'):
+    for field in ('treatment_refractory_status', 'progression', 'stem_cell_transplant_history', 'sct_date'):
         assert descriptors[field]['writable'] is True
         assert descriptors[field]['overridable'] is True
 

@@ -1497,10 +1497,17 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     pair_derived=derived_from_pair,
                 )
                 patient_info.refresh_from_db()
-            elif profile_projected or touched_languages:
+            elif profile_projected:
                 from omop_core.services.patient_record_service import recompute_patient_record_fields
                 recompute_patient_record_fields(patient_info, changed_fields=profile_projected)
                 patient_info.refresh_from_db()
+
+            # Rows are written above; the flattened columns the matcher reads
+            # are derived from them and were the one thing a language edit
+            # left stale until the next full derivation.
+            if touched_languages:
+                from omop_core.services.patient_record_service import sync_language_columns
+                patient_info = sync_language_columns(person, patient_info)
 
             # Full-form autosave echoes are not confirmations (#1988). Only an
             # actual change of the answer may create/renew its provenance.

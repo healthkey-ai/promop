@@ -26114,6 +26114,23 @@ class PersonLanguageSkillPatchTest(_SmartBase):
         self.assertFalse(record.english_speak)
         self.assertEqual(record.languages_skills, 'English language: read')
 
+    def test_the_patient_info_patch_derives_the_read_model_too(self):
+        """The legacy /api/patient-info/ route must not leave a stale read model.
+
+        `/api/persons/` refreshes the whole record; `/api/patient-info/` built
+        only the rows and left `english_read` null, so the matcher kept
+        answering "not asked" after a successful language edit.
+        """
+        resp = self.client.patch(
+            f'/api/patient-info/{self.person.person_id}/',
+            {'language_skills': {'english': ['read']}},
+            content_type='application/json', **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        record = self._record()
+        self.assertTrue(record.english_read)
+        self.assertFalse(record.english_speak)
+        self.assertEqual(record.languages_skills, 'English language: read')
+
     def test_both_languages_can_be_set_at_once(self):
         self._patch({'english': ['speak'], 'spanish': ['write']})
         record = self._record()
