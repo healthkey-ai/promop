@@ -5,6 +5,7 @@ import FieldMappingLink from './FieldMappingLink';
 import { clinicalClient, clinicalUrl } from '@/api/clinicalTransport';
 import { Button } from '@/components/shadcn/button';
 import { useWritableFields } from '@/hooks/useWritableFields';
+import { usePatientFormStore } from '@/federation/PatientFormContext';
 import { Dialog, DialogContent, DialogTitle, DialogDescription } from '@/components/ui-labs/dialog';
 
 export type Variant = { id?: number; gene?: string; variant?: string; [key: string]: string | number | null | undefined };
@@ -148,6 +149,7 @@ export default function GenomicsFindings({
   url = clinicalUrl,
 }: GenomicsFindingsProps) {
   const { descriptors } = useWritableFields(personId);
+  const store = usePatientFormStore();
   const editable = !readOnly && descriptors.genetic_mutations?.writable === true;
   const [variants, setVariants] = useState<Variant[]>([]);
   const [markers, setMarkers] = useState<Marker[]>([]);
@@ -205,6 +207,7 @@ export default function GenomicsFindings({
   async function save() {
     if (!draft || !editable) return;
     setBusy(true); setError(''); setStatus('');
+    store?.beginBypassWrite();
     try {
       const payload = { ...draft, allelic_frequency: draft.allelic_frequency === '' ? null : draft.allelic_frequency };
       const marker = markerFor(draft);
@@ -224,19 +227,20 @@ export default function GenomicsFindings({
       setDraft(null); setStatus('Genomic finding saved.');
       onChanged?.();
     } catch (err) { setError(errorMessage(err)); }
-    finally { setBusy(false); }
+    finally { store?.endBypassWrite(); setBusy(false); }
   }
 
   async function remove() {
     if (!deleting || !editable) return;
     setBusy(true); setError(''); setStatus('');
+    store?.beginBypassWrite();
     try {
       await client.delete(`${genomicsUrl}${deleting.id}/`);
       setVariants(old => old.filter(v => v.id !== deleting.id));
       setDeleting(null); setViewing(null); setStatus('Genomic finding deleted.');
       onChanged?.();
     } catch (err) { setError(errorMessage(err)); }
-    finally { setBusy(false); }
+    finally { store?.endBypassWrite(); setBusy(false); }
   }
 
   const active = draft || viewing;

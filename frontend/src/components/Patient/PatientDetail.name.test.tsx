@@ -39,6 +39,11 @@ const PATIENT = {
 beforeEach(() => {
   vi.clearAllMocks();
   (api.get as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
+    if (url.includes("writable-fields")) {
+      // The descriptor is a mapping; the generic [] below would be rejected as
+      // a malformed contract.
+      return Promise.resolve({ data: {} });
+    }
     if (url.includes("/patient-info/")) {
       return Promise.resolve({
         data: { patient_info: PATIENT, user: null, patient_name: PATIENT.patient_name },

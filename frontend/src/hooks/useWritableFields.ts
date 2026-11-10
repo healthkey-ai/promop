@@ -1,6 +1,7 @@
 import { useContext, useEffect, useState, useSyncExternalStore } from 'react';
 import { PatientFormContext } from '@/federation/PatientFormContext';
 import { clinicalClient, clinicalUrl } from '@/api/clinicalTransport';
+import { parseWritableDescriptor } from '@/federation/descriptorVersion';
 
 /**
  * What the server says a client may do with each PatientRecord field.
@@ -154,7 +155,12 @@ export function fetchWritableFields(
         params: key ? { person_id: key } : undefined,
       })
       .then((res) => {
-        const data = (res.data ?? {}) as FieldDescriptors;
+        // The native editor saves fields from this mapping too. An unknown
+        // contract must fail closed here as well, not only in the federated
+        // store: otherwise a newer descriptor would still offer old boxes.
+        const parsed = parseWritableDescriptor(res.data);
+        if (parsed.error) throw new Error(parsed.error);
+        const data = parsed.fields as unknown as FieldDescriptors;
         cached.set(key, data);
         return data;
       })

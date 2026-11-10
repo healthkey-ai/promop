@@ -65,20 +65,6 @@ afterEach(async () => {
   runtimes.clear();
 });
 
-async function mount(apiBase: string) {
-  // The panel loads through the store; do it before the act below so the
-  // first render has lines.
-  const runtime = runtimeFor(apiBase);
-  await runtime.store.load();
-  const root = document.createElement('div');
-  document.body.appendChild(root);
-  await act(async () => {
-    disposers.push(mountTherapyLines(root, { apiBase, readOnly: false }));
-  });
-  await act(async () => {});
-  return runtime;
-}
-
 const complete = (root: HTMLElement) =>
   root.querySelector<HTMLInputElement>(
     'input[aria-label="Treatment history is complete"]',

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { clinicalClient, clinicalUrl } from '@/api/clinicalTransport';
 import { useVocabulary } from '@/hooks/useVocabulary';
+import { usePatientFormStore } from '@/federation/PatientFormContext';
 
 export interface ConditionsAnswer {
   no_pre_existing_conditions: boolean | null;
@@ -16,6 +17,7 @@ export default function PreexistingConditionsAnswer({
   readOnly: boolean;
   onSaved: (answer: ConditionsAnswer) => void | Promise<void>;
 }) {
+  const store = usePatientFormStore();
   const { options, loading } = useVocabulary('pre-existing-condition-category', 'code');
   const [selected, setSelected] = useState<string[]>(
     Array.isArray(categories) ? categories.filter((v): v is string => typeof v === 'string') : []);
@@ -49,6 +51,9 @@ export default function PreexistingConditionsAnswer({
     setBusy(true);
     setError('');
     setMessage('');
+    // The attestation endpoint bypasses the save queue; hold the host's
+    // listeners until the answer, its acknowledgement and `onSaved` land.
+    store?.beginBypassWrite();
     try {
       const { data } = await clinicalClient().post<ConditionsAnswer>(
         clinicalUrl(`/v1/patient-records/${personId}/preexisting-conditions-answer/`), {

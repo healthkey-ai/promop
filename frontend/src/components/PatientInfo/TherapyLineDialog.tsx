@@ -9,6 +9,7 @@ import {
   type TherapyConnection,
 } from '@/api/therapyLines';
 import type { TherapyRegimen } from '@/types/therapy';
+import { usePatientFormStore } from '@/federation/PatientFormContext';
 
 interface Props {
   personId: number;
@@ -57,6 +58,7 @@ export default function TherapyLineDialog({
   onAuthored,
   connection,
 }: Props) {
+  const store = usePatientFormStore();
   const episodeId = typeof line?.episode_id === 'number' ? line.episode_id : null;
   const editing = episodeId !== null;
   const [lineNumber, setLineNumber] = useState(String(line?.line ?? defaultLineNumber));
@@ -310,9 +312,17 @@ export default function TherapyLineDialog({
           : [],
         ...(knownComposition ? {} : { composition_unknown: true }),
       };
-      const result = episodeId !== null
-        ? await updateTherapyLine(episodeId, payload, connection)
-        : await authorTherapyLine(payload, connection);
+      // The authoring endpoints bypass the save queue; hold the host's
+      // listeners until the write and its acknowledgement land.
+      store?.beginBypassWrite();
+      let result;
+      try {
+        result = episodeId !== null
+          ? await updateTherapyLine(episodeId, payload, connection)
+          : await authorTherapyLine(payload, connection);
+      } finally {
+        store?.endBypassWrite();
+      }
       onAuthored(result.patient_info);
       onClose();
     } catch (err: unknown) {

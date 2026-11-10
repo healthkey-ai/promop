@@ -65,6 +65,7 @@ export default function TherapyLinesPanel({ store, readOnly = false, onChanged, 
   const retract = async (line: EditableTherapyLine) => {
     if (typeof line.episode_id !== 'number') return;
     setBusy(true); setError('');
+    store.beginBypassWrite();
     try {
       await retractTherapyLine(line.episode_id, connection);
       await store.load();
@@ -72,6 +73,7 @@ export default function TherapyLinesPanel({ store, readOnly = false, onChanged, 
     } catch {
       setError('Could not remove that line. Try again.');
     } finally {
+      store.endBypassWrite();
       setBusy(false);
     }
   };
@@ -79,6 +81,7 @@ export default function TherapyLinesPanel({ store, readOnly = false, onChanged, 
   const setComplete = async (next: boolean) => {
     if (personId === null) return;
     setBusy(true); setError('');
+    store.beginBypassWrite();
     try {
       await setTherapyHistoryCompleteness(personId, next, connection);
       await store.load();
@@ -86,6 +89,7 @@ export default function TherapyLinesPanel({ store, readOnly = false, onChanged, 
     } catch {
       setError('Could not update whether this history is complete.');
     } finally {
+      store.endBypassWrite();
       setBusy(false);
     }
   };

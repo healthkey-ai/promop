@@ -15,6 +15,7 @@ import { createPortal } from 'react-dom';
 import { createRoot, type Root } from "react-dom/client";
 
 import { PatientInfo } from "./PatientInfo";
+import { PatientFormContext } from "./PatientFormContext";
 import { injectStyles } from "./injectStyles";
 import { patientFormRuntime, retainPatientFormRuntime, type PatientFormConnection } from './patientFormRuntime';
 import { __resetWritableFieldsCache } from '@/hooks/useWritableFields';
@@ -129,17 +130,19 @@ export function mountTherapyLines(el: HTMLElement, opts: MountOptions = {}): () 
   roots.set(el, root);
   root.render(
     <StrictMode>
-      <TherapyLinesPanel
-        store={runtime.store}
-        // The panel takes the connection explicitly: two mounted widgets must
-        // not act through a shared module-level transport.
-        connection={{ client: runtime.client, basePath: apiBasePath }}
-        readOnly={opts.readOnly ?? true}
-        // Therapy mutations bypass the store's save queue, so `store.load()`
-        // alone never reaches the host's `onUpdated` listeners. The host still
-        // has to invalidate its own queries and re-render the row.
-        onChanged={() => { void opts.onPatientUpdated?.(); }}
-      />
+      <PatientFormContext.Provider value={runtime.store}>
+        <TherapyLinesPanel
+          store={runtime.store}
+          // The panel takes the connection explicitly: two mounted widgets
+          // must not act through a shared module-level transport.
+          connection={{ client: runtime.client, basePath: apiBasePath }}
+          readOnly={opts.readOnly ?? true}
+          // Therapy mutations bypass the store's save queue, so `store.load()`
+          // alone never reaches the host's `onUpdated` listeners. The host
+          // still has to invalidate its own queries and re-render the row.
+          onChanged={() => { void opts.onPatientUpdated?.(); }}
+        />
+      </PatientFormContext.Provider>
     </StrictMode>,
   );
   return () => unmount(el);
