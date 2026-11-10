@@ -318,7 +318,7 @@ export default function WearableTab({ formData, onRefresh, readOnly = false }: P
         <button
           type="button"
           onClick={handleUploadClick}
-          disabled={uploading}
+          disabled={uploading || readOnly}
           className="inline-flex items-center gap-2 rounded-md bg-portal-brand px-4 py-2 text-sm font-medium text-white shadow-sm hover:bg-portal-brand/90 disabled:opacity-50"
         >
           {uploading ? (
@@ -355,6 +355,7 @@ export default function WearableTab({ formData, onRefresh, readOnly = false }: P
         type="file"
         accept=".fit,.zip"
         multiple
+        disabled={readOnly}
         className="hidden"
         onChange={handleFileChange}
       />
@@ -390,7 +391,7 @@ export default function WearableTab({ formData, onRefresh, readOnly = false }: P
                 <button
                   type="button"
                   onClick={(e) => { e.stopPropagation(); handleDelete(upload.id); }}
-                  disabled={deletingId === upload.id}
+                  disabled={readOnly || deletingId === upload.id}
                   className="ml-1 rounded p-1 text-gray-400 hover:bg-red-50 hover:text-red-500 disabled:opacity-50"
                   title="Delete upload"
                 >

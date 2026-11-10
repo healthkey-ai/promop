@@ -81,9 +81,9 @@ async function renderForm(options: { disease?: string; federated?: boolean } = {
   await waitFor(() => expect(screen.getByRole('navigation', { name: 'Patient info tabs' })).toBeInTheDocument());
 }
 
-it('lets wide tab tables scroll locally instead of stretching the host fieldset', async () => {
+it('lets wide tab tables scroll locally instead of stretching the host page', async () => {
   await renderForm();
-  expect(document.querySelector('fieldset')).toHaveClass('min-w-0');
+  expect(document.querySelector('[data-patient-info-panel]')).toHaveClass('min-w-0');
 });
 
 /** The strip's labels, in render order. */

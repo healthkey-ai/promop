@@ -1,4 +1,5 @@
 import type { FieldDescriptor } from '@/hooks/useWritableFields';
+import { usePatientFormReadOnly } from '@/federation/PatientFormContext';
 
 const FACTORS = [
   ['large_mass', 'A nodal or extranodal mass > 7 cm'],
@@ -13,9 +14,10 @@ const FACTORS = [
 export default function GelfAssessment({ value, descriptor, onChange }: {
   value: unknown; descriptor?: FieldDescriptor; onChange: (field: string, value: unknown) => void;
 }) {
+  const locked = usePatientFormReadOnly();
   const selected = value == null ? null : String(value).split(',').filter(Boolean);
   const write = (next: string[] | null) => onChange('gelf_criteria_options', next == null ? null : next.join(','));
-  return <fieldset className="space-y-3 rounded-md border p-4" disabled={!descriptor?.writable}>
+  return <fieldset className="space-y-3 rounded-md border p-4" disabled={locked || !descriptor?.writable}>
     <legend className="px-1 font-medium">GELF high tumor burden</legend>
     <p className="text-sm text-muted-foreground">Any selected criterion meets this GELF definition. Nodal count or marrow involvement alone is insufficient.</p>
     {FACTORS.map(([key, label]) => <label className="flex items-center gap-3 text-sm" key={key}>

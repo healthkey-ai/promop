@@ -6,6 +6,7 @@ import ClinicalField from '../ClinicalField';
 import TreatingInstitutionField from '../TreatingInstitutionField';
 import Section from '../Section';
 import { Input } from '@/components/shadcn/input';
+import { usePatientFormReadOnly } from '@/federation/PatientFormContext';
 import SelectControl from '../controls/SelectControl';
 import { today } from '@/api/clinicalFacts';
 import PreexistingConditionsAnswer, { type ConditionsAnswer } from '../PreexistingConditionsAnswer';import {
@@ -56,6 +57,8 @@ export default function GeneralTab({
   // asking and whose record it is, not only on whether the field is mapped.
   const personId = (formData?.person_id ?? formData?.person) as number | undefined;
   const { descriptors, loading } = useWritableFields(personId);
+  // A read-only form keeps navigation usable, so each writing control opts out.
+  const locked = usePatientFormReadOnly();
   const [date, setDate] = useState(today());
 
   const { source: ecogSource }        = useVocabulary('ecog-status', 'code');
@@ -135,13 +138,14 @@ export default function GeneralTab({
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
           <div className="space-y-1.5">
             <label className="text-sm font-medium text-portal-text-primary">Patient Name</label>
-            <Input value={editedName} onChange={(e) => onNameChange(e.target.value)} />
+            <Input value={editedName} disabled={locked} onChange={(e) => onNameChange(e.target.value)} />
           </div>
 
           <div className="space-y-1.5">
             <label className="text-sm font-medium text-portal-text-primary">Date Precision</label>
             <SelectControl
               value={(formData?.date_of_birth_precision as string) ?? 'day'}
+              disabled={locked}
               options={[
                 { value: 'day', label: 'Full date' },
                 { value: 'month', label: 'Month & year' },
@@ -186,6 +190,7 @@ export default function GeneralTab({
             <label className="text-sm font-medium text-portal-text-primary">Disease Category</label>
             <SelectControl
               value={selectedCategory ?? ''}
+              disabled={locked}
               options={categories.map((c) => ({ value: c.value, label: c.label }))}
               onChange={(v: unknown) => {
                 const cat = (v as string) || null;
@@ -208,7 +213,7 @@ export default function GeneralTab({
             <SelectControl
               value={(formData?.disease as string) ?? ''}
               options={categoryDiseaseOptions.map((d) => ({ value: d, label: d }))}
-              disabled={!selectedCategory}
+              disabled={locked || !selectedCategory}
               placeholder={selectedCategory ? 'Select…' : 'Select a category first'}
               allowClear
               onChange={(v: unknown) => onChange('disease', (v as string) || null)}
@@ -230,6 +235,7 @@ export default function GeneralTab({
             <label className="text-sm font-medium text-portal-text-primary">Postal Code / Zip Code</label>
             <Input
               value={(formData?.postal_code as string) || ''}
+              disabled={locked}
               onChange={(e) => onZipcodeChange(e.target.value)}
               placeholder="Enter 5-digit US zip code to auto-fill city and state"
             />

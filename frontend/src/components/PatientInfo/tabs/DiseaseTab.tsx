@@ -1,6 +1,7 @@
 import { useVocabulary } from '@/hooks/useVocabulary';
 import { useWritableFields } from '@/hooks/useWritableFields';
 import ClinicalField from '../ClinicalField';
+import { usePatientFormReadOnly } from '@/federation/PatientFormContext';
 import SelectControl from '../controls/SelectControl';
 import Section from '../Section';
 import FlipiAssessment from '../FlipiAssessment';
@@ -39,12 +40,14 @@ function DatePrecisionPicker({
   onChange: (field: string, value: unknown) => void;
 }) {
   const precision = (formData?.[precisionField] as string) ?? 'day';
+  const locked = usePatientFormReadOnly();
   return (
     <div className="space-y-1.5">
       <label className="text-sm font-medium text-portal-text-primary">Date Precision</label>
       <SelectControl
         value={precision}
         options={PRECISION_OPTIONS}
+        disabled={locked}
         onChange={(v) => {
           const newPrec = v ?? 'day';
           onChange(precisionField, newPrec);

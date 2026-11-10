@@ -2,6 +2,7 @@ import { useEffect, useId, useState } from 'react';
 import { clinicalClient, clinicalUrl } from '@/api/clinicalTransport';
 import { Input } from '@/components/shadcn/input';
 import FieldMappingLink from './FieldMappingLink';
+import { usePatientFormReadOnly } from '@/federation/PatientFormContext';
 import type { FieldDescriptor } from '@/hooks/useWritableFields';
 
 interface Institution { id: string; label: string; state_code: string }
@@ -19,7 +20,8 @@ export default function TreatingInstitutionField({ value, descriptor, onChange }
   const query = draft ?? value;
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(-1);
-  const writable = !!descriptor?.writable;
+  const locked = usePatientFormReadOnly();
+  const writable = !!descriptor?.writable && !locked;
   useEffect(() => {
     // Nothing to search when the field is read-only: the directory fetch is only
     // useful to a writer (#5576).

@@ -33,6 +33,10 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
   const labels: Record<string, string> = { general: 'General', disease: diseaseLabel, treatment: 'Treatment',
     labs: 'Labs', behavior: 'Behavior', wearable: 'Wearable', genomics: 'Genomics', history: 'History' };
   const tabKey = tabKeys[activeTab] ?? 'general';
+  // Edits are off for a read-only mount and for a caller the server denies
+  // writes. This gates the controls that write, one by one; navigation and
+  // display controls inside the tabs stay usable.
+  const locked = Boolean(readOnly) || !state.writable;
   useEffect(() => {
     if (deepLinkAppliedRef.current || state.loading) return;
     deepLinkAppliedRef.current = true;
@@ -41,11 +45,11 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
     if (index >= 0) setActiveTab(index);
   }, [state.loading, showDiseaseTab, federated]);
   const handleFieldChange = useCallback((name: string, value: unknown) => {
-    if (!readOnly) store.enqueue(name, value);
-  }, [store, readOnly]);
+    if (!locked) store.enqueue(name, value);
+  }, [store, locked]);
   const handleZipcodeChange = useCallback(async (zipcode: string) => {
     handleFieldChange('postal_code', zipcode);
-    if (!/^\d{5}$/.test(zipcode) || readOnly) return;
+    if (!/^\d{5}$/.test(zipcode) || locked) return;
     try {
       const response = await fetch(`https://api.zippopotam.us/us/${zipcode}`);
       if (!response.ok) return;
@@ -59,7 +63,7 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
         if (place['state abbreviation']) handleFieldChange('region', place['state abbreviation']);
       }
     } catch { /* ZIP lookup is optional; the typed ZIP still saves. */ }
-  }, [store, readOnly, handleFieldChange]);
+  }, [store, locked, handleFieldChange]);
 
   if (state.loading) return <div role="status">Loading patient information…</div>;
   if (state.error) return <div role="alert" className="rounded-2xl bg-background p-8 text-center">
@@ -79,10 +83,11 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
     </nav></div>
     <div><div className="pb-4 pt-2"><h2 className="text-base font-medium text-foreground/70">{labels[tabKey]}</h2></div>
       {/* Let tab-local scroll containers bound wide tables instead of allowing
-          the fieldset's default min-content width to stretch the host page. */}
-      <fieldset className="min-w-0" disabled={readOnly || !state.writable}>
+          a min-content width to stretch the host page. */}
+      <PatientFormReadOnlyContext.Provider value={locked}>
+      <div className="min-w-0" data-patient-info-panel>
         {tabKey === 'general' && <GeneralTab showCoordinates={!federated} patientMode={federated}
-          conditionsReadOnly={readOnly}
+          conditionsReadOnly={locked}
           onConditionsSaved={(answer) => {
             store.applyServerValues({ ...answer });
             // The attestation endpoint bypasses the save queue, so the host's
@@ -93,7 +98,7 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
           onNameChange={(value) => handleFieldChange('patient_name', value)} onZipcodeChange={handleZipcodeChange} />}
         {tabKey === 'disease' && <DiseaseTab formData={editedInfo} onChange={handleFieldChange} diseaseType={diseaseType} />}
         {tabKey === 'treatment' && <TreatmentTab formData={editedInfo} onChange={handleFieldChange}
-          diseaseType={diseaseType} readOnly={readOnly}
+          diseaseType={diseaseType} readOnly={locked}
           // Therapy mutations bypass the store's queue: reload the record and
           // tell the host, or its trial matches keep the old therapy history.
           onRecordRefreshed={() => {
@@ -106,8 +111,8 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
           }} />}
         {tabKey === 'labs' && <LabsTab formData={editedInfo} onChange={handleFieldChange} />}
         {tabKey === 'behavior' && <BehaviorTab formData={editedInfo} onChange={handleFieldChange} />}
-        {tabKey === 'wearable' && <WearableTab formData={editedInfo} onChange={handleFieldChange} />}
-        {tabKey === 'genomics' && <GenomicsTab formData={editedInfo} readOnly={readOnly}
+        {tabKey === 'wearable' && <WearableTab formData={editedInfo} onChange={handleFieldChange} readOnly={locked} />}
+        {tabKey === 'genomics' && <GenomicsTab formData={editedInfo} readOnly={locked}
           onChanged={() => {
             store.beginBypassWrite();
             void store.load()
@@ -115,14 +120,14 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
               .finally(() => store.endBypassWrite());
           }} />}
         {tabKey === 'history' && <ClinicalSummaryTab formData={editedInfo} onNavigateToLabs={() => setActiveTab(tabKeys.indexOf('labs'))} />}
-      </fieldset>
+      </div>
+      </PatientFormReadOnlyContext.Provider>
     </div>
   </div>;
 }
 
 export function PatientInfo({ apiClient, apiBasePath, queryClient, className, theme, ...props }: PatientInfoProps) {
   return <PatientInfoProvider apiClient={apiClient} apiBasePath={apiBasePath} queryClient={queryClient}
-    className={className} theme={theme}><PatientFormReadOnlyContext.Provider value={Boolean(props.readOnly)}>
-      <PatientInfoInner {...props} /></PatientFormReadOnlyContext.Provider></PatientInfoProvider>;
+    className={className} theme={theme}><PatientInfoInner {...props} /></PatientInfoProvider>;
 }
 export default PatientInfo;

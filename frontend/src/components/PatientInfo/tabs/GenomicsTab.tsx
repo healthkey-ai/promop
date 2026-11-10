@@ -14,7 +14,7 @@ export default function GenomicsTab({ formData, readOnly = false, onChanged }: {
 
   return <section className="space-y-5" aria-label="Patient genomic findings" data-patient-field="genetic_mutations">
     {store && <div className="rounded-md border p-4">
-      <PatientFieldEditor store={store} name="tp53_disruption" label="TP53 Disruption" />
+      <PatientFieldEditor store={store} name="tp53_disruption" label="TP53 Disruption" readOnly={readOnly} />
     </div>}
     <GenomicsFindings personId={personId} disease={disease} readOnly={readOnly}
       onChanged={onChanged} />
