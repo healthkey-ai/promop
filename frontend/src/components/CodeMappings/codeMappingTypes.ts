@@ -36,6 +36,8 @@ export interface CodeMappingRow {
   destination_invalid_reason?: string | null;
   status: "proposed" | "approved" | "rejected" | "unmapped";
   notes: string;
+  /** A curator wrote the note; Suggest's rationale in the same field is not one. */
+  has_curator_note?: boolean;
   origin: string;
   origin_system: string;
   /** The surface of the last curator save and the ranker's confidence in its destination (#2382). */

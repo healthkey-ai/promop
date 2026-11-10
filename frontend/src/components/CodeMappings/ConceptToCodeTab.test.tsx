@@ -179,6 +179,26 @@ describe('concept-first curation', () => {
     await waitFor(() => expect(get).toHaveBeenCalledWith('/v1/concept-to-code/123/', expect.objectContaining({ params: expect.objectContaining({ seen_only: '0', page: 1 }) })));
   });
 
+  it('filters source codes to those with a curator note, off by default, and marks them (#2423)', async () => {
+    get.mockImplementation((url: string, config?: { params?: Record<string, unknown> }) => Promise.resolve({ data:
+      url === '/v1/concept-to-code/' ? page([concept])
+        : config?.params?.with_notes === '1' ? page([{ ...source, curator_note: 'Ask the lab about the specimen.' }])
+          : page([{ ...source, curator_note: 'Ask the lab about the specimen.' }, { ...source, mapping_id: 78, source_code: 'S2', curator_note: '' }]) }));
+    await selectConcept();
+    const checkbox = screen.getByRole('checkbox', { name: 'Only source codes with a curator note' });
+    expect(checkbox).not.toBeChecked();
+    expect(checkbox.closest('th')).toHaveTextContent('Description');
+    expect(get).not.toHaveBeenCalledWith('/v1/concept-to-code/123/', expect.objectContaining({ params: expect.objectContaining({ with_notes: '1' }) }));
+    // Only the row whose note a curator wrote carries the sticky note.
+    const marks = screen.getAllByTestId('curator-note');
+    expect(marks).toHaveLength(1);
+    expect(marks[0]).toHaveAttribute('title', 'Ask the lab about the specimen.');
+    expect(marks[0].closest('tr')).toHaveTextContent('SNOMED:S1');
+    fireEvent.click(checkbox);
+    await waitFor(() => expect(get).toHaveBeenCalledWith('/v1/concept-to-code/123/', expect.objectContaining({ params: expect.objectContaining({ with_notes: '1', page: 1 }) })));
+    await waitFor(() => expect(screen.queryByText('SNOMED:S2')).not.toBeInTheDocument());
+  });
+
   it('approves only reviewed selections, with revision guards, and has no Find view (#2010)', async () => {
     await selectConcept();
     expect(screen.queryByRole('button', { name: 'Find source codes' })).not.toBeInTheDocument();

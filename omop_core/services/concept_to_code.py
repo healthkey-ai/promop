@@ -40,6 +40,8 @@ def source_payload(row):
         'confidence': row.suggestion_confidence,
         'decision_confidence': row.decision_confidence, 'decision_surface': row.decision_surface,
         'source_label_norm': row.source_label_norm,
+        # The note when a curator wrote it; Suggest's rationale is not one (#2423).
+        'curator_note': row.notes.strip() if row.curator_note_at else '',
         'units': [e.get('display') or e.get('unit', '') for e in (row.source_unit_evidence or []) if isinstance(e, dict)],
         'based_on': getattr(row, '_source_samples', {}).get('based_on', []),
         # Its units imply this many LOINC axis sets (the blue "n axis values").

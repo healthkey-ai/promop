@@ -106,6 +106,9 @@ _CODE_MAPPING_OPTIONAL_FIELDS: dict[str, object] = {
     # The last curator decision's surface and ranker confidence (#2382).
     'decision_surface': '',
     'decision_confidence': None,
+    # Travels with the note it describes (#2423): the copy replaces the text,
+    # so a payload without the key leaves no mark over the source's note.
+    'curator_note_at': None,
 }
 _CODE_MAPPING_CONCEPT_FKS = (
     'source_concept', 'target_concept', 'suggested_target_concept',
