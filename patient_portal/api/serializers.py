@@ -527,12 +527,14 @@ class PatientRecordSerializer(serializers.ModelSerializer):
     def to_internal_value(self, data):
         """Accept the historical misspelling on writes during API migration."""
         data = data.copy() if hasattr(data, 'copy') else dict(data)
-        # A direct computed-only assignment is refused, not silently dropped
-        # (#2135). An unchanged echo of the GET representation is not an
-        # assignment; the message names the source inputs where they exist.
-        computed_assignments = computed_only_assignments(data, self.instance)
-        if computed_assignments:
-            raise serializers.ValidationError(computed_assignments)
+        # A direct computed-only assignment is dropped on this native path,
+        # as dev did: its callers PATCH whole records and predate the refusal,
+        # so a 400 there rolled back their real edits (#2418 regression
+        # review). The shared form (X-Patient-Form, apply_patient_form_patch)
+        # still refuses it atomically (#2135); the descriptor marks these
+        # fields read-only on both.
+        for field_name in computed_only_assignments(data, self.instance):
+            data.pop(field_name, None)
         # Hemoglobin's source pair (#2318). Normalise the unit spelling BEFORE
         # field validation: the column's `TextChoices` only accepts the stored
         # code, and a reader may send the display label.

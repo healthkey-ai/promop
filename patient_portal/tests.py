@@ -30043,8 +30043,9 @@ class PatientSelfEditClinicalFieldsTest(TestCase):
         )
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
 
-    def test_computed_field_direct_assignment_is_rejected(self):
-        """#2135: a computed-only field is a 400, not a silent 200."""
+    def test_computed_field_silently_ignored(self):
+        """KIND_COMPUTED fields (e.g. bmi) are ignored on the native PATCH, as in
+        dev; the shared form refuses them (#2135, tests/test_computed_only_patch)."""
         self.patient_record.bmi = None
         self.patient_record.save(update_fields=['bmi'])
         resp = self._client().patch(
@@ -30052,9 +30053,7 @@ class PatientSelfEditClinicalFieldsTest(TestCase):
             {'bmi': '99.9'},
             format='json',
         )
-        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
-        self.assertIn('bmi', resp.data)
-        self.assertIn('height', str(resp.data['bmi']))
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
         self.patient_record.refresh_from_db()
         self.assertIsNone(self.patient_record.bmi)
 

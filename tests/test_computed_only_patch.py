@@ -37,18 +37,16 @@ def _record():
     ('meets_crab', ['serum_calcium_mg_dl', 'creatinine_clearance_ml_min']),
     ('meets_slim', ['clonal_plasma_cells', 'kappa_flc']),
 ])
-def test_a_direct_assignment_is_a_field_error(client, field, inputs):
+def test_a_native_direct_assignment_is_ignored_as_in_dev(client, field, inputs):
+    """The native path keeps dev's contract: a computed field is dropped, not a
+    400 (#2418 regression review). The shared form still refuses it (below)."""
     response = client.patch(NATIVE, {field: '1'}, format='json')
 
-    assert response.status_code == 400, response.data
-    assert field in response.data
-    message = str(response.data[field])
-    for name in inputs:
-        assert name in message
+    assert response.status_code == 200, response.data
     assert getattr(_record(), field) is None
 
 
-def test_a_mixed_request_saves_nothing(client):
+def test_a_native_mixed_request_keeps_the_real_edit(client):
     record = _record()
     record.disease = 'CLL'
     record.save(update_fields=['disease'])
@@ -56,9 +54,9 @@ def test_a_mixed_request_saves_nothing(client):
     response = client.patch(
         NATIVE, {'disease': 'multiple myeloma', 'bmi': 99}, format='json')
 
-    assert response.status_code == 400, response.data
+    assert response.status_code == 200, response.data
     record.refresh_from_db()
-    assert record.disease == 'CLL'
+    assert record.disease == 'multiple myeloma'
     assert record.bmi is None
 
 
@@ -153,7 +151,7 @@ def test_the_shared_form_ignores_an_unchanged_echo_beside_a_real_edit(client):
 
 
 @pytest.mark.parametrize('submitted', ['on', 't', 'y', '1', 'yes', 'TRUE', '', 2])
-def test_boolean_spellings_of_a_changed_verdict_are_still_refused(client, submitted):
+def test_boolean_spellings_of_a_changed_verdict_are_still_not_written(client, submitted):
     record = _record()
     record.meets_crab = False
     record.save(update_fields=['meets_crab'])
@@ -161,10 +159,10 @@ def test_boolean_spellings_of_a_changed_verdict_are_still_refused(client, submit
     response = client.patch(
         NATIVE, {'meets_crab': submitted, 'disease': 'CLL'}, format='json')
 
-    assert response.status_code == 400, (submitted, response.data)
+    assert response.status_code == 200, (submitted, response.data)
     record.refresh_from_db()
     assert record.meets_crab is False
-    assert record.disease != 'CLL'
+    assert record.disease == 'CLL'
 
 
 @pytest.mark.parametrize('submitted', ['on', 't', 'y', 'bogus', '', 2])
