@@ -20,6 +20,19 @@ empty element, PROMOP owns the dialog, the fields and the write, and the host
 refreshes its own queries from `onPatientUpdated`.
 `omop_core/services/patient_form.py` is portable to an embedded Django host.
 
+### React-tree hosts
+
+A host that shares this React tree does not use the standalone widget. It mounts
+`federation/TherapyLinesEditor.tsx`, `federation/GenomicsEditor.tsx` or
+`federation/PatientFieldEditorSlot.tsx` through the Module Federation remote
+(`vite.remote.config.ts`) and hands over its own authenticated axios client
+plus a base path instead of a DRF token. That keeps the host's interceptor
+(Firebase Bearer in ht-phr), its origin and its connection-scoped identity:
+minting a client from a token would either send the wrong auth scheme or split
+one browser session into two identities. `usePromopFieldBindings` answers which
+trial-row names resolve (canonical keys and declared `bindings`), so the host
+can return `null` for a row PROMOP cannot draw and EXACT keeps its own editor.
+
 Native v1 clients explicitly opt in with `X-Patient-Form: 1` on both descriptor
 GET and record PATCH. Legacy descriptors and serializer writes remain unchanged.
 Responses carry `patient_info`, optional `patient_name`, and per-field
