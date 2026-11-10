@@ -20,10 +20,18 @@ created just to satisfy a link.
 ## 2. Non-goals
 
 - no clinical formula, threshold or vocabulary;
-- no `PatientInfo` read (the archive is not a source);
+- no clinical reads from the retired CancerBot archive or PROMOP legacy interfaces;
 - no matcher read path;
 - no automatic transfer of a losing value;
-- no replacement for the OMOP projection or the PatientRecord-first writer.
+- no replacement for the OMOP projection or the
+  [PatientRecord-first writer](patient-record-first-writes.md).
+
+`PatientRecord` is the clinical read/write model for this plan. New API integrations
+use `/api/v1/patient-records/`. PROMOP's `patient_info` compatibility view and legacy
+`/api/patient-info/` API are outside the staging-store design; no new reader, writer,
+or identity lookup may depend on them. CancerBot's retired `PatientInfo` model is a
+separate historical source. Its existing identifiers may survive in migration audit
+metadata, as explained in §5; they do not designate a PROMOP view or endpoint.
 
 ## 3. Storage location
 
@@ -77,7 +85,7 @@ patient):
 | `item_key` | text | stable within the batch: `<field>` or `<field>:<index>` |
 | `group_key` | text, null | atomic group (e.g. one therapy line) |
 | `payload_hash` | char(64) | canonical hash of the item payload |
-| `subject_key` | text | stable CB identity: `user:<id>` or `patient_info:<id>` |
+| `subject_key` | text | stable CB identity; historical wire labels are defined in §5 |
 | `person_id` | bigint, null | PROMOP Person; null until CB links |
 | `field` | text | manifest field name |
 | `value` | jsonb | scalar/list/dict, with the manifest type |
@@ -158,8 +166,13 @@ through the M2M table.
 
 ## 5. Identity
 
-- `subject_key` is the stable CB identity. `patient_info:<id>` is an opaque
-  identifier; it is never dereferenced and never read as clinical data.
+- `subject_key` is the stable CB identity. Existing `user:<id>` and
+  `patient_info:<id>` values are historical CancerBot wire labels. The
+  `cb_patient_info` provenance source and `patient_info:<id>` source-record label
+  likewise identify a captured CancerBot payload, not PROMOP's compatibility view
+  or legacy API. Preserve those labels for idempotency and audit continuity; never
+  dereference them to obtain clinical data. Resolve the subject through the
+  authorized CB identity-to-Person link.
 - `person_id` is nullable until CB links the identity. A transfer may create the
   Person only through the same service call that carries the disease and the rest of
   the payload; it must not create a bare Person/record first.
@@ -171,7 +184,7 @@ through the M2M table.
 
 | State | Meaning | Allowed next |
 | --- | --- | --- |
-| `awaiting_transfer` | safe to transfer once the target is ready | `transferred`, `conflict`, `approved_deletion` |
+| `awaiting_transfer` | safe to evaluate once the target is ready | `transferred`, `conflict`, `retained_not_for_transfer` (approved retain), `approved_deletion` |
 | `conflict` | unresolved; blocks the cutover gate | `awaiting_transfer` (approved resolution), `retained_not_for_transfer`, `approved_deletion` |
 | `retained_not_for_transfer` | a losing/displaced value kept for audit | `approved_deletion` |
 | `approved_deletion` | approved removal; purge per retention | terminal |
@@ -184,12 +197,14 @@ manifest hash it was decided against. If the target changes, the row returns to
 A losing value never moves to `awaiting_transfer` automatically. Only an explicit
 approved resolution can do that.
 
-Every transition out of `conflict` writes a `PatientRecordStagingTransition` and the
-approval object in the same transaction.
+Every transition out of `conflict` writes a `PatientRecordStagingTransition` and
+links the applied approval rows in the same transaction. The same approval links
+are required for an approved retain from `awaiting_transfer`.
 
 ## 7. Approval
 
-Approvals are rows (`§4.3 Auth` fields), not a free JSON object. Every transfer that
+Approvals use the rows defined in §4.3 and the transition M2M links in §4.2.
+The staging item has no separate approval JSON column. Every transfer that
 needed a resolution, and every retain/delete, carries one or more approval rows.
 
 - `transfer` needs one of `clinical-data-owner` or `data-owner`.
@@ -243,7 +258,7 @@ Rules:
 
    | # | Source | Target | Mode | Result |
    | --- | --- | --- | --- | --- |
-   | 1 | pending target | any | any | `keep_target`; stage loser |
+   | 1 | value/clear | pending target | any | `keep_target`; stage loser |
    | 2 | explicit clear | absent | any | no-op (nothing to clear) |
    | 3 | absent/ambiguous | value/absent | any | `keep_target`/no-op; no invented clear |
    | 4 | value | absent | any | `copy` |
@@ -263,8 +278,10 @@ Rules:
    A version match is **not** overwrite authority. `overwrite` requires the approved
    cohort/field scope and a later authoritative source; `chronology_override` needs
    its own recorded approval. This table is self-contained and must stay in lockstep
-   with CB's `patientrecord-cutover-plan.md` §0.6.0–§0.6.2; a divergence is a
-   blocker, not an interpretation.
+   with the [reviewed CancerBot cutover contract, §0.6.0–§0.6.2](https://github.com/cancerbot-org/cancerbot/blob/78749fc710df3c808aa1974f8c0a100a249a18de/docs/patientrecord-cutover-plan.md#060-evaluation-order-applies-before-the-table).
+   This link pins the contract revision used by this plan; it is not a file in
+   PROMOP. Changes to either decision table or state machine require a coordinated
+   contract review; a divergence blocks implementation.
 4. Compare the stored decision's `target_version`/`manifest_hash` with the current
    target. If they differ, return to `conflict`. If an approval exists, verify
    decision, scope, expiry, target version and manifest hash even when the row is
@@ -272,8 +289,29 @@ Rules:
 5. For a disease-less batch: create the Person/record only in this transaction and
    only when a valid disease item is part of the transferred group. A disease value
    that is skipped, conflicting or losing does not authorize record creation.
-6. Apply the group atomically through the shared PatientRecord writer (validation,
-   revisions, `user_edited_fields`, source authorship). All record writes in the
+6. Classify every item before writing any member of its group:
+
+   | Evaluator result | PatientRecord action | Staging outcome |
+   | --- | --- | --- |
+   | `copy` / `clear`, with valid write authority | Apply the source value or explicit clear | `transferred` only after the write commits |
+   | `keep_target`, with an approved retain resolution | Preserve the target | `retained_not_for_transfer`; link the retain approval and current destination |
+   | equal values or a no-op with no target change, with approved retain | No record write | `retained_not_for_transfer`; record equality/nothing-to-clear/absence as the transition reason |
+   | `conflict`, stale authority, or a non-writing outcome without required retain approval | No record write | `conflict`; record the unresolved decision or missing retention approval |
+
+   All retain outcomes use §7's existing data-owner approval and retention-location
+   requirements. Equality and absence do not authorize a write or waive retention
+   approval. A losing value is never marked `transferred`. Significant divergence
+   stays `conflict` until an explicit resolution; `keep_target` alone does not
+   resolve it. These dispositions use the existing states, without adding a new
+   terminal no-op state to the cross-repository contract.
+
+   If any member is unresolved, apply no PatientRecord writes or success/retain
+   transitions for that group. Record the blocking conflicts; other group members
+   remain awaiting evaluation. Ungrouped items are independent scalar groups.
+
+   Apply the writable members of a resolved group atomically through the shared
+   PatientRecord writer (validation, revisions, `user_edited_fields`, source
+   authorship). All record writes in the
    group share one transaction; a failure of any component rolls back the whole
    group, not only its savepoint. Per-field savepoints are only for the OMOP
    projection, never for the record writes. Do not call `refresh_patient_record`.
@@ -281,12 +319,18 @@ Rules:
 7. Write displaced targets as `retained_not_for_transfer` rows in a **new committed
    batch** keyed `"<source_batch>:displaced:<winning_item_id>"`; the original batch
    is immutable. Set `winning_item_id` and write them in the same transaction.
-8. Mark `transferred` and append transitions in the same transaction as the record
-   write. A crash leaves either both or neither.
-9. Project mapped fields best-effort per field with `project_single_value`; a
-   failure keeps the record edit and a pending projection. A durable worker owns
+8. Persist each resolved item's disposition from step 6 and append its transition
+   with any applied approval links in the same transaction as the group writes.
+   Set `transferred_at` only for `copy`/`clear` items actually written. Set
+   `destination_kind`/`destination_ref` to the actual PatientRecord field or retained
+   staging item; they must not imply a transfer for a retained value. A crash leaves
+   either the whole resolved group and its dispositions committed, or neither.
+9. Project only the fields actually written, best-effort per field with
+   `project_single_value`; a failure keeps the record edit and a pending projection. A durable worker owns
    retries after `transferred`; the transfer itself is not retried for projection.
-10. A repeated call is a no-op that returns the current state.
+10. A repeated call returns the persisted dispositions without repeating record
+    writes, transitions, displaced-target rows or projection scheduling. Retained
+    items stay retained; conflicts require a new valid resolution before retry.
 
 ## 10. Concurrency
 
@@ -316,7 +360,7 @@ Rules:
   command removes payloads but keeps the transition tombstones.
 - Legal hold overrides purge.
 - No values in logs or error messages; log ids and field names only.
-- The archive `PatientInfo` is never read.
+- The retired CancerBot archive and PROMOP legacy view/API are never clinical sources.
 
 ## 12. Migration
 
@@ -335,10 +379,17 @@ Rules:
   `displaced_target` with `winning_item_id`;
 - disease-less batch transfers atomically with the disease and creates no bare
   record; a disease that is skipped/conflicting does not authorize creation;
+- `copy`/`clear` commit before `transferred`; losing, equal and empty/no-op values
+  never receive `transferred_at` or create a record revision;
+- approved `keep_target` and equal/no-op outcomes are retained; missing retain
+  approval remains `conflict`; significant divergence needs explicit resolution;
 - losing value never auto-transfers;
 - concurrent transfer: one wins, one no-ops;
 - creation race with the existing `/me/` `get_or_create` path;
-- group atomicity (therapy line) and no partial group;
+- group atomicity (therapy line), including a mixed copy/conflict group that writes
+  nothing and a resolved copy/equal group with distinct per-item dispositions;
+- retry after a retained/equal/no-op outcome creates no duplicate transition,
+  revision, displaced value or projection job;
 - projection failure keeps the record edit and marks pending; durable retry after
   `transferred`;
 - API auth: scopes, object ownership, staff/clinical roles, no self-approval,
