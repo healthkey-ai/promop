@@ -5959,6 +5959,12 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
 
         if shared_form:
             descriptor = shared(descriptor)
+        elif request.query_params.get('envelope') != '1':
+            # The plain response stays dev's field-only mapping: clients that
+            # iterate it predate the envelope and break on a key without
+            # `writable`. The versioned envelope is opt-in, with the shared-form
+            # header or `?envelope=1` (#2418 regression review).
+            descriptor.pop(DESCRIPTOR_META_KEY, None)
 
         raw_person = request.query_params.get('person_id')
         if raw_person is None:

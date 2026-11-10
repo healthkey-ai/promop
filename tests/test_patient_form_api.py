@@ -217,7 +217,10 @@ def test_legacy_descriptor_is_not_narrowed_by_shared_form_restrictions():
     client = _client()
     url = '/api/v1/patient-records/writable-fields/'
     legacy = client.get(url, {'person_id': record.person_id}).data
-    assert legacy == build_writable_field_descriptor()
+    # The plain response is the field-only mapping; the envelope is opt-in.
+    expected = build_writable_field_descriptor()
+    expected.pop('__descriptor__')
+    assert legacy == expected
     shared = client.get(url, {'person_id': record.person_id}, HTTP_X_PATIENT_FORM='1').data
     # The shared form authors the relapse count as a therapy override; the
     # legacy descriptor already advertises it (no narrowing in the other
@@ -617,3 +620,23 @@ def test_org_client_gets_no_record_data_for_a_patient_it_cannot_read():
     # Its PATCH 404s, so nothing may claim to be writable either.
     assert not any(entry.get('writable') for name, entry in scoped.data.items()
                    if not name.startswith('__'))
+
+
+def test_the_plain_descriptor_is_field_only_and_the_envelope_is_opt_in():
+    """Dev's clients iterate the plain mapping and expect `writable` on every
+    entry (#2418 regression review); the versioned envelope is opt-in."""
+    from omop_core.services.write_descriptor import DESCRIPTOR_SCHEMA_VERSION
+    record = PatientRecordFactory()
+    client = _client()
+    url = '/api/v1/patient-records/writable-fields/'
+    for params in ({}, {'person_id': record.person_id}):
+        plain = client.get(url, params).data
+        assert '__descriptor__' not in plain
+        assert all('writable' in entry for entry in plain.values())
+        opted = client.get(url, {**params, 'envelope': '1'}).data
+        assert opted['__descriptor__']['schema_version'] == DESCRIPTOR_SCHEMA_VERSION
+    reader = APIClient()
+    reader.force_authenticate(Identity.objects.create_user(email='plain-reader@example.test'))
+    read_only = reader.get(url, {'person_id': record.person_id}).data
+    assert '__descriptor__' not in read_only
+    assert not any(entry['writable'] for entry in read_only.values())

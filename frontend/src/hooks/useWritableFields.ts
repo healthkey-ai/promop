@@ -166,7 +166,10 @@ export function fetchWritableFields(
         // Without a person the server answers for the deployment. With one it
         // answers for this caller and this patient, which is what a tab needs
         // before it decides whether to render a box.
-        params: key ? { person_id: key } : undefined,
+        // `envelope=1` asks for the versioned `__descriptor__` envelope, which
+        // the plain response no longer carries by default. Without it the
+        // schema-version gate below would never see a version to refuse.
+        params: key ? { envelope: '1', person_id: key } : { envelope: '1' },
       })
       .then((res) => {
         // The native editor saves fields from this mapping too. An unknown

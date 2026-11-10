@@ -22,6 +22,11 @@ The response is a mapping of field name to entry, plus one reserved key:
 name, so it never collides with one; any loop over the mapping must skip keys
 starting with `__`. The form enrichment (`patient_form_descriptors`) does.
 
+The envelope is **opt-in** on the HTTP endpoint: it is sent with the
+shared-form header `X-Patient-Form: 1` or with `?envelope=1`. Without either,
+the response is the field-only mapping older clients iterate. A client that
+wants the version gate must ask for it.
+
 `schema_version` bumps only when a **client-visible meaning** changes: a new
 kind, a renamed capability key, different `writable`/`answerable` semantics, or
 a new write/readback path. Adding a field, an option or a binding does not bump
