@@ -10,6 +10,7 @@ interface DescriptorEntry {
 interface Answer {
   client: AxiosInstance;
   base: string;
+  key: string;
   descriptor: Record<string, DescriptorEntry>;
 }
 
@@ -43,8 +44,9 @@ export function usePromopFieldBindings(
   connection: EditorConnection,
   options: { enabled?: boolean } = {},
 ): PromopFieldBindings {
-  const { apiClient } = connection;
+  const { apiClient, connectionKey } = connection;
   const base = editorBasePath(connection);
+  const key = connectionKey ?? '';
   const enabled = options.enabled ?? true;
   const [answer, setAnswer] = useState<Answer | null>(null);
 
@@ -58,22 +60,23 @@ export function usePromopFieldBindings(
         signal: controller.signal,
       })
       .then((response) => {
-        if (alive) setAnswer({ client: apiClient, base, descriptor: response.data ?? {} });
+        if (alive) setAnswer({ client: apiClient, base, key, descriptor: response.data ?? {} });
       })
       .catch((error: { name?: string }) => {
         // A failed descriptor must fall back to the host's editor, never to
         // PROMOP's "no binding" notice.
         if (alive && error?.name !== 'CanceledError') {
-          setAnswer({ client: apiClient, base, descriptor: {} });
+          setAnswer({ client: apiClient, base, key, descriptor: {} });
         }
       });
     return () => {
       alive = false;
       controller.abort();
     };
-  }, [apiClient, base, enabled]);
+  }, [apiClient, base, key, enabled]);
 
   const current = enabled && answer?.client === apiClient && answer.base === base
+    && answer.key === key
     ? answer.descriptor
     : null;
   const resolvable = useMemo(() => {

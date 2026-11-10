@@ -6,6 +6,7 @@ import {
   retractTherapyLine,
   setTherapyHistoryCompleteness,
   type EditableTherapyLine,
+  type TherapyConnection,
 } from '@/api/therapyLines';
 import TherapyLineDialog from '@/components/PatientInfo/TherapyLineDialog';
 import { usePatientFormSnapshot } from './PatientFormContext';
@@ -18,6 +19,10 @@ interface Props {
    *  invalidate whatever query rendered the row. `store.load()` alone does not:
    *  it publishes a snapshot but never reaches the store's `onUpdated` set. */
   onChanged?: () => void;
+  /** Which connection the line endpoints talk through. Omitted, the panel uses
+   *  the module-level clinical transport the standalone app owns. A federated
+   *  host passes its own client so two mounted editors cannot cross. */
+  connection?: TherapyConnection;
 }
 
 /** The therapy-line editor, mounted on its own by a host that only has a modal.
@@ -27,7 +32,7 @@ interface Props {
  * whole patient form. Values come from the shared patient-form store, which is
  * why authoring one line updates the host's row on the next `load()`.
  */
-export default function TherapyLinesPanel({ store, readOnly = false, onChanged }: Props) {
+export default function TherapyLinesPanel({ store, readOnly = false, onChanged, connection }: Props) {
   const state = usePatientFormSnapshot(store);
   const [dialog, setDialog] = useState<{ mode: 'add' } | { mode: 'edit'; line: EditableTherapyLine } | null>(null);
   const [busy, setBusy] = useState(false);
@@ -55,7 +60,7 @@ export default function TherapyLinesPanel({ store, readOnly = false, onChanged }
     if (typeof line.episode_id !== 'number') return;
     setBusy(true); setError('');
     try {
-      await retractTherapyLine(line.episode_id);
+      await retractTherapyLine(line.episode_id, connection);
       await store.load();
       onChanged?.();
     } catch {
@@ -69,7 +74,7 @@ export default function TherapyLinesPanel({ store, readOnly = false, onChanged }
     if (personId === null) return;
     setBusy(true); setError('');
     try {
-      await setTherapyHistoryCompleteness(personId, next);
+      await setTherapyHistoryCompleteness(personId, next, connection);
       await store.load();
       onChanged?.();
     } catch {
@@ -152,6 +157,7 @@ export default function TherapyLinesPanel({ store, readOnly = false, onChanged }
       defaultLineNumber={nextLine}
       line={dialog.mode === 'edit' ? dialog.line : undefined}
       diseaseCode={diseaseCode}
+      connection={connection}
       onClose={() => setDialog(null)}
       onAuthored={() => { setDialog(null); void store.load(); onChanged?.(); }}
     />}

@@ -1,7 +1,6 @@
 import { useEffect, useMemo } from 'react';
 import type { AxiosInstance } from 'axios';
 
-import { pushClinicalTransport } from '@/api/clinicalTransport';
 import { __resetWritableFieldsCache } from '@/hooks/useWritableFields';
 import { patientFormForClient } from './patientFormRuntime';
 import type { PatientFormStore } from './patientFormStore';
@@ -27,6 +26,19 @@ export interface EditorConnection {
   apiClient: AxiosInstance;
   /** Prefix before `/patient-info/me/` and `/v1/…`. Defaults to none. */
   apiBasePath?: string;
+  /**
+   * Identity revision, when the host's client object outlives a sign-in or
+   * impersonation change. The store is keyed by client + base + this value, so
+   * a new identity never reads the previous session's pending drafts or writes
+   * its edits into that queue.
+   *
+   * This is the weaker of the two fixes. A batch already queued belongs to the
+   * store that captured the client, so it still drains through whatever
+   * credentials that client now sends. A host that must keep an old batch on
+   * the old credentials has to supply a NEW client object per identity; the
+   * key is for a host that cannot do that and accepts the in-flight window.
+   */
+  connectionKey?: string;
 }
 
 /** Trim trailing slashes once; `/patient-info/me/` is appended verbatim. */
@@ -37,36 +49,31 @@ export function editorBasePath(connection: EditorConnection): string {
 /**
  * The patient-form store for one connection, loaded on mount.
  *
- * The store is shared per (client, base) by `patientFormForClient`, so several
- * editors mounted for the same session read one queue: a therapy-line write is
- * visible to the field slot without a second read. `pushClinicalTransport` is
- * stack-scoped, so mounting and unmounting these editors cannot leave the
- * module-level clinical helpers pointed at a previous host, and the release
- * restores whatever was underneath.
+ * The store is shared per (client, base, connectionKey) by
+ * `patientFormForClient`, so several editors mounted for the same session read
+ * one queue: a therapy-line write is visible to the field slot without a
+ * second read.
  *
- * The transport is pushed in an effect, which runs after the children's
- * effects. That is safe for these editors: the therapy panel reads the
- * transport only from event handlers, and the genomics dialog takes the client
- * and URL explicitly. Anything added below that fetches during its own mount
- * effect would need the transport pushed before the first render instead.
+ * Nothing here touches the module-level clinical transport. The therapy panel
+ * and its dialog take this connection explicitly, the genomics dialog takes the
+ * client and URL explicitly, and the field slot writes through the store — so
+ * two editors on one page cannot inherit each other's connection, and
+ * unmounting one cannot leave a helper pointed at the wrong host.
  */
 export function useEditorSession(connection: EditorConnection): PatientFormStore {
-  const { apiClient } = connection;
+  const { apiClient, connectionKey } = connection;
   const base = editorBasePath(connection);
   const store = useMemo(
-    () => patientFormForClient(apiClient, base),
-    [apiClient, base],
+    () => patientFormForClient(apiClient, base, connectionKey ?? ''),
+    [apiClient, base, connectionKey],
   );
   useEffect(() => {
-    const releaseTransport = pushClinicalTransport(apiClient, base);
-    // The writability descriptor is cached per deployment, not per client.
-    // A different connection may see different permissions on the same field.
+    // The writability descriptor is cached per deployment, not per client. A
+    // host that mounted the full form elsewhere may have cached another
+    // deployment's permissions for the same person.
     __resetWritableFieldsCache();
     void store.load();
-    return () => {
-      releaseTransport();
-      __resetWritableFieldsCache();
-    };
-  }, [apiClient, base, store]);
+    return () => { __resetWritableFieldsCache(); };
+  }, [store]);
   return store;
 }

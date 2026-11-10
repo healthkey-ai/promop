@@ -1,3 +1,5 @@
+import { useEffect } from 'react';
+
 import PatientFieldEditor from './PatientFieldEditor';
 import { useEditorSession, type EditorConnection } from './editorSession';
 
@@ -13,6 +15,10 @@ export interface PatientFieldEditorSlotProps extends EditorConnection {
   labelIncludesUnit?: boolean;
   /** Narrow layout for a table cell. */
   compact?: boolean;
+  /** Called after the server acknowledges a save. The record, its derived
+   *  values and the trial verdict have all moved, so the host must invalidate
+   *  its trial queries. Not called for a failed write. */
+  onChanged?: () => void;
 }
 
 /**
@@ -28,13 +34,23 @@ export interface PatientFieldEditorSlotProps extends EditorConnection {
 export default function PatientFieldEditorSlot({
   apiClient,
   apiBasePath,
+  connectionKey,
   name,
   label,
   readOnly = false,
   labelIncludesUnit = false,
   compact = false,
+  onChanged,
 }: PatientFieldEditorSlotProps) {
-  const store = useEditorSession({ apiClient, apiBasePath });
+  const store = useEditorSession({ apiClient, apiBasePath, connectionKey });
+  // The store acknowledges a write only after the server answers; a hard
+  // failure never reaches its `updated` listeners. `onUpdated` keeps the
+  // host's callback until the queue drains, so a save that outlives this row
+  // still invalidates.
+  useEffect(
+    () => (onChanged ? store.onUpdated(() => onChanged()) : undefined),
+    [store, onChanged],
+  );
   return (
     <PatientFieldEditor
       store={store}

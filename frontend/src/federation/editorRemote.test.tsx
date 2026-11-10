@@ -1,4 +1,4 @@
-import { render, renderHook, screen, waitFor } from '@testing-library/react';
+import { act, render, renderHook, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import type { AxiosInstance } from 'axios';
 
@@ -6,6 +6,7 @@ import { clinicalClient } from '@/api/clinicalTransport';
 import GenomicsEditor from './GenomicsEditor';
 import PatientFieldEditorSlot from './PatientFieldEditorSlot';
 import TherapyLinesEditor from './TherapyLinesEditor';
+import { patientFormForClient } from './patientFormRuntime';
 import { usePromopFieldBindings } from './usePromopFieldBindings';
 
 interface Fixtures {
@@ -63,7 +64,10 @@ function hostClient(fixtures: Fixtures = {}) {
   const patch = vi.fn(async (_url: string, values: Record<string, unknown>) => ({
     data: { patient_info: { person_id: 12, ...values }, write: { applied: Object.keys(values) } },
   }));
-  return { get, patch, client: { get, patch } as unknown as AxiosInstance };
+  const post = vi.fn(async (_url: string, body: unknown) => ({
+    data: { therapy_history_complete: true, patient_info: {}, ...(body as object) },
+  }));
+  return { get, patch, post, client: { get, patch, post } as unknown as AxiosInstance };
 }
 
 describe('the PROMOP editors for a host that shares the React tree', () => {
@@ -81,19 +85,27 @@ describe('the PROMOP editors for a host that shares the React tree', () => {
     );
   });
 
-  it('makes the host client the clinical transport while mounted and restores it after', async () => {
+  it('never touches the global clinical transport and writes through the host client', async () => {
     const host = hostClient();
-    const before = clinicalClient();
-    const view = render(
-      <TherapyLinesEditor apiClient={host.client} apiBasePath="" readOnly={false} />,
+    // Another widget on the page owns the global transport. This editor must
+    // neither steal it nor write through it.
+    const ownerBefore = clinicalClient();
+    render(
+      <TherapyLinesEditor apiClient={host.client} apiBasePath="/fed" readOnly={false} />,
     );
     await screen.findByText(/Line 1:/);
-    expect(clinicalClient()).toBe(host.client);
+    expect(clinicalClient()).toBe(ownerBefore);
 
-    view.unmount();
-    // The previous owner is back, so a widget mounted elsewhere is not left
-    // writing through a client this editor took away.
-    expect(clinicalClient()).toBe(before);
+    // The completeness flag is one of the writes that used to go through the
+    // global transport. It must land on the host's client at the host's base.
+    await act(async () => {
+      screen.getByRole('checkbox', { name: 'Treatment history is complete' }).click();
+    });
+    await waitFor(() => expect(host.post).toHaveBeenCalledWith(
+      '/fed/v1/therapy-history/completeness/',
+      { person: 12, complete: true },
+    ));
+    expect(clinicalClient()).toBe(ownerBefore);
   });
 
   it('draws the genomic findings dialog and reports its close', async () => {
@@ -164,6 +176,78 @@ describe('the PROMOP editors for a host that shares the React tree', () => {
 
     await waitFor(() => expect(result.current.ready).toBe(true));
     expect(result.current.canResolve('height')).toBe(false);
+  });
+
+  it('gives a new connectionKey a new store and descriptor answer', async () => {
+    const host = hostClient();
+    // One axios instance whose interceptor now signs as somebody else: the
+    // key, not the client reference, is what starts a new queue.
+    expect(patientFormForClient(host.client, '/api', 'session-a'))
+      .not.toBe(patientFormForClient(host.client, '/api', 'session-b'));
+    expect(patientFormForClient(host.client, '/api', 'session-a'))
+      .toBe(patientFormForClient(host.client, '/api', 'session-a'));
+
+    const { result, rerender } = renderHook(
+      ({ connectionKey }: { connectionKey: string }) =>
+        usePromopFieldBindings({ apiClient: host.client, apiBasePath: '', connectionKey }),
+      { initialProps: { connectionKey: 'session-a' } },
+    );
+    await waitFor(() => expect(result.current.ready).toBe(true));
+    rerender({ connectionKey: 'session-b' });
+    expect(result.current.ready).toBe(false);
+    await waitFor(() => expect(result.current.ready).toBe(true));
+  });
+
+  it('notifies the host after an acknowledged field save', async () => {
+    const host = hostClient();
+    const onChanged = vi.fn();
+    render(
+      <PatientFieldEditorSlot
+        apiClient={host.client}
+        apiBasePath=""
+        name="height"
+        label="Height"
+        readOnly={false}
+        onChanged={onChanged}
+      />,
+    );
+    await screen.findByRole('spinbutton', { name: 'Height' });
+
+    // The slot writes through the shared store; drive that store the way the
+    // editor does and let it acknowledge the batch.
+    const store = patientFormForClient(host.client, '');
+    await act(async () => { store.enqueue('height', 180); await store.flush(); });
+
+    expect(host.patch).toHaveBeenCalledWith(
+      '/v1/patient-records/12/',
+      { height: 180 },
+      expect.objectContaining({ headers: { 'X-Patient-Form': '1' } }),
+    );
+    expect(onChanged).toHaveBeenCalledTimes(1);
+  });
+
+  it('stays quiet when the server refuses the field write', async () => {
+    const host = hostClient();
+    const onChanged = vi.fn();
+    render(
+      <PatientFieldEditorSlot
+        apiClient={host.client}
+        apiBasePath=""
+        name="height"
+        label="Height"
+        readOnly={false}
+        onChanged={onChanged}
+      />,
+    );
+    await screen.findByRole('spinbutton', { name: 'Height' });
+    vi.mocked(host.patch).mockRejectedValueOnce(new Error('server refused'));
+
+    const store = patientFormForClient(host.client, '');
+    await act(async () => { store.enqueue('height', 181); await store.flush(); });
+
+    // The row still shows the last saved value; the host must not treat the
+    // failed batch as a reason to invalidate and redraw it.
+    expect(onChanged).not.toHaveBeenCalled();
   });
 
   it('does not answer a new identity from the previous descriptor', async () => {

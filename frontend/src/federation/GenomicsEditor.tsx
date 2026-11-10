@@ -1,3 +1,5 @@
+import { useMemo } from 'react';
+
 import GenomicsFindingsModal from './GenomicsFindingsModal';
 import { editorBasePath, useEditorSession, type EditorConnection } from './editorSession';
 
@@ -23,12 +25,15 @@ export interface GenomicsEditorProps extends EditorConnection {
 export default function GenomicsEditor({
   apiClient,
   apiBasePath,
+  connectionKey,
   readOnly = false,
   onClose,
   onChanged,
 }: GenomicsEditorProps) {
+  const store = useEditorSession({ apiClient, apiBasePath, connectionKey });
   const base = editorBasePath({ apiClient, apiBasePath });
-  const store = useEditorSession({ apiClient, apiBasePath });
+  // Stable identity: the editor stores this callback and compares it.
+  const changed = useMemo(() => onChanged ?? (() => {}), [onChanged]);
   return (
     <GenomicsFindingsModal
       store={store}
@@ -36,7 +41,7 @@ export default function GenomicsEditor({
       apiBase={base}
       readOnly={readOnly}
       onClose={onClose}
-      onChanged={onChanged ?? (() => {})}
+      onChanged={changed}
     />
   );
 }

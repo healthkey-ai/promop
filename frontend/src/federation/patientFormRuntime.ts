@@ -16,11 +16,16 @@ interface Runtime {
 const widgets = new Map<string, Runtime>();
 const clients = new WeakMap<AxiosInstance, Map<string, PatientFormStore>>();
 
-export function patientFormForClient(client: AxiosInstance, base = '') {
+export function patientFormForClient(client: AxiosInstance, base = '', sessionKey = '') {
   let stores = clients.get(client);
   if (!stores) { stores = new Map(); clients.set(client, stores); }
-  let store = stores.get(base);
-  if (!store) { store = new PatientFormStore(client, base); stores.set(base, store); }
+  // The client object identifies the connection; `sessionKey` identifies the
+  // identity inside it. A host whose axios instance survives a sign-in change
+  // must pass a new key, or a pending edit from the old session would drain
+  // through the new credentials.
+  const key = `${base}\u0000${sessionKey}`;
+  let store = stores.get(key);
+  if (!store) { store = new PatientFormStore(client, base); stores.set(key, store); }
   return store;
 }
 
