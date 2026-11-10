@@ -125,3 +125,38 @@ describe('explicit pre-existing-conditions answers', () => {
     expect(holds.count).toBe(0);
   });
 });
+
+describe('after a save the host re-renders with the new answer', () => {
+  it('keeps the confirmation and re-seeds the selection from the new props', async () => {
+    const answer = { no_pre_existing_conditions: null, preexisting_conditions: ['infections'] };
+    post.mockResolvedValue({ data: answer });
+    const props = { personId: 42, readOnly: false };
+    // The host applies the saved answer inside onSaved, while the save is busy.
+    const onSaved = vi.fn(() => {
+      view.rerender(<PreexistingConditionsAnswer {...props} flag={null} categories={['infections']}
+        onSaved={onSaved} />);
+    });
+    const view = render(<PreexistingConditionsAnswer {...props} flag={true} categories={[]}
+      onSaved={onSaved} />);
+    fireEvent.click(screen.getByLabelText('Infections'));
+    fireEvent.click(screen.getByRole('button', { name: /Save categories/ }));
+    expect(await screen.findByText('Answer saved.')).toBeInTheDocument();
+    expect(screen.getByLabelText('Infections')).toBeChecked();
+
+    view.rerender(<PreexistingConditionsAnswer {...props} flag={null} categories={[]}
+      onSaved={onSaved} />);
+    expect(screen.getByLabelText('Infections')).not.toBeChecked();
+    expect(screen.queryByText('Answer saved.')).not.toBeInTheDocument();
+  });
+
+  it('drops a stale conflict alert once the host delivers the changed answer', async () => {
+    post.mockRejectedValue({ response: { status: 409 } });
+    const props = { personId: 42, readOnly: false, onSaved: vi.fn() };
+    const view = render(<PreexistingConditionsAnswer {...props} flag={true} categories={[]} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm no pre-existing conditions' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Reload');
+
+    view.rerender(<PreexistingConditionsAnswer {...props} flag={null} categories={['infections']} />);
+    await waitFor(() => expect(screen.queryByText(/This answer changed/)).not.toBeInTheDocument());
+  });
+});

@@ -279,7 +279,7 @@ export default function GeneralTab({
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
           <div className="sm:col-span-2">
             {personId && onConditionsSaved ? <PreexistingConditionsAnswer
-              key={JSON.stringify([personId, formData.no_pre_existing_conditions, formData.preexisting_conditions])}
+              key={personId}
               personId={personId}
               flag={formData.no_pre_existing_conditions}
               categories={formData.preexisting_conditions}

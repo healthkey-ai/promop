@@ -24,6 +24,22 @@ export default function PreexistingConditionsAnswer({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
+  // A saved answer comes back as new props. Re-seed the selection from them
+  // during render instead of remounting on a key: a remount also dropped the
+  // "Answer saved." confirmation the save had just set.
+  const answerKey = JSON.stringify([flag ?? null, categories ?? null]);
+  const [seededFrom, setSeededFrom] = useState(answerKey);
+  if (seededFrom !== answerKey) {
+    setSeededFrom(answerKey);
+    setSelected(Array.isArray(categories) ? categories.filter((v): v is string => typeof v === 'string') : []);
+    // An answer that changed outside this editor answers its old alert ("This
+    // answer changed. Reload…") and outdates its old confirmation. Our own
+    // save is still busy when its result arrives, and sets its message after.
+    if (!busy) {
+      setError('');
+      setMessage('');
+    }
+  }
   const [loaded, setLoaded] = useState<ConditionsAnswer | null>(null);
   const needsSnapshot = flag === undefined;
   const answerFlag = needsSnapshot ? loaded?.no_pre_existing_conditions : flag;
