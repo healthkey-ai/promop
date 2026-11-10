@@ -84,3 +84,17 @@ def test_a_caller_without_write_access_sees_them_read_only():
     for field in CANONICAL:
         assert descriptor[field]['read_only_for_caller'] is True, field
         assert descriptor[field]['writable'] is False, field
+
+
+def test_plain_descriptor_hosts_are_told_the_canonical_is_writable(staff):
+    """EXACT's editabilityOf refuses `writable: false` and does not follow
+    `inputs`; the native PATCH accepts the canonical. The shared form keeps the
+    pair as its editor (#2418 regression review)."""
+    record = PatientRecordFactory()
+    url = '/api/v1/patient-records/writable-fields/'
+    for params in ({}, {'person_id': record.person_id}):
+        plain = staff.get(url, params).data
+        shared = staff.get(url, params, HTTP_X_PATIENT_FORM='1').data
+        for field in CANONICAL:
+            assert plain[field]['writable'] is True, (field, params)
+            assert shared[field]['writable'] is False, (field, params)

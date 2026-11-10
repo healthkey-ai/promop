@@ -220,6 +220,9 @@ def test_legacy_descriptor_is_not_narrowed_by_shared_form_restrictions():
     # The plain response is the field-only mapping; the envelope is opt-in.
     expected = build_writable_field_descriptor()
     expected.pop('__descriptor__')
+    # Plain-descriptor hosts edit a normalised lab read-model directly.
+    expected = {name: ({**entry, 'writable': True} if entry.get('normalised_read_model') else entry)
+                for name, entry in expected.items()}
     assert legacy == expected
     shared = client.get(url, {'person_id': record.person_id}, HTTP_X_PATIENT_FORM='1').data
     # The shared form authors the relapse count as a therapy override; the

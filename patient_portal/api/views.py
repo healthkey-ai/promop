@@ -5965,6 +5965,19 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
             # `writable`. The versioned envelope is opt-in, with the shared-form
             # header or `?envelope=1` (#2418 regression review).
             descriptor.pop(DESCRIPTOR_META_KEY, None)
+        if not shared_form:
+            # A normalised lab read-model (hemoglobin_g_dl, ...) is edited
+            # through its source pair only by the shared form. The native
+            # PATCH still accepts the canonical value and retires the pair, and
+            # plain-descriptor hosts (EXACT, the standalone view) have no pair
+            # editor: in dev these were writable fields. Say so here; the
+            # caller restriction below still applies (#2418 regression review).
+            descriptor = {
+                name: ({**entry, 'writable': True}
+                       if isinstance(entry, dict) and entry.get('normalised_read_model')
+                       else entry)
+                for name, entry in descriptor.items()
+            }
 
         raw_person = request.query_params.get('person_id')
         if raw_person is None:

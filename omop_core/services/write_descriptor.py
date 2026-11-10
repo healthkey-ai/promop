@@ -1678,14 +1678,15 @@ def build_writable_field_descriptor():
         'writable': False,
         'value_kind': 'number',
         'inputs': ['hemoglobin_level'],
-        # A canonical import (an approved mapping or an older client that still
-        # speaks g/dL) may write this column directly; the server then retires
-        # the pending pair. Editors are told the source pair instead, and only
-        # the server paths honour this flag.
+        # A canonical import (an approved mapping, a plain-descriptor host,
+        # an older client that speaks g/dL) may write this column directly;
+        # the server then retires the pending pair. The shared form edits the
+        # source pair; the plain writable-fields response reports this entry
+        # writable for hosts without a pair editor (writable_fields view).
         'normalised_read_model': True,
         'reason': canonical_hemoglobin.get('reason') or (
             'Normalised from hemoglobin_level in the default unit (g/dL); '
-            'edit that field and its unit instead.'
+            'the shared form edits that field and its unit.'
         ),
         'unit': canonical_hemoglobin.get('unit') or 'g/dL',
     }
@@ -1719,7 +1720,7 @@ def build_writable_field_descriptor():
         'normalised_read_model': True,
         'reason': canonical_creatinine.get('reason') or (
             'Normalised from serum_creatinine_level in the default unit (mg/dL); '
-            'edit that field and its unit instead.'
+            'the shared form edits that field and its unit.'
         ),
         'unit': canonical_creatinine.get('unit') or 'mg/dL',
     }
@@ -1761,7 +1762,7 @@ def build_writable_field_descriptor():
             'normalised_read_model': True,
             'reason': canonical_entry.get('reason') or (
                 f'Normalised from {pair} in the default unit '
-                f'({spec["canonical_unit"]}); edit that field and its unit instead.'
+                f'({spec["canonical_unit"]}); the shared form edits that field and its unit.'
             ),
             'unit': canonical_entry.get('unit') or spec['canonical_unit'],
         }
@@ -1918,7 +1919,7 @@ def build_writable_field_descriptor():
             'normalised_read_model': True,
             'reason': (
                 f'Normalised from {source} in {spec["canonical_unit"]}; '
-                'edit that field and its unit instead.'
+                'the shared form edits that field and its unit.'
             ),
             'unit': spec['canonical_unit'],
         }

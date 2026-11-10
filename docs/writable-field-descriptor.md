@@ -112,7 +112,13 @@ A `computed` entry is never authored directly: writing it would be replaced by
 the next derivation. `overridable: true` marks a value the matcher infers but
 the patient may replace; the client offers an editor with the reason “inferred
 by default; enter a value to override”. `normalised_read_model: true` marks a
-value derived from a source pair (a lab value and its unit): edit the pair.
+value derived from a source pair (a lab value and its unit). The shared form
+(`X-Patient-Form: 1`) reports it `computed`, `writable: false`, with the pair in
+`inputs`: edit the pair. The plain response reports it `writable: true`,
+because a host without a pair editor (EXACT, the standalone record page) writes
+the canonical value through the native PATCH, which the server honours and
+which retires a pending pair. A caller without write access gets
+`read_only_for_caller` on both.
 
 ## Canonical mapping
 
