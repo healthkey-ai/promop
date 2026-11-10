@@ -4629,7 +4629,15 @@ def _get_mm_specific_data(person: Person, snapshot: OmopSnapshot = None) -> dict
         hgb_vals = crab_vals.get('718-7', []) or crab_vals.get('59260-0', [])
         ca_vals = crab_vals.get('17861-6', []) or crab_vals.get('2000-0', [])
         crcl_vals = crab_vals.get('2164-2', []) or crab_vals.get('33914-3', [])
-        creatinine_vals = crab_vals.get('2160-0', [])
+        # Coded EHR rows carry the LOINC on the concept and a display name as
+        # source value, and 38483-4 is an approved serum creatinine alias.
+        _creatinine_codes = ('2160-0', '38483-4')
+        creatinine_rows = list({
+            m.measurement_id: m
+            for m in (_rows_by_codes(snapshot, _creatinine_codes)
+                      + _rows_by_sources(snapshot, _creatinine_codes))
+            if m.value_as_number is not None
+        }.values())
 
         crab_anemia = hgb_vals and min(hgb_vals) < 10.0
         crab_calcium = ca_vals and max(ca_vals) > 11.0
@@ -4637,8 +4645,17 @@ def _get_mm_specific_data(person: Person, snapshot: OmopSnapshot = None) -> dict
         # the recorded alternative, matching derive_meets_crab().
         if crcl_vals:
             crab_renal = min(crcl_vals) < 40.0
-        elif creatinine_vals:
-            crab_renal = max(creatinine_vals) > 2.0
+        elif creatinine_rows:
+            # The newest serum creatinine only, in mg/dL. The snapshot already
+            # holds each value in its unit_source_value's unit; the reported
+            # unit (text, else UCUM concept) converts it. Raw values have no
+            # unit (80 umol/L is normal) and span all history, so max() made
+            # one old or SI result CRAB for good (#2430). An unreadable newest
+            # unit is no renal evidence, not a reason to fall back to older.
+            newest = sorted(creatinine_rows, key=_fact_recency_key, reverse=True)[0]
+            recognised, creatinine = creatinine_canonical_from_pair(
+                newest.value_as_number, _chemistry_reported_unit(newest) or 'mg/dL')
+            crab_renal = bool(recognised and creatinine is not None and creatinine > 2)
         else:
             crab_renal = False
         crab_bone = data.get('bone_lesions') == 'Present'
