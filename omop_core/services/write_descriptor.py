@@ -1356,6 +1356,20 @@ def build_writable_field_descriptor():
         entry = descriptor.get(field)
         if entry is not None and options and 'options' not in entry:
             entry['options'] = options
+    # The five-step toxicity scale is a closed vocabulary. Without it the
+    # shared editor falls back to a free-text number box; the values are the
+    # grades the trial rows already use, and the column takes the number.
+    if 'toxicity_grade' in descriptor and 'options' not in descriptor['toxicity_grade']:
+        descriptor['toxicity_grade']['options'] = [
+            {'value': grade, 'label': label}
+            for grade, label in (
+                (0, 'Grade 0 (None)'),
+                (1, 'Grade 1 (Mild)'),
+                (2, 'Grade 2 (Moderate)'),
+                (3, 'Grade 3 (Severe)'),
+                (4, 'Grade 4 (Life-Threatening)'),
+            )
+        ]
     # A scalar measurement/observation may carry the clinical date it was
     # observed (docs/clinical-event-time-policy.md). The editor offers the date
     # control only when this marker is present; a best-effort side effect is not
@@ -1391,6 +1405,19 @@ def build_writable_field_descriptor():
             'canonical': canonical,
             'reason': f'Mirrors {canonical}; edit that field instead.',
         })
+    # The trial catalog still spells the legacy summary `cytogenic_markers`
+    # (no second "t"); the record and the serializer alias use
+    # `cytogenetic_markers`. Describe that spelling rather than leaving an
+    # editor with no entry at all (healthkey-ai/exact#755).
+    descriptor.setdefault('cytogenic_markers', {
+        'kind': KIND_ALIAS,
+        'writable': False,
+        'canonical': 'cytogenetic_markers',
+        'reason': (
+            'Legacy summary of cytogenetic_markers; that column is read-only. '
+            'Record individual findings in Genomics.'
+        ),
+    })
 
     # The trial vocabulary asks the negated question ("No Hepatitis B
     # required"), while the record keeps the positive answer. The descriptor
@@ -1851,4 +1878,17 @@ def build_writable_field_descriptor():
             ),
             'unit': spec['canonical_unit'],
         }
+    # These values are inferred by the matcher and can be overridden by the
+    # patient; the flag tells a federated client to offer the editor rather
+    # than treating every recomputed attribute as read-only (#751). Applied
+    # last: later blocks rebuild some of these entries.
+    for field in (
+        'treatment_refractory_status',
+        'progression',
+        'stem_cell_transplant_history',
+    ):
+        entry = descriptor.get(field)
+        if entry is not None and entry.get('writable'):
+            entry['overridable'] = True
+
     return descriptor

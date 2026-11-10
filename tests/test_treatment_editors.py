@@ -97,6 +97,23 @@ def test_descriptor_exposes_overrides_and_death_date(editor):
         assert descriptors[field]['writable'] is True
 
 
+def test_descriptor_describes_the_legacy_cytogenic_spelling(editor):
+    descriptors = build_writable_field_descriptor()
+    assert descriptors['cytogenic_markers']['kind'] == 'alias'
+    assert descriptors['cytogenic_markers']['canonical'] == 'cytogenetic_markers'
+    assert descriptors['cytogenetic_markers']['writable'] is False
+
+
+def test_descriptor_carries_the_toxicity_scale_and_overridable_flags(editor):
+    descriptors = build_writable_field_descriptor()
+    assert [option['value'] for option in descriptors['toxicity_grade']['options']] == [
+        0, 1, 2, 3, 4,
+    ]
+    for field in ('treatment_refractory_status', 'progression', 'stem_cell_transplant_history'):
+        assert descriptors[field]['writable'] is True
+        assert descriptors[field]['overridable'] is True
+
+
 def test_catalog_is_idempotent_and_has_disease_specific_outcomes(editor, catalog):
     _, client = editor
     before = TherapyOutcome.objects.count()
