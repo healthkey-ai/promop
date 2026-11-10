@@ -15,6 +15,8 @@ export { default as TherapyLinesEditor } from './TherapyLinesEditor';
 export { default as GenomicsEditor } from './GenomicsEditor';
 export { default as PatientFieldEditorSlot } from './PatientFieldEditorSlot';
 export { usePromopFieldBindings } from './usePromopFieldBindings';
+export { default as TrialEditors } from './TrialEditors';
+export { isGenomicsTrialRow, isTherapyTrialRow } from './trialRows';
 
 /** Bumped only on a breaking change to this set's props or behavior. */
 export const PROMOP_EDITORS_API = 1;

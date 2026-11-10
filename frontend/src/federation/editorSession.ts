@@ -2,8 +2,15 @@ import { useEffect, useMemo } from 'react';
 import type { AxiosInstance } from 'axios';
 
 import { __resetWritableFieldsCache } from '@/hooks/useWritableFields';
+import { injectStyles } from './injectStyles';
 import { patientFormForClient } from './patientFormRuntime';
 import type { PatientFormStore } from './patientFormStore';
+
+// The React exports do not go through PatientInfoProvider, which is where the
+// remote's stylesheet is normally injected. Every editor imports this module,
+// so doing it here means a host that mounts one of them gets the same styles as
+// the full form instead of host-tailwind approximations.
+injectStyles();
 
 /**
  * What a host supplies to mount a PROMOP editor: a client, not credentials.

@@ -23,10 +23,16 @@ refreshes its own queries from `onPatientUpdated`.
 ### React-tree hosts
 
 A host that shares this React tree does not use the standalone widget. It mounts
-`federation/TherapyLinesEditor.tsx`, `federation/GenomicsEditor.tsx` or
-`federation/PatientFieldEditorSlot.tsx` through the Module Federation remote
+`federation/TrialEditors.tsx` through the Module Federation remote
 (`vite.remote.config.ts`) and hands over its own authenticated axios client
-plus a base path instead of a DRF token. That keeps the host's interceptor
+plus a base path instead of a DRF token. `TrialEditors` is the one adapter for
+EXACT's three per-row slots: it classifies therapy/genomics/scalar rows, asks
+the descriptor which scalars resolve, and forwards one `onChanged` callback, so
+a host implements no routing of its own. Both current hosts are on the same
+React major (CB `ui.v2` and ht-phr, React 19), so the adapter is shared rather
+than reimplemented per host; the lower-level `TherapyLinesEditor`,
+`GenomicsEditor` and `PatientFieldEditorSlot` exports remain for a host that
+needs one editor without the row routing. That keeps the host's interceptor
 (Firebase Bearer in ht-phr), its origin and its connection-scoped identity:
 minting a client from a token would either send the wrong auth scheme or split
 one browser session into two identities.
