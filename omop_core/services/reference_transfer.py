@@ -23,6 +23,7 @@ from omop_core.models import (
     Concept,
     ConceptClass,
     ConceptMappingDone,
+    ConceptMappingNote,
     ConceptMappingPriority,
     DiseaseCategoryChoice,
     DiseaseCategoryMapping,
@@ -117,6 +118,7 @@ def copied_tables() -> list[ReferenceTable]:
         # concept not loaded here is skipped with a warning.
         ReferenceTable(ConceptMappingPriority, ('concept',)),
         ReferenceTable(ConceptMappingDone, ('concept',)),
+        ReferenceTable(ConceptMappingNote, ('concept',)),
         ReferenceTable(DiseaseCategoryChoice, ('code',)),
         ReferenceTable(DiseaseCategoryMapping, ('disease_name',)),
     ]

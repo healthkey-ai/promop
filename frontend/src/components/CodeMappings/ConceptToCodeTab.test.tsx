@@ -7,9 +7,11 @@ const get = vi.fn();
 const post = vi.fn();
 const remove = vi.fn(() => Promise.resolve({ data: {} }));
 const patch = vi.fn(() => Promise.resolve({ data: {} }));
+const put = vi.fn();
 vi.mock('@/api/axios', () => ({ default: {
   get: (...args: unknown[]) => get(...args), post: (...args: unknown[]) => post(...args),
   delete: (...args: unknown[]) => remove(...args), patch: (...args: unknown[]) => patch(...args),
+  put: (...args: unknown[]) => put(...args),
 } }));
 const concept = {
   concept_id: 123, concept_name: 'Serum albumin', concept_code: 'A1', vocabulary_id: 'LOINC', domain_id: 'Measurement',
@@ -955,6 +957,58 @@ describe('concept priority (#1914)', () => {
     await showExisting(dialog);
     await screen.findByText('SNOMED:S1');
     expect(within(dialog).getByRole('button', { name: /Approve selected/ })).toBeDisabled();
+  });
+
+  it('shows a note icon before the lock, and writes, clears and fails to save a note in its popup (#2411)', async () => {
+    list = [named(1, 'Albumin', 1), { ...named(2, 'Bilirubin'), note: { text: 'Ask Lisa first', updated_by: 'lisa@healthtree.org' },
+                                      lock: { username: 'lisa@healthtree.org', mine: false } }];
+    put.mockReset();
+    render(<ConceptToCodeTab canApprove />);
+    const add = await screen.findByRole('button', { name: 'Add a note for Albumin' });
+    expect(add).toHaveAttribute('data-has-note', 'false');
+    // The icon sits between the concept's name and its lock.
+    expect(add.compareDocumentPosition(screen.getByRole('button', { name: 'Lock Albumin' })) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Albumin' }).compareDocumentPosition(add) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // A written note fills the icon and shows on hover, even on a concept someone else holds.
+    const existing = screen.getByRole('button', { name: 'Edit the note for Bilirubin' });
+    expect(existing).toHaveAttribute('data-has-note', 'true');
+    expect(existing).toHaveAttribute('title', 'Ask Lisa first');
+
+    // The popup opens with focus in the textarea; Escape closes it without saving.
+    const user = userEvent.setup();
+    await user.click(add);
+    const box = await screen.findByLabelText('Note for Albumin', { selector: 'textarea' });
+    await waitFor(() => expect(box).toHaveFocus());
+    await user.type(box, 'Draft');
+    await user.keyboard('{Escape}');
+    await waitFor(() => expect(screen.queryByRole('textbox', { name: 'Note for Albumin' })).toBeNull());
+    expect(put).not.toHaveBeenCalled();
+
+    // A failed save says so and keeps the popup and the text.
+    put.mockRejectedValueOnce({ response: { status: 403, data: { detail: 'Professional access required.' } } });
+    await user.click(add);
+    const again = await screen.findByLabelText('Note for Albumin', { selector: 'textarea' });
+    expect(again).toHaveValue('');
+    await user.type(again, 'Parked until the LOINC reload');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not save the note. Professional access required.');
+    expect(again).toHaveValue('Parked until the LOINC reload');
+
+    // Saving closes the popup and fills the icon without reloading the list.
+    put.mockResolvedValueOnce({ data: { concept_id: 1, note: { text: 'Parked until the LOINC reload', updated_by: 'me@healthtree.org' } } });
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(put).toHaveBeenLastCalledWith('/v1/concept-to-code/1/note/', { note: 'Parked until the LOINC reload' }));
+    const edit = await screen.findByRole('button', { name: 'Edit the note for Albumin' });
+    expect(edit).toHaveAttribute('title', 'Parked until the LOINC reload');
+    expect(screen.getByText('Saved the note for Albumin.')).toBeInTheDocument();
+
+    // Emptying the note clears it.
+    put.mockResolvedValueOnce({ data: { concept_id: 1, note: null } });
+    await user.click(edit);
+    await user.clear(await screen.findByLabelText('Note for Albumin', { selector: 'textarea' }));
+    await user.click(screen.getByRole('button', { name: 'Clear note' }));
+    await waitFor(() => expect(put).toHaveBeenLastCalledWith('/v1/concept-to-code/1/note/', { note: '' }));
+    expect(await screen.findByRole('button', { name: 'Add a note for Albumin' })).toHaveAttribute('data-has-note', 'false');
   });
 
   it('reports a failed move and keeps the list as it was', async () => {
