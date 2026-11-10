@@ -129,7 +129,9 @@ def test_staging_hosts_identity_for_phr_and_production_does_not_yet():
     # The signing key is a secret entered once, never a value in the repo.
     assert staging['FAMILY_AUTH_PRIVATE_KEY'] == {'key': 'FAMILY_AUTH_PRIVATE_KEY', 'sync': False}
     assert staging['FAMILY_AUTH_ISSUER']['value'] == 'https://promop-staging.onrender.com'
-    assert staging['FAMILY_AUTH_AUDIENCE']['value'] == staging['PHR_AUDIENCE']['value'] == 'promop-api'
+    # PROMOP's own audience first, then each sibling that checks `aud` (exact#700).
+    assert staging['FAMILY_AUTH_AUDIENCE']['value'] == 'promop-api,exact-api,soc-api,labs-api'
+    assert staging['PHR_AUDIENCE']['value'] == 'promop-api'
     assert staging['FAMILY_AUTH_SIGNUP_ORGS']['value'] == 'phr:HealthKey PHR'
     # phr's sign-ups verify on phr, at the origin CORS lets call the API.
     app_slug, app_url = staging['FAMILY_AUTH_APP_URLS']['value'].split('=')

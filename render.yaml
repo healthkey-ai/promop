@@ -246,8 +246,11 @@ services:
         sync: false
       - key: FAMILY_AUTH_ISSUER
         value: https://promop-staging.onrender.com
+      # PROMOP's own audience, then each sibling that checks `aud` (exact#700).
+      # List a sibling here before it starts checking; the other way round it
+      # rejects every sign-in.
       - key: FAMILY_AUTH_AUDIENCE
-        value: promop-api
+        value: promop-api,exact-api,soc-api,labs-api
       # phr's sign-up org, kept in place by every deploy (ensure_signup_orgs).
       - key: FAMILY_AUTH_SIGNUP_ORGS
         value: "phr:HealthKey PHR"
