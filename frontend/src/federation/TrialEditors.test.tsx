@@ -73,6 +73,9 @@ function renderAdapter(onChanged?: () => void) {
           <div data-testid="therapy">
             {slots.renderFieldEditor({ field: 'priorTherapy', label: 'Prior Therapy' })}
           </div>
+          <div data-testid="therapy-two">
+            {slots.renderFieldEditor({ field: 'therapyLinesCount', label: 'Therapy Lines Count' })}
+          </div>
           <div data-testid="unknown">
             {slots.renderFieldEditor({ field: 'notInTheDescriptor', label: 'Unknown Row' })}
           </div>
@@ -132,6 +135,21 @@ describe('the shared trial editor adapter', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Close therapy editor' }));
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
     // The scroll lock is released with it.
+    expect(document.body.style.overflow).not.toBe('hidden');
+  });
+
+  it('keeps one therapy panel open and releases the scroll lock', async () => {
+    renderAdapter();
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit Prior Therapy' }));
+    expect(document.body.style.overflow).toBe('hidden');
+
+    // A second row switches the panel instead of stacking another modal that
+    // remembers "hidden" as its value to restore.
+    fireEvent.click(screen.getByRole('button', { name: 'Edit Therapy Lines Count' }));
+    expect(screen.getAllByRole('dialog')).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Close therapy editor' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
     expect(document.body.style.overflow).not.toBe('hidden');
   });
 

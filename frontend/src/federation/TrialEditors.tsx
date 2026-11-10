@@ -56,14 +56,17 @@ function TherapyRowEditor({
   connection,
   readOnly,
   label,
+  open,
+  onOpenChange,
   onChanged,
 }: {
   connection: TrialEditorsConnection;
   readOnly: boolean;
   label: string;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
   onChanged?: () => void;
 }) {
-  const [open, setOpen] = useState(false);
   useEffect(() => {
     if (!open) return;
     const previous = document.body.style.overflow;
@@ -77,12 +80,12 @@ function TherapyRowEditor({
         type="button"
         aria-label={`Edit ${label}`}
         title={`Edit ${label}`}
-        onClick={() => setOpen(true)}
+        onClick={() => onOpenChange(true)}
         className="rounded p-1 text-muted-foreground hover:text-foreground"
       >
         <Pencil className="h-4 w-4" strokeWidth={1.67} />
       </button>
-      <Dialog.Root modal={false} open={open} onOpenChange={setOpen}>
+      <Dialog.Root modal={false} open={open} onOpenChange={onOpenChange}>
         <Dialog.Portal>
           {/* Below the nested line editor (z-50): that dialog portals to the
               body and must sit above this panel, not behind it. */}
@@ -152,6 +155,10 @@ export default function TrialEditors({
     { enabled },
   );
   const connection: TrialEditorsConnection = { apiClient, apiBasePath, connectionKey };
+  // One therapy panel at a time. `modal={false}` leaves the page interactive,
+  // so two rows could otherwise both hold the body-scroll lock and the second
+  // close would restore "hidden" from the first.
+  const [openTherapy, setOpenTherapy] = useState<string | null>(null);
 
   // One notification for a scalar save, not one per mounted row. Every scalar
   // slot shares this store, so a listener inside each slot would fire N times
@@ -172,6 +179,8 @@ export default function TrialEditors({
             connection={connection}
             readOnly={readOnly}
             label={label}
+            open={openTherapy === field}
+            onOpenChange={(next) => setOpenTherapy(next ? field : null)}
             onChanged={onChanged}
           />
         );
