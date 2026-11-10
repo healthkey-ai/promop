@@ -21,6 +21,9 @@ export interface PromopFieldBindings {
   ready: boolean;
   /** Whether PROMOP can resolve this trial-row name to a descriptor key. */
   canResolve: (name: string) => boolean;
+  /** The descriptor entry a trial-row name resolves to (canonical key or a
+   *  declared binding), for callers that need its `kind`. */
+  entryFor: (name: string) => Record<string, unknown> | undefined;
 }
 
 /**
@@ -80,16 +83,19 @@ export function usePromopFieldBindings(
     ? answer.descriptor
     : null;
   const resolvable = useMemo(() => {
-    const names = new Set<string>();
+    const entries = new Map<string, Record<string, unknown>>();
     for (const [name, entry] of Object.entries(current ?? {})) {
-      names.add(name);
-      for (const alias of entry.bindings ?? []) names.add(alias);
+      entries.set(name, entry as Record<string, unknown>);
+      for (const alias of entry.bindings ?? []) {
+        entries.set(alias, entry as Record<string, unknown>);
+      }
     }
-    return names;
+    return entries;
   }, [current]);
 
   return {
     ready: current !== null,
     canResolve: (name: string) => resolvable.has(name),
+    entryFor: (name: string) => resolvable.get(name),
   };
 }

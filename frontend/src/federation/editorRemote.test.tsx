@@ -160,6 +160,7 @@ describe('the PROMOP editors for a host that shares the React tree', () => {
     expect(result.current.canResolve('heightAtTrial')).toBe(true);
     expect(result.current.canResolve('meetsSLIM')).toBe(true);
     expect(result.current.canResolve('therapy_types')).toBe(false);
+    expect(result.current.entryFor('heightAtTrial')?.control).toBe('number');
     expect(host.get).toHaveBeenCalledWith(
       '/fed/v1/patient-records/writable-fields/',
       expect.objectContaining({ headers: { 'X-Patient-Form': '1' } }),
