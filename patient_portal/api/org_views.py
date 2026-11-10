@@ -161,8 +161,6 @@ def _get_or_create_invitee_identity(email):
     return Identity.objects.create_user(email=email, password=None)
 
 
-ROLE_RANK = {'org_admin': 3, 'doctor': 2, 'analyst': 1, 'patient': 0}
-
 NONCONFORMING_VOCABULARIES = frozenset({'LOCAL', 'FHIR', 'sct'})
 
 VOCABULARY_USAGE_SOURCES = (
@@ -291,28 +289,24 @@ def _normalize_redirect_url(role, redirect_url):
 
 
 def _grant_org_access(identity, org, role, granted_by, redirect_url=''):
+    """Add *role* at *org* for *identity*, or refresh the row it already has.
+
+    Roles are additive (#2416): a doctor invited as an analyst holds both rows
+    afterwards, and nothing is ever upgraded or downgraded in place. An
+    existing row of the same role only has its redirect site refreshed.
+    """
     normalized_redirect_url = _normalize_redirect_url(role, redirect_url)
-    existing = GroupAccess.objects.filter(identity=identity, org=org).first()
+    existing = GroupAccess.objects.filter(identity=identity, org=org, role=role).first()
     if existing:
-        changed_fields = []
-        if ROLE_RANK.get(existing.role, 0) < ROLE_RANK.get(role, 0):
-            existing.role = role
-            existing.granted_by = granted_by
-            changed_fields.extend(['role', 'granted_by'])
-
-        desired_redirect_url = normalized_redirect_url if existing.role == 'analyst' else ''
-        if existing.redirect_url != desired_redirect_url:
-            existing.redirect_url = desired_redirect_url
-            changed_fields.append('redirect_url')
-
-        if changed_fields:
-            existing.save(update_fields=changed_fields)
+        if existing.redirect_url != normalized_redirect_url:
+            existing.redirect_url = normalized_redirect_url
+            existing.save(update_fields=['redirect_url'])
         return existing
     return GroupAccess.objects.create(
         identity=identity,
         org=org,
         role=role,
-        redirect_url=normalized_redirect_url if role == 'analyst' else '',
+        redirect_url=normalized_redirect_url,
         granted_by=granted_by,
     )
 
@@ -576,10 +570,9 @@ def confirm_invitation(request):
             if (target.email or '').lower() == invitation.email.lower():
                 target.mark_email_verified()
 
-        # Grant access — use get_or_create rather than update_or_create to avoid
-        # silently downgrading an existing higher-privilege role (e.g. org_admin → doctor).
-        # If the grant already exists, leave it unchanged; the invitation is still
-        # marked confirmed so it can't be replayed.
+        # Grant access. Roles are additive (#2416): the invited role is added
+        # beside any the invitee already holds, never replacing one. The
+        # invitation is marked confirmed either way so it can't be replayed.
         grants = [
             _grant_org_access(
                 target,
@@ -744,6 +737,16 @@ class OrgAccessDetailView(APIView):
                 return Response(
                     {'error': "role must be 'doctor' or 'analyst'"},
                     status=status.HTTP_400_BAD_REQUEST,
+                )
+            if new_role != grant.role and GroupAccess.objects.filter(
+                identity=grant.identity, org=org, role=new_role,
+            ).exists():
+                # Roles are additive (#2416): the user already holds that
+                # role in its own row, so this one is simply surplus.
+                return Response(
+                    {'error': f"This user already holds the {new_role} role here; "
+                              "revoke this grant instead."},
+                    status=status.HTTP_409_CONFLICT,
                 )
             grant.role = new_role
             changed_grant.append('role')
@@ -943,24 +946,24 @@ class OrgPatientSignupView(APIView):
                 from omop_core.services.patient_record_service import refresh_patient_record
                 refresh_patient_record(person)
 
-                # Grant access to this org.  A public demo org gives 'analyst' so
+                # Grant access to this org.  A public demo org gives 'doctor' so
                 # the user can browse its sample patients; that depends on the
-                # org's policy, not on who the user says they are.
+                # org's policy, not on who the user says they are. It used to
+                # give 'analyst', but that role no longer reads any patient
+                # (#2416); accounts granted it before keep it.
                 #
-                # An org that trusts the email domain should give 'analyst' too
+                # An org that trusts the email domain should give 'doctor' too
                 # (#1454) -- but at this moment the address is only something the
                 # user typed. So it starts as 'patient' (self-access only) and
                 # verify_email promotes it once the address is proved. Invitation-
                 # only signups stay 'patient'; the invited role is claimed with
                 # the invitation token through accept-invite.
-                signup_role = 'analyst' if org.allows_patient_signup else 'patient'
+                signup_role = 'doctor' if org.allows_patient_signup else 'patient'
                 GroupAccess.objects.get_or_create(
                     identity=identity,
                     org=org,
-                    defaults={
-                        'role': signup_role,
-                        'pending_email_verification': True,
-                    },
+                    role=signup_role,
+                    defaults={'pending_email_verification': True},
                 )
         except Exception:
             logger.exception('Unexpected error during patient signup for %s', email)

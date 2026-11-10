@@ -357,7 +357,12 @@ class PatientGroupMembership(models.Model):
 
 
 class GroupAccess(models.Model):
-    """Grants a professional (Identity) access to an org or a patient group."""
+    """Grants a professional (Identity) one role at an org or a patient group.
+
+    A user may hold several rows at one org, one per role; each role adds its
+    own reach and none implies another (#2416). See "Roles and what each
+    reaches" in AGENTS.md.
+    """
     ROLE_CHOICES = [
         ('org_admin', 'Org Admin'),
         ('doctor',    'Doctor'),
@@ -399,15 +404,18 @@ class GroupAccess(models.Model):
                 ),
                 name='group_access_org_xor_group',
             ),
+            # Roles are additive (#2416): one row per identity, scope and
+            # role, so a doctor who also curates code mappings holds a doctor
+            # row and an analyst row at the same org.
             models.UniqueConstraint(
-                fields=['identity', 'group'],
+                fields=['identity', 'group', 'role'],
                 condition=Q(group__isnull=False),
-                name='uq_identity_group',
+                name='uq_identity_group_role',
             ),
             models.UniqueConstraint(
-                fields=['identity', 'org'],
+                fields=['identity', 'org', 'role'],
                 condition=Q(org__isnull=False),
-                name='uq_identity_org',
+                name='uq_identity_org_role',
             ),
         ]
 

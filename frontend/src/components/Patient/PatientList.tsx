@@ -9,7 +9,7 @@ import { PaginationControls } from "@/components/labs/PaginationControls";
 import { useLocalPagination } from "@/lib/pagination";
 
 import { loadPreferences, REVIEW_FILTER_DEFAULTS, VIEW_COLUMNS, type PatientView, type ReviewFilters } from './patientListViews';
-import { hasCodeMappingRole, hasCurationRole, isReadOnlyAnalyst, isStaffOrOrgAdmin } from '@/utils/roles';
+import { hasCodeMappingRole, hasCurationRole, isStaffOrOrgAdmin } from '@/utils/roles';
 
 interface Patient {
   person_id: number;
@@ -321,10 +321,10 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
   const isAllSelected =
     patients.length > 0 &&
     (selectAllMode || visibleSelectedCount === patients.length);
+  // Roles are additive (#2416): a curator reaches the mapping hub; a user
+  // who only also holds the analyst grant reaches the Code Mapping page.
   const canCurate = hasCurationRole(currentUser);
   const canMapCodes = hasCodeMappingRole(currentUser);
-  // An analyst views patients read-only (#2398); the API refuses the delete too.
-  const canDeletePatients = !isReadOnlyAnalyst(currentUser);
   const canAdministerOrganizations = isStaffOrOrgAdmin(currentUser);
 
   const handleLogout = () => {
@@ -338,15 +338,13 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
         <div className="flex flex-wrap gap-2">
           {(selectedIds.size > 0 || selectAllMode) && (
             <>
-              {canDeletePatients && (
-                <button
-                  onClick={() => setDeleteDialogOpen(true)}
-                  className="inline-flex items-center gap-2 rounded-md border border-destructive px-4 py-2 text-sm font-medium text-destructive hover:bg-destructive/10"
-                >
-                  <Trash2 size={16} />
-                  Delete ({selectAllMode ? `All ${patientCount}` : selectedIds.size})
-                </button>
-              )}
+              <button
+                onClick={() => setDeleteDialogOpen(true)}
+                className="inline-flex items-center gap-2 rounded-md border border-destructive px-4 py-2 text-sm font-medium text-destructive hover:bg-destructive/10"
+              >
+                <Trash2 size={16} />
+                Delete ({selectAllMode ? `All ${patientCount}` : selectedIds.size})
+              </button>
               {canAdministerOrganizations && (
                 <button
                   onClick={() => { setResolveRun(null); setResolveDialogOpen(true); }}
@@ -366,7 +364,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
               </button>
             </>
           )}
-          {canMapCodes && (
+          {(canCurate || canMapCodes) && (
             <button
               onClick={() => navigate(canCurate ? "/mappings" : "/code-mappings")}
               className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"

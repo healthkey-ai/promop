@@ -2698,8 +2698,8 @@ describe("curation controls follow the role (#2398)", () => {
     expect(screen.queryByRole("link", { name: "Source systems / hospitals" })).not.toBeInTheDocument();
   });
 
-  it("shows Upload and Source systems to a doctor", async () => {
-    mockUseAuth.mockReturnValue(grant("doctor"));
+  it("shows Upload and Source systems to an org admin", async () => {
+    mockUseAuth.mockReturnValue({ currentUser: { id: 9, is_org_admin: true, org_accesses: [] } });
     renderPage([proposedRow]);
     await screen.findByText("Code Mapping");
     expect(screen.getByRole("button", { name: "Upload" })).toBeInTheDocument();

@@ -96,8 +96,10 @@ def promote_trusted_domain_grants(identity) -> int:
 
     Signing up at a private organization that trusts the email domain records a
     self-access ('patient') grant, because at that moment the address is only a
-    claim. Once it is proved, that grant becomes 'analyst' -- what a trusted
-    domain signup is meant to receive (#1454). Returns the number promoted.
+    claim. Once it is proved, that grant becomes 'doctor' -- what a trusted
+    domain signup is meant to receive: the trusting org's patients (#1454). It
+    was 'analyst' until that role stopped reading patients (#2416); grants
+    promoted earlier are left as they are. Returns the number promoted.
     """
     from omop_core.models import GroupAccess, OrgTrust
     domain = identity.verified_email_domain
@@ -109,7 +111,7 @@ def promote_trusted_domain_grants(identity) -> int:
     return GroupAccess.objects.filter(
         identity=identity, role='patient', pending_email_verification=True,
         org_id__in=list(trusting),
-    ).update(role='analyst', pending_email_verification=False)
+    ).update(role='doctor', pending_email_verification=False)
 
 
 @csrf_exempt

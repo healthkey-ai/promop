@@ -165,21 +165,21 @@ it('places Upload immediately after Mappings', async () => {
 });
 
 it.each([
-  ['doctor', 'Mappings', true],
-  ['analyst', 'Code Mapping', false],
-])('offers an organization %s "%s" (Upload: %s) and never Org Admin', async (role, mappingsLabel, upload) => {
+  [['doctor'], '/mappings'],
+  [['doctor', 'analyst'], '/mappings'],
+])('offers an organization %s "Mappings" to %s and Upload, never Org Admin', async (roles, target) => {
   mockUseAuth.mockReturnValue({
     currentUser: {
-      org_accesses: [{ role, org_name: 'Example', org_slug: 'example', expires_at: null }],
+      org_accesses: roles.map((role) => ({ role, org_name: 'Example', org_slug: 'example', expires_at: null })),
     },
   });
   vi.mocked(api.get).mockResolvedValue({ data: { count: 0, results: [] } });
 
   render(<MemoryRouter><PatientList /></MemoryRouter>);
 
-  expect(await screen.findByRole('button', { name: mappingsLabel })).toBeInTheDocument();
-  if (upload) expect(screen.getByRole('button', { name: 'Upload' })).toBeInTheDocument();
-  else expect(screen.queryByRole('button', { name: 'Upload' })).not.toBeInTheDocument();
+  fireEvent.click(await screen.findByRole('button', { name: 'Mappings' }));
+  expect(navigate).toHaveBeenCalledWith(target);
+  expect(screen.getByRole('button', { name: 'Upload' })).toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'Org Admin' })).not.toBeInTheDocument();
 });
 
@@ -237,19 +237,3 @@ it('downloads every matching patient with the list filters when all are selected
   expect(await screen.findByText(/At most 500 patients per export/)).toBeInTheDocument();
 });
 
-it('offers an analyst Code Mapping, not the mapping hub, upload or delete', async () => {
-  mockUseAuth.mockReturnValue({ currentUser: { org_accesses: [{ org_slug: 'acme', org_name: 'Acme', role: 'analyst', expires_at: null }] } });
-  vi.mocked(api.get).mockResolvedValue({ data: { count: 1, results: [
-    { person_id: 1, patient_name: 'Alexandra Catherine Example', disease: 'Breast Cancer' },
-  ] } });
-  render(<MemoryRouter><PatientList /></MemoryRouter>);
-  await screen.findByTitle('Alexandra Catherine Example');
-  fireEvent.click(screen.getByRole('button', { name: 'Code Mapping' }));
-  expect(navigate).toHaveBeenCalledWith('/code-mappings');
-  expect(screen.queryByRole('button', { name: 'Mappings' })).not.toBeInTheDocument();
-  expect(screen.queryByRole('button', { name: 'Upload' })).not.toBeInTheDocument();
-  expect(screen.queryByRole('button', { name: 'Org Admin' })).not.toBeInTheDocument();
-  fireEvent.click(screen.getAllByRole('checkbox')[1]);
-  expect(screen.queryByRole('button', { name: /^Delete/ })).not.toBeInTheDocument();
-  expect(screen.getByRole('button', { name: /Download CSV/ })).toBeInTheDocument();
-});

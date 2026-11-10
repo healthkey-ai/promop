@@ -27,7 +27,7 @@ import RelevanceSignalsPage from "@/components/MappingHub/RelevanceSignalsPage";
 import CodeMappingAccuracyPage from "@/components/CodeMappings/CodeMappingAccuracyPage";
 import MappingAccuracyAnalyticsPage from "@/components/CodeMappings/MappingAccuracyAnalyticsPage";
 import MappingHubPage from "@/components/MappingHub/MappingHubPage";
-import { hasCodeMappingRole, hasCurationRole, isStaffOrOrgAdmin } from "@/utils/roles";
+import { hasCodeMappingRole, hasCurationRole, isAnalystOnly, isStaffOrOrgAdmin } from "@/utils/roles";
 import DiseaseCategoryPage from "@/components/MappingHub/DiseaseCategoryPage";
 import TherapyMappingPage from "@/components/TherapyMappings/TherapyMappingPage";
 import OrgLogin from "@/components/Auth/OrgLogin";
@@ -98,20 +98,24 @@ function AppRoutes() {
   }
 
   const isPatient = !!currentUser?.is_patient;
+  // An analyst-only account sees no patient data (#2416): its home is the
+  // Code Mapping page, and the patient pages send it there.
+  const analystOnly = isAnalystOnly(currentUser);
 
   // Provider-only routes: require a signed-in provider. Signed-in patients are
   // redirected home (their own record); logged-out users go to login.
   const providerRoute = (element: ReactNode) => {
     if (!currentUser) return <Navigate to="/login" replace />;
     if (isPatient) return <Navigate to="/" replace />;
+    if (analystOnly) return <Navigate to="/code-mappings" replace />;
     return element;
   };
 
-  // Curation pages are for staff, org_admin and doctor. The Code Mapping page
-  // is for every professional role, the analyst included: an analyst curates
-  // code mappings and views patients read-only, nothing else (#2398). Doctors
-  // and analysts propose; only staff and org_admin approve. The API
-  // independently enforces the same policy.
+  // Roles are additive (#2416). Curation pages are for staff, org_admin and
+  // doctor. The Code Mapping page is for staff, org_admin and the analyst
+  // grant: a doctor maps codes only when also granted analyst. Analysts
+  // propose; only staff and org_admin approve. The API independently
+  // enforces the same policy.
   const curationRoute = (element: ReactNode) => {
     if (!currentUser) return <Navigate to="/login" replace />;
     if (!hasCurationRole(currentUser)) return <Navigate to="/" replace />;
@@ -159,6 +163,8 @@ function AppRoutes() {
           currentUser ? (
             isPatient ? (
               <PatientHome user={currentUser} onLogout={logout} />
+            ) : analystOnly ? (
+              <Navigate to="/code-mappings" replace />
             ) : (
               <PatientList />
             )

@@ -125,7 +125,7 @@ from omop_core.mapping.therapy import (
 from omop_core.services.concept_cache import concept_by_id as _cc_by_id, concept_by_loinc as _cc_by_loinc, concept_by_name_ilike as _cc_by_name, concept_by_vocab as _cc_by_vocab
 from omop_core.services.access import (
     PROFESSIONAL_ROLES, get_visible_orgs, build_trusting_map, get_admin_orgs,
-    has_org_admin_access, has_professional_access, has_curation_access,
+    has_org_admin_access, has_code_mapping_access, has_curation_access,
 )
 from datetime import date as _date, datetime, timedelta
 from django.utils.timezone import localdate, make_aware, is_naive
@@ -946,11 +946,15 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             # Org-admin access includes trust-derived admin orgs.
             admin_org_ids = list(get_admin_orgs(self.request.user).values_list('id', flat=True))
 
+            # An analyst grant lists nothing (#2416): the role is code
+            # mapping and PRism analytics, never a patient's data.
+            reading_grants = active_grants.exclude(role='analyst')
+
             # Public demo orgs: patients can browse all org patients.
             # Only direct org grants are checked — no trust expansion,
             # no admin powers, no mapping curation access.
             demo_org_ids = list(
-                active_grants.filter(
+                reading_grants.filter(
                     org__isnull=False,
                     org__allows_patient_signup=True,
                 ).values_list('org_id', flat=True)
@@ -959,7 +963,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
             # Group grants: see patients in those groups
             actor_group_ids = list(
-                active_grants.filter(group__isnull=False).values_list('group_id', flat=True)
+                reading_grants.filter(group__isnull=False).values_list('group_id', flat=True)
             )
             if actor_group_ids:
                 group_pids = PatientGroupMembership.objects.filter(
@@ -12206,25 +12210,25 @@ def _can_manage_field_mappings(user):
     Field mappings and their synonyms, choices and custom fields, therapy and
     disease-category reference, relevance signals, source systems and the
     mapping hub are for staff, org admins and doctors. An analyst is a
-    code-mapping curator and a read-only patient viewer (#2398), so this
+    code-mapping curator and sees no patient data (#2398, #2416), so this
     gate refuses the role -- see ``_can_manage_code_mappings`` for the one
-    curation surface it keeps. Approval is narrower still: see
+    curation surface it has. Approval is narrower still: see
     ``_can_approve_mappings``.
     """
     return bool(getattr(user, 'is_staff', False) or has_curation_access(user))
 
 
 def _can_manage_code_mappings(user):
-    """Whether a user may use the Code Mapping page (#2398).
+    """Whether a user may use the Code Mapping page (#2398, #2416).
 
     Both tabs -- Code to Concept and Concept to Code -- with the mapping
     dialog, Suggest, Lock, Done, priority, axis variants, LOINC axes and the
-    accuracy pages. Every professional role may propose here, the analyst
-    included; approval still needs ``_can_approve_mappings``, and the CSV
-    upload and source-system registry stay behind
-    ``_can_manage_field_mappings``.
+    accuracy pages. Staff, org admins and analysts; a doctor needs an analyst
+    grant as well, since roles are additive and code mapping is the analyst's.
+    Approval still needs ``_can_approve_mappings``, and the CSV upload and
+    source-system registry stay behind ``_can_manage_field_mappings``.
     """
-    return bool(getattr(user, 'is_staff', False) or has_professional_access(user))
+    return bool(getattr(user, 'is_staff', False) or has_code_mapping_access(user))
 
 
 def _can_read_mappings(request):
@@ -12259,8 +12263,8 @@ def _without_source_samples(mappings):
 def _can_approve_mappings(user):
     """Whether a user may set a mapping's status to 'approved'.
 
-    Only staff and org-admin users can approve.  Doctors and analysts may
-    propose or reject mappings but cannot approve them.
+    Only staff and org-admin users can approve.  An analyst may propose or
+    reject code mappings and a doctor field mappings, but neither approves.
     """
     return bool(getattr(user, 'is_staff', False) or has_org_admin_access(user))
 
@@ -12918,7 +12922,7 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None, person_id=Non
         if status_value == 'approved':
             raise serializers.ValidationError({
                 'status': 'Only org admins and staff can approve mappings. '
-                          'Doctors and analysts may propose mappings for review.'
+                          'Analysts may propose mappings for review.'
             })
         if mapping is not None and mapping.status == 'approved' and status_value != 'approved':
             raise serializers.ValidationError({

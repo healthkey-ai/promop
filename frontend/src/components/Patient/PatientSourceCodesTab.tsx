@@ -8,7 +8,7 @@ import type {
 } from "../../types/sourceCodes";
 import EditMappingDialog from "../CodeMappings/EditMappingDialog";
 import SourceQuantityCell from "../CodeMappings/SourceQuantityCell";
-import { hasCurationRole, isStaffOrOrgAdmin } from "@/utils/roles";
+import { hasCodeMappingRole, hasCurationRole, isStaffOrOrgAdmin } from "@/utils/roles";
 import {
   type CodeMappingRow,
   type Reference,
@@ -94,9 +94,11 @@ const SECTIONS: { key: SectionKey; label: string; defaultOpen: boolean }[] = [
 function SourceCodeTable({
   rows,
   onRowClick,
+  clickable = true,
 }: {
   rows: PatientSourceCode[];
   onRowClick: (sc: PatientSourceCode) => void;
+  clickable?: boolean;
 }) {
   return (
     <div className="overflow-x-auto rounded-md border">
@@ -115,8 +117,8 @@ function SourceCodeTable({
           {rows.map((sc, i) => (
             <tr
               key={`${sc.omop_table}-${sc.source_value}-${i}`}
-              className="cursor-pointer hover:bg-muted/30"
-              onClick={() => onRowClick(sc)}
+              className={clickable ? "cursor-pointer hover:bg-muted/30" : undefined}
+              onClick={clickable ? () => onRowClick(sc) : undefined}
             >
               <td className="px-3 py-2">
                 <div className="font-mono text-xs">{sc.source_value}</div>
@@ -157,6 +159,9 @@ function SourceCodeTable({
 export default function PatientSourceCodesTab({ personId }: Props) {
   const { currentUser } = useAuth();
   const canApprove = isStaffOrOrgAdmin(currentUser);
+  // Mapping a code is the analyst's work (#2416): a doctor without that grant
+  // reads this tab and the API would refuse the save, so no dialog opens.
+  const canMap = hasCodeMappingRole(currentUser);
   const [data, setData] = useState<SourceCodesResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -342,6 +347,7 @@ export default function PatientSourceCodesTab({ personId }: Props) {
                 <SourceCodeTable
                   rows={expanded[key] ? rows : rows.slice(0, SECTION_ROW_LIMIT)}
                   onRowClick={handleRowClick}
+                  clickable={canMap}
                 />
                 {!expanded[key] && rows.length > SECTION_ROW_LIMIT && (
                   <button

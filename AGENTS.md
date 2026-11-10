@@ -665,31 +665,39 @@ brew install python@3.12
 
 ## Roles and what each reaches
 
-`GroupAccess.role` has four values. The helpers in `omop_core/services/access.py`
-and `omop_core/authorization.py` decide the reach; the frontend mirrors them in
+`GroupAccess.role` has four values, and **roles are additive**: a user holds one
+`GroupAccess` row per role at an org (unique on identity, org and role since
+migration 0333, #2416), each row adds its own reach, and no role implies
+another. Inviting an existing member with a second role adds a row; revoking a
+row removes that role. The helpers in `omop_core/services/access.py` and
+`omop_core/authorization.py` decide the reach; the frontend mirrors them in
 `frontend/src/utils/roles.ts` for what the UI offers, and never decides alone.
 
 | Role | Reaches |
 |---|---|
-| `org_admin` (a grant, or an admin path through an org or domain trust) | everything for its orgs: approves mappings, administers access, uploads |
-| `doctor` | every curation page (`has_curation_access`), patient writes (`can_write_patient`), proposes and rejects mappings |
-| `analyst` | the Code Mapping page only -- both tabs, the dialog, Suggest, Lock, Done, priority, axis variants, the accuracy pages (`has_professional_access`, `_can_manage_code_mappings`) -- and the patient list and detail **read-only**: the patients of a public demo org (the signup path that hands out the role) or of a group the grant names; an org-level grant at an ordinary org lists nothing, as for a doctor (`PatientRecordViewSet.get_queryset`). PRism analytics is a separate app that shares the identity table. Nothing else (#2398). |
+| `org_admin` (a grant, or an admin path through an org or domain trust) | everything for its orgs: approves mappings (so it reaches the Code Mapping page), administers access, uploads |
+| `doctor` | patients, read and write (`can_access_patient`, `can_write_patient`, `get_visible_orgs`), every curation page except Code Mapping (`has_curation_access`): field mappings, therapy and disease-category reference, relevance signals, source systems, the mapping hub |
+| `analyst` | the Code Mapping page only -- both tabs, the dialog, Suggest, Lock, Done, priority, axis variants, the accuracy pages (`has_code_mapping_access`, `_can_manage_code_mappings`) -- and PRism analytics, a separate app that shares the identity table. **No individual patient's data**: the patient list is empty, a detail is 404, clinical rows and a patient's source codes are out of reach, aggregated org stats show no org (#2398, #2416). |
 | `patient` | their own record; never another patient's (see `PatientRecordIsolationTest`) |
 
-An analyst is refused with 403 on field mappings and their synonyms, choices and
-custom fields, therapy and disease-category reference writes, relevance signals,
-source-system management, the CSV code-mapping upload, the mapping hub and every
-patient write; the UI hides those routes and controls. An organization
-trust makes a doctor or org_admin at the trusted org an admin of the granting
-org; it gives an analyst nothing, not even a read of the granting org's patients
-(`get_admin_access_paths`). A **domain** trust is different and unchanged
-(#1454): a trusted-domain self-signup is promoted to analyst once the address is
-verified, and that promotion is how the user reaches the trusting org at all, so
-a trusted-domain analyst is the admin the trust makes them. Approval stays with
+So a doctor maps codes only when also granted `analyst`, and an analyst sees a
+patient only when also granted `doctor`. An analyst is refused with 403 on field
+mappings and their synonyms, choices and custom fields, therapy and
+disease-category reference writes, relevance signals, source-system management,
+the CSV code-mapping upload, the mapping hub and every patient read or write;
+the UI opens an analyst-only account on Code Mapping and hides the patient
+pages. A trust of either kind makes a `doctor` or `org_admin` at the trusted
+org or domain an admin of the granting org, and still does so for a verified
+account with no grant at all (a federated login, or a trusted-domain
+self-signup once verified); it gives an account whose grants are all `analyst`
+or `patient` nothing (`get_admin_access_paths`). A self-signup at a public demo
+org, and a verified trusted-domain self-signup (#1454), are granted `doctor`
+rather than the former `analyst`, because that signup exists to browse
+patients; grants made before #2416 are left as they are. Approval stays with
 staff and org_admin (`_can_approve_mappings`) for every role. Gate a new
-curation endpoint with `_can_manage_field_mappings` unless it belongs on the Code
-Mapping page, where `_can_manage_code_mappings` admits the analyst too.
-`AnalystRoleScopeTest` in `patient_portal/tests.py` holds the role to this.
+curation endpoint with `_can_manage_field_mappings` unless it belongs on the
+Code Mapping page, where `_can_manage_code_mappings` admits the analyst.
+`AnalystRoleScopeTest` in `patient_portal/tests.py` holds the roles to this.
 
 ---
 

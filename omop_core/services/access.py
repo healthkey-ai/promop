@@ -80,11 +80,13 @@ def get_visible_orgs(user) -> QuerySet:
     Access is always explicit — there are no open orgs. Access is granted via:
       - is_staff → all active orgs
       - allows_public_aggregated_data → active orgs available to any authenticated user
-      - GroupAccess (org_admin, doctor, analyst) → specific orgs/groups
+      - GroupAccess (org_admin, doctor) → specific orgs/groups
       - OrgTrust (domain or org-to-org) → orgs that trust the user's email domain
         or that trust an org the user already belongs to
 
-    If a user has no matching grant and no matching trust, they see nothing.
+    An analyst grant counts for nothing here (#2416): the role never reads
+    patient data, so it opens no org and carries no trust. If a user has no
+    matching grant and no matching trust, they see nothing.
     """
     if getattr(user, 'is_staff', False):
         return Organization.objects.filter(is_active=True)
@@ -96,14 +98,16 @@ def get_visible_orgs(user) -> QuerySet:
         Q(expires_at__isnull=True) | Q(expires_at__gt=now)
     )
 
-    # Direct org grants (org_admin, doctor, analyst)
+    # Direct org grants (org_admin, doctor); a group-scoped grant does not
+    # administer an entire org, so org_admin counts only at org level.
+    reading = active.filter(role__in=CURATION_ROLES)
     direct_ids = set(
-        active.filter(org__isnull=False)
-              .values_list('org_id', flat=True)
+        reading.filter(org__isnull=False)
+               .values_list('org_id', flat=True)
     )
     group_org_ids = set(
-        active.exclude(role='org_admin')
-              .values_list('group__organization_id', flat=True)
+        reading.exclude(role='org_admin')
+               .values_list('group__organization_id', flat=True)
     )
     group_org_ids.discard(None)
     direct_ids |= group_org_ids
@@ -157,17 +161,13 @@ def get_admin_access_paths(user):
     org_grants = [grant for grant in active if grant.org_id]
     # An organization trust makes a professional at the trusted org an admin
     # of the granting org. Only the curation roles carry that far: an analyst
-    # is a code-mapping curator and a read-only viewer at their own org, and
-    # would otherwise write the granting org's patients and approve its
-    # mappings through the trust (#2398). Patient-only grants never did.
+    # never reads patient data (#2398, #2416), so a trust in its name would
+    # hand it the granting org's patients. Patient-only grants never did.
     trust_expanding = {}
-    professional = {}
     for grant in org_grants:
         if grant.role == 'org_admin':
             paths.append({'org': grant.org, 'source': 'org_grant',
                           'expires_at': grant.expires_at})
-        if grant.role != 'patient':
-            professional[grant.org_id] = grant
         if grant.role in CURATION_ROLES:
             trust_expanding[grant.org_id] = grant
     for trust in OrgTrust.objects.filter(
@@ -180,19 +180,16 @@ def get_admin_access_paths(user):
             'source_org_slug': trust.trusted_org.slug,
             'expires_at': grant.expires_at,
         })
-    # Preserve domain-trust policy: patient-only organization memberships do
-    # not inherit admin authority just because their email matches a domain.
-    # Verified only -- see get_accessible_orgs.
-    #
-    # Domain trust is deliberately NOT narrowed to the curation roles (#2398):
-    # a trusted-domain self-signup is promoted *to* analyst when the address
-    # is verified (#1454), and that promotion is how the legitimate user gets
-    # into the trusting org's patients at all
-    # (SelfSignupEmailTrustTest.test_verified_address_at_a_trusted_domain_is_trusted).
-    # So a trusted-domain analyst is the admin the trust makes them, and the
-    # curation pages open for them as ``is_org_admin`` says.
+    # A domain trust makes a verified address at the domain an admin of the
+    # granting org, for an account with a curation-role grant or with no grant
+    # at all (a federated login, or a trusted-domain self-signup once verified:
+    # #1454 promotes that signup to doctor). An account whose grants are all
+    # patient or analyst gets nothing from it: neither role reads patients, and
+    # a domain is not a reason to start (#2416). Verified only -- see
+    # get_accessible_orgs.
     domain = getattr(user, 'verified_email_domain', '')
-    if domain and not (org_grants and not professional):
+    curation_grant = any(grant.role in CURATION_ROLES for grant in active)
+    if domain and (curation_grant or not active):
         for trust in OrgTrust.objects.filter(
             trusted_domain__iexact=domain, granting_org__is_active=True,
         ).select_related('granting_org').order_by('id'):
@@ -236,13 +233,22 @@ def has_explicit_org_admin_access(user, slug: str) -> bool:
 
 
 PROFESSIONAL_ROLES = ('org_admin', 'doctor', 'analyst')
-"""Every non-patient role: who may read patients and curate code mappings."""
+"""Every non-patient role. Says only that an account is a professional and
+not a patient (so no patient record is provisioned for it); it decides no
+access. Roles are additive and each has its own reach (#2416): patient
+data is CURATION_ROLES, code mapping is CODE_MAPPING_ROLES."""
 
 CURATION_ROLES = ('org_admin', 'doctor')
-"""The roles with the full curation reach: field, therapy and disease-category
-mappings, relevance signals, source systems, the mapping hub, and admin
-authority through an organization trust. An analyst is deliberately absent
-(#2398): the role is a code-mapping curator and a read-only patient viewer."""
+"""The roles that reach patient data and the clinical curation surface:
+patient reads and writes, field, therapy and disease-category mappings,
+relevance signals, source systems, the mapping hub, and admin authority
+through a trust. An analyst is deliberately absent (#2398, #2416): the role
+sees no individual patient's health data."""
+
+CODE_MAPPING_ROLES = ('analyst',)
+"""The grant that opens the Code Mapping page. A doctor does not map codes
+unless also granted it; an org_admin reaches the page through
+``has_org_admin_access`` because approval happens there (#2416)."""
 
 
 def _has_active_role(user, roles) -> bool:
@@ -260,12 +266,22 @@ def _has_active_role(user, roles) -> bool:
 def has_professional_access(user) -> bool:
     """Return True when the user holds any professional role (org_admin, doctor, analyst).
 
-    Gates the Code Mapping page, which every professional may propose on
-    (approval is staff and org_admin only). Patient reads are decided by
-    ``can_access_patient`` and ``get_visible_orgs``, not here. For every
-    other curation page use ``has_curation_access``.
+    A classifier, not a gate: it tells a professional from a patient. Patient
+    reads are ``can_access_patient`` and ``get_visible_orgs`` (curation roles
+    only); the Code Mapping page is ``has_code_mapping_access``; every other
+    curation page is ``has_curation_access``.
     """
     return _has_active_role(user, PROFESSIONAL_ROLES)
+
+
+def has_code_mapping_access(user) -> bool:
+    """Return True when the user may use the Code Mapping page (#2416).
+
+    Staff, an analyst grant, or an org_admin (by grant or through a trust,
+    since approval happens on that page). A doctor without an analyst grant
+    gets False: code mapping is the analyst's work, and roles are additive.
+    """
+    return _has_active_role(user, CODE_MAPPING_ROLES) or has_org_admin_access(user)
 
 
 def has_curation_access(user) -> bool:
@@ -273,7 +289,8 @@ def has_curation_access(user) -> bool:
 
     Everything a professional reaches beyond Code Mapping and patient reads:
     field mappings, therapy and disease-category reference, relevance
-    signals, source systems, the mapping hub. An analyst gets False (#2398).
+    signals, source systems, the mapping hub, and every patient read. An
+    analyst gets False (#2398, #2416).
 
     An admin path through a trust counts as org_admin here, as it does for
     ``is_org_admin``, approval and patient writes: the one user who is an
