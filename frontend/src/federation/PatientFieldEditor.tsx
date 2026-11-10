@@ -105,11 +105,14 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
   // after a rejected clear). If the pair later clears again, a surviving draft
   // would quietly reapply an obsolete unit to the next typed number. Computing
   // this before the early returns keeps the hook order stable.
+  // A queued edit, else a failed draft the reader has not retried yet.
+  const hasDraft = (key: string) => key in state.pending || key in state.failed;
+  const draftOf = (key: string) => key in state.pending ? state.pending[key] : state.failed[key];
   const initialCanonical = store.resolve(name);
-  const initialPending = initialCanonical && initialCanonical in state.pending
-    ? state.pending[initialCanonical] : undefined;
+  const initialPending = initialCanonical && hasDraft(initialCanonical)
+    ? draftOf(initialCanonical) : undefined;
   const initialValue = initialCanonical
-    ? (initialCanonical in state.pending
+    ? (hasDraft(initialCanonical)
       ? (initialPending && typeof initialPending === 'object'
         && !Array.isArray(initialPending) && 'value' in initialPending
         ? (initialPending as { value: unknown }).value : initialPending)
@@ -145,8 +148,8 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
     ? store.resolve(field.canonical) : undefined;
   if (negatedSource) {
     const source = state.fields[negatedSource];
-    const queued = negatedSource in state.pending ? state.pending[negatedSource] : undefined;
-    const raw = negatedSource in state.pending
+    const queued = hasDraft(negatedSource) ? draftOf(negatedSource) : undefined;
+    const raw = hasDraft(negatedSource)
       ? (queued && typeof queued === 'object' && !Array.isArray(queued) && 'value' in queued
         ? (queued as { value: unknown }).value : queued)
       : state.values[negatedSource];
@@ -170,15 +173,17 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
           <p className="text-xs text-muted-foreground">{readOnlyReason}
             {' '}{infoHref && <a href={infoHref}>Open Your Info</a>}</p></>}
       {negatedSource in state.pending && <span role="status" className="text-xs">Saving…</span>}
-      {state.errors[negatedSource] && <p role="alert" className="text-xs text-red-600">{state.errors[negatedSource]}</p>}
+      {state.errors[negatedSource] && <p role="alert" className="text-xs text-red-600">{state.errors[negatedSource]}
+        {negatedSource in state.failed && canWrite && <>{' '}<button type="button" className="underline"
+          onClick={() => store.retryFailed([negatedSource])}>Retry</button></>}</p>}
     </div>;
   }
-  const pending = canonical in state.pending ? state.pending[canonical] : undefined;
+  const pending = hasDraft(canonical) ? draftOf(canonical) : undefined;
   // A dated edit is queued as {value, date}; the row still edits the value.
   const pendingValue = pending && typeof pending === 'object' && !Array.isArray(pending) && 'value' in pending
     ? (pending as { value: unknown }).value : pending;
-  const value = canonical in state.pending ? pendingValue : state.values[canonical];
-  const dobPrecision = state.pending.date_of_birth_precision ?? state.values.date_of_birth_precision;
+  const value = hasDraft(canonical) ? pendingValue : state.values[canonical];
+  const dobPrecision = draftOf('date_of_birth_precision') ?? state.values.date_of_birth_precision;
   const precision = canonical === 'date_of_birth'
     && (dobPrecision === 'day' || dobPrecision === 'month' || dobPrecision === 'year')
     ? dobPrecision : undefined;
@@ -214,8 +219,8 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
   // the correction target; a new entry defaults to today, and an older choice
   // says plainly that it becomes history rather than the current value.
   const dated = writable && field.dated === true;
-  const pendingUnit = unitFieldName && unitFieldName in state.pending
-    ? state.pending[unitFieldName] : undefined;
+  const pendingUnit = unitFieldName && hasDraft(unitFieldName)
+    ? draftOf(unitFieldName) : undefined;
   const storedUnit = String(pendingUnit
     ?? (unitFieldName ? state.values[unitFieldName] : undefined) ?? '');
   // A draft chosen while the value was empty must not outlive a pair that
@@ -232,6 +237,8 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
     ?? (unitFieldName ? state.errors[unitFieldName] : undefined);
   const pairPending = canonical in state.pending
     || Boolean(unitFieldName && unitFieldName in state.pending);
+  const pairFailed = canonical in state.failed
+    || Boolean(unitFieldName && unitFieldName in state.failed);
   // A field the record would accept, shown in a read-only mount or to a caller
   // without write access, is not derived: it is only locked here. It keeps the
   // descriptor's own explanation if it has one and otherwise claims nothing.
@@ -408,6 +415,8 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
     {writable && field.projection?.omop_table === 'measurement' && !dated
       && <p className="text-xs text-muted-foreground">This edit is recorded with today’s date.</p>}
     {pairPending && <span role="status" className="text-xs">Saving…</span>}
-    {pairError && <p role="alert" className="text-xs text-red-600">{pairError}</p>}
+    {pairError && <p role="alert" className="text-xs text-red-600">{pairError}
+      {pairFailed && writable && <>{' '}<button type="button" className="underline"
+        onClick={() => store.retryFailed([canonical])}>Retry</button></>}</p>}
   </div>;
 }

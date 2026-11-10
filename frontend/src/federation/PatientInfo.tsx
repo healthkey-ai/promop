@@ -17,7 +17,10 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
   'readOnly' | 'federated' | 'onPatientUpdated' | 'showHeading'>) {
   const store = usePatientFormStore()!;
   const state = usePatientFormSnapshot(store);
-  const editedInfo = { ...state.values, ...state.pending };
+  // A failed draft stays on screen over the saved value until it is retried
+  // or edited again, the way dev kept the typed values after "Save failed".
+  const editedInfo = { ...state.values, ...state.failed, ...state.pending };
+  const failedDrafts = Object.keys(state.failed).length > 0;
   const editedName = String(editedInfo.patient_name ?? '');
   const [activeTab, setActiveTab] = useState(0);
   const deepLinkAppliedRef = useRef(false);
@@ -56,7 +59,9 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
       const result = await response.json();
       // Do not apply an old lookup to a newer ZIP draft.
       const current = store.getSnapshot();
-      if ((current.pending.postal_code ?? current.values.postal_code) !== zipcode) return;
+      const draft = 'postal_code' in current.pending ? current.pending.postal_code
+        : 'postal_code' in current.failed ? current.failed.postal_code : current.values.postal_code;
+      if (draft !== zipcode) return;
       const place = result.places?.[0];
       if (place) {
         handleFieldChange('city', place['place name']);
@@ -73,7 +78,11 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
     <div className="flex items-center justify-between">
       {showHeading && <h1 className="text-lg font-medium text-foreground/70">Health Profile</h1>}
       {(state.saving || Object.keys(state.pending).length > 0) && <span role="status" className="text-xs">Saving…</span>}
-      {Object.keys(state.errors).length > 0 && <span role="alert" className="text-xs text-red-600">Some values could not be saved. Review the field errors.</span>}
+      {Object.keys(state.errors).length > 0 && <span role="alert" className="text-xs text-red-600">
+        Some values could not be saved. Review the field errors.
+        {failedDrafts && !locked && <>{' '}<button type="button" className="font-semibold underline"
+          onClick={() => store.retryFailed()}>Save failed · Retry</button></>}
+      </span>}
     </div>
     <div className="border-b border-border"><nav className="flex gap-x-1 overflow-x-auto" aria-label="Patient info tabs">
       {tabKeys.map((key, index) => <button key={key} onClick={() => setActiveTab(index)} className={[

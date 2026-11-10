@@ -147,7 +147,8 @@ describe('federated PatientInfo save', () => {
     await waitFor(() => expect(patches).toHaveLength(1));
     fireEvent.click(screen.getByRole('button', { name: 'Withdraw answer' }));
     await waitFor(() => expect(screen.getByText(/Not answered/)).toBeInTheDocument());
-    await act(async () => { finishPatch({ data: { patient_info: { ...PATIENT_INFO, email: 'new@example.org' } } }); });
+    await act(async () => { finishPatch({ data: { patient_info: { ...PATIENT_INFO, email: 'new@example.org' },
+      write: { applied: ['email'] } } }); });
     expect(screen.getByText(/Not answered/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Confirm no pre-existing conditions' }));
     await waitFor(() => expect(posts.at(-1)![1]).toMatchObject({
@@ -164,7 +165,7 @@ describe('federated PatientInfo save', () => {
       return Promise.resolve({ data: { patient_info: {
         ...PATIENT_INFO, ...(body as Record<string, unknown>),
         no_pre_existing_conditions: null, preexisting_conditions: [],
-      } } });
+      }, write: { applied: Object.keys(body as Record<string, unknown>) } } });
     });
     await renderAndLoad();
     await waitFor(() => expect(screen.getByRole('button', { name: 'Withdraw answer' })).toBeEnabled());
@@ -307,6 +308,29 @@ describe('federated PatientInfo save', () => {
     await act(async () => { await vi.advanceTimersByTimeAsync(500); });
     await waitFor(() => expect(patches).toHaveLength(1));
     expect(patches[0][1]).toEqual({ email: 'b.howell@example.org' });
+  });
+
+  it('keeps the typed value after a failed save and resends it from Save failed · Retry', async () => {
+    const patch = client.patch as ReturnType<typeof vi.fn>;
+    const succeed = patch.getMockImplementation()!;
+    patch.mockImplementationOnce((url: string, body: unknown) => {
+      patches.push([url, body]);
+      return Promise.reject(new Error('offline'));
+    });
+    await renderAndLoad();
+    await editAndSave('howell@example.org', 'new@example.org');
+    await waitFor(() => expect(patches).toHaveLength(1));
+
+    expect(await screen.findByRole('button', { name: 'Save failed · Retry' })).toBeInTheDocument();
+    expect(screen.getByDisplayValue('new@example.org')).toBeInTheDocument();
+    expect(screen.getByText(/Retry to send it again/)).toBeInTheDocument();
+
+    patch.mockImplementation(succeed);
+    fireEvent.click(screen.getByRole('button', { name: 'Save failed · Retry' }));
+    await waitFor(() => expect(patches).toHaveLength(2));
+    expect(patches[1]).toEqual(['/api/v1/patient-records/261/', { email: 'new@example.org' }]);
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Save failed · Retry' })).not.toBeInTheDocument());
+    expect(screen.getByDisplayValue('new@example.org')).toBeInTheDocument();
   });
 
   it('says no record is linked when the record read answers 404', async () => {

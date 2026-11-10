@@ -356,6 +356,26 @@ describe('read-only views do not call a stored field derived', () => {
   });
 });
 
+describe('a failed save', () => {
+  it('keeps the draft in the field and retries it from the row', async () => {
+    const { store, patch } = await setup();
+    patch.mockRejectedValueOnce(new Error('offline'));
+    render(<PatientFieldEditor store={store} name="weight" />);
+
+    fireEvent.change(screen.getByRole('spinbutton', { name: 'Weight' }), { target: { value: '80' } });
+    await act(async () => { await store.flush(); });
+
+    expect(screen.getByRole('spinbutton', { name: 'Weight' })).toHaveValue(80);
+    expect(screen.getByRole('alert')).toHaveTextContent('Retry to send it again');
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await act(async () => { await store.flush(); });
+
+    expect(patch).toHaveBeenCalledTimes(2);
+    expect(patch.mock.calls[1][1]).toEqual({ weight: 80 });
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+});
+
 describe('negated trial questions (#5663)', () => {
   const hivStatus = {
     label: 'HIV Positive', writable: true, target: 'patient_record',

@@ -70,6 +70,259 @@ describe('planned-therapy options from a host catalog', () => {
   });
 });
 
+describe('failed saves keep their draft', () => {
+  it('keeps the typed value after a failed save and resends it only on Retry', async () => {
+    const { store, patch } = setup();
+    await store.load();
+    patch.mockRejectedValueOnce(new Error('offline'));
+    store.enqueue('weight', 80);
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(store.getSnapshot().failed).toEqual({ weight: 80 });
+    expect(store.getSnapshot().errors.weight).toMatch(/Retry/);
+    expect(store.getSnapshot().errors.weight).not.toMatch(/restored/);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(patch).toHaveBeenCalledOnce();
+
+    store.retryFailed();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(patch).toHaveBeenCalledTimes(2);
+    expect(patch.mock.calls[1][1]).toEqual({ weight: 80 });
+    expect(store.getSnapshot().failed).toEqual({});
+    expect(store.getSnapshot().errors).toEqual({});
+    expect(store.getSnapshot().values.weight).toBe(80);
+  });
+
+  it('keeps the draft again when the retry fails too', async () => {
+    const { store, patch } = setup();
+    await store.load();
+    patch.mockRejectedValueOnce(new Error('offline')).mockRejectedValueOnce(new Error('offline'));
+    store.enqueue('weight', 80);
+    await vi.advanceTimersByTimeAsync(500);
+    store.retryFailed(['weight']);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(patch).toHaveBeenCalledTimes(2);
+    expect(store.getSnapshot().failed).toEqual({ weight: 80 });
+  });
+
+  it('lets a new edit replace a failed draft', async () => {
+    const { store, patch } = setup();
+    await store.load();
+    patch.mockRejectedValueOnce(new Error('offline'));
+    store.enqueue('weight', 80);
+    await vi.advanceTimersByTimeAsync(500);
+    store.enqueue('weight', 90);
+
+    expect(store.getSnapshot().failed).toEqual({});
+    expect(store.getSnapshot().errors.weight).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(patch.mock.calls[1][1]).toEqual({ weight: 90 });
+  });
+
+  it('restores the saved value when the server refuses the field', async () => {
+    const { store, patch } = setup();
+    await store.load();
+    patch.mockRejectedValueOnce({ response: { status: 400, data: { rejected: { weight: 'Too heavy.' } } } });
+    store.enqueue('weight', 800);
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(store.getSnapshot().failed).toEqual({});
+    expect(store.getSnapshot().values.weight).toBe(60);
+    expect(store.getSnapshot().errors.weight).toBe('Too heavy.');
+  });
+
+  it('holds a failed dated draft while the result dates are stale', async () => {
+    let metadataFails = false;
+    const get = vi.fn(async (url: string) => {
+      if (url.includes('writable-fields')) {
+        if (metadataFails) throw new Error('metadata unavailable');
+        return { data: { hemoglobin_g_dl: { writable: true, target: 'patient_record',
+          dated: true, latest_date: '2026-08-01', projection: { omop_table: 'measurement' } } } };
+      }
+      return { data: { patient_info: { person_id: 12, hemoglobin_g_dl: 12.5 }, write_enabled: true } };
+    });
+    const patch = vi.fn(async (_url: string, edits: Record<string, unknown>) => ({ data: {
+      patient_info: { person_id: 12, hemoglobin_g_dl: 13 },
+      write: { applied: Object.keys(edits), rejected: {} },
+    } }));
+    const store = new PatientFormStore({ get, patch } as unknown as AxiosInstance, '/api');
+    await store.load();
+    const draft = { value: 13, date: '2026-08-02' };
+    patch.mockRejectedValueOnce(new Error('offline'));
+    store.enqueue('hemoglobin_g_dl', draft);
+    await vi.advanceTimersByTimeAsync(500);
+    metadataFails = true;
+    await store.reloadDates();
+    expect(store.getSnapshot().datesStale).toBe(true);
+
+    store.retryFailed();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(patch).toHaveBeenCalledOnce();
+    expect(store.getSnapshot().failed).toEqual({ hemoglobin_g_dl: draft });
+    expect(store.getSnapshot().errors.hemoglobin_g_dl).toMatch(/could not be refreshed/);
+
+    metadataFails = false;
+    await store.reloadDates();
+    expect(store.getSnapshot().errors.hemoglobin_g_dl).toMatch(/Retry to send it again/);
+    store.retryFailed();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(patch).toHaveBeenCalledTimes(2);
+    expect(patch.mock.calls[1][1]).toEqual({ hemoglobin_g_dl: draft });
+  });
+});
+
+describe('save failures are classified by what the server said', () => {
+  it.each([
+    [400, { detail: 'Date of birth cannot be in the future.' }, 'Date of birth cannot be in the future.'],
+    [400, { rejected: { other_field: 'Not in this batch.' } }, 'refused'],
+    [403, { detail: 'You have read-only access to this patient record.' }, 'read-only access'],
+    [422, {}, 'refused'],
+  ])('restores the saved value after a %s refusal and shows why', async (status, data, message) => {
+    const { store, patch } = setup();
+    await store.load();
+    patch.mockRejectedValueOnce({ response: { status, data } });
+    store.enqueue('weight', 80);
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(store.getSnapshot().failed).toEqual({});
+    expect(store.getSnapshot().pending).toEqual({});
+    expect(store.getSnapshot().values.weight).toBe(60);
+    expect(store.getSnapshot().errors.weight).toContain(message);
+    expect(store.getSnapshot().errors.weight).not.toMatch(/Retry/);
+    expect(store.getSnapshot().writable).toBe(status !== 403);
+  });
+
+  it('keeps valid sibling drafts when a 400 refuses only some fields of the batch', async () => {
+    const { store, patch } = setup();
+    await store.load();
+    patch.mockRejectedValueOnce({ response: { status: 400, data: {
+      detail: 'Some fields were refused', rejected: { height: 'Height is out of range.' } } } });
+    store.enqueue('weight', 80); store.enqueue('height', 999);
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(store.getSnapshot().errors.height).toBe('Height is out of range.');
+    expect(store.getSnapshot().values.height).toBe(170);
+    expect(store.getSnapshot().failed).toEqual({ weight: 80 });
+    expect(store.getSnapshot().errors.weight).toMatch(/Retry to send it again/);
+    expect(store.getSnapshot().errors.weight).not.toMatch(/Some fields were refused/);
+  });
+
+  it('ends a request-wide detail with a full stop', async () => {
+    const { store, patch } = setup();
+    await store.load();
+    patch.mockRejectedValueOnce({ response: { status: 400, data: { detail: 'Email is invalid' } } });
+    store.enqueue('weight', 80);
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(store.getSnapshot().errors.weight)
+      .toBe('Email is invalid. Your last saved value has been restored.');
+  });
+
+  it('reloads with a fresh read after an unconfirmed save, not a read already in flight', async () => {
+    const { store, patch, get } = setup();
+    await store.load();
+    // A read that started before the write is still running when it lands.
+    let finishStaleRead!: () => void;
+    get.mockImplementationOnce(() => new Promise((resolve) => {
+      finishStaleRead = () => resolve({ data: { patient_info: { person_id: 12, height: 170, weight: 60 },
+        write_enabled: true } } as never);
+    }));
+    void store.load();
+    patch.mockResolvedValueOnce({ data: { ok: true } } as never);
+    get.mockImplementation(async (url: string) => ({ data: url.includes('writable-fields') ? fields
+      : { patient_info: { person_id: 12, height: 170, weight: 80 }, write_enabled: true } }));
+    store.enqueue('weight', 80);
+    await vi.advanceTimersByTimeAsync(500);
+    finishStaleRead();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(store.getSnapshot().values.weight).toBe(80);
+  });
+
+  it.each([401, 408, 429, 500, 503])('keeps the draft for Retry after a %s', async (status) => {
+    const { store, patch } = setup();
+    await store.load();
+    patch.mockRejectedValueOnce({ response: { status, data: { detail: 'Try later.' } } });
+    store.enqueue('weight', 80);
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(store.getSnapshot().failed).toEqual({ weight: 80 });
+    expect(store.getSnapshot().errors.weight).toMatch(/Retry to send it again/);
+  });
+
+  it('reloads the record instead of offering Retry when a 2xx is not acknowledged', async () => {
+    const { store, patch, get } = setup();
+    await store.load();
+    const reads = get.mock.calls.length;
+    patch.mockResolvedValueOnce({ data: { ok: true } } as never);
+    store.enqueue('weight', 80);
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(store.getSnapshot().failed).toEqual({});
+    expect(store.getSnapshot().errors.weight).toMatch(/did not confirm/);
+    expect(get.mock.calls.length).toBeGreaterThan(reads);
+    expect(get.mock.calls.slice(reads).some(([url]) => String(url).includes('patient-info/me'))).toBe(true);
+  });
+
+  it('does not resend a failed draft for a field that is no longer writable', async () => {
+    const { store, patch, get } = setup();
+    await store.load();
+    patch.mockRejectedValueOnce(new Error('offline'));
+    store.enqueue('weight', 80);
+    await vi.advanceTimersByTimeAsync(500);
+    get.mockImplementation(async (url: string) => ({ data: url.includes('writable-fields')
+      ? { ...fields, weight: { writable: false, reason: 'Locked.' } }
+      : { patient_info: { person_id: 12, height: 170, weight: 60 }, write_enabled: true } }));
+    await store.load();
+
+    store.retryFailed();
+    await vi.advanceTimersByTimeAsync(500);
+    expect(patch).toHaveBeenCalledOnce();
+    expect(store.getSnapshot().failed).toEqual({});
+    expect(store.getSnapshot().errors.weight).toMatch(/no longer be edited/);
+  });
+
+  it('keeps a retried dated draft held behind a save whose date refresh fails', async () => {
+    const dated = { writable: true, target: 'patient_record', dated: true,
+      latest_date: '2026-08-01', projection: { omop_table: 'measurement' } };
+    let metadataFails = false;
+    let resolvePatch!: (payload: unknown) => void;
+    const get = vi.fn(async (url: string) => {
+      if (url.includes('writable-fields')) {
+        if (metadataFails) throw new Error('metadata unavailable');
+        return { data: { hemoglobin_g_dl: dated, platelet_count: dated } };
+      }
+      return { data: { patient_info: { person_id: 12, hemoglobin_g_dl: 12.5, platelet_count: 200 },
+        write_enabled: true } };
+    });
+    const patch = vi.fn();
+    const store = new PatientFormStore({ get, patch } as unknown as AxiosInstance, '/api');
+    await store.load();
+    const draft = { value: 13, date: '2026-08-02' };
+    patch.mockRejectedValueOnce(new Error('offline'));
+    store.enqueue('hemoglobin_g_dl', draft);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(store.getSnapshot().failed).toEqual({ hemoglobin_g_dl: draft });
+
+    // Another dated save is in flight when the reader retries the draft.
+    patch.mockImplementationOnce(() => new Promise((resolve) => { resolvePatch = resolve; }));
+    store.enqueue('platelet_count', { value: 210, date: '2026-08-02' });
+    await vi.advanceTimersByTimeAsync(500);
+    store.retryFailed();
+    // That save lands, but its date refresh fails, so the retried draft is held.
+    metadataFails = true;
+    resolvePatch({ data: { patient_info: { person_id: 12, hemoglobin_g_dl: 12.5, platelet_count: 210 },
+      write: { applied: ['platelet_count'] } } });
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(patch).toHaveBeenCalledTimes(2);
+    expect(store.getSnapshot().pending).toEqual({});
+    expect(store.getSnapshot().failed).toEqual({ hemoglobin_g_dl: draft });
+    expect(store.getSnapshot().errors.hemoglobin_g_dl).toMatch(/could not be refreshed/);
+  });
+});
+
 describe('load failures', () => {
   function failing(failure: (url: string) => unknown) {
     const get = vi.fn(async (url: string) => {
@@ -162,12 +415,13 @@ describe('shared patient-form queue', () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(store.getSnapshot().values.no_pre_existing_conditions).toBeNull();
   });
-  it('rolls failed PATCH back and exposes an error', async () => {
+  it('keeps the draft of a failed PATCH beside the saved value and exposes an error', async () => {
     const { store, patch } = setup();
     await store.load(); patch.mockRejectedValueOnce(new Error('offline'));
     store.enqueue('weight', 80);
     await vi.advanceTimersByTimeAsync(500);
     expect(store.getSnapshot().pending).toEqual({});
+    expect(store.getSnapshot().failed).toEqual({ weight: 80 });
     expect(store.getSnapshot().values.weight).toBe(60);
     expect(store.getSnapshot().errors.weight).toContain('Could not save');
   });
@@ -399,14 +653,16 @@ describe('dated result edits', () => {
     expect(store.getSnapshot().pending).toEqual({});
     expect(store.getSnapshot().errors.hemoglobin_g_dl).toMatch(/Retry/);
 
-    // A retry refreshes the dates but does not re-send an unconfirmed date.
+    // A retry refreshes the dates but does not re-send an unconfirmed date on
+    // its own. The held draft stays visible until the reader retries it.
     metadataFails = false;
     latest = '2026-08-03';
     await store.reloadDates();
     await vi.advanceTimersByTimeAsync(500);
     expect(patch).toHaveBeenCalledOnce();
     expect(store.getSnapshot().datesStale).toBe(false);
-    expect(store.getSnapshot().errors.hemoglobin_g_dl).toBeUndefined();
+    expect(store.getSnapshot().failed).toEqual({ hemoglobin_g_dl: { value: 14, date: '2026-08-03' } });
+    expect(store.getSnapshot().errors.hemoglobin_g_dl).toMatch(/Retry to send it again/);
     expect(store.getSnapshot().fields.hemoglobin_g_dl.latest_date).toBe('2026-08-03');
   });
 
@@ -627,12 +883,13 @@ describe('shared patient-form queue', () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(store.getSnapshot().values.no_pre_existing_conditions).toBeNull();
   });
-  it('rolls failed PATCH back and exposes an error', async () => {
+  it('keeps the draft of a failed PATCH beside the saved value and exposes an error', async () => {
     const { store, patch } = setup();
     await store.load(); patch.mockRejectedValueOnce(new Error('offline'));
     store.enqueue('weight', 80);
     await vi.advanceTimersByTimeAsync(500);
     expect(store.getSnapshot().pending).toEqual({});
+    expect(store.getSnapshot().failed).toEqual({ weight: 80 });
     expect(store.getSnapshot().values.weight).toBe(60);
     expect(store.getSnapshot().errors.weight).toContain('Could not save');
   });
@@ -937,6 +1194,35 @@ describe('source-pair writes (#5700)', () => {
     expect(patch.mock.calls[0][1]).toEqual({
       hemoglobin_level: 120, hemoglobin_level_units: 'G/L',
     });
+  });
+
+  it('keeps both halves of a failed pair and retries them together', async () => {
+    const { store, patch } = pairSetup();
+    await store.load();
+    patch.mockRejectedValueOnce(new Error('offline'));
+
+    store.enqueuePair('hemoglobin_level', 120, 'hemoglobin_level_units', 'G/L');
+    await vi.advanceTimersByTimeAsync(500);
+    expect(store.getSnapshot().failed).toEqual({ hemoglobin_level: 120, hemoglobin_level_units: 'G/L' });
+
+    store.retryFailed(['hemoglobin_level']);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(patch.mock.calls[1][1]).toEqual({ hemoglobin_level: 120, hemoglobin_level_units: 'G/L' });
+    expect(store.getSnapshot().failed).toEqual({});
+  });
+
+  it('restores both halves when the server refuses only one', async () => {
+    const { store, patch } = pairSetup();
+    await store.load();
+    patch.mockRejectedValueOnce({ response: { data: { rejected: {
+      hemoglobin_level_units: 'Unsupported unit.' } } } });
+
+    store.enqueuePair('hemoglobin_level', 120, 'hemoglobin_level_units', 'G/L');
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(store.getSnapshot().failed).toEqual({});
+    expect(store.getSnapshot().values.hemoglobin_level_units).toBe('G/DL');
+    expect(store.getSnapshot().errors.hemoglobin_level_units).toBe('Unsupported unit.');
   });
 
   it('reports a refusal on both halves without keeping a half-saved pair', async () => {

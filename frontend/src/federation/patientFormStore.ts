@@ -19,6 +19,17 @@ function isNotFound(error: unknown): boolean {
   return (error as { response?: { status?: number } } | null)?.response?.status === 404;
 }
 
+/** A save that failed without a refusal from the server keeps its draft. */
+const FAILED_SAVE_ERROR = 'Could not save this value. Retry to send it again.';
+/** The server refused the request as a whole (a 4xx without a field map). */
+const REFUSED_SAVE_ERROR = 'The server refused this value. Your last saved value has been restored.';
+/** A 2xx that did not acknowledge the fields: the server may have saved them. */
+const UNCONFIRMED_SAVE_ERROR =
+  'The server did not confirm this save. The record was reloaded; check the value.';
+
+/** Statuses that say "try again later", not "this value is wrong". */
+const TRANSIENT_STATUSES = new Set([401, 408, 429]);
+
 const STALE_DATES_ERROR =
   'The result dates could not be refreshed. Retry before saving so this result lands on the right day.';
 
@@ -40,6 +51,12 @@ export interface PatientFormSnapshot {
   values: Record<string, unknown>;
   fields: Record<string, FormFieldDescriptor>;
   pending: Record<string, unknown>;
+  /** Drafts whose save failed without a server refusal (offline, 5xx, an
+   *  unreadable answer). They stay visible over the saved value until the
+   *  reader retries them or edits the field again; they are never resent on
+   *  their own. A field the server refused is not here: its saved value is
+   *  shown again with the server's reason. */
+  failed: Record<string, unknown>;
   errors: Record<string, string>;
   personId?: number;
   loading: boolean;
@@ -61,7 +78,7 @@ export interface PatientFormResult {
  * This deliberately does not promise delivery after closing the browser tab. */
 export class PatientFormStore {
   private snapshot: PatientFormSnapshot = {
-    values: {}, fields: {}, pending: {}, errors: {}, loading: true, saving: false, writable: false,
+    values: {}, fields: {}, pending: {}, failed: {}, errors: {}, loading: true, saving: false, writable: false,
   };
   private listeners = new Set<() => void>();
   /** Listener -> the registration that owns it. A later registration with the
@@ -175,10 +192,12 @@ export class PatientFormStore {
     return enriched;
   };
 
-  load = (): Promise<void> => {
-    if (this.loading) return this.loading;
+  /** Read the record. A read already in flight is shared, unless `fresh`:
+   * then a new read starts and supersedes it (its answer may predate a write). */
+  load = (fresh = false): Promise<void> => {
+    if (this.loading && !fresh) return this.loading;
     const revision = ++this.readRevision;
-    this.loading = (async () => {
+    const run = (async () => {
       // Only the record read's 404 means "no linked record"; a 404 from the
       // descriptor request is a different failure.
       let readingRecord = true;
@@ -219,9 +238,13 @@ export class PatientFormStore {
         if (revision === this.readRevision) this.publish({ loading: false, writable: false,
           error: readingRecord && isNotFound(error) ? MISSING_RECORD_ERROR
             : 'Could not load the patient record and field permissions. Please retry.' });
-      } finally { this.loading = undefined; }
+      }
     })();
-    return this.loading;
+    this.loading = run;
+    // Only the newest read clears the slot: a superseded read settling late
+    // must not drop the one that replaced it.
+    void run.finally(() => { if (this.loading === run) this.loading = undefined; });
+    return run;
   };
   private enqueueEntries = (entries: Record<string, unknown>) => {
     const names = Object.keys(entries);
@@ -230,8 +253,10 @@ export class PatientFormStore {
       this.revisions[name] = ++this.revision;
     }
     const errors = { ...this.snapshot.errors };
-    for (const name of names) delete errors[name];
-    this.publish({ pending: { ...this.snapshot.pending, ...entries }, errors });
+    const failed = { ...this.snapshot.failed };
+    // A new edit replaces a failed draft of the same field.
+    for (const name of names) { delete errors[name]; delete failed[name]; }
+    this.publish({ pending: { ...this.snapshot.pending, ...entries }, failed, errors });
     clearTimeout(this.timer);
     this.timer = setTimeout(() => { void this.flush(); }, 500);
   };
@@ -269,6 +294,57 @@ export class PatientFormStore {
     this.enqueueEntries({ [name]: value, [unitField]: unit });
     return true;
   };
+  /**
+   * Send failed drafts again: all of them, or the named fields with their
+   * companion units. Each goes back through the queue, so the revision,
+   * serialisation and stale-date rules apply as to a fresh edit. A dated draft
+   * waits while the result dates are stale, keeping its draft.
+   */
+  retryFailed = (names?: string[]) => {
+    if (!this.snapshot.writable) return;
+    const failed = { ...this.snapshot.failed };
+    const fields = this.snapshot.fields;
+    const chosen = new Set(names ?? Object.keys(failed));
+    for (const name of [...chosen]) {
+      const owner = fields[name]?.qualifies;
+      if (owner) chosen.add(owner);
+    }
+    for (const key of Object.keys(failed)) {
+      const owner = fields[key]?.qualifies;
+      if (owner && chosen.has(owner)) chosen.add(key);
+    }
+    const drafts: Record<string, unknown> = {};
+    const errors = { ...this.snapshot.errors };
+    let dropped = false;
+    for (const name of chosen) {
+      if (!(name in failed)) continue;
+      const owner = fields[name]?.qualifies ?? name;
+      // The same gate `enqueue` applies: a field (or the value a unit
+      // qualifies) the descriptor no longer offers for writing is not resent.
+      const target = fields[owner];
+      if (!target?.writable || target.target !== 'patient_record') {
+        delete failed[name];
+        dropped = true;
+        errors[name] = 'This field can no longer be edited here; the saved value is shown.';
+        continue;
+      }
+      const dated = isDatedEdit(failed[owner]);
+      if (dated && this.snapshot.datesStale) {
+        errors[name] = STALE_DATES_ERROR;
+        continue;
+      }
+      drafts[name] = failed[name];
+    }
+    const next = dropped ? { errors, failed } : { errors };
+    if (!Object.keys(drafts).length) {
+      this.publish(next);
+      return;
+    }
+    this.publish(next);
+    this.enqueueEntries(drafts);
+    void this.flush();
+  };
+
   private reloadFields = async (): Promise<boolean> => {
     const personId = this.snapshot.personId;
     if (!personId) return false;
@@ -326,7 +402,10 @@ export class PatientFormStore {
   private withoutStaleErrors(): Record<string, string> {
     const errors = { ...this.snapshot.errors };
     for (const [name, message] of Object.entries(errors)) {
-      if (message === STALE_DATES_ERROR && !(name in this.snapshot.pending)) delete errors[name];
+      if (message !== STALE_DATES_ERROR || name in this.snapshot.pending) continue;
+      // A failed draft held back by stale dates can be retried again now.
+      if (name in this.snapshot.failed) errors[name] = FAILED_SAVE_ERROR;
+      else delete errors[name];
     }
     return errors;
   }
@@ -400,32 +479,43 @@ export class PatientFormStore {
       ? Object.keys(batch).filter((name) => isDatedEdit(batch[name])) : [];
     if (staleDated.length) {
       const pending = { ...this.snapshot.pending };
+      const failed = { ...this.snapshot.failed };
       const errors = { ...this.snapshot.errors };
+      // Held, not discarded: the draft moves to `failed`, so it stays visible
+      // and goes out again only from an explicit Retry once dates refresh.
+      const hold = (key: string) => {
+        if (this.revisions[key] === revisions[key]) {
+          delete pending[key];
+          failed[key] = batch[key];
+        }
+        delete batch[key];
+      };
       for (const name of staleDated) {
-        if (this.revisions[name] === revisions[name]) delete pending[name];
         errors[name] = STALE_DATES_ERROR;
-        delete batch[name];
+        hold(name);
         // A companion unit is not a fact on its own. Holding the dated value
         // must hold the unit too, or the next PATCH would write a lone unit.
         for (const key of Object.keys(batch)) {
-          if (this.snapshot.fields[key]?.qualifies === name) {
-            if (this.revisions[key] === revisions[key]) delete pending[key];
-            delete batch[key];
-          }
+          if (this.snapshot.fields[key]?.qualifies === name) hold(key);
         }
       }
-      this.publish({ pending, errors });
+      this.publish({ pending, failed, errors });
       if (!Object.keys(batch).length) return;
     }
     this.flight = true;
     this.publish({ saving: true });
     const batchErrors: Record<string, string> = {};
+    // Fields whose request failed without a server refusal: their drafts stay.
+    const unsent = new Set<string>();
+    // A 2xx without the acknowledgement: the write may have landed.
+    let unconfirmed = false;
     try {
       const { data } = await this.client.patch<PatientFormResult>(
         `${this.base}/v1/patient-records/${this.snapshot.personId}/`, batch,
         { headers: { 'X-Patient-Form': '1' } },
       );
       if (!data.patient_info || !Array.isArray(data.write?.applied)) {
+        unconfirmed = true;
         throw new Error('The server did not acknowledge the saved fields.');
       }
       // Ignore GETs started before this confirmed write. Never merge submitted
@@ -462,27 +552,67 @@ export class PatientFormStore {
       await Promise.allSettled([...this.updated.keys()]
         .map((listener) => Promise.resolve().then(() => listener(data))));
     } catch (error) {
-      const rejected = (error as { response?: { data?: { rejected?: Record<string, string> } } })
-        ?.response?.data?.rejected;
-      for (const name of Object.keys(batch)) batchErrors[name] = rejected?.[name]
-        ?? 'Could not save this value. Your last saved value has been restored.';
+      const response = (error as { response?: { status?: number; data?: {
+        rejected?: Record<string, string>; detail?: unknown;
+      } } })?.response;
+      const rejected = response?.data?.rejected;
+      const status = response?.status;
+      // A 4xx (other than auth expiry, timeout and rate limiting) is the
+      // server's answer about this request: resending it gets the same answer.
+      // Only a failure that says nothing about the value keeps the draft for
+      // Retry: offline, a 5xx, 401/408/429.
+      const refusal = status !== undefined && status >= 400 && status < 500
+        && !TRANSIENT_STATUSES.has(status);
+      const detail = typeof response?.data?.detail === 'string' && response.data.detail
+        ? response.data.detail : undefined;
+      // A refusal names the field and restores the saved value: a retry would
+      // send the same refused value. A value and its unit are one assertion:
+      // refusing either half restores both.
+      const owner = (name: string) => this.snapshot.fields[name]?.qualifies ?? name;
+      const refusedOwners = new Set(Object.keys(batch)
+        .filter((name) => rejected?.[name]).map(owner));
+      // When the refusal names fields of this batch, it is about those fields:
+      // the others were valid and only went unsent with them, so they keep
+      // their drafts for Retry. A request-wide refusal (no field of the batch
+      // named) restores everything and shows `detail` when there is one.
+      const namesBatchField = refusedOwners.size > 0;
+      const sentence = (text: string) => (/[.!?]$/.test(text) ? text : `${text}.`);
+      for (const name of Object.keys(batch)) {
+        if (unconfirmed) batchErrors[name] = UNCONFIRMED_SAVE_ERROR;
+        else if (rejected?.[name]) batchErrors[name] = rejected[name];
+        else if (refusedOwners.has(owner(name))) {
+          batchErrors[name] = 'Could not save this value. Your last saved value has been restored.';
+        } else if (refusal && !namesBatchField) {
+          batchErrors[name] = detail && !rejected
+            ? `${sentence(detail)} Your last saved value has been restored.`
+            : REFUSED_SAVE_ERROR;
+        } else { batchErrors[name] = FAILED_SAVE_ERROR; unsent.add(name); }
+      }
+      // The server says this caller may not write this record at all.
+      if (status === 403) this.publish({ writable: false });
     } finally {
       // A refresh started while this batch was settling decides whether the
       // queued dated edits still have a valid correction target: never dispatch
       // them ahead of it, and never ahead of one that supersedes it.
       await this.settleDateRefresh();
       const pending = { ...this.snapshot.pending };
+      const failed = { ...this.snapshot.failed };
       const errors = { ...this.snapshot.errors };
       // A stale failure/success must not retire a newer edit to the same field.
       for (const name of Object.keys(batch)) {
         if (this.revisions[name] === revisions[name]) {
           delete pending[name];
+          if (unsent.has(name)) failed[name] = batch[name];
           if (batchErrors[name]) errors[name] = batchErrors[name];
           else delete errors[name];
         }
       }
       this.flight = false;
-      this.publish({ pending, errors, saving: false });
+      this.publish({ pending, failed, errors, saving: false });
+      // The server may have saved what it did not acknowledge: read the record
+      // back instead of guessing either way.
+      // A read already in flight may predate the write, so start a fresh one.
+      if (unconfirmed) void this.load(true);
       if (Object.keys(this.queue).length) await this.flush();
     }
   };
