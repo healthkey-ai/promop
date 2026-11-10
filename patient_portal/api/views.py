@@ -5939,13 +5939,26 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
         before rendering is to be told the truth for the person doing the
         editing.
         """
-        from omop_core.services.write_descriptor import build_writable_field_descriptor
+        from omop_core.services.write_descriptor import (
+            DESCRIPTOR_META_KEY, build_writable_field_descriptor,
+        )
         from omop_core.services.patient_form import patient_form_descriptors
 
         shared_form = request.headers.get('X-Patient-Form') == '1'
         descriptor = build_writable_field_descriptor()
+        # patient_form_descriptors enriches fields only and drops the envelope;
+        # the store's schema_version gate needs it, or it reads every response
+        # as a legacy descriptor and never refuses an unknown version.
+        meta = descriptor.get(DESCRIPTOR_META_KEY)
+
+        def shared(entries, **kwargs):
+            enriched = patient_form_descriptors(entries, **kwargs)
+            if meta is not None:
+                enriched[DESCRIPTOR_META_KEY] = meta
+            return enriched
+
         if shared_form:
-            descriptor = patient_form_descriptors(descriptor)
+            descriptor = shared(descriptor)
 
         raw_person = request.query_params.get('person_id')
         if raw_person is None:
@@ -5962,7 +5975,7 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
         if _caller_may_write_patient(request, person_id):
             if shared_form:
                 record = PatientRecord.objects.filter(person_id=person_id).first()
-                descriptor = patient_form_descriptors(descriptor, record=record)
+                descriptor = shared(descriptor, record=record)
                 if not getattr(request.user, 'is_staff', False):
                     for field in self._STAFF_ONLY_FIELDS:
                         entry = descriptor.get(field)

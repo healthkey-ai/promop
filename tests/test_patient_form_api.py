@@ -568,3 +568,18 @@ def test_shared_form_enforces_the_native_transformation_rules():
     assert unknown.status_code == 400, unknown.data
     record.refresh_from_db()
     assert record.post_transformation_outcome is None
+
+
+def test_shared_form_descriptor_keeps_the_schema_version_envelope():
+    """#2429: without the envelope the store reads every response as a legacy
+    descriptor, so its schema_version gate could never refuse a newer contract."""
+    from omop_core.services.write_descriptor import DESCRIPTOR_SCHEMA_VERSION
+    record = PatientRecordFactory()
+    url = '/api/v1/patient-records/writable-fields/'
+    writer = _client()
+    reader = APIClient()
+    reader.force_authenticate(Identity.objects.create_user(email='form-reader@example.test'))
+    for client, params in ((writer, {}), (writer, {'person_id': record.person_id}),
+                           (reader, {'person_id': record.person_id})):
+        data = client.get(url, params, HTTP_X_PATIENT_FORM='1').data
+        assert data['__descriptor__']['schema_version'] == DESCRIPTOR_SCHEMA_VERSION, params
