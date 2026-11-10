@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, waitFor, within } from "@testing-library/react";
+import { cleanup, render, screen, fireEvent, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { vi, describe, it, expect, beforeEach, afterEach } from "vitest";
 import CodeMappingPage from "./CodeMappingPage";
@@ -229,7 +229,8 @@ function accessibleName(el: Element): string {
 function columnIndex(table: HTMLElement, name: string) {
   const headers = within(table).getAllByRole("columnheader");
   const index = headers.findIndex(
-    (header) => header.textContent?.replace(/[↕↑↓]/g, "").trim() === name,
+    // A header that also holds a filter checkbox names itself.
+    (header) => (header.getAttribute("aria-label") ?? header.textContent?.replace(/[↕↑↓]/g, "").trim()) === name,
   );
   expect(index, `no "${name}" column`).toBeGreaterThanOrEqual(0);
   return index;
@@ -742,6 +743,33 @@ describe("CodeMappingPage", () => {
       await waitFor(() => expect(mockPatch).toHaveBeenCalledWith("/v1/code-mappings/7/", expect.objectContaining({ decision_surface: "code2concept" })));
       const [, payload] = mockPatch.mock.calls.at(-1) as [string, Record<string, unknown>];
       expect(payload).not.toHaveProperty("decision_confidence");
+    });
+
+    it("sends the note only when the curator changed it, against the stored one (#2423)", async () => {
+      // The list's copy is stale: the stored note has moved on since it loaded.
+      const open = async () => {
+        renderPage();
+        const listed = mockGet.getMockImplementation()!;
+        mockGet.mockImplementation((url: string, ...rest: unknown[]) => url === "/v1/code-mappings/7/"
+          ? Promise.resolve({ data: { ...proposedRow, notes: "high confidence: stored since." } })
+          : listed(url, ...rest));
+        const cell = await screen.findByText("M-PROTEIN, SERUM", { selector: '[data-testid=source-code]' });
+        fireEvent.click(cell.closest("tr")!);
+        const dialog = within(await screen.findByRole("dialog"));
+        await waitFor(() => expect(dialog.getByLabelText("Notes")).toHaveValue("high confidence: stored since."));
+        return dialog;
+      };
+      const dialog = await open();
+      fireEvent.click(dialog.getByRole("button", { name: "Update Mapping" }));
+      await waitFor(() => expect(mockPatch).toHaveBeenCalled());
+      expect((mockPatch.mock.calls.at(-1) as [string, Record<string, unknown>])[1].notes).toBeUndefined();
+
+      cleanup();
+      mockPatch.mockClear();
+      const reopened = await open();
+      fireEvent.change(reopened.getByLabelText("Notes"), { target: { value: "Ask the lab." } });
+      fireEvent.click(reopened.getByRole("button", { name: "Update Mapping" }));
+      await waitFor(() => expect(mockPatch).toHaveBeenCalledWith("/v1/code-mappings/7/", expect.objectContaining({ notes: "Ask the lab." })));
     });
 
     it("displays inline individual results and fills the winner when nothing was selected", async () => {
@@ -2005,6 +2033,32 @@ describe("server mapping pages", () => {
     fireEvent.click(filter);
     await screen.findByText("SEEN PAGE 1");
     expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/", { params: expect.objectContaining({ seen_only: "1", page_0: 1 }) });
+  });
+
+  it("filters to codes with a curator note, off by default, and marks them (#2423)", async () => {
+    mockGet.mockImplementation((url: string, config?: { params?: Record<string, unknown> }) => {
+      if (url !== "/v1/code-mappings/") return Promise.resolve({ data: url.includes("reference") ? reference : {} });
+      const noted = { ...proposedRow, source_code: "NOTED CODE", notes: "Ask the lab about the specimen.", has_curator_note: true };
+      const machine = { ...proposedRow, mapping_id: 9901, source_code: "MACHINE CODE", notes: "high confidence: same test.", has_curator_note: false };
+      const results = config?.params?.with_notes === "1" ? [noted] : [noted, machine];
+      return Promise.resolve({ data: browseData({
+        results, total: results.length,
+        pages: { ...browseData().pages, Unmapped: { page: 1, page_size: 100, total: results.length } },
+      }) });
+    });
+    render(<MemoryRouter initialEntries={["/code-mappings?direction=forward"]}><CodeMappingPage /></MemoryRouter>);
+    await screen.findByText("MACHINE CODE");
+    const filter = screen.getByRole("checkbox", { name: "Unmapped: only codes with a curator note" });
+    expect(filter).not.toBeChecked();
+    expect(mockGet).not.toHaveBeenCalledWith("/v1/code-mappings/", { params: expect.objectContaining({ with_notes: "1" }) });
+    // Suggest's rationale sits in the same field and gets no sticky note.
+    const marks = screen.getAllByTestId("curator-note");
+    expect(marks).toHaveLength(1);
+    expect(marks[0]).toHaveAttribute("title", "Ask the lab about the specimen.");
+    expect(marks[0].closest("tr")).toHaveTextContent("NOTED CODE");
+    fireEvent.click(filter);
+    await waitFor(() => expect(screen.queryByText("MACHINE CODE")).not.toBeInTheDocument());
+    expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/", { params: expect.objectContaining({ with_notes: "1", page_0: 1 }) });
   });
 
   it("shows and filters hospital organization on vendor tabs", async () => {

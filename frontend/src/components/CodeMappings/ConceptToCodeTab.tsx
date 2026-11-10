@@ -7,6 +7,7 @@ import { BarChart3, Lock, StickyNote, Unlock } from 'lucide-react';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/shadcn/popover';
 import AxisVariantWalkPanel from './AxisVariantWalkPanel';
 import EditMappingDialog from './EditMappingDialog';
+import { CuratorNoteMark } from './CuratorNoteMark';
 import { AxisVariantFlag, AxisVariantList } from './LoincAxisChips';
 import type { AxisVariant, LoincAxesPayload } from './loincAxes';
 import { type CodeMappingRow, type ConceptResult, type Reference, DOMAIN_TO_TABLE, emptyReference } from './codeMappingTypes';
@@ -36,6 +37,8 @@ type Source = {
   origin_system: string; updated_at: string; destination_concept_id: number | null;
   destination_concept_name: string; destination_standard_concept: string | null;
   evidence?: string[]; verdict?: string; note?: string;
+  /** The mapping's note when a curator wrote it, else blank (#2423). */
+  curator_note?: string;
   /** How many LOINC axis sets this code's units imply, when the server reports it. */
   axis_variant_count?: number;
   /** The variants themselves, each with its own (suggested) destination (#2012). */
@@ -571,13 +574,13 @@ function newMappingRow(source: Source, concept: Concept): CodeMappingRow {
 
 /** One status group of a concept's stored mappings, fetched while it is open. */
 function useSourceGroup(conceptId: number, status: Status, enabled: boolean, query: {
-  search: string; seenOnly: boolean; order: ConfidenceOrder; revision: number;
+  search: string; seenOnly: boolean; withNotes: boolean; order: ConfidenceOrder; revision: number;
 }) {
   const [page, setPage] = useState(1);
   const [data, setData] = useState<SourcePage | null>(null);
   const [loading, setLoading] = useState(false);
   const [failed, setFailed] = useState(false);
-  const { search, seenOnly, order, revision } = query;
+  const { search, seenOnly, withNotes, order, revision } = query;
   useEffect(() => {
     if (!enabled) return;
     let current = true;
@@ -586,7 +589,7 @@ function useSourceGroup(conceptId: number, status: Status, enabled: boolean, que
       setLoading(true); setFailed(false);
       try {
         const response = await api.get<SourcePage>(`/v1/concept-to-code/${conceptId}/`, {
-          params: { mode: 'linked', status, search, seen_only: seenOnly ? '1' : '0', page, ...(order ? { order } : {}) },
+          params: { mode: 'linked', status, search, seen_only: seenOnly ? '1' : '0', page, ...(withNotes ? { with_notes: '1' } : {}), ...(order ? { order } : {}) },
           signal: controller.signal,
         });
         if (current) setData(response.data);
@@ -595,7 +598,7 @@ function useSourceGroup(conceptId: number, status: Status, enabled: boolean, que
       } finally { if (current) setLoading(false); }
     }, 250);
     return () => { current = false; controller.abort(); window.clearTimeout(timer); };
-  }, [conceptId, status, enabled, search, seenOnly, order, page, revision]);
+  }, [conceptId, status, enabled, search, seenOnly, withNotes, order, page, revision]);
   // Stale rows must not stay selectable while a changed query loads, and a
   // folded group's failure must not outlive the group.
   const reset = useCallback(() => { setData(null); setPage(1); setFailed(false); }, []);
@@ -614,6 +617,8 @@ function SourceCoverage({ concept, canApprove, readOnly = false, onSaved, onWrit
   const [mode, setMode] = useState<SourceMode>('candidates');
   const [search, setSearch] = useState('');
   const [seenOnly, setSeenOnly] = useState(true);
+  // Only the source codes a curator has left a note on (#2423).
+  const [withNotes, setWithNotes] = useState(false);
   const [revision, setRevision] = useState(0);
   const [error, setError] = useState('');
   // Approved mappings are done and rejected ones are decided; both start folded
@@ -651,7 +656,7 @@ function SourceCoverage({ concept, canApprove, readOnly = false, onSaved, onWrit
   const [progress, setProgress] = useState('');
   const [order, setOrder] = useState<ConfidenceOrder>('');
   const [threshold, setThreshold] = useState(80);
-  const groupQuery = { search, seenOnly, order, revision };
+  const groupQuery = { search, seenOnly, withNotes, order, revision };
   const approvedGroup = useSourceGroup(concept.concept_id, 'approved', mode === 'linked' && open.approved, groupQuery);
   const proposedGroup = useSourceGroup(concept.concept_id, 'proposed', mode === 'linked' && open.proposed, groupQuery);
   const rejectedGroup = useSourceGroup(concept.concept_id, 'rejected', mode === 'linked' && open.rejected, groupQuery);
@@ -811,7 +816,7 @@ function SourceCoverage({ concept, canApprove, readOnly = false, onSaved, onWrit
   // ranker was unavailable) is hidden too, but nothing was decided (#2034).
   const declinedHidden = unscored.filter(row => row.declined).length;
   const unrankedHidden = unscored.length - declinedHidden;
-  const candidateRows = scored.filter(row => !seenOnly || row.occurrence_count > 0);
+  const candidateRows = scored.filter(row => (!seenOnly || row.occurrence_count > 0) && (!withNotes || !!row.curator_note));
   const sortedCandidates = order ? [...candidateRows].sort(byConfidence(order)) : candidateRows;
 
   // Group candidates by normalised description so identical-label codes can be
@@ -891,6 +896,9 @@ function SourceCoverage({ concept, canApprove, readOnly = false, onSaved, onWrit
     // start() fires and patched is cleared.
     setPreviousCandidates(previous => previous.map(item => sourceKey(item) === key
       ? (replace ? updated as Source : { ...item, ...updated }) : item));
+    // ... and the copy the next run's carried-over candidates are rebuilt from.
+    const seen = seenRef.current.get(key);
+    if (seen) seenRef.current.set(key, replace ? updated as Source : { ...seen, ...updated });
   };
 
   // One click approves: a suggested source with no mapping yet is proposed from
@@ -1019,6 +1027,7 @@ function SourceCoverage({ concept, canApprove, readOnly = false, onSaved, onWrit
         edited: true, mapping_id: saved.mapping_id, status: saved.status,
         destination_concept_id: saved.destination_concept_id, destination_concept_name: saved.destination_concept_name,
         destination_standard_concept: saved.standard_concept ?? null,
+        curator_note: saved.has_curator_note ? saved.notes : '',
       });
     }
   };
@@ -1029,6 +1038,7 @@ function SourceCoverage({ concept, canApprove, readOnly = false, onSaved, onWrit
       patchRow(edit.source, {
         edited: false, mapping_id: null, status: 'unmapped',
         destination_concept_id: null, destination_concept_name: '', destination_standard_concept: null,
+        curator_note: '',
       });
     }
   };
@@ -1110,7 +1120,11 @@ function SourceCoverage({ concept, canApprove, readOnly = false, onSaved, onWrit
             &gt;<input type="number" aria-label="Select sources with confidence above, percent" className="w-14 rounded border border-slate-300 bg-white px-1 py-0.5"
               min={0} max={100} value={Number.isNaN(threshold) ? '' : threshold} disabled={busy}
               onChange={event => setThreshold(event.target.valueAsNumber)} />% confidence</span></div></th>
-        <th className="p-2">Description</th>
+        <th className="p-2">Description
+          <label className="ml-2 inline-flex items-center gap-1 whitespace-nowrap font-normal">
+            <input type="checkbox" aria-label="Only source codes with a curator note" checked={withNotes} disabled={busy}
+              title="Show only source codes a curator has left a note on"
+              onChange={event => { setWithNotes(event.target.checked); resetView(); }} />with notes</label></th>
         <th className="p-2" aria-sort={order ? 'none' : 'descending'}><label className="mb-1 flex whitespace-nowrap items-center gap-1 font-normal">
           <input type="checkbox" aria-label="Only source codes with Seen greater than zero" checked={seenOnly} disabled={busy}
             onChange={event => { setSeenOnly(event.target.checked); resetView(); }} />&gt; 0 only</label>
@@ -1137,13 +1151,13 @@ function SourceCoverage({ concept, canApprove, readOnly = false, onSaved, onWrit
           </tr>
           {open[status] && group.data?.results.map(renderRow)}
           {open[status] && group.data && !group.data.results.length && <tr><td colSpan={6} className="p-2 text-sm text-slate-500">
-            No {status} mappings{search ? ' match this search' : ''}{seenOnly ? '; uncheck > 0 only to include zero-Seen codes' : ''}.</td></tr>}
+            No {status} mappings{withNotes ? ' with a curator note' : ''}{search ? ' match this search' : ''}{seenOnly ? '; uncheck > 0 only to include zero-Seen codes' : ''}.</td></tr>}
           {open[status] && group.data && <tr><td colSpan={6} className="p-0">
             <Pagination data={group.data} disabled={writing || group.loading} change={next => { group.setPage(next); group.setData(null); setSelected(new Set()); }} /></td></tr>}
         </tbody>;
       }) : <tbody>{candidateGroups.map(renderGroup)}</tbody>}
     </table></div>
-    {mode === 'candidates' && !loading && !rows.length && <p className="text-sm text-slate-500">No source codes shown. {seenOnly ? 'Uncheck > 0 only to include zero-Seen codes. ' : ''}
+    {mode === 'candidates' && !loading && !rows.length && <p className="text-sm text-slate-500">No source codes shown. {withNotes ? 'Uncheck with notes to include codes without a curator note. ' : ''}{seenOnly ? 'Uncheck > 0 only to include zero-Seen codes. ' : ''}
       Run Suggest source codes to search.</p>}
     <EditMappingDialog open={edit !== null} onClose={closeEditor} mode={edit?.mode ?? 'edit'} row={edit?.row ?? null}
       reference={reference ?? emptyReference} canApprove={canApprove}
@@ -1204,7 +1218,7 @@ function SourceCoverage({ concept, canApprove, readOnly = false, onSaved, onWrit
           disabled={locked} aria-haspopup="dialog" title={`Open ${row.source_code} in Edit Mapping`}
           onClick={() => void openEditor(row)}>{row.source_vocabulary_id || 'Uncoded'}:{row.source_code}</button><AxisVariantFlag count={row.axis_variant_count} />
           <AxisVariantList variants={row.axis_variants} canApprove={canApprove} busy={locked} onApprove={variant => void approveVariant(row, variant)} /></td>
-        <td className="p-2 text-slate-500">{row.source_code_description || '—'}
+        <td className="p-2 text-slate-500">{row.source_code_description || '—'}<CuratorNoteMark note={row.curator_note} />
           {(row.units?.length || row.based_on?.length) ? <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-xs">
             {row.units?.length ? <span title="Units observed"><span className="font-medium text-slate-600">Units:</span> {row.units.join(', ')}</span> : null}
             {row.based_on?.length ? <span title="FHIR basedOn (order context)"><span className="font-medium text-slate-600">BasedOn:</span> {row.based_on.join(', ')}</span> : null}
@@ -1238,7 +1252,7 @@ function SourceCoverage({ concept, canApprove, readOnly = false, onSaved, onWrit
           disabled={locked} aria-haspopup="dialog" title={`Open ${row.source_code} in Edit Mapping`}
           onClick={() => void openEditor(row)}>{row.source_vocabulary_id || 'Uncoded'}:{row.source_code}</button><AxisVariantFlag count={row.axis_variant_count} />
           <AxisVariantList variants={row.axis_variants} canApprove={canApprove} busy={locked} onApprove={variant => void approveVariant(row, variant)} /></td>
-        <td className="p-2">{row.source_code_description || '—'}
+        <td className="p-2">{row.source_code_description || '—'}<CuratorNoteMark note={row.curator_note} />
           {(row.units?.length || row.based_on?.length) ? <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-xs">
             {row.units?.length ? <span title="Units observed"><span className="font-medium text-slate-600">Units:</span> {row.units.join(', ')}</span> : null}
             {row.based_on?.length ? <span title="FHIR basedOn (order context)"><span className="font-medium text-slate-600">BasedOn:</span> {row.based_on.join(', ')}</span> : null}
