@@ -27,10 +27,14 @@ PAGE_SIZE = 50
 CONCEPT_PAGE_SIZES = (50, 100, 250, 500)
 
 
-def _authorize(user):
-    from patient_portal.api.views import _can_manage_code_mappings
-    if not _can_manage_code_mappings(user):
+def _authorize(user, *, write=False):
+    """Every professional role reads the tab; writing needs the analyst grant,
+    org_admin or staff (#2416)."""
+    from patient_portal.api.views import _can_manage_mappings, _can_view_mappings
+    if not _can_view_mappings(user):
         raise PermissionDenied('Professional access required.')
+    if write and not _can_manage_mappings(user):
+        raise PermissionDenied('Mapping curator access required.')
 
 
 def _paginate(queryset, params, page_size=PAGE_SIZE):
@@ -101,7 +105,7 @@ def concept_to_code_priority(request):
     knowledge of the rest of the list: the server renumbers it.
     """
     from omop_core.services import concept_priority
-    _authorize(request.user)
+    _authorize(request.user, write=True)
     data = request.data
     if not isinstance(data, dict):
         raise ValidationError({'detail': 'Supply a JSON object.'})
@@ -124,7 +128,7 @@ def concept_to_code_done(request):
     Done unranks the concept; the list then shows it last, in italics.
     """
     from omop_core.services import concept_priority
-    _authorize(request.user)
+    _authorize(request.user, write=True)
     data = request.data
     if not isinstance(data, dict):
         raise ValidationError({'detail': 'Supply a JSON object.'})
@@ -148,7 +152,7 @@ def concept_to_code_lock(request, concept_id):
     POST is idempotent for the holder and 423 for anyone else; DELETE is for
     the holder or staff.
     """
-    _authorize(request.user)
+    _authorize(request.user, write=True)
     concept = get_object_or_404(standard_destinations(), pk=concept_id)
     if request.method == 'POST':
         lock = concept_lock.acquire(concept, request.user)
@@ -179,7 +183,7 @@ def concept_to_code_note(request, concept_id):
     One shared note per concept; the last save wins. A note is commentary,
     not a mapping write, so another curator's lock does not refuse it.
     """
-    _authorize(request.user)
+    _authorize(request.user, write=True)
     concept = get_object_or_404(standard_destinations(), pk=concept_id)
     text = ''
     if request.method == 'PUT':
@@ -358,7 +362,7 @@ def concept_to_code_estimate(request, concept_id):
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def concept_to_code_suggest(request):
-    _authorize(request.user)
+    _authorize(request.user, write=True)
     data = request.data
     if not isinstance(data, dict):
         raise ValidationError({'detail': 'Supply a JSON object.'})
@@ -440,7 +444,7 @@ def concept_to_code_propose(request, concept_id):
     """Create a proposal only for a reviewed source in a saved preview."""
     from omop_core.mapping.reverse_catalog import refresh_catalog_candidate
     from patient_portal.api.views import _upsert_source_code_mapping
-    _authorize(request.user)
+    _authorize(request.user, write=True)
     if not isinstance(request.data, dict):
         raise ValidationError({'detail': 'Supply a JSON object.'})
     if request.data.get('status', 'proposed') != 'proposed':
@@ -495,7 +499,7 @@ def concept_to_code_apply(request, concept_id, mapping_id):
     from patient_portal.api.views import (
         _check_mapping_lock, _upsert_source_code_mapping, MappingLocked,
     )
-    _authorize(request.user)
+    _authorize(request.user, write=True)
     if not isinstance(request.data, dict):
         raise ValidationError({'detail': 'Supply a JSON object.'})
     concept = get_object_or_404(standard_destinations(), pk=concept_id)

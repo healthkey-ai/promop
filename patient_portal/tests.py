@@ -27283,9 +27283,10 @@ class VocabScopeAndSuggestedCodesTest(TestCase):
 # =============================================================================
 
 class MappingApprovalRoleTest(TestCase):
-    """Verify that doctors reach field mappings and analysts code mappings, and
-    that neither approves — only staff and org_admin can approve (#2416: a
-    doctor without an analyst grant does not reach the code-mapping page).
+    """Verify that every professional reads the mapping pages, that writing
+    them is the analyst grant's (a doctor without one creates, edits and
+    deletes nothing, #2416), and that nobody but staff and org_admin
+    approves.
 
     Also checks that non-admins cannot un-approve (change approved→proposed),
     delete approved mappings, or create field mappings as approved.
@@ -27357,24 +27358,48 @@ class MappingApprovalRoleTest(TestCase):
         resp = self.client.get('/api/v1/code-mappings/')
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
-    def test_doctor_without_analyst_grant_cannot_list_code_mappings(self):
+    def test_doctor_without_analyst_grant_reads_code_mappings_and_creates_none(self):
         self.client.force_authenticate(user=self.doctor)
-        self.assertEqual(self.client.get('/api/v1/code-mappings/').status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(self.client.get('/api/v1/code-mappings/').status_code, status.HTTP_200_OK)
+        resp = self.client.post('/api/v1/code-mappings/', {
+            'source_vocabulary_id': 'HK-Labs', 'source_code': 'doc-1',
+            'source_code_description': 'Doctor tries', 'target_concept': self.concept.concept_id,
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(resp.data['detail'], 'Mapping curator access required.')
         self.client.force_authenticate(user=self.org_admin_user)
         self.assertEqual(self.client.get('/api/v1/code-mappings/').status_code, status.HTTP_200_OK)
 
-    # ---- Doctor CANNOT create field mapping as approved ----
+    # ---- Doctor CANNOT create field mappings; an analyst creates, not as approved ----
 
-    def test_doctor_cannot_create_field_mapping_as_approved(self):
+    def test_doctor_cannot_create_field_mapping(self):
         self.client.force_authenticate(user=self.doctor)
-        resp = self.client.post('/api/v1/field-mappings/', {
+        payload = {
+            'field_name': 'weight',
+            'concept_id': self.concept.concept_id,
+            'concept_code': self.concept.concept_code,
+            'vocabulary_id': self.concept.vocabulary.vocabulary_id,
+            'status': 'proposed',
+        }
+        resp = self.client.post('/api/v1/field-mappings/', payload, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(resp.data['detail'], 'Mapping curator access required.')
+        self.assertFalse(FieldConceptMapping.objects.filter(field_name='weight').exists())
+
+    def test_analyst_cannot_create_field_mapping_as_approved(self):
+        self.client.force_authenticate(user=self.analyst)
+        payload = {
             'field_name': 'weight',
             'concept_id': self.concept.concept_id,
             'concept_code': self.concept.concept_code,
             'vocabulary_id': self.concept.vocabulary.vocabulary_id,
             'status': 'approved',
-        }, format='json')
+        }
+        resp = self.client.post('/api/v1/field-mappings/', payload, format='json')
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        resp = self.client.post('/api/v1/field-mappings/', {**payload, 'status': 'proposed'}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        FieldConceptMapping.objects.filter(field_name='weight').delete()
 
     # ---- Org admin CAN create field mapping as approved ----
 
@@ -27447,7 +27472,7 @@ class MappingApprovalRoleTest(TestCase):
 
     # ---- Doctor CAN delete proposed field mapping ----
 
-    def test_doctor_can_delete_proposed_field_mapping(self):
+    def test_analyst_can_delete_proposed_field_mapping_and_doctor_cannot(self):
         mapping = FieldConceptMapping.objects.create(
             field_name='diastolic_blood_pressure',
             concept=self.concept,
@@ -27456,6 +27481,11 @@ class MappingApprovalRoleTest(TestCase):
             status='proposed',
         )
         self.client.force_authenticate(user=self.doctor)
+        self.assertEqual(self.client.get(f'/api/v1/field-mappings/{mapping.pk}/').status_code, status.HTTP_200_OK)
+        resp = self.client.delete(f'/api/v1/field-mappings/{mapping.pk}/')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertTrue(FieldConceptMapping.objects.filter(pk=mapping.pk).exists())
+        self.client.force_authenticate(user=self.analyst)
         resp = self.client.delete(f'/api/v1/field-mappings/{mapping.pk}/')
         self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
         self.assertFalse(FieldConceptMapping.objects.filter(pk=mapping.pk).exists())
@@ -33536,11 +33566,12 @@ class TherapyComponentDetailTest(MappingHubTestBase):
 class AnalystRoleScopeTest(TestCase):
     """An analyst reaches two things and nothing else (#2398, #2416).
 
-    Code mapping on both tabs, and PRism (a separate app that shares the
-    identity table, so nothing here). No individual patient's data, on any
-    surface. Every other professional surface is a 403, and neither kind of
-    trust makes an analyst-only account an admin of the granting org. Roles
-    are additive: a doctor maps codes only when also granted analyst.
+    The mapping pages, which it alone (with staff and org_admin) writes, and
+    PRism (a separate app that shares the identity table, so nothing here).
+    No individual patient's data, on any surface, and neither kind of trust
+    makes an analyst-only account an admin of the granting org. Roles are
+    additive: a doctor reads every mapping page and writes one only when also
+    granted analyst.
     """
 
     def setUp(self):
@@ -33641,41 +33672,54 @@ class AnalystRoleScopeTest(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertNotIn('analyst-org', {o['org_slug'] for o in resp.data})
 
-    # -- denied curation -----------------------------------------------------
+    # -- the other mapping pages are the analyst's too ------------------------
 
-    def test_field_mappings_are_refused(self):
-        self.assertEqual(self.client.get('/api/v1/field-mappings/').status_code, status.HTTP_403_FORBIDDEN)
-        # Field choices are read by the patient form, so GET stays open; the write is not.
+    def test_every_mapping_page_is_reachable_and_writable(self):
+        for url in ('/api/v1/field-mappings/', '/api/v1/mapping-stats/', '/api/v1/relevance/signals/',
+                    '/api/v1/code-mappings/source-systems/'):
+            self.assertEqual(self.client.get(url).status_code, status.HTTP_200_OK, url)
+        self.assertEqual(self.client.get('/api/v1/relevance/signals/').data['permissions'],
+                         {'can_accept': False, 'can_reject': True})
         resp = self.client.post('/api/v1/field-choices/', {'field_name': 'ecog_score', 'value': 'x'}, format='json')
-        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
-
-    def test_mapping_hub_is_refused(self):
-        self.assertEqual(self.client.get('/api/v1/mapping-stats/').status_code, status.HTTP_403_FORBIDDEN)
-
-    def test_relevance_signals_are_refused(self):
-        self.assertEqual(self.client.get('/api/v1/relevance/signals/').status_code, status.HTTP_403_FORBIDDEN)
-
-    def test_source_systems_and_code_mapping_upload_are_refused(self):
-        self.assertEqual(self.client.get('/api/v1/code-mappings/source-systems/').status_code,
-                         status.HTTP_403_FORBIDDEN)
+        self.assertNotEqual(resp.status_code, status.HTTP_403_FORBIDDEN, resp.data)
+        # The upload is a write the analyst may make; an empty one is a 400, not a 403.
         resp = self.client.post('/api/v1/code-mappings/upload/', {}, format='multipart')
-        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
 
     # -- additive roles ------------------------------------------------------
 
-    def test_a_doctor_maps_codes_only_with_the_analyst_grant_too(self):
+    def test_a_doctor_reads_every_mapping_page_and_writes_only_with_the_analyst_grant_too(self):
         doctor = _make_user('doctor-scope@test.com')
         GroupAccess.objects.create(identity=doctor, org=self.org, role='doctor')
         self.client.force_authenticate(user=doctor)
-        self.assertEqual(self.client.get('/api/v1/field-mappings/').status_code, status.HTTP_200_OK)
-        self.assertEqual(self.client.get('/api/v1/mapping-stats/').status_code, status.HTTP_200_OK)
-        self.assertEqual(self.client.get('/api/v1/code-mappings/').status_code, status.HTTP_403_FORBIDDEN)
-        self.assertEqual(self.client.get('/api/v1/concept-to-code/').status_code, status.HTTP_403_FORBIDDEN)
+        for url in ('/api/v1/field-mappings/', '/api/v1/mapping-stats/', '/api/v1/code-mappings/',
+                    '/api/v1/concept-to-code/', '/api/v1/code-mappings/reference/',
+                    '/api/v1/relevance/signals/', '/api/v1/code-mappings/source-systems/'):
+            self.assertEqual(self.client.get(url).status_code, status.HTTP_200_OK, url)
+        self.assertEqual(self.client.get('/api/v1/relevance/signals/').data['permissions'],
+                         {'can_accept': False, 'can_reject': False})
         self.assertIn(self.person.person_id,
                       [r['person_id'] for r in self._rows(self.client.get('/api/patient-info/'))])
-        # A second row, not a replacement: the doctor keeps patients and gains the page.
+        # Reading is the whole of it: no mapping, synonym, choice, Suggest or lock.
+        self.assertEqual(self.client.post('/api/v1/code-mappings/', {
+            'source_vocabulary_id': 'HK-Labs', 'source_code': 'doc-2', 'source_code_description': 'x',
+        }, format='json').status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(self.client.post('/api/v1/code-mappings/suggest/', {}, format='json').status_code,
+                         status.HTTP_403_FORBIDDEN)
+        self.assertEqual(self.client.post('/api/v1/field-mappings/weight/synonyms/', {'synonym_text': 'mass'},
+                                          format='json').status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(self.client.post('/api/v1/concept-to-code/priority/', {}, format='json').status_code,
+                         status.HTTP_403_FORBIDDEN)
+        self.assertEqual(self.client.post('/api/v1/code-mappings/upload/', {}, format='multipart').status_code,
+                         status.HTTP_403_FORBIDDEN)
+        # A second row, not a replacement: the doctor keeps patients and gains the writes.
         GroupAccess.objects.create(identity=doctor, org=self.org, role='analyst')
-        self.assertEqual(self.client.get('/api/v1/code-mappings/').status_code, status.HTTP_200_OK)
+        concept = _make_test_concept(2_100_009_003, 'Doctor-analyst destination', 'DOC-DEST', 'Measurement')
+        resp = self.client.post('/api/v1/code-mappings/', {
+            'source_vocabulary_id': 'VendorLab', 'source_code': 'doc-2', 'source_code_description': 'x',
+            'omop_table': 'measurement', 'target_concept_id': concept.pk,
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
         self.assertEqual(self.client.get(f'/api/patient-info/{self.person.person_id}/').status_code,
                          status.HTTP_200_OK)
 
@@ -33720,7 +33764,7 @@ class AnalystRoleScopeTest(TestCase):
         self.analyst.mark_email_verified()
         resp = self.client.get('/api/user/')
         self.assertFalse(resp.data['user']['is_org_admin'])
-        self.assertEqual(self.client.get('/api/v1/mapping-stats/').status_code, status.HTTP_403_FORBIDDEN)
+        self.assertNotIn(granting, get_admin_orgs(self.analyst))
         nobody = _make_user('nobody@test.com')
         nobody.mark_email_verified()
         self.assertIn(granting, get_admin_orgs(nobody))

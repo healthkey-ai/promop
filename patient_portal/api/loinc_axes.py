@@ -79,7 +79,7 @@ def _payload(mapping):
 @permission_classes([IsAuthenticated])
 def code_mapping_loinc_axes(request, mapping_id):
     views = _views()
-    if not views._can_manage_code_mappings(request.user):
+    if not views._can_view_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
     mapping = SourceCodeConceptMapping.objects.filter(pk=mapping_id).first()
     if mapping is None:
@@ -87,6 +87,8 @@ def code_mapping_loinc_axes(request, mapping_id):
     if request.method == 'GET':
         return Response(_payload(mapping))
 
+    if not views._can_manage_mappings(request.user):
+        return Response({'detail': 'Mapping curator access required.'}, status=status.HTTP_403_FORBIDDEN)
     if not views._can_administer_code_mapping(request.user, mapping):
         return Response({'detail': 'You do not administer this mapping organization.'},
                         status=status.HTTP_403_FORBIDDEN)
@@ -113,7 +115,7 @@ def code_mapping_axis_variant(request, mapping_id):
     on one the dialog detected but no refresh has saved yet.
     """
     views = _views()
-    if not views._can_manage_code_mappings(request.user):
+    if not views._can_manage_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
     with transaction.atomic():
         mapping = (SourceCodeConceptMapping.objects.select_for_update(of=('self',))
@@ -194,7 +196,7 @@ def code_mapping_axis_variant_suggest(request, mapping_id):
     from omop_core.services.suggest_jobs import get_dispatcher
 
     views = _views()
-    if not views._can_manage_code_mappings(request.user):
+    if not views._can_manage_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
     mapping = SourceCodeConceptMapping.objects.filter(pk=mapping_id).first()
     if mapping is None:
@@ -245,7 +247,7 @@ def loinc_axis_values(request):
     """The commonest LOINC values of one axis containing ``q``."""
     from django.db.models import Count
 
-    if not _views()._can_manage_code_mappings(request.user):
+    if not _views()._can_view_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
     axis = request.query_params.get('axis', '')
     if axis not in loinc_axes.AXES:
@@ -326,7 +328,7 @@ def code_mapping_snomed_attributes(request, mapping_id):
     from omop_core.mapping import snomed_attributes
 
     views = _views()
-    if not views._can_manage_code_mappings(request.user):
+    if not views._can_view_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
     mapping = SourceCodeConceptMapping.objects.filter(pk=mapping_id).first()
     if mapping is None:
@@ -334,6 +336,8 @@ def code_mapping_snomed_attributes(request, mapping_id):
     if request.method == 'GET':
         return Response(_snomed_payload(mapping))
 
+    if not views._can_manage_mappings(request.user):
+        return Response({'detail': 'Mapping curator access required.'}, status=status.HTTP_403_FORBIDDEN)
     if not views._can_administer_code_mapping(request.user, mapping):
         return Response({'detail': 'You do not administer this mapping organization.'},
                         status=status.HTTP_403_FORBIDDEN)

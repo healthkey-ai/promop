@@ -27,7 +27,7 @@ import RelevanceSignalsPage from "@/components/MappingHub/RelevanceSignalsPage";
 import CodeMappingAccuracyPage from "@/components/CodeMappings/CodeMappingAccuracyPage";
 import MappingAccuracyAnalyticsPage from "@/components/CodeMappings/MappingAccuracyAnalyticsPage";
 import MappingHubPage from "@/components/MappingHub/MappingHubPage";
-import { hasCodeMappingRole, hasCurationRole, isAnalystOnly, isStaffOrOrgAdmin } from "@/utils/roles";
+import { canViewMappings, isAnalystOnly, isStaffOrOrgAdmin } from "@/utils/roles";
 import DiseaseCategoryPage from "@/components/MappingHub/DiseaseCategoryPage";
 import TherapyMappingPage from "@/components/TherapyMappings/TherapyMappingPage";
 import OrgLogin from "@/components/Auth/OrgLogin";
@@ -111,19 +111,14 @@ function AppRoutes() {
     return element;
   };
 
-  // Roles are additive (#2416). Curation pages are for staff, org_admin and
-  // doctor. The Code Mapping page is for staff, org_admin and the analyst
-  // grant: a doctor maps codes only when also granted analyst. Analysts
-  // propose; only staff and org_admin approve. The API independently
-  // enforces the same policy.
-  const curationRoute = (element: ReactNode) => {
+  // Roles are additive (#2416). Every professional role opens the mapping
+  // pages; a doctor reads them, and writing (create, edit, propose, Suggest)
+  // is for staff, org_admin and the analyst grant, which each page hides
+  // from a reader. Analysts propose; only staff and org_admin approve. The
+  // API independently enforces the same policy.
+  const mappingRoute = (element: ReactNode) => {
     if (!currentUser) return <Navigate to="/login" replace />;
-    if (!hasCurationRole(currentUser)) return <Navigate to="/" replace />;
-    return element;
-  };
-  const codeMappingRoute = (element: ReactNode) => {
-    if (!currentUser) return <Navigate to="/login" replace />;
-    if (!hasCodeMappingRole(currentUser)) return <Navigate to="/" replace />;
+    if (!canViewMappings(currentUser)) return <Navigate to="/" replace />;
     return element;
   };
 
@@ -180,16 +175,16 @@ function AppRoutes() {
       <Route path="/stats" element={<Navigate to="/org-admin" replace />} />
       <Route path="/service-applications" element={currentUser?.is_staff ? <ServiceApplicationsPage /> : <Navigate to={currentUser ? "/" : "/login"} replace />} />
       <Route path="/org-admin" element={orgAdminRoute(<OrgAdminPage />)} />
-      <Route path="/mappings" element={curationRoute(<MappingHubPage />)} />
-      <Route path="/field-mappings" element={curationRoute(<FieldMappingPage />)} />
-      <Route path="/code-mappings" element={codeMappingRoute(<CodeMappingPage />)} />
-      <Route path="/code-mappings/source-systems" element={curationRoute(<SourceSystemManagementPage />)} />
-      <Route path="/code-mappings/suggest-runs/:runId" element={codeMappingRoute(<SuggestRunLogPage />)} />
-      <Route path="/code-mappings/accuracy" element={codeMappingRoute(<CodeMappingAccuracyPage />)} />
-      <Route path="/code-mappings/accuracy/analytics" element={codeMappingRoute(<MappingAccuracyAnalyticsPage />)} />
-      <Route path="/therapy-mappings" element={curationRoute(<TherapyMappingPage />)} />
-      <Route path="/relevance-signals" element={curationRoute(<RelevanceSignalsPage />)} />
-      <Route path="/disease-category-mappings" element={curationRoute(<DiseaseCategoryPage />)} />
+      <Route path="/mappings" element={mappingRoute(<MappingHubPage />)} />
+      <Route path="/field-mappings" element={mappingRoute(<FieldMappingPage />)} />
+      <Route path="/code-mappings" element={mappingRoute(<CodeMappingPage />)} />
+      <Route path="/code-mappings/source-systems" element={mappingRoute(<SourceSystemManagementPage />)} />
+      <Route path="/code-mappings/suggest-runs/:runId" element={mappingRoute(<SuggestRunLogPage />)} />
+      <Route path="/code-mappings/accuracy" element={mappingRoute(<CodeMappingAccuracyPage />)} />
+      <Route path="/code-mappings/accuracy/analytics" element={mappingRoute(<MappingAccuracyAnalyticsPage />)} />
+      <Route path="/therapy-mappings" element={mappingRoute(<TherapyMappingPage />)} />
+      <Route path="/relevance-signals" element={mappingRoute(<RelevanceSignalsPage />)} />
+      <Route path="/disease-category-mappings" element={mappingRoute(<DiseaseCategoryPage />)} />
       <Route
         path="/profile"
         element={

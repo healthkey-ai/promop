@@ -101,8 +101,11 @@ type Status = 'approved' | 'proposed' | 'rejected';
 const STATUSES: Status[] = ['approved', 'proposed', 'rejected'];
 type SourcePage = Page<Source> & { zero_seen: number; status_counts?: Record<Status, number> };
 
-export default function ConceptToCodeTab({ canApprove, onWritingChange, initialConceptId, onInitialConceptHandled }: {
-  canApprove: boolean; onWritingChange?: (value: boolean) => void;
+export default function ConceptToCodeTab({ canApprove, canWrite = true, onWritingChange, initialConceptId, onInitialConceptHandled }: {
+  canApprove: boolean;
+  /** A doctor reads the tab (#2416): no priority, Done, Lock, notes or mapping. */
+  canWrite?: boolean;
+  onWritingChange?: (value: boolean) => void;
   /** Open this concept's source codes on arrival, ready to suggest more. */
   initialConceptId?: number;
   /** Called once the linked concept is opened or reported, so it is not reopened. */
@@ -311,7 +314,7 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange, initialC
           <th className="p-3 text-right">Approved</th><th className="p-3 text-right">Proposed</th><th className="p-3 text-right">Rejected</th>
         </tr></thead>
         <tbody>{data?.results.map(concept => <tr key={concept.concept_id} data-testid={`concept-row-${concept.concept_id}`}
-          draggable={!writing && !moving && !concept.done}
+          draggable={canWrite && !writing && !moving && !concept.done}
           onDragStart={event => { event.dataTransfer?.setData('text/plain', String(concept.concept_id)); setDragged(concept); }}
           onDragEnd={() => { setDragged(null); setDropTarget(null); }}
           onDragOver={event => { if (dragged) { event.preventDefault(); setDropTarget(concept.concept_id); } }}
@@ -321,13 +324,13 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange, initialC
             concept.done ? 'italic text-slate-500' : ''} ${
             dropTarget === concept.concept_id && dragged?.concept_id !== concept.concept_id ? 'outline outline-2 outline-sky-500' : ''}`}>
           <td className="p-3 align-top"><PriorityCell concept={concept} lastPosition={lastPosition}
-            disabled={writing || moving} onMove={position => void move(concept, position)}
+            disabled={!canWrite || writing || moving} onMove={position => void move(concept, position)}
             onDone={done => void markDone(concept, done)} /></td>
           <td className="p-3"><button className="text-left font-medium text-slate-950 underline underline-offset-2" disabled={writing}
             aria-haspopup="dialog" aria-expanded={selected?.concept_id === concept.concept_id}
             onClick={event => { selectedTrigger.current = event.currentTarget; setSelected(concept); }}>{concept.concept_name}</button>
-            <NoteBadge concept={concept} onSaved={note => noteSaved(concept, note)} />
-            <LockBadge concept={concept} disabled={writing || moving} onToggle={() => void toggleLock(concept)} />
+            {canWrite && <NoteBadge concept={concept} onSaved={note => noteSaved(concept, note)} />}
+            <LockBadge concept={concept} disabled={!canWrite || writing || moving} onToggle={() => void toggleLock(concept)} />
             <div className="mt-1 text-xs text-slate-500">{concept.vocabulary_id}:{concept.concept_code} · OMOP {concept.concept_id} · {concept.domain_id}</div></td>
           <td className="p-3 text-xs text-slate-600">{concept.fields.length
             ? concept.fields.map(field => <div key={field.field_name}>{field.field_name} <span className="text-slate-400">({field.status})</span></div>) : '—'}</td>
@@ -354,7 +357,7 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange, initialC
           </div>
           <Dialog.Close className={button} disabled={writing}>Close</Dialog.Close>
         </div>
-        <SourceCoverage key={selected.concept_id} concept={selected} canApprove={canApprove} readOnly={lockedByOther(selected)}
+        <SourceCoverage key={selected.concept_id} concept={selected} canApprove={canApprove} readOnly={!canWrite || lockedByOther(selected)}
           onWriting={value => { setWriting(value); onWritingChange?.(value); }} onSaved={() => setRevision(value => value + 1)}
           onEditingChange={setEditing} suggestCache={suggestCache} />
       </Dialog.Content>

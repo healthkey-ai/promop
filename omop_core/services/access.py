@@ -237,23 +237,23 @@ def has_explicit_org_admin_access(user, slug: str) -> bool:
 
 
 PROFESSIONAL_ROLES = ('org_admin', 'doctor', 'analyst')
-"""Every non-patient role. Says only that an account is a professional and
-not a patient (so no patient record is provisioned for it); it decides no
-access. Roles are additive and each has its own reach (#2416): patient
-data is CURATION_ROLES, code mapping is CODE_MAPPING_ROLES."""
+"""Every non-patient role. Says that an account is a professional and not a
+patient (so no patient record is provisioned for it), and that it may read
+the mapping pages (``has_mapping_read_access``). Roles are additive and each
+has its own reach beyond that (#2416): patient data is CURATION_ROLES,
+writing mappings is MAPPING_WRITE_ROLES."""
 
 CURATION_ROLES = ('org_admin', 'doctor')
-"""The roles that reach patient data and the clinical curation surface:
-patient reads and writes, field, therapy and disease-category mappings,
-relevance signals, source systems, the mapping hub, and admin authority
-through a trust. An analyst is deliberately absent (#2398, #2416): the role
-sees no individual patient's health data."""
+"""The roles that reach patient data: patient reads and writes, and admin
+authority through a trust. An analyst is deliberately absent (#2398, #2416):
+the role sees no individual patient's health data."""
 
-CODE_MAPPING_ROLES = ('analyst',)
-"""The grant that opens the Code Mapping page. A doctor does not map codes
-unless also granted it; an org_admin reaches the page through
-``has_org_admin_access`` because approval happens there (#2416)."""
-
+MAPPING_WRITE_ROLES = ('analyst',)
+"""The grant that writes mappings: creates, edits and proposes code and field
+mappings, synonyms, choices, custom fields and source-system facilities, and
+runs Suggest. A doctor reads every mapping page but does not write one unless
+also granted it; an org_admin writes through ``has_org_admin_access`` because
+approval happens there (#2416)."""
 
 def _has_active_role(user, roles) -> bool:
     if getattr(user, 'is_staff', False):
@@ -267,27 +267,34 @@ def _has_active_role(user, roles) -> bool:
     ).exists()
 
 
-def has_code_mapping_access(user) -> bool:
-    """Return True when the user may use the Code Mapping page (#2416).
+def has_mapping_read_access(user) -> bool:
+    """Return True when the user may open the mapping pages (#2416).
+
+    Staff, any active professional grant (org_admin, doctor or analyst), or
+    an admin path through a trust. Reading is the whole of a doctor's reach
+    there; see ``has_mapping_write_access`` for who changes a mapping.
+    """
+    return _has_active_role(user, PROFESSIONAL_ROLES) or has_org_admin_access(user)
+
+
+def has_mapping_write_access(user) -> bool:
+    """Return True when the user may create or change mappings (#2416).
 
     Staff, an analyst grant, or an org_admin (by grant or through a trust,
-    since approval happens on that page). A doctor without an analyst grant
-    gets False: code mapping is the analyst's work, and roles are additive.
+    since approval happens on the same pages). A doctor without an analyst
+    grant gets False: mapping is the analyst's work, and roles are additive,
+    so a doctor who should map is given the analyst role beside the doctor one.
     """
-    return _has_active_role(user, CODE_MAPPING_ROLES) or has_org_admin_access(user)
+    return _has_active_role(user, MAPPING_WRITE_ROLES) or has_org_admin_access(user)
 
 
 def has_curation_access(user) -> bool:
     """Return True when the user is staff, an org_admin or a doctor.
 
-    Everything a professional reaches beyond Code Mapping and patient reads:
-    field mappings, therapy and disease-category reference, relevance
-    signals, source systems, the mapping hub, and every patient read. An
-    analyst gets False (#2398, #2416).
+    The roles that read and write patient data. An analyst gets False
+    (#2398, #2416). The mapping pages have their own helpers above.
 
     An admin path through a trust counts as org_admin here, as it does for
-    ``is_org_admin``, approval and patient writes: the one user who is an
-    admin somewhere but could not open a curation page would be a UI that
-    offers what the API refuses.
+    ``is_org_admin``, approval and patient writes.
     """
     return _has_active_role(user, CURATION_ROLES) or has_org_admin_access(user)

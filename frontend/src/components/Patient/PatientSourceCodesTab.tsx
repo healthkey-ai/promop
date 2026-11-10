@@ -8,7 +8,7 @@ import type {
 } from "../../types/sourceCodes";
 import EditMappingDialog from "../CodeMappings/EditMappingDialog";
 import SourceQuantityCell from "../CodeMappings/SourceQuantityCell";
-import { hasCurationRole, isStaffOrOrgAdmin } from "@/utils/roles";
+import { isStaffOrOrgAdmin } from "@/utils/roles";
 import {
   type CodeMappingRow,
   type Reference,
@@ -372,7 +372,6 @@ export default function PatientSourceCodesTab({ personId }: Props) {
         row={dialogRow}
         reference={reference}
         canApprove={canApprove}
-        canCurate={hasCurationRole(currentUser)}
         strategies={strategies}
         rankingModel={rankingModel}
         onStrategiesChange={setStrategies}

@@ -675,18 +675,19 @@ row removes that role. The helpers in `omop_core/services/access.py` and
 
 | Role | Reaches |
 |---|---|
-| `org_admin` (a grant, or an admin path through an org or domain trust) | everything for its orgs: approves mappings (so it reaches the Code Mapping page), administers access, uploads |
-| `doctor` | patients, read and write (`can_access_patient`, `can_write_patient`, `get_visible_orgs`), every curation page except Code Mapping (`has_curation_access`): field mappings, therapy and disease-category reference, relevance signals, source systems, the mapping hub |
-| `analyst` | the Code Mapping page only -- both tabs, the dialog, Suggest, Lock, Done, priority, axis variants, the accuracy pages (`has_code_mapping_access`, `_can_manage_code_mappings`) -- and PRism analytics, a separate app that shares the identity table. **No individual patient's data**: the patient list is empty, a detail is 404, clinical rows and a patient's source codes are out of reach, aggregated org stats show no org (#2398, #2416). |
+| `org_admin` (a grant, or an admin path through an org or domain trust) | everything for its orgs: writes and approves mappings, administers access, uploads |
+| `doctor` | patients, read and write (`can_access_patient`, `can_write_patient`, `get_visible_orgs`, `has_curation_access`), and **every mapping page read-only** (`has_mapping_read_access`, `_can_view_mappings`): the hub, Code Mapping, field mappings, therapy and disease-category reference, relevance signals, source systems |
+| `analyst` | every mapping page, **and writing them** (`has_mapping_write_access`, `_can_manage_mappings`): creating, editing, proposing and uploading code and field mappings, synonyms, choices and custom fields, Suggest, Lock, Done, priority, axis variants, LOINC axes, SNOMED attributes, concept minting, source-system facility review, rejecting relevance signals -- and PRism analytics, a separate app that shares the identity table. **No individual patient's data**: the patient list is empty, a detail is 404, clinical rows and a patient's source codes are out of reach, aggregated org stats show no org (#2398, #2416). |
 | `patient` | their own record; never another patient's (see `PatientRecordIsolationTest`) |
 
-So a doctor maps codes only when also granted `analyst`, and an analyst sees a
-patient only when also granted `doctor`. An analyst is refused with 403 on field
-mappings and their synonyms, choices and custom fields, therapy and
-disease-category reference writes, relevance signals, source-system management,
-the CSV code-mapping upload, the mapping hub and every patient read or write;
-the UI opens an analyst-only account on Code Mapping and hides the patient
-pages. A trust of either kind makes a `doctor` or `org_admin` at the trusted
+So a doctor sees every mapping but creates or changes one only when also
+granted `analyst` (a 403 "Mapping curator access required." on every write
+verb, and the pages hide their write controls behind `canWriteMappings`), and
+an analyst sees a patient only when also granted `doctor`. An analyst is
+refused every patient read or write; the UI opens an analyst-only account on
+Code Mapping and hides the patient pages. Therapy and disease-category
+reference writes stay org_admin-only (`_require_mapping_admin`), as before.
+A trust of either kind makes a `doctor` or `org_admin` at the trusted
 org or domain an admin of the granting org, and still does so for a verified
 account that has never held a grant (a federated login, or a trusted-domain
 self-signup once verified); it gives an account whose grants are all `analyst`
@@ -698,9 +699,10 @@ trusted-domain self-signup (#1454), are granted `doctor` rather than the former
 `analyst`, because that signup exists to browse patients; grants made before
 #2416 are left as they are. Approval stays with
 staff and org_admin (`_can_approve_mappings`) for every role. Gate a new
-curation endpoint with `_can_manage_field_mappings` unless it belongs on the
-Code Mapping page, where `_can_manage_code_mappings` admits the analyst.
-`AnalystRoleScopeTest` in `patient_portal/tests.py` holds the roles to this.
+mapping endpoint's reads with `_can_view_mappings` and its writes with
+`_can_manage_mappings` (`concept_to_code._authorize(user, write=True)` on
+that module); a mixed-verb view checks both. `AnalystRoleScopeTest` and
+`MappingApprovalRoleTest` in `patient_portal/tests.py` hold the roles to this.
 
 ---
 

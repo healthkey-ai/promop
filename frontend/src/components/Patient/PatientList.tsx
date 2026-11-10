@@ -9,7 +9,7 @@ import { PaginationControls } from "@/components/labs/PaginationControls";
 import { useLocalPagination } from "@/lib/pagination";
 
 import { loadPreferences, REVIEW_FILTER_DEFAULTS, VIEW_COLUMNS, type PatientView, type ReviewFilters } from './patientListViews';
-import { hasCurationRole, isStaffOrOrgAdmin } from '@/utils/roles';
+import { canReadPatients, isStaffOrOrgAdmin } from '@/utils/roles';
 
 interface Patient {
   person_id: number;
@@ -324,7 +324,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
   // Every professional who reaches this list is a curator (an analyst-only
   // account is routed to Code Mapping before it mounts, #2416), so the hub
   // is the one mapping entry point here.
-  const canCurate = hasCurationRole(currentUser);
+  const canCurate = canReadPatients(currentUser);
   const canAdministerOrganizations = isStaffOrOrgAdmin(currentUser);
 
   const handleLogout = () => {

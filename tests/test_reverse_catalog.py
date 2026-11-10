@@ -223,7 +223,8 @@ def test_publisher_revision_and_professional_access_are_rechecked(client, albumi
     client.force_authenticate(django_user_model.objects.create_user(email='catalog-patient@test.com'))
     assert propose(client, albumin, run, candidate).status_code == 403
     # A professional who can propose still cannot create-and-approve.
-    with patch('patient_portal.api.views._can_manage_code_mappings', return_value=True):
+    with patch('patient_portal.api.views._can_view_mappings', return_value=True), \
+            patch('patient_portal.api.views._can_manage_mappings', return_value=True):
         assert propose(client, albumin, run, candidate, status='approved').status_code == 400
         term.vocabulary.release_version = 'replacement-release'
         term.vocabulary.save()

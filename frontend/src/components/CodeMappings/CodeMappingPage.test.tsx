@@ -10,7 +10,10 @@ const mockPost = vi.fn();
 const mockPatch = vi.fn();
 const mockDelete = vi.fn();
 
-const mockUseAuth = vi.hoisted(() => vi.fn(() => ({ currentUser: null })));
+// The page is exercised as an analyst: a mapping writer who cannot approve (#2416).
+const ANALYST_USER = { id: 7, org_accesses: [{ org_slug: "acme", org_name: "Acme", role: "analyst", expires_at: null }] };
+const mockUseAuth = vi.hoisted(() => vi.fn((): { currentUser: unknown } => ({ currentUser: null })));
+mockUseAuth.mockReturnValue({ currentUser: ANALYST_USER });
 vi.mock("@/hooks/useAuth", () => ({ useAuth: () => mockUseAuth() }));
 vi.mock("@/api/axios", () => ({
   default: {
@@ -2684,18 +2687,39 @@ describe("CodeMappingPage links", () => {
   });
 });
 
-describe("curation controls follow the role (#2398)", () => {
+describe("write controls follow the role (#2416)", () => {
   const grant = (role: string) => ({
     currentUser: { id: 9, org_accesses: [{ org_slug: "acme", org_name: "Acme", role, expires_at: null }] },
   });
-  afterEach(() => { mockUseAuth.mockReturnValue({ currentUser: null }); });
+  afterEach(() => { mockUseAuth.mockReturnValue({ currentUser: ANALYST_USER }); });
 
-  it("hides Upload and Source systems from an analyst", async () => {
+  it("shows an analyst Upload, New Mapping, Suggest, Source systems and the edit controls", async () => {
     mockUseAuth.mockReturnValue(grant("analyst"));
     renderPage([proposedRow]);
     await screen.findByText("Code Mapping");
+    expect(screen.getByRole("button", { name: "Upload" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "New Mapping" })).toBeInTheDocument();
+    expect(screen.getByRole("group", { name: "Suggest controls" })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Source systems / hospitals" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: `Edit ${proposedRow.source_code}` })).toBeInTheDocument();
+  });
+
+  it("gives a doctor without the analyst grant a read-only page", async () => {
+    mockUseAuth.mockReturnValue(grant("doctor"));
+    renderPage([proposedRow]);
+    await screen.findByText("Code Mapping");
+    const cells = await screen.findAllByText(proposedRow.source_code);
+    expect(cells.length).toBeGreaterThan(0);
+    expect(screen.getByText("Read-only: mapping codes needs the analyst role.")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Source systems / hospitals" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Upload" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("link", { name: "Source systems / hospitals" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "New Mapping" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("group", { name: "Suggest controls" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: `Edit ${proposedRow.source_code}` })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: `Approve ${proposedRow.source_code}` })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: `Choose destination for ${proposedRow.source_code}` })).not.toBeInTheDocument();
+    fireEvent.click(cells[0]);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
   });
 
   it("shows Upload and Source systems to an org admin", async () => {

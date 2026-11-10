@@ -148,19 +148,16 @@ class _SignalSerializer(serializers.Serializer):
 
 
 def signal_rights(user):
-    """Who may decide signals, following the mapping pages' roles.
+    """Who may decide signals, following the mapping pages' roles (#2416).
 
-    Org admins and staff accept and reject. A doctor may reject, or return a
-    rejected signal to proposed, as a doctor may reject a proposed mapping.
-    An analyst reaches neither: the queue is a curation page (#2398).
+    Org admins and staff accept and reject. A mapping writer (the analyst
+    grant) may reject, or return a rejected signal to proposed, as it may
+    reject a proposed mapping. A doctor reads the queue and decides nothing.
     """
-    from omop_core.models import GroupAccess
-    from patient_portal.api.views import _can_approve_mappings
+    from patient_portal.api.views import _can_approve_mappings, _can_manage_mappings
     if _can_approve_mappings(user):
         return {'can_accept': True, 'can_reject': True}
-    doctor = GroupAccess.objects.filter(identity=user, role='doctor').filter(
-        Q(expires_at__isnull=True) | Q(expires_at__gt=timezone.now())).exists()
-    return {'can_accept': False, 'can_reject': doctor}
+    return {'can_accept': False, 'can_reject': _can_manage_mappings(user)}
 
 
 def _signal_payload(signal):
@@ -229,8 +226,8 @@ def _receive_signals(request):
 def relevance_signals(request):
     if request.method == 'POST':
         return _receive_signals(request)
-    from patient_portal.api.views import _can_manage_field_mappings
-    if is_service_token(request) or not _can_manage_field_mappings(request.user):
+    from patient_portal.api.views import _can_view_mappings
+    if is_service_token(request) or not _can_view_mappings(request.user):
         raise PermissionDenied('Professional access required.')
     queryset = RelevanceSignal.objects.order_by('disease', '-document_count', 'concept_id')
     wanted = request.query_params.get('status', 'proposed')
