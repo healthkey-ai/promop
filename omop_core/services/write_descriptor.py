@@ -1907,6 +1907,10 @@ def build_writable_field_descriptor():
         'treatment_refractory_status',
         'progression',
         'stem_cell_transplant_history',
+        # A stored fact, but EXACT drops it when prior therapy is 'None' — the
+        # one case where a transplant date cannot be true. The patient may
+        # still correct it, so offer the editor beside the derived day count.
+        'sct_date',
     ):
         entry = descriptor.get(field)
         if entry is not None and entry.get('writable'):
