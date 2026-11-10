@@ -1536,7 +1536,6 @@ def build_writable_field_descriptor():
             'confirm_none': 'No pre-existing conditions',
             'set_categories': 'Save these conditions',
             'withdraw': 'Withdraw answer',
-
         },
         'value_kind': 'string',
         'multiple': True,
