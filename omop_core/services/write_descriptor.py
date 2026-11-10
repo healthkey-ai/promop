@@ -1506,6 +1506,14 @@ def build_writable_field_descriptor():
         'target': 'patient_record',
         'endpoint': 'preexisting-conditions-answer',
         'actions': ['confirm_none', 'set_categories', 'withdraw'],
+        # The dialog draws a button per labelled action; an action without a
+        # label is an incomplete contract, so it drew none and the row read
+        # "not available in this view".
+        'action_labels': {
+            'confirm_none': 'I have none of these conditions',
+            'set_categories': 'Save selected conditions',
+            'withdraw': 'Withdraw this answer',
+        },
         'value_kind': 'string',
         'multiple': True,
         # `writable: false` is about the PATCH; the endpoint is a separate
