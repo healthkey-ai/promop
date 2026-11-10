@@ -531,8 +531,8 @@ by `measurement_concept.concept_code` (LOINC), then by
 |---------------------|-------|-------------|
 | `monoclonal_protein_serum` | 51435-6 | Serum M-spike (M-protein) |
 | `monoclonal_protein_urine` | 32730-5 | Urine M-spike 24 h |
-| `kappa_flc` | 33944-8 | Kappa free light chains |
-| `lambda_flc` | 33945-5 | Lambda free light chains |
+| `kappa_flc` | 36916-5 | Kappa free light chains |
+| `lambda_flc` | 33944-0 | Lambda free light chains |
 | `clonal_plasma_cells` | 26098-4 | Plasma cells % in bone marrow |
 
 ### Behavior / lifestyle — `_get_behavior_data`

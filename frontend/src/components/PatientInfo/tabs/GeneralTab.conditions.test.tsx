@@ -25,6 +25,18 @@ vi.mock('@/hooks/useVocabulary', () => ({
   }),
 }));
 
+// This test is about the pre-existing-conditions editor, not the disease
+// category picker; the picker's own endpoints return lists and are covered by
+// useDiseaseCategories tests.
+vi.mock('@/hooks/useDiseaseCategories', () => ({
+  useCategoryObjects: () => ({ categories: [], loading: false }),
+  useAllDiseaseMappings: () => ({
+    categoryForDisease: () => null,
+    diseasesByCategory: {},
+    loading: false,
+  }),
+}));
+
 beforeEach(() => {
   vi.clearAllMocks();
   __resetWritableFieldsCache();

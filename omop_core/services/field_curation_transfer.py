@@ -96,6 +96,9 @@ _CODE_MAPPING_OPTIONAL_FIELDS: dict[str, object] = {
     'loinc_axes': dict,
     'snomed_attributes': dict,
     'axis_variant_count': 0,
+    # The last curator decision's surface and ranker confidence (#2382).
+    'decision_surface': '',
+    'decision_confidence': None,
 }
 _CODE_MAPPING_CONCEPT_FKS = (
     'source_concept', 'target_concept', 'suggested_target_concept',

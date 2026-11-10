@@ -114,3 +114,6 @@ synthea-with-dependencies.jar
 .claude/
 .worktrees/
 .review/
+
+# Personal Claude Code instructions, loaded alongside CLAUDE.md (see AGENTS.md)
+CLAUDE.local.md

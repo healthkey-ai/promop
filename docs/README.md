@@ -160,7 +160,8 @@ separately tracks remaining requirements, acceptance criteria, and deployment wo
 ## 5. Deliver patient and integration workflows
 
 The [PHR architecture](phrs-fm-architecture.md) connects the patient account,
-own-record access, consent, messaging, and clinical lists. [PROlog surveys](prolog-surveys.md)
+own-record access, consent, messaging, and clinical lists; [consent model v2](consent-v2.md)
+keeps consent wording as versioned data and every answer as history. [PROlog surveys](prolog-surveys.md)
 describes the current survey runner and migration from the old survey feature.
 [Patient list review views](patient-list-review-views.md) covers review workflows;
 the [organization disease-statistics design](superpowers/specs/2026-06-20-org-disease-stats-design.md)
@@ -168,7 +169,8 @@ provides the original reporting design context.
 
 Applications consume patient state through the [API surface](API_SURFACE.md).
 [FHIR export](fhir-export-architecture.md) describes patient download and integration
-exports. Consumers that need a local vocabulary mirror use the
+exports; [PHR record export](phr-record-export.md) is the member's own download of
+their record from the PHR API, as a FHIR bundle or a PDF. Consumers that need a local vocabulary mirror use the
 [vocabulary cache protocol](vocab-consumer-cache-protocol.md); [ADR 0001](adr/0001-vocabulary-source-of-truth.md)
 records vocabulary authority and distribution decisions. The
 [field/value plan](field_concept_mapping_plan.md#vocabulary-distribution-and-mapping-provenance)
@@ -203,10 +205,10 @@ inputs to measured projection and eligibility workloads.
 [Release 1.2 runbook](release-1.2-dev-to-main-runbook.md) retains release-specific
 checkpoints and migration gates; its saved status is not evidence of the currently
 deployed revision. Repository working conventions are in [AGENTS.md](../AGENTS.md)
-and agent implementation guidance is in [CLAUDE.md](../CLAUDE.md).
+and agent implementation guidance is in [AGENTS.md](../AGENTS.md).
 [Code of conduct](../CODE_OF_CONDUCT.md) and [third-party notices](../THIRD_PARTY_NOTICES.md)
 cover participation and attribution.
 
 Reference guides and implementation plans live in `docs/`. Repository entry
-points, agent instructions (`AGENTS.md` and `CLAUDE.md`), contribution and policy
+points, agent instructions (`AGENTS.md`; `CLAUDE.md` only imports it), contribution and policy
 files, and the research paper remain at the root for discovery and tooling.

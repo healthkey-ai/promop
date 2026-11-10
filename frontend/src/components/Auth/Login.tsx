@@ -22,6 +22,7 @@ export function Login() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const [verificationRequired, setVerificationRequired] = useState(false);
 
   // Orgs accepting patient self-signup. Empty (or an unreachable endpoint)
   // means this deployment has none, and the Sign Up tab stays hidden.
@@ -89,7 +90,11 @@ export function Login() {
     } catch (err: unknown) {
       let msg = "Login failed. Please try again.";
       if (err && typeof err === "object" && "response" in err) {
-        const resp = (err as { response?: { data?: { error?: string } } }).response;
+        const resp = (err as { response?: { data?: { error?: string; code?: string } } }).response;
+        if (resp?.data?.code === "email_not_verified") {
+          setVerificationRequired(true);
+          return;
+        }
         if (resp?.data?.error) msg = resp.data.error;
       }
       setError(msg);
@@ -123,8 +128,9 @@ export function Login() {
         given_name: givenName,
         family_name: familyName,
       });
-      // Backend auto-logs in via session cookie — go straight to patient home.
-      window.location.href = `/org/${orgSlug}/`;
+      // Account created — email verification required before login.
+      setVerificationRequired(true);
+      return;
     } catch (err: unknown) {
       let msg = "Signup failed. Please try again.";
       if (err && typeof err === "object" && "response" in err) {
@@ -148,6 +154,29 @@ export function Login() {
 
   const inputClass =
     "mt-1 block w-full rounded-md border border-input px-3 py-2 shadow-sm placeholder:text-muted-foreground focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary";
+
+  if (verificationRequired) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-muted/40">
+        <div className="w-full max-w-md space-y-6 rounded-lg bg-background p-8 shadow-lg text-center">
+          <PageTitle className="text-2xl font-bold text-foreground">
+            Check your email
+          </PageTitle>
+          <p className="text-sm text-muted-foreground">
+            We sent a verification link to your email address.
+            Please click the link to verify your account before signing in.
+          </p>
+          <button
+            type="button"
+            onClick={() => { setVerificationRequired(false); setMode("signin"); }}
+            className="text-sm font-medium text-primary hover:text-primary/80"
+          >
+            Back to sign in
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-muted/40">

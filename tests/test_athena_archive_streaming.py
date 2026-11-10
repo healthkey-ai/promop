@@ -164,7 +164,7 @@ def test_failed_load_cleans_its_downloads_only(tmp_path, monkeypatch, fail_downl
     unrelated.write_text('operator-owned file')
     owned_dirs = []
 
-    def download(url, download_dir, log):
+    def download(url, download_dir, log, selection=None):
         owned_dirs.append(download_dir)
         archive = download_dir / 'athena.zip'
         with zipfile.ZipFile(archive, 'w') as zf:
@@ -173,6 +173,10 @@ def test_failed_load_cleans_its_downloads_only(tmp_path, monkeypatch, fail_downl
             raise OSError('Download interrupted')
         return archive
 
+    # The loader resolves the Drive selection before downloading (#2288).
+    monkeypatch.setattr(loader, '_resolve_gdrive_vocabulary', lambda url, log: {
+        'id': 'f', 'name': 'athena.zip', 'identity': 'gdrive-file:f:athena.zip',
+    })
     monkeypatch.setattr(loader, '_download_gdrive_vocabulary', download)
     monkeypatch.setattr(loader.Command, '_load_relationships', Mock(side_effect=CommandError('Load interrupted')))
     with pytest.raises((CommandError, OSError), match='interrupted'):
@@ -236,12 +240,15 @@ def test_full_dry_run_reads_every_table_without_extracting(tmp_path, monkeypatch
             zf.writestr(f'export/{table}.csv', header + '\n')
     owned_dirs = []
 
-    def download(url, download_dir, log):
+    def download(url, download_dir, log, selection=None):
         owned_dirs.append(download_dir)
         dest = download_dir / 'athena.zip'
         dest.write_bytes(archive.read_bytes())
         return dest
 
+    monkeypatch.setattr(loader, '_resolve_gdrive_vocabulary', lambda url, log: {
+        'id': 'f', 'name': 'athena.zip', 'identity': 'gdrive-file:f:athena.zip',
+    })
     monkeypatch.setattr(loader, '_download_gdrive_vocabulary', download)
     output = StringIO()
     call_command(

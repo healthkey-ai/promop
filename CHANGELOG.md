@@ -30,6 +30,34 @@ All notable changes to PRomop are documented here.
   and OMOP paths. Full SLiM/MIPI-parity with Trial Details (MRI lesions, MIPI
   result ownership) remains a documented clinical decision (#5482).
 
+- **The PHR record PDF renders Cyrillic, Greek and extended Latin names** —
+  the export is set in DejaVu Sans, bundled under `patient_portal/api/phr/fonts/`
+  and embedded in each PDF, instead of reportlab's built-in Helvetica, whose
+  glyphs stop at Western Latin. A member's name, drug or facility in
+  Russian, Greek, Polish or Vietnamese reads as written; CJK remains a
+  documented gap. See [PHR record export](docs/phr-record-export.md). (#2308)
+- **A member can download their own record from the PHR API** —
+  `GET /api/v1/phr/record/export/?format=fhir` is the signed FHIR R4 bundle
+  the person-id export serves, resolved through the member's own link so no
+  id is needed, and `?format=pdf` is the same record as a PDF, one page per
+  section (about, diagnoses, lines of therapy, check-ins, medications,
+  procedures, labs), built from the section builders the app's screens read.
+  `?lang=` is accepted as on `consent/`; the PDF's text is English for now.
+  Every export writes a `record_view` audit row carrying `detail.export`, and
+  the integrity headers of both FHIR exports are now readable cross-origin
+  (#1603). Adds `reportlab`. See [PHR record export](docs/phr-record-export.md).
+  (#2308)
+- **Consent model v2** — purposes (permissions, contact preferences,
+  declarations) and legal documents are data with versioned texts per
+  language, loaded by `load_consent_texts` or edited in the admin, so legal
+  rewording is a new version and not a code change. Every answer is an
+  append-only `ConsentEvent` carrying the version seen; withdrawal keeps the
+  grant in the history. A `ConsentLedgerEntry` store with no link to the
+  account holds the email address and permission history and outlives
+  deletion. `/api/v1/phr/consent/` serves sign-up, settings and "confirm the
+  new Terms"; `has_consent(person, key)` and `persons_granting(key)` are the
+  enforcement points, with a per-country gate, though nothing enforces
+  through them yet. See [consent model v2](docs/consent-v2.md).
 - **Versioned clinical source-input SDK on dev** — opt-in, per-field approved
   source writes for laboratory ULN ratios, explicit swallowing answers and SCT
   dates append corrections/clear tombstones and verify refreshed readback.
@@ -160,6 +188,49 @@ All notable changes to PRomop are documented here.
   staff or service edit that day writes its own fact rather than the patient's.
   Their types are otherwise unchanged. Without concept 32865 loaded, the recipe
   type stands (#1959).
+- **One instruction file for every coding agent** — `AGENTS.md` now holds the
+  whole rulebook (the former `CLAUDE.md` content and the former `AGENTS.md`
+  conventions), and `CLAUDE.md` is `@AGENTS.md` plus a short Claude Code
+  section, so Claude Code, Codex and the rest read the same file. Personal
+  additions go in the gitignored `CLAUDE.local.md`. (#2236)
+- **The deployed commit sits under the PRomop logo** — in tiny type, with
+  the full SHA as a tooltip, so a report from staging names its build. It
+  comes from the new public `GET /api/v1/version/`, which answers with
+  Render's `RENDER_GIT_COMMIT` (or a checkout's `HEAD`) only when it is a Git
+  commit (#2016).
+
+- **LOINC axes read the record units first, and lead with the variants** —
+  a code whose records all arrive in mass-concentration units showed every
+  axis as "Not settled" when its stored metadata carried only a reference-range
+  unit; record units now settle Property (when they agree) and Scale (whenever
+  records carry units) ahead of the metadata's one sample. When the units
+  imply several axis sets, the LOINC axes panel leads with the variants, their
+  units and destinations, and folds the shared axes under them. The SNOMED
+  evidence section is hidden on any LOINC axis evidence, not only a settled
+  lab property (`snomed-attributes` answers `applies: false` with
+  `loinc_evidence`) (#2014).
+
+- **Suggest fills in a LOINC for each axis variant** — a source code whose
+  units imply several LOINC axis sets no longer needs one Suggest click and
+  one pick per variant. In Edit Mapping, Suggest also posts to
+  `code-mappings/<id>/axis-variants/suggest/`, which suggests a standard LOINC
+  for every variant without a destination under that variant's axes and
+  stores it as proposed; the LOINC axes panel then shows each with Approve.
+  The Concept to Code preview does the same for each flagged candidate and
+  lists the variants, with their units and destinations, under the code, where
+  an approver can approve them. The SNOMED evidence section is hidden when
+  the source's evidence says it is a lab value, since its destination is a
+  LOINC (`snomed-attributes` answers `applies: false` with `lab_signal`)
+  (#2012).
+
+- **The concept's source-code dialog opens on Suggested source codes** — and
+  has two views instead of three: the Find source codes list is gone, since
+  Suggest reaches the same rows with the ranker's evidence attached. Existing
+  mappings is grouped by status: approved first and folded, then the proposals
+  open for review, then rejected, folded, each group fetched and paged on its
+  own (`status=` on the detail endpoint, with `status_counts` for the headers).
+  Propose selected is gone too; Approve selected proposes a vocabulary-only
+  candidate from its preview and approves it in the same click (#2010).
 
 - **A patient's own record edits are recorded as patient self-report** — a
   `PatientRecord` PATCH by the patient (`/patient-info/me/`) or their verified

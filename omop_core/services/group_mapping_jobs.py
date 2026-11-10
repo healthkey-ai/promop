@@ -141,7 +141,8 @@ def _apply_group_action(mapping_ids, action, destination_id, *, run, actor, sele
                 )
             _upsert_source_code_mapping(
                 concept if action == 'approve' else mapping.target_concept,
-                {'status': 'approved' if action == 'approve' else 'rejected'},
+                {'status': 'approved' if action == 'approve' else 'rejected',
+                 'decision_surface': 'code2concept'},
                 actor, mapping=mapping,
             )
             done += 1

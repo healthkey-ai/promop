@@ -23,6 +23,15 @@ vi.mock('@/hooks/useVocabulary', () => ({
   useVocabulary: () => ({ options: [], source: null, loading: false }),
 }));
 
+vi.mock('@/hooks/useDiseaseCategories', () => ({
+  useCategoryObjects: () => ({ categories: [], loading: false }),
+  useAllDiseaseMappings: () => ({
+    categoryForDisease: () => null,
+    diseasesByCategory: {},
+    loading: false,
+  }),
+}));
+
 const measurement = (code: string) => ({
   kind: 'direct', writable: true, target: 'patient_record',
   value_kind: 'number',

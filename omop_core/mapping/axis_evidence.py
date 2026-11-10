@@ -97,6 +97,16 @@ def code_evidence(mapping, units, resources, variant_count=0):
     evidence['component']['varies'] = len(components) >= 2
     evidence['system']['varies'] = len(specimen_systems | coding_systems) >= 2
     evidence['method_type']['varies'] = len(methods) >= 2
+    # Top-level data-availability flags: what raw data the code's patients carry,
+    # regardless of whether it settled an axis.  Read by Summary.add().
+    evidence['_units'] = sorted(set(units)) if units else []
+    # basedOn labels from the FHIR resources (e.g. "Complete blood count").
+    from omop_core.services.source_fhir_context import based_on_labels
+    based_on = set()
+    for metadata in resources:
+        for label in based_on_labels(metadata):
+            based_on.add(label)
+    evidence['_based_on'] = sorted(based_on) if based_on else []
     return evidence
 
 
@@ -112,6 +122,12 @@ class Summary:
     def __init__(self, data=None):
         data = data or {}
         self.codes = int(data.get('codes') or 0)
+        self.codes_with_units = int(data.get('codes_with_units') or 0)
+        # A summary stored before basedOn was counted has only the old
+        # specimen keys; they are not basedOn and are not read as it (#2296).
+        self.codes_with_based_on = int(data.get('codes_with_based_on') or 0)
+        self.distinct_units = Counter(data.get('distinct_units') or {})
+        self.distinct_based_on = Counter(data.get('distinct_based_on') or {})
         self.axes = {}
         for axis in AXES:
             stored = (data.get('axes') or {}).get(axis) or {}
@@ -124,7 +140,19 @@ class Summary:
 
     def add(self, evidence):
         self.codes += 1
+        units = evidence.get('_units', [])
+        based_on = evidence.get('_based_on', [])
+        if units:
+            self.codes_with_units += 1
+            for u in units:
+                self.distinct_units[u] += 1
+        if based_on:
+            self.codes_with_based_on += 1
+            for label in based_on:
+                self.distinct_based_on[label] += 1
         for axis, found in evidence.items():
+            if not isinstance(found, dict):
+                continue
             counts = self.axes[axis]
             if found['bases']:
                 counts['settled'] += 1
@@ -135,9 +163,19 @@ class Summary:
             if found['varies']:
                 counts['varies'] += 1
 
+    #: How many distinct values ``as_dict`` keeps per counter; the rest are
+    #: only represented by the ``_total`` count.
+    TOP_N = 200
+
     def as_dict(self):
         return {
             'codes': self.codes,
+            'codes_with_units': self.codes_with_units,
+            'codes_with_based_on': self.codes_with_based_on,
+            'distinct_units': dict(self.distinct_units.most_common(self.TOP_N)),
+            'distinct_units_total': len(self.distinct_units),
+            'distinct_based_on': dict(self.distinct_based_on.most_common(self.TOP_N)),
+            'distinct_based_on_total': len(self.distinct_based_on),
             'axes': {axis: {
                 'settled': counts['settled'], 'hint': counts['hint'], 'varies': counts['varies'],
                 'bases': {basis: counts['bases'][basis] for basis in BASES if counts['bases'][basis]},

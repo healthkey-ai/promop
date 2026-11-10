@@ -4,7 +4,7 @@ from django.db.models.functions import Coalesce
 from django.utils import timezone
 
 from omop_core.mapping import axis_variants
-from omop_core.models import Concept, FieldConceptMapping, SourceCodeConceptMapping
+from omop_core.models import Concept, ConceptMappingDone, FieldConceptMapping, SourceCodeConceptMapping
 from omop_core.services.source_vocabularies import DOMAIN_TO_TABLE
 
 
@@ -38,6 +38,10 @@ def source_payload(row):
         'destination_standard_concept': row.target_concept.standard_concept if row.target_concept else None,
         'domain_id': row.domain_id, 'omop_table': row.omop_table,
         'confidence': row.suggestion_confidence,
+        'decision_confidence': row.decision_confidence, 'decision_surface': row.decision_surface,
+        'source_label_norm': row.source_label_norm,
+        'units': [e.get('display') or e.get('unit', '') for e in (row.source_unit_evidence or []) if isinstance(e, dict)],
+        'based_on': getattr(row, '_source_samples', {}).get('based_on', []),
         # Its units imply this many LOINC axis sets (the blue "n axis values").
         'axis_variant_count': row.axis_variant_count,
         # ... and these are the variants, each with its own destination (#2012).
@@ -97,8 +101,12 @@ def browse_concepts(params):
 
     # Curator priority first (#1914), on every page and under every filter;
     # unranked concepts keep the alphabetical order after them.
-    concepts = concepts.annotate(priority=F('mapping_priority__position'))
-    return concepts.order_by(F('priority').asc(nulls_last=True), 'concept_name', 'pk'), fields, {
+    # Done concepts (#2388) come after every other: finished, not forgotten.
+    concepts = concepts.annotate(
+        priority=F('mapping_priority__position'),
+        done=Exists(ConceptMappingDone.objects.filter(concept_id=OuterRef('pk'))),
+    )
+    return concepts.order_by(F('priority').asc(nulls_last=True), 'done', 'concept_name', 'pk'), fields, {
         'approved': count('approved'), 'proposed': count('proposed'), 'rejected': count('rejected'),
         'seen': Coalesce(Subquery(mappings.order_by().values('target_concept_id').annotate(
             n=Sum('occurrence_count')).values('n')), Value(0)),

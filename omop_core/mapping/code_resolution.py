@@ -338,19 +338,90 @@ def _record_proposal(*, source_vocabulary_id, source_code, source_text,
         updates['occurrence_count'] = F('occurrence_count') + 1
     if mapping.first_seen is None:
         updates['first_seen'] = now
+    named = _name_if_unnamed(mapping, source_text)
+    if named:
+        updates['source_code_description'] = named
     SourceCodeConceptMapping.objects.filter(pk=mapping.pk).update(**updates)
-    mapping.refresh_from_db(fields=['occurrence_count', 'first_seen', 'last_seen'])
+    mapping.refresh_from_db(fields=['occurrence_count', 'first_seen', 'last_seen', 'source_code_description'])
     return mapping
 
 
-def _effective_direct_mapping(*, source_vocabulary_id, source_code, concept, omop_table):
+def _unnamed(name, source_code):
+    return not (name or '').strip() or name.strip() == source_code
+
+
+def _name_if_unnamed(mapping, source_text):
+    """The name a later sighting gives a code first seen without one (#2168).
+
+    The description is written when the row is created. A code first seen as
+    a bare code (no display, no text) stayed unnamed even after a later
+    import sent its name, and so did the HK concept minted for it, which is
+    named after the code (``hkp:85025`` "85025"). Returns the new
+    description, or ``''`` when the row already has one or the sighting
+    brings none. A curator's text is never replaced: only an empty
+    description, or one that repeats the code, counts as unnamed.
+    """
+    text = (source_text or '').strip()[:255]
+    if _unnamed(mapping.source_code_description, mapping.source_code) and not _unnamed(text, mapping.source_code):
+        _name_minted_concept(mapping, text)
+        return text
+    return ''
+
+
+def _name_minted_concept(mapping, name):
+    """Rename the HK concept minted for this code when it is named after the code.
+
+    Only a concept no other mapping points at: one minted from a bare code
+    can be shared by another vocabulary's identical code, and that code's
+    name is not this one.
+    """
+    concept_id = mapping.target_concept_id
+    if concept_id is None:
+        return
+    concept = Concept.objects.filter(
+        concept_id=concept_id, vocabulary_id__in=_QUARANTINE_VOCABULARIES,
+    ).first()
+    if concept is None or not _unnamed(concept.concept_name, mapping.source_code):
+        return
+    shared = SourceCodeConceptMapping.objects.filter(
+        Q(target_concept_id=concept_id) | Q(suggested_target_concept_id=concept_id),
+    ).exclude(pk=mapping.pk).exists()
+    if shared:
+        return
+    Concept.objects.filter(concept_id=concept_id).update(concept_name=name)
+
+
+def _standard_maps_to(concept):
+    """The one live standard concept a non-standard Athena concept maps to, or None.
+
+    A J-code (HCPCS, Drug domain) is non-standard and carries a 'Maps to'
+    RxNorm ingredient; an ICD-10-CM code maps to SNOMED. ``sync_athena_mappings``
+    turns those edges into approved SCCM rows for the codes it is pointed at,
+    but a code it has not met yet should resolve the same way here rather
+    than to its own non-standard id, which no OMOP consumer can use.
+    """
+    targets = list(
+        Concept.objects.filter(
+            relationships_as_target__concept_1=concept,
+            relationships_as_target__relationship_id='Maps to',
+            relationships_as_target__invalid_reason__isnull=True,
+            standard_concept='S', invalid_reason__isnull=True,
+        ).distinct()[:2]
+    )
+    return targets[0] if len(targets) == 1 else None
+
+
+def _effective_direct_mapping(*, source_vocabulary_id, source_code, concept, omop_table,
+                              target=None):
     """Cache an authoritative direct vocabulary hit in SCCM.
 
     ``approved`` remains the effective state for backwards compatibility, but
     ``origin_system`` makes this a refreshable Athena-derived cache entry, not
     a curator sign-off.  A concurrent creator, or any existing curator row,
-    always wins rather than being overwritten.
+    always wins rather than being overwritten. ``target`` is the standard
+    concept the hit maps to when the hit itself is not standard.
     """
+    target = target or concept
     source_code = source_code[:SOURCE_CODE_MAX]
     existing = SourceCodeConceptMapping.objects.filter(
         organization__isnull=True, source_vocabulary_id=source_vocabulary_id or '',
@@ -367,10 +438,10 @@ def _effective_direct_mapping(*, source_vocabulary_id, source_code, concept, omo
                 source_code=source_code,
                 source_code_description=(concept.concept_name or '')[:255],
                 source_concept=concept,
-                target_concept=concept,
-                destination_vocabulary_id=concept.vocabulary_id or '',
-                domain_id=concept.domain_id or _DOMAIN_FOR_TABLE.get(omop_table, ''),
-                omop_table=table_for_domain(concept.domain_id) if standard_identity else omop_table,
+                target_concept=target,
+                destination_vocabulary_id=target.vocabulary_id or '',
+                domain_id=target.domain_id or _DOMAIN_FOR_TABLE.get(omop_table, ''),
+                omop_table=table_for_domain(target.domain_id) if standard_identity else omop_table,
                 source='Athena', status='approved', origin='import',
                 origin_system=IDENTITY_ORIGIN if standard_identity else 'athena-direct', occurrence_count=0,
             )
@@ -588,13 +659,25 @@ def _resolve_source_code(*, source_code, omop_table, source_vocabulary_id,
         )
         return None, gap
 
-    # Rule 3a — resolve against Athena as before.
+    # Rule 3a — resolve against Athena as before. A standard, valid concept
+    # is the answer. A non-standard one (an HCPCS J-code, an ICD-10-CM code
+    # the mapping sync has not met) is the answer only through its one
+    # 'Maps to' standard target; with none it stays with a curator, as a
+    # non-standard hit already does on the promotion path (#2300).
     concept = _direct_concept(source_vocabulary_id, source_code)
     if concept is not None:
-        return concept, _effective_direct_mapping(
-            source_vocabulary_id=source_vocabulary_id,
-            source_code=source_code, concept=concept, omop_table=table,
-        )
+        if concept.standard_concept == 'S' and not concept.invalid_reason:
+            return concept, _effective_direct_mapping(
+                source_vocabulary_id=source_vocabulary_id,
+                source_code=source_code, concept=concept, omop_table=table,
+            )
+        target = _standard_maps_to(concept)
+        if target is not None:
+            return target, _effective_direct_mapping(
+                source_vocabulary_id=source_vocabulary_id,
+                source_code=source_code, concept=concept, omop_table=table,
+                target=target,
+            )
 
     # Rule 4 — the suggestion service owns every retrieval/ranking strategy.
     # Its returned target is useful evidence for a curator but never an answer
@@ -813,7 +896,7 @@ def _collapse_duplicates(model, concept_col, source_col, match,
                          concept_id, person_ids, organization_id=None):
     """Collapse rows the re-point just made identical.
 
-    "Identical" is the event identity CLAUDE.md documents for the bulk write
+    "Identical" is the event identity AGENTS.md documents for the bulk write
     path, not just (person, date). Measurement and Observation carry more of it
     on purpose: a patient legitimately has several distinct results for one
     analyte on one day, and keying on the date alone would delete real results

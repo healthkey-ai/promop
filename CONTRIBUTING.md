@@ -51,7 +51,7 @@ A few conventions to follow:
 
 - **Adding a new patient attribute** — touch all required layers (model, migration,
   serializer, FHIR loader, TypeScript type, React UI, FHIR generator). The checklist in
-  [CLAUDE.md](CLAUDE.md) walks through each layer in order.
+  [AGENTS.md](AGENTS.md) walks through each layer in order.
 - **New features must have tests.** Write them before considering the work done. See
   [Running tests](#running-tests) below.
 - **No comments that describe *what* the code does** — well-named identifiers do that.

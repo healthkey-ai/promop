@@ -9,7 +9,7 @@ from .version import version_view
 from .concept_to_code import (
     concept_to_code_list, concept_to_code_detail, concept_to_code_suggest,
     concept_to_code_run, concept_to_code_apply, concept_to_code_propose,
-    concept_to_code_source_examples, concept_to_code_priority, concept_to_code_estimate,
+    concept_to_code_source_examples, concept_to_code_priority, concept_to_code_done, concept_to_code_lock, concept_to_code_estimate,
     concept_to_code_axis_variant_walk,
 )
 from rest_framework.routers import DefaultRouter
@@ -43,7 +43,7 @@ from .views import (
     mapping_stats,
     therapy_regimen_components, therapy_component_classes,
     disease_therapy_regimen_list, disease_therapy_regimen_detail,
-    disease_category_list,
+    disease_category_list, disease_category_detail,
     disease_category_mapping_list, disease_category_mapping_detail,
     concept_ancestors, concept_descendants, concept_detail, concept_graph_batch,
     concept_synonyms, concept_synonym_search, concept_replacement,
@@ -64,6 +64,7 @@ from .views import (
     code_mapping_lookup,
     code_mapping_accuracy,
     code_mapping_accuracy_dashboard,
+    code_mapping_accuracy_analytics,
     code_mapping_unit_search,
     custom_patient_field_list,
     field_synonyms, field_synonym_detail, field_synonyms_batch,
@@ -189,6 +190,8 @@ urlpatterns = [
     path('concept-to-code/suggest/', concept_to_code_suggest, name='v1-concept-to-code-suggest'),
     path('concept-to-code/suggest-runs/<uuid:run_id>/', concept_to_code_run, name='v1-concept-to-code-run'),
     path('concept-to-code/priority/', concept_to_code_priority, name='v1-concept-to-code-priority'),
+    path('concept-to-code/done/', concept_to_code_done, name='v1-concept-to-code-done'),
+    path('concept-to-code/<int:concept_id>/lock/', concept_to_code_lock, name='v1-concept-to-code-lock'),
     path('concept-to-code/axis-variant-walk/', concept_to_code_axis_variant_walk, name='v1-concept-to-code-axis-variant-walk'),
     path('concept-to-code/source-examples/', concept_to_code_source_examples, name='v1-concept-to-code-source-examples'),
     path('concept-to-code/<int:concept_id>/', concept_to_code_detail, name='v1-concept-to-code-detail'),
@@ -215,6 +218,7 @@ urlpatterns = [
     path('relevance/signals/<int:signal_id>/', relevance_signal_review, name='v1-relevance-signal-review'),
     path('code-mappings/accuracy/', code_mapping_accuracy, name='v1-code-mapping-accuracy'),
     path('code-mappings/accuracy/dashboard/', code_mapping_accuracy_dashboard, name='v1-code-mapping-accuracy-dashboard'),
+    path('code-mappings/accuracy/analytics/', code_mapping_accuracy_analytics, name='v1-code-mapping-accuracy-analytics'),
     path('code-mappings/unit-search/', code_mapping_unit_search, name='v1-code-mapping-unit-search'),
     path('code-mappings/vocabularies/', code_mapping_vocabularies, name='v1-code-mapping-vocabularies'),
     path('code-mappings/<int:mapping_id>/', code_mapping_detail, name='v1-code-mapping-detail'),
@@ -251,6 +255,7 @@ urlpatterns = [
     path('disease-therapy-regimens/', disease_therapy_regimen_list, name='v1-disease-therapy-regimen-list'),
     path('disease-therapy-regimens/<int:pk>/', disease_therapy_regimen_detail, name='v1-disease-therapy-regimen-detail'),
     path('disease-categories/', disease_category_list, name='v1-disease-category-list'),
+    path('disease-categories/<str:code>/', disease_category_detail, name='v1-disease-category-detail'),
     path('disease-category-mappings/', disease_category_mapping_list, name='v1-disease-category-mapping-list'),
     path('disease-category-mappings/<int:pk>/', disease_category_mapping_detail, name='v1-disease-category-mapping-detail'),
 ]

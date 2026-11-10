@@ -16,6 +16,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from omop_core.mapping import axis_variants, loinc_axes
+from omop_core.services import concept_lock
 from omop_core.models import Concept, LoincCodeClass, SourceCodeConceptMapping, SuggestRun
 
 AXIS_VALUE_LIMIT = 25
@@ -78,7 +79,7 @@ def _payload(mapping):
 @permission_classes([IsAuthenticated])
 def code_mapping_loinc_axes(request, mapping_id):
     views = _views()
-    if not views._can_manage_field_mappings(request.user):
+    if not views._can_manage_code_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
     mapping = SourceCodeConceptMapping.objects.filter(pk=mapping_id).first()
     if mapping is None:
@@ -112,7 +113,7 @@ def code_mapping_axis_variant(request, mapping_id):
     on one the dialog detected but no refresh has saved yet.
     """
     views = _views()
-    if not views._can_manage_field_mappings(request.user):
+    if not views._can_manage_code_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
     with transaction.atomic():
         mapping = (SourceCodeConceptMapping.objects.select_for_update(of=('self',))
@@ -150,6 +151,9 @@ def code_mapping_axis_variant(request, mapping_id):
         if approve and concept is None:
             return Response({'target_concept_id': 'Choose a destination before approving.'},
                             status=status.HTTP_400_BAD_REQUEST)
+        # A variant destination on a concept another curator holds (#2390).
+        if concept is not None:
+            concept_lock.check_concept_lock(concept.pk, request.user)
         if reopen and not views._can_approve_mappings(request.user):
             # Reopening rewrites stored rows, like approving.
             return Response({'detail': 'Reopening an approved variant requires approver access.'},
@@ -190,7 +194,7 @@ def code_mapping_axis_variant_suggest(request, mapping_id):
     from omop_core.services.suggest_jobs import get_dispatcher
 
     views = _views()
-    if not views._can_manage_field_mappings(request.user):
+    if not views._can_manage_code_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
     mapping = SourceCodeConceptMapping.objects.filter(pk=mapping_id).first()
     if mapping is None:
@@ -241,7 +245,7 @@ def loinc_axis_values(request):
     """The commonest LOINC values of one axis containing ``q``."""
     from django.db.models import Count
 
-    if not _views()._can_manage_field_mappings(request.user):
+    if not _views()._can_manage_code_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
     axis = request.query_params.get('axis', '')
     if axis not in loinc_axes.AXES:
@@ -322,7 +326,7 @@ def code_mapping_snomed_attributes(request, mapping_id):
     from omop_core.mapping import snomed_attributes
 
     views = _views()
-    if not views._can_manage_field_mappings(request.user):
+    if not views._can_manage_code_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
     mapping = SourceCodeConceptMapping.objects.filter(pk=mapping_id).first()
     if mapping is None:

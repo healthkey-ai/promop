@@ -95,7 +95,9 @@ def curated_values_from_snapshot(snapshot, *, confirmed_clinical_fields=None):
         _latest_assertion_rows, _latest_blood_count_measurements,
         _latest_loinc_measurement,
     )
-    from omop_core.services.clinical_units import blood_count_projection
+    from omop_core.services.clinical_units import (
+        BLOOD_COUNT_FIELDS, LEGACY_COUNT_ALIASES, blood_count_projection,
+    )
     from omop_core.services.field_write_service import _invert_inverse_assertion
     from omop_core.services.write_descriptor import (
         PINNED_PROJECTION_FIELDS, _LIFECYCLE_FIELDS, _WRITE_RECIPE_INCOMPLETE,
@@ -187,11 +189,8 @@ def curated_values_from_snapshot(snapshot, *, confirmed_clinical_fields=None):
                 # The extractor has already handled this question, including
                 # coded answers, newer source-only results, and explicit clears.
                 continue
-        count_field = {
-            'absolute_neutrophile_count': 'anc_thousand_per_ul',
-            'platelet_count': 'platelet_count_thousand_per_ul',
-        }.get(name, name)
-        if count_field in ('anc_thousand_per_ul', 'platelet_count_thousand_per_ul'):
+        count_field = LEGACY_COUNT_ALIASES.get(name, name)
+        if count_field in BLOOD_COUNT_FIELDS:
             # Approved question mappings still carry source-scale results.
             row_date = getattr(row, 'measurement_date', None) or row.observation_date
             if count_dates.get(count_field, (row_date, row.pk)) > (row_date, row.pk):

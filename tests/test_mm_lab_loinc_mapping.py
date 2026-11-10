@@ -77,10 +77,10 @@ def test_real_world_lambda_codes_project_to_lambda_flc(code):
     assert float(_get_laboratory_data(person)['lambda_flc']) == pytest.approx(0.92)
 
 
-def test_seeded_kappa_and_real_lambda_codes_are_not_confused():
-    """One character apart and opposite analytes."""
+def test_kappa_and_lambda_serum_codes_are_not_confused():
+    """36916-5 is kappa, 33944-0 is lambda: opposite analytes."""
     person = PersonFactory()
-    _measure(person, '33944-8', 5.0, unit='mg/L')
+    _measure(person, '36916-5', 5.0, unit='mg/L')
     _measure(person, '33944-0', 7.0, unit='mg/L')
 
     data = _get_laboratory_data(person)

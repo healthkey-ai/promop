@@ -9,6 +9,7 @@ import { PaginationControls } from "@/components/labs/PaginationControls";
 import { useLocalPagination } from "@/lib/pagination";
 
 import { loadPreferences, REVIEW_FILTER_DEFAULTS, VIEW_COLUMNS, type PatientView, type ReviewFilters } from './patientListViews';
+import { hasCodeMappingRole, hasCurationRole, isReadOnlyAnalyst, isStaffOrOrgAdmin } from '@/utils/roles';
 
 interface Patient {
   person_id: number;
@@ -18,11 +19,10 @@ interface Patient {
   organization_slug?: string | null;
   disease: string;
   stage: string;
-  genomics_summary?: string;
+  unmapped_source_code_count?: number;
   therapy_lines_count?: number | null;
   updated_at: string;
   treatment_summary?: { name: string; line: number; start_date: string | null; end_date: string | null } | null;
-  disease_status?: string | null;
   subtype_biomarkers?: string;
   ecog_performance_status?: number | null;
   ecog_assessment_date?: string | null;
@@ -38,6 +38,8 @@ const ALL_FILTER_VALUE = "all";
 interface FilterOptions {
   orgs: Array<{ value: string; label: string }>;
   diseases: string[];
+  disease_categories?: Array<{ value: string; label: string }>;
+  diseases_by_category?: Record<string, string[]>;
   stages: string[];
   clinical_statuses?: string[];
 }
@@ -109,6 +111,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
   useEffect(() => () => { if (resolvePollRef.current) clearInterval(resolvePollRef.current); }, []);
   const [orgFilter, setOrgFilter] = useState(ALL_FILTER_VALUE);
   const [search, setSearch] = useState("");
+  const [diseaseCategoryFilter, setDiseaseCategoryFilter] = useState(ALL_FILTER_VALUE);
   const [diseaseFilter, setDiseaseFilter] = useState(ALL_FILTER_VALUE);
   const [stageFilter, setStageFilter] = useState(ALL_FILTER_VALUE);
   const [dateFilter, setDateFilter] = useState(ALL_FILTER_VALUE);
@@ -123,6 +126,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
           page_size: pageSize,
           org: orgFilter,
           search,
+          disease_category: diseaseCategoryFilter,
           disease: diseaseFilter,
           stage: stageFilter,
           date: dateFilter,
@@ -145,7 +149,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
     } finally {
       setLoading(false);
     }
-  }, [page, pageSize, orgFilter, search, diseaseFilter, stageFilter, dateFilter, reviewFilters, ordering]);
+  }, [page, pageSize, orgFilter, search, diseaseCategoryFilter, diseaseFilter, stageFilter, dateFilter, reviewFilters, ordering]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount
@@ -202,7 +206,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
       setDeleting(true);
       if (selectAllMode) {
         await api.delete("/patient-info/bulk_delete_filtered/", {
-          params: { org: orgFilter, search, disease: diseaseFilter, stage: stageFilter, date: dateFilter, ...reviewFilters },
+          params: { org: orgFilter, search, disease_category: diseaseCategoryFilter, disease: diseaseFilter, stage: stageFilter, date: dateFilter, ...reviewFilters },
         });
       } else {
         await api.delete("/patient-info/bulk_delete/", {
@@ -229,7 +233,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
         ? { select_all: true }
         : { person_ids: Array.from(selectedIds) };
       const params = selectAllMode
-        ? { org: orgFilter, search, disease: diseaseFilter, stage: stageFilter, date: dateFilter, ...reviewFilters }
+        ? { org: orgFilter, search, disease_category: diseaseCategoryFilter, disease: diseaseFilter, stage: stageFilter, date: dateFilter, ...reviewFilters }
         : undefined;
       const res = await api.post<{ run_id: string; total: number }>(
         "/v1/patient-records/bulk-resolve-source-codes/",
@@ -262,7 +266,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
     try {
       setDownloading(true);
       const params = selectAllMode
-        ? { org: orgFilter, search, disease: diseaseFilter, stage: stageFilter, date: dateFilter, ...reviewFilters, ordering }
+        ? { org: orgFilter, search, disease_category: diseaseCategoryFilter, disease: diseaseFilter, stage: stageFilter, date: dateFilter, ...reviewFilters, ordering }
         : { person_ids: Array.from(selectedIds).join(",") };
       const response = await api.get<Blob>("/v1/patient-records/export-csv/", { params, responseType: "blob" });
       const disposition = String(response.headers?.["content-disposition"] ?? "");
@@ -317,9 +321,11 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
   const isAllSelected =
     patients.length > 0 &&
     (selectAllMode || visibleSelectedCount === patients.length);
-  const canManageMappings = !!(currentUser?.is_staff || currentUser?.is_org_admin
-    || currentUser?.org_accesses?.some(a => ['org_admin', 'doctor', 'analyst'].includes(a.role ?? '')));
-  const canAdministerOrganizations = !!(currentUser?.is_staff || currentUser?.is_org_admin);
+  const canCurate = hasCurationRole(currentUser);
+  const canMapCodes = hasCodeMappingRole(currentUser);
+  // An analyst views patients read-only (#2398); the API refuses the delete too.
+  const canDeletePatients = !isReadOnlyAnalyst(currentUser);
+  const canAdministerOrganizations = isStaffOrOrgAdmin(currentUser);
 
   const handleLogout = () => {
     void logout();
@@ -332,14 +338,16 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
         <div className="flex flex-wrap gap-2">
           {(selectedIds.size > 0 || selectAllMode) && (
             <>
-              <button
-                onClick={() => setDeleteDialogOpen(true)}
-                className="inline-flex items-center gap-2 rounded-md border border-destructive px-4 py-2 text-sm font-medium text-destructive hover:bg-destructive/10"
-              >
-                <Trash2 size={16} />
-                Delete ({selectAllMode ? `All ${patientCount}` : selectedIds.size})
-              </button>
-              {!!(currentUser?.is_staff || currentUser?.is_org_admin) && (
+              {canDeletePatients && (
+                <button
+                  onClick={() => setDeleteDialogOpen(true)}
+                  className="inline-flex items-center gap-2 rounded-md border border-destructive px-4 py-2 text-sm font-medium text-destructive hover:bg-destructive/10"
+                >
+                  <Trash2 size={16} />
+                  Delete ({selectAllMode ? `All ${patientCount}` : selectedIds.size})
+                </button>
+              )}
+              {canAdministerOrganizations && (
                 <button
                   onClick={() => { setResolveRun(null); setResolveDialogOpen(true); }}
                   className="inline-flex items-center gap-2 rounded-md border border-input px-4 py-2 text-sm font-medium text-foreground hover:bg-accent"
@@ -358,23 +366,23 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
               </button>
             </>
           )}
-          {canManageMappings && (
-            <>
-              <button
-                onClick={() => navigate("/mappings")}
-                className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
-              >
-                <Globe size={16} />
-                Mappings
-              </button>
-              <button
-                onClick={() => navigate("/upload")}
-                className="inline-flex items-center gap-2 rounded-md border border-input px-4 py-2 text-sm font-medium text-foreground hover:bg-accent"
-              >
-                <Upload size={16} />
-                Upload
-              </button>
-            </>
+          {canMapCodes && (
+            <button
+              onClick={() => navigate(canCurate ? "/mappings" : "/code-mappings")}
+              className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+            >
+              <Globe size={16} />
+              {canCurate ? "Mappings" : "Code Mapping"}
+            </button>
+          )}
+          {canCurate && (
+            <button
+              onClick={() => navigate("/upload")}
+              className="inline-flex items-center gap-2 rounded-md border border-input px-4 py-2 text-sm font-medium text-foreground hover:bg-accent"
+            >
+              <Upload size={16} />
+              Upload
+            </button>
           )}
           <div className="ml-auto flex gap-2">
             {canAdministerOrganizations && (
@@ -429,6 +437,8 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
             <option value="name">Name</option><option value="age">Age: youngest first</option><option value="-age">Age: oldest first</option>
             <option value="disease">Disease</option><option value="stage">Stage</option><option value="status">Disease status</option>
             <option value="organization">Organization</option>
+            <option value="unmapped_source_codes">Unmapped Source Codes: low to high</option>
+            <option value="-unmapped_source_codes">Unmapped Source Codes: high to low</option>
           </select>
         </label>
         <span className="text-xs text-muted-foreground">View and clinical filters are saved in this browser.</span>
@@ -470,6 +480,26 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
           </label>
 
           <label className="flex flex-col gap-1.5 text-sm font-medium text-foreground">
+            Disease Category
+            <select
+              value={diseaseCategoryFilter}
+              onChange={(e) => {
+                resetToFirstPage();
+                setDiseaseCategoryFilter(e.target.value);
+                setDiseaseFilter(ALL_FILTER_VALUE);
+              }}
+              className="h-10 rounded-md border border-input bg-background px-3 text-sm font-normal text-foreground"
+            >
+              <option value={ALL_FILTER_VALUE}>All</option>
+              {(filterOptions.disease_categories ?? []).map((cat) => (
+                <option key={cat.value} value={cat.value}>
+                  {cat.label}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label className="flex flex-col gap-1.5 text-sm font-medium text-foreground">
             Disease
             <select
               value={diseaseFilter}
@@ -477,14 +507,16 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
                 resetToFirstPage();
                 setDiseaseFilter(e.target.value);
               }}
-              className="h-10 rounded-md border border-input bg-background px-3 text-sm font-normal text-foreground"
+              disabled={diseaseCategoryFilter === ALL_FILTER_VALUE}
+              className="h-10 rounded-md border border-input bg-background px-3 text-sm font-normal text-foreground disabled:opacity-50"
             >
               <option value={ALL_FILTER_VALUE}>All</option>
-              {filterOptions.diseases.map((disease) => (
-                <option key={disease} value={disease}>
-                  {disease}
-                </option>
-              ))}
+              {diseaseCategoryFilter !== ALL_FILTER_VALUE &&
+                (filterOptions.diseases_by_category?.[diseaseCategoryFilter] ?? []).map((disease) => (
+                  <option key={disease} value={disease}>
+                    {disease}
+                  </option>
+                ))}
             </select>
           </label>
 
@@ -585,13 +617,17 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
               <th className="px-4 py-3 font-medium text-muted-foreground">Age</th>
               <th className="px-4 py-3 font-medium text-muted-foreground">Disease</th>
               <th className="px-4 py-3 font-medium text-muted-foreground">Stage</th>
-              <th className="px-4 py-3 font-medium text-muted-foreground">Genomics</th>
               <th className="whitespace-nowrap px-4 py-3 text-center font-medium text-muted-foreground">Num Lines</th>
               {extraColumns.map((column) => <th key={column} className="whitespace-nowrap px-4 py-3 font-medium text-muted-foreground">{{
-                treatment: 'Latest Recorded Line', status: 'Disease Status', ecog: 'ECOG', gaps: 'Key Data Gaps',
+                treatment: 'Latest Recorded Line', ecog: 'ECOG', gaps: 'Key Data Gaps',
                 freshness: 'Latest Clinical Result', location: 'Location', contact: 'Contact Info', organization: 'Organization',
               }[column]}</th>)}
               <th className="px-4 py-3 font-medium text-muted-foreground">Last Updated</th>
+              <th aria-sort={ordering === 'unmapped_source_codes' ? 'ascending' : ordering === '-unmapped_source_codes' ? 'descending' : 'none'} className="whitespace-nowrap px-4 py-3 text-right font-medium text-muted-foreground">
+                <button type="button" onClick={() => changeOrdering(ordering === 'unmapped_source_codes' ? '-unmapped_source_codes' : 'unmapped_source_codes')}>
+                  Unmapped Source Codes{ordering === 'unmapped_source_codes' ? ' ↑' : ordering === '-unmapped_source_codes' ? ' ↓' : ''}
+                </button>
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -641,11 +677,6 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
                   <td className="px-4 py-3" onClick={() => navigate(`/patient/${patient.person_id}`)}>
                     {patient.stage || "N/A"}
                   </td>
-                  <td className="px-4 py-3" onClick={() => navigate(`/patient/${patient.person_id}`)}>
-                    <span className="block max-w-72 truncate" title={patient.genomics_summary || undefined}>
-                      {patient.genomics_summary || "No genomic data"}
-                    </span>
-                  </td>
                   <td className="px-4 py-3 text-center tabular-nums" onClick={() => navigate(`/patient/${patient.person_id}`)}>
                     {patient.therapy_lines_count ?? "N/A"}
                   </td>
@@ -654,7 +685,6 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
                       <span className="block text-xs text-muted-foreground">Line {patient.treatment_summary.line} · Start: {formatDate(patient.treatment_summary.start_date)}</span>
                       <span className="block text-xs text-muted-foreground">End: {formatDate(patient.treatment_summary.end_date)}</span></> : 'Not recorded'}
                   </td>}
-                  {show('status') && <td className="px-4 py-3" onClick={() => navigate(`/patient/${patient.person_id}`)}>{patient.disease_status || 'Not recorded'}</td>}
                   {show('ecog') && <td className="px-4 py-3 tabular-nums" onClick={() => navigate(`/patient/${patient.person_id}`)}>{patient.ecog_performance_status ?? 'Not recorded'}
                     {patient.ecog_performance_status != null && <span className="block whitespace-nowrap text-xs text-muted-foreground">Assessed: {formatDate(patient.ecog_assessment_date)}</span>}
                   </td>}
@@ -665,6 +695,9 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
                   {show('freshness') && <td className="whitespace-nowrap px-4 py-3" onClick={() => navigate(`/patient/${patient.person_id}`)}>{formatDate(patient.latest_result_date)}</td>}
                   <td className="px-4 py-3" onClick={() => navigate(`/patient/${patient.person_id}`)}>
                     {formatDate(patient.updated_at)}
+                  </td>
+                  <td className={`px-4 py-3 text-right tabular-nums${patient.unmapped_source_code_count === 0 ? ' text-red-600 dark:text-red-400' : ''}`} onClick={() => navigate(`/patient/${patient.person_id}`)}>
+                    {patient.unmapped_source_code_count ?? 'Not available'}
                   </td>
                 </tr>
               ))

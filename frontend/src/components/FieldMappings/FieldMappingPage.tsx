@@ -10,6 +10,7 @@ import { FieldChoiceEditor } from "./FieldChoiceEditor";
 import { FormulaEditDialog } from "./FormulaEditDialog";
 import { DerivationInfoDialog } from "./DerivationInfoDialog";
 import { AddCustomFieldDialog } from "@/components/PatientInfo/CustomPatientFields";
+import { isStaffOrOrgAdmin } from "@/utils/roles";
 
 interface FieldDescriptor {
   field_name: string;
@@ -122,7 +123,7 @@ const provenanceLabel = (mapping: FieldDescriptor["mapping"]): string => {
 export default function FieldMappingPage() {
   const navigate = useNavigate();
   const { currentUser } = useAuth();
-  const canApprove = !!(currentUser?.is_staff || currentUser?.is_org_admin);
+  const canApprove = isStaffOrOrgAdmin(currentUser);
   const [descriptors, setDescriptors] = useState<FieldDescriptor[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");

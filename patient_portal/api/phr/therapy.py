@@ -220,14 +220,19 @@ def therapy_lines(person, record) -> list[dict[str, Any]]:
     return _primary(_Context(person, record))
 
 
-def _cancer_names(person, record) -> dict[str, str]:
-    """Each cancer diagnosis by the slug its lines are filed under."""
+def _cancer_names(person, record, diagnosed: dict | None = None) -> dict[str, str]:
+    """Each cancer diagnosis by the slug its lines are filed under.
+
+    ``diagnosed`` is the Diagnoses section when the caller already built it
+    (the record export builds every section in one request); else it is
+    derived here.
+    """
     from omop_core.services.disease_episodes import disease_slug
 
     from .views import diagnoses
 
     names = {}
-    for cancer in diagnoses(person, record)['cancer']:
+    for cancer in (diagnosed if diagnosed is not None else diagnoses(person, record))['cancer']:
         if cancer['id'] == 'primary':
             continue  # the record's primary cancer, which has its own track
         slug = disease_slug(cancer['name'])
@@ -236,16 +241,17 @@ def _cancer_names(person, record) -> dict[str, str]:
     return names
 
 
-def therapy(person, record) -> dict[str, Any]:
+def therapy(person, record, diagnosed: dict | None = None) -> dict[str, Any]:
     """One track per cancer, primary first (#1739).
 
     A cancer with no lines still has a track, with no lines, so the record can
     say so when filtered to it. No cancers and no lines: no tracks.
+    ``diagnosed``: the Diagnoses section, when already built.
     """
     from omop_core.services.disease_episodes import lines_by_disease
 
     ctx = _Context(person, record)
-    names = _cancer_names(person, record)
+    names = _cancer_names(person, record, diagnosed)
     primary_slug = ((record.disease_slug if record else '') or '').lower()
     tracks = []
     primary = _primary(ctx)

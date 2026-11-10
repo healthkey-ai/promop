@@ -42,7 +42,8 @@ def test_trust_admin_role_matches_authority_and_stays_scoped(trust_type):
     source, target, unrelated = OrganizationFactory(), OrganizationFactory(), OrganizationFactory()
     if trust_type == 'organization':
         expiry = timezone.now() + timedelta(days=1)
-        GroupAccess.objects.create(identity=actor, org=source, role='analyst', expires_at=expiry)
+        # A doctor's grant carries through the trust; an analyst's does not (#2398).
+        GroupAccess.objects.create(identity=actor, org=source, role='doctor', expires_at=expiry)
         OrgTrust.objects.create(granting_org=target, trusted_org=source)
     else:
         OrgTrust.objects.create(granting_org=target, trusted_domain='example.test')
@@ -64,6 +65,17 @@ def test_trust_admin_role_matches_authority_and_stays_scoped(trust_type):
     assert client.get(f'/api/orgs/{target.slug}/').status_code == 200
     assert client.get(f'/api/orgs/{unrelated.slug}/').status_code in {403, 404}
     assert client.post('/api/orgs/', {'name': 'Cannot create', 'slug': 'cannot-create'}, format='json').status_code == 403
+
+
+def test_an_analyst_inherits_no_admin_role_through_an_organization_trust():
+    actor = user()
+    source, target = OrganizationFactory(), OrganizationFactory()
+    GroupAccess.objects.create(identity=actor, org=source, role='analyst')
+    OrgTrust.objects.create(granting_org=target, trusted_org=source)
+    data = UserSerializer(actor).data
+    assert not [r for r in data['effective_roles'] if r['role'] == 'org_admin']
+    assert set(get_admin_orgs(actor)) == set()
+    assert data['is_org_admin'] is False
 
 
 def test_pending_invitation_cannot_enable_a_professional_role():

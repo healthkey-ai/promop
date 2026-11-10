@@ -84,18 +84,92 @@ def tab_queryset(mappings, source):
     return mappings.filter(source_tab_filter(source))
 
 
+def concept_id_from_search(search):
+    """The destination concept id a search names, or None.
+
+    A concept id is an integer, so it matches whole, never as a substring:
+    ``icontains`` on the foreign key raised FieldError and turned every
+    all-digit search into a 500 (#2371). Only ASCII digits that fit an
+    integer column count: ``'\u00b2'.isdigit()`` is true but ``int('\u00b2')``
+    raises, and ``int()`` refuses a string of thousands of digits.
+    """
+    if not (search.isascii() and search.isdigit() and len(search) <= 10):
+        return None
+    value = int(search)
+    return value if value < 2 ** 31 else None
+
+
+# ``field:value`` restricts a search to one column (#2376). Keys are what a
+# curator may type before the colon; values are the lookups searched. A
+# prefix that is not listed here is ordinary text, so an Epic vocabulary
+# such as ``urn:oid:1.2.840`` still searches as a whole.
+SEARCH_FIELDS = {
+    'source_code': ('source_code',),
+    'code': ('source_code',),
+    'source_code_value': ('source_code',),
+    'description': ('source_code_description',),
+    'vocabulary': ('source_vocabulary_id',),
+    'system': ('source_vocabulary_id',),
+    'source_system': ('source_vocabulary_id',),
+    'concept': ('target_concept__concept_name',),
+    'concept_name': ('target_concept__concept_name',),
+    'concept_code': ('target_concept__concept_code',),
+    'concept_id': (),
+    'organization': ('organization__name', 'organization__slug'),
+    'org': ('organization__name', 'organization__slug'),
+}
+
+ALL_SEARCH_FIELDS = (
+    'source_code', 'source_vocabulary_id', 'source_code_description',
+    'target_concept__concept_name', 'target_concept__concept_code',
+    'organization__name', 'organization__slug',
+)
+
+
+def parse_search(search):
+    """Split ``field:value`` into ``(field, value)``; ``(None, search)`` otherwise.
+
+    The field is matched case-insensitively against ``SEARCH_FIELDS`` and
+    returned in its canonical spelling. A colon with no known field before
+    it, or nothing after it, leaves the search as plain text.
+    """
+    field, sep, value = search.partition(':')
+    key = field.strip().lower()
+    if sep and key in SEARCH_FIELDS and value.strip():
+        return key, value.strip()
+    return None, search
+
+
+def search_filter(search):
+    """The Q a stripped, non-empty search means, shared by every list path.
+
+    * ``field:value`` searches that field alone; ``concept_id:`` is exact.
+    * An all-digit search is a source code and matches only ``source_code``:
+      Epic vocabularies are OIDs, so the digits would otherwise match every
+      row of a code system (#2376), and a concept id is ``concept_id:N``.
+    * Anything else searches every field as substring.
+    """
+    field, value = parse_search(search)
+    if field == 'concept_id':
+        concept_id = concept_id_from_search(value)
+        return Q(target_concept_id=concept_id) if concept_id is not None else Q(pk__in=[])
+    if field is not None:
+        lookups = SEARCH_FIELDS[field]
+    elif value.isascii() and value.isdigit():
+        lookups = ('source_code',)
+    else:
+        lookups = ALL_SEARCH_FIELDS
+    query = Q()
+    for lookup in lookups:
+        query |= Q(**{f'{lookup}__icontains': value})
+    return query
+
+
 def apply_search(mappings, tab_rows, search):
     """A search deliberately reaches across every tab, not just the active one."""
     if not search:
         return tab_rows
-    query = Q()
-    for field in ('source_code', 'source_vocabulary_id', 'source_code_description',
-                  'target_concept__concept_name', 'target_concept__concept_code',
-                  'organization__name', 'organization__slug'):
-        query |= Q(**{f'{field}__icontains': search})
-    if search.isdigit():
-        query |= Q(target_concept_id__icontains=search)
-    return mappings.filter(query)
+    return mappings.filter(search_filter(search))
 
 
 def apply_provenance(queryset, provenance):

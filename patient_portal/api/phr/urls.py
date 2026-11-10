@@ -1,5 +1,6 @@
 from django.urls import path
 
+from .consent import ConsentDocumentsView, ConsentHistoryView, ConsentView
 from .entries import (
     ConditionEntryView,
     MedicationNoteView,
@@ -7,6 +8,7 @@ from .entries import (
     OwnMedicationView,
     ProcedureEntryView,
 )
+from .export import RecordExportView
 from .explanations import ExplanationView, SharedExplanationView
 from .sharing import (
     SharedAboutView,
@@ -68,6 +70,12 @@ urlpatterns = [
     path('whats-new/', WhatsNewView.as_view(), name='phr-whats-new'),
     path('imaging/', ImagingView.as_view(), name='phr-imaging'),
     path('outcomes/', OutcomesView.as_view(), name='phr-outcomes'),
+    # The member's own record to keep: ?format=fhir or ?format=pdf.
+    path('record/export/', RecordExportView.as_view(), name='phr-record-export'),
+    # Consent model v2: the member's permissions, preferences and documents.
+    path('consent/', ConsentView.as_view(), name='phr-consent'),
+    path('consent/documents/', ConsentDocumentsView.as_view(), name='phr-consent-documents'),
+    path('consent/history/', ConsentHistoryView.as_view(), name='phr-consent-history'),
     # The patient's shares.
     path('shares/', SharesView.as_view(), name='phr-shares'),
     path('shares/options/', ShareOptionsView.as_view(), name='phr-share-options'),

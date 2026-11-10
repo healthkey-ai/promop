@@ -9,7 +9,10 @@ from django.db import connection, transaction
 from django.utils import timezone
 
 from omop_core.mapping.code_resolution import NO_MATCHING_CONCEPT_ID
+from omop_core.mapping.table_relocation import relocatable
 from omop_core.models import CodeMappingUpload, Concept, SourceCodeConceptMapping
+from omop_core.services.concept_lock import check_concept_locks
+from omop_core.services.relocation_jobs import queue_relocation
 from omop_core.services.repoint_jobs import queue_repoints
 from omop_core.services.source_vocabularies import DOMAIN_TO_TABLE
 
@@ -277,11 +280,17 @@ def import_upload(*, upload, vocabulary, provenance, actor, can_approve=True):
                         ),
                     } for row in protected[:100]],
                 )
+        # A concept another curator has claimed (#2390) takes no destinations
+        # from a file either: the whole upload is refused, naming the holder.
+        check_concept_locks(
+            [row.destination_concept_id for row in rows if row.destination_concept_id is not None], actor,
+        )
         now = timezone.now()
         inserts = []
         updates = []
         unchanged = 0
         approval_repoints = []
+        relocations = []
         for row in rows:
             mapping = existing.get(row.source_code)
             concept = concepts.get(row.destination_concept_id)
@@ -357,11 +366,18 @@ def import_upload(*, upload, vocabulary, provenance, actor, can_approve=True):
                     or mapping.omop_table != expected_table
                 ):
                     if mapping.target_concept_id != concept.pk:
-                        # The ranker's score was for the destination it chose.
+                        # The ranker's score was for the destination it chose,
+                        # and the curator's last decision was about it too (#2382).
                         mapping.suggestion_confidence = None
+                        mapping.decision_surface = ''
+                        mapping.decision_confidence = None
                     mapping.target_concept = concept
                     mapping.destination_vocabulary_id = concept.vocabulary_id or ''
                     mapping.domain_id = concept.domain_id
+                    if relocatable(mapping.omop_table, expected_table):
+                        # The file re-filed the code: its stored rows follow
+                        # after commit, as a dialog save's do (#2386).
+                        relocations.append((mapping, mapping.omop_table, expected_table))
                     mapping.omop_table = expected_table
                     mapping.status = row.state
                     changed = True
@@ -397,9 +413,12 @@ def import_upload(*, upload, vocabulary, provenance, actor, can_approve=True):
                  'destination_vocabulary_id', 'domain_id', 'omop_table', 'status',
                  'reviewer', 'reviewed_at', 'pending_repoint_concept_ids',
                  'deferred_repoint_concept_ids',
-                 'suggestion_confidence', 'updated_by', 'updated_at'],
+                 'suggestion_confidence', 'decision_surface', 'decision_confidence',
+                 'updated_by', 'updated_at'],
                 batch_size=1_000,
             )
+        for moved_mapping, from_table, to_table in relocations:
+            queue_relocation(moved_mapping, from_table, to_table)
         if approval_repoints:
             approved = {
                 mapping.source_code: mapping

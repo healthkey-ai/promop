@@ -946,9 +946,13 @@ class TestSuggestRunLifecycle:
         latest = SuggestRun.objects.create(state='success', activity=[{'message': 'Saved log'}])
         response = self.client.get(path)
         assert response.status_code == 200
-        assert response.data == {'run_id': str(latest.id)}
+        assert response.data['run_id'] == str(latest.id)
+        assert 'activity' not in response.data, 'activity excluded without include_activity'
         log = self.client.get(f'/api/v1/code-mappings/suggest-runs/{latest.id}/?include_activity=1')
         assert log.data['activity'] == [{'message': 'Saved log'}]
+        with_activity = self.client.get(f'{path}?include_activity=1')
+        assert with_activity.data['run_id'] == str(latest.id)
+        assert with_activity.data['activity'] == [{'message': 'Saved log'}]
         self.client.force_authenticate(user=None)
         assert self.client.get(path).status_code in (401, 403)
 

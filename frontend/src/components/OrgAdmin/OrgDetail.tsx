@@ -510,34 +510,37 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
           {!orgStats ? (
             <p className="text-sm text-gray-500">No patient data available for this organization.</p>
           ) : (
-            <table className="w-full text-sm border border-gray-200 rounded-lg overflow-hidden">
-              <thead className="bg-gray-50">
-                <tr>
-                  <th className="text-left px-4 py-2 font-medium text-gray-600">Disease</th>
-                  <th className="text-right px-4 py-2 font-medium text-gray-600">Patients</th>
-                </tr>
-              </thead>
-              <tbody>
-                {orgStats.disease_counts.map(dc => (
-                  <tr key={dc.disease_slug} className="border-t border-gray-100">
-                    <td className="px-4 py-2 text-gray-800">{dc.label}</td>
-                    <td className="px-4 py-2 text-right text-gray-800">{dc.count}</td>
+            <>
+              <table className="w-full text-sm border border-gray-200 rounded-lg overflow-hidden">
+                <thead className="bg-gray-50">
+                  <tr>
+                    <th className="text-left px-4 py-2 font-medium text-gray-600">Disease</th>
+                    <th className="text-right px-4 py-2 font-medium text-gray-600">Patients</th>
                   </tr>
-                ))}
-              </tbody>
-              <tfoot>
-                <tr className="border-t border-gray-200 bg-gray-50">
-                  <td className="px-4 py-2 font-medium text-gray-700">Owned</td>
-                  <td className="px-4 py-2 text-right font-medium text-gray-700">{orgStats.owned_count}</td>
-                </tr>
-                {orgStats.accessible_count !== orgStats.owned_count && (
-                  <tr className="bg-gray-50">
-                    <td className="px-4 py-2 text-sm text-gray-500">Accessible (incl. trusted orgs)</td>
-                    <td className="px-4 py-2 text-right text-sm text-gray-500">{orgStats.accessible_count}</td>
+                </thead>
+                <tbody>
+                  {orgStats.disease_counts.map(dc => (
+                    <tr key={dc.disease_slug} className="border-t border-gray-100">
+                      <td className="px-4 py-2 text-gray-800">{dc.label}</td>
+                      <td className="px-4 py-2 text-right text-gray-800">{dc.count}</td>
+                    </tr>
+                  ))}
+                </tbody>
+                <tfoot>
+                  <tr className="border-t border-gray-200 bg-gray-50">
+                    <td className="px-4 py-2 font-medium text-gray-700">Owned</td>
+                    <td className="px-4 py-2 text-right font-medium text-gray-700">{orgStats.owned_count}</td>
                   </tr>
-                )}
-              </tfoot>
-            </table>
+                  {orgStats.accessible_count !== orgStats.owned_count && (
+                    <tr className="bg-gray-50">
+                      <td className="px-4 py-2 text-sm text-gray-500">Accessible (incl. trusted orgs)</td>
+                      <td className="px-4 py-2 text-right text-sm text-gray-500">{orgStats.accessible_count}</td>
+                    </tr>
+                  )}
+                </tfoot>
+              </table>
+              <p className="mt-2 text-xs text-gray-500">A patient with more than one cancer is counted under each.</p>
+            </>
           )}
         </div>
       )}

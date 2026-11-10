@@ -11,6 +11,8 @@ from django.utils import timezone
 
 from omop_core.models import Concept, SourceCodeConceptMapping, SourceVocabularyTerm, UmlsSourceCode
 from omop_core.services.concept_to_code import source_payload
+from omop_core.services.mapping_samples import attach_source_samples
+from omop_core.services.source_labels import normalise
 from omop_core.services.source_vocabularies import (
     DOMAIN_TO_TABLE, VOCAB_TO_UMLS_ROOT, VOCABULARY_OID_ALIASES,
     canonical_source_vocabulary,
@@ -53,6 +55,9 @@ def _candidate(kind, row, domain_id):
     source['source_revision'] = hashlib.sha256(json.dumps(
         [source, version], sort_keys=True, default=str,
     ).encode()).hexdigest()
+    # Added after the hash: a pure function of name, so it cannot drift
+    # independently and must not invalidate in-flight previews.
+    source['source_label_norm'] = normalise(name)
     return source
 
 
@@ -206,6 +211,7 @@ def catalog_candidates(concept, *, strategies, terms, limit, evaluate):
     if not pool:
         return []
     mappings = _registered(pool, evaluate)
+    attach_source_samples(mappings)  # units and basedOn for the payload (#2295)
     registered = {}
     for row in mappings:
         registered.setdefault((canonical_source_vocabulary(row.source_vocabulary_id), row.source_code), []).append(row)

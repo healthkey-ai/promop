@@ -35,22 +35,41 @@ echo "Running production deploy checks..."
 python manage.py check --deploy --fail-level ERROR
 
 # A deployment with no vocabulary source is a broken deployment, so this aborts
-# rather than defaulting. It has to be set on *every* target that runs this
-# script, which is the trap when pointing a new one at it: the Cloud Run job
-# will fail here until its environment carries the variable.
-: "${ATHENA_VOCABULARY_GDRIVE_URL:?ATHENA_VOCABULARY_GDRIVE_URL must point to the full Athena vocabulary folder before this service can deploy}"
+# rather than defaulting. At least one has to be set on *every* target that
+# runs this script, which is the trap when pointing a new one at it: the Cloud
+# Run job will fail here until its environment carries a variable.
+#
+# Two sources (#2288): ATHENA_VOCABULARY_LFS_URL is the Git LFS repository that
+# publishes the Athena and LOINC ZIPs and is tried first; the Drive folder in
+# ATHENA_VOCABULARY_GDRIVE_URL is the fallback when it cannot be reached.
+ATHENA_SOURCE_ARGS=()
+if [ -n "${ATHENA_VOCABULARY_LFS_URL:-}" ]; then
+  ATHENA_SOURCE_ARGS+=(--lfs "$ATHENA_VOCABULARY_LFS_URL")
+fi
+if [ -n "${ATHENA_VOCABULARY_GDRIVE_URL:-}" ]; then
+  ATHENA_SOURCE_ARGS+=(--gdrive "$ATHENA_VOCABULARY_GDRIVE_URL")
+fi
+if [ "${#ATHENA_SOURCE_ARGS[@]}" -eq 0 ]; then
+  echo "ATHENA_VOCABULARY_LFS_URL or ATHENA_VOCABULARY_GDRIVE_URL must name the full Athena vocabulary source before this service can deploy" >&2
+  exit 1
+fi
 echo "Preparing the production database..."
-python manage.py prepare_production_database --gdrive "$ATHENA_VOCABULARY_GDRIVE_URL"
+python manage.py prepare_production_database "${ATHENA_SOURCE_ARGS[@]}"
 
 # Record one durable request and publish it to the worker's dedicated Athena
 # queue. The worker resolves the Drive identity and performs either the initial
 # load or a later insert-only update. No archive download, scan, synonym refresh
 # or release hashing is allowed to hold the web deployment open (#1674).
 echo "Queuing the Athena vocabulary freshness check..."
-python manage.py queue_athena_vocabulary_sync --gdrive "$ATHENA_VOCABULARY_GDRIVE_URL"
+python manage.py queue_athena_vocabulary_sync "${ATHENA_SOURCE_ARGS[@]}"
 
 echo "Creating/resetting admin user..."
 python manage.py setup_admin
+
+# phr installations' sign-up organizations (family auth, phr#43). A no-op
+# unless FAMILY_AUTH_SIGNUP_ORGS names some.
+echo "Ensuring the family auth sign-up organizations..."
+python manage.py ensure_signup_orgs
 
 # Check the LOINC release version and queue a load when it has moved. The check
 # is one small authenticated request; the archive is ~92MB and goes to a Celery

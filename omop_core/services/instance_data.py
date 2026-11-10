@@ -20,16 +20,26 @@ SYSTEM: frozenset[str] = frozenset({
     'oauth2_provider.AccessToken', 'oauth2_provider.Application',
     'oauth2_provider.DeviceGrant', 'oauth2_provider.Grant',
     'oauth2_provider.IDToken', 'oauth2_provider.RefreshToken',
+    # Family auth refresh tokens (phr#43): this deployment's sessions.
+    'family_auth.RefreshToken',
     'patient_portal.AuditEvent', 'patient_portal.BreakGlassGrant',
     'patient_portal.Identity', 'patient_portal.Identity_groups',
     'patient_portal.Identity_user_permissions', 'patient_portal.PasswordHistory',
     'patient_portal.ServiceAccessToken', 'patient_portal.ServiceApplication',
     # Tied to a login account, which is system data.
     'patient_portal.PatientConsent', 'patient_portal.PatientInvitation',
+    # Consent model v2: what this deployment asks, and what its members answered.
+    # Consent is given to a deployment, so copy_patient does not carry it.
+    'patient_portal.ConsentPurpose', 'patient_portal.ConsentText',
+    'patient_portal.LegalDocument', 'patient_portal.LegalDocumentVersion',
+    'patient_portal.ConsentEvent', 'patient_portal.DocumentAcceptance',
+    'patient_portal.ConsentLedgerEntry',
     'patient_portal.PatientMessage', 'patient_portal.PatientUser',
     # Access a patient granted to their record, and who opened it. A link is
     # derived from this deployment's own key, so it would open nothing elsewhere.
     'patient_portal.RecordShare', 'patient_portal.ShareScan',
+    # A curator's claim on a concept names this deployment's user (#2390).
+    'omop_core.ConceptMappingLock',
     # Tenancy and access.
     'omop_core.ApplicationOrganization', 'omop_core.GroupAccess',
     'omop_core.InterchangeAgreement', 'omop_core.OrgInvitation', 'omop_core.OrgTrust',
@@ -103,8 +113,9 @@ REFERENCE_FROM_RELEASE: dict[str, str] = {
 
 # Hand-curated reference data with no release behind it, so copying is the only way to move it.
 _REFERENCE_COPIED_EXPLICIT: frozenset[str] = frozenset({
-    'omop_core.ConceptMappingPriority',
-    'omop_core.CustomPatientField', 'omop_core.DiseaseCategoryMapping',
+    'omop_core.ConceptMappingDone', 'omop_core.ConceptMappingPriority',
+    'omop_core.CustomPatientField', 'omop_core.DiseaseCategoryChoice',
+    'omop_core.DiseaseCategoryMapping',
     'omop_core.FieldChoice', 'omop_core.FieldChoiceCode',
     'omop_core.FieldConceptMapping', 'omop_core.FieldFormula', 'omop_core.FieldSynonym',
     'omop_core.MappingDestinationCandidate',

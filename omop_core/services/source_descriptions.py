@@ -49,6 +49,34 @@ UMLS_ROOTS = list(VOCAB_TO_UMLS_ROOT.items()) + [
 ]
 
 
+def source_metadata_description(metadata) -> str:
+    """The source's own name for a code, from what the ETL sent alongside it.
+
+    ``text`` (CodeableConcept.text) before ``display``: Epic files every vital
+    sign under LOINC 8716-3, whose display is "Vital signs" on all of them,
+    while the text names the measurement (#1778). Both arrive as lists, gathered
+    over every observation carrying the code, and the description lands on a
+    mapping shared by every patient -- so a key counts only when it names one
+    thing. Several texts for 8716-3 fall back to its single display.
+    """
+    if not isinstance(metadata, dict):
+        return ''
+    for key in ('text', 'display'):
+        values = metadata.get(key)
+        if isinstance(values, str):
+            values = [values]
+        if not isinstance(values, list):
+            continue
+        # Names differing only in case are one name: "4 mg" and "4 MG" (#2349).
+        names = {}
+        for value in values:
+            if isinstance(value, str) and value.strip():
+                names.setdefault(value.strip().casefold(), value.strip())
+        if len(names) == 1:
+            # SourceCodeConceptMapping.source_code_description is 255 chars.
+            return next(iter(names.values()))[:255]
+    return ''
+
 
 def _values(pairs):
     """A ``(%s, %s), ...`` VALUES list for *pairs* and its flattened params."""
