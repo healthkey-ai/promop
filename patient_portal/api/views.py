@@ -12401,6 +12401,7 @@ def _serialize_code_mapping_row(concept, mapping=None, source_retirement=None,
             'source': mapping.source if mapping else '',
             'status': mapping.status if mapping else 'unmapped',
             'notes': mapping.notes if mapping else '',
+            'has_curator_note': bool(mapping and mapping.curator_note_at and mapping.notes.strip()),
             'origin': mapping.origin if mapping else '',
             'origin_system': mapping.origin_system if mapping else '',
             'suggestion_model_version': mapping.suggestion_model_version if mapping else '',
@@ -12478,6 +12479,8 @@ def _serialize_code_mapping_row(concept, mapping=None, source_retirement=None,
         # Review state and provenance
         'status': mapping.status if mapping else 'unmapped',
         'notes': mapping.notes if mapping else '',
+        # True when a curator wrote the note; Suggest's rationale is not one.
+        'has_curator_note': bool(mapping and mapping.curator_note_at and mapping.notes.strip()),
         'origin': mapping.origin if mapping else '',
         'origin_system': mapping.origin_system if mapping else '',
         'suggestion_model_version': mapping.suggestion_model_version if mapping else '',
@@ -12774,8 +12777,13 @@ def _existing_mapping_conflict(existing, requested_table):
 
 
 def _upsert_source_code_mapping(concept, data, user, mapping=None, person_id=None,
-                                record_decision=True):
+                                record_decision=True, curator_note=False):
     """Create or update one mapping. Returns (mapping, repoint_result).
+
+    ``curator_note`` is True when ``data['notes']`` is what a person typed
+    (the mapping dialog's save). A note that changes then stamps
+    ``curator_note_at``; every other caller passes text a machine composed,
+    which is not a curator's note (#2423).
 
     ``record_decision`` is True for a curator's save, which stamps the row's
     ``decision_surface`` and ``decision_confidence`` (#2382). A machine write
@@ -13117,6 +13125,12 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None, person_id=Non
         values['reviewed_at'] = None
     if 'notes' in data:
         values['notes'] = str(data.get('notes') or '').strip()
+        # The dialog sends the note back on every save, so only a changed
+        # text is the curator's; an unchanged machine note stays a machine's.
+        if not values['notes']:
+            values['curator_note_at'] = None
+        elif curator_note and values['notes'] != (mapping.notes.strip() if mapping else ''):
+            values['curator_note_at'] = timezone.now()
     if 'destination_unit_concept_id' in data:
         raw_unit_id = data.get('destination_unit_concept_id')
         if raw_unit_id in (None, '', 0):
@@ -13366,7 +13380,8 @@ def _group_job_rows(data):
         })
     # A search deliberately reaches across tabs for browsing. A group decision
     # never does: Epic and Cerner albumin are two decisions.
-    filters = {key: data.get(key) for key in ('source', 'provenance', 'organization', 'seen_only', 'queue_sections')}
+    filters = {key: data.get(key) for key in (
+        'source', 'provenance', 'organization', 'seen_only', 'with_notes', 'queue_sections')}
     filters['search'] = ''
     mappings = without_icd10_athena_duplicates(
         SourceCodeConceptMapping.objects.select_related('organization')
@@ -13686,7 +13701,8 @@ def code_mapping_list(request):
         person_id = _mapping_patient_scope(request)
         concept = _get_destination_concept(request.data)
         mapping, repoint = _upsert_source_code_mapping(
-            concept, request.data, request.user, person_id=person_id)
+            concept, request.data, request.user, person_id=person_id,
+            curator_note=not is_machine_request(request))
     from omop_core.services.mapping_destinations import destination_options
     payload = _serialize_code_mapping_row(concept, mapping, destination_count=len(destination_options(mapping)))
     payload['repoint'] = repoint
@@ -13782,7 +13798,8 @@ def code_mapping_detail(request, mapping_id):
     person_id = _mapping_patient_scope(request)
     with transaction.atomic():
         mapping, repoint = _upsert_source_code_mapping(
-            concept, data, request.user, mapping=mapping, person_id=person_id)
+            concept, data, request.user, mapping=mapping, person_id=person_id,
+            curator_note=not is_machine_request(request))
     from omop_core.services.mapping_destinations import destination_options
     payload = _serialize_code_mapping_row(concept, mapping, destination_count=len(destination_options(mapping)))
     payload['repoint'] = repoint

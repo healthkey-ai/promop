@@ -229,7 +229,8 @@ function accessibleName(el: Element): string {
 function columnIndex(table: HTMLElement, name: string) {
   const headers = within(table).getAllByRole("columnheader");
   const index = headers.findIndex(
-    (header) => header.textContent?.replace(/[↕↑↓]/g, "").trim() === name,
+    // A header that also holds a filter checkbox names itself.
+    (header) => (header.getAttribute("aria-label") ?? header.textContent?.replace(/[↕↑↓]/g, "").trim()) === name,
   );
   expect(index, `no "${name}" column`).toBeGreaterThanOrEqual(0);
   return index;
@@ -2005,6 +2006,32 @@ describe("server mapping pages", () => {
     fireEvent.click(filter);
     await screen.findByText("SEEN PAGE 1");
     expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/", { params: expect.objectContaining({ seen_only: "1", page_0: 1 }) });
+  });
+
+  it("filters to codes with a curator note, off by default, and marks them (#2423)", async () => {
+    mockGet.mockImplementation((url: string, config?: { params?: Record<string, unknown> }) => {
+      if (url !== "/v1/code-mappings/") return Promise.resolve({ data: url.includes("reference") ? reference : {} });
+      const noted = { ...proposedRow, source_code: "NOTED CODE", notes: "Ask the lab about the specimen.", has_curator_note: true };
+      const machine = { ...proposedRow, mapping_id: 9901, source_code: "MACHINE CODE", notes: "high confidence: same test.", has_curator_note: false };
+      const results = config?.params?.with_notes === "1" ? [noted] : [noted, machine];
+      return Promise.resolve({ data: browseData({
+        results, total: results.length,
+        pages: { ...browseData().pages, Unmapped: { page: 1, page_size: 100, total: results.length } },
+      }) });
+    });
+    render(<MemoryRouter initialEntries={["/code-mappings?direction=forward"]}><CodeMappingPage /></MemoryRouter>);
+    await screen.findByText("MACHINE CODE");
+    const filter = screen.getByRole("checkbox", { name: "Unmapped: only codes with a curator note" });
+    expect(filter).not.toBeChecked();
+    expect(mockGet).not.toHaveBeenCalledWith("/v1/code-mappings/", { params: expect.objectContaining({ with_notes: "1" }) });
+    // Suggest's rationale sits in the same field and gets no sticky note.
+    const marks = screen.getAllByTestId("curator-note");
+    expect(marks).toHaveLength(1);
+    expect(marks[0]).toHaveAttribute("title", "Ask the lab about the specimen.");
+    expect(marks[0].closest("tr")).toHaveTextContent("NOTED CODE");
+    fireEvent.click(filter);
+    await waitFor(() => expect(screen.queryByText("MACHINE CODE")).not.toBeInTheDocument());
+    expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/", { params: expect.objectContaining({ with_notes: "1", page_0: 1 }) });
   });
 
   it("shows and filters hospital organization on vendor tabs", async () => {

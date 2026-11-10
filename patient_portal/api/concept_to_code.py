@@ -214,9 +214,11 @@ def concept_to_code_detail(request, concept_id):
     if search:
         rows = rows.filter(Q(source_code__icontains=search) | Q(source_code_description__icontains=search)
                            | Q(source_vocabulary_id__icontains=search))
+    from omop_core.services.mapping_browse import apply_notes, apply_seen
+    # Before the counts, so they describe the codes the filter leaves (#2423).
+    rows = apply_notes(rows, request.query_params)
     counts = rows.aggregate(encountered=Count('pk', filter=Q(occurrence_count__gt=0)),
                             zero_seen=Count('pk', filter=Q(occurrence_count=0)))
-    from omop_core.services.mapping_browse import apply_seen
     rows = apply_seen(rows, request.query_params)
     # The dialog lists approved, proposed and rejected mappings as separate
     # groups (#2010); counts cover every status so a collapsed group can show

@@ -1291,6 +1291,25 @@ moves a destination outside the writer (a code-mapping upload, Athena
 destination recovery) clears both, as it clears `suggestion_confidence`. Both
 travel with `copy_reference_data`.
 
+### Which notes are a curator's
+
+`SourceCodeConceptMapping.notes` is one column that Suggest (its rationale),
+importers and reconciliations (their receipts) and curators all write, and the
+mapping dialog sends it back on every save. `curator_note_at` (#2423) records
+that a curator changed the text: the dialog's save stamps it when the note it
+sends differs from the stored one, and clears it when the note is emptied. A
+machine credential, and every machine write through
+`_upsert_source_code_mapping` (`curator_note=False`, the default), leaves it
+alone. Migration `0334` marked the existing notes of curator-saved rows that do
+not begin like a machine-written note.
+
+`with_notes=1` narrows to rows with a mark and a note that is not blank
+(`mapping_browse.apply_notes`), on the browse endpoint in every section, the
+group-members and group-action endpoints, and the Concept to Code source list,
+before paging and counts. Both lists have a "with notes" checkbox, off by
+default, and show a yellow sticky note with the text on hover on each such
+row (`has_curator_note` on a mapping row, `curator_note` on a source row).
+
 ### A code's rows follow its mapping to another table
 
 A curator who changes a mapping's Domain re-files it under another clinical
