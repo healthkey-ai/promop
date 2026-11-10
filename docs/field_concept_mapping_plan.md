@@ -928,47 +928,57 @@ default, and nothing reports it.
 
 #### Intended result
 
-- **Placement is data a curator sets, not code.** Every field has a placement
-  row: `tab`, optional `section`, `sort_order`, provenance. It is reference
-  data (`instance_data.py` kind `reference`), carried by `copy_reference_data`
-  and the `field_curation_v1.json` fixture, seeded once from the frozensets
-  and the tab components' current lists so nothing moves on day one.
+Placement is **one value per field, the tab**. This is not a form designer:
+a placed field renders last on its tab, on its own row, and nothing about
+sections, columns or order is curated. #2328 delivered the data and the
+visibility; the rest is #2329 and #2330.
+
+- **Placement is data a curator sets, not code.** `FieldConceptMapping.tab`
+  names the patient tab (#2328). Blank keeps the placement the code gives a
+  built-in field, so nothing moves on day one; a set value overrides the
+  frozensets. It travels with the mapping through `copy_reference_data`,
+  `dump_field_curation`/`load_field_curation` and the fixture; a payload
+  written before the column reads as blank.
 - **Unplaced is an explicit state, `tab: "omop"`.** A field created or mapped
-  without a tab keeps its mapping and derivation and surfaces in two places
-  only: the patient's OMOP tab (raw facts) and an **Unplaced (OMOP only)** group
-  on the Field Mappings page, with a count. No tab renders a form control for
-  it. This is the default for a new field, visible rather than accidental.
-- **One tab vocabulary** shared by the registry, `CustomPatientField` and the
-  mapping page: `general`, `disease`, `treatment`, `labs`, `genomics`,
-  `behavior`, `wearable`, `omop`. `blood` is retired as a tab and becomes a
-  Labs section.
-- **One reader.** The descriptor emits `tab`, `section`, `sort_order` and
-  `placed`; the mapping page, the patient tabs and `disease_relevance` read
-  that, never a frozenset. The frozensets survive only as the seed source.
-- **Tabs render what the registry says.** Hand-authored controls stay, but
-  each tab also renders, through the generic `ClinicalField` slot at its
-  bottom, every placed field that no hand-authored control covers. Built-in and
-  custom fields share that slot. A drift test fails when a tab component
-  renders a field the registry places elsewhere, as
+  without a tab, or one the code's lists do not name (`blood_type`,
+  `red_blood_cell_count`, `pod24`, `serum_bilirubin_level` at the time of
+  writing), keeps its mapping and derivation and surfaces in two places only:
+  the patient's OMOP tab (raw facts) and the **OMOP (unplaced)** tab of the
+  Field Mappings page, with a count. No tab renders a form control for it.
+  This is the default for a new field, visible rather than accidental; the
+  old `other` value, which no page had a tab for, is gone.
+- **One tab vocabulary** (`FIELD_TAB_CHOICES`) shared by the mapping row,
+  `CustomPatientField` and the mapping page: `general`, `disease`,
+  `treatment`, `blood`, `labs`, `genomics`, `behavior`, `wearable`, `omop`.
+  `blood` stays a mapping-page grouping; whether it folds into Labs is a
+  registry edit later, not a schema change.
+- **One reader.** `field_descriptor.resolve_tab` (mapping's tab, then the
+  custom field's, then the code) is what the descriptor emits as `tab`; the
+  mapping page, the patient tabs and `disease_relevance` read that.
+- **Tabs render what the registry says** (#2330). Hand-authored controls
+  stay; each tab also renders, last and one per row through the generic
+  `ClinicalField` slot, every placed field that no hand-authored control
+  covers. Built-in and custom fields share that slot. A drift test fails when
+  a tab component renders a field the registry places elsewhere, as
   `tests/test_disease_relevance.py` already does for `DISEASE_FIELDS`.
-- **Curation UI.** The concept-assign dialog and the custom-field dialog use
-  one placement control; #721's "Add field" action on a tab preselects that
-  tab. Admin/staff only (#1147). A placement edit never changes a concept
+- **Curation UI** (#2329). The concept-assign dialog and the custom-field
+  dialog use one tab control; #721's "Add field" action on a tab preselects
+  that tab. Admin/staff only (#1147). A placement edit never changes a concept
   mapping or a stored value.
 
 This absorbs #624's "organise by tab" (the mapping page already has tabs; the
-missing piece is that the grouping is code), #661's reclassification of
-`other` fields (a registry edit) and #662's computed-at-the-bottom rule (the
+missing piece was that the grouping is code), #661's reclassification of
+`other` fields (now a mapping edit) and #662's computed-at-the-bottom rule (the
 Computed section follows the placed tab).
 
 #### Acceptance
 
-Every descriptor field has a placement row or is reported as `omop`; the
-seed, the tab components and the custom-field choices agree under a drift
-test; placements round-trip through `dump_field_curation`/`load_field_curation`
-and `copy_reference_data`; a new field with an approved mapping and a
-placement row renders on its tab with no frontend change; existing tabs
-render exactly today's field sets.
+Every descriptor field reports a tab, `omop` when nothing places it; the
+mapping API sets and refuses it; placements round-trip through
+`dump_field_curation`/`load_field_curation` and `copy_reference_data` (all
+#2328, `tests/test_field_placement.py`); a new field with an approved mapping
+and a tab renders last on that tab with no frontend change (#2330); existing
+tabs render exactly today's field sets.
 
 ### 10.2 PatientRecord structure per disease
 
@@ -1009,8 +1019,11 @@ remains a way to *contribute* memberships, not a replacement for them.
   additive on replay; `DISEASE_FIELDS` becomes the seed source and
   `disease_relevance` reads the rows. Reference data, copied and fixtured like
   placements.
-- **A patient's record is the union** of the memberships of every disease in
-  `disease_slugs` plus the common fields. `Other` gets common fields only.
+- **The patient's selected disease decides what is shown.** A patient's
+  record is the union of the memberships of every disease in `disease_slugs`
+  plus the common fields. By default every existing field that is not on the
+  Disease tab applies to all diseases; only the Disease tab's fields start
+  with memberships. `Other` gets common fields only.
 - **The descriptor exposes it.** Each field carries `diseases`; the
   writable-fields endpoint accepts `?disease=`; `export_field_mapping_inventory`
   and #1311's per-disease coverage read the same rows. The legacy
@@ -1067,7 +1080,7 @@ unaffected, disease change preserving values, multi-disease union and `Other`.
 | Issue | Work | Dependencies |
 |---|---|---|
 | [#2327](https://github.com/healthkey-ai/promop/issues/2327) | Tracking: field placement and per-disease PatientRecord structure | — |
-| [#2328](https://github.com/healthkey-ai/promop/issues/2328) | Field placement registry as reference data; unplaced means OMOP-only; descriptor, mapping page and relevance read it | None |
+| [#2328](https://github.com/healthkey-ai/promop/issues/2328) | `FieldConceptMapping.tab`: the tab a field renders on; unplaced means OMOP-only; descriptor, API, transfer and mapping page carry it | None |
 | [#2329](https://github.com/healthkey-ai/promop/issues/2329) | Placement curation: choose a tab when adding or mapping a field; Unplaced group | #2328 |
 | [#2330](https://github.com/healthkey-ai/promop/issues/2330) | Patient tabs render registry-placed fields through a generic slot; drift test | #2328 |
 | [#2331](https://github.com/healthkey-ai/promop/issues/2331) | Field disease membership as reference data; descriptor `diseases`; relevance reads it | #2328 |

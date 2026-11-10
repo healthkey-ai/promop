@@ -50,6 +50,24 @@ def move(concept, position, user=None):
         return None if position is None else order.index(concept.pk) + 1
 
 
+def renumber():
+    """Close gaps in the priority list after rows were removed outside ``move``.
+
+    A vocabulary replacement deletes the rows of concepts Athena dropped.
+    Returns how many rows changed position.
+    """
+    with transaction.atomic():
+        _lock()
+        changed, now = [], timezone.now()
+        for index, row in enumerate(ConceptMappingPriority.objects.order_by('position', 'concept_id'), start=1):
+            if row.position != index:
+                row.position, row.updated_at = index, now  # bulk_update skips auto_now
+                changed.append(row)
+        if changed:
+            ConceptMappingPriority.objects.bulk_update(changed, ['position', 'updated_at'])
+        return len(changed)
+
+
 def positions(domain_id=None):
     """{concept_id: position} for ranked concepts, in one domain when given."""
     rows = ConceptMappingPriority.objects.all()

@@ -1394,6 +1394,13 @@ in `_upsert_source_code_mapping`). The holder sees Unlock; staff may unlock
 too. Explicit and unexpiring, unlike the mapping dialog's per-row edit lock.
 System data, never copied.
 
+Any curator leaves a **note** on a concept from the note icon before its Lock
+(`ConceptMappingNote`, `PUT`/`DELETE concept-to-code/<id>/note/`, #2411): one
+shared note per concept, last save wins, a blank save clears it. The list
+returns it, the icon is filled when one exists and shows it on hover. A note
+is commentary, not a mapping write, so another curator's lock does not refuse
+it. Reference data: it travels with `copy_reference_data`, author cleared.
+
 ### The six LOINC axes decide which candidates are the same test
 
 A LOINC code is defined by component, property, time aspect, system, scale and

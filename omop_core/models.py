@@ -4442,6 +4442,26 @@ class PatientRecord(models.Model):
 # Concept mapping registry
 # =============================================================================
 
+# The patient tabs a field can be placed on (#2328). One list for the mapping
+# row, the custom-field definition and the Field Mappings page. ``omop`` is the
+# explicit "unplaced" state: the field keeps its mapping and derivation but no
+# tab renders a control for it, so its facts show only as raw rows on the
+# patient's OMOP tab. A placed field renders last on its tab, on its own row;
+# there is no section or ordering to curate.
+FIELD_TAB_CHOICES = [
+    ('general', 'General'),
+    ('disease', 'Disease'),
+    ('treatment', 'Treatment'),
+    ('blood', 'Blood'),
+    ('labs', 'Labs'),
+    ('genomics', 'Genomics'),
+    ('behavior', 'Behavior'),
+    ('wearable', 'Wearable'),
+    ('omop', 'OMOP (unplaced)'),
+]
+UNPLACED_TAB = 'omop'
+
+
 class FieldConceptMapping(models.Model):
     """A reviewer-approved OMOP concept assignment for a PatientRecord field.
 
@@ -4521,6 +4541,16 @@ class FieldConceptMapping(models.Model):
     multiple = models.BooleanField(
         default=False,
         help_text='Several answers at once, stored comma-joined.',
+    )
+    tab = models.CharField(
+        max_length=20, blank=True, default='', db_default='',
+        choices=FIELD_TAB_CHOICES,
+        help_text=(
+            'The patient tab the field renders on, last and on its own row. '
+            'Blank keeps the placement the code gives a built-in field; a field '
+            'the code does not place is "omop": unplaced, visible only as raw '
+            'OMOP rows.'
+        ),
     )
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='proposed')
     reviewer = models.ForeignKey(
@@ -4625,21 +4655,41 @@ class ConceptMappingLock(models.Model):
         return f'locked by {self.locked_by_id}: concept {self.concept_id}'
 
 
+class ConceptMappingNote(models.Model):
+    """A curator's note about a standard concept on Concept to Code (#2411).
+
+    One shared note per concept: why it is parked, what to check before
+    mapping it. Clearing the note deletes the row. Commentary, not a mapping
+    write, so another curator's lock does not stop an edit. Reference data:
+    copy_reference_data moves it, matched on the concept's
+    (vocabulary_id, concept_code).
+    """
+    MAX_LENGTH = 4000
+
+    concept = models.OneToOneField(
+        Concept, on_delete=models.CASCADE, related_name='mapping_note',
+    )
+    text = models.TextField()
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='+',
+    )
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'concept_mapping_note'
+
+    def __str__(self):
+        return f'note: concept {self.concept_id}'
+
+
 class CustomPatientField(models.Model):
     """Administrator-defined PatientRecord field backed by ``custom_fields``.
 
     The one-to-one mapping is deliberately required: a field cannot be added to
     PatientRecord unless its OMOP meaning has been reviewed and approved.
     """
-    TAB_CHOICES = [
-        ('general', 'General'),
-        ('disease', 'Disease'),
-        ('treatment', 'Treatment'),
-        ('blood', 'Blood'),
-        ('labs', 'Labs'),
-        ('behavior', 'Behavior'),
-        ('wearable', 'Wearable'),
-    ]
+    TAB_CHOICES = FIELD_TAB_CHOICES
     FIELD_TYPE_CHOICES = [
         ('text', 'Text'),
         ('number', 'Number'),
@@ -4653,7 +4703,7 @@ class CustomPatientField(models.Model):
 
     field_name = models.CharField(max_length=100, unique=True, db_index=True)
     display_name = models.CharField(max_length=200)
-    tab = models.CharField(max_length=20, choices=TAB_CHOICES)
+    tab = models.CharField(max_length=20, choices=TAB_CHOICES, default=UNPLACED_TAB)
     field_type = models.CharField(max_length=20, choices=FIELD_TYPE_CHOICES)
     mode = models.CharField(max_length=20, choices=MODE_CHOICES, default='editable')
     mapping = models.OneToOneField(
