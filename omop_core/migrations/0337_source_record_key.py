@@ -5,7 +5,7 @@ from django.db import migrations, models
 
 class Migration(migrations.Migration):
     # #2453: a nullable column is a catalog-only change in PostgreSQL, so this
-    # takes no table rewrite. The unique constraints are built concurrently in
+    # takes no table rewrite. The unique indexes are built concurrently in
     # 0338, apart from this migration so a retry there never re-adds a column.
 
     dependencies = [

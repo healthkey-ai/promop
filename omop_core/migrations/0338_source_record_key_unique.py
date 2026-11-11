@@ -2,51 +2,41 @@ from django.db import migrations, models
 
 
 def _unique(table):
-    """Build the (person_id, source_record_key) unique constraint without
-    blocking writes, on the pattern of 0144.
+    """A partial unique index on (person_id, source_record_key) for keyed rows,
+    built without blocking writes.
 
-    A plain unique constraint, not a partial index: NULLs are distinct, so the
-    unkeyed rows never collide, and ON CONFLICT (person_id, source_record_key)
-    finds it without a predicate.
+    Partial, so the index holds only keyed rows: none today, instead of every
+    row of the table. The keyed upsert inserts with ON CONFLICT DO NOTHING and
+    no conflict target, which a partial unique index satisfies.
 
     CREATE INDEX CONCURRENTLY cannot run in a transaction, and a failed build
-    leaves an INVALID index of the same name. Every step is therefore safe to
-    repeat: a retry drops what a stopped run left and builds it again.
+    leaves an INVALID index of the same name, so each build is preceded by
+    DROP ... IF EXISTS. A retry rebuilds both; the build is a scan that writes
+    almost nothing.
     """
     name = f'uq_{table}_person_source_record_key'
-    tmp = f'ix_{table}_source_record_key_build'
     return migrations.SeparateDatabaseAndState(
         database_operations=[
             migrations.RunSQL(
-                sql=f'ALTER TABLE {table} DROP CONSTRAINT IF EXISTS {name}',
-                reverse_sql=migrations.RunSQL.noop,
-            ),
-            migrations.RunSQL(
-                sql=f'DROP INDEX CONCURRENTLY IF EXISTS {tmp}',
+                sql=f'DROP INDEX CONCURRENTLY IF EXISTS {name}',
                 reverse_sql=migrations.RunSQL.noop,
             ),
             migrations.RunSQL(
                 sql=(
-                    f'CREATE UNIQUE INDEX CONCURRENTLY {tmp} '
-                    f'ON {table} (person_id, source_record_key)'
+                    f'CREATE UNIQUE INDEX CONCURRENTLY {name} '
+                    f'ON {table} (person_id, source_record_key) '
+                    f'WHERE source_record_key IS NOT NULL'
                 ),
-                reverse_sql=migrations.RunSQL.noop,
-            ),
-            # Attaching a valid index takes a brief lock and no scan; the
-            # index is renamed to the constraint's name.
-            migrations.RunSQL(
-                sql=(
-                    f'ALTER TABLE {table} ADD CONSTRAINT {name} '
-                    f'UNIQUE USING INDEX {tmp}'
-                ),
-                reverse_sql=f'ALTER TABLE {table} DROP CONSTRAINT IF EXISTS {name}',
+                reverse_sql=f'DROP INDEX CONCURRENTLY IF EXISTS {name}',
             ),
         ],
         state_operations=[
             migrations.AddConstraint(
                 model_name=table,
                 constraint=models.UniqueConstraint(
-                    fields=('person', 'source_record_key'), name=name,
+                    fields=('person', 'source_record_key'),
+                    condition=models.Q(source_record_key__isnull=False),
+                    name=name,
                 ),
             ),
         ],
@@ -54,8 +44,8 @@ def _unique(table):
 
 
 class Migration(migrations.Migration):
-    # #2453: measurement holds tens of millions of rows; a plain unique index
-    # build would block its writes for the whole deploy.
+    # #2453: a plain CREATE UNIQUE INDEX on measurement (tens of millions of
+    # rows) would block its writes for the whole build.
     atomic = False
 
     dependencies = [

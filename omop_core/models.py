@@ -1330,6 +1330,7 @@ class Measurement(models.Model):
         constraints = [
             models.UniqueConstraint(
                 fields=['person', 'source_record_key'],
+                condition=models.Q(source_record_key__isnull=False),
                 name='uq_measurement_person_source_record_key',
             ),
         ]
@@ -1398,6 +1399,7 @@ class Observation(models.Model):
         constraints = [
             models.UniqueConstraint(
                 fields=['person', 'source_record_key'],
+                condition=models.Q(source_record_key__isnull=False),
                 name='uq_observation_person_source_record_key',
             ),
         ]
