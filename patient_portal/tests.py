@@ -10212,6 +10212,49 @@ class OrgAccessAPITest(TestCase):
         self.grant.refresh_from_db()
         self.assertEqual(self.grant.role, 'doctor')
 
+    def test_add_a_second_role_for_a_user_who_holds_a_grant(self):
+        """Roles are additive (#2416): POST adds the analyst row beside the
+        doctor one (#2457), and a repeat is a 409."""
+        resp = self.client.post('/api/v1/orgs/access-org/access/',
+                                {'email': 'Grantee@example.com', 'role': 'analyst'}, format='json')
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data['role'], 'analyst')
+        self.assertEqual(resp.data['redirect_url'], 'https://analytics.healthkey.ai')
+        self.assertEqual(
+            sorted(GroupAccess.objects.filter(identity=self.grantee, org=self.org).values_list('role', flat=True)),
+            ['analyst', 'doctor'],
+        )
+        resp = self.client.post('/api/v1/orgs/access-org/access/',
+                                {'email': 'grantee@example.com', 'role': 'analyst'}, format='json')
+        self.assertEqual(resp.status_code, 409, resp.data)
+        self.assertEqual(GroupAccess.objects.filter(identity=self.grantee, org=self.org).count(), 2)
+
+    def test_add_role_is_refused_for_org_admins_patients_and_strangers(self):
+        url = '/api/v1/orgs/access-org/access/'
+        self.assertEqual(self.client.post(url, {'email': 'grantee@example.com', 'role': 'org_admin'},
+                                          format='json').status_code, 400)
+        self.assertEqual(self.client.post(url, {'email': 'nobody@example.com', 'role': 'doctor'},
+                                          format='json').status_code, 404)
+        admin = _make_user('admin@example.com')
+        GroupAccess.objects.create(identity=admin, org=self.org, role='org_admin')
+        resp = self.client.post(url, {'email': 'admin@example.com', 'role': 'doctor'}, format='json')
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn('org admin', resp.data['error'])
+        patient = _make_user('patient@example.com')
+        GroupAccess.objects.create(identity=patient, org=self.org, role='patient')
+        resp = self.client.post(url, {'email': 'patient@example.com', 'role': 'doctor'}, format='json')
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn('invite', resp.data['error'])
+        self.assertEqual(GroupAccess.objects.filter(org=self.org).count(), 3)
+
+    def test_add_role_needs_an_explicit_org_admin(self):
+        doctor = _make_user('doc-only@example.com')
+        GroupAccess.objects.create(identity=doctor, org=self.org, role='doctor')
+        self.client.force_authenticate(user=doctor)
+        resp = self.client.post('/api/v1/orgs/access-org/access/',
+                                {'email': 'grantee@example.com', 'role': 'analyst'}, format='json')
+        self.assertEqual(resp.status_code, 403)
+
     def test_patch_access_grant_clears_redirect_url_when_switching_to_doctor(self):
         self.grant.role = 'analyst'
         self.grant.redirect_url = 'https://analytics.healthkey.ai/custom'

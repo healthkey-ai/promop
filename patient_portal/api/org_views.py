@@ -706,12 +706,66 @@ class OrgTrustDetailView(APIView):
 # ---------------------------------------------------------------------------
 
 class OrgAccessListView(APIView):
-    permission_classes = [IsStaffOrAccessAdmin]
+    def get_permissions(self):
+        if self.request.method == 'POST':
+            return [IsStaffOrAccessAdmin(), OrgAdminTokenScopePermission()]
+        return [IsStaffOrAccessAdmin()]
 
     def get(self, request, slug):
         org = _get_org(slug)
         grants = GroupAccess.objects.filter(org=org).select_related('identity').order_by('id')
         return Response(GroupAccessSerializer(grants, many=True).data)
+
+    def post(self, request, slug):
+        """Add a second role for an account that already holds a grant here.
+
+        Roles are additive (#2416, #2457): a doctor who should also map codes
+        gets an ``analyst`` row beside the ``doctor`` one, and the Role select
+        on a row swaps rather than adds. ``{"email": ..., "role": ...}`` adds
+        the row; the account must already hold a professional grant at this
+        org (a new account is invited instead, which proves its address), and
+        an org_admin needs no other role. 409 when the role is already held.
+        """
+        org = _get_org(slug)
+        email = (request.data.get('email') or '').strip().lower()
+        role = request.data.get('role')
+        if not email:
+            return Response({'error': 'email is required'}, status=status.HTTP_400_BAD_REQUEST)
+        if role not in ('doctor', 'analyst'):
+            return Response({'error': "role must be 'doctor' or 'analyst'"},
+                            status=status.HTTP_400_BAD_REQUEST)
+        held = list(GroupAccess.objects.filter(
+            org=org, identity__email__iexact=email,
+        ).select_related('identity').order_by('id'))
+        if not held:
+            return Response(
+                {'error': 'This user holds no grant here; invite them instead.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        roles = {grant.role for grant in held}
+        if 'org_admin' in roles:
+            return Response(
+                {'error': 'An org admin already has every role; nothing to add.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not roles & {'doctor', 'analyst'}:
+            return Response(
+                {'error': 'This user holds only a patient grant here; invite them instead.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if role in roles:
+            return Response(
+                {'error': f'This user already holds the {role} role here.'},
+                status=status.HTTP_409_CONFLICT,
+            )
+        try:
+            normalized_redirect_url = _normalize_redirect_url(role, request.data.get('redirect_url', ''))
+        except ValidationError:
+            return Response({'error': 'redirect_url must be a valid http(s) URL.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        grant = _grant_org_access(held[0].identity, org, role, request.user,
+                                  redirect_url=normalized_redirect_url)
+        return Response(GroupAccessSerializer(grant).data, status=status.HTTP_201_CREATED)
 
 
 class OrgAccessDetailView(APIView):

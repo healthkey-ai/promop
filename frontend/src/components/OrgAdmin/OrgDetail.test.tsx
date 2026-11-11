@@ -360,3 +360,51 @@ describe("role change into a role the user already holds (#2416)", () => {
     expect(await screen.findByText(/already holds the analyst role here; revoke this grant instead/)).toBeInTheDocument();
   });
 });
+
+describe("adding a second role on the Access Grants tab (#2457)", () => {
+  const grant = (id: number, email: string, role: string) => ({
+    id, email, name: "", is_premium: false, org_slug: "acme", group_name: null,
+    role, redirect_url: null, expires_at: null, granted_at: "2024-01-01",
+  });
+  const mockGrants = (grants: ReturnType<typeof grant>[]) => {
+    mockGet.mockImplementation((url: string) => {
+      if (url.includes("/orgs/acme/access/")) return Promise.resolve({ data: grants });
+      if (url.includes("/orgs/acme/trusts/") || url.includes("/orgs/acme/invitations/")) return Promise.resolve({ data: [] });
+      if (url.includes("/orgs/acme/vocabulary/")) return Promise.resolve({ data: VOCABULARY_DATA });
+      if (url.includes("/orgs/acme/")) return Promise.resolve({ data: ORG_DATA });
+      return Promise.resolve({ data: [] });
+    });
+  };
+
+  it("offers a doctor the analyst role and adds the row", async () => {
+    setupMocks();
+    mockGrants([grant(7, "doc@test.com", "doctor"), grant(8, "boss@test.com", "org_admin")]);
+    mockPost.mockResolvedValueOnce({ data: grant(9, "doc@test.com", "analyst") });
+    renderOrgDetail();
+    await screen.findByText("Acme Clinic");
+    fireEvent.click(screen.getByText("Access Grants"));
+    const add = await screen.findByRole("button", { name: /also grant the analyst role to doc@test.com/i });
+    // An org admin needs no other role, so its row offers none.
+    expect(screen.queryByRole("button", { name: /boss@test.com/i })).not.toBeInTheDocument();
+    fireEvent.click(add);
+    await waitFor(() => {
+      expect(mockPost).toHaveBeenCalledWith("/orgs/acme/access/", { email: "doc@test.com", role: "analyst" });
+    });
+    // Both rows are held now, so neither offers an addition.
+    await waitFor(() => {
+      expect(screen.queryByRole("button", { name: /also grant/i })).not.toBeInTheDocument();
+    });
+    expect(screen.getAllByText("doc@test.com")).toHaveLength(2);
+  });
+
+  it("shows the server's message when the add is refused", async () => {
+    setupMocks();
+    mockGrants([grant(7, "doc@test.com", "doctor")]);
+    mockPost.mockRejectedValueOnce({ response: { status: 409, data: { error: "This user already holds the analyst role here." } } });
+    renderOrgDetail();
+    await screen.findByText("Acme Clinic");
+    fireEvent.click(screen.getByText("Access Grants"));
+    fireEvent.click(await screen.findByRole("button", { name: /also grant the analyst role/i }));
+    expect(await screen.findByText(/already holds the analyst role here/)).toBeInTheDocument();
+  });
+});

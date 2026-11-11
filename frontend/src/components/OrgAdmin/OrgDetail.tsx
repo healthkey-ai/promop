@@ -362,6 +362,31 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
     }
   };
 
+  // Roles are additive (#2416): a user holds one row per role, and the Role
+  // select swaps a row's role. Adding the other professional role is its own
+  // call (#2457), offered on a row whose user does not hold it yet.
+  const heldRoles = (email: string) =>
+    new Set(accessGrants.filter(g => g.email === email).map(g => g.role));
+  const addableRole = (g: AccessGrant): 'doctor' | 'analyst' | null => {
+    if (g.role !== 'doctor' && g.role !== 'analyst') return null;
+    const held = heldRoles(g.email);
+    if (held.has('org_admin')) return null;
+    if (!held.has('analyst')) return 'analyst';
+    if (!held.has('doctor')) return 'doctor';
+    return null;
+  };
+  const handleAddRole = async (email: string, role: 'doctor' | 'analyst') => {
+    setAccessError(null);
+    try {
+      const res = await api.post<AccessGrant>(`${base}/access/`, { email, role });
+      setAccessGrants(prev => [...prev, res.data]);
+    } catch (err: unknown) {
+      console.error('Failed to add role:', err);
+      const serverMessage = (err as { response?: { data?: { error?: string } } })?.response?.data?.error;
+      setAccessError(serverMessage ?? 'Failed to add the role. Please try again.');
+    }
+  };
+
   const handleUpdateGrant = async (grantId: number, patch: { role?: string; is_premium?: boolean }) => {
     setAccessGrants(prev => prev.map(g => g.id === grantId ? { ...g, ...patch } : g));
     try {
@@ -810,7 +835,18 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
                           </label>
                         )}
                       </td>
-                      <td className="px-4 py-3 text-right">
+                      <td className="px-4 py-3 text-right whitespace-nowrap">
+                        {addableRole(g) && (
+                          <button
+                            type="button"
+                            onClick={() => handleAddRole(g.email, addableRole(g)!)}
+                            className="mr-3 text-xs text-blue-600 hover:text-blue-800"
+                            aria-label={`Also grant the ${addableRole(g)} role to ${g.email}`}
+                            title={`Also grant the ${addableRole(g)} role to ${g.email}`}
+                          >
+                            + {addableRole(g) === 'doctor' ? 'Doctor' : 'Analyst'}
+                          </button>
+                        )}
                         <button
                           onClick={() => handleRevokeAccess(g.id)}
                           className="text-red-400 hover:text-red-600"
