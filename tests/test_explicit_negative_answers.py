@@ -191,11 +191,13 @@ def test_patient_can_answer_own_record_but_not_someone_elses(editor):
 
 
 def test_analyst_cannot_confirm(editor):
+    # Analysts have no patient access at all since #2417, so the record is not
+    # even acknowledged: 404, not 403.
     record, client = editor
     analyst = Identity.objects.create_user(email='negative-analyst@example.test')
     GroupAccess.objects.create(identity=analyst, org=record.organization, role='analyst')
     client.force_authenticate(analyst)
-    assert answer(editor, INFECTION, 'confirm_negative').status_code == 403
+    assert answer(editor, INFECTION, 'confirm_negative').status_code == 404
     assert not ExplicitNegativeAnswer.objects.exists()
 
 
