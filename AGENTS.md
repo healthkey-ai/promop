@@ -1589,11 +1589,16 @@ out of range is a 400, not a silent cap). The ceiling is the request budget:
 at ~1s per 100 rows on HealthTree, 5,000 would outrun gunicorn's 30s.
 `updated_since=<ISO 8601>` (naive means UTC; a decoded `+` offset is
 tolerated) narrows to rows whose `updated_at` is at or after it, for a
-nightly delta. The delta is additive only: a hard-deleted row is never seen,
-`copy_reference_data` keeps the source's `updated_at`, and a few bulk
-maintenance commands `bulk_update` without stamping it, so a client
-reconciles with a periodic full read and uses the previous run's start time
-as the next `updated_since` (`docs/code-mapping-api.md`). `X-Total-Count`
+nightly delta. The delta is additive and tracks curation: a hard-deleted row is never
+seen, so a client reconciles with a periodic full read and uses the previous
+run's start time as the next `updated_since` (`docs/code-mapping-api.md`).
+`auto_now` is skipped by `bulk_update`/`.update()`, so every writer that
+changes a destination, status, description or source concept sets
+`updated_at` itself (`apply_icd10cm_mappings`, `enrich_source_mappings`,
+`backfill_icd10_source_info`, `reference_transfer._apply_table`, which
+stamps every `auto_now` column with this instance's clock, and the naming
+branch of `resolve_source_code`); the Seen counters and unit evidence are
+sightings and deliberately do not. `ix_sccm_updated_at` serves the filter. `X-Total-Count`
 counts the filtered set; on the keyset path it is sent on the first page
 only. `Link` URLs are absolute, so behind a proxy they are
 `https://` only when `SECURE_PROXY_SSL_HEADER` is trusted: automatic on

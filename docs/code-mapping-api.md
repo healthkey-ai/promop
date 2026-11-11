@@ -235,10 +235,13 @@ Three limits of that delta:
 - Use the previous run's *start* time (less a margin for clock skew) as the
   next `updated_since`, not its end: a row updated during a run, below its
   cursor, is not delivered by that run.
-- `updated_at` is stamped by the curation writers and uploads, but a few
-  bulk maintenance commands and `copy_reference_data` (which keeps the
-  source instance's timestamps) write rows without touching it. The periodic
-  full read covers those too.
+- It tracks curation, not sightings. Every writer that changes a row's
+  destination, status, description or source concept stamps `updated_at`,
+  including the bulk maintenance commands and `copy_reference_data` (a
+  copied row carries this instance's clock, not the source's). The Seen
+  count (`occurrence_count`, `first_seen`, `last_seen`) and the stored unit
+  evidence are counters that ingest bumps on every sighting; they do not
+  stamp it, or every row would be "updated" every night.
 Filters: `status` (`approved`, `proposed`, `rejected`), `source` (a source
 vocabulary id), `organization` (an organization slug, or `__none__` for
 instance-wide rows) and `search`, which matches the source code, the source

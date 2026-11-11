@@ -18,6 +18,7 @@ from typing import Any, TypedDict
 
 from django.db import transaction
 from django.db.models import Field, Model, Q
+from django.utils import timezone
 
 from omop_core.models import (
     Concept,
@@ -270,7 +271,11 @@ def _apply_table(table: ReferenceTable, rows: Iterable[ReferenceRow], stats: Tra
     cleared = [f for f in fks.values() if f.related_model is not Concept and f.related_model not in _related_keys()]
     key_attnames = [model._meta.get_field(name).attname for name in table.key]
     copied = [f.attname for f in model._meta.concrete_fields if not f.primary_key]
+    # The row changes *here* now, whatever the source's clock said: a reader
+    # of this instance's updated_since delta must see it (#2451).
+    stamped = [f.attname for f in model._meta.concrete_fields if getattr(f, 'auto_now', False)]
 
+    now = timezone.now()
     for chunk in chunked(rows):
         link_pks = {
             name: _key_to_pk(fks[name].related_model, (row['links'][name] for row in chunk))
@@ -286,6 +291,7 @@ def _apply_table(table: ReferenceTable, rows: Iterable[ReferenceRow], stats: Tra
                 stats._bump(stats.skipped, label)
                 continue
             values.update({f.attname: None for f in cleared})
+            values.update({attname: now for attname in stamped})
             wanted.append((row, values))
 
         existing = _existing_by_key(model, key_attnames, [v for _, v in wanted])

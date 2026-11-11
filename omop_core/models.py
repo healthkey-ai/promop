@@ -2336,6 +2336,8 @@ class SourceCodeConceptMapping(models.Model):
             # Curator notes are a handful of rows in a large catalog.
             models.Index(fields=['curator_note_at'], name='ix_sccm_curator_note',
                          condition=Q(curator_note_at__isnull=False)),
+            # A warehouse reads its nightly delta with updated_since (#2451).
+            models.Index(fields=['updated_at'], name='ix_sccm_updated_at'),
         ]
         constraints = [
             # Blank source systems stay distinct from each other: Postgres treats
