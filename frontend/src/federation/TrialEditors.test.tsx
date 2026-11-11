@@ -109,6 +109,20 @@ function renderAdapter(onChanged?: () => void) {
           <span data-testid="owns-therapy">
             {String(slots.fieldEditorOwnsValue({ field: 'priorTherapy', label: 'Prior Therapy' }))}
           </span>
+          <span data-testid="owns-explicit">
+            {String(slots.fieldEditorOwnsValue({
+              field: 'preExistingConditionsExcluded', label: 'Pre Existing Conditions Excluded',
+            }))}
+          </span>
+          <span data-testid="owns-negated">
+            {String(slots.fieldEditorOwnsValue({ field: 'noHiv', label: 'No HIV' }))}
+          </span>
+          <span data-testid="owns-unknown">
+            {String(slots.fieldEditorOwnsValue({ field: 'notInTheDescriptor', label: 'Unknown Row' }))}
+          </span>
+          <span data-testid="owns-genomics">
+            {String(slots.fieldEditorOwnsValue({ field: 'geneticMutations', label: 'Mutations' }))}
+          </span>
         </div>
       )}
     </TrialEditors>,
@@ -140,9 +154,13 @@ describe('the shared trial editor adapter', () => {
     // would replace it with a read-only note or a plain select.
     expect(screen.getByTestId('explicit')).toBeEmptyDOMElement();
     expect(screen.getByTestId('negated')).toBeEmptyDOMElement();
-    // The scalar slot owns the value; the therapy pencil does not.
+    // Only a rendered scalar slot owns the value. A row that renders nothing
+    // must leave EXACT's own value in place, or the cell goes blank (#2433).
     expect(screen.getByTestId('owns-scalar')).toHaveTextContent('true');
     expect(screen.getByTestId('owns-therapy')).toHaveTextContent('false');
+    for (const row of ['owns-explicit', 'owns-negated', 'owns-unknown', 'owns-genomics']) {
+      expect(screen.getByTestId(row)).toHaveTextContent('false');
+    }
     // A second scalar row is a second editor against the same store.
     expect(screen.getByRole('spinbutton', { name: 'Weight' })).toHaveValue(60);
   });
