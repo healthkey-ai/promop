@@ -4656,8 +4656,6 @@ def _get_mm_specific_data(person: Person, snapshot: OmopSnapshot = None) -> dict
                 if m.value_as_number is not None:
                     crab_vals.setdefault(code, []).append(float(m.value_as_number))
 
-        hgb_vals = crab_vals.get('718-7', []) or crab_vals.get('59260-0', [])
-        ca_vals = crab_vals.get('17861-6', []) or crab_vals.get('2000-0', [])
         crcl_vals = crab_vals.get('2164-2', []) or crab_vals.get('33914-3', [])
         # Coded EHR rows carry the LOINC on the concept and a display name as
         # source value, and 38483-4 is an approved serum creatinine alias.
@@ -4669,8 +4667,45 @@ def _get_mm_specific_data(person: Person, snapshot: OmopSnapshot = None) -> dict
             if m.value_as_number is not None
         }.values())
 
-        crab_anemia = hgb_vals and min(hgb_vals) < 10.0
-        crab_calcium = ca_vals and max(ca_vals) > 11.0
+        def newest_canonical(codes, normalize, default_unit, from_pair):
+            """The newest row's value in the canonical unit, or None.
+
+            The snapshot holds each value in its reported unit (#2249), so a
+            raw 8.1 mmol/L hemoglobin is 13 g/dL — not anemia. An unreadable
+            newest unit is no evidence, not a reason to fall back to an older
+            result with a different unit.
+            """
+            rows = list({
+                m.measurement_id: m
+                for m in (_rows_by_codes(snapshot, codes)
+                          + _rows_by_sources(snapshot, codes))
+                if m.value_as_number is not None
+            }.values())
+            if not rows:
+                return None
+            newest = sorted(rows, key=_fact_recency_key, reverse=True)[0]
+            _reported_unit, unit_code = _resolve_reported_unit(
+                newest, normalize, default_unit)
+            if unit_code is None:
+                return None
+            recognised, canonical = from_pair(newest.value_as_number, unit_code)
+            return canonical if recognised else None
+
+        hgb = newest_canonical(
+            ('718-7', '59260-0'), normalize_hemoglobin_unit,
+            HEMOGLOBIN_DEFAULT_UNIT,
+            hemoglobin_canonical_from_pair,
+        )
+        calcium = newest_canonical(
+            ('17861-6', '2000-0'),
+            lambda unit: normalize_chemistry_unit('serum_calcium_mg_dl', unit),
+            _CHEMISTRY_PAIRS['serum_calcium_mg_dl']['default_unit'],
+            lambda value, unit: chemistry_canonical_from_pair(
+                'serum_calcium_mg_dl', value, unit),
+        )
+
+        crab_anemia = hgb is not None and hgb < 10.0
+        crab_calcium = calcium is not None and calcium > 11.0
         # Clearance is the preferred renal fact; serum creatinine > 2 mg/dL is
         # the recorded alternative, matching derive_meets_crab().
         if crcl_vals:
