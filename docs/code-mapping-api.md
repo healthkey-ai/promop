@@ -205,10 +205,40 @@ GET /api/v1/code-mappings/?status=approved
 Authorization: Bearer <service credential>
 ```
 
-The response is a bare JSON array of mapping rows, 100 to a page. Pagination is
-in the headers: `X-Total-Count`, `X-Page`, `X-Page-Size`, and a `Link` header
-with `rel="next"` and `rel="prev"` URLs. Follow the `rel="next"` URL until the
-`Link` header carries none (on the last page it still carries `rel="prev"`).
+The response is a bare JSON array of mapping rows, `page_size` to a page
+(default 100, at most 1000; outside that range is a 400). Pagination is in
+the headers: `X-Total-Count`, `X-Page-Size`, and a `Link` header whose
+`rel="next"` URL is absolute (`https://` behind a proxy that passes
+`X-Forwarded-Proto`, as Render and Cloud Run do). Follow it until the `Link`
+header carries none.
+
+Two ways to page (#2451):
+
+- `page=N`, the default: offset pages in (vocabulary, code, id) order, with
+  `X-Page` and a `rel="prev"` link. A row written or deleted while you page
+  shifts every later page, so rows can be skipped or repeated. Fine for a
+  look, not for a full read.
+- `ordering=id&after=<mapping_id>`: a keyset cursor in id order. Start with
+  `ordering=id` alone; each `rel="next"` URL carries `after=` the last id on
+  the page, there is no `rel="prev"`, and `X-Total-Count` comes on the first
+  page only. A row written mid-read has a higher id than any already read and
+  a deleted one leaves no gap, so a full read sees every row that existed
+  throughout exactly once. `page` with `after` is a 400.
+
+`updated_since=<ISO 8601 datetime>` (naive means UTC; percent-encode a `+`
+offset, or use `Z`) narrows to rows whose `updated_at` is at or after it.
+Three limits of that delta:
+
+- It is additive. A deleted mapping is gone, not marked, so a nightly delta
+  never sees it. Reconcile deletions with a periodic full read
+  (`ordering=id`) and a set difference on `mapping_id`.
+- Use the previous run's *start* time (less a margin for clock skew) as the
+  next `updated_since`, not its end: a row updated during a run, below its
+  cursor, is not delivered by that run.
+- `updated_at` is stamped by the curation writers and uploads, but a few
+  bulk maintenance commands and `copy_reference_data` (which keeps the
+  source instance's timestamps) write rows without touching it. The periodic
+  full read covers those too.
 Filters: `status` (`approved`, `proposed`, `rejected`), `source` (a source
 vocabulary id), `organization` (an organization slug, or `__none__` for
 instance-wide rows) and `search`, which matches the source code, the source

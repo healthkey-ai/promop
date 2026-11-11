@@ -13629,7 +13629,8 @@ class _CodeMappingPage:
     table: a row written while it pages gets a higher id than any it has
     read, and a deleted one leaves no gap to skip over, so a full read neither
     repeats nor misses a row that existed throughout. The next link carries
-    ``after=`` and there is no prev link. ``page_size`` is honoured on both,
+    ``after=`` and there is no prev link; ``X-Total-Count`` is sent on the
+    first page only, since it is a count of the whole table. ``page_size`` is honoured on both,
     up to ``CODE_MAPPING_MAX_PAGE_SIZE``; HealthTree's table is 863k rows, and
     at 100 a page that is 8,600 requests.
     """
@@ -13647,6 +13648,8 @@ class _CodeMappingPage:
         if ordering not in ('source', 'id'):
             raise ValidationError({'ordering': 'Choose one of source, id.'})
         after = self._int(params, 'after', None, 0, None)
+        if after is not None and params.get('ordering') == 'source':
+            raise ValidationError({'after': 'after=<mapping_id> pages in id order; use ordering=id or omit it.'})
         mappings = with_destination_counts(mappings)
         self.headers = {'X-Page-Size': str(page_size)}
         self.links = []
@@ -13662,12 +13665,15 @@ class _CodeMappingPage:
             return
         if 'page' in params:
             raise ValidationError({'page': 'Use after=<mapping_id> with ordering=id, not page.'})
-        self.headers['X-Total-Count'] = str(mappings.order_by().count())
+        # The total is one full count of the table; a cursor needs it once.
+        if after is None:
+            self.headers['X-Total-Count'] = str(mappings.order_by().count())
         window = mappings.order_by('id')
         if after is not None:
             window = window.filter(id__gt=after)
-        self.rows = list(window[:page_size])
-        if len(self.rows) == page_size:
+        rows = list(window[:page_size + 1])
+        self.rows = rows[:page_size]
+        if len(rows) > page_size:
             url = replace_query_param(request.build_absolute_uri(), 'after', self.rows[-1].pk)
             url = replace_query_param(url, 'ordering', 'id')
             self.links.append(('next', remove_query_param(url, 'page')))
@@ -13736,7 +13742,8 @@ def code_mapping_list(request):
         if updated_since:
             from django.utils import timezone
             from django.utils.dateparse import parse_datetime
-            since = parse_datetime(updated_since)
+            # A '+hh:mm' offset sent unencoded arrives as a space.
+            since = parse_datetime(updated_since.strip()) or parse_datetime(updated_since.strip().replace(' ', '+'))
             if since is None:
                 return Response({'updated_since': 'An ISO 8601 datetime is required.'},
                                 status=status.HTTP_400_BAD_REQUEST)
@@ -13750,9 +13757,12 @@ def code_mapping_list(request):
         from omop_core.services.source_retirement import mapping_source_retirement
         from omop_core.services.mapping_samples import attach_source_samples
         mappings = page.rows
-        attach_source_samples(mappings)
         if is_service_token(request):
+            # A machine never sees the per-patient samples, so skip the window
+            # query over the inventory rather than run it and blank the result.
             _without_source_samples(mappings)
+        else:
+            attach_source_samples(mappings)
         source_metadata = mapping_source_retirement(mappings)
         rows = [
             _serialize_code_mapping_row(

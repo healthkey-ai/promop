@@ -830,9 +830,22 @@ def test_plain_list_pages_by_keyset_cursor_without_skipping_or_repeating():
         seen.extend(r['mapping_id'] for r in response.data)
         url = response['Link'].split('>')[0][1:] if 'Link' in response else None
     assert seen == sorted(seen) and len(seen) == len(set(seen)) == 8
-    assert response.data == [] or len(response.data) < 3
+    assert len(response.data) == 2  # 8 rows at 3 a page: no trailing empty page
+    assert 'X-Total-Count' not in response
+
+    # A later page repeats neither the count nor loses the filters it was asked with.
+    SourceCodeConceptMapping.objects.filter(pk__in=seen[1:3]).update(status='approved')  # seen[0] was deleted
+    response = client.get('/api/v1/code-mappings/', {
+        'ordering': 'id', 'page_size': 1, 'status': 'approved', 'updated_since': '2020-01-01T00:00:00+00:00',
+    }, secure=True)
+    assert response['X-Total-Count'] == '2' and [r['mapping_id'] for r in response.data] == [seen[1]]
+    query = parse_qs(urlparse(response['Link'].split('>')[0][1:]).query)
+    assert query['status'] == ['approved'] and query['updated_since'] == ['2020-01-01T00:00:00+00:00']
+    response = client.get(response['Link'].split('>')[0][1:], secure=True)
+    assert [r['mapping_id'] for r in response.data] == [seen[2]] and 'X-Total-Count' not in response
 
     assert client.get('/api/v1/code-mappings/', {'after': ids[0], 'page': 2}, secure=True).status_code == 400
+    assert client.get('/api/v1/code-mappings/', {'after': ids[0], 'ordering': 'source'}, secure=True).status_code == 400
     assert client.get('/api/v1/code-mappings/', {'ordering': 'name'}, secure=True).status_code == 400
     assert client.get('/api/v1/code-mappings/', {'after': '-1'}, secure=True).status_code == 400
     # after= alone implies ordering=id and starts past the id given.
@@ -871,6 +884,7 @@ def test_proxy_ssl_header_is_trusted_on_cloud_run(k_service, expected):
            'DATABASE_URL': 'postgresql://postgres@localhost:5432/unused_bootstrap_test',
            'RENDER': '', 'RENDER_EXTERNAL_HOSTNAME': '', 'RENDER_EXTERNAL_URL': ''}
     env.pop('TRUST_PROXY_SSL_HEADER', None)  # an explicit value, even empty, overrides the platform default
+    env['PYTHON_DOTENV_DISABLED'] = '1'  # a developer's .env must not fill it back in
     script = ("from django.conf import settings; h = settings.SECURE_PROXY_SSL_HEADER; "
               "print('trusted' if h == ('HTTP_X_FORWARDED_PROTO', 'https') else h)")
     result = subprocess.run([sys.executable, '-c', script], cwd=Path(__file__).resolve().parents[1],

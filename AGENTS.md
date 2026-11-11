@@ -1587,9 +1587,15 @@ retrieval needs all standard concepts embedded, not just the queue's candidates.
 `page_size` is honoured on both, 1 to `CODE_MAPPING_MAX_PAGE_SIZE` (1000;
 out of range is a 400, not a silent cap). The ceiling is the request budget:
 at ~1s per 100 rows on HealthTree, 5,000 would outrun gunicorn's 30s.
-`updated_since=<ISO 8601>` (naive means UTC) narrows to rows whose
-`updated_at` is at or after it, for a nightly delta; `X-Total-Count` counts
-the filtered set. `Link` URLs are absolute, so behind a proxy they are
+`updated_since=<ISO 8601>` (naive means UTC; a decoded `+` offset is
+tolerated) narrows to rows whose `updated_at` is at or after it, for a
+nightly delta. The delta is additive only: a hard-deleted row is never seen,
+`copy_reference_data` keeps the source's `updated_at`, and a few bulk
+maintenance commands `bulk_update` without stamping it, so a client
+reconciles with a periodic full read and uses the previous run's start time
+as the next `updated_since` (`docs/code-mapping-api.md`). `X-Total-Count`
+counts the filtered set; on the keyset path it is sent on the first page
+only. `Link` URLs are absolute, so behind a proxy they are
 `https://` only when `SECURE_PROXY_SSL_HEADER` is trusted: automatic on
 Render and Cloud Run (`K_SERVICE`), `TRUST_PROXY_SSL_HEADER=true` elsewhere.
 
