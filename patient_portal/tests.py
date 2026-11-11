@@ -16221,13 +16221,16 @@ class SelfSignupEmailTrustTest(TestCase):
         return identity, grant
 
     def test_verification_promotes_a_pending_domain_trust_grant(self):
-        """#1454: proving the address turns the held-back patient grant into analyst."""
+        """#1454: proving the address turns the held-back patient grant into doctor.
+
+        It was 'analyst' until that role stopped reading patients (#2416).
+        """
         from patient_portal.api.email_verification import make_verification_link
         identity, grant = self._pending_domain_signup()
         token = make_verification_link(identity).split('token=')[1]
         self.assertEqual(APIClient().post('/api/v1/auth/verify-email/', {'token': token}).status_code, 200)
         grant.refresh_from_db()
-        self.assertEqual(grant.role, 'analyst')
+        self.assertEqual(grant.role, 'doctor')
         self.assertFalse(grant.pending_email_verification)
 
     def test_verification_does_not_promote_from_an_inactive_granting_org(self):
