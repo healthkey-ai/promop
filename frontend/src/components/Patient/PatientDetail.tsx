@@ -354,6 +354,9 @@ export default function PatientDetail({
   const saveRevisionRef = useRef(0);
   const dirtyFieldsRef = useRef(new Set<string>());
   const confirmedWritesRef = useRef<Record<string, unknown>>({});
+  // A lab value's clinical date, keyed by field. It travels with the value in
+  // the PATCH as {value, date}; a date-only change re-sends the value (#2439).
+  const pendingDatesRef = useRef<Record<string, string>>({});
    
   const pendingDataRef = useRef<{ info: Record<string, unknown>; name: string } | null>(null);
    
@@ -487,13 +490,15 @@ export default function PatientDetail({
 
       for (const [f, v] of Object.entries(info)) {
         if (f === 'no_pre_existing_conditions' || f === 'preexisting_conditions') continue;
-        if (LIFECYCLE.has(f) || v === baseline[f]) continue;
+        const pendingDate = pendingDatesRef.current[f];
+        if (LIFECYCLE.has(f) || (v === baseline[f] && !pendingDate)) continue;
         const desc = descriptors[f];
+        const value = pendingDate ? { value: v, date: pendingDate } : v;
         if (editableWithoutFormStore(desc) && desc?.target === 'patient_record') {
-          patchFields[f] = v;
+          patchFields[f] = value;
         } else if (!(f in descriptors)) {
           // Unknown to the descriptor (e.g. custom fields) — PATCH them too.
-          patchFields[f] = v;
+          patchFields[f] = value;
         }
       }
 
@@ -507,6 +512,7 @@ export default function PatientDetail({
         for (const f of Object.keys(patchFields)) {
           if (patientInfoRef.current) patientInfoRef.current[f] = info[f];
           confirmedWritesRef.current[f] = info[f];
+          delete pendingDatesRef.current[f];
           if (pendingDataRef.current?.info[f] === info[f]) dirtyFieldsRef.current.delete(f);
         }
       }
@@ -619,10 +625,12 @@ export default function PatientDetail({
       .catch(() => {});
   }, [personId, adoptServerRecord]);
 
-  const handleFieldChange = useCallback((field: string, value: unknown) => {
+  const handleFieldChange = useCallback((field: string, value: unknown, date?: string) => {
     if (readOnly) return;
     const base = pendingDataRef.current?.info ?? editedInfoRef.current;
     const updated = { ...base, [field]: value };
+    if (date) pendingDatesRef.current[field] = date;
+    else delete pendingDatesRef.current[field];
     if (value === patientInfoRef.current?.[field]) dirtyFieldsRef.current.delete(field);
     else dirtyFieldsRef.current.add(field);
 

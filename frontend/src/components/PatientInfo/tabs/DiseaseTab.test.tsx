@@ -531,7 +531,9 @@ describe('DiseaseTab — descriptor-driven', () => {
   const CONVERTED: Record<string, unknown> = {
     estrogen_receptor_status: measurement('16112-5'),
     her2_status: measurement('48676-1'),
-    ki67_proliferation_index: { ...measurement('85337-4'), value_kind: 'number' },
+    ki67_proliferation_index: {
+      ...measurement('85337-4'), value_kind: 'number', dated: true,
+    },
     tumor_stage: measurement('21905-5'),
     // Real column, no concept assigned yet.
     staging_modalities: {

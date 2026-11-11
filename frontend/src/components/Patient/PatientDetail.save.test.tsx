@@ -60,7 +60,7 @@ const DESCRIPTORS = {
   },
   hemoglobin_g_dl: {
     kind: 'direct', writable: true, target: 'patient_record',
-    value_kind: 'number',
+    value_kind: 'number', dated: true,
     projection: {
       omop_table: 'measurement', concept_id: 3000963, code: '718-7',
       type_concept_id: 32856, source_value: '718-7',
@@ -205,6 +205,39 @@ describe('PatientDetail save — the edit, not the record', () => {
 
     await waitFor(() => expect(api.patch).toHaveBeenCalled());
     expect(patchBody()).toMatchObject({ hemoglobin_g_dl: 9.5 });
+  });
+
+  it('sends a lab result date with its value (#2439)', async () => {
+    await renderAndLoad();
+    await openLabsTab();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    fireEvent.change(screen.getByDisplayValue('12.5'), { target: { value: '9.5' } });
+    fireEvent.change(document.getElementById('hemoglobin_g_dl-date')!,
+      { target: { value: '2026-10-01' } });
+    await act(async () => { vi.advanceTimersByTime(2100); });
+
+    await waitFor(() => expect(api.patch).toHaveBeenCalled());
+    expect(patchBody()).toMatchObject({
+      hemoglobin_g_dl: { value: 9.5, date: '2026-10-01' },
+    });
+  });
+
+  it('saves a date picked after the value was already autosaved (#2439)', async () => {
+    await renderAndLoad();
+    await openLabsTab();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    fireEvent.change(screen.getByDisplayValue('12.5'), { target: { value: '9.5' } });
+    await act(async () => { vi.advanceTimersByTime(2100); });
+    await waitFor(() => expect(api.patch).toHaveBeenCalledTimes(1));
+
+    fireEvent.change(document.getElementById('hemoglobin_g_dl-date')!,
+      { target: { value: '2026-10-01' } });
+    await act(async () => { vi.advanceTimersByTime(2100); });
+
+    await waitFor(() => expect(api.patch).toHaveBeenCalledTimes(2));
+    expect(patchBody()).toMatchObject({
+      hemoglobin_g_dl: { value: 9.5, date: '2026-10-01' },
+    });
   });
 
   it('never sends an alias in the PATCH', async () => {

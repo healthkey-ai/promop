@@ -1359,6 +1359,22 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # A dated edit is {field: {"value": ..., "date": "YYYY-MM-DD"}}: one
+        # result, not a structured value. Unwrap it before the serializer sees
+        # a field value and carry its clinical date into the projection. The
+        # shared form uses the same contract; the standalone editor used to
+        # lose the date picked on a lab row (#2439).
+        fact_dates = {}
+        if any(isinstance(value, dict) and set(value) == {'value', 'date'}
+               for value in patch_data.values()):
+            from omop_core.services.field_write_service import split_dated_edits
+            from omop_core.services.write_descriptor import build_writable_field_descriptor
+            try:
+                patch_data, fact_dates = split_dated_edits(
+                    patch_data, build_writable_field_descriptor())
+            except ValueError as exc:
+                raise ValidationError({'detail': str(exc)}) from exc
+
         with transaction.atomic():
             # Match derivation's lock order and serialize the read/modify/write
             # of user_edited_fields as well as same-day OMOP projection.
@@ -1383,6 +1399,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 field for field in serializer.validated_data
                 if field in PATIENT_RECORD_OMOP_MAPPED_FIELDS
                 and (serializer.validated_data[field] != previous_values.get(field)
+                     or field in fact_dates  # a date-only correction still names its day
                      or (field in {'relapse_count', 'treatment_refractory_status'}
                          and field not in (patient_info.therapy_overrides or {})
                          and serializer.validated_data[field] is not None))
@@ -1483,6 +1500,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         projection_data['medication_contexts'])
                 projected = set(self._project_mapped_fields(
                     person, clinical_fields, projection_data, actor=request.user,
+                    fact_dates=fact_dates,
                 ))
                 if _direct_units.PAIR_FIELD in projected:
                     # A successful projection confirms the pair as a whole; an
@@ -1536,7 +1554,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         return Response({**PatientRecordSerializer(patient_info).data, 'previous_values': previous_values})
 
     @staticmethod
-    def _project_mapped_fields(person, direct_fields, patch_data, actor=None):
+    def _project_mapped_fields(person, direct_fields, patch_data, actor=None,
+                               fact_dates=None):
         """Project validated edits using the editor's curated or built-in recipe.
 
         Each projection uses a savepoint so failure preserves the PatientRecord
@@ -1565,6 +1584,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         except Exception:
             logger.warning('Could not resolve OMOP projections')
             return set()
+        fact_dates = fact_dates or {}
         projected = set()
         authorship = None
         patient_author_without_type = False
@@ -1582,7 +1602,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     # overwrite today's clinical fact. Keep the record value.
                     continue
                 if project_single_value(person, field, patch_data[field], projection,
-                                        acknowledge_existing=True, **authorship):
+                                        acknowledge_existing=True,
+                                        fact_date=fact_dates.get(field), **authorship):
                     # Occurrences and structured answers need their dedicated
                     # extractors before their saved values can be acknowledged.
                     # A pinned current-state answer is never read back from

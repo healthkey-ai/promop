@@ -66,6 +66,65 @@ def test_edit_appends_today_then_reuses_today_and_returns_current_value(editor):
     assert refresh_patient_record(record.person).hemoglobin_g_dl == 14
 
 
+def test_a_dated_edit_projects_on_the_chosen_clinical_day(editor):
+    record, client = editor
+    concept = hemoglobin()
+    day = timezone.localdate() - timedelta(days=30)
+
+    response = client.patch(
+        f'/api/patient-info/{record.person_id}/',
+        {'hemoglobin_g_dl': {'value': 12, 'date': day.isoformat()}},
+        format='json',
+    )
+
+    assert response.status_code == 200, response.data
+    row = Measurement.objects.get(person=record.person, measurement_concept=concept)
+    assert row.measurement_date == day
+    assert row.value_as_number == 12
+    record.refresh_from_db()
+    assert record.hemoglobin_g_dl == 12
+
+
+def test_a_date_only_correction_still_projects_on_its_day(editor):
+    record, client = editor
+    concept = hemoglobin()
+    patch_field(editor, 'hemoglobin_g_dl', 12)  # today
+    day = timezone.localdate() - timedelta(days=10)
+
+    response = client.patch(
+        f'/api/patient-info/{record.person_id}/',
+        {'hemoglobin_g_dl': {'value': 12, 'date': day.isoformat()}},
+        format='json',
+    )
+
+    assert response.status_code == 200, response.data
+    assert Measurement.objects.filter(
+        person=record.person, measurement_concept=concept,
+        measurement_date=day, value_as_number=12).exists()
+
+
+def test_a_date_on_a_non_dated_field_is_refused(editor):
+    record, client = editor
+    response = client.patch(
+        f'/api/patient-info/{record.person_id}/',
+        {'disease': {'value': 'CLL', 'date': timezone.localdate().isoformat()}},
+        format='json',
+    )
+    assert response.status_code == 400, response.data
+
+
+def test_a_future_result_date_is_refused(editor):
+    record, client = editor
+    tomorrow = timezone.localdate() + timedelta(days=1)
+    response = client.patch(
+        f'/api/patient-info/{record.person_id}/',
+        {'hemoglobin_g_dl': {'value': 12, 'date': tomorrow.isoformat()}},
+        format='json',
+    )
+    assert response.status_code == 400, response.data
+    assert not Measurement.objects.filter(person=record.person).exists()
+
+
 def test_same_day_import_is_updated_but_erroneous_and_other_concepts_are_not(editor):
     record, _ = editor
     concept = hemoglobin()

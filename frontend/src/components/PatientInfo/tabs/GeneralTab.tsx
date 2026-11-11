@@ -16,7 +16,7 @@ import PreexistingConditionsAnswer, { type ConditionsAnswer } from '../Preexisti
 
 interface Props {
   formData: Record<string, unknown>;
-  onChange: (field: string, value: unknown) => void;
+  onChange: (field: string, value: unknown, date?: string) => void;
   editedName: string;
   onNameChange: (name: string) => void;
   onZipcodeChange: (zip: string) => void;
@@ -103,7 +103,19 @@ export default function GeneralTab({
     extra: { options?: string[]; vocabSource?: ReturnType<typeof useVocabulary>['source'] } = {},
   ) => {
     const descriptor = descriptors[name];
-    const dated = descriptor?.writable && descriptor.projection?.omop_table === 'measurement';
+    // Only the server's `dated` contract accepts a result date; a measurement
+    // projection alone is not enough (#2439).
+    const dated = descriptor?.dated === true;
+    const changeWithDate = (field: string, value: unknown) => (
+      dated ? onChange(field, value, date) : onChange(field, value)
+    );
+    const changeDate = (field: string, next: string) => {
+      setDate(next);
+      const current = formData?.[field];
+      if (current !== undefined && current !== null && current !== '') {
+        onChange(field, current, next);
+      }
+    };
     const prec = name === 'date_of_birth'
       ? ((formData?.date_of_birth_precision as string) ?? 'day')
       : undefined;
@@ -116,10 +128,10 @@ export default function GeneralTab({
         descriptor={descriptor}
         options={extra.options}
         vocabSource={extra.vocabSource}
-        onChange={onChange}
+        onChange={changeWithDate}
         precision={prec as 'day' | 'month' | 'year' | undefined}
         date={dated ? date : undefined}
-        onDateChange={dated ? setDate : undefined}
+        onDateChange={dated ? (next) => changeDate(name, next) : undefined}
       />
     );
   };

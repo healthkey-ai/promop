@@ -18,7 +18,7 @@ import type { LabMeasurementGroup } from '@/hooks/useLabMeasurements';
 
 interface Props {
   formData: Record<string, unknown>;
-  onChange: (field: string, value: unknown) => void;
+  onChange: (field: string, value: unknown, date?: string) => void;
 }
 
 /**
@@ -145,6 +145,17 @@ export default function LabsTab({ formData, onChange }: Props) {
   const { descriptors, loading } = useWritableFields(personId);
   const { grouped: measurementGroups } = useLabMeasurements(personId);
   const [date, setDate] = useState(today());
+  // A lab value and the date it was observed are one edit. The date control
+  // is shared across this tab, so a value edit carries the current date and a
+  // date change re-sends the value it belongs to (#2439).
+  const changeValue = (name: string, value: unknown) => onChange(name, value, date);
+  const changeDate = (name: string, next: string) => {
+    setDate(next);
+    const current = formData?.[name];
+    if (current !== undefined && current !== null && current !== '') {
+      onChange(name, current, next);
+    }
+  };
   const [chartDialog, setChartDialog] = useState<{
     label: string;
     group: LabMeasurementGroup;
@@ -168,6 +179,9 @@ export default function LabsTab({ formData, onChange }: Props) {
         {fields.map(([label, name]) => {
           const group = getGroup(name);
           const hasChart = !!group && group.values.length >= MIN_CHART_POINTS;
+          // Only a descriptor the server marks `dated` accepts a result date;
+          // sending an envelope for any other field is a 400.
+          const dated = descriptors[name]?.dated === true;
           return (
             <div key={name} className="relative">
               <div className="flex items-start gap-1">
@@ -179,9 +193,9 @@ export default function LabsTab({ formData, onChange }: Props) {
                     type={type}
                     value={formData?.[name]}
                     descriptor={descriptors[name]}
-                    onChange={onChange}
-                    date={date}
-                    onDateChange={setDate}
+                    onChange={dated ? changeValue : onChange}
+                    date={dated ? date : undefined}
+                    onDateChange={dated ? (next) => changeDate(name, next) : undefined}
                   />
                 </div>
                 {hasChart && (
