@@ -216,6 +216,30 @@ def _propagate_pair_fact_dates(fact_dates, fact_ids):
             fact_ids[canonical] = fact_ids[source]
 
 
+def _authored_pair_dates(serializer, fact_dates):
+    """The clinical day to remember for each source pair this PATCH authored (#2426).
+
+    A dated edit names its day; an undated one projects onto today, as it always
+    did. Only pairs the serializer actually authored are here, so an autosave
+    echo cannot re-date a pending pair.
+    """
+    from django.utils import timezone
+    from omop_core.services.source_pair_dates import (
+        SOURCE_PAIR_CANONICALS, pair_sources_in,
+    )
+
+    sources = pair_sources_in(getattr(serializer, '_source_pairs', ()))
+    today = timezone.localdate()
+    dates = {}
+    for source in sources:
+        dates[source] = (
+            fact_dates.get(source)
+            or fact_dates.get(SOURCE_PAIR_CANONICALS[source])
+            or today
+        )
+    return dates
+
+
 def _patient_author(actor, person):
     """(is the caller the patient or their representative, project_single_value keywords).
 
@@ -1467,6 +1491,27 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     and serializer.validated_data.get(_direct_units.UNIT_FIELD)
                     != previous_values.get(_direct_units.UNIT_FIELD)):
                 direct_fields.add(_direct_units.PAIR_FIELD)
+            # A resend of a pending pair whose projection failed is a retry, not
+            # an authored edit, so the serializer drops it as an echo. Project
+            # it again on the day it was first entered, without dating it again
+            # (#2426); the shared form's retry has the same contract.
+            from omop_core.services.source_pair_dates import (
+                SOURCE_PAIR_CANONICALS, pair_sources_in, stored_dates,
+            )
+            pending_pair_dates = stored_dates(patient_info)
+            authored_pairs = pair_sources_in(
+                getattr(serializer, '_source_pairs', ()))
+            retried_pairs = {
+                source for source in pair_sources_in(serializer.validated_data)
+                if source in pending_pair_dates
+                and source in (patient_info.user_edited_fields or [])
+                and source not in authored_pairs
+            }
+            for source in retried_pairs:
+                canonical = SOURCE_PAIR_CANONICALS[source]
+                if canonical in serializer.validated_data:
+                    direct_fields.add(canonical)
+                    fact_dates.setdefault(canonical, pending_pair_dates[source])
             _apply_patient_name(person, patient_name)
             if priority_edits:
                 from omop_core.services.genomics import replace_priority_fields
@@ -1533,7 +1578,11 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     | set(getattr(serializer, '_source_pairs', ()))
                 )
                 patient_info.user_edited_fields = sorted(edited)
-                patient_info.save(update_fields=['user_edited_fields'])
+                from omop_core.services.source_pair_dates import remember_dates
+                remember_dates(
+                    patient_info, _authored_pair_dates(serializer, fact_dates))
+                patient_info.save(update_fields=[
+                    'user_edited_fields', 'pending_source_pair_dates'])
             _write_record_revisions(patient_info, previous_values, request)
 
             # Handle language skills (PersonLanguageSkill rows).

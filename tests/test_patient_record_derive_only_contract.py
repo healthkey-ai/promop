@@ -71,7 +71,8 @@ def test_every_concrete_patientrecord_data_column_is_api_read_only():
     """No pending derivation is a temporary PatientRecord write exception."""
     lifecycle_fields = {
         'id', 'person', 'organization', 'created_at', 'updated_at',
-        'derived_at', 'derivation_version', 'user_edited_fields', 'custom_fields', 'therapy_overrides',
+        'derived_at', 'derivation_version', 'user_edited_fields', 'custom_fields',
+        'therapy_overrides', 'pending_source_pair_dates',
     }
     writable = {
         field.name for field in PatientRecord._meta.concrete_fields

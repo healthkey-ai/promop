@@ -430,3 +430,39 @@ def test_a_count_whose_canonical_overflows_the_column_is_refused(api):
 def test_canonical_from_source_refuses_what_the_column_cannot_hold(value, unit, recognised):
     from omop_core.services.blood_count_source_pairs import canonical_from_source
     assert canonical_from_source('absolute_neutrophile_count', value, unit)[0] is recognised
+
+
+def test_a_newer_dated_import_retires_the_source_pair(api):
+    from datetime import date
+
+    from omop_core.signals import suppress_patient_record_refresh
+    from tests.factories import MeasurementFactory
+
+    ConceptFactory(concept_id=32817, concept_code='EHR')
+    record = _record()
+    draw = date(2024, 1, 1)
+    _edit(api, record, {'absolute_neutrophile_count': {
+        'value': 1550, 'date': draw.isoformat()}})
+    assert record.pending_source_pair_dates == {
+        'absolute_neutrophile_count': draw.isoformat()}
+
+    with suppress_patient_record_refresh():
+        MeasurementFactory(
+            person=record.person,
+            measurement_concept=ConceptFactory(
+                concept_code='751-8', concept_name='Neutrophils [#/volume] in Blood'),
+            measurement_source_value='751-8',
+            measurement_date=date(2024, 2, 1),
+            measurement_type_concept_id=32817,
+            value_as_number=Decimal('2.5'),
+            unit_source_value='10*3/uL',
+        )
+    record = refresh_patient_record(record.person)
+
+    # The newer result wins; the cells column follows the canonical read-model.
+    assert float(record.anc_thousand_per_ul) == 2.5
+    assert float(record.absolute_neutrophile_count) == 2500
+    assert not ({'absolute_neutrophile_count',
+                 'absolute_neutrophile_count_units'} & set(
+                     record.user_edited_fields or []))
+    assert record.pending_source_pair_dates == {}

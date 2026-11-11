@@ -269,10 +269,19 @@ A source pair is one assertion: the number and the unit the reader chose. Once
 the pair is authoritative, derivation keeps both pending — the extractor can
 reproduce the canonical number but not the reader's unit — so a later import
 cannot relabel `120 g/L` as `12 g/dL` in the pair. A full refresh restores a
-pending pair before recompute; it is retired only by an explicit canonical
-event (a `changed_fields` canonical write or import), not by a numerical match
-alone, and a plain OMOP import plus refresh does not retire it. This is the
-`_SOURCE_PAIR_FIELDS` rule in `patient_record_service.py`.
+pending pair before recompute. An explicit canonical event (a `changed_fields`
+canonical write or import) retires it regardless of dates, and a numerical
+match alone does not. This is the `_SOURCE_PAIR_FIELDS` rule in
+`patient_record_service.py`.
+
+A newer imported result also retires it (#2426). Otherwise a patient's older
+answer — its pending pair masking derivation for good — would keep hiding
+today's result from CRAB, SLiM and the trial matcher. The recorded day decides:
+the pair is retired when the result derivation now selects for the field's
+canonical is *strictly later* than the day the pair was entered. A same-day
+result leaves it pending, an unusable or unproven newer result leaves it pending
+(the extractor records no day for one), and a pair whose entered day is unknown
+does too. The old projected fact stays history; nothing is deleted.
 
 The pair is also the dated target (#2397): a patient-entered lab result carries
 the day it was drawn, not the day it was typed, and the canonical projection is
@@ -280,13 +289,19 @@ that same dated result. The pair is marked `dated` only when its canonical has a
 resolved projection — without a target there is no fact to carry the date, so a
 dated envelope is refused rather than silently stamped with today.
 
-The draw date is carried into the canonical projection at save time; it is not
-stored with the pending pair. A projection skipped by its savepoint or by a
-missing type concept keeps the value pending but not the date, so a later retry
-records that answer on the day it is projected. And because the pair stays
-pending until an explicit canonical event, an older dated pair remains the
-record's current answer even though its fact is history — the editor must not
-promise otherwise.
+The entered day is kept in `PatientRecord.pending_source_pair_dates`, a
+server-managed mapping of the pair's source field to `YYYY-MM-DD` (the
+serializer exposes it read-only and omits it from responses). It is written
+before projection, so a failed projection keeps both the value and its day, and
+a retry records the answer on the day it was first entered instead of today.
+Only an authored pair is dated: an autosave echo of a pending pair keeps its
+recorded day, and an undated *change* is a new result on the day it is saved. An
+entry lives only while its pair is pending; retiring the pair removes it with
+the marker.
+
+Because the pair stays pending until one of those events, an older dated pair
+remains the record's current answer even though its fact is history — the
+editor must not promise otherwise.
 
 ## Frontend Simplification
 

@@ -28,6 +28,7 @@ from omop_core.services.creatinine_units import SOURCE_PAIRS as CREATININE_SOURC
 from omop_core.services.hemoglobin_units import SOURCE_PAIRS
 from omop_core.services.blood_count_source_pairs import PAIRS as COUNT_SOURCE_PAIRS
 from omop_core.services.chemistry_units import PAIRS as CHEMISTRY_SOURCE_PAIRS
+from omop_core.services.source_pair_dates import forget_dates, pair_sources_in
 from omop_core.services.genomic_concepts import (
     MUTATION_INTERPRETATION_CONCEPTS,
     MUTATION_ORIGIN_CONCEPTS,
@@ -310,7 +311,10 @@ def _retire_source_pairs(person, applied):
     if not pending & retired:
         return
     record.user_edited_fields = sorted(pending - retired)
-    record.save(update_fields=['user_edited_fields'])
+    # The entered day describes a pending pair only; it must not outlive it and
+    # later make a fresh pair look older than it is (#2426).
+    forget_dates(record, pair_sources_in(retired))
+    record.save(update_fields=['user_edited_fields', 'pending_source_pair_dates'])
 
 
 @transaction.atomic
