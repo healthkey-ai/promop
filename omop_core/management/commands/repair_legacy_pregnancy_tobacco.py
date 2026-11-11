@@ -5,10 +5,9 @@ is a read-only dry-run. Apply requires a pinned audit, a new private backup, an
 explicit local/staging target, and the migrations that made the columns
 nullable and deactivated the pregnancy formula.
 
-It clears only the two classifications the audit recommends for clearing:
-``unattributed_true`` (a pure legacy default) and ``rewritten_true`` (the last
-authored value was False and the old formula wrote True again). Authored and
-source-backed True values are never touched.
+It clears only ``unattributed_true`` (a pure legacy default). Authored,
+source-backed, source-conflict and rewritten True values are never touched;
+those need a person's answer or a policy review.
 """
 import hashlib
 import ipaddress

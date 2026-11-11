@@ -120,35 +120,70 @@ def _latest_by_person(rows):
     return {person: row for person, (_key, row) in best.items()}
 
 
+_TOBACCO_CODE_STATE = {
+    '266919005': True,     # Never smoker
+    '8517006': False,      # Former smoker
+    '77176002': False,     # Current smoker
+}
+_TOBACCO_ANSWER_STATE = {
+    'LA18978-9': True,     # Never smoker
+    'LA15920-4': False,    # Former smoker
+    'LA18976-3': False,    # Current smoker
+}
+
+
 def _tobacco_supports_true(row):
-    """True/False for what the recorded tobacco fact says, or None if unknown."""
-    codes = {row['concept_code'], row['source_value']} - {None, ''}
-    if '266919005' in codes:
-        return True
-    if codes & {'8517006', '77176002'}:
+    """True/False for what the recorded tobacco fact says, or None if unknown.
+
+    The normalized answer code wins. Otherwise the concept code wins over the
+    source code; a recognised conflict is not evidence of True (it becomes a
+    source conflict).
+    """
+    answer = _TOBACCO_ANSWER_STATE.get(row['answer_code'])
+    if answer is not None:
+        return answer
+    states = {
+        _TOBACCO_CODE_STATE[code]
+        for code in (row['concept_code'], row['source_value'])
+        if code in _TOBACCO_CODE_STATE
+    }
+    if len(states) == 1:
+        return states.pop()
+    if len(states) > 1:
         return False
-    if '72166-2' in codes:
-        answer = row['answer_code']
-        if answer in ('LA18978-9',):
-            return True
-        if answer in ('LA15920-4', 'LA18976-3'):
-            return False
-        text = ' '.join(filter(None, (row['string'], row['source_value']))).casefold()
-        if 'never' in text:
-            return True
-        if 'former' in text or 'current' in text or 'smoker' in text:
-            return False
+    text = ' '.join(filter(None, (
+        row['string'], row['answer_name'], row['source_value'],
+    ))).strip().splitlines()[0].strip().casefold() if any(
+        (row['string'], row['answer_name'], row['source_value'])) else ''
+    if 'never' in text:
+        return True
+    if 'former' in text or 'current' in text or 'smoker' in text:
+        return False
     return None
 
 
 def _pregnancy_supports_true(row):
-    """True/False for what the recorded pregnancy test says, or None if unknown."""
-    text = ' '.join(filter(None, (
-        row['string'], row['source_value'], row['answer_code'], row['answer_name'],
-    ))).casefold()
-    if 'negative' in text or 'not detected' in text:
+    """True/False for what the recorded pregnancy test says, or None if unknown.
+
+    The derivation keeps the first line of ``pregnancy_test_result_value`` and
+    reads value_as_string before the coded answer (#2250). A leading "not
+    negative" is the positive answer; "NEG" is the common negative spelling.
+    """
+    value = row['string'] or row['answer_name'] or row['answer_code'] or row['source_value']
+    if value in (None, ''):
+        return None
+    first = str(value).strip().splitlines()[0].strip().casefold()
+    if not first:
+        return None
+    if first.startswith('not negative') or first.startswith('not neg'):
+        return False
+    if first.startswith('non-reactive') or first.startswith('nonreactive'):
         return True
-    if 'positive' in text or 'detected' in text:
+    if first.startswith('negative') or first.startswith('neg') or first.startswith('not detected'):
+        return True
+    if first.startswith('positive') or first.startswith('pos') or first.startswith('detected'):
+        return False
+    if first.startswith('reactive'):
         return False
     return None
 

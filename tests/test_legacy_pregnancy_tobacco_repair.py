@@ -9,7 +9,7 @@ from django.db.migrations.recorder import MigrationRecorder
 from omop_core.management.commands.repair_legacy_pregnancy_tobacco import REQUIRED
 from omop_core.models import FieldFormula, PatientRecord, RecordRevision
 from tests.factories import (
-    MeasurementFactory, ObservationFactory, PatientRecordFactory,
+    ConceptFactory, MeasurementFactory, ObservationFactory, PatientRecordFactory,
 )
 
 pytestmark = pytest.mark.django_db
@@ -123,6 +123,37 @@ def test_fail_on_makes_defaults_a_release_gate(tmp_path):
     with pytest.raises(CommandError, match='finding gate'):
         call_command('audit_legacy_pregnancy_tobacco',
                      fail_on=['unattributed_true'], stdout=StringIO())
+
+
+def test_source_parsers_handle_lab_spellings_and_conflicts(tmp_path):
+    records = {}
+    for name, value in (
+            ('neg', 'NEG\nSamples with Specific Gravity <1.010'),
+            ('positive', 'Positive\nReference range: Negative'),
+            ('not_negative', 'Not negative')):
+        record = PatientRecordFactory(**{PREGNANCY: True, TOBACCO: False})
+        MeasurementFactory(person=record.person, measurement_source_value='2106-3',
+                           value_as_string=value)
+        records[name] = record
+    conflict = PatientRecordFactory(**{PREGNANCY: False, TOBACCO: True})
+    ObservationFactory(
+        person=conflict.person,
+        observation_concept=ConceptFactory(concept_code='72166-2'),
+        observation_source_value='266919005',
+        value_as_concept=ConceptFactory(concept_code='LA18976-3'),
+    )
+    records['tobacco_conflict'] = conflict
+    for record in records.values():
+        PatientRecord.objects.filter(pk=record.pk).update(
+            **{PREGNANCY: True, TOBACCO: True})
+
+    manifest, _sha = audit(tmp_path)
+    data = json.loads(open(manifest).read())
+    by_id = {row['id']: row for row in data['records']}
+    assert by_id[records['neg'].pk]['fields'][PREGNANCY]['classification'] == 'source_backed_true'
+    assert by_id[records['positive'].pk]['fields'][PREGNANCY]['classification'] == 'source_conflict'
+    assert by_id[records['not_negative'].pk]['fields'][PREGNANCY]['classification'] == 'source_conflict'
+    assert by_id[records['tobacco_conflict'].pk]['fields'][TOBACCO]['classification'] == 'source_conflict'
 
 
 def test_a_pending_marker_does_not_override_a_recorded_false(tmp_path):
