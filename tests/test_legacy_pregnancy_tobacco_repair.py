@@ -33,21 +33,29 @@ def cohort():
         patient_record=authored, field=PREGNANCY, old_value='None', new_value='True')
     pending = PatientRecordFactory(
         **{PREGNANCY: False, TOBACCO: True}, user_edited_fields=[TOBACCO])
-    rewritten = PatientRecordFactory(**{PREGNANCY: True, TOBACCO: True})
+    rewritten = PatientRecordFactory(**{PREGNANCY: True, TOBACCO: False})
     RecordRevision.objects.create(
         patient_record=rewritten, field=PREGNANCY, old_value='True', new_value='False')
     tobacco_source = PatientRecordFactory(**{PREGNANCY: False, TOBACCO: True})
     ObservationFactory(person=tobacco_source.person,
-                       observation_source_value='72166-2', value_as_string='Never smoker')
+                       observation_source_value='266919005')
     pregnancy_source = PatientRecordFactory(**{PREGNANCY: True, TOBACCO: False})
     MeasurementFactory(person=pregnancy_source.person,
-                       measurement_source_value='2106-3', value_as_number=1)
+                       measurement_source_value='2106-3', value_as_string='Negative')
+    tobacco_conflict = PatientRecordFactory(**{PREGNANCY: False, TOBACCO: True})
+    ObservationFactory(person=tobacco_conflict.person,
+                       observation_source_value='77176002')
+    pregnancy_conflict = PatientRecordFactory(**{PREGNANCY: True, TOBACCO: False})
+    MeasurementFactory(person=pregnancy_conflict.person,
+                       measurement_source_value='2106-3', value_as_string='Positive')
     # The save signal re-derives the record from the new fact. Put the legacy
     # True back with a queryset update (no signal), which is the state the audit
     # exists to classify.
     ForRecord = PatientRecord.objects
-    ForRecord.filter(pk=tobacco_source.pk).update(**{PREGNANCY: False, TOBACCO: True})
-    ForRecord.filter(pk=pregnancy_source.pk).update(**{PREGNANCY: True, TOBACCO: False})
+    for record in (tobacco_source, pregnancy_source, tobacco_conflict, pregnancy_conflict):
+        ForRecord.filter(pk=record.pk).update(
+            **{PREGNANCY: record.no_pregnancy_or_lactation_status,
+               TOBACCO: record.no_tobacco_use_status})
     negative = PatientRecordFactory(**{PREGNANCY: False, TOBACCO: False})
     unknown = PatientRecordFactory(**{PREGNANCY: None, TOBACCO: None})
     return {
@@ -57,6 +65,8 @@ def cohort():
         'rewritten': rewritten,
         'tobacco_source': tobacco_source,
         'pregnancy_source': pregnancy_source,
+        'tobacco_conflict': tobacco_conflict,
+        'pregnancy_conflict': pregnancy_conflict,
         'negative': negative,
         'unknown': unknown,
     }
@@ -101,6 +111,9 @@ def test_audit_classifies_each_kind_of_evidence(tmp_path):
     assert field('rewritten')['classification'] == 'rewritten_true'
     assert field('tobacco_source', TOBACCO)['classification'] == 'source_backed_true'
     assert field('pregnancy_source')['classification'] == 'source_backed_true'
+    assert field('tobacco_conflict', TOBACCO)['classification'] == 'source_conflict'
+    assert field('pregnancy_conflict')['classification'] == 'source_conflict'
+    assert field('rewritten')['recommended_action'] == 'needs_policy'
     assert field('negative')['classification'] == 'explicit_false'
     assert field('unknown')['classification'] == 'unanswered'
 
@@ -110,6 +123,28 @@ def test_fail_on_makes_defaults_a_release_gate(tmp_path):
     with pytest.raises(CommandError, match='finding gate'):
         call_command('audit_legacy_pregnancy_tobacco',
                      fail_on=['unattributed_true'], stdout=StringIO())
+
+
+def test_a_pending_marker_does_not_override_a_recorded_false(tmp_path):
+    record = PatientRecordFactory(
+        **{PREGNANCY: True, TOBACCO: False}, user_edited_fields=[PREGNANCY])
+    RecordRevision.objects.create(
+        patient_record=record, field=PREGNANCY, old_value='True', new_value='False')
+    manifest, _sha = audit(tmp_path)
+    data = json.loads(open(manifest).read())
+    row = next(item for item in data['records'] if item['id'] == record.pk)
+    assert row['fields'][PREGNANCY]['classification'] == 'rewritten_true'
+    assert row['fields'][PREGNANCY]['recommended_action'] == 'needs_policy'
+
+
+def test_a_recorded_clear_then_true_is_rewritten(tmp_path):
+    record = PatientRecordFactory(**{PREGNANCY: True, TOBACCO: False})
+    RecordRevision.objects.create(
+        patient_record=record, field=PREGNANCY, old_value='True', new_value='None')
+    manifest, _sha = audit(tmp_path)
+    data = json.loads(open(manifest).read())
+    row = next(item for item in data['records'] if item['id'] == record.pk)
+    assert row['fields'][PREGNANCY]['classification'] == 'rewritten_true'
 
 
 def test_dry_run_changes_nothing(tmp_path):
@@ -129,14 +164,16 @@ def test_apply_clears_only_defaults_and_rewritten_values(tmp_path, ready):
     path, receipt = apply(tmp_path, manifest, sha)
 
     assert path.stat().st_mode & 0o777 == 0o600
-    assert len(receipt['entries']) == 2      # one record per affected patient
+    assert len(receipt['entries']) == 1      # only the unattributed record
     for name, expected in (
             ('unattributed', (None, None)),
-            ('rewritten', (None, None)),
+            ('rewritten', (True, False)),
             ('authored', (True, False)),
             ('pending', (False, True)),
             ('tobacco_source', (False, True)),
             ('pregnancy_source', (True, False)),
+            ('tobacco_conflict', (False, True)),
+            ('pregnancy_conflict', (True, False)),
             ('negative', (False, False)),
             ('unknown', (None, None))):
         record = names[name]
@@ -157,12 +194,27 @@ def test_rollback_restores_the_backup(tmp_path, ready):
     path, receipt = apply(tmp_path, manifest, sha)
     undo = rollback(tmp_path, path, receipt)
 
-    assert len(undo['entries']) == 2
-    for name in ('unattributed', 'rewritten'):
-        record = names[name]
-        record.refresh_from_db()
-        assert record.no_pregnancy_or_lactation_status is True
-        assert record.no_tobacco_use_status is True
+    assert len(undo['entries']) == 1
+    record = names['unattributed']
+    record.refresh_from_db()
+    assert record.no_pregnancy_or_lactation_status is True
+    assert record.no_tobacco_use_status is True
+    # The rollback revision is not authorship: the restored default classifies
+    # as a default again.
+    manifest, _sha = audit(tmp_path, name='after-rollback.json')
+    data = json.loads(open(manifest).read())
+    row = next(item for item in data['records'] if item['id'] == record.pk)
+    assert row['fields'][PREGNANCY]['classification'] == 'unattributed_true'
+
+
+def test_rollback_refuses_when_the_record_moved(tmp_path, ready):
+    names = cohort()
+    manifest, sha = audit(tmp_path)
+    path, receipt = apply(tmp_path, manifest, sha)
+    PatientRecord.objects.filter(pk=names['unattributed'].pk).update(
+        **{PREGNANCY: False})
+    with pytest.raises(CommandError, match='Rollback conflict'):
+        rollback(tmp_path, path, receipt)
 
 
 def test_apply_requires_the_nullable_migrations(tmp_path):

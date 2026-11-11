@@ -15,24 +15,28 @@ It only reads; the repair command is a separate, guarded action.
 Classification, in priority order:
 
 ``unanswered``        None: nobody answered.
-``explicit_false``    False. The legacy writers only produced True/None, so this
-                      is a real answer.
+``explicit_false``    False. The legacy default never produced it; a person or a
+                      recorded source fact answered.
 ``authored_true``     ``RecordRevision`` or ``user_edited_fields`` says a person
                       set the field.
 ``source_backed_true``A tobacco observation / pregnancy test is recorded. The
                       derivation wrote True from a fact, not from the default.
-``rewritten_true``    The last authored value was False, then the current value
-                      became True again. The old formula is the likely writer.
+``rewritten_true``    The last authored value was False (or a clear), then the
+                      current value became True again. The old formula is the
+                      likely writer. This needs policy review, not an automatic
+                      clear: the authored False may be clinically important.
+``source_conflict``   A recorded tobacco/pregnancy fact says the opposite of the
+                      stored True (current smoker, positive test).
 ``unattributed_true`` True with no evidence at all: the legacy default.
 
-Only ``unattributed_true`` and ``rewritten_true`` are recommended for clearing,
-matching ``audit_pre_existing_conditions``. Everything else is kept.
+Only ``unattributed_true`` is recommended for clearing. Everything else is kept
+or left for policy review.
 """
 
 import hashlib
 import json
 import os
-from datetime import datetime, timezone as dt_timezone
+from datetime import date, datetime, timezone as dt_timezone
 
 from django.core.management.base import BaseCommand, CommandError
 from django.db import connection, transaction
@@ -50,6 +54,7 @@ CLASSIFICATIONS = (
     'authored_true',
     'source_backed_true',
     'rewritten_true',
+    'source_conflict',
     'unattributed_true',
 )
 ACTIONS = {
@@ -57,7 +62,8 @@ ACTIONS = {
     'explicit_false': 'keep',
     'authored_true': 'keep',
     'source_backed_true': 'keep',
-    'rewritten_true': 'clear',
+    'rewritten_true': 'needs_policy',
+    'source_conflict': 'needs_policy',
     'unattributed_true': 'clear',
 }
 
@@ -81,10 +87,16 @@ def _as_bool(text):
 
 
 def _revisions(field_name):
-    """The field's authored history, grouped by record, oldest first."""
+    """The field's authored history, grouped by record, oldest first.
+
+    Repair/rollback revisions are operator actions, not authorship: a restored
+    default must keep classifying as a default.
+    """
     history = {}
     rows = (RecordRevision.objects
             .filter(field=field_name)
+            .exclude(changed_by__startswith='repair:2432:')
+            .exclude(changed_by__startswith='rollback:2432:')
             .order_by('patient_record_id', 'changed_at', 'id')
             .values_list('patient_record_id', 'changed_at', 'old_value', 'new_value')
             .iterator(chunk_size=2000))
@@ -97,58 +109,145 @@ def _revisions(field_name):
     return history
 
 
-def _source_backed_people():
-    """People whose record has a recorded tobacco/pregnancy source fact."""
-    tobacco = set(
+def _latest_by_person(rows):
+    """The newest fact per person, by (date, id), from value dicts."""
+    best = {}
+    for row in rows:
+        key = (row['date'] or date.min, row['id'])
+        current = best.get(row['person_id'])
+        if current is None or key > current[0]:
+            best[row['person_id']] = (key, row)
+    return {person: row for person, (_key, row) in best.items()}
+
+
+def _tobacco_supports_true(row):
+    """True/False for what the recorded tobacco fact says, or None if unknown."""
+    codes = {row['concept_code'], row['source_value']} - {None, ''}
+    if '266919005' in codes:
+        return True
+    if codes & {'8517006', '77176002'}:
+        return False
+    if '72166-2' in codes:
+        answer = row['answer_code']
+        if answer in ('LA18978-9',):
+            return True
+        if answer in ('LA15920-4', 'LA18976-3'):
+            return False
+        text = ' '.join(filter(None, (row['string'], row['source_value']))).casefold()
+        if 'never' in text:
+            return True
+        if 'former' in text or 'current' in text or 'smoker' in text:
+            return False
+    return None
+
+
+def _pregnancy_supports_true(row):
+    """True/False for what the recorded pregnancy test says, or None if unknown."""
+    text = ' '.join(filter(None, (
+        row['string'], row['source_value'], row['answer_code'], row['answer_name'],
+    ))).casefold()
+    if 'negative' in text or 'not detected' in text:
+        return True
+    if 'positive' in text or 'detected' in text:
+        return False
+    return None
+
+
+def _source_state():
+    """Per person: whether the newest recorded tobacco/pregnancy fact supports True."""
+    tobacco_rows = list(
         Observation.objects
         .filter(is_erroneous=False)
         .filter(
             Q(observation_concept__concept_code__in=_TOBACCO_CODES)
             | Q(observation_source_value__in=_TOBACCO_CODES)
         )
-        .values_list('person_id', flat=True)
+        .values(
+            'person_id', 'observation_date', 'observation_id',
+            'observation_concept__concept_code', 'observation_source_value',
+            'value_as_concept__concept_code', 'value_as_string',
+        )
     )
-    pregnancy = set(
-        Measurement.objects
-        .filter(is_erroneous=False)
-        .filter(
+    tobacco = {
+        person: _tobacco_supports_true({
+            'concept_code': row['observation_concept__concept_code'],
+            'source_value': row['observation_source_value'],
+            'answer_code': row['value_as_concept__concept_code'],
+            'string': row['value_as_string'],
+        })
+        for person, row in _latest_by_person([
+            {**row, 'date': row['observation_date'], 'id': row['observation_id']}
+            for row in tobacco_rows
+        ]).items()
+    }
+
+    pregnancy_rows = []
+    for row in Measurement.objects.filter(is_erroneous=False).filter(
             Q(measurement_concept__concept_code__in=_PREGNANCY_CODES)
-            | Q(measurement_source_value__in=_PREGNANCY_CODES)
-        )
-        .values_list('person_id', flat=True)
-    )
-    pregnancy |= set(
-        Observation.objects
-        .filter(is_erroneous=False)
-        .filter(
+            | Q(measurement_source_value__in=_PREGNANCY_CODES)).values(
+                'person_id', 'measurement_date', 'measurement_id',
+                'measurement_concept__concept_code', 'measurement_source_value',
+                'value_as_concept__concept_code', 'value_as_concept__concept_name',
+                'value_as_string', 'value_source_value'):
+        pregnancy_rows.append({
+            **row, 'date': row['measurement_date'], 'id': row['measurement_id'],
+        })
+    for row in Observation.objects.filter(is_erroneous=False).filter(
             Q(observation_concept__concept_code__in=_PREGNANCY_CODES)
-            | Q(observation_source_value__in=_PREGNANCY_CODES)
-        )
-        .values_list('person_id', flat=True)
-    )
+            | Q(observation_source_value__in=_PREGNANCY_CODES)).values(
+                'person_id', 'observation_date', 'observation_id',
+                'observation_concept__concept_code', 'observation_source_value',
+                'value_as_concept__concept_code', 'value_as_concept__concept_name',
+                'value_as_string', 'value_source_value'):
+        pregnancy_rows.append({
+            **row, 'date': row['observation_date'], 'id': row['observation_id'],
+        })
+    pregnancy = {
+        person: _pregnancy_supports_true({
+            'string': row['value_as_string'],
+            'source_value': row['value_source_value'],
+            'answer_code': row['value_as_concept__concept_code'],
+            'answer_name': row['value_as_concept__concept_name'],
+        })
+        for person, row in _latest_by_person(pregnancy_rows).items()
+    }
     return {
         'no_tobacco_use_status': tobacco,
         'no_pregnancy_or_lactation_status': pregnancy,
     }
 
 
-def classify(value, revisions=(), pending_edit=False, source_backed=False):
+def _revision_value(text):
+    """A revision's new value: True/False, the 'clear' sentinel, or None."""
+    if text is None or str(text).strip().casefold() in ('', 'none', 'null'):
+        return 'clear'
+    return _as_bool(text)
+
+
+def classify(value, revisions=(), pending_edit=False, source_state=None):
     """Classify one stored field from its value and the evidence behind it."""
     if value is None:
         return 'unanswered'
     if value is False:
         return 'explicit_false'
     latest = None
-    for revision in revisions:
-        parsed = _as_bool(revision['new'])
+    for revision in reversed(revisions):
+        parsed = _revision_value(revision['new'])
         if parsed is not None:
             latest = parsed
-    if pending_edit or latest is True:
+            break
+    if latest is True:
         return 'authored_true'
-    if source_backed:
-        return 'source_backed_true'
-    if latest is False:
+    if latest is False or latest == 'clear':
+        # The last authored value was not True; the old formula is the likely
+        # writer. A pending marker does not override a recorded contradiction.
         return 'rewritten_true'
+    if pending_edit:
+        return 'authored_true'
+    if source_state is True:
+        return 'source_backed_true'
+    if source_state is False:
+        return 'source_conflict'
     return 'unattributed_true'
 
 
@@ -232,7 +331,7 @@ class Command(BaseCommand):
 
     def _collect(self, summary_only):
         histories = {field: _revisions(field) for field in FIELDS}
-        backed = _source_backed_people()
+        source_states = _source_state()
         queryset = (
             PatientRecord.objects
             .order_by('pk')
@@ -262,9 +361,9 @@ class Command(BaseCommand):
             for field in FIELDS:
                 revisions = histories[field].get(pk, [])
                 pending_edit = field in edited
-                source_backed = person_id in backed[field]
+                source_state = source_states[field].get(person_id)
                 classification = classify(
-                    values[field], revisions, pending_edit, source_backed)
+                    values[field], revisions, pending_edit, source_state)
                 action = ACTIONS[classification]
                 by_field[field]['by_classification'][classification] += 1
                 by_field[field]['by_action'][action] = (
@@ -275,10 +374,10 @@ class Command(BaseCommand):
                     'recommended_action': action,
                     'revision_count': len(revisions),
                     'pending_edit': pending_edit,
-                    'source_backed': source_backed,
+                    'source_state': source_state,
                     'last_authored': next(
                         (parsed for parsed in (
-                            _as_bool(revision['new']) for revision in reversed(revisions))
+                            _revision_value(revision['new']) for revision in reversed(revisions))
                          if parsed is not None), None),
                 }
             totals += 1
