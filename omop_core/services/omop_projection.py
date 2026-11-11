@@ -571,16 +571,17 @@ def _same_projection_value(row, value, val_num, val_str):
 
 
 def move_owned_fact_date(person, field_name, value, projection, fact_date, *,
-                         type_concept_id=None):
-    """Move the fact this projector owns to ``fact_date``, if it can.
+                         type_concept_id=None, fact_id=None):
+    """Move the identified fact this projector owns to ``fact_date``.
 
-    Returns True when the day is already correct or was moved, None when there
-    is no fact for this field (the caller may create one), and False when the
-    fact is not ours, the value does not match the stored result, or another
-    result already occupies the target day. A date-only correction must not add
-    a second row and leave the wrong-dated one active, and must not move a
-    different result of the same test.
+    Returns True when the result is already on that day or was moved, and False
+    when the id names no matching fact, the fact is not ours to rewrite, the
+    value no longer matches, or another result already occupies the target day.
+    The caller refuses the edit on False; a date-only correction never guesses
+    which result the reader meant.
     """
+    if fact_id is None:
+        return False
     target = projection.get('omop_table')
     concept_id = projection.get('concept_id')
     source_value = projection.get('source_value')
@@ -593,31 +594,25 @@ def move_owned_fact_date(person, field_name, value, projection, fact_date, *,
     from omop_core.services.cancer_details import projection_scope
     scope = projection_scope(person, field_name, model)
     rows = model.objects.select_for_update().filter(
-        person=person, is_erroneous=False,
+        person=person, is_erroneous=False, pk=fact_id,
         **{concept_field: concept_id, src_field: source_value}, **scope,
     )
     if type_concept_id is not None:
         rows = rows.filter(**{type_field: type_concept_id})
     else:
-        # Match project_single_value: unless the recipe itself is patient
-        # self-report, a clinical edit must not move a patient's fact.
         fact_type = projection.get('type_concept_id') or 32817
         if fact_type != PATIENT_SELF_REPORT_TYPE:
             rows = rows.exclude(**{type_field: PATIENT_SELF_REPORT_TYPE})
-    all_rows = list(rows.order_by('-' + date_field, '-' + pk_field))
-    if not all_rows:
-        return None
-    target_rows = [row for row in all_rows
-                   if getattr(row, date_field) == fact_date]
-    if target_rows:
-        if any(_same_projection_value(row, value, val_num, val_str)
-               and _projection_owned(row) for row in target_rows):
-            return True
+    row = rows.first()
+    if row is None or not _projection_owned(row) or not _same_projection_value(
+            row, value, val_num, val_str):
         return False
-    row = next((candidate for candidate in all_rows
-                if _same_projection_value(candidate, value, val_num, val_str)
-                and _projection_owned(candidate)), None)
-    if row is None:
+    siblings = model.objects.filter(
+        person=person, is_erroneous=False,
+        **{concept_field: concept_id, src_field: source_value, date_field: fact_date},
+        **scope,
+    ).exclude(pk=row.pk)
+    if siblings.exists():
         return False
     model.objects.filter(pk=row.pk).update(**{date_field: fact_date})
     return True

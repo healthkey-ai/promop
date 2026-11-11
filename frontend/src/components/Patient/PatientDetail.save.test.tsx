@@ -33,7 +33,10 @@ vi.mock('@/hooks/useVocabulary', () => ({
 }));
 
 vi.mock('@/hooks/useLabMeasurements', () => ({
-  useLabMeasurements: vi.fn(() => ({ grouped: new Map(), isLoading: false })),
+  useLabMeasurements: vi.fn(() => ({ grouped: new Map([[
+    '718-7', { sourceValue: '718-7', unit: 'g/dL',
+      values: [{ measurement_id: 55, measured_at: '2026-11-10' }] },
+  ]]), isLoading: false })),
 }));
 
 import api from '@/api/axios';
@@ -236,7 +239,7 @@ describe('PatientDetail save — the edit, not the record', () => {
 
     await waitFor(() => expect(api.patch).toHaveBeenCalledTimes(2));
     expect(patchBody()).toMatchObject({
-      hemoglobin_g_dl: { value: 9.5, date: '2026-10-01' },
+      hemoglobin_g_dl: { value: 9.5, date: '2026-10-01', fact_id: 55 },
     });
   });
 

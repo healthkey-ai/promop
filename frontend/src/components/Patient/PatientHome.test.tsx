@@ -9,6 +9,10 @@ vi.mock("@/components/Patient/PatientDetail", () => ({
     <div>{`PATIENT_DETAIL:${props.personIdOverride}:${String(props.patientMode)}:${props.user?.person_id ?? "none"}`}</div>
   ),
 }));
+vi.mock('@/hooks/useLabMeasurements', () => ({
+  useLabMeasurements: () => ({ grouped: new Map(), isLoading: false }),
+}));
+
 
 vi.mock("@/api/axios", () => ({
   default: { get: vi.fn() },

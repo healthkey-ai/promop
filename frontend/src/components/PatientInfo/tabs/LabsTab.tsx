@@ -18,7 +18,7 @@ import type { LabMeasurementGroup } from '@/hooks/useLabMeasurements';
 
 interface Props {
   formData: Record<string, unknown>;
-  onChange: (field: string, value: unknown, date?: string) => void;
+  onChange: (field: string, value: unknown, date?: string, factId?: number) => void;
 }
 
 /**
@@ -153,7 +153,9 @@ export default function LabsTab({ formData, onChange }: Props) {
     setDates((current) => ({ ...current, [name]: next }));
     const value = formData?.[name];
     if (value !== undefined && value !== null && value !== '') {
-      onChange(name, value, next);
+      // The id names the measurement this date corrects; without it the
+      // backend would have to guess between equal values (#2439).
+      onChange(name, value, next, getGroup(name)?.values[0]?.measurement_id);
     }
   };
   const [chartDialog, setChartDialog] = useState<{

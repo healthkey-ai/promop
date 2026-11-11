@@ -1387,10 +1387,23 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         # shared form uses the same contract; the standalone editor used to
         # lose the date picked on a lab row (#2439).
         fact_dates = {}
-        if any(isinstance(value, dict) and set(value) == {'value', 'date'}
+        fact_ids = {}
+        if any(isinstance(value, dict) and set(value) in (
+                {'value', 'date'}, {'value', 'date', 'fact_id'})
                for value in patch_data.values()):
             from omop_core.services.field_write_service import split_dated_edits
             from omop_core.services.write_descriptor import build_writable_field_descriptor
+            for field, value in list(patch_data.items()):
+                if not (isinstance(value, dict)
+                        and set(value) == {'value', 'date', 'fact_id'}):
+                    continue
+                try:
+                    fact_ids[field] = int(value['fact_id'])
+                except (TypeError, ValueError) as exc:
+                    raise ValidationError(
+                        {field: 'fact_id must identify the result being dated.'}) from exc
+                patch_data[field] = {key: item for key, item in value.items()
+                                     if key != 'fact_id'}
             try:
                 patch_data, fact_dates = split_dated_edits(
                     patch_data, build_writable_field_descriptor())
@@ -1529,6 +1542,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 projected = set(self._project_mapped_fields(
                     person, clinical_fields, projection_data, actor=request.user,
                     fact_dates=fact_dates, date_only_fields=date_only_fields,
+                    fact_ids=fact_ids,
                 ))
                 if _direct_units.PAIR_FIELD in projected:
                     # A successful projection confirms the pair as a whole; an
@@ -1583,7 +1597,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
     @staticmethod
     def _project_mapped_fields(person, direct_fields, patch_data, actor=None,
-                               fact_dates=None, date_only_fields=()):
+                               fact_dates=None, date_only_fields=(), fact_ids=None):
         """Project validated edits using the editor's curated or built-in recipe.
 
         Each projection uses a savepoint so failure preserves the PatientRecord
@@ -1614,6 +1628,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             return set()
         fact_dates = fact_dates or {}
         date_only_fields = set(date_only_fields)
+        fact_ids = fact_ids or {}
         projected = set()
         authorship = None
         patient_author_without_type = False
@@ -1632,9 +1647,15 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     continue
                 if field in date_only_fields:
                     from omop_core.services.omop_projection import move_owned_fact_date
+                    fact_id = fact_ids.get(field)
+                    if fact_id is None:
+                        raise ValidationError({field: (
+                            'Reload the result before changing its date; the result '
+                            'to correct is not identified.')})
                     moved = move_owned_fact_date(
                         person, field, patch_data[field], projection, fact_dates[field],
                         type_concept_id=authorship.get('type_concept_id'),
+                        fact_id=fact_id,
                     )
                     if moved is False:
                         raise ValidationError({field: (

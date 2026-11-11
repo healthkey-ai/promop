@@ -107,11 +107,12 @@ def test_a_date_only_correction_moves_the_fact_instead_of_duplicating(editor):
     record, client = editor
     concept = hemoglobin()
     patch_field(editor, 'hemoglobin_g_dl', 12)  # today
+    row = Measurement.objects.get(person=record.person, measurement_concept=concept)
     day = timezone.localdate() - timedelta(days=10)
 
     response = client.patch(
         f'/api/patient-info/{record.person_id}/',
-        {'hemoglobin_g_dl': {'value': 12, 'date': day.isoformat()}},
+        {'hemoglobin_g_dl': {'value': 12, 'date': day.isoformat(), 'fact_id': row.pk}},
         format='json',
     )
 
@@ -133,11 +134,13 @@ def test_a_date_only_correction_cannot_move_an_imported_fact(editor):
             value_as_number=12)
     record.hemoglobin_g_dl = 12
     record.save(update_fields=['hemoglobin_g_dl'])
+    imported = Measurement.objects.get(person=record.person)
     day = timezone.localdate() - timedelta(days=10)
 
     response = client.patch(
         f'/api/patient-info/{record.person_id}/',
-        {'hemoglobin_g_dl': {'value': 12, 'date': day.isoformat()}},
+        {'hemoglobin_g_dl': {'value': 12, 'date': day.isoformat(),
+                             'fact_id': imported.pk}},
         format='json',
     )
 
@@ -156,10 +159,13 @@ def test_a_repeated_date_correction_does_not_move_another_result(editor):
             f'/api/patient-info/{record.person_id}/',
             {'hemoglobin_g_dl': {'value': value, 'date': day.isoformat()}},
             format='json').status_code == 200
+    rows = Measurement.objects.filter(person=record.person, measurement_concept=concept)
+    twelve = rows.get(value_as_number=12)
     for _ in range(2):
         assert client.patch(
             f'/api/patient-info/{record.person_id}/',
-            {'hemoglobin_g_dl': {'value': 12, 'date': chosen.isoformat()}},
+            {'hemoglobin_g_dl': {'value': 12, 'date': chosen.isoformat(),
+                                 'fact_id': twelve.pk}},
             format='json').status_code == 200
 
     rows = Measurement.objects.filter(person=record.person, measurement_concept=concept)
@@ -176,10 +182,13 @@ def test_a_date_correction_refuses_an_occupied_day(editor):
             person=record.person, measurement_concept=concept,
             measurement_source_value='718-7', measurement_date=chosen, value_as_number=9)
     patch_field(editor, 'hemoglobin_g_dl', 12)
+    row = Measurement.objects.get(
+        person=record.person, measurement_concept=concept,
+        measurement_date=timezone.localdate())
 
     response = client.patch(
         f'/api/patient-info/{record.person_id}/',
-        {'hemoglobin_g_dl': {'value': 12, 'date': chosen.isoformat()}},
+        {'hemoglobin_g_dl': {'value': 12, 'date': chosen.isoformat(), 'fact_id': row.pk}},
         format='json',
     )
 

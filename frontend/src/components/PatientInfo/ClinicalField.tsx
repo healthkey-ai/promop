@@ -162,12 +162,7 @@ export default function ClinicalField({
             onChange={(e) => {
               const next = e.target.value;
               if (onDateChange) onDateChange(next);
-              else {
-                setOwnDate(next);
-                if (value !== undefined && value !== null && value !== '') {
-                  onChange(name, value, next);
-                }
-              }
+              else setOwnDate(next);
             }}
             className="rounded-md border border-input px-2 py-1 text-xs"
           />

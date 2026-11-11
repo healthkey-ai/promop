@@ -23,6 +23,10 @@ vi.mock('@/hooks/useVocabulary', () => ({
   useVocabulary: () => ({ options: [], source: null, loading: false }),
 }));
 
+vi.mock('@/hooks/useLabMeasurements', () => ({
+  useLabMeasurements: () => ({ grouped: new Map(), isLoading: false }),
+}));
+
 vi.mock('@/hooks/useDiseaseCategories', () => ({
   useCategoryObjects: () => ({ categories: [], loading: false }),
   useAllDiseaseMappings: () => ({

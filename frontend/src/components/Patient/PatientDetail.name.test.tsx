@@ -15,6 +15,10 @@ import PatientDetail from "./PatientDetail";
 vi.mock("@/api/axios", () => ({
   default: { get: vi.fn(), patch: vi.fn(), post: vi.fn() },
 }));
+vi.mock('@/hooks/useLabMeasurements', () => ({
+  useLabMeasurements: () => ({ grouped: new Map(), isLoading: false }),
+}));
+
 
 vi.mock("react-router-dom", async importOriginal => ({
   ...await importOriginal<typeof import("react-router-dom")>(),

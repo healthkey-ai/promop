@@ -357,6 +357,7 @@ export default function PatientDetail({
   // A lab value's clinical date, keyed by field. It travels with the value in
   // the PATCH as {value, date}; a date-only change re-sends the value (#2439).
   const pendingDatesRef = useRef<Record<string, string>>({});
+  const pendingFactIdsRef = useRef<Record<string, number>>({});
    
   const pendingDataRef = useRef<{ info: Record<string, unknown>; name: string } | null>(null);
    
@@ -488,13 +489,19 @@ export default function PatientDetail({
       const renamed = !!data.name && data.name !== patientNameRef.current;
       const patchFields: Record<string, unknown> = {};
       const sentDates: Record<string, string> = {};
+      const sentFactIds: Record<string, number> = {};
 
       for (const [f, v] of Object.entries(info)) {
         if (f === 'no_pre_existing_conditions' || f === 'preexisting_conditions') continue;
         const pendingDate = pendingDatesRef.current[f];
         if (LIFECYCLE.has(f) || (v === baseline[f] && !pendingDate)) continue;
         const desc = descriptors[f];
-        const value = pendingDate ? { value: v, date: pendingDate } : v;
+        // A date-only correction names the result it corrects. A changed value
+        // is a new result, so it must not carry the old fact's id.
+        const pendingFactId = v === baseline[f] ? pendingFactIdsRef.current[f] : undefined;
+        const value = pendingDate
+          ? { value: v, date: pendingDate, ...(pendingFactId ? { fact_id: pendingFactId } : {}) }
+          : v;
         if (editableWithoutFormStore(desc) && desc?.target === 'patient_record') {
           patchFields[f] = value;
         } else if (!(f in descriptors)) {
@@ -502,6 +509,7 @@ export default function PatientDetail({
           patchFields[f] = value;
         }
         if (pendingDate) sentDates[f] = pendingDate;
+        if (pendingFactId) sentFactIds[f] = pendingFactId;
       }
 
       // All fields ride the single PatientRecord PATCH.
@@ -518,8 +526,11 @@ export default function PatientDetail({
           // the next save; only clear the pair this response confirmed.
           if (sentDates[f]
               && pendingDatesRef.current[f] === sentDates[f]
+              && (sentFactIds[f] === undefined
+                  || pendingFactIdsRef.current[f] === sentFactIds[f])
               && pendingDataRef.current?.info[f] === info[f]) {
             delete pendingDatesRef.current[f];
+            delete pendingFactIdsRef.current[f];
           }
           if (pendingDataRef.current?.info[f] === info[f]) dirtyFieldsRef.current.delete(f);
         }
@@ -633,12 +644,16 @@ export default function PatientDetail({
       .catch(() => {});
   }, [personId, adoptServerRecord]);
 
-  const handleFieldChange = useCallback((field: string, value: unknown, date?: string) => {
+  const handleFieldChange = useCallback((
+    field: string, value: unknown, date?: string, factId?: number,
+  ) => {
     if (readOnly) return;
     const base = pendingDataRef.current?.info ?? editedInfoRef.current;
     const updated = { ...base, [field]: value };
     if (date) pendingDatesRef.current[field] = date;
     else delete pendingDatesRef.current[field];
+    if (factId) pendingFactIdsRef.current[field] = factId;
+    else delete pendingFactIdsRef.current[field];
     if (value === patientInfoRef.current?.[field]) dirtyFieldsRef.current.delete(field);
     else dirtyFieldsRef.current.add(field);
 
