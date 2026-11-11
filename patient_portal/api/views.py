@@ -192,8 +192,8 @@ def _patient_author_role(actor, person):
     return get_actor_role(actor, person.person_id)
 
 
-def _propagate_pair_fact_dates(fact_dates):
-    """Copy a source pair's date onto its canonical read-model (#2397).
+def _propagate_pair_fact_dates(fact_dates, fact_ids):
+    """Copy a source pair's date and result id onto its canonical read-model (#2397).
 
     A pair editor dates the source field; the projection that writes the fact
     is on the canonical field. Both must carry the same clinical day.
@@ -212,6 +212,8 @@ def _propagate_pair_fact_dates(fact_dates):
     for source, canonical in pairs.items():
         if source in fact_dates and canonical not in fact_dates:
             fact_dates[canonical] = fact_dates[source]
+        if source in fact_ids and canonical not in fact_ids:
+            fact_ids[canonical] = fact_ids[source]
 
 
 def _patient_author(actor, person):
@@ -1387,7 +1389,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         # shared form uses the same contract; the standalone editor used to
         # lose the date picked on a lab row (#2439).
         fact_dates = {}
-        fact_ids = {}
+        requested_fact_ids = {}
         if any(isinstance(value, dict) and set(value) in (
                 {'value', 'date'}, {'value', 'date', 'fact_id'})
                for value in patch_data.values()):
@@ -1398,7 +1400,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         and set(value) == {'value', 'date', 'fact_id'}):
                     continue
                 try:
-                    fact_ids[field] = int(value['fact_id'])
+                    requested_fact_ids[field] = int(value['fact_id'])
                 except (TypeError, ValueError) as exc:
                     raise ValidationError(
                         {field: 'fact_id must identify the result being dated.'}) from exc
@@ -1409,9 +1411,9 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     patch_data, build_writable_field_descriptor())
             except ValueError as exc:
                 raise ValidationError({'detail': str(exc)}) from exc
-            _propagate_pair_fact_dates(fact_dates)
+            _propagate_pair_fact_dates(fact_dates, requested_fact_ids)
 
-        fact_ids = {}
+        projected_fact_ids = {}
         with transaction.atomic():
             # Match derivation's lock order and serialize the read/modify/write
             # of user_edited_fields as well as same-day OMOP projection.
@@ -1540,10 +1542,10 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     projection_data['medication_contexts'] = context_delta(
                         previous_values.get('medication_contexts') or {},
                         projection_data['medication_contexts'])
-                projected, fact_ids = self._project_mapped_fields(
+                projected, projected_fact_ids = self._project_mapped_fields(
                     person, clinical_fields, projection_data, actor=request.user,
                     fact_dates=fact_dates, date_only_fields=date_only_fields,
-                    known_fact_ids=fact_ids,
+                    known_fact_ids=requested_fact_ids,
                 )
                 if _direct_units.PAIR_FIELD in projected:
                     # A successful projection confirms the pair as a whole; an
@@ -1595,10 +1597,10 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 patient_info.refresh_from_db()
 
         body = {**PatientRecordSerializer(patient_info).data, 'previous_values': previous_values}
-        if fact_ids:
+        if projected_fact_ids:
             # The client uses these ids to correct a result's date later; a
             # cached measurement list goes stale as soon as this write lands.
-            body['fact_ids'] = fact_ids
+            body['fact_ids'] = projected_fact_ids
         return Response(body)
 
     @staticmethod

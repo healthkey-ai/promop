@@ -103,6 +103,33 @@ def test_a_dated_source_pair_projects_on_the_chosen_day(editor):
     assert row.value_as_number == 12
 
 
+def test_a_source_pair_date_correction_carries_its_fact_id(editor):
+    record, client = editor
+    concept = hemoglobin()
+    first = timezone.localdate() - timedelta(days=5)
+    chosen = timezone.localdate() - timedelta(days=15)
+    response = client.patch(
+        f'/api/patient-info/{record.person_id}/',
+        {'hemoglobin_level': {'value': 12, 'date': first.isoformat()},
+         'hemoglobin_level_units': 'G/DL'},
+        format='json',
+    )
+    assert response.status_code == 200, response.data
+    fact_id = response.data['fact_ids']['hemoglobin_g_dl']
+
+    response = client.patch(
+        f'/api/patient-info/{record.person_id}/',
+        {'hemoglobin_level': {'value': 12, 'date': chosen.isoformat(),
+                              'fact_id': fact_id},
+         'hemoglobin_level_units': 'G/DL'},
+        format='json',
+    )
+
+    assert response.status_code == 200, response.data
+    assert Measurement.objects.get(
+        person=record.person, measurement_concept=concept).measurement_date == chosen
+
+
 def test_a_date_only_correction_moves_the_fact_instead_of_duplicating(editor):
     record, client = editor
     concept = hemoglobin()
@@ -248,13 +275,15 @@ def test_a_date_correction_keeps_the_result_when_another_has_equal_value(editor)
         person=record.person, measurement_concept=concept,
         measurement_date=b_day).pk
     assert a != b
-    for day in (a_day - timedelta(days=1), a_day - timedelta(days=2)):
+    # Cross B's date: the second correction must still name A, not the now
+    # newer B with the same value.
+    for day in (b_day - timedelta(days=1), b_day - timedelta(days=2)):
         assert client.patch(
             f'/api/patient-info/{record.person_id}/',
             {'hemoglobin_g_dl': {'value': 12, 'date': day.isoformat(), 'fact_id': a}},
             format='json').status_code == 200
 
-    assert Measurement.objects.get(pk=a).measurement_date == a_day - timedelta(days=2)
+    assert Measurement.objects.get(pk=a).measurement_date == b_day - timedelta(days=2)
     assert Measurement.objects.get(pk=b).measurement_date == b_day
 
 
