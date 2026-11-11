@@ -1127,6 +1127,21 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             'stages': ['I', 'II', 'III', 'IV'],
         }
     
+    def _withholds_identifiers(self, request) -> bool:
+        """A session reader with no curation access sees no demographics (#2460).
+
+        The demo-org browse lists sample patients to an analyst or a
+        patient-role grant (#1392), neither of which may read a patient's
+        data: the list and the CSV export carry their rows de-identified.
+        Machine credentials and org-scoped tokens are not readers here.
+        """
+        if is_service_token(request) or get_request_org(request) is not None:
+            return False
+        user = request.user
+        if not (user and user.is_authenticated) or getattr(user, 'is_staff', False):
+            return False
+        return not has_curation_access(user)
+
     def list(self, request):
         """List all patients - accessible to authenticated users"""
         base_queryset = self.get_queryset()
@@ -1136,7 +1151,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         from patient_portal.models import PatientUser
         own_person_id = (PatientUser.objects.filter(identity=request.user).values_list('person_id', flat=True).first()
                          if request.user and request.user.is_authenticated else None)
-        context = {'request': request, 'own_person_id': own_person_id}
+        context = {'request': request, 'own_person_id': own_person_id,
+                   'withhold_identifiers': self._withholds_identifiers(request)}
 
         if 'page' in request.query_params or 'page_size' in request.query_params:
             page = self.paginate_queryset(queryset)
@@ -5348,7 +5364,9 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                                           'narrow the filters.'},
                                 status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
 
-        rows = PatientRecordSerializer(queryset, many=True, context={'request': request}).data
+        rows = PatientRecordSerializer(queryset, many=True, context={
+            'request': request, 'withhold_identifiers': self._withholds_identifiers(request),
+        }).data
         columns = list(rows[0].keys()) if rows else ['person_id']
 
         buffer = StringIO()

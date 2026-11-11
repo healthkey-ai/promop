@@ -350,8 +350,13 @@ class PatientListSerializer(serializers.ModelSerializer):
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
+        # A reader without curation access -- a demo-org browse by an
+        # analyst or a patient-role grant (#2460) -- is withheld every
+        # patient's demographics, as if each had opted in; otherwise only
+        # the patients who did, from anyone but themselves.
+        withheld = self.context.get('withhold_identifiers', False)
         if (self.context.get('request') is not None
-                and instance.suppress_demographics_for_others
+                and (withheld or instance.suppress_demographics_for_others)
                 and self.context.get('own_person_id') != instance.person_id):
             for field in ('patient_name', 'age', 'location_summary'):
                 data[field] = None
@@ -719,7 +724,10 @@ class PatientRecordSerializer(serializers.ModelSerializer):
         paths) no redaction is applied. Wiring redaction into every read path
         that omits serializer context is documented as deferred.
         """
-        if not getattr(instance, 'suppress_demographics_for_others', False):
+        # A reader without curation access (#2460) is treated as if every
+        # patient had opted in: the demo-org browse shows de-identified rows.
+        if not (getattr(instance, 'suppress_demographics_for_others', False)
+                or self.context.get('withhold_identifiers', False)):
             return data
         request = self.context.get('request')
         if request is None or self._is_account_holder(request, instance):
