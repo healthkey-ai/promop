@@ -30,8 +30,9 @@ def request_refresh(apps, schema_editor):
         except Exception as error:
             # The live model can be ahead of this schema when a deployment
             # migrates through several releases at once. The row is what matters.
-            # A fresh database has no broker; that is expected, so one line, not
-            # a traceback. The worker sweep publishes it.
+            # Publishing can fail on a fresh database or when the live model is
+            # ahead of this schema. That is recoverable, so warn once instead of
+            # printing a traceback. The worker sweep publishes the row.
             logger.warning('Axis variant refresh %s not published (%s); the worker will publish it.',
                            row.pk, error)
             logger.debug('Axis variant refresh %s publish failed', row.pk, exc_info=True)

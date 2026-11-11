@@ -39,8 +39,9 @@ def request_rebuild(apps, schema_editor):
 
             axis_variant_jobs.publish(LiveModel.objects.get(pk=row.pk))
         except Exception as error:
-            # A fresh database has no broker; the row is durable and the worker
-            # sweep publishes it. One line, not a traceback.
+            # Publishing can fail on a fresh database or when the live model is
+            # ahead of this schema. The row is durable and the worker sweep
+            # publishes it; warn once instead of printing a traceback.
             logger.warning('Axis variant refresh %s not published (%s); the worker will publish it.',
                            row.pk, error)
             logger.debug('Axis variant refresh %s publish failed', row.pk, exc_info=True)
