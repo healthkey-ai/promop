@@ -67,7 +67,8 @@ def _failure(person_id, exc):
     while cause is not None and not hasattr(cause, "sqlstate"):
         cause = cause.__cause__
     if cause is not None:
-        failure["sqlstate"] = cause.sqlstate
+        if cause.sqlstate:
+            failure["sqlstate"] = cause.sqlstate
         constraint = getattr(getattr(cause, "diag", None), "constraint_name", None)
         if constraint:
             failure["constraint"] = constraint

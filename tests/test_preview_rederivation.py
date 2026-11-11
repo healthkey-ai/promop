@@ -160,8 +160,9 @@ def test_a_pending_edit_the_refresh_overrides_is_reported_and_marked():
 
     assert rows['languages_skills'] == {
         'person_id': record.person_id, 'field': 'languages_skills',
-        'stored': 'English language: speak', 'rederived': None,
-        'user_edited': True, 'redacted': False,
+        # Free text: the value is redacted; the cleared side stays visible.
+        'stored': '[redacted]', 'rederived': None,
+        'user_edited': True, 'redacted': True,
     }
     assert rows['user_edited_fields']['stored'] == ['languages_skills', 'race']
     assert rows['user_edited_fields']['rederived'] == ['race']
@@ -249,8 +250,8 @@ def test_csv_output_keeps_the_summary_off_stdout():
 
     rows = list(csv.DictReader(io.StringIO(out)))
     assert rows == [
-        {'person_id': str(record.person_id), 'field': 'languages_skills', 'stored': '"x"',
-         'rederived': 'null', 'user_edited': 'true', 'redacted': 'false'},
+        {'person_id': str(record.person_id), 'field': 'languages_skills', 'stored': '"[redacted]"',
+         'rederived': 'null', 'user_edited': 'true', 'redacted': 'true'},
         {'person_id': str(record.person_id), 'field': 'race', 'stored': '"Asian"',
          'rederived': '"White"', 'user_edited': 'false', 'redacted': 'false'},
     ]
@@ -507,3 +508,40 @@ def test_a_refused_task_the_refresh_swallows_still_fails_the_preview(monkeypatch
 
     with pytest.raises(PreviewWriteBlocked, match='Celery'):
         preview_record(record)
+
+
+# ---------------------------------------------------------------------------
+# Default-deny redaction (round-2 review: genomic report text leaked)
+# ---------------------------------------------------------------------------
+
+def test_no_free_text_date_or_json_column_shows_its_values():
+    """Every PatientRecord column that can hold free text, a personal date or a
+    JSON document is redacted unless it is explicitly listed as a vocabulary
+    term or field-name list. A new column is redacted by default."""
+    from omop_core.models import PatientRecord
+    from omop_core.services.rederivation_preview import SHOWN_FIELDS, value_is_shown
+    for field in PatientRecord._meta.concrete_fields:
+        kind = field.get_internal_type()
+        risky = kind in ('JSONField', 'DateField', 'DateTimeField') or (
+            kind in ('CharField', 'TextField') and not field.choices)
+        if risky and field.name not in SHOWN_FIELDS:
+            assert not value_is_shown(field.name), field.name
+
+
+@pytest.mark.parametrize('field, value, shown', [
+    ('genetic_mutations', [{'gene': 'BRCA1', 'variant': 'Jane Doe report'}], False),
+    ('genomics_brca1', {'variant': 'Jane Doe report'}, False),
+    ('molecular_markers', 'Jane Doe report', False),
+    ('diagnosis_date', '2024-01-01', False),
+    ('latitude', 45.5, False),
+    ('patient_age', 90, False),
+    ('patient_age', 64, True),
+    ('bmi', 24.2, True),
+    ('disease', 'Multiple Myeloma', True),
+    ('custom_fields.note', 'Jane Doe', False),
+    ('custom_fields.score', 3, True),
+])
+def test_values_are_shown_only_for_non_identifying_fields(field, value, shown):
+    from omop_core.services.rederivation_preview import REDACTED, _shown
+    assert (_shown(field, value) != REDACTED) is shown
+
