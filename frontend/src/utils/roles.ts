@@ -38,11 +38,18 @@ const hasDemoOrgGrant = (user: User | null | undefined): boolean =>
     (a) => a.org_allows_patient_signup && PROFESSIONAL_ROLES.includes(a.role ?? ''),
   );
 
-/** Reaches the patient list: staff, org_admin or doctor (the server's
- *  `has_curation_access`), or any professional grant at a public demo org,
- *  whose list every grant there sees. */
+/** Reads a patient's data: opens the detail page, sees names and other
+ *  demographics on the list. Staff, org_admin or doctor, the server's
+ *  `has_curation_access`. */
+export function canOpenPatients(user: User | null | undefined): boolean {
+  return isStaffOrOrgAdmin(user) || hasGrant(user, PATIENT_ROLES);
+}
+
+/** Reaches the patient list: anyone who opens patients, or any professional
+ *  grant at a public demo org, whose list every grant there sees. A reader
+ *  who cannot open patients gets the rows de-identified (#2460). */
 export function canReadPatients(user: User | null | undefined): boolean {
-  return isStaffOrOrgAdmin(user) || hasGrant(user, PATIENT_ROLES) || hasDemoOrgGrant(user);
+  return canOpenPatients(user) || hasDemoOrgGrant(user);
 }
 
 /** Opens the mapping pages (the hub, Code Mapping, field mappings, therapy

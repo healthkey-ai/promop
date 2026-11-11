@@ -1096,6 +1096,9 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             )
             queryset = queryset.filter(updated_at__gte=start_of_year)
 
+        # The withheld reader (#2460) searches, filters and sorts only on what
+        # it is shown: ids and clinical fields, never a name, email or address.
+        withheld = self._withholds_identifiers(self.request)
         search = self._normalize_all_param(params.get('search'))
         if search:
             from omop_core.services.patient_list_context import visible_demographics
@@ -1110,7 +1113,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 Q(email__icontains=search) |
                 Q(person__portal_user__identity__email__icontains=search)
             )
-            search_query = name_query & visible_demographics(self.request.user)
+            search_query = name_query & visible_demographics(self.request.user, withheld)
             try:
                 search_query |= Q(person__person_id=int(search))
             except (TypeError, ValueError):
@@ -1118,7 +1121,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             queryset = queryset.filter(search_query)
 
         from omop_core.services.patient_list_context import filter_context
-        return filter_context(queryset, params, self.request.user)
+        return filter_context(queryset, params, self.request.user, withheld)
 
     def _build_filter_options(self, queryset):
         org_rows = (
@@ -1165,16 +1168,33 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             'stages': ['I', 'II', 'III', 'IV'],
         }
     
+    def _withholds_identifiers(self, request) -> bool:
+        """A session reader with no curation access sees no demographics (#2460).
+
+        The demo-org browse lists sample patients to an analyst or a
+        patient-role grant (#1392), neither of which may read a patient's
+        data: the list and the CSV export carry their rows de-identified.
+        Machine credentials and org-scoped tokens are not readers here.
+        """
+        if is_service_token(request) or get_request_org(request) is not None:
+            return False
+        user = request.user
+        # A reader this cannot classify is withheld, not shown: fail closed.
+        if not (user and user.is_authenticated):
+            return True
+        return not has_curation_access(user)
+
     def list(self, request):
         """List all patients - accessible to authenticated users"""
         base_queryset = self.get_queryset()
         from omop_core.services.patient_list_context import annotate_context, order_context
+        withheld = self._withholds_identifiers(request)
         queryset = order_context(self._apply_patient_list_filters(base_queryset),
-                                 request.query_params.get('ordering', '-updated'), request.user)
+                                 request.query_params.get('ordering', '-updated'), request.user, withheld)
         from patient_portal.models import PatientUser
         own_person_id = (PatientUser.objects.filter(identity=request.user).values_list('person_id', flat=True).first()
                          if request.user and request.user.is_authenticated else None)
-        context = {'request': request, 'own_person_id': own_person_id}
+        context = {'request': request, 'own_person_id': own_person_id, 'withhold_identifiers': withheld}
 
         if 'page' in request.query_params or 'page_size' in request.query_params:
             page = self.paginate_queryset(queryset)
@@ -5533,6 +5553,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         from omop_core.services.patient_list_context import order_context
 
         queryset = self.get_queryset()
+        withheld = self._withholds_identifiers(request)
         raw_ids = request.query_params.get('person_ids')
         if raw_ids is not None:
             try:
@@ -5548,13 +5569,14 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             queryset = queryset.filter(person__person_id__in=person_ids).order_by('person__person_id')
         else:
             queryset = order_context(self._apply_patient_list_filters(queryset),
-                                     request.query_params.get('ordering', '-updated'), request.user)
+                                     request.query_params.get('ordering', '-updated'), request.user, withheld)
             if queryset.count() > self.EXPORT_CSV_MAX_ROWS:
                 return Response({'error': f'At most {self.EXPORT_CSV_MAX_ROWS} patients per export; '
                                           'narrow the filters.'},
                                 status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
 
-        rows = PatientRecordSerializer(queryset, many=True, context={'request': request}).data
+        rows = PatientRecordSerializer(queryset, many=True,
+                                       context={'request': request, 'withhold_identifiers': withheld}).data
         columns = list(rows[0].keys()) if rows else ['person_id']
 
         buffer = StringIO()

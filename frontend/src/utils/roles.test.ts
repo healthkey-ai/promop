@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { User } from '@/hooks/useAuth';
 
-import { canReadPatients, isAnalystOnly } from './roles';
+import { canOpenPatients, canReadPatients, isAnalystOnly } from './roles';
 
 const grant = (role: string, extra: Record<string, unknown> = {}) => ({
   org_name: 'Org', org_slug: 'org', role, expires_at: null, ...extra,
@@ -22,6 +22,9 @@ describe('canReadPatients / isAnalystOnly', () => {
     const u = user([grant('analyst', { org_allows_patient_signup: true })]);
     expect(canReadPatients(u)).toBe(true);
     expect(isAnalystOnly(u)).toBe(false);
+    // The list only: no detail page, no names (#2460).
+    expect(canOpenPatients(u)).toBe(false);
+    expect(canOpenPatients(user([grant('doctor', { org_allows_patient_signup: true })]))).toBe(true);
   });
 
   it('does not count a patient-role grant at a demo org as a professional read', () => {
