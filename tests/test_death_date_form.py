@@ -9,6 +9,7 @@ clearing recorded as an assertion rather than a silent delete.
 from datetime import date, timedelta
 
 import pytest
+from django.core.exceptions import ValidationError
 
 from omop_core.models import Observation
 from omop_core.services.patient_form import apply_patient_form_patch
@@ -81,7 +82,7 @@ def test_clearing_writes_a_cleared_assertion():
 def test_a_future_death_date_is_rejected():
     person, record = _person_with_record()
 
-    with pytest.raises(ValueError, match='cannot be in the future'):
+    with pytest.raises(ValidationError, match='cannot be in the future'):
         apply_patient_form_patch(
             person, {'death_date': (date.today() + timedelta(days=1)).isoformat()})
 
@@ -95,7 +96,7 @@ def test_a_death_date_before_birth_is_rejected():
     record.date_of_birth = date(2020, 6, 1)
     record.save(update_fields=['date_of_birth'])
 
-    with pytest.raises(ValueError, match='cannot precede date of birth'):
+    with pytest.raises(ValidationError, match='cannot precede date of birth'):
         apply_patient_form_patch(person, {'death_date': DEATH.isoformat()})
 
     record.refresh_from_db()
@@ -146,7 +147,7 @@ def test_the_effective_birth_and_death_pair_is_validated():
 
     # A submitted DOB must be compared with the submitted death date, not the
     # stored one (the native serializer validates the submitted pair).
-    with pytest.raises(ValueError, match='cannot precede date of birth'):
+    with pytest.raises(ValidationError, match='cannot precede date of birth'):
         apply_patient_form_patch(person, {
             'date_of_birth': date(2021, 1, 1).isoformat(),
             'death_date': DEATH.isoformat(),
@@ -155,7 +156,7 @@ def test_the_effective_birth_and_death_pair_is_validated():
     # A DOB-only correction must respect a death date already on the record.
     record.death_date = date(2020, 1, 1)
     record.save(update_fields=['death_date'])
-    with pytest.raises(ValueError, match='cannot precede date of birth'):
+    with pytest.raises(ValidationError, match='cannot precede date of birth'):
         apply_patient_form_patch(
             person, {'date_of_birth': date(2021, 1, 1).isoformat()})
 

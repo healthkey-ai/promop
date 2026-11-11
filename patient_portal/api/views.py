@@ -1414,11 +1414,10 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         {field: 'fact_id must identify the result being dated.'}) from exc
                 patch_data[field] = {key: item for key, item in value.items()
                                      if key != 'fact_id'}
-            try:
-                patch_data, fact_dates = split_dated_edits(
-                    patch_data, build_writable_field_descriptor())
-            except ValueError as exc:
-                raise ValidationError({'detail': str(exc)}) from exc
+            patch_data, fact_dates, refusal = split_dated_edits(
+                patch_data, build_writable_field_descriptor())
+            if refusal is not None:
+                raise ValidationError({'detail': refusal})
             _propagate_pair_fact_dates(fact_dates, requested_fact_ids)
 
         projected_fact_ids = {}
@@ -5962,9 +5961,10 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
                 person, payload, authorship=authorship, patient_author=patient_author,
                 changed_by=changed_by,
             )
-        except ValueError as exc:
-            return Response({'detail': str(exc)}, status=400)
         except DjangoValidationError as exc:
+            # Every refusal is a ValidationError by now, and its messages are
+            # written for the reader; nothing here forwards a caught
+            # exception's text (code scanning `py/stack-trace-exposure`).
             detail = '; '.join(exc.messages)
             body = {'detail': detail}
             errors = getattr(exc, 'message_dict', None)

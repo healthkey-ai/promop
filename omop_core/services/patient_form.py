@@ -72,8 +72,13 @@ def _profile_record_value(name, value, entry):
     return value
 
 
-def parse_fact_date(raw, field):
-    """The clinical date carried by a dated edit, or a 400-worthy error.
+def fact_date_or_error(raw, field):
+    """The clinical date carried by a dated edit, or the refusal to explain it.
+
+    Returns ``(date, None)`` or ``(None, message)``. The message is built here
+    from the parsed input rather than from a raised exception, so a caller that
+    answers 400 can return it without exposing exception text
+    (code scanning `py/stack-trace-exposure`).
 
     A date is never inferred: an unknown date must not become "today" and a
     future date is not a measurement that happened (clinical-event-time-policy).
@@ -81,13 +86,21 @@ def parse_fact_date(raw, field):
     from datetime import date
 
     if not isinstance(raw, str) or not raw:
-        raise ValueError(f'{field}: a dated result requires a date.')
+        return None, f'{field}: a dated result requires a date.'
     try:
         parsed = date.fromisoformat(raw)
-    except ValueError as exc:
-        raise ValueError(f'{field}: a result date must be YYYY-MM-DD.') from exc
+    except ValueError:
+        return None, f'{field}: a result date must be YYYY-MM-DD.'
     if parsed > timezone.localdate():
-        raise ValueError(f'{field}: a result date cannot be in the future.')
+        return None, f'{field}: a result date cannot be in the future.'
+    return parsed, None
+
+
+def parse_fact_date(raw, field):
+    """The clinical date carried by a dated edit; raises on a refused date."""
+    parsed, error = fact_date_or_error(raw, field)
+    if error is not None:
+        raise ValueError(error)
     return parsed
 
 
@@ -456,7 +469,26 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
     with no authorship means the self-report type concept is not loaded:
     pinned current-state fields are skipped, while other fields keep the
     recipe type, matching the native PATCH.
+
+    A refusal is a ``ValidationError`` whatever its depth: every ``ValueError``
+    a step of the write raises for a bad value is restated as one here, so the
+    API layer can answer with ``exc.messages`` and never has to forward the text
+    of a caught exception (code scanning `py/stack-trace-exposure`).
     """
+    try:
+        return _apply_patient_form_patch(
+            person, changes, allowed_fields=allowed_fields, descriptor=descriptor,
+            authorship=authorship, patient_author=patient_author, changed_by=changed_by,
+        )
+    except ValidationError:
+        raise
+    except ValueError as exc:
+        raise ValidationError(str(exc)) from exc
+
+
+def _apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor=None,
+                              authorship=None, patient_author=False, changed_by='system'):
+    """The write behind ``apply_patient_form_patch``; raises while unwinding."""
     result = FieldWriteResult()
     record, _ = PatientRecord.objects.get_or_create(person=person)
     record = PatientRecord.objects.select_for_update().get(pk=record.pk)
@@ -502,7 +534,9 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
     # (docs/clinical-event-time-policy.md). Shared with the direct applier so
     # both federation PATCH paths behave the same.
     from omop_core.services.field_write_service import split_dated_edits
-    changes, fact_dates = split_dated_edits(changes, descriptor)
+    changes, fact_dates, refusal = split_dated_edits(changes, descriptor)
+    if refusal is not None:
+        raise ValueError(refusal)
     # Hemoglobin's source pair (#2318): the form writer must apply the same
     # validation and normalisation as the native serializer, because the
     # descriptor now offers `hemoglobin_level` and its unit rather than the

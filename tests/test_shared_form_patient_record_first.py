@@ -7,6 +7,7 @@ pin the PatientRecord-first contract from docs/patient-record-first-writes.md.
 """
 import pytest
 from django.contrib.contenttypes.models import ContentType
+from django.core.exceptions import ValidationError
 from django.utils import timezone
 from rest_framework.test import APIClient
 
@@ -292,7 +293,7 @@ def test_scalar_string_limit_boundary():
     assert 'progression' in result.applied
     assert saved.progression == 'a' * 60
 
-    with pytest.raises(ValueError, match='at most 60 characters'):
+    with pytest.raises(ValidationError, match='at most 60 characters'):
         apply_patient_form_patch(
             record.person, {'progression': 'a' * 61}, descriptor=recipe,
         )

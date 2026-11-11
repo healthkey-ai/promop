@@ -10,6 +10,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
+from django.core.exceptions import ValidationError
 
 from omop_core.models import Concept, Measurement, PatientRecord
 from omop_core.services.patient_form import apply_patient_form_patch, patient_form_descriptors
@@ -255,7 +256,7 @@ def test_a_future_date_is_refused_before_anything_is_written():
     person = _person_with_lab()
     tomorrow = (date.today() + timedelta(days=1)).isoformat()
 
-    with pytest.raises(ValueError, match='future'):
+    with pytest.raises(ValidationError, match='future'):
         apply_patient_form_patch(
             person, {FIELD: {'value': 12.5, 'date': tomorrow}}, allowed_fields={FIELD})
 
@@ -270,7 +271,7 @@ def test_a_future_date_is_refused_before_anything_is_written():
 def test_a_malformed_dated_envelope_is_refused(payload):
     person = _person_with_lab()
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValidationError):
         apply_patient_form_patch(person, {FIELD: payload}, allowed_fields={FIELD})
 
     assert not Measurement.objects.filter(person=person).exists()
@@ -312,7 +313,7 @@ def test_an_undated_patch_keeps_todays_date_for_compatibility():
 def test_a_non_dated_field_refuses_a_result_date():
     person = _person_with_lab()
 
-    with pytest.raises(ValueError, match='does not accept a result date'):
+    with pytest.raises(ValidationError, match='does not accept a result date'):
         apply_patient_form_patch(
             person, {'systolic_blood_pressure': {'value': 120, 'date': '2026-07-04'}},
             allowed_fields={'systolic_blood_pressure'})
@@ -435,7 +436,7 @@ def test_an_undated_pair_refuses_a_result_date():
     person = _person_with_lab()
     Concept.objects.filter(concept_code=LOINC).delete()
 
-    with pytest.raises(ValueError, match='does not accept a result date'):
+    with pytest.raises(ValidationError, match='does not accept a result date'):
         apply_patient_form_patch(
             person,
             {'hemoglobin_level': {'value': 120, 'date': '2026-07-04'},
@@ -507,7 +508,7 @@ def test_a_future_date_on_the_pair_is_refused():
     person = _person_with_lab()
     tomorrow = (date.today() + timedelta(days=1)).isoformat()
 
-    with pytest.raises(ValueError, match='future'):
+    with pytest.raises(ValidationError, match='future'):
         apply_patient_form_patch(
             person,
             {'hemoglobin_level': {'value': 120, 'date': tomorrow},

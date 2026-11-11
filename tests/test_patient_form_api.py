@@ -1,5 +1,6 @@
 """The standalone v1 API and the embedded host use the same form writer."""
 import pytest
+from django.core.exceptions import ValidationError
 from django.utils import timezone
 from rest_framework.test import APIClient
 from omop_core.models import (
@@ -46,6 +47,47 @@ def test_readonly_form_payload_is_rejected_instead_of_a_silent_200():
                                {'bmi': 50}, format='json', HTTP_X_PATIENT_FORM='1')
     assert response.status_code == 400, response.data
     assert 'bmi' in response.data['rejected']
+
+
+def test_a_refused_result_date_is_answered_with_its_own_sentence():
+    """A refusal reaches the reader as a 400 with the sentence written for it.
+
+    The shared form used to catch ``ValueError`` and echo ``str(exc)``; the
+    refusal is returned as data now, so a 400 still names the field and the
+    reason without forwarding an exception's text (code scanning
+    `py/stack-trace-exposure`).
+    """
+    from datetime import date, timedelta
+    record = PatientRecordFactory()
+    # The pair is the dated editor once its LOINC concept resolves.
+    ConceptFactory(concept_code='718-7', concept_name='Hemoglobin [Mass/volume] in Blood')
+    tomorrow = (date.today() + timedelta(days=1)).isoformat()
+
+    response = _client().patch(
+        f'/api/v1/patient-records/{record.person_id}/',
+        {'hemoglobin_level': {'value': 120, 'date': tomorrow},
+         'hemoglobin_level_units': 'G/L'},
+        format='json', HTTP_X_PATIENT_FORM='1')
+
+    assert response.status_code == 400, response.data
+    assert response.data['detail'] == 'hemoglobin_level: a result date cannot be in the future.'
+
+
+def test_the_native_patch_answers_a_refused_result_date_too():
+    """The native path unwraps dated edits the same way and must keep its 400.
+
+    Here the field is not dated in the plain descriptor, so the envelope itself
+    is refused; the point is that the sentence is returned and nothing raises.
+    """
+    record = PatientRecordFactory()
+
+    response = _client().patch(
+        f'/api/patient-info/{record.person_id}/',
+        {'hemoglobin_level': {'value': 120, 'date': '2026-07-04'}},
+        format='json')
+
+    assert response.status_code == 400, response.data
+    assert response.data['detail'] == 'hemoglobin_level: this field does not accept a result date.'
 
 
 def test_complex_verdict_gate_withholds_the_result_but_not_its_source_facts():
@@ -191,7 +233,7 @@ def test_long_projected_clinical_string_is_rejected_without_truncation():
     # seed data. No mapping is added or approved by this regression test.
     recipe = {'progression': {'kind': 'direct', 'writable': True, 'target': 'patient_record',
                              'value_kind': 'string', 'projection': {'omop_table': 'observation', 'concept_id': 1}}}
-    with pytest.raises(ValueError, match='at most 60 characters'):
+    with pytest.raises(ValidationError, match='at most 60 characters'):
         apply_patient_form_patch(record.person, {'progression': 'a' * 61}, descriptor=recipe)
     assert not Observation.objects.filter(person=record.person).exists()
 
