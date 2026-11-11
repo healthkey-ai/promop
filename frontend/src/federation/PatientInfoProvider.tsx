@@ -8,7 +8,10 @@ import type { LabsThemeTokens } from "./types";
 import { injectStyles } from "./injectStyles";
 import { assertLabsTokens } from "./assertLabsTokens";
 import { PatientFormContext, PatientFormRenewContext } from './PatientFormContext';
-import { patientFormForClient, patientFormStoreId, renewPatientFormForClient } from './patientFormRuntime';
+import {
+  noteRetiredDrafts, patientFormForClient, patientFormStoreId,
+  renewPatientFormForClient, takeRetiredDraftCount,
+} from './patientFormRuntime';
 import type { PatientFormStore } from './patientFormStore';
 
 injectStyles();
@@ -94,16 +97,9 @@ export function PatientInfoProvider({
   const [renewals, setRenewals] = useState(0);
   // Unsent edits live on the *old* store after a renewal. It is unmounted with
   // the patient it belongs to, so without this the reader never learns the
-  // draft was dropped (`retire()` moves it to `failed`, not to the server).
+  // draft was dropped. The count travels through the runtime, because the
+  // provider itself may remount between the switch and the notice.
   const [retiredNotice, setRetiredNotice] = useState<string | null>(null);
-  const announceRetired = (prior: PatientFormStore) => {
-    const snapshot = prior.getSnapshot();
-    const count = Object.keys(snapshot.pending).length + Object.keys(snapshot.failed).length;
-    if (!count) return;
-    setRetiredNotice(count === 1
-      ? '1 unsent edit for the previous patient was not saved.'
-      : `${count} unsent edits for the previous patient were not saved.`);
-  };
   const store = useMemo(
     () => {
       void renewals; // a renewal replaced the cache entry; read it again
@@ -123,10 +119,17 @@ export function PatientInfoProvider({
   useEffect(() => {
     const prior = previous.current;
     if (prior && prior.store !== store && prior.client === apiClient && prior.base === apiBasePath) {
-      announceRetired(prior.store);
-      prior.store.retire();
+      noteRetiredDrafts(apiClient, prior.store);
     }
     previous.current = { client: apiClient, base: apiBasePath, store };
+    // Consume on mount too: a renewal or key switch can retire the store
+    // before this provider instance exists.
+    const lost = takeRetiredDraftCount(apiClient);
+    if (lost) {
+      setRetiredNotice(lost === 1
+        ? '1 unsent edit for the previous patient was not saved.'
+        : `${lost} unsent edits for the previous patient were not saved.`);
+    }
   }, [apiClient, apiBasePath, store]);
   useEffect(() => { void store.load(); }, [store]);
   useEffect(() => {

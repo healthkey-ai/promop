@@ -3,7 +3,9 @@ import { createPortal } from 'react-dom';
 
 import PatientFieldEditor from './PatientFieldEditor';
 import { PatientFormRenewContext } from './PatientFormContext';
-import { renewPatientFormForClient, type patientFormRuntime } from './patientFormRuntime';
+import {
+  renewPatientFormForClient, takeRetiredDraftCount, type patientFormRuntime,
+} from './patientFormRuntime';
 import type { PatientFormResult } from './patientFormStore';
 import { hasNewSaveError } from './saveErrors';
 
@@ -23,14 +25,17 @@ export default function FieldSlots({ runtime, opts, slots }: {
   runtime: ReturnType<typeof patientFormRuntime>; opts: FieldSlotsOptions; slots: HTMLElement[];
 }) {
   const apiBase = (opts.apiBase ?? '').replace(/\/+$/, '');
+  const { onPatientUpdated, onSaveError } = opts;
   const [store, setStore] = useState(() => runtime.store);
   const [generation, setGeneration] = useState(0);
   const renew = useCallback(() => {
     setStore(renewPatientFormForClient(runtime.client, apiBase, '', store));
     setGeneration((count) => count + 1);
-  }, [runtime, apiBase, store]);
+    // The old store's unsent drafts will never be sent. Tell the host, which
+    // has a slot for exactly this; there is no other surface on this card.
+    if (takeRetiredDraftCount(runtime.client)) onSaveError?.();
+  }, [runtime, apiBase, store, onSaveError]);
   useEffect(() => { void store.load(); }, [store]);
-  const { onPatientUpdated, onSaveError } = opts;
   useEffect(() => onPatientUpdated ? store.onUpdated(onPatientUpdated) : undefined,
     [store, onPatientUpdated]);
   useEffect(() => {

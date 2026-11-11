@@ -281,11 +281,11 @@ class TestCost:
         # One batch lookup per source table (LOINC codes, UCUM units, attributed
         # codes), plus the approved-mapping table and one read per *distinct*
         # answer vocabulary those mappings name — four fields sharing a set cost
-        # one query, not four. The therapy-line catalog and the pre-existing
-        # condition categories are two more, each a single read per build.
-        # Constant in the number of fields either way; the bound guards the
-        # shape, not the exact number.
-        assert len(ctx) <= 8, [q['sql'][:80] for q in ctx]
+        # one query, not four. The therapy-line catalog, the pre-existing
+        # condition categories and the genomics endpoint's readiness check are
+        # single reads per build. Constant in the number of fields either way;
+        # the bound guards the shape, not the exact number.
+        assert len(ctx) <= 9, [q['sql'][:80] for q in ctx]
 
 
 class TestEndpoint:
@@ -743,15 +743,19 @@ class TestGenomicsWritability:
         assert entry['writable'] is False
         assert 'vocabular' in entry['reason'].lower()
 
-    def test_genetic_mutations_is_writable_once_the_vocabulary_is_loaded(self):
-        from omop_core.services.field_write_service import PATIENT_REPORTED_TYPE_CONCEPT_ID
+    def test_genetic_mutations_is_writable_once_the_genomics_vocabulary_is_loaded(self):
+        """The Genomics endpoint needs concept 0, a CDM event concept and both
+        actor type concepts; a gene LOINC alone is the retired list writer."""
+        from omop_core.services.genomics import ACTOR_TYPE_CONCEPT_IDS
 
         VocabularyFactory(vocabulary_id='Type Concept')
-        VocabularyFactory(vocabulary_id='LOINC')
-        ConceptFactory(concept_id=PATIENT_REPORTED_TYPE_CONCEPT_ID,
-                       concept_code='32865', vocabulary_id='Type Concept')
-        # A reviewed gene LOINC: 21636-6 is BRCA1 in `_GENETIC_MUTATION_LOINCS`.
-        ConceptFactory(concept_code='21636-6', vocabulary_id='LOINC')
+        VocabularyFactory(vocabulary_id='CDM')
+        ConceptFactory(concept_id=0, concept_code='0', vocabulary_id='Type Concept')
+        for concept_id in ACTOR_TYPE_CONCEPT_IDS:
+            ConceptFactory(concept_id=concept_id, concept_code=str(concept_id),
+                           vocabulary_id='Type Concept')
+        ConceptFactory(concept_id=9_500_001, concept_code='measurement.measurement_id',
+                       vocabulary_id='CDM', concept_name='measurement.measurement_id')
 
         entry = descriptor_fields()['genetic_mutations']
         assert entry['writable'] is True
