@@ -4381,6 +4381,15 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
                         data[field] = float(m.value_as_number)
                     break
 
+    # A blocked creatinine is an explicit unknown, not an absent key: absent,
+    # refresh_patient_record would let the approved 2160-0 mapping refill it
+    # with the newest row's raw number (90 micromol/L as 90 mg/dL, #2438).
+    # The aliases go with it.
+    if creatinine_blocked and data.get('serum_creatinine_mg_dl') is None:
+        data['serum_creatinine_mg_dl'] = None
+        for alias in _LAB_FIELD_ALIASES.get('serum_creatinine_mg_dl', ()):
+            data[alias] = None
+
     # --- Copy canonical values to legacy aliases (issue #471) ---
     for canonical, aliases in _LAB_FIELD_ALIASES.items():
         value = data.get(canonical)

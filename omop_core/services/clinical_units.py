@@ -222,6 +222,8 @@ def creatinine_to_mg_dl(value, text, concept_code):
 
 def measurement_creatinine_mg_dl(row):
     """``creatinine_to_mg_dl`` for a measurement row."""
+    # Only a UCUM concept names a unit (as measurement_count_unit and #2249's
+    # reading); concept 0 "No matching concept" and other vocabularies do not.
     concept = row.unit_concept if row.unit_concept_id else None
     return creatinine_to_mg_dl(row.value_as_number, row.unit_source_value,
-                               concept.concept_code if concept else None)
+                               concept.concept_code if concept and concept.vocabulary_id == 'UCUM' else None)

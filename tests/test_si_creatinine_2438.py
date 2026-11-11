@@ -123,6 +123,18 @@ def test_concept_only_umol_l_creatinine_converts():
 
 
 @pytest.mark.django_db
+def test_a_non_ucum_unit_concept_is_not_a_unit():
+    """Only a UCUM concept names a unit, as measurement_count_unit and #2249's
+    reading have it: a concept from another vocabulary is ignored, so an empty
+    text reads as mg/dL."""
+    person = PersonFactory()
+    snomed = ConceptFactory(vocabulary__vocabulary_id='SNOMED', concept_code='umol/L')
+    _creatinine(person, 1.1, unit_concept=snomed)
+
+    assert _get_laboratory_data(person)['serum_creatinine_mg_dl'] == pytest.approx(1.1)
+
+
+@pytest.mark.django_db
 @pytest.mark.parametrize('unit', ['mg', 'mg/L'])
 def test_unreadable_newest_creatinine_is_unknown_and_older_is_not_resurrected(unit):
     person = PersonFactory()
@@ -210,3 +222,39 @@ def test_renal_adequacy_reads_si_creatinine_in_mg_dl(value, stored, adequate):
     assert record.serum_creatinine_mg_dl == stored
     assert record.creatinine_mg_dl == stored
     assert record.renal_adequacy_status is adequate
+
+
+# ---------------------------------------------------------------------------
+# Through refresh, with the approved 2160-0 mapping the curation fixture ships
+# ---------------------------------------------------------------------------
+
+@pytest.mark.django_db
+@pytest.mark.parametrize('newest_value, newest_unit', [
+    (3.4, 'mg'), (90, 'mg/L'), (90, 'micromol/L'),
+])
+def test_a_blocked_newest_result_stays_unknown_through_refresh(newest_value, newest_unit):
+    """The extractor blocks an unreadable newest unit; the approved mapping
+    (concept + source_value '2160-0', the shape omop_write_service and the FHIR
+    upload write) must not then refill the field with that row's raw number."""
+    from datetime import date as day
+    from omop_core.models import FieldConceptMapping, PatientRecord
+    from omop_core.services.patient_record_service import refresh_patient_record
+    person = PersonFactory()
+    PatientRecord.objects.get_or_create(person=person)
+    concept = _loinc('2160-0')
+    FieldConceptMapping.objects.create(
+        field_name='serum_creatinine_mg_dl', concept=concept, vocabulary_id='LOINC',
+        concept_code='2160-0', status='approved', omop_table='measurement',
+        source_value='2160-0', value_kind='number',
+    )
+    MeasurementFactory(person=person, measurement_concept=concept, measurement_source_value='2160-0',
+                       measurement_date=day(2024, 1, 1), value_as_number=1.0, unit_source_value='mg/dL')
+    MeasurementFactory(person=person, measurement_concept=concept, measurement_source_value='2160-0',
+                       measurement_date=day(2024, 6, 1), value_as_number=newest_value,
+                       unit_source_value=newest_unit)
+
+    record = refresh_patient_record(person)
+
+    record.refresh_from_db()
+    assert record.serum_creatinine_mg_dl is None
+    assert record.creatinine_mg_dl is None
