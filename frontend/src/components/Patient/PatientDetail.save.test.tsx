@@ -265,6 +265,30 @@ describe('PatientDetail save — the edit, not the record', () => {
     });
   });
 
+  it('keeps the date when the value changes during the previous PATCH (#2439)', async () => {
+    await renderAndLoad();
+    await openLabsTab();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let finishFirst!: (value: unknown) => void;
+    (api.patch as ReturnType<typeof vi.fn>).mockImplementationOnce(
+      () => new Promise((resolve) => { finishFirst = resolve; }),
+    );
+    fireEvent.change(screen.getByDisplayValue('12.5'), { target: { value: '9.5' } });
+    fireEvent.change(document.getElementById('hemoglobin_g_dl-date')!,
+      { target: { value: '2026-10-01' } });
+    await act(async () => { vi.advanceTimersByTime(2100); });
+    expect(api.patch).toHaveBeenCalledTimes(1);
+
+    fireEvent.change(screen.getByDisplayValue('9.5'), { target: { value: '10' } });
+    await act(async () => { finishFirst({ data: {} }); await Promise.resolve(); });
+    await act(async () => { vi.advanceTimersByTime(2100); });
+
+    await waitFor(() => expect(api.patch).toHaveBeenCalledTimes(2));
+    expect(patchBody()).toMatchObject({
+      hemoglobin_g_dl: { value: 10, date: '2026-10-01' },
+    });
+  });
+
   it('never sends an alias in the PATCH', async () => {
     await renderAndLoad();
     await openLabsTab();

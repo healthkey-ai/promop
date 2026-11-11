@@ -145,6 +145,50 @@ def test_a_date_only_correction_cannot_move_an_imported_fact(editor):
     assert Measurement.objects.get(person=record.person).measurement_date == timezone.localdate()
 
 
+def test_a_repeated_date_correction_does_not_move_another_result(editor):
+    record, client = editor
+    concept = hemoglobin()
+    older = timezone.localdate() - timedelta(days=20)
+    first = timezone.localdate() - timedelta(days=10)
+    chosen = timezone.localdate() - timedelta(days=15)
+    for value, day in ((11, older), (12, first)):
+        assert client.patch(
+            f'/api/patient-info/{record.person_id}/',
+            {'hemoglobin_g_dl': {'value': value, 'date': day.isoformat()}},
+            format='json').status_code == 200
+    for _ in range(2):
+        assert client.patch(
+            f'/api/patient-info/{record.person_id}/',
+            {'hemoglobin_g_dl': {'value': 12, 'date': chosen.isoformat()}},
+            format='json').status_code == 200
+
+    rows = Measurement.objects.filter(person=record.person, measurement_concept=concept)
+    assert rows.get(value_as_number=12).measurement_date == chosen
+    assert rows.get(value_as_number=11).measurement_date == older
+
+
+def test_a_date_correction_refuses_an_occupied_day(editor):
+    record, client = editor
+    concept = hemoglobin()
+    chosen = timezone.localdate() - timedelta(days=15)
+    with suppress_patient_record_refresh():
+        MeasurementFactory(
+            person=record.person, measurement_concept=concept,
+            measurement_source_value='718-7', measurement_date=chosen, value_as_number=9)
+    patch_field(editor, 'hemoglobin_g_dl', 12)
+
+    response = client.patch(
+        f'/api/patient-info/{record.person_id}/',
+        {'hemoglobin_g_dl': {'value': 12, 'date': chosen.isoformat()}},
+        format='json',
+    )
+
+    assert response.status_code == 400, response.data
+    assert Measurement.objects.get(
+        person=record.person, measurement_concept=concept,
+        measurement_date=chosen).value_as_number == 9
+
+
 def test_a_date_on_a_non_dated_field_is_refused(editor):
     record, client = editor
     response = client.patch(

@@ -514,9 +514,11 @@ export default function PatientDetail({
         for (const f of Object.keys(patchFields)) {
           if (patientInfoRef.current) patientInfoRef.current[f] = info[f];
           confirmedWritesRef.current[f] = info[f];
-          // A date changed while this PATCH was in flight belongs to the next
-          // save; only clear the date this response confirmed.
-          if (sentDates[f] && pendingDatesRef.current[f] === sentDates[f]) {
+          // A value or date changed while this PATCH was in flight belongs to
+          // the next save; only clear the pair this response confirmed.
+          if (sentDates[f]
+              && pendingDatesRef.current[f] === sentDates[f]
+              && pendingDataRef.current?.info[f] === info[f]) {
             delete pendingDatesRef.current[f];
           }
           if (pendingDataRef.current?.info[f] === info[f]) dirtyFieldsRef.current.delete(f);
