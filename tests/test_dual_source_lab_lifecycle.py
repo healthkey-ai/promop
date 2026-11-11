@@ -158,7 +158,8 @@ def test_a_later_same_day_import_does_not_take_over_the_patient_answer(lab):
 
 def test_a_failed_lab_mapping_keeps_the_answer_pending_then_projects_once(lab):
     # Remove the LOINC concept so the canonical has no projection target. The
-    # pair is then undated too: there is no result row to carry the date.
+    # editor cannot name a draw date without a target, so the undated edit is
+    # recorded on today; the answer and its day stay pending until it projects.
     lab['concept'].delete()
     _patch_pair(lab, 120, 'G/L')
 
