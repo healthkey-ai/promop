@@ -236,3 +236,30 @@ it('downloads every matching patient with the list filters when all are selected
   })));
   expect(await screen.findByText(/At most 500 patients per export/)).toBeInTheDocument();
 });
+
+it('shows an analyst at a public demo org a de-identified, unopenable list (#2460)', async () => {
+  mockUseAuth.mockReturnValue({
+    currentUser: {
+      org_accesses: [{ role: 'analyst', org_name: 'Demo', org_slug: 'demo', expires_at: null, org_allows_patient_signup: true }],
+    },
+  });
+  vi.mocked(api.get).mockResolvedValue({ data: { count: 1, results: [
+    { person_id: 5, patient_name: null, age: null, demographics_redacted: true, disease: 'Breast Cancer',
+      therapy_lines_count: 1, unmapped_source_code_count: 2 },
+  ] } });
+  render(<MemoryRouter><PatientList /></MemoryRouter>);
+  const row = (await screen.findByText('Breast Cancer')).closest('tr')!;
+  expect(screen.getByRole('status')).toHaveTextContent(/names and other demographics are withheld, and records cannot be opened/);
+  expect(screen.queryByRole('columnheader', { name: 'Name' })).not.toBeInTheDocument();
+  expect(row).toHaveAttribute('aria-disabled', 'true');
+  expect(row).not.toHaveClass('cursor-pointer');
+  fireEvent.click(row.lastElementChild!);
+  fireEvent.click(screen.getByText('Breast Cancer'));
+  expect(navigate).not.toHaveBeenCalledWith('/patient/5');
+  expect(screen.getByRole('button', { name: 'Code Mapping' })).toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Upload' })).not.toBeInTheDocument();
+  // No name search and no name or age sort over fields the server withholds.
+  expect(screen.getByLabelText('Patient ID')).toHaveAttribute('placeholder', 'Search by ID, then press Enter');
+  expect(screen.queryByRole('option', { name: 'Name' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('option', { name: /Age:/ })).not.toBeInTheDocument();
+});

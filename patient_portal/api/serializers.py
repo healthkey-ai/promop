@@ -379,8 +379,13 @@ class PatientListSerializer(serializers.ModelSerializer):
 
     def to_representation(self, instance):
         data = super().to_representation(instance)
+        # A reader without curation access -- a demo-org browse by an
+        # analyst or a patient-role grant (#2460) -- is withheld every
+        # patient's demographics, as if each had opted in; otherwise only
+        # the patients who did, from anyone but themselves.
+        withheld = self.context.get('withhold_identifiers', False)
         if (self.context.get('request') is not None
-                and instance.suppress_demographics_for_others
+                and (withheld or instance.suppress_demographics_for_others)
                 and self.context.get('own_person_id') != instance.person_id):
             for field in ('patient_name', 'age', 'location_summary'):
                 data[field] = None
@@ -1018,6 +1023,13 @@ class PatientRecordSerializer(serializers.ModelSerializer):
         'country', 'region', 'city', 'postal_code', 'longitude', 'latitude',
         'patient_name', 'name',
     )
+    # What a reader with no curation access is withheld (#2460): the opt-in
+    # set plus every other direct identifier and free-text name the record
+    # carries. Gender stays: it is clinical here, not identifying.
+    WITHHELD_IDENTIFIER_FIELDS = REDACTED_DEMOGRAPHIC_FIELDS + (
+        'email', 'phone_number', 'death_date', 'date_of_birth_precision',
+        'race', 'ethnicity', 'insurance_type', 'facility_name', 'validated_by',
+    )
 
     def _apply_demographic_redaction(self, instance, data):
         """Redact selected demographics unless the reader is the account holder.
@@ -1027,12 +1039,15 @@ class PatientRecordSerializer(serializers.ModelSerializer):
         paths) no redaction is applied. Wiring redaction into every read path
         that omits serializer context is documented as deferred.
         """
-        if not getattr(instance, 'suppress_demographics_for_others', False):
+        # A reader without curation access (#2460) is withheld every
+        # patient's identifiers: the demo-org browse shows de-identified rows.
+        withheld = self.context.get('withhold_identifiers', False)
+        if not (getattr(instance, 'suppress_demographics_for_others', False) or withheld):
             return data
         request = self.context.get('request')
         if request is None or self._is_account_holder(request, instance):
             return data
-        for field in self.REDACTED_DEMOGRAPHIC_FIELDS:
+        for field in (self.WITHHELD_IDENTIFIER_FIELDS if withheld else self.REDACTED_DEMOGRAPHIC_FIELDS):
             if field in data:
                 data[field] = None
         data['demographics_redacted'] = True
