@@ -10381,6 +10381,7 @@ class UserSerializerOrgAdminTest(TestCase):
                 'expires_at': None,
                 'access_via': ['explicit_grant'],
                 'group_name': None,
+                'org_allows_patient_signup': False,
             },
             {
                 'org_name': 'Pending Org',
