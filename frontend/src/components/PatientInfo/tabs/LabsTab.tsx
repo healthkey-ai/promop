@@ -18,7 +18,7 @@ import type { LabMeasurementGroup } from '@/hooks/useLabMeasurements';
 
 interface Props {
   formData: Record<string, unknown>;
-  onChange: (field: string, value: unknown) => void;
+  onChange: (field: string, value: unknown, date?: string) => void;
 }
 
 /**
@@ -144,7 +144,18 @@ export default function LabsTab({ formData, onChange }: Props) {
   const personId = (formData?.person_id ?? formData?.person) as number | undefined;
   const { descriptors, loading } = useWritableFields(personId);
   const { grouped: measurementGroups } = useLabMeasurements(personId);
-  const [date, setDate] = useState(today());
+  const [dates, setDates] = useState<Record<string, string>>({});
+  const dateFor = (name: string) => dates[name] ?? today();
+  // A lab value and the date it was observed are one edit. The date is per
+  // field: changing one result's date must not relabel its neighbours (#2439).
+  const changeValue = (name: string, value: unknown) => onChange(name, value, dateFor(name));
+  const changeDate = (name: string, next: string) => {
+    setDates((current) => ({ ...current, [name]: next }));
+    const value = formData?.[name];
+    if (value !== undefined && value !== null && value !== '') {
+      onChange(name, value, next);
+    }
+  };
   const [chartDialog, setChartDialog] = useState<{
     label: string;
     group: LabMeasurementGroup;
@@ -168,6 +179,9 @@ export default function LabsTab({ formData, onChange }: Props) {
         {fields.map(([label, name]) => {
           const group = getGroup(name);
           const hasChart = !!group && group.values.length >= MIN_CHART_POINTS;
+          // Only a descriptor the server marks `dated` accepts a result date;
+          // sending an envelope for any other field is a 400.
+          const dated = descriptors[name]?.dated === true;
           return (
             <div key={name} className="relative">
               <div className="flex items-start gap-1">
@@ -179,9 +193,9 @@ export default function LabsTab({ formData, onChange }: Props) {
                     type={type}
                     value={formData?.[name]}
                     descriptor={descriptors[name]}
-                    onChange={onChange}
-                    date={date}
-                    onDateChange={setDate}
+                    onChange={dated ? changeValue : onChange}
+                    date={dated ? dateFor(name) : undefined}
+                    onDateChange={dated ? (next) => changeDate(name, next) : undefined}
                   />
                 </div>
                 {hasChart && (

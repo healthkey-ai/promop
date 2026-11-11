@@ -192,6 +192,30 @@ def _patient_author_role(actor, person):
     return get_actor_role(actor, person.person_id)
 
 
+def _propagate_pair_fact_dates(fact_dates, fact_ids):
+    """Copy a source pair's date and result id onto its canonical read-model (#2397).
+
+    A pair editor dates the source field; the projection that writes the fact
+    is on the canonical field. Both must carry the same clinical day.
+    """
+    from omop_core.services.blood_count_source_pairs import PAIRS as COUNT_PAIRS
+    from omop_core.services.chemistry_units import PAIRS as CHEMISTRY_PAIRS
+    from omop_core.services.creatinine_units import (
+        CANONICAL_FIELD as CREATININE_CANONICAL, PAIR_FIELD as CREATININE_PAIR,
+    )
+    from omop_core.services.hemoglobin_units import (
+        CANONICAL_FIELD as HEMOGLOBIN_CANONICAL, PAIR_FIELD as HEMOGLOBIN_PAIR,
+    )
+    pairs = {HEMOGLOBIN_PAIR: HEMOGLOBIN_CANONICAL, CREATININE_PAIR: CREATININE_CANONICAL}
+    pairs.update({spec['value']: canonical for canonical, spec in CHEMISTRY_PAIRS.items()})
+    pairs.update({source: spec['canonical'] for source, spec in COUNT_PAIRS.items()})
+    for source, canonical in pairs.items():
+        if source in fact_dates and canonical not in fact_dates:
+            fact_dates[canonical] = fact_dates[source]
+        if source in fact_ids and canonical not in fact_ids:
+            fact_ids[canonical] = fact_ids[source]
+
+
 def _patient_author(actor, person):
     """(is the caller the patient or their representative, project_single_value keywords).
 
@@ -1359,6 +1383,37 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # A dated edit is {field: {"value": ..., "date": "YYYY-MM-DD"}}: one
+        # result, not a structured value. Unwrap it before the serializer sees
+        # a field value and carry its clinical date into the projection. The
+        # shared form uses the same contract; the standalone editor used to
+        # lose the date picked on a lab row (#2439).
+        fact_dates = {}
+        requested_fact_ids = {}
+        if any(isinstance(value, dict) and set(value) in (
+                {'value', 'date'}, {'value', 'date', 'fact_id'})
+               for value in patch_data.values()):
+            from omop_core.services.field_write_service import split_dated_edits
+            from omop_core.services.write_descriptor import build_writable_field_descriptor
+            for field, value in list(patch_data.items()):
+                if not (isinstance(value, dict)
+                        and set(value) == {'value', 'date', 'fact_id'}):
+                    continue
+                try:
+                    requested_fact_ids[field] = int(value['fact_id'])
+                except (TypeError, ValueError) as exc:
+                    raise ValidationError(
+                        {field: 'fact_id must identify the result being dated.'}) from exc
+                patch_data[field] = {key: item for key, item in value.items()
+                                     if key != 'fact_id'}
+            try:
+                patch_data, fact_dates = split_dated_edits(
+                    patch_data, build_writable_field_descriptor())
+            except ValueError as exc:
+                raise ValidationError({'detail': str(exc)}) from exc
+            _propagate_pair_fact_dates(fact_dates, requested_fact_ids)
+
+        projected_fact_ids = {}
         with transaction.atomic():
             # Match derivation's lock order and serialize the read/modify/write
             # of user_edited_fields as well as same-day OMOP projection.
@@ -1379,10 +1434,16 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 if hasattr(patient_info, field)
             }
             derived_from_pair = set(getattr(serializer, '_derived_from_pair', ()))
+            date_only_fields = {
+                field for field in fact_dates
+                if field in serializer.validated_data
+                and serializer.validated_data[field] == previous_values.get(field)
+            }
             direct_fields = {
                 field for field in serializer.validated_data
                 if field in PATIENT_RECORD_OMOP_MAPPED_FIELDS
                 and (serializer.validated_data[field] != previous_values.get(field)
+                     or field in fact_dates  # a date-only correction still names its day
                      or (field in {'relapse_count', 'treatment_refractory_status'}
                          and field not in (patient_info.therapy_overrides or {})
                          and serializer.validated_data[field] is not None))
@@ -1481,9 +1542,11 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     projection_data['medication_contexts'] = context_delta(
                         previous_values.get('medication_contexts') or {},
                         projection_data['medication_contexts'])
-                projected = set(self._project_mapped_fields(
+                projected, projected_fact_ids = self._project_mapped_fields(
                     person, clinical_fields, projection_data, actor=request.user,
-                ))
+                    fact_dates=fact_dates, date_only_fields=date_only_fields,
+                    known_fact_ids=requested_fact_ids,
+                )
                 if _direct_units.PAIR_FIELD in projected:
                     # A successful projection confirms the pair as a whole; an
                     # orphan unit marker would re-attach the old unit to a
@@ -1533,10 +1596,16 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     raise ValidationError(rejected)
                 patient_info.refresh_from_db()
 
-        return Response({**PatientRecordSerializer(patient_info).data, 'previous_values': previous_values})
+        body = {**PatientRecordSerializer(patient_info).data, 'previous_values': previous_values}
+        if projected_fact_ids:
+            # The client uses these ids to correct a result's date later; a
+            # cached measurement list goes stale as soon as this write lands.
+            body['fact_ids'] = projected_fact_ids
+        return Response(body)
 
     @staticmethod
-    def _project_mapped_fields(person, direct_fields, patch_data, actor=None):
+    def _project_mapped_fields(person, direct_fields, patch_data, actor=None,
+                               fact_dates=None, date_only_fields=(), known_fact_ids=None):
         """Project validated edits using the editor's curated or built-in recipe.
 
         Each projection uses a savepoint so failure preserves the PatientRecord
@@ -1564,8 +1633,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 descriptors = build_writable_field_descriptor()
         except Exception:
             logger.warning('Could not resolve OMOP projections')
-            return set()
+            return set(), {}
+        fact_dates = fact_dates or {}
+        date_only_fields = set(date_only_fields)
+        known_fact_ids = known_fact_ids or {}
         projected = set()
+        fact_ids = {}
         authorship = None
         patient_author_without_type = False
         for field in direct_fields:
@@ -1581,8 +1654,24 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     # from a clinical one; a current-state answer must not
                     # overwrite today's clinical fact. Keep the record value.
                     continue
+                if field in date_only_fields:
+                    from omop_core.services.omop_projection import move_owned_fact_date
+                    moved = move_owned_fact_date(
+                        person, field, patch_data[field], projection, fact_dates[field],
+                        type_concept_id=authorship.get('type_concept_id'),
+                        fact_id=known_fact_ids.get(field),
+                    )
+                    if moved is False:
+                        raise ValidationError({field: (
+                            'This result was not written here, so its date cannot be '
+                            'corrected. Edit the value to record a corrected result.')})
+                    if moved:
+                        projected.add(field)
+                        fact_ids[field] = moved
+                        continue
                 if project_single_value(person, field, patch_data[field], projection,
-                                        acknowledge_existing=True, **authorship):
+                                        acknowledge_existing=True,
+                                        fact_date=fact_dates.get(field), **authorship):
                     # Occurrences and structured answers need their dedicated
                     # extractors before their saved values can be acknowledged.
                     # A pinned current-state answer is never read back from
@@ -1592,7 +1681,15 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                             and projection.get('value_kind') != 'json'
                             and field not in PINNED_PROJECTION_FIELDS):
                         projected.add(field)
-        return projected
+                        from omop_core.services.omop_projection import projected_fact_id
+                        fact_id = projected_fact_id(
+                            person, field, patch_data[field], projection,
+                            fact_dates.get(field),
+                            type_concept_id=authorship.get('type_concept_id'),
+                        )
+                        if fact_id is not None:
+                            fact_ids[field] = fact_id
+        return projected, fact_ids
 
     @action(detail=True, methods=['get'], permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
     def provenance(self, request, pk=None):

@@ -20,7 +20,7 @@ interface Props {
    *  refuses to write. See #646. */
   unknownField?: boolean;
   descriptor?: FieldDescriptor;
-  onChange: (name: string, value: unknown) => void;
+  onChange: (name: string, value: unknown, date?: string) => void;
   /** Date precision for date fields (e.g. date_of_birth). */
   precision?: 'day' | 'month' | 'year' | null;
   /** Event date for this edit, shared across the tab. */
@@ -78,6 +78,14 @@ export default function ClinicalField({
   // report's do, can leave it out and get a date per field rather than one date
   // pretending to cover all of them.
   const [ownDate, setOwnDate] = useState(today());
+  const eventDate = date ?? ownDate;
+  // A field the server marks `dated` is an event: its value and the date it was
+  // observed are one edit. Tabs that share one date pass `onDateChange`; a tab
+  // that leaves the date per field still reports it here (#2439).
+  const change = (field: string, next: unknown) => {
+    if (descriptor?.dated && !onDateChange) onChange(field, next, eventDate);
+    else onChange(field, next);
+  };
   // Both the tabbed profile and embedded Trial Details use the same control,
   // dependency dialogs and save queue. Dedicated authoring views remain separate.
   if (store) return <PatientFieldEditor store={store} name={name} label={label}
@@ -136,10 +144,10 @@ export default function ClinicalField({
         vocabSource={vocabSource}
         triState={triState}
         answerLabels={descriptor?.answer_labels}
-        onChange={onChange}
+        onChange={change}
         precision={precision}
       />
-      {(onDateChange || descriptor?.projection?.omop_table === 'measurement') && (
+      {(onDateChange || descriptor?.dated) && (
         <div className="mt-1 flex items-center gap-2">
           <label
             htmlFor={`${name}-date`}
@@ -150,8 +158,17 @@ export default function ClinicalField({
           <input
             id={`${name}-date`}
             type="date"
-            value={date ?? ownDate}
-            onChange={(e) => (onDateChange ?? setOwnDate)(e.target.value)}
+            value={eventDate}
+            onChange={(e) => {
+              const next = e.target.value;
+              if (onDateChange) onDateChange(next);
+              else {
+                setOwnDate(next);
+                if (value !== undefined && value !== null && value !== '') {
+                  onChange(name, value, next);
+                }
+              }
+            }}
             className="rounded-md border border-input px-2 py-1 text-xs"
           />
         </div>

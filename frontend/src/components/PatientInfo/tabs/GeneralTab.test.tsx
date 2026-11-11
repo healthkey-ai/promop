@@ -34,7 +34,7 @@ vi.mock('@/hooks/useDiseaseCategories', () => ({
 
 const measurement = (code: string) => ({
   kind: 'direct', writable: true, target: 'patient_record',
-  value_kind: 'number',
+  value_kind: 'number', dated: true,
   projection: {
     omop_table: 'measurement', concept_id: 1, code,
     type_concept_id: 32856, source_value: code,

@@ -16,7 +16,7 @@ import PreexistingConditionsAnswer, { type ConditionsAnswer } from '../Preexisti
 
 interface Props {
   formData: Record<string, unknown>;
-  onChange: (field: string, value: unknown) => void;
+  onChange: (field: string, value: unknown, date?: string) => void;
   editedName: string;
   onNameChange: (name: string) => void;
   onZipcodeChange: (zip: string) => void;
@@ -59,7 +59,8 @@ export default function GeneralTab({
   const { descriptors, loading } = useWritableFields(personId);
   // A read-only form keeps navigation usable, so each writing control opts out.
   const locked = usePatientFormReadOnly();
-  const [date, setDate] = useState(today());
+  const [dates, setDates] = useState<Record<string, string>>({});
+  const dateFor = (name: string) => dates[name] ?? today();
 
   const { source: ecogSource }        = useVocabulary('ecog-status', 'code');
   const { source: karnofskySource }   = useVocabulary('karnofsky-score', 'code');
@@ -103,7 +104,19 @@ export default function GeneralTab({
     extra: { options?: string[]; vocabSource?: ReturnType<typeof useVocabulary>['source'] } = {},
   ) => {
     const descriptor = descriptors[name];
-    const dated = descriptor?.writable && descriptor.projection?.omop_table === 'measurement';
+    // Only the server's `dated` contract accepts a result date; a measurement
+    // projection alone is not enough (#2439).
+    const dated = descriptor?.dated === true;
+    const changeWithDate = (field: string, value: unknown) => (
+      dated ? onChange(field, value, dateFor(field)) : onChange(field, value)
+    );
+    const changeDate = (field: string, next: string) => {
+      setDates((current) => ({ ...current, [field]: next }));
+      const value = formData?.[field];
+      if (value !== undefined && value !== null && value !== '') {
+        onChange(field, value, next);
+      }
+    };
     const prec = name === 'date_of_birth'
       ? ((formData?.date_of_birth_precision as string) ?? 'day')
       : undefined;
@@ -116,10 +129,10 @@ export default function GeneralTab({
         descriptor={descriptor}
         options={extra.options}
         vocabSource={extra.vocabSource}
-        onChange={onChange}
+        onChange={changeWithDate}
         precision={prec as 'day' | 'month' | 'year' | undefined}
-        date={dated ? date : undefined}
-        onDateChange={dated ? setDate : undefined}
+        date={dated ? dateFor(name) : undefined}
+        onDateChange={dated ? (next) => changeDate(name, next) : undefined}
       />
     );
   };

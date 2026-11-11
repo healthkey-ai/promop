@@ -559,6 +559,99 @@ def _projection_owned(instance):
     ).exists()
 
 
+def _same_projection_value(row, value, val_num, val_str):
+    if val_num is not None:
+        try:
+            return float(getattr(row, val_num)) == float(value)
+        except (TypeError, ValueError):
+            return False
+    if val_str is not None:
+        return str(getattr(row, val_str) or '') == str(value)
+    return False
+
+
+def move_owned_fact_date(person, field_name, value, projection, fact_date, *,
+                         type_concept_id=None, fact_id=None):
+    """Move the fact this projector owns to ``fact_date``, if it can.
+
+    Returns the fact's primary key when it is already on that day or was moved,
+    None when there is no fact for this field (the caller may create one), and
+    False when the fact is not ours, its value no longer matches, a different
+    result already occupies the target day, or its author type is not the one
+    this edit may change. ``fact_id`` is the id a previous PATCH returned for
+    this result; without it the active (newest) fact is the only candidate, and
+    a correction never guesses between equal results.
+    """
+    target = projection.get('omop_table')
+    concept_id = projection.get('concept_id')
+    source_value = projection.get('source_value')
+    if target not in _TARGET_CONFIG or concept_id is None or not source_value:
+        return False
+    model, pk_field, concept_field, date_field, type_field, src_field, val_num, val_str = (
+        _TARGET_CONFIG[target])
+    if value is None or _is_empty(value):
+        return False
+    from omop_core.services.cancer_details import projection_scope
+    scope = projection_scope(person, field_name, model)
+    rows = model.objects.select_for_update().filter(
+        person=person, is_erroneous=False,
+        **{concept_field: concept_id, src_field: source_value}, **scope,
+    )
+    if fact_id is not None:
+        rows = rows.filter(pk=fact_id)
+    current = rows.order_by('-' + date_field, '-' + pk_field).first()
+    if current is None:
+        return None if fact_id is None else False
+    fact_type = getattr(current, type_field)
+    if type_concept_id is not None:
+        if fact_type != type_concept_id:
+            return False
+    elif fact_type == PATIENT_SELF_REPORT_TYPE and (
+            projection.get('type_concept_id') or 32817) != PATIENT_SELF_REPORT_TYPE:
+        return False
+    if not _projection_owned(current):
+        return False
+    if not _same_projection_value(current, value, val_num, val_str):
+        return False
+    if getattr(current, date_field) == fact_date:
+        return current.pk
+    siblings = model.objects.filter(
+        person=person, is_erroneous=False,
+        **{concept_field: concept_id, src_field: source_value, date_field: fact_date},
+        **scope,
+    ).exclude(pk=current.pk)
+    if siblings.exists():
+        return False
+    model.objects.filter(pk=current.pk).update(**{date_field: fact_date})
+    return current.pk
+
+
+def projected_fact_id(person, field_name, value, projection, fact_date, *,
+                       type_concept_id=None):
+    """The id of the fact this write projected, for a later date correction."""
+    target = projection.get('omop_table')
+    concept_id = projection.get('concept_id')
+    source_value = projection.get('source_value')
+    if target not in _TARGET_CONFIG or concept_id is None or not source_value:
+        return None
+    model, pk_field, concept_field, date_field, type_field, src_field, _num, _str = (
+        _TARGET_CONFIG[target])
+    from omop_core.services.cancer_details import projection_scope
+    scope = projection_scope(person, field_name, model)
+    rows = model.objects.filter(
+        person=person, is_erroneous=False,
+        **{concept_field: concept_id, src_field: source_value,
+           date_field: fact_date or timezone.localdate()}, **scope,
+    )
+    if type_concept_id is not None:
+        rows = rows.filter(**{type_field: type_concept_id})
+    else:
+        fact_type = projection.get('type_concept_id') or 32817
+        if fact_type != PATIENT_SELF_REPORT_TYPE:
+            rows = rows.exclude(**{type_field: PATIENT_SELF_REPORT_TYPE})
+    return rows.order_by('-' + pk_field).values_list(pk_field, flat=True).first()
+
+
 def _record_projection_provenance(instance):
     from django.contrib.contenttypes.models import ContentType
     from omop_core.models import ProvenanceRecord
