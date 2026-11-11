@@ -92,6 +92,18 @@ export function PatientInfoProvider({
   // linked patient changed bumps `renewals`, which re-reads the cache entry
   // that renewPatientFormForClient replaced.
   const [renewals, setRenewals] = useState(0);
+  // Unsent edits live on the *old* store after a renewal. It is unmounted with
+  // the patient it belongs to, so without this the reader never learns the
+  // draft was dropped (`retire()` moves it to `failed`, not to the server).
+  const [retiredNotice, setRetiredNotice] = useState<string | null>(null);
+  const announceRetired = (prior: PatientFormStore) => {
+    const snapshot = prior.getSnapshot();
+    const count = Object.keys(snapshot.pending).length + Object.keys(snapshot.failed).length;
+    if (!count) return;
+    setRetiredNotice(count === 1
+      ? '1 unsent edit for the previous patient was not saved.'
+      : `${count} unsent edits for the previous patient were not saved.`);
+  };
   const store = useMemo(
     () => {
       void renewals; // a renewal replaced the cache entry; read it again
@@ -111,6 +123,7 @@ export function PatientInfoProvider({
   useEffect(() => {
     const prior = previous.current;
     if (prior && prior.store !== store && prior.client === apiClient && prior.base === apiBasePath) {
+      announceRetired(prior.store);
       prior.store.retire();
     }
     previous.current = { client: apiClient, base: apiBasePath, store };
@@ -146,6 +159,13 @@ export function PatientInfoProvider({
       className={`promop-root ${className ?? ""}`}
       style={cssVars as React.CSSProperties}
     >
+      {retiredNotice && (
+        <div role="status" className="mb-2 rounded-lg bg-amber-50 px-4 py-2 text-sm text-amber-900">
+          {retiredNotice}
+          {' '}<button type="button" className="font-semibold underline"
+            onClick={() => setRetiredNotice(null)}>Dismiss</button>
+        </div>
+      )}
       <QueryClientProvider client={qc}>{content}</QueryClientProvider>
     </div>
   );

@@ -151,6 +151,24 @@ describe('patient identity with a reused client', () => {
     }
   });
 
+  it('tells the reader that the previous patient\'s unsent edit was dropped', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const view = render(form('session-a'));
+      await typeFirst();
+
+      signedIn = 262;
+      view.rerender(form('session-b'));
+
+      expect(await screen.findByRole('status')).toHaveTextContent(
+        '1 unsent edit for the previous patient was not saved.');
+      fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
+      expect(screen.queryByText(/unsent edit/)).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('does not send it either when the form remounts under a new key', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
