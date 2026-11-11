@@ -567,3 +567,59 @@ def test_the_native_patch_retry_uses_the_stored_day(lab):
     record.refresh_from_db()
     assert record.pending_source_pair_dates == {
         'hemoglobin_level': draw.isoformat()}
+
+
+def test_the_native_patch_dates_a_changed_pair_today(lab):
+    draw = TODAY - timedelta(days=6)
+    _patch_native(lab, 120, 'G/L', draw)
+
+    # The value changed, so the resend is a new result, not a retry of the old
+    # one: it must not inherit the old draw date.
+    _patch_native(lab, 130, 'G/L')
+
+    record = lab['record']
+    assert record.pending_source_pair_dates == {
+        'hemoglobin_level': TODAY.isoformat()}
+    rows = _hemoglobin_rows(lab, SELF_REPORT_TYPE).order_by('measurement_date')
+    assert [row.measurement_date for row in rows] == [draw, TODAY]
+    assert rows.last().value_as_number == 13
+
+
+def test_the_native_patch_dates_a_changed_unit_today(lab):
+    draw = TODAY - timedelta(days=6)
+    _patch_native(lab, 12, 'G/DL', draw)
+
+    _patch_native(lab, 12, 'G/L')
+
+    record = lab['record']
+    assert record.pending_source_pair_dates == {
+        'hemoglobin_level': TODAY.isoformat()}
+    rows = _hemoglobin_rows(lab, SELF_REPORT_TYPE).order_by('measurement_date')
+    assert [row.measurement_date for row in rows] == [draw, TODAY]
+
+
+def test_a_failed_shared_form_projection_leaves_no_canonical_pending(lab):
+    from omop_core.models import Concept
+    Concept.objects.filter(concept_id__in=(EHR_TYPE, SELF_REPORT_TYPE)).delete()
+    draw = TODAY - timedelta(days=2)
+    _patch_pair(lab, 120, 'G/L', draw)
+
+    record = lab['record']
+    record.refresh_from_db()
+    assert 'hemoglobin_g_dl' not in (record.user_edited_fields or [])
+    assert record.pending_source_pair_dates == {
+        'hemoglobin_level': draw.isoformat()}
+    assert not _hemoglobin_rows(lab, SELF_REPORT_TYPE).exists()
+
+    ConceptFactory(concept_id=EHR_TYPE, concept_code='ehr-type')
+    ConceptFactory(concept_id=SELF_REPORT_TYPE, concept_code='patient-report-type')
+    # No retry: the newer import alone must become current, with no stale
+    # canonical marker restoring the old read-model over it.
+    _import(lab, 8.0, 'g/dL', TODAY)
+
+    record.refresh_from_db()
+    assert record.hemoglobin_g_dl == Decimal('8.0')
+    assert record.hemoglobin_level == Decimal('8.00')
+    assert not {'hemoglobin_level', 'hemoglobin_level_units'} & set(
+        record.user_edited_fields or [])
+    assert record.pending_source_pair_dates == {}

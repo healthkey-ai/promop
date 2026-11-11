@@ -1475,8 +1475,14 @@ def _apply_patient_form_patch(person, changes, *, allowed_fields=None, descripto
         # An echo is written but not protected: it is not the reader's edit.
         clinical_direct = set(direct) - set(profile_changes) - echo_fields
         pair_pending -= echo_fields
+        # A pair's canonical (injected from the pair) is written but is a
+        # derived read-model, never a second pending edit: protecting it would
+        # leave a stale value masking a newer import when its projection fails,
+        # exactly as the native writer excludes `_derived_from_pair` (#2318,
+        # #2426).
         record.user_edited_fields = sorted(
-            set(record.user_edited_fields or []) | clinical_direct | pair_pending)
+            set(record.user_edited_fields or [])
+            | (clinical_direct - pair_derived) | pair_pending)
         remember_dates(record, pair_date_values)
         record.save(update_fields=sorted(set(direct) | unit_fields)
                     + ['user_edited_fields', 'pending_source_pair_dates'])

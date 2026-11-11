@@ -1499,10 +1499,13 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 SOURCE_PAIR_CANONICALS, pair_sources_in, stored_dates,
             )
             pending_pair_dates = stored_dates(patient_info)
+            authored_pairs = pair_sources_in(
+                getattr(serializer, '_source_pairs', ()))
             retried_pairs = {
                 source for source in pair_sources_in(serializer.validated_data)
                 if source in pending_pair_dates
                 and source in (patient_info.user_edited_fields or [])
+                and source not in authored_pairs
             }
             for source in retried_pairs:
                 canonical = SOURCE_PAIR_CANONICALS[source]
