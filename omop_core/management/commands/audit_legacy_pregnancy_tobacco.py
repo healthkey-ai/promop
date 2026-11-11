@@ -1,0 +1,334 @@
+"""Audit legacy pregnancy/tobacco defaults that look like explicit answers (#2432).
+
+Both columns were ``null=False, default=True`` and were written by a derivation:
+
+* ``no_pregnancy_or_lactation_status`` by ``@not(pregnancy_test_result)``, whose
+  input also defaulted to False;
+* ``no_tobacco_use_status`` by the tobacco observations, with no observation
+  needed for the column's own default.
+
+So every legacy row says "not pregnant" / "does not use tobacco" whether or not
+anyone answered. They are now nullable self-assessments (0323, 0329). This
+command measures which stored values have evidence and which are pure defaults.
+It only reads; the repair command is a separate, guarded action.
+
+Classification, in priority order:
+
+``unanswered``        None: nobody answered.
+``explicit_false``    False. The legacy writers only produced True/None, so this
+                      is a real answer.
+``authored_true``     ``RecordRevision`` or ``user_edited_fields`` says a person
+                      set the field.
+``source_backed_true``A tobacco observation / pregnancy test is recorded. The
+                      derivation wrote True from a fact, not from the default.
+``rewritten_true``    The last authored value was False, then the current value
+                      became True again. The old formula is the likely writer.
+``unattributed_true`` True with no evidence at all: the legacy default.
+
+Only ``unattributed_true`` and ``rewritten_true`` are recommended for clearing,
+matching ``audit_pre_existing_conditions``. Everything else is kept.
+"""
+
+import hashlib
+import json
+import os
+from datetime import datetime, timezone as dt_timezone
+
+from django.core.management.base import BaseCommand, CommandError
+from django.db import connection, transaction
+from django.db.models import Q
+
+from omop_core.models import Measurement, Observation, PatientRecord, RecordRevision
+
+FIELDS = (
+    'no_pregnancy_or_lactation_status',
+    'no_tobacco_use_status',
+)
+CLASSIFICATIONS = (
+    'unanswered',
+    'explicit_false',
+    'authored_true',
+    'source_backed_true',
+    'rewritten_true',
+    'unattributed_true',
+)
+ACTIONS = {
+    'unanswered': 'none',
+    'explicit_false': 'keep',
+    'authored_true': 'keep',
+    'source_backed_true': 'keep',
+    'rewritten_true': 'clear',
+    'unattributed_true': 'clear',
+}
+
+_TOBACCO_CODES = ('72166-2', '266919005', '8517006', '77176002')
+_PREGNANCY_CODES = ('2106-3',)
+
+_TRUE_TEXT = {'true', 't', '1', 'yes', 'y', 'on'}
+_FALSE_TEXT = {'false', 'f', '0', 'no', 'n', 'off'}
+
+
+def _as_bool(text):
+    """Interpret a ``RecordRevision`` textual value, or None when it is blank."""
+    if text is None:
+        return None
+    normalized = str(text).strip().casefold()
+    if normalized in _TRUE_TEXT:
+        return True
+    if normalized in _FALSE_TEXT:
+        return False
+    return None
+
+
+def _revisions(field_name):
+    """The field's authored history, grouped by record, oldest first."""
+    history = {}
+    rows = (RecordRevision.objects
+            .filter(field=field_name)
+            .order_by('patient_record_id', 'changed_at', 'id')
+            .values_list('patient_record_id', 'changed_at', 'old_value', 'new_value')
+            .iterator(chunk_size=2000))
+    for record_id, changed_at, old_value, new_value in rows:
+        history.setdefault(record_id, []).append({
+            'changed_at': changed_at.isoformat() if changed_at else None,
+            'old': old_value,
+            'new': new_value,
+        })
+    return history
+
+
+def _source_backed_people():
+    """People whose record has a recorded tobacco/pregnancy source fact."""
+    tobacco = set(
+        Observation.objects
+        .filter(is_erroneous=False)
+        .filter(
+            Q(observation_concept__concept_code__in=_TOBACCO_CODES)
+            | Q(observation_source_value__in=_TOBACCO_CODES)
+        )
+        .values_list('person_id', flat=True)
+    )
+    pregnancy = set(
+        Measurement.objects
+        .filter(is_erroneous=False)
+        .filter(
+            Q(measurement_concept__concept_code__in=_PREGNANCY_CODES)
+            | Q(measurement_source_value__in=_PREGNANCY_CODES)
+        )
+        .values_list('person_id', flat=True)
+    )
+    pregnancy |= set(
+        Observation.objects
+        .filter(is_erroneous=False)
+        .filter(
+            Q(observation_concept__concept_code__in=_PREGNANCY_CODES)
+            | Q(observation_source_value__in=_PREGNANCY_CODES)
+        )
+        .values_list('person_id', flat=True)
+    )
+    return {
+        'no_tobacco_use_status': tobacco,
+        'no_pregnancy_or_lactation_status': pregnancy,
+    }
+
+
+def classify(value, revisions=(), pending_edit=False, source_backed=False):
+    """Classify one stored field from its value and the evidence behind it."""
+    if value is None:
+        return 'unanswered'
+    if value is False:
+        return 'explicit_false'
+    latest = None
+    for revision in revisions:
+        parsed = _as_bool(revision['new'])
+        if parsed is not None:
+            latest = parsed
+    if pending_edit or latest is True:
+        return 'authored_true'
+    if source_backed:
+        return 'source_backed_true'
+    if latest is False:
+        return 'rewritten_true'
+    return 'unattributed_true'
+
+
+def approval_digest(payload):
+    """Authenticate the reviewable document, not just its underlying data state."""
+    stable = {key: value for key, value in payload.items()
+              if key not in ('generated_at', 'approval_sha256')}
+    return hashlib.sha256(json.dumps(
+        stable, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+
+class Command(BaseCommand):
+    help = ('Report legacy pregnancy/tobacco defaults with their provenance; '
+            'read-only, writes an optional manifest for the repair command')
+
+    def add_arguments(self, parser):
+        parser.add_argument(
+            '--output', metavar='PATH',
+            help='Write the full manifest (summary + per-record classification) as JSON',
+        )
+        parser.add_argument(
+            '--summary-only', action='store_true',
+            help='Omit per-record rows from the output file (the manifest changes)',
+        )
+        parser.add_argument(
+            '--fail-on', action='append', choices=CLASSIFICATIONS, default=[],
+            help='Exit 1 when any record falls into this classification (repeatable)',
+        )
+        parser.add_argument(
+            '--quiet', action='store_true', help='Print only the full-document approval hash',
+        )
+
+    def handle(self, *args, **options):
+        if options['output'] and os.path.exists(options['output']):
+            raise CommandError(
+                f'{options["output"]} already exists; refusing to overwrite an audit '
+                'manifest (choose a new path)')
+
+        owns_transaction = not connection.in_atomic_block
+        with transaction.atomic():
+            if owns_transaction:
+                self._make_transaction_read_only()
+            payload = self._collect(summary_only=options['summary_only'])
+
+        if options['quiet']:
+            self.stdout.write(payload['approval_sha256'])
+        else:
+            self._print_summary(payload)
+
+        if options['output']:
+            directory = os.path.dirname(os.path.abspath(options['output']))
+            os.makedirs(directory, exist_ok=True)
+            try:
+                fd = os.open(options['output'], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            except FileExistsError as exc:
+                raise CommandError(
+                    f'{options["output"]} already exists; refusing to overwrite an audit '
+                    'manifest.') from exc
+            with os.fdopen(fd, 'w', encoding='utf-8') as handle:
+                json.dump(payload, handle, indent=2, sort_keys=True)
+                handle.write('\n')
+            self.stdout.write(self.style.SUCCESS(
+                f'manifest written to {options["output"]} ({payload["manifest_sha256"]})'))
+
+        failing = set(options['fail_on'])
+        if failing:
+            found = sorted(
+                name for name in failing
+                if any(payload['totals']['by_field'][field]['by_classification'].get(name)
+                       for field in FIELDS))
+            if found:
+                raise CommandError(
+                    f'finding gate: records classified as {", ".join(found)}')
+
+    def _make_transaction_read_only(self):
+        """Ask Postgres to reject writes for this transaction, as a second guard."""
+        if connection.vendor != 'postgresql':
+            return
+        with connection.cursor() as cursor:
+            cursor.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY')
+
+    def _collect(self, summary_only):
+        histories = {field: _revisions(field) for field in FIELDS}
+        backed = _source_backed_people()
+        queryset = (
+            PatientRecord.objects
+            .order_by('pk')
+            .values_list('pk', 'person_id', 'organization_id', *FIELDS,
+                         'user_edited_fields', 'derivation_version', 'derived_at')
+        )
+
+        records = []
+        totals = 0
+        by_field = {
+            field: {
+                'by_classification': {name: 0 for name in CLASSIFICATIONS},
+                'by_action': {},
+            }
+            for field in FIELDS
+        }
+        hashed = hashlib.sha256()
+
+        for row in queryset.iterator(chunk_size=2000):
+            pk = row[0]
+            person_id = row[1]
+            organization_id = row[2]
+            values = dict(zip(FIELDS, row[3:5]))
+            edited = row[5] if isinstance(row[5], list) else []
+            derivation_version, derived_at = row[6], row[7]
+            fields = {}
+            for field in FIELDS:
+                revisions = histories[field].get(pk, [])
+                pending_edit = field in edited
+                source_backed = person_id in backed[field]
+                classification = classify(
+                    values[field], revisions, pending_edit, source_backed)
+                action = ACTIONS[classification]
+                by_field[field]['by_classification'][classification] += 1
+                by_field[field]['by_action'][action] = (
+                    by_field[field]['by_action'].get(action, 0) + 1)
+                fields[field] = {
+                    'value': values[field],
+                    'classification': classification,
+                    'recommended_action': action,
+                    'revision_count': len(revisions),
+                    'pending_edit': pending_edit,
+                    'source_backed': source_backed,
+                    'last_authored': next(
+                        (parsed for parsed in (
+                            _as_bool(revision['new']) for revision in reversed(revisions))
+                         if parsed is not None), None),
+                }
+            totals += 1
+            line = json.dumps({
+                'id': pk, 'fields': fields,
+            }, sort_keys=True, separators=(',', ':'))
+            hashed.update((line + '\n').encode('utf-8'))
+            if not summary_only:
+                records.append({
+                    'id': pk,
+                    'person_id': person_id,
+                    'organization_id': organization_id,
+                    'fields': fields,
+                    'derivation_version': derivation_version,
+                    'derived_at': derived_at.isoformat() if derived_at else None,
+                })
+
+        payload = {
+            'generated_at': datetime.now(dt_timezone.utc).isoformat(),
+            'database': {
+                'name': connection.settings_dict.get('NAME'),
+                'host': connection.settings_dict.get('HOST'),
+                'port': str(connection.settings_dict.get('PORT') or '5432'),
+            },
+            'fields': list(FIELDS),
+            'totals': {
+                'records': totals,
+                'by_field': by_field,
+            },
+            'records': records,
+            'manifest_sha256': hashed.hexdigest(),
+            'manifest_version': 1,
+            'manifest_scope': 'canonical JSON per record: id, per-field value, classification, '
+                              'revision count, pending edit, source-backed evidence',
+        }
+        payload['approval_sha256'] = approval_digest(payload)
+        return payload
+
+    def _print_summary(self, payload):
+        self.stdout.write(f'database: {payload["database"]["name"]} '
+                          f'({payload["database"]["host"]}:{payload["database"]["port"]})')
+        self.stdout.write(f'records: {payload["totals"]["records"]}')
+        for field in FIELDS:
+            counts = payload['totals']['by_field'][field]['by_classification']
+            actions = payload['totals']['by_field'][field]['by_action']
+            self.stdout.write(f'  {field}:')
+            self.stdout.write('    ' + ', '.join(
+                f'{name}={counts[name]}' for name in CLASSIFICATIONS
+                if counts[name]) if any(counts.values()) else '    all unanswered')
+            if actions:
+                self.stdout.write('    actions: ' + ', '.join(
+                    f'{name}={count}' for name, count in sorted(actions.items())))
+        self.stdout.write(f'approval_sha256: {payload["approval_sha256"]}')
