@@ -130,7 +130,9 @@ def test_source_parsers_handle_lab_spellings_and_conflicts(tmp_path):
     for name, value in (
             ('neg', 'NEG\nSamples with Specific Gravity <1.010'),
             ('positive', 'Positive\nReference range: Negative'),
-            ('not_negative', 'Not negative')):
+            ('not_negative', 'Not negative'),
+            ('nd', 'ND'),
+            ('blank', '   ')):
         record = PatientRecordFactory(**{PREGNANCY: True, TOBACCO: False})
         MeasurementFactory(person=record.person, measurement_source_value='2106-3',
                            value_as_string=value)
@@ -143,6 +145,11 @@ def test_source_parsers_handle_lab_spellings_and_conflicts(tmp_path):
         value_as_concept=ConceptFactory(concept_code='LA18976-3'),
     )
     records['tobacco_conflict'] = conflict
+    tobacco_text = PatientRecordFactory(**{PREGNANCY: False, TOBACCO: True})
+    ObservationFactory(person=tobacco_text.person,
+                       observation_source_value='72166-2',
+                       value_as_string='Current smoker, never tried quitting')
+    records['tobacco_text'] = tobacco_text
     for record in records.values():
         PatientRecord.objects.filter(pk=record.pk).update(
             **{PREGNANCY: True, TOBACCO: True})
@@ -153,7 +160,10 @@ def test_source_parsers_handle_lab_spellings_and_conflicts(tmp_path):
     assert by_id[records['neg'].pk]['fields'][PREGNANCY]['classification'] == 'source_backed_true'
     assert by_id[records['positive'].pk]['fields'][PREGNANCY]['classification'] == 'source_conflict'
     assert by_id[records['not_negative'].pk]['fields'][PREGNANCY]['classification'] == 'source_conflict'
+    assert by_id[records['nd'].pk]['fields'][PREGNANCY]['classification'] == 'source_unknown'
+    assert by_id[records['blank'].pk]['fields'][PREGNANCY]['classification'] == 'source_unknown'
     assert by_id[records['tobacco_conflict'].pk]['fields'][TOBACCO]['classification'] == 'source_conflict'
+    assert by_id[records['tobacco_text'].pk]['fields'][TOBACCO]['classification'] == 'source_conflict'
 
 
 def test_a_pending_marker_does_not_override_a_recorded_false(tmp_path):

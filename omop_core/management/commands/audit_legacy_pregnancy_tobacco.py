@@ -55,6 +55,7 @@ CLASSIFICATIONS = (
     'source_backed_true',
     'rewritten_true',
     'source_conflict',
+    'source_unknown',
     'unattributed_true',
 )
 ACTIONS = {
@@ -64,6 +65,7 @@ ACTIONS = {
     'source_backed_true': 'keep',
     'rewritten_true': 'needs_policy',
     'source_conflict': 'needs_policy',
+    'source_unknown': 'needs_policy',
     'unattributed_true': 'clear',
 }
 
@@ -151,13 +153,13 @@ def _tobacco_supports_true(row):
         return states.pop()
     if len(states) > 1:
         return False
-    text = ' '.join(filter(None, (
-        row['string'], row['answer_name'], row['source_value'],
-    ))).strip().splitlines()[0].strip().casefold() if any(
-        (row['string'], row['answer_name'], row['source_value'])) else ''
-    if 'never' in text:
+    value = row['string'] or row['answer_name'] or row['source_value']
+    if not value or not str(value).strip():
+        return None
+    first = str(value).strip().splitlines()[0].strip().casefold()
+    if first.startswith('never'):
         return True
-    if 'former' in text or 'current' in text or 'smoker' in text:
+    if first.startswith(('former', 'current', 'smoker', 'yes')):
         return False
     return None
 
@@ -170,7 +172,7 @@ def _pregnancy_supports_true(row):
     negative" is the positive answer; "NEG" is the common negative spelling.
     """
     value = row['string'] or row['answer_name'] or row['answer_code'] or row['source_value']
-    if value in (None, ''):
+    if not value or not str(value).strip():
         return None
     first = str(value).strip().splitlines()[0].strip().casefold()
     if not first:
@@ -200,7 +202,8 @@ def _source_state():
         .values(
             'person_id', 'observation_date', 'observation_id',
             'observation_concept__concept_code', 'observation_source_value',
-            'value_as_concept__concept_code', 'value_as_string',
+            'value_as_concept__concept_code', 'value_as_concept__concept_name',
+            'value_as_string',
         )
     )
     tobacco = {
@@ -208,6 +211,7 @@ def _source_state():
             'concept_code': row['observation_concept__concept_code'],
             'source_value': row['observation_source_value'],
             'answer_code': row['value_as_concept__concept_code'],
+            'answer_name': row['value_as_concept__concept_name'],
             'string': row['value_as_string'],
         })
         for person, row in _latest_by_person([
@@ -215,6 +219,8 @@ def _source_state():
             for row in tobacco_rows
         ]).items()
     }
+    tobacco = {person: ('unknown' if state is None else state)
+               for person, state in tobacco.items()}
 
     pregnancy_rows = []
     for row in Measurement.objects.filter(is_erroneous=False).filter(
@@ -246,6 +252,8 @@ def _source_state():
         })
         for person, row in _latest_by_person(pregnancy_rows).items()
     }
+    pregnancy = {person: ('unknown' if state is None else state)
+                 for person, state in pregnancy.items()}
     return {
         'no_tobacco_use_status': tobacco,
         'no_pregnancy_or_lactation_status': pregnancy,
@@ -283,6 +291,8 @@ def classify(value, revisions=(), pending_edit=False, source_state=None):
         return 'source_backed_true'
     if source_state is False:
         return 'source_conflict'
+    if source_state == 'unknown':
+        return 'source_unknown'
     return 'unattributed_true'
 
 
