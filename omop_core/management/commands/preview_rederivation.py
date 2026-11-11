@@ -22,9 +22,10 @@ Usage:
     python manage.py preview_rederivation --format json --max-rows 1000
     python manage.py preview_rederivation --format csv > changes.csv
 
-Values of direct identifiers (email, phone, date of birth, address-level
-location, facility, validator) are printed as [redacted]; that they change is
-still reported. No names are printed: rows carry person_id only.
+Values of identifiers, the person's own dates and free text are printed as
+[redacted] (a null still as null); that they change is still reported. No
+names are printed: rows carry person_id only. Needs the writable primary: see
+"Before a backfill" in docs/DERIVATION_CHANGELOG.md.
 """
 
 import csv
@@ -33,6 +34,7 @@ import logging
 from collections import Counter
 
 from django.core.management.base import BaseCommand, CommandError
+from django.db import DatabaseError
 
 from omop_core.models import PatientRecord
 from omop_core.services.patient_record_service import DERIVATION_VERSION
@@ -50,6 +52,32 @@ def _jsonable(value):
         return {str(key): _jsonable(item) for key, item in value.items()}
     # Decimal, date, datetime: their string form is exact.
     return str(value)
+
+
+def _failure(person_id, exc):
+    """What can be said about a failed preview without quoting the record.
+
+    Not the message or the traceback: a constraint violation's message carries
+    PostgreSQL's "Failing row contains (...)", which is every column of the
+    patient's record. A database error is described by its SQLSTATE and
+    constraint name only.
+    """
+    failure = {"person_id": person_id, "error": type(exc).__name__}
+    cause = exc if isinstance(exc, DatabaseError) else None
+    while cause is not None and not hasattr(cause, "sqlstate"):
+        cause = cause.__cause__
+    if cause is not None:
+        failure["sqlstate"] = cause.sqlstate
+        constraint = getattr(getattr(cause, "diag", None), "constraint_name", None)
+        if constraint:
+            failure["constraint"] = constraint
+    return failure
+
+
+def _known_fields():
+    from omop_core.services.rederivation_preview import IGNORED_FIELDS
+
+    return {field.name for field in PatientRecord._meta.concrete_fields} - IGNORED_FIELDS
 
 
 def _text(value):
@@ -161,10 +189,22 @@ class Command(BaseCommand):
 
         qs, label = self._cohort(options)
         wanted = set(options["fields"] or ())
+        known = _known_fields()
+        unknown = sorted(
+            field for field in wanted
+            if field not in known and not field.startswith("custom_fields.")
+        )
+        if unknown:
+            raise CommandError(
+                f"Unknown field(s): {', '.join(unknown)}. Use a PatientRecord field name "
+                "or custom_fields.<key>."
+            )
+        max_rows = options["max_rows"]
 
         scanned = 0
         changed_records = 0
         per_field = Counter()
+        total_rows = 0
         rows = []
         errors = []
         for record in qs.only("pk", "person_id").iterator(chunk_size=options["batch_size"]):
@@ -172,19 +212,23 @@ class Command(BaseCommand):
             try:
                 changes = preview_record(record)
             except Exception as exc:
-                errors.append({"person_id": record.person_id, "error": type(exc).__name__})
-                logger.exception("Preview failed for person_id=%s", record.person_id)
+                failure = _failure(record.person_id, exc)
+                errors.append(failure)
+                # No exc_info: see _failure.
+                logger.error(
+                    "Preview failed for person_id=%s: %s",
+                    record.person_id,
+                    " ".join(f"{key}={value}" for key, value in failure.items() if key != "person_id"),
+                )
                 continue
             changes = [c for c in changes if self._selected(c.field, wanted)]
             if changes:
                 changed_records += 1
             for change in changes:
                 per_field[change.field] += 1
-                rows.append(change)
-
-        total_rows = len(rows)
-        if options["max_rows"] is not None:
-            rows = rows[:options["max_rows"]]
+                total_rows += 1
+                if max_rows is None or len(rows) < max_rows:
+                    rows.append(change)
 
         summary = {
             "cohort": label,
@@ -229,7 +273,8 @@ class Command(BaseCommand):
             if summary["changes_shown"] < summary["changes"]:
                 out.write(f"... {summary['changes'] - summary['changes_shown']} more row(s) not shown (--max-rows)")
         for error in errors:
-            out.write(self.style.ERROR(f"person_id={error['person_id']} not previewed: {error['error']}"))
+            detail = " ".join(f"{key}={value}" for key, value in error.items() if key != "person_id")
+            out.write(self.style.ERROR(f"person_id={error['person_id']} not previewed: {detail}"))
 
     def _write_json(self, summary, rows, errors):
         document = {

@@ -2,19 +2,22 @@
 import csv
 import io
 import json
-from unittest import mock
+import logging
+import threading
 
 import pytest
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.db import connection
 
-from omop_core.models import Measurement, PatientRecord, RecordRevision
+from omop_core.models import Location, Measurement, PatientRecord, Person, RecordRevision
 from omop_core.services import patient_record_service
 from omop_core.services.patient_record_service import (
     DERIVATION_VERSION, refresh_patient_record,
 )
-from omop_core.services.rederivation_preview import PreviewWriteBlocked, preview_record
+from omop_core.services.rederivation_preview import (
+    PreviewWriteBlocked, _statement_is_allowed, preview_record,
+)
 from tests.factories import MeasurementFactory, OrganizationFactory, PatientRecordFactory
 
 pytestmark = pytest.mark.django_db
@@ -92,12 +95,51 @@ def test_identifier_values_are_redacted_but_their_change_is_reported():
     rows = {row['field']: row for row in _json()['changes']}
 
     assert 'someone@example.org' not in out and '555-0100' not in out
+    # Person carries no email, so refresh clears it: the wipe stays visible.
     assert rows['email'] == {
         'person_id': record.person_id, 'field': 'email', 'stored': '[redacted]',
-        'rederived': '[redacted]', 'user_edited': False, 'redacted': True,
+        'rederived': None, 'user_edited': False, 'redacted': True,
     }
     assert rows['phone_number']['redacted'] is True
     assert rows['race']['stored'] == 'Asian'
+
+
+def test_a_redacted_value_appearing_from_null_shows_the_null():
+    record = _settled()
+    Person.objects.filter(pk=record.person_id).update(email='someone@example.org')
+
+    rows = _json('--field', 'email')['changes']
+
+    assert rows == [{
+        'person_id': record.person_id, 'field': 'email', 'stored': None,
+        'rederived': '[redacted]', 'user_edited': False, 'redacted': True,
+    }]
+
+
+def test_personal_dates_and_free_text_are_redacted(monkeypatch):
+    record = _settled()
+    _stale(record, death_date='2024-03-01', validation_date='2024-02-01',
+           custom_fields={'note': 'Jane Doe called', 'score': 7})
+    # Free text is not cleared by refresh; have an extractor derive some.
+    monkeypatch.setattr(patient_record_service, '_get_blood_type_data', lambda person, snapshot=None: {
+        'blood_type': None, 'tobacco_use_details': 'Told Dr Smith he quit',
+        'planned_therapies': 'per Jane',
+    })
+
+    out, _ = _run()
+    rows = {row['field']: row for row in _json()['changes']}
+
+    for value in ('2024-03-01', '2024-02-01', 'Smith', 'Jane'):
+        assert value not in out
+    for field in ('death_date', 'validation_date', 'custom_fields.note'):
+        assert (rows[field]['stored'], rows[field]['rederived'], rows[field]['redacted']) == (
+            '[redacted]', None, True), field
+    for field in ('tobacco_use_details', 'planned_therapies'):
+        assert (rows[field]['stored'], rows[field]['rederived'], rows[field]['redacted']) == (
+            None, '[redacted]', True), field
+    # A custom field's number is a value, not free text.
+    assert rows['custom_fields.score']['stored'] == 7
+    assert rows['custom_fields.score']['redacted'] is False
 
 
 def test_a_pending_edit_the_refresh_keeps_is_not_a_change():
@@ -177,13 +219,13 @@ def test_field_filter_and_row_limit():
 
 def test_custom_fields_are_compared_per_key():
     record = _settled()
-    _stale(record, custom_fields={'stale_custom_answer': 'yes'})
+    _stale(record, custom_fields={'stale_custom_answer': 3})
 
     rows = _json('--field', 'custom_fields')['changes']
 
     assert rows == [{
         'person_id': record.person_id, 'field': 'custom_fields.stale_custom_answer',
-        'stored': 'yes', 'rederived': None, 'user_edited': False, 'redacted': False,
+        'stored': 3, 'rederived': None, 'user_edited': False, 'redacted': False,
     }]
 
 
@@ -253,14 +295,144 @@ def test_the_command_writes_nothing(django_capture_on_commit_callbacks):
     before = _database_fingerprint()
     assert len(before) > 50  # every table, not an empty comparison
 
-    with mock.patch('celery.app.base.Celery.send_task') as send_task, \
-            django_capture_on_commit_callbacks() as callbacks:
+    with django_capture_on_commit_callbacks() as callbacks:
         document = _json('--all')
 
     assert document['summary']['records_changed'] == 2  # the preview did run
+    # A publish attempt would have been refused and reported as an error.
+    assert document['summary']['errors'] == 0
     assert _database_fingerprint() == before
     assert callbacks == []
-    send_task.assert_not_called()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_the_command_writes_nothing_under_real_commits():
+    """Outside a test transaction each preview is the outermost transaction."""
+    records = [_settled() for _ in range(4)]
+    for record in records[:3]:
+        _stale(record, race='Asian')
+    before = _database_fingerprint()
+
+    document = _json('--all', '--batch-size', '1')
+
+    assert document['summary']['records_scanned'] == 4
+    assert document['summary']['records_changed'] == 3
+    assert document['summary']['errors'] == 0
+    assert _database_fingerprint() == before
+
+
+def _other_connection():
+    import psycopg
+
+    settings = connection.settings_dict
+    return psycopg.connect(
+        dbname=settings['NAME'], user=settings['USER'], password=settings['PASSWORD'],
+        host=settings['HOST'] or None, port=settings['PORT'] or None, autocommit=True,
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+def test_the_baseline_is_read_under_the_row_lock(monkeypatch):
+    """A save landing mid-preview must wait, not slip in after the baseline read."""
+    record = _settled()
+    real_refresh = patient_record_service.refresh_patient_record
+    outcome = {}
+
+    def refresh_while_someone_saves(person):
+        def concurrent_save():
+            import psycopg
+
+            with _other_connection() as other:
+                try:
+                    other.execute("SET lock_timeout = '300ms'")
+                    other.execute(
+                        "UPDATE patient_record SET race = 'Asian' WHERE id = %s", [record.pk])
+                    outcome['save'] = 'committed'
+                except psycopg.errors.LockNotAvailable:
+                    outcome['save'] = 'waited'
+
+        worker = threading.Thread(target=concurrent_save)
+        worker.start()
+        worker.join()
+        return real_refresh(person)
+
+    monkeypatch.setattr(patient_record_service, 'refresh_patient_record', refresh_while_someone_saves)
+
+    preview_record(record)
+
+    assert outcome == {'save': 'waited'}
+    assert PatientRecord.objects.get(pk=record.pk).race == 'White'
+
+
+def test_a_failure_is_logged_without_the_row(caplog):
+    """A CHECK violation's message quotes the whole row: it must not reach the log."""
+    record = _settled()
+    Location.objects.create(location_id=8801, latitude=500, longitude=10, zip='02139')
+    Person.objects.filter(pk=record.person_id).update(location_id=8801, email='someone@example.org')
+    _stale(record, email='someone@example.org', phone_number='555-0100')
+
+    out = io.StringIO()
+    with caplog.at_level(logging.DEBUG), pytest.raises(CommandError):
+        call_command('preview_rederivation', '--format', 'json', stdout=out)
+
+    logged = caplog.text + ''.join(
+        str(r.exc_info) + str(r.exc_text) for r in caplog.records)
+    for value in ('someone@example.org', '555-0100', '02139', 'Failing row', 'Traceback'):
+        assert value not in logged, value
+        assert value not in out.getvalue(), value
+    assert all(r.exc_info is None for r in caplog.records)
+    assert json.loads(out.getvalue())['errors'] == [{
+        'person_id': record.person_id, 'error': 'IntegrityError',
+        'sqlstate': '23514', 'constraint': 'patientrecord_latitude_range',
+    }]
+    assert 'sqlstate=23514 constraint=patientrecord_latitude_range' in caplog.text
+
+
+def test_an_unknown_field_is_refused():
+    _settled()
+
+    with pytest.raises(CommandError, match='Unknown field.*disese'):
+        _run('--field', 'disese')
+    # A custom field's key is not known in advance.
+    assert _json('--field', 'custom_fields.anything')['changes'] == []
+
+
+@pytest.mark.parametrize('sql', [
+    'SELECT "patient_record"."id" FROM "patient_record" WHERE "id" = %s FOR UPDATE',
+    'UPDATE "patient_record" SET "race" = %s WHERE "id" = %s',
+    'WITH x AS (SELECT 1) SELECT * FROM x',
+    'SAVEPOINT "s1"',
+    'RELEASE SAVEPOINT "s1"',
+    'ROLLBACK TO SAVEPOINT "s1"',
+    'SELECT 1;',
+])
+def test_the_guard_allows_reads_and_the_record_update(sql):
+    assert _statement_is_allowed(sql)
+
+
+@pytest.mark.parametrize('sql', [
+    'INSERT INTO "measurement" ("id") VALUES (%s)',
+    'INSERT INTO "patient_record" ("person_id") VALUES (%s)',
+    'UPDATE "person" SET "email" = %s',
+    'DELETE FROM "record_revision"',
+    'SET LOCAL lock_timeout = 1',
+    "SELECT nextval('measurement_id_seq')",
+    "SELECT setval('measurement_id_seq', 1)",
+    'SELECT pg_advisory_lock(1)',
+    'SELECT pg_advisory_xact_lock(1)',
+    'SELECT pg_try_advisory_lock(1)',
+    "SELECT set_config('x.y', 'z', false)",
+    'SELECT lo_create(0)',
+    "SELECT dblink_exec('x', 'y')",
+    'SELECT * INTO new_table FROM person',
+    'WITH x AS (SELECT 1) SELECT * INTO new_table FROM x',
+    'WITH d AS (DELETE FROM person RETURNING *) SELECT * FROM d',
+    'SELECT 1; DELETE FROM person',
+    'UPDATE "patient_record" SET "race" = %s; DELETE FROM person',
+])
+def test_the_guard_refuses_anything_that_can_outlive_the_rollback(sql):
+    assert not _statement_is_allowed(sql)
+
 
 
 def test_a_write_outside_the_record_is_refused_and_rolled_back(monkeypatch):

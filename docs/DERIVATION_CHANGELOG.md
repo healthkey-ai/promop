@@ -25,16 +25,34 @@ re-derived value. `--limit` caps the records scanned, `--max-rows` the lines
 printed (the counts still cover everything). A field that held a pending user
 edit is marked `[user-edited]`; the refresh keeps such an edit until OMOP backs
 it, so most pending edits show no change, and the preview reports exactly what
-the refresh does to the rest. Values of direct identifiers (email, phone, date
-of birth, city, postal code, coordinates, facility, validator) print as
-`[redacted]`; names are never printed.
+the refresh does to the rest. `--field` accepts a `PatientRecord` field name or
+`custom_fields.<key>` and refuses anything else.
+
+Some values are printed as `[redacted]`: direct identifiers (email, phone,
+city, postal code, coordinates, facility, validator), the person's own dates
+(birth, death, validation), the free-text columns (`*_details`,
+`planned_therapies`) and text values of custom fields. That such a field
+changes is still reported, and a null still prints as null, so a value being
+cleared shows as `"[redacted]" -> null`. Names are never printed; rows carry
+`person_id` only. A record that cannot be previewed is reported, and logged, by
+error type, plus SQLSTATE and constraint name for a database error -- never the
+error message, which for a constraint violation quotes the whole row.
 
 It is read-only: each record runs the real `refresh_patient_record` inside a
 transaction that is always rolled back, while a guard refuses any SQL other
-than reads and the `patient_record` update, and any Celery publish. A refused
-write is reported as an error for that person and the command exits non-zero.
-It does hold each record's row lock for the length of its refresh, as the
-backfill does.
+than reads and the `patient_record` update (and, within reads, sequence,
+advisory-lock, setting and `SELECT ... INTO` calls), and any Celery publish. A
+refused write is reported as an error for that person and the command exits
+non-zero. Operational costs:
+
+- It must run against the writable primary, as a role that may `UPDATE
+  patient_record`: the refresh really executes its update before the rollback,
+  so it fails on a read replica or under `default_transaction_read_only`.
+- Each record's row lock is held for the length of its refresh, as the backfill
+  holds it; concurrent edits to that patient wait.
+- Each record previewed leaves one dead row version in `patient_record` and
+  writes WAL, as an update that rolled back does. Vacuum reclaims them; a
+  preview of the whole table costs about what an update of it would.
 
 | Version | Date       | Description                                      |
 |---------|------------|--------------------------------------------------|

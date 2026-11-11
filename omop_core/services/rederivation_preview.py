@@ -43,10 +43,19 @@ IGNORED_FIELDS = frozenset({
     'created_at', 'updated_at',
 })
 
-# Direct identifiers: a change is reported, its values are not.
+# A change to these is reported, their values are not (a null is still shown
+# as null, so a field being wiped stays visible). Direct identifiers and the
+# HIPAA Safe Harbor dates, plus the free-text columns, which hold whatever a
+# source system or a person typed and so can hold a name.
 REDACTED_FIELDS = frozenset({
-    'email', 'phone_number', 'date_of_birth', 'city', 'postal_code',
-    'latitude', 'longitude', 'facility_name', 'validated_by',
+    # identifiers
+    'email', 'phone_number', 'city', 'postal_code', 'latitude', 'longitude',
+    'facility_name', 'validated_by',
+    # dates of the person rather than of their disease
+    'date_of_birth', 'death_date', 'validation_date',
+    # free text
+    'concomitant_medication_details', 'tobacco_use_details', 'substance_use_details',
+    'geographic_exposure_risk_details', 'planned_therapies',
 })
 REDACTED = '[redacted]'
 
@@ -61,6 +70,15 @@ _READ_OR_CONTROL = re.compile(
 )
 _WRITE_KEYWORD = re.compile(
     r'\b(INSERT|UPDATE|DELETE|TRUNCATE|MERGE|COPY|CREATE|ALTER|DROP)\b', re.IGNORECASE,
+)
+# SELECT ... INTO creates a table.
+_INTO = re.compile(r'\bINTO\b', re.IGNORECASE)
+# Functions a SELECT can call that change state a rollback does not undo
+# (sequences, session-level advisory locks, settings, large objects, other
+# databases).
+_SIDE_EFFECT_FUNCTION = re.compile(
+    r'\b(nextval|setval|pg_advisory_\w*lock\w*|pg_try_advisory_\w*|set_config|lo_\w+|dblink\w*)\s*\(',
+    re.IGNORECASE,
 )
 
 
@@ -79,14 +97,26 @@ class FieldChange:
 
 
 def _statement_is_allowed(sql: str) -> bool:
-    if _ALLOWED_WRITE.match(sql):
+    """Whether ``sql`` can only read, or update patient_record.
+
+    Errs towards refusing: a refused statement fails one person's preview,
+    a wrongly allowed one could write.
+    """
+    body = sql.strip().rstrip(';').rstrip()
+    if ';' in body:
+        # More than one statement: psycopg can send them together, and only the
+        # first would have been checked.
+        return False
+    if _SIDE_EFFECT_FUNCTION.search(body):
+        return False
+    if _ALLOWED_WRITE.match(body):
         return True
-    if _READ_OR_CONTROL.match(sql):
-        # A SELECT cannot write; a data-modifying CTE starts with WITH and is
-        # caught below. FOR UPDATE takes a lock and writes nothing.
-        return True
-    if re.match(r'^\s*WITH\b', sql, re.IGNORECASE):
-        return not _WRITE_KEYWORD.search(sql)
+    if _READ_OR_CONTROL.match(body):
+        # FOR UPDATE takes a lock, released by the rollback, and writes nothing.
+        return not _INTO.search(body)
+    if re.match(r'^\s*WITH\b', body, re.IGNORECASE):
+        # A data-modifying CTE also starts with WITH.
+        return not (_WRITE_KEYWORD.search(body) or _INTO.search(body))
     return False
 
 
@@ -137,6 +167,19 @@ def _values(record: PatientRecord) -> dict[str, object]:
     return values
 
 
+def _redacted(field: str, value) -> bool:
+    if value is None:
+        return False
+    if field.startswith('custom_fields.'):
+        # A custom field's text is free text; its numbers and flags are not.
+        return isinstance(value, str)
+    return field in REDACTED_FIELDS
+
+
+def _shown(field: str, value):
+    return REDACTED if _redacted(field, value) else value
+
+
 def preview_record(record: PatientRecord) -> list[FieldChange]:
     """The changes ``refresh_patient_record`` would make to ``record``, unsaved.
 
@@ -145,17 +188,26 @@ def preview_record(record: PatientRecord) -> list[FieldChange]:
     pending edits produce no change; one that does change shows what the
     refresh actually does to it, and the edit marker's own removal is reported
     under ``user_edited_fields``.
+
+    The stored side is read under the same row lock the refresh takes, so a
+    save that lands while the preview runs cannot pose as a derivation change.
+
+    Not for a threaded server: the Celery guard patches ``Celery.send_task`` on
+    the class, process-wide, for as long as the refresh runs, so another thread
+    publishing a task at that moment would be refused too. A management
+    command is single-threaded.
     """
     from omop_core.services.patient_record_service import refresh_patient_record
-
-    stored_record = PatientRecord.objects.select_related('person').get(pk=record.pk)
-    stored = _values(stored_record)
-    pending = set(stored_record.user_edited_fields or [])
 
     with read_only_guard() as refusals:
         try:
             with transaction.atomic():
                 try:
+                    # Lock first, then read: refresh_patient_record takes the
+                    # same lock again, which the holder is granted at once.
+                    stored_record = PatientRecord.objects.select_for_update().get(pk=record.pk)
+                    stored = _values(stored_record)
+                    pending = set(stored_record.user_edited_fields or [])
                     refresh_patient_record(stored_record.person)
                     rederived = _values(PatientRecord.objects.get(pk=record.pk))
                 finally:
@@ -174,14 +226,12 @@ def preview_record(record: PatientRecord) -> list[FieldChange]:
         before, after = stored.get(field), rederived.get(field)
         if before == after:
             continue
-        column = field.split('.', 1)[0]
-        redacted = column in REDACTED_FIELDS
         changes.append(FieldChange(
             person_id=stored_record.person_id,
             field=field,
-            stored=REDACTED if redacted else before,
-            rederived=REDACTED if redacted else after,
+            stored=_shown(field, before),
+            rederived=_shown(field, after),
             user_edited=field in pending,
-            redacted=redacted,
+            redacted=_redacted(field, before) or _redacted(field, after),
         ))
     return changes
