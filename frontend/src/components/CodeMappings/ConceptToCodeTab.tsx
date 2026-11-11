@@ -101,8 +101,11 @@ type Status = 'approved' | 'proposed' | 'rejected';
 const STATUSES: Status[] = ['approved', 'proposed', 'rejected'];
 type SourcePage = Page<Source> & { zero_seen: number; status_counts?: Record<Status, number> };
 
-export default function ConceptToCodeTab({ canApprove, onWritingChange, initialConceptId, onInitialConceptHandled }: {
-  canApprove: boolean; onWritingChange?: (value: boolean) => void;
+export default function ConceptToCodeTab({ canApprove, canWrite, onWritingChange, initialConceptId, onInitialConceptHandled }: {
+  canApprove: boolean;
+  /** A doctor reads the tab (#2416): no priority, Done, Lock, notes or mapping. */
+  canWrite: boolean;
+  onWritingChange?: (value: boolean) => void;
   /** Open this concept's source codes on arrival, ready to suggest more. */
   initialConceptId?: number;
   /** Called once the linked concept is opened or reported, so it is not reopened. */
@@ -313,7 +316,7 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange, initialC
           <th className="p-3 text-right">Approved</th><th className="p-3 text-right">Proposed</th><th className="p-3 text-right">Rejected</th>
         </tr></thead>
         <tbody>{data?.results.map(concept => <tr key={concept.concept_id} data-testid={`concept-row-${concept.concept_id}`}
-          draggable={!writing && !moving && !concept.done}
+          draggable={canWrite && !writing && !moving && !concept.done}
           onDragStart={event => { event.dataTransfer?.setData('text/plain', String(concept.concept_id)); setDragged(concept); }}
           onDragEnd={() => { setDragged(null); setDropTarget(null); }}
           onDragOver={event => { if (dragged) { event.preventDefault(); setDropTarget(concept.concept_id); } }}
@@ -323,13 +326,16 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange, initialC
             concept.done ? 'italic text-slate-500' : ''} ${
             dropTarget === concept.concept_id && dragged?.concept_id !== concept.concept_id ? 'outline outline-2 outline-sky-500' : ''}`}>
           <td className="p-3 align-top"><PriorityCell concept={concept} lastPosition={lastPosition}
-            disabled={writing || moving} onMove={position => void move(concept, position)}
+            disabled={!canWrite || writing || moving} onMove={position => void move(concept, position)}
             onDone={done => void markDone(concept, done)} /></td>
           <td className="p-3"><button className="text-left font-medium text-slate-950 underline underline-offset-2" disabled={writing}
             aria-haspopup="dialog" aria-expanded={selected?.concept_id === concept.concept_id}
             onClick={event => { selectedTrigger.current = event.currentTarget; setSelected(concept); }}>{concept.concept_name}</button>
-            <NoteBadge concept={concept} onSaved={note => noteSaved(concept, note)} />
-            <LockBadge concept={concept} disabled={writing || moving} onToggle={() => void toggleLock(concept)} />
+            {canWrite ? <NoteBadge concept={concept} onSaved={note => noteSaved(concept, note)} />
+              : concept.note && <span className="ml-2 inline-flex items-center rounded border border-amber-300 bg-amber-50 px-1 py-0.5 align-middle text-amber-700"
+                title={concept.note.text} aria-label={`Note for ${concept.concept_name}: ${concept.note.text}`}>
+                <StickyNote size={12} aria-hidden="true" className="fill-amber-200" /></span>}
+            {(canWrite || concept.lock) && <LockBadge concept={concept} disabled={!canWrite || writing || moving} onToggle={() => void toggleLock(concept)} />}
             <div className="mt-1 text-xs text-slate-500">{concept.vocabulary_id}:{concept.concept_code} · OMOP {concept.concept_id} · {concept.domain_id}</div></td>
           <td className="p-3 text-xs text-slate-600">{concept.fields.length
             ? concept.fields.map(field => <div key={field.field_name}>{field.field_name} <span className="text-slate-400">({field.status})</span></div>) : '—'}</td>
@@ -356,7 +362,7 @@ export default function ConceptToCodeTab({ canApprove, onWritingChange, initialC
           </div>
           <Dialog.Close className={button} disabled={writing}>Close</Dialog.Close>
         </div>
-        <SourceCoverage key={selected.concept_id} concept={selected} canApprove={canApprove} readOnly={lockedByOther(selected)}
+        <SourceCoverage key={selected.concept_id} concept={selected} canApprove={canApprove} readOnly={!canWrite || lockedByOther(selected)}
           onWriting={value => { setWriting(value); onWritingChange?.(value); }} onSaved={() => setRevision(value => value + 1)}
           onEditingChange={setEditing} suggestCache={suggestCache} />
       </Dialog.Content>
@@ -1050,6 +1056,9 @@ function SourceCoverage({ concept, canApprove, readOnly = false, onSaved, onWrit
   // for a write, so a curator works through the list while Suggest searches (#2028).
   const busy = writing || running || readOnly;
   const locked = writing || opening || readOnly;
+  // Filtering and ordering are reads: a reader, or a curator waiting on
+  // another's lock, still browses the list (#2416).
+  const viewBusy = writing || running;
   const retry = () => { resetView(); setError(''); setRevision(value => value + 1); };
   return <section aria-label={`Source codes for ${concept.concept_name}`} className="space-y-4">
     <div role="group" aria-label="Source code views" className="flex flex-wrap gap-2">
@@ -1124,17 +1133,17 @@ function SourceCoverage({ concept, canApprove, readOnly = false, onSaved, onWrit
               onChange={event => setThreshold(event.target.valueAsNumber)} />% confidence</span></div></th>
         <th className="p-2">Description
           <label className="ml-2 inline-flex items-center gap-1 whitespace-nowrap font-normal">
-            <input type="checkbox" aria-label="Only source codes with a curator note" checked={withNotes} disabled={busy}
+            <input type="checkbox" aria-label="Only source codes with a curator note" checked={withNotes} disabled={viewBusy}
               title="Show only source codes a curator has left a note on"
               onChange={event => { setWithNotes(event.target.checked); resetView(); }} />with notes</label></th>
         <th className="p-2" aria-sort={order ? 'none' : 'descending'}><label className="mb-1 flex whitespace-nowrap items-center gap-1 font-normal">
-          <input type="checkbox" aria-label="Only source codes with Seen greater than zero" checked={seenOnly} disabled={busy}
+          <input type="checkbox" aria-label="Only source codes with Seen greater than zero" checked={seenOnly} disabled={viewBusy}
             onChange={event => { setSeenOnly(event.target.checked); resetView(); }} />&gt; 0 only</label>
-          {order ? <button type="button" className="font-semibold hover:text-slate-950 disabled:opacity-40" disabled={busy} title="Order by Seen"
+          {order ? <button type="button" className="font-semibold hover:text-slate-950 disabled:opacity-40" disabled={viewBusy} title="Order by Seen"
             onClick={() => { setOrder(''); resetView(); }}>Seen ↕</button> : 'Seen ↓'}</th>
         <th className="p-2">Current destination</th>
         <th className="p-2" aria-sort={order === '-confidence' ? 'descending' : order === 'confidence' ? 'ascending' : 'none'}>
-          <button type="button" className="flex items-center gap-1 font-semibold hover:text-slate-950 disabled:opacity-40" disabled={busy}
+          <button type="button" className="flex items-center gap-1 font-semibold hover:text-slate-950 disabled:opacity-40" disabled={viewBusy}
             title="Order by confidence" onClick={changeOrder}>Status / evidence · Confidence
             <span aria-hidden="true">{order === '-confidence' ? '↓' : order === 'confidence' ? '↑' : '↕'}</span></button></th>
       </tr></thead>

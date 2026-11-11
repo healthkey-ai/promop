@@ -717,6 +717,34 @@ describe("FieldMappingPage", () => {
     expect(screen.queryByText("2 choices")).not.toBeInTheDocument();
   });
 
+  it("shows a reader every field with no write controls (#2416)", async () => {
+    // A doctor without the analyst grant: the API answers 403 on every
+    // mapping write, so the page offers none.
+    mockUseAuth.mockReturnValue({ currentUser: {
+      id: 2, sub: "doc", email: "doc@example.com", name: "Doc", is_staff: false,
+      org_accesses: [{ role: "doctor", org_name: "Org", org_slug: "org", expires_at: null }],
+    } });
+    renderPage();
+    await screen.findByText("Field Concept Mappings");
+    expect(screen.getByRole("status")).toHaveTextContent("Read-only: mapping codes needs the analyst role.");
+    expect(screen.queryByRole("button", { name: /add field/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /suggest/i })).not.toBeInTheDocument();
+    expect(screen.queryByTitle("Manage synonyms")).not.toBeInTheDocument();
+    expect(screen.queryByTitle("Remove mapping")).not.toBeInTheDocument();
+    expect(screen.queryByTitle("Click to assign or edit concept")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByText(/Behavior/));
+    expect(await screen.findByText("smoking_status")).toBeInTheDocument();
+    expect(screen.queryByText("click to map")).not.toBeInTheDocument();
+    // The row is still there, but nothing on it opens the assign dialog.
+    fireEvent.click(screen.getAllByText("unmapped")[0]);
+    fireEvent.click(screen.getByText("smoking_status"));
+    expect(screen.queryByText("Assign Concept")).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(mockPost).not.toHaveBeenCalled();
+    expect(mockPatch).not.toHaveBeenCalled();
+  });
+
   it("opens Add Field from the mapping header for the selected tab", async () => {
     renderPage();
     await screen.findByText("Field Concept Mappings");

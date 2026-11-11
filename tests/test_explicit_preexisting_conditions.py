@@ -150,12 +150,14 @@ def test_snapshot_get_is_read_only_and_v1_only(editor):
 
 
 def test_analyst_cannot_confirm(editor):
+    # Analysts have no patient access at all since #2417, so the record is not
+    # even acknowledged: 404, not 403.
     from omop_core.models import GroupAccess
     record, client = editor
     analyst = Identity.objects.create_user(email='analyst-explicit@example.test')
     GroupAccess.objects.create(identity=analyst, org=record.organization, role='analyst')
     client.force_authenticate(analyst)
-    assert answer(editor, 'confirm_none').status_code == 403
+    assert answer(editor, 'confirm_none').status_code == 404
     assert not PreexistingConditionsAttestation.objects.exists()
 
 

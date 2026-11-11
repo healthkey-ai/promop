@@ -6,11 +6,19 @@ import SourceSystemManagementPage from "./SourceSystemManagementPage";
 const mockGet = vi.fn();
 const mockPost = vi.fn();
 const mockPatch = vi.fn();
+const mockUseAuth = vi.fn();
 vi.mock("@/api/axios", () => ({ default: {
   get: (...args: unknown[]) => mockGet(...args),
   post: (...args: unknown[]) => mockPost(...args),
   patch: (...args: unknown[]) => mockPatch(...args),
 } }));
+vi.mock("@/hooks/useAuth", () => ({ useAuth: () => mockUseAuth() }));
+
+/** A doctor without the analyst grant: reads every mapping page, writes none (#2416). */
+const READER = {
+  id: 2, sub: "doc", email: "doc@example.com", name: "Doc", is_staff: false,
+  org_accesses: [{ role: "doctor", org_name: "Org", org_slug: "org", expires_at: null }],
+};
 
 const system = "urn:oid:1.2.840.114350.1.13.90.2.7.2.707679";
 
@@ -30,7 +38,28 @@ function response(overrides: Record<string, unknown> = {}) {
 }
 
 describe("SourceSystemManagementPage", () => {
-  beforeEach(() => { mockGet.mockReset(); mockPost.mockReset(); mockPatch.mockReset(); });
+  beforeEach(() => {
+    mockGet.mockReset(); mockPost.mockReset(); mockPatch.mockReset();
+    mockUseAuth.mockReturnValue({ currentUser: { id: 1, is_staff: true } });
+  });
+
+  it("shows a reader the registry with no review or association controls", async () => {
+    mockUseAuth.mockReturnValue({ currentUser: READER });
+    mockGet.mockResolvedValue({ data: response() });
+    render(<MemoryRouter initialEntries={[`/code-mappings/source-systems?system=${encodeURIComponent(system)}`]}>
+      <SourceSystemManagementPage />
+    </MemoryRouter>);
+    expect(await screen.findByRole("table", { name: `Facilities for ${system}` })).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent("Read-only: mapping codes needs the analyst role.");
+    expect(screen.getByText("University Hospital", { selector: "td" })).toBeInTheDocument();
+    expect(screen.getByText("unreviewed")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Confirm" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Reject" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Add facility association" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "Facility name" })).not.toBeInTheDocument();
+    expect(mockPatch).not.toHaveBeenCalled();
+    expect(mockPost).not.toHaveBeenCalled();
+  });
 
   it("opens a dialog drill-through with the exact system and observed name", async () => {
     mockGet.mockResolvedValue({ data: response() });

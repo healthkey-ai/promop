@@ -43,7 +43,7 @@ describeLive('ConceptToCodeTab against a live backend', () => {
   beforeAll(() => { api.defaults.headers.common.Authorization = `Bearer ${LIVE_TOKEN}`; });
 
   it('edits a source code with patient Source Metadata and lands it on the concept', async () => {
-    render(<ConceptToCodeTab canApprove />);
+    render(<ConceptToCodeTab canWrite canApprove />);
     fireEvent.change(await screen.findByRole('textbox', { name: 'Search standard concepts' }), { target: { value: CONCEPT } });
     fireEvent.click(await screen.findByRole('button', { name: new RegExp(CONCEPT) }, { timeout: 10000 }));
     const coverage = await screen.findByRole('dialog', { name: new RegExp(`Source codes for .*${CONCEPT}`) });

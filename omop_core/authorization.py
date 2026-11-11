@@ -5,8 +5,9 @@ Three access paths checked in order:
 1. Self-access (Identity → PatientUser → person_id matches target)
 2. Personal representative (Identity → PersonalRepresentative → person_id, verified only)
 3. Professional access (Identity → GroupAccess → group ∩ patient's groups
-   OR org holding patient's record, non-expired, role-filtered), including
-   the same scoped organization-admin trusts used by the patient list.
+   OR org holding patient's record, non-expired, role-filtered to org_admin
+   and doctor), including the same scoped organization-admin trusts used by
+   the patient list. An analyst grant opens nothing here (#2416).
 """
 from django.db import models
 from django.utils import timezone
@@ -17,10 +18,14 @@ from .models import (
 )
 from .services.access import CURATION_ROLES, PROFESSIONAL_ROLES
 
-# One inventory of the role split (#2398): every professional reads a
-# patient, the curation roles write one. The analyst is read-only.
-_READ_ROLES = frozenset(PROFESSIONAL_ROLES)
+# One inventory of the role split (#2398, #2416): the curation roles read and
+# write a patient. An analyst reaches no patient data at all -- the role is
+# code mapping and PRism analytics -- so it is in neither set.
+_READ_ROLES = frozenset(CURATION_ROLES)
 _WRITE_ROLES = frozenset(CURATION_ROLES)
+assert 'analyst' not in _READ_ROLES, 'an analyst never reads patient data (#2416)'
+assert not set(PROFESSIONAL_ROLES) - _READ_ROLES - {'analyst'}, (
+    'a professional role that is neither a reader nor the analyst has no reach')
 
 
 def _administers_patient(actor_identity, target_person_id: int) -> bool:
@@ -85,8 +90,8 @@ def can_access_patient(actor_identity, target_person_id: int) -> bool:
 def can_write_patient(actor_identity, target_person_id: int) -> bool:
     """Return True if the actor may write (create/update/delete) patient data.
 
-    Analysts have read-only access unless separately granted admin authority.
-    Doctors and org_admins, including scoped trust admins, may write.
+    Doctors and org_admins, including scoped trust admins, may write; since
+    #2416 that is the same set that may read, an analyst holding neither.
     Self-access and personal representatives can always write their own data.
     """
     from patient_portal.models import PatientUser
@@ -122,7 +127,8 @@ def can_write_patient(actor_identity, target_person_id: int) -> bool:
 def get_actor_role(actor_identity, target_person_id: int) -> str | None:
     """Return the actor's role relative to the target patient.
 
-    Returns: 'self', 'representative', 'org_admin', 'doctor', 'analyst', or None.
+    Returns: 'self', 'representative', 'org_admin', 'doctor', or None. An
+    analyst has no role toward any patient (#2416).
     """
     from patient_portal.models import PatientUser
 

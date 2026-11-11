@@ -187,7 +187,7 @@ def test_non_approver_can_import_proposed_destination_but_not_approved(
         target_concept=destination, status='approved', reviewer=user,
     )
     monkeypatch.setattr(
-        'patient_portal.api.views._can_manage_field_mappings', lambda _user: True,
+        'patient_portal.api.views._can_manage_mappings', lambda _user: True,
     )
     monkeypatch.setattr(
         'patient_portal.api.views._can_approve_mappings', lambda _user: False,

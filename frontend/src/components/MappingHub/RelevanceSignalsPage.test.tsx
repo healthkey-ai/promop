@@ -6,8 +6,8 @@ import RelevanceSignalsPage from "./RelevanceSignalsPage";
 const mocks = vi.hoisted(() => ({ get: vi.fn(), patch: vi.fn() }));
 vi.mock("@/api/axios", () => ({ default: mocks }));
 const ADMIN = { can_accept: true, can_reject: true };
-const DOCTOR = { can_accept: false, can_reject: true };
-const ANALYST = { can_accept: false, can_reject: false };
+const ANALYST = { can_accept: false, can_reject: true };
+const READER = { can_accept: false, can_reject: false };
 
 const signal = (overrides: Record<string, unknown>) => ({
   id: 1, source: "cdew", disease: "MM", concept_id: 4123456, concept_name: "Bone marrow aspirate",
@@ -65,25 +65,25 @@ describe("Relevance signals", () => {
     await waitFor(() => expect(mocks.patch).toHaveBeenCalledWith("/v1/relevance/signals/1/", { status: "proposed" }));
   });
 
-  it("is read-only for analysts", async () => {
-    mocks.get.mockResolvedValue({ data: { permissions: ANALYST, results: [signal({})] } });
+  it("is read-only for doctors", async () => {
+    mocks.get.mockResolvedValue({ data: { permissions: READER, results: [signal({})] } });
     renderPage();
     await screen.findByText("Bone marrow aspirate");
     expect(screen.queryByRole("button", { name: /Accept|Reject|Return/ })).not.toBeInTheDocument();
     expect(screen.getByText(/You can view the queue/)).toBeInTheDocument();
   });
 
-  it("lets a doctor reject and reopen, but not accept or reopen an accepted pair", async () => {
-    mocks.get.mockResolvedValue({ data: { permissions: DOCTOR, results: [signal({})] } });
+  it("lets an analyst reject and reopen, but not accept or reopen an accepted pair", async () => {
+    mocks.get.mockResolvedValue({ data: { permissions: ANALYST, results: [signal({})] } });
     const { unmount } = renderPage();
     expect(await screen.findByRole("button", { name: "Reject Bone marrow aspirate for MM" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Accept/ })).not.toBeInTheDocument();
     unmount();
-    mocks.get.mockResolvedValue({ data: { permissions: DOCTOR, results: [signal({ status: "rejected" })] } });
+    mocks.get.mockResolvedValue({ data: { permissions: ANALYST, results: [signal({ status: "rejected" })] } });
     const second = renderPage("/relevance-signals?status=rejected");
     expect(await screen.findByRole("button", { name: /Return .* to proposed/ })).toBeInTheDocument();
     second.unmount();
-    mocks.get.mockResolvedValue({ data: { permissions: DOCTOR, results: [signal({ status: "accepted" })] } });
+    mocks.get.mockResolvedValue({ data: { permissions: ANALYST, results: [signal({ status: "accepted" })] } });
     renderPage("/relevance-signals?status=accepted");
     await screen.findByText("Bone marrow aspirate");
     expect(screen.queryByRole("button", { name: /Return/ })).not.toBeInTheDocument();

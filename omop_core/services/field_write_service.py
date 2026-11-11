@@ -243,25 +243,36 @@ def split_dated_edits(changes, descriptor):
 
     A dated entry is ``{field: {"value": ..., "date": "YYYY-MM-DD"}}``. Only a
     descriptor that advertises ``dated`` may use it. Returns
-    ``(plain_changes, dates)``; the caller keeps its own clear/validation rules
-    on the unwrapped values.
+    ``(plain_changes, dates, refusal)``; the caller keeps its own
+    clear/validation rules on the unwrapped values.
+
+    ``refusal`` is the first refused entry's sentence, written for the reader,
+    or ``None`` when every entry was accepted. It is returned rather than
+    raised so the API layer can answer with it without echoing an exception's
+    text: an unreviewed exception message may carry internals, and a caller
+    that catches ``ValueError`` and forwards ``str(exc)`` is how that reaches
+    a response (code scanning `py/stack-trace-exposure`).
     """
     values, dates = {}, {}
     for field, value in changes.items():
         entry = descriptor.get(field) or {}
         if isinstance(value, dict) and entry.get('dated'):
             if set(value) - {'value', 'date'} or 'value' not in value or 'date' not in value:
-                raise ValueError(
-                    f'{field}: a dated result must be {{"value": ..., "date": "YYYY-MM-DD"}}.')
-            from omop_core.services.patient_form import parse_fact_date
-            dates[field] = parse_fact_date(value['date'], field)
+                return values, dates, (
+                    f'{field}: a dated result must be '
+                    '{"value": ..., "date": "YYYY-MM-DD"}.')
+            from omop_core.services.patient_form import fact_date_or_error
+            parsed, error = fact_date_or_error(value['date'], field)
+            if error is not None:
+                return values, dates, error
+            dates[field] = parsed
             values[field] = value['value']
         elif (isinstance(value, dict) and set(value) == {'value', 'date'}
                 and entry.get('value_kind') != 'json'):
-            raise ValueError(f'{field}: this field does not accept a result date.')
+            return values, dates, f'{field}: this field does not accept a result date.'
         else:
             values[field] = value
-    return values, dates
+    return values, dates, None
 
 
 def _retire_source_pairs(person, applied):
@@ -318,7 +329,9 @@ def apply_field_writes(person, changes, today=None, descriptor=None, dates=None,
         today = date.today()
     if descriptor is None:
         descriptor = build_writable_field_descriptor()
-    changes, envelope_dates = split_dated_edits(changes, descriptor)
+    changes, envelope_dates, refusal = split_dated_edits(changes, descriptor)
+    if refusal is not None:
+        raise ValueError(refusal)
     dates = {**envelope_dates, **(dates or {})}
 
     result = FieldWriteResult()

@@ -582,8 +582,9 @@ def test_plain_list_pages_before_serialization_and_filters_in_database(status_fi
         force_authenticate(request, user=user)
         return code_mapping_list(request)
 
+    assert get(page_size=100000).status_code == 400
     with patch.object(views, '_serialize_code_mapping_row', wraps=views._serialize_code_mapping_row) as serialize:
-        first = get(page_size=100000)
+        first = get()
         assert first.status_code == 200
         assert len(first.data) == serialize.call_count == 100
     assert first['X-Page-Size'] == '100'
@@ -772,3 +773,121 @@ def test_delete_rejected_mapping_with_destination_truly_deletes(staff_user):
     response = _delete(staff_user, mapping.id)
     assert response.status_code == 204
     assert not SourceCodeConceptMapping.objects.filter(id=mapping.id).exists()
+
+
+def test_plain_list_honours_page_size_up_to_the_ceiling():
+    SourceCodeConceptMapping.objects.bulk_create([
+        SourceCodeConceptMapping(source_vocabulary_id='ICD10CM', source_code=f'S{i:03}')
+        for i in range(250)
+    ])
+    client = APIClient()
+    client.force_authenticate(user=Identity.objects.create_user(email='page-size@example.test', is_staff=True))
+
+    response = client.get('/api/v1/code-mappings/', {'page_size': 200}, secure=True)
+    assert response.status_code == 200
+    assert len(response.data) == 200
+    assert response['X-Page-Size'] == '200'
+    assert response['X-Total-Count'] == '250'
+    assert 'page=2' in response['Link'] and 'page_size=200' in response['Link']
+    assert len(client.get('/api/v1/code-mappings/', {'page_size': 200, 'page': 2}, secure=True).data) == 50
+
+    for bad in ('0', '1001', 'ten'):
+        response = client.get('/api/v1/code-mappings/', {'page_size': bad}, secure=True)
+        assert response.status_code == 400, bad
+        assert 'page_size' in response.data
+
+
+def test_plain_list_pages_by_keyset_cursor_without_skipping_or_repeating():
+    from urllib.parse import parse_qs, urlparse
+
+    SourceCodeConceptMapping.objects.bulk_create([
+        SourceCodeConceptMapping(source_vocabulary_id='ICD10CM', source_code=f'K{i:03}')
+        for i in range(7)
+    ])
+    client = APIClient()
+    client.force_authenticate(user=Identity.objects.create_user(email='keyset@example.test', is_staff=True))
+
+    first = client.get('/api/v1/code-mappings/', {'ordering': 'id', 'page_size': 3}, secure=True)
+    assert first.status_code == 200
+    ids = [r['mapping_id'] for r in first.data]
+    assert ids == sorted(ids) and len(ids) == 3
+    assert first['X-Total-Count'] == '7'
+    assert 'X-Page' not in first
+    assert 'rel="prev"' not in first['Link']
+    next_url = first['Link'].split('>')[0][1:]
+    assert next_url.startswith('https://')
+    query = parse_qs(urlparse(next_url).query)
+    assert query['after'] == [str(ids[-1])] and query['ordering'] == ['id'] and 'page' not in query
+
+    # A row written and one deleted mid-read neither repeat nor skip anything.
+    SourceCodeConceptMapping.objects.filter(pk=ids[0]).delete()
+    SourceCodeConceptMapping.objects.create(source_vocabulary_id='ICD10CM', source_code='A-new')
+    seen = list(ids)
+    url = next_url
+    while url:
+        response = client.get(url, secure=True)
+        assert response.status_code == 200
+        seen.extend(r['mapping_id'] for r in response.data)
+        url = response['Link'].split('>')[0][1:] if 'Link' in response else None
+    assert seen == sorted(seen) and len(seen) == len(set(seen)) == 8
+    assert len(response.data) == 2  # 8 rows at 3 a page: no trailing empty page
+    assert 'X-Total-Count' not in response
+
+    # A later page repeats neither the count nor loses the filters it was asked with.
+    SourceCodeConceptMapping.objects.filter(pk__in=seen[1:3]).update(status='approved')  # seen[0] was deleted
+    response = client.get('/api/v1/code-mappings/', {
+        'ordering': 'id', 'page_size': 1, 'status': 'approved', 'updated_since': '2020-01-01T00:00:00+00:00',
+    }, secure=True)
+    assert response['X-Total-Count'] == '2' and [r['mapping_id'] for r in response.data] == [seen[1]]
+    query = parse_qs(urlparse(response['Link'].split('>')[0][1:]).query)
+    assert query['status'] == ['approved'] and query['updated_since'] == ['2020-01-01T00:00:00+00:00']
+    response = client.get(response['Link'].split('>')[0][1:], secure=True)
+    assert [r['mapping_id'] for r in response.data] == [seen[2]] and 'X-Total-Count' not in response
+
+    assert client.get('/api/v1/code-mappings/', {'after': ids[0], 'page': 2}, secure=True).status_code == 400
+    assert client.get('/api/v1/code-mappings/', {'after': ids[0], 'ordering': 'source'}, secure=True).status_code == 400
+    assert client.get('/api/v1/code-mappings/', {'ordering': 'name'}, secure=True).status_code == 400
+    assert client.get('/api/v1/code-mappings/', {'after': '-1'}, secure=True).status_code == 400
+    # after= alone implies ordering=id and starts past the id given.
+    response = client.get('/api/v1/code-mappings/', {'after': ids[-1]}, secure=True)
+    assert [r['mapping_id'] for r in response.data] == sorted(seen)[3:]
+
+
+def test_plain_list_filters_by_updated_since():
+    older = SourceCodeConceptMapping.objects.create(source_vocabulary_id='ICD10CM', source_code='OLD')
+    SourceCodeConceptMapping.objects.filter(pk=older.pk).update(updated_at='2024-01-01T00:00:00Z')
+    newer = SourceCodeConceptMapping.objects.create(source_vocabulary_id='ICD10CM', source_code='NEW')
+    client = APIClient()
+    client.force_authenticate(user=Identity.objects.create_user(email='since@example.test', is_staff=True))
+
+    response = client.get('/api/v1/code-mappings/', {'updated_since': '2025-01-01T00:00:00Z'}, secure=True)
+    assert [r['mapping_id'] for r in response.data] == [newer.pk]
+    assert response['X-Total-Count'] == '1'
+    # A naive datetime is read as UTC.
+    response = client.get('/api/v1/code-mappings/', {'updated_since': '2023-12-31T00:00:00'}, secure=True)
+    assert {r['mapping_id'] for r in response.data} == {older.pk, newer.pk}
+    response = client.get('/api/v1/code-mappings/', {'updated_since': 'yesterday'}, secure=True)
+    assert response.status_code == 400 and 'updated_since' in response.data
+
+
+@pytest.mark.parametrize('k_service, expected', [('ctomop-staging', 'trusted'), ('', 'None')])
+def test_proxy_ssl_header_is_trusted_on_cloud_run(k_service, expected):
+    """Cloud Run strips a client's X-Forwarded-Proto as Render does, so Django
+    may build https links behind it; a bare server still trusts nothing."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    env = {**os.environ, 'DJANGO_SETTINGS_MODULE': 'promop.settings', 'DEBUG': 'True',
+           'SECRET_KEY': 'local-proxy-header-test', 'K_SERVICE': k_service,
+           'DATABASE_URL': 'postgresql://postgres@localhost:5432/unused_bootstrap_test',
+           'RENDER': '', 'RENDER_EXTERNAL_HOSTNAME': '', 'RENDER_EXTERNAL_URL': ''}
+    env.pop('TRUST_PROXY_SSL_HEADER', None)  # an explicit value, even empty, overrides the platform default
+    env['PYTHON_DOTENV_DISABLED'] = '1'  # a developer's .env must not fill it back in
+    script = ("from django.conf import settings; h = settings.SECURE_PROXY_SSL_HEADER; "
+              "print('trusted' if h == ('HTTP_X_FORWARDED_PROTO', 'https') else h)")
+    result = subprocess.run([sys.executable, '-c', script], cwd=Path(__file__).resolve().parents[1],
+                            env=env, capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == expected

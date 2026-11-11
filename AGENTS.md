@@ -665,31 +665,44 @@ brew install python@3.12
 
 ## Roles and what each reaches
 
-`GroupAccess.role` has four values. The helpers in `omop_core/services/access.py`
-and `omop_core/authorization.py` decide the reach; the frontend mirrors them in
+`GroupAccess.role` has four values, and **roles are additive**: a user holds one
+`GroupAccess` row per role at an org (unique on identity, org and role since
+migration 0335, #2416), each row adds its own reach, and no role implies
+another. Inviting an existing member with a second role adds a row; revoking a
+row removes that role. The helpers in `omop_core/services/access.py` and
+`omop_core/authorization.py` decide the reach; the frontend mirrors them in
 `frontend/src/utils/roles.ts` for what the UI offers, and never decides alone.
 
 | Role | Reaches |
 |---|---|
-| `org_admin` (a grant, or an admin path through an org or domain trust) | everything for its orgs: approves mappings, administers access, uploads |
-| `doctor` | every curation page (`has_curation_access`), patient writes (`can_write_patient`), proposes and rejects mappings |
-| `analyst` | the Code Mapping page only -- both tabs, the dialog, Suggest, Lock, Done, priority, axis variants, the accuracy pages (`has_professional_access`, `_can_manage_code_mappings`) -- and the patient list and detail **read-only**: the patients of a public demo org (the signup path that hands out the role) or of a group the grant names; an org-level grant at an ordinary org lists nothing, as for a doctor (`PatientRecordViewSet.get_queryset`). PRism analytics is a separate app that shares the identity table. Nothing else (#2398). |
+| `org_admin` (a grant, or an admin path through an org or domain trust) | everything for its orgs: writes and approves mappings, administers access, uploads |
+| `doctor` | patients, read and write (`can_access_patient`, `can_write_patient`, `get_visible_orgs`, `has_curation_access`), and **every mapping page read-only** (`has_mapping_read_access`, `_can_view_mappings`): the hub, Code Mapping, field mappings, therapy and disease-category reference, relevance signals, source systems |
+| `analyst` | every mapping page, **and writing them** (`has_mapping_write_access`, `_can_manage_mappings`): creating, editing, proposing and uploading code and field mappings, synonyms, choices and custom fields, Suggest, Lock, Done, priority, axis variants, LOINC axes, SNOMED attributes, concept minting, source-system facility review, rejecting relevance signals -- and PRism analytics, a separate app that shares the identity table. **No individual patient's data**: the patient list is empty, a detail is 404, clinical rows and a patient's source codes are out of reach, aggregated org stats show no org (#2398, #2416). The one exception is a public demo org (`allows_patient_signup`) the grant sits at: its sample patients are listed and CSV-exported to every grant there, whatever the role, a patient's included (#1392); the detail stays 404 as it does for a patient there. |
 | `patient` | their own record; never another patient's (see `PatientRecordIsolationTest`) |
 
-An analyst is refused with 403 on field mappings and their synonyms, choices and
-custom fields, therapy and disease-category reference writes, relevance signals,
-source-system management, the CSV code-mapping upload, the mapping hub and every
-patient write; the UI hides those routes and controls. An organization
-trust makes a doctor or org_admin at the trusted org an admin of the granting
-org; it gives an analyst nothing, not even a read of the granting org's patients
-(`get_admin_access_paths`). A **domain** trust is different and unchanged
-(#1454): a trusted-domain self-signup is promoted to analyst once the address is
-verified, and that promotion is how the user reaches the trusting org at all, so
-a trusted-domain analyst is the admin the trust makes them. Approval stays with
+So a doctor sees every mapping but creates or changes one only when also
+granted `analyst` (a 403 "Mapping curator access required." on every write
+verb, and the pages hide their write controls behind `canWriteMappings`), and
+an analyst sees a patient only when also granted `doctor`. An analyst is
+refused every patient read or write; the UI opens an analyst-only account on
+Code Mapping and hides the patient pages. Therapy and disease-category
+reference writes stay org_admin-only (`_require_mapping_admin`), as before.
+A trust of either kind makes a `doctor` or `org_admin` at the trusted
+org or domain an admin of the granting org, and still does so for a verified
+account that has never held a grant (a federated login, or a trusted-domain
+self-signup once verified); it gives an account whose grants are all `analyst`
+or `patient`, or have expired or been revoked, nothing. A grant at a public demo
+org (`allows_patient_signup`) is a sandbox credential that expands no
+**organization** trust; a **domain** trust is about the verified address and
+still applies to it (`get_admin_access_paths`). A self-signup at a public demo org, and a verified
+trusted-domain self-signup (#1454), are granted `doctor` rather than the former
+`analyst`, because that signup exists to browse patients; grants made before
+#2416 are left as they are. Approval stays with
 staff and org_admin (`_can_approve_mappings`) for every role. Gate a new
-curation endpoint with `_can_manage_field_mappings` unless it belongs on the Code
-Mapping page, where `_can_manage_code_mappings` admits the analyst too.
-`AnalystRoleScopeTest` in `patient_portal/tests.py` holds the role to this.
+mapping endpoint's reads with `_can_view_mappings` and its writes with
+`_can_manage_mappings` (`concept_to_code._authorize(user, write=True)` on
+that module); a mixed-verb view checks both. `AnalystRoleScopeTest` and
+`MappingApprovalRoleTest` in `patient_portal/tests.py` hold the roles to this.
 
 ---
 
@@ -1573,6 +1586,36 @@ diagnostics (`--measure`) but is no longer auto-dispatched, because vector
 retrieval needs all standard concepts embedded, not just the queue's candidates.
 
 ---
+
+## Code Mapping List — paging for a full read
+
+`GET /api/v1/code-mappings/` (a `system/*.read` service token may read it,
+#2340) pages two ways (#2451, `_CodeMappingPage` in `views.py`):
+
+| Params | Order | Use |
+|---|---|---|
+| `page=N` (default) | vocabulary, code, id | the curation UI; offset paging, so a row inserted or deleted mid-read shifts later pages |
+| `ordering=id` + `after=<mapping_id>` | id | a client reading the whole table: a row written mid-read has a higher id than any read, a deleted one leaves no gap, so nothing repeats or is skipped. The `Link` next URL carries `after=`; there is no prev. `page` with `after` is a 400 |
+
+`page_size` is honoured on both, 1 to `CODE_MAPPING_MAX_PAGE_SIZE` (1000;
+out of range is a 400, not a silent cap). The ceiling is the request budget:
+at ~1s per 100 rows on HealthTree, 5,000 would outrun gunicorn's 30s.
+`updated_since=<ISO 8601>` (naive means UTC; a decoded `+` offset is
+tolerated) narrows to rows whose `updated_at` is at or after it, for a
+nightly delta. The delta is additive and tracks curation: a hard-deleted row is never
+seen, so a client reconciles with a periodic full read and uses the previous
+run's start time as the next `updated_since` (`docs/code-mapping-api.md`).
+`auto_now` is skipped by `bulk_update`/`.update()`, so every writer that
+changes a destination, status, description or source concept sets
+`updated_at` itself (`apply_icd10cm_mappings`, `enrich_source_mappings`,
+`backfill_icd10_source_info`, `reference_transfer._apply_table`, which
+stamps every `auto_now` column with this instance's clock, and the naming
+branch of `resolve_source_code`); the Seen counters and unit evidence are
+sightings and deliberately do not. `ix_sccm_updated_at` serves the filter. `X-Total-Count`
+counts the filtered set; on the keyset path it is sent on the first page
+only. `Link` URLs are absolute, so behind a proxy they are
+`https://` only when `SECURE_PROXY_SSL_HEADER` is trusted: automatic on
+Render and Cloud Run (`K_SERVICE`), `TRUST_PROXY_SSL_HEADER=true` elsewhere.
 
 ## Code Mapping Lookup — Unit Conversion
 

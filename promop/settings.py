@@ -655,9 +655,13 @@ SECURE_HSTS_PRELOAD = _env_bool('SECURE_HSTS_PRELOAD', True)
 SECURE_CONTENT_TYPE_NOSNIFF = _env_bool('SECURE_CONTENT_TYPE_NOSNIFF', True)
 X_FRAME_OPTIONS = os.environ.get('X_FRAME_OPTIONS', 'DENY')
 # Only trust this header behind a proxy that strips client-supplied values.
-# Render supplies such a proxy; direct/local servers default to no trust.
+# Render and Cloud Run (K_SERVICE) supply such a proxy; direct/local servers
+# default to no trust. Without it every absolute URL Django builds -- the
+# code-mapping list's Link next/prev, for one -- is http://, and a client
+# that follows it sends its bearer token in cleartext (#2451).
 TRUST_PROXY_SSL_HEADER = _env_bool('TRUST_PROXY_SSL_HEADER', bool(
     _env_bool('RENDER') or _render_hostname or os.environ.get('RENDER_EXTERNAL_URL')
+    or os.environ.get('K_SERVICE')
 ))
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https') if TRUST_PROXY_SSL_HEADER else None
 

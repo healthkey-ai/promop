@@ -3,7 +3,7 @@ import CodeMappingUploadDialog, { type CodeMappingUploadResult } from "./CodeMap
 import SourceQuantityCell from "./SourceQuantityCell";
 import { rowMatchesSearch, SEARCH_PLACEHOLDER } from "./mappingSearch";
 import PageTitle from '@/components/Branding/PageTitle';
-import { hasCurationRole, isStaffOrOrgAdmin } from '@/utils/roles';
+import { canWriteMappings, isStaffOrOrgAdmin } from '@/utils/roles';
 import InlineDestinationPicker from "./InlineDestinationPicker";
 import SuggestCandidates, { type CandidateActivity } from "./SuggestCandidates";
 import EditMappingDialog from "./EditMappingDialog";
@@ -322,9 +322,10 @@ export default function CodeMappingPage() {
   const navigate = useNavigate();
   const { currentUser } = useAuth();
   const canApprove = isStaffOrOrgAdmin(currentUser);
-  // The CSV upload and the source-system registry are curation, not code
-  // mapping: an analyst reaches neither (#2398), and the API refuses both.
-  const canCurate = hasCurationRole(currentUser);
+  // A doctor reads this page; creating, editing, uploading and Suggest are
+  // for staff, org_admin and the analyst grant (#2416). The API refuses the
+  // rest, so a reader is shown no control that would end in a 403.
+  const canWrite = canWriteMappings(currentUser);
   // ?direction=reverse&concept=<id>, from the field mapper's {codes} button:
   // open Concept → Source Code on that concept's source codes.
   const [searchParams] = useSearchParams();
@@ -566,8 +567,9 @@ export default function CodeMappingPage() {
 
   // Restore the last successful suggest run's candidates when the page loads
   // or the vocabulary tab changes, so navigating away and back doesn't lose them.
+  // A reader gets no panel: its buttons are writes (#2416).
   useEffect(() => {
-    if (!selectedVocabulary) return;
+    if (!selectedVocabulary || !canWrite) return;
     let cancelled = false;
     (async () => {
       try {
@@ -584,7 +586,7 @@ export default function CodeMappingPage() {
       }
     })();
     return () => { cancelled = true; };
-  }, [selectedVocabulary]);
+  }, [selectedVocabulary, canWrite]);
 
   const overallTab = selectedVocabulary === OVERALL_TAB;
   // Keep the latest reviewed model visible while a newer model awaits reviews.
@@ -625,6 +627,12 @@ export default function CodeMappingPage() {
   }, [rows, overallTab, selectedVocabulary, browse, asyncDuplicates]);
 
   const revealDuplicate = async (row: CodeMappingRow | DuplicateSummary) => {
+    // A reader opens no dialog: scroll to the row instead (#2416).
+    if (!canWrite) {
+      if ('summary' in row) return;
+      setNavigationTarget({ id: mappingRowId(row) });
+      return;
+    }
     if ('summary' in row) {
       const sequence = ++duplicateLoadSequence.current;
       setLoadingDuplicate(row.mapping_id);
@@ -804,6 +812,7 @@ export default function CodeMappingPage() {
   const approvedRows = useMemo(() => visibleRows.filter((r) => sectionForRow(r) === "Approved").sort(browse ? () => 0 : byOccurrence), [visibleRows, browse]);
 
   const openNewDialog = () => {
+    if (!canWrite) return;
     duplicateLoadSequence.current += 1;
     setLoadingDuplicate(null);
     setInlineMappingId(null);
@@ -812,6 +821,7 @@ export default function CodeMappingPage() {
   };
 
   const openEditDialog = (row: CodeMappingRow) => {
+    if (!canWrite) return;
     duplicateLoadSequence.current += 1;
     setLoadingDuplicate(null);
     setInlineMappingId(null);
@@ -1122,8 +1132,8 @@ export default function CodeMappingPage() {
       <Fragment key={mappingRowId(row)}>
           <tr
             id={mappingRowId(row)}
-            role="button"
-            tabIndex={0}
+            role={canWrite ? "button" : undefined}
+            tabIndex={canWrite ? 0 : undefined}
             onClick={() => openEditDialog(row)}
             onKeyDown={(e) => {
               if (e.target !== e.currentTarget) return;
@@ -1132,7 +1142,7 @@ export default function CodeMappingPage() {
                 openEditDialog(row);
               }
             }}
-            className={`scroll-mt-24 cursor-pointer hover:bg-slate-50 focus:outline-2 focus:outline-red-600 ${
+            className={`scroll-mt-24 ${canWrite ? "cursor-pointer hover:bg-slate-50" : ""} focus:outline-2 focus:outline-red-600 ${
               navigationTarget?.id === mappingRowId(row) ? "bg-red-50" : ""
             }`}
           >
@@ -1160,7 +1170,7 @@ export default function CodeMappingPage() {
               {(row.measurement_type || row.suggested_unit) && (
                 <ConceptInputDetails domain_id={row.destination_domain_id || ""} measurement_type={row.measurement_type} suggested_unit={row.suggested_unit} example_units={row.example_units} />
               )}
-              {section !== "Approved" && row.mapping_id && <button type="button"
+              {canWrite && section !== "Approved" && row.mapping_id && <button type="button"
                 aria-label={`Choose destination for ${row.source_code}`}
                 aria-expanded={inlineMappingId === row.mapping_id}
                 onClick={event => { event.stopPropagation(); setInlineMappingId(current => current === row.mapping_id ? null : row.mapping_id); }}
@@ -1169,6 +1179,7 @@ export default function CodeMappingPage() {
               </button>}
             </td>
             <td className="px-4 py-3">
+              {canWrite && <>
               <button type="button" onClick={(e) => { e.stopPropagation(); void toggleApproval(row); }}
                 disabled={!row.destination_concept_id}
                 aria-label={row.status === "approved" ? `Unapprove ${row.source_code}` : `Approve ${row.source_code}`}
@@ -1180,6 +1191,7 @@ export default function CodeMappingPage() {
                 aria-label={`Edit ${row.source_code}`}>
                 <Pencil size={14} />
               </button>
+              </>}
             </td>
           </tr>
           {inlineMappingId === row.mapping_id && row.mapping_id && <tr>
@@ -1253,7 +1265,7 @@ export default function CodeMappingPage() {
                       ) : <span className="text-xs text-slate-500">—</span>}
                     </td>
                     <td className="px-4 py-3">
-                      {section !== "Approved" && entry.proposed > 0 && (
+                      {canWrite && section !== "Approved" && entry.proposed > 0 && (
                         <div className="flex flex-col gap-1">
                           <button type="button" disabled={groupRunning === cacheKey}
                             onClick={() => void runGroupJob(entry, "suggest", section)}
@@ -1328,7 +1340,7 @@ export default function CodeMappingPage() {
       <PageTitle className="text-2xl font-semibold text-slate-950" meta={releaseMarker}>Code Mapping</PageTitle>
     </div>
     {directionControls}
-    <ConceptToCodeTab canApprove={canApprove} onWritingChange={setReverseWriting} initialConceptId={linkedConceptId}
+    <ConceptToCodeTab canApprove={canApprove} canWrite={canWrite} onWritingChange={setReverseWriting} initialConceptId={linkedConceptId}
       onInitialConceptHandled={() => setLinkedConceptId(undefined)} />
   </div></div>;
 
@@ -1352,27 +1364,29 @@ export default function CodeMappingPage() {
             </div>
           </div>
           <div className="flex items-center gap-2">
-            {canCurate && (
+            <a href="/code-mappings/source-systems"
+              className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-800 hover:bg-slate-100">
+              Source systems / hospitals
+            </a>
+            {canWrite ? (
               <>
-                <a href="/code-mappings/source-systems"
-                  className="rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-800 hover:bg-slate-100">
-                  Source systems / hospitals
-                </a>
                 <button type="button" onClick={() => setUploadOpen(true)} disabled={!referenceReady}
                   className="inline-flex items-center gap-2 rounded-md border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-800 hover:bg-slate-100">
                   <Upload size={16} />
                   Upload
                 </button>
+                <button
+                  onClick={openNewDialog}
+                  disabled={!referenceReady}
+                  className="inline-flex items-center gap-2 rounded-md bg-slate-950 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"
+                >
+                  <Plus size={16} />
+                  New Mapping
+                </button>
               </>
+            ) : (
+              <p role="status" className="text-sm text-slate-600">Read-only: mapping codes needs the analyst role.</p>
             )}
-            <button
-              onClick={openNewDialog}
-              disabled={!referenceReady}
-              className="inline-flex items-center gap-2 rounded-md bg-slate-950 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"
-            >
-              <Plus size={16} />
-              New Mapping
-            </button>
           </div>
         </div>
 
@@ -1522,7 +1536,8 @@ export default function CodeMappingPage() {
           })}
         </div>
 
-        {/* Keep the primary action immediately below the source tabs. */}
+        {/* Keep the primary action immediately below the source tabs; a reader gets none of it. */}
+        {canWrite && <>
         <div role="group" aria-label="Suggest controls" className="mb-4 flex flex-wrap items-center gap-2">
           <button
             type="button"
@@ -1609,6 +1624,8 @@ export default function CodeMappingPage() {
             </a>
           </section>
         </div>
+
+        </>}
 
         {(suggestRun || accumulatedActivity.length > 0) && <SuggestCandidates
           key="suggest-candidates"
@@ -1768,7 +1785,7 @@ export default function CodeMappingPage() {
         mode={dialogMode || "new"}
         row={selectedRow}
         reference={reference}
-        canApprove={canApprove} canCurate={canCurate}
+        canApprove={canApprove}
         sourceExamples
         strategies={strategies}
         rankingModel={rankingModel}
