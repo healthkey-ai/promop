@@ -703,3 +703,34 @@ class TestProfilePayloadField:
             assert entry['payload_field'] in accepted, (
                 f"{field} payload_field '{entry['payload_field']}' not in accepted set"
             )
+
+
+class TestListShape:
+    def test_multiple_survives_an_unloaded_vocabulary(self):
+        """A list field is a list even when its picker vocabulary is absent.
+
+        `multiple` used to be emitted only beside `options`, so a client saw a
+        single select for a JSON list and wrote a scalar over it (#2441).
+        """
+        from omop_core.models import FieldConceptMapping
+
+        VocabularyFactory(vocabulary_id='SNOMED')
+        concept = ConceptFactory(concept_code='SCT-LIST', vocabulary_id='SNOMED')
+        FieldConceptMapping.objects.update_or_create(
+            field_name='stem_cell_transplant_history',
+            defaults={
+                'concept': concept,
+                'vocabulary_id': 'SNOMED',
+                'concept_code': 'SCT-LIST',
+                'omop_table': 'observation',
+                'source_value': 'sct-list',
+                'value_kind': 'string',
+                'type_concept_id': 32817,
+                'status': 'approved',
+                'multiple': True,
+                'value_vocabulary': 'VocabularyThatIsNotLoaded',
+            },
+        )
+        entry = descriptor_fields()['stem_cell_transplant_history']
+        assert entry.get('multiple') is True
+        assert 'options' not in entry

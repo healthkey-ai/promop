@@ -787,10 +787,14 @@ def _curated_writes(choice_options=None, genomics_recipes=None, clinical_mapping
             options = titles.get(row.value_vocabulary) or ()
             if options:
                 entry['options'] = [{'value': t} for t in options]
-                entry['multiple'] = row.multiple
         elif choice_options and row.field_name in choice_options:
             entry['options'] = choice_options[row.field_name]
-            entry['multiple'] = row.multiple
+        # `multiple` describes the field's shape, not the presence of a picker
+        # vocabulary. A list field whose vocabulary is not loaded (or that has
+        # no vocabulary at all) is still a list: without this the client fell
+        # back to a single select and wrote a scalar over the list.
+        if row.multiple:
+            entry['multiple'] = True
         if (row.field_name == 'cytogenetic_markers' and row.multiple
                 and row.vocabulary_id == 'SNOMED' and row.concept_code == '107675007'):
             from omop_core.services.cytogenetics import descriptor as cytogenetic_descriptor
