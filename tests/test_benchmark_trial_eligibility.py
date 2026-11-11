@@ -21,6 +21,7 @@ from tests.factories import (
     ObservationFactory,
     PatientRecordFactory,
     PersonFactory,
+    VocabularyFactory,
 )
 
 
@@ -233,3 +234,43 @@ def test_an_unreadable_newest_unit_is_no_evidence():
     _measurement(person, '2160-0', 221, 'units-unknown')
 
     assert _fetch_omop_trial_row(person.person_id)['serum_creatinine_mg_dl'] is None
+
+
+def _ucum(code):
+    VocabularyFactory(vocabulary_id='UCUM')
+    return ConceptFactory(vocabulary_id='UCUM', concept_code=code)
+
+
+def test_a_row_converted_on_write_is_read_from_the_number_as_sent():
+    """The stored value is in UCUM's unit; the sent number proves the source."""
+    person = PersonFactory(year_of_birth=1960)
+    MeasurementFactory(
+        person=person, measurement_source_value='718-7',
+        value_as_number=13.5, unit_source_value='g/L',
+        unit_concept=_ucum('g/dL'), value_source_value='135',
+    )
+
+    assert _fetch_omop_trial_row(person.person_id)['hemoglobin_g_dl'] == Decimal('13.5')
+
+
+def test_a_known_but_unsupported_source_unit_is_no_evidence():
+    """mmol/L haemoglobin is known and is not g/dL; the UCUM concept must not
+    silently replace the number's own unit."""
+    person = PersonFactory(year_of_birth=1960)
+    MeasurementFactory(
+        person=person, measurement_source_value='718-7',
+        value_as_number=8.1, unit_source_value='mmol/L',
+        unit_concept=_ucum('g/dL'),
+    )
+
+    assert _fetch_omop_trial_row(person.person_id)['hemoglobin_g_dl'] is None
+
+
+def test_a_readable_lab_spelling_resolves_without_a_unit_concept():
+    person = PersonFactory(year_of_birth=1960)
+    MeasurementFactory(
+        person=person, measurement_source_value='718-7',
+        value_as_number=13.5, unit_source_value='Grams/Deciliter',
+    )
+
+    assert _fetch_omop_trial_row(person.person_id)['hemoglobin_g_dl'] == Decimal('13.5')

@@ -20,6 +20,7 @@ import json
 import statistics
 import time
 from datetime import date
+from types import SimpleNamespace
 
 from django.core.management.base import BaseCommand, CommandError
 from django.db.models import (
@@ -43,6 +44,7 @@ from omop_core.services.chemistry_units import (
     canonical_from_pair as chemistry_canonical_from_pair,
     normalize_unit as normalize_chemistry_unit,
 )
+from omop_core.services.canonical_units import value_in_source_unit
 from omop_core.services.clinical_units import blood_count_to_canonical, count_unit
 from omop_core.services.creatinine_units import (
     canonical_from_pair as creatinine_canonical_from_pair,
@@ -53,6 +55,7 @@ from omop_core.services.hemoglobin_units import (
     canonical_from_pair as hemoglobin_canonical_from_pair,
     normalize_unit as normalize_hemoglobin_unit,
 )
+from omop_core.services.patient_record_service import _resolve_reported_unit
 
 
 TRIAL_ELIGIBILITY_FIELDS = [
@@ -178,36 +181,43 @@ def _latest_measurement_pair_subquery(concept_codes):
                 value='value_as_number',
                 unit='unit_source_value',
                 ucum=Case(When(unit_concept__vocabulary_id='UCUM', then='unit_concept__concept_code')),
+                source_value='value_source_value',
             ),
         ).values('measurement_payload')[:1]
     )
 
 
-def _payload_unit_code(payload, normalize):
-    """The unit code for a measurement payload, preferring the lab's text.
-
-    A spelling the converter cannot read falls back to the UCUM concept, the
-    cleaned unit the ETL puts there (#2248). With neither, the caller's default
-    applies; an unreadable unit stays None so the value is not invented.
-    """
-    text = (payload.get('unit') or '').strip()
+def _reading(payload):
+    """The measurement shape ``canonical_units`` and ``_resolve_reported_unit`` read."""
     ucum = payload.get('ucum')
-    if text:
-        code = normalize(text)
-        return code if code is not None else (normalize(ucum) if ucum else None)
-    return normalize(ucum) if ucum else None
+    return SimpleNamespace(
+        value_as_number=payload['value'],
+        unit_source_value=payload['unit'],
+        unit_concept_id=1 if ucum else None,
+        unit_concept=(SimpleNamespace(vocabulary_id='UCUM', concept_code=ucum)
+                      if ucum else None),
+        value_source_value=payload.get('source_value'),
+    )
 
 
 def _canonical_pair(payload, normalize, default_unit, from_pair):
-    """A measurement payload in its canonical unit, or None (no evidence)."""
+    """A measurement payload in its canonical unit, or None (no evidence).
+
+    Read exactly as the derivation does: first put the number back in
+    ``unit_source_value``'s unit (a row converted on write holds it in
+    ``unit_concept``'s, #2249), then resolve the reported unit and convert. A
+    unit that cannot be proven is no evidence, not a number to guess.
+    """
     if not payload:
         return None
-    code = _payload_unit_code(payload, normalize)
+    reading = _reading(payload)
+    sent = value_in_source_unit(reading)
+    if sent is None:
+        return None
+    _reported, code = _resolve_reported_unit(reading, normalize, default_unit)
     if code is None:
-        if (payload.get('unit') or '').strip() or payload.get('ucum'):
-            return None
-        code = default_unit
-    recognised, canonical = from_pair(payload['value'], code)
+        return None
+    recognised, canonical = from_pair(sent, code)
     return canonical if recognised else None
 
 
