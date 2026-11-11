@@ -6,10 +6,6 @@ import App from "./App";
 // Controllable useAuth mock.
 const { mockUseAuth } = vi.hoisted(() => ({ mockUseAuth: vi.fn() }));
 vi.mock("@/hooks/useAuth", () => ({ useAuth: () => mockUseAuth() }));
-vi.mock('@/hooks/useLabMeasurements', () => ({
-  useLabMeasurements: () => ({ grouped: new Map(), isLoading: false }),
-}));
-
 
 // Replace route targets with identifiable markers so we assert on routing only.
 vi.mock("@/components/Patient/PatientList", () => ({ default: () => <div>PROVIDER_LIST</div> }));

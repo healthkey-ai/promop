@@ -239,7 +239,7 @@ describe('PatientDetail save — the edit, not the record', () => {
 
     await waitFor(() => expect(api.patch).toHaveBeenCalledTimes(2));
     expect(patchBody()).toMatchObject({
-      hemoglobin_g_dl: { value: 9.5, date: '2026-10-01', fact_id: 55 },
+      hemoglobin_g_dl: { value: 9.5, date: '2026-10-01' },
     });
   });
 

@@ -2,7 +2,6 @@ import { useState, useEffect, useMemo } from 'react';
 import { useVocabulary } from '@/hooks/useVocabulary';
 import { useCategoryObjects, useAllDiseaseMappings } from '@/hooks/useDiseaseCategories';
 import { useWritableFields } from '@/hooks/useWritableFields';
-import { useLabMeasurements } from '@/hooks/useLabMeasurements';
 import ClinicalField from '../ClinicalField';
 import TreatingInstitutionField from '../TreatingInstitutionField';
 import Section from '../Section';
@@ -17,7 +16,7 @@ import PreexistingConditionsAnswer, { type ConditionsAnswer } from '../Preexisti
 
 interface Props {
   formData: Record<string, unknown>;
-  onChange: (field: string, value: unknown, date?: string, factId?: number) => void;
+  onChange: (field: string, value: unknown, date?: string) => void;
   editedName: string;
   onNameChange: (name: string) => void;
   onZipcodeChange: (zip: string) => void;
@@ -58,7 +57,6 @@ export default function GeneralTab({
   // asking and whose record it is, not only on whether the field is mapped.
   const personId = (formData?.person_id ?? formData?.person) as number | undefined;
   const { descriptors, loading } = useWritableFields(personId);
-  const { grouped: measurementGroups } = useLabMeasurements(personId);
   // A read-only form keeps navigation usable, so each writing control opts out.
   const locked = usePatientFormReadOnly();
   const [dates, setDates] = useState<Record<string, string>>({});
@@ -112,17 +110,11 @@ export default function GeneralTab({
     const changeWithDate = (field: string, value: unknown) => (
       dated ? onChange(field, value, dateFor(field)) : onChange(field, value)
     );
-    const factIdFor = (field: string) => {
-      const source = descriptors[field]?.projection?.source_value
-        ?? descriptors[field]?.source_value;
-      const group = source ? measurementGroups.get(source) : undefined;
-      return group?.values[0]?.measurement_id;
-    };
     const changeDate = (field: string, next: string) => {
       setDates((current) => ({ ...current, [field]: next }));
       const value = formData?.[field];
       if (value !== undefined && value !== null && value !== '') {
-        onChange(field, value, next, factIdFor(field));
+        onChange(field, value, next);
       }
     };
     const prec = name === 'date_of_birth'

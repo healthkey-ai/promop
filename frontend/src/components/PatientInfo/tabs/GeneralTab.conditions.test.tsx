@@ -16,10 +16,6 @@ const mockGet = vi.fn();
 vi.mock('@/api/axios', () => ({
   default: { get: (...args: unknown[]) => mockGet(...args), post: vi.fn(), patch: vi.fn() },
 }));
-vi.mock('@/hooks/useLabMeasurements', () => ({
-  useLabMeasurements: () => ({ grouped: new Map(), isLoading: false }),
-}));
-
 
 vi.mock('@/hooks/useVocabulary', () => ({
   useVocabulary: () => ({
