@@ -38,7 +38,21 @@ from django.db.models import (
 from django.db.models.functions import Coalesce, JSONObject
 
 from omop_core.models import ConditionOccurrence, Measurement, Observation, PatientRecord, Person
+from omop_core.services.chemistry_units import (
+    PAIRS as CHEMISTRY_PAIRS,
+    canonical_from_pair as chemistry_canonical_from_pair,
+    normalize_unit as normalize_chemistry_unit,
+)
 from omop_core.services.clinical_units import blood_count_to_canonical, count_unit
+from omop_core.services.creatinine_units import (
+    canonical_from_pair as creatinine_canonical_from_pair,
+    normalize_unit as normalize_creatinine_unit,
+)
+from omop_core.services.hemoglobin_units import (
+    DEFAULT_UNIT as HEMOGLOBIN_DEFAULT_UNIT,
+    canonical_from_pair as hemoglobin_canonical_from_pair,
+    normalize_unit as normalize_hemoglobin_unit,
+)
 
 
 TRIAL_ELIGIBILITY_FIELDS = [
@@ -144,17 +158,57 @@ def _latest_measurement_number_subquery(concept_codes, output_field):
 
 def _latest_blood_count_subquery(code):
     """Keep the source unit alongside the newest count, including unknowns."""
+    return _latest_measurement_pair_subquery([code])
+
+
+def _latest_measurement_pair_subquery(concept_codes):
+    """The newest measurement with its value, source unit and UCUM unit.
+
+    The derivation reads a value in its canonical unit, so a benchmark that
+    compared the raw ``value_as_number`` would report 221 umol/L creatinine as
+    221 mg/dL (#2438 class). The payload carries the unit to convert with.
+    """
     return Subquery(
         Measurement.objects.filter(person=OuterRef('pk'), is_erroneous=False).filter(
-            Q(measurement_concept__concept_code=code) | Q(measurement_source_value=code)
-        ).order_by('-measurement_date', '-measurement_id').annotate(
-            count_payload=JSONObject(
+            Q(measurement_concept__concept_code__in=concept_codes)
+            | Q(measurement_source_value__in=concept_codes)
+        ).exclude(value_as_number__isnull=True)
+        .order_by('-measurement_date', '-measurement_id').annotate(
+            measurement_payload=JSONObject(
                 value='value_as_number',
                 unit='unit_source_value',
                 ucum=Case(When(unit_concept__vocabulary_id='UCUM', then='unit_concept__concept_code')),
             ),
-        ).values('count_payload')[:1]
+        ).values('measurement_payload')[:1]
     )
+
+
+def _payload_unit_code(payload, normalize):
+    """The unit code for a measurement payload, preferring the lab's text.
+
+    A spelling the converter cannot read falls back to the UCUM concept, the
+    cleaned unit the ETL puts there (#2248). With neither, the caller's default
+    applies; an unreadable unit stays None so the value is not invented.
+    """
+    text = (payload.get('unit') or '').strip()
+    ucum = payload.get('ucum')
+    if text:
+        code = normalize(text)
+        return code if code is not None else (normalize(ucum) if ucum else None)
+    return normalize(ucum) if ucum else None
+
+
+def _canonical_pair(payload, normalize, default_unit, from_pair):
+    """A measurement payload in its canonical unit, or None (no evidence)."""
+    if not payload:
+        return None
+    code = _payload_unit_code(payload, normalize)
+    if code is None:
+        if (payload.get('unit') or '').strip() or payload.get('ucum'):
+            return None
+        code = default_unit
+    recognised, canonical = from_pair(payload['value'], code)
+    return canonical if recognised else None
 
 
 def _canonical_blood_count(payload):
@@ -284,17 +338,17 @@ def _fetch_omop_trial_row(person_id):
             ),
             ecog_performance_status=_latest_observation_number_name_subquery(['ecog'], IntegerField()),
             karnofsky_performance_score=_latest_observation_number_name_subquery(['karnofsky'], IntegerField()),
-            hemoglobin_g_dl=_latest_measurement_number_subquery(['718-7'], DecimalField(max_digits=5, decimal_places=1)),
+            hemoglobin_g_dl=_latest_measurement_pair_subquery(['718-7', '59260-0']),
             platelet_count_thousand_per_ul=_latest_blood_count_subquery('777-3'),
             anc_thousand_per_ul=_latest_blood_count_subquery('751-8'),
-            wbc_count_thousand_per_ul=_latest_measurement_number_subquery(['6690-2'], DecimalField(max_digits=6, decimal_places=1)),
-            serum_creatinine_mg_dl=_latest_measurement_number_subquery(['2160-0', '38483-4'], DecimalField(max_digits=5, decimal_places=2)),
+            wbc_count_thousand_per_ul=_latest_blood_count_subquery('6690-2'),
+            serum_creatinine_mg_dl=_latest_measurement_pair_subquery(['2160-0', '38483-4']),
             creatinine_clearance_ml_min=_latest_measurement_number_subquery(['2164-2'], DecimalField(max_digits=6, decimal_places=1)),
-            serum_calcium_mg_dl=_latest_measurement_number_subquery(['17861-6', '49765-1'], DecimalField(max_digits=5, decimal_places=1)),
-            bilirubin_total_mg_dl=_latest_measurement_number_subquery(['1975-2'], DecimalField(max_digits=5, decimal_places=1)),
+            serum_calcium_mg_dl=_latest_measurement_pair_subquery(['17861-6', '49765-1']),
+            bilirubin_total_mg_dl=_latest_measurement_pair_subquery(['1975-2']),
             ast_u_l=_latest_measurement_number_subquery(['1920-8'], IntegerField()),
             alt_u_l=_latest_measurement_number_subquery(['1742-6'], IntegerField()),
-            albumin_g_dl=_latest_measurement_number_subquery(['1751-7'], DecimalField(max_digits=5, decimal_places=1)),
+            albumin_g_dl=_latest_measurement_pair_subquery(['1751-7']),
             her2_raw=_latest_measurement_text_subquery(['48676-1']),
             estrogen_receptor_raw=_latest_measurement_text_subquery(['16112-5']),
             progesterone_receptor_raw=_latest_measurement_text_subquery(['16113-3']),
@@ -331,17 +385,36 @@ def _fetch_omop_trial_row(person_id):
         'stage': row['stage'],
         'ecog_performance_status': row['ecog_performance_status'],
         'karnofsky_performance_score': row['karnofsky_performance_score'],
-        'hemoglobin_g_dl': row['hemoglobin_g_dl'],
+        'hemoglobin_g_dl': _canonical_pair(
+            row['hemoglobin_g_dl'], normalize_hemoglobin_unit,
+            HEMOGLOBIN_DEFAULT_UNIT, hemoglobin_canonical_from_pair),
         'platelet_count_thousand_per_ul': _canonical_blood_count(row['platelet_count_thousand_per_ul']),
         'anc_thousand_per_ul': _canonical_blood_count(row['anc_thousand_per_ul']),
-        'wbc_count_thousand_per_ul': row['wbc_count_thousand_per_ul'],
-        'serum_creatinine_mg_dl': row['serum_creatinine_mg_dl'],
+        'wbc_count_thousand_per_ul': _canonical_blood_count(row['wbc_count_thousand_per_ul']),
+        'serum_creatinine_mg_dl': _canonical_pair(
+            row['serum_creatinine_mg_dl'], normalize_creatinine_unit,
+            'MG/DL', creatinine_canonical_from_pair),
         'creatinine_clearance_ml_min': row['creatinine_clearance_ml_min'],
-        'serum_calcium_mg_dl': row['serum_calcium_mg_dl'],
-        'bilirubin_total_mg_dl': row['bilirubin_total_mg_dl'],
+        'serum_calcium_mg_dl': _canonical_pair(
+            row['serum_calcium_mg_dl'],
+            lambda unit: normalize_chemistry_unit('serum_calcium_mg_dl', unit),
+            CHEMISTRY_PAIRS['serum_calcium_mg_dl']['default_unit'],
+            lambda value, unit: chemistry_canonical_from_pair(
+                'serum_calcium_mg_dl', value, unit)),
+        'bilirubin_total_mg_dl': _canonical_pair(
+            row['bilirubin_total_mg_dl'],
+            lambda unit: normalize_chemistry_unit('bilirubin_total_mg_dl', unit),
+            CHEMISTRY_PAIRS['bilirubin_total_mg_dl']['default_unit'],
+            lambda value, unit: chemistry_canonical_from_pair(
+                'bilirubin_total_mg_dl', value, unit)),
         'ast_u_l': row['ast_u_l'],
         'alt_u_l': row['alt_u_l'],
-        'albumin_g_dl': row['albumin_g_dl'],
+        'albumin_g_dl': _canonical_pair(
+            row['albumin_g_dl'],
+            lambda unit: normalize_chemistry_unit('albumin_g_dl', unit),
+            CHEMISTRY_PAIRS['albumin_g_dl']['default_unit'],
+            lambda value, unit: chemistry_canonical_from_pair(
+                'albumin_g_dl', value, unit)),
         'her2_status': _normalize_receptor_status(row['her2_raw']),
         'estrogen_receptor_status': _normalize_receptor_status(row['estrogen_receptor_raw']),
         'progesterone_receptor_status': _normalize_receptor_status(row['progesterone_receptor_raw']),

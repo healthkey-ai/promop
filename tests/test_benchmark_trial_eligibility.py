@@ -6,10 +6,13 @@ Covers:
   - Uses the organization-slug cohort selection path.
   - Writes an output JSON file when requested.
 """
+from decimal import Decimal
+
 import pytest
 from django.core.management import call_command
 from django.core.management.base import CommandError
 
+from omop_core.management.commands.benchmark_trial_eligibility import _fetch_omop_trial_row
 from omop_core.models import Organization, PatientRecord
 from tests.factories import (
     ConditionOccurrenceFactory,
@@ -193,3 +196,40 @@ class TestBenchmarkTrialEligibility:
     def test_empty_cohort_raises_command_error(self):
         with pytest.raises(CommandError):
             call_command('benchmark_trial_eligibility', person_ids='999999999')
+
+
+def _measurement(person, code, value, unit):
+    MeasurementFactory(
+        person=person,
+        measurement_source_value=code,
+        value_as_number=value,
+        unit_source_value=unit,
+    )
+
+
+def test_si_results_are_read_in_their_canonical_units():
+    """The raw row must match what the derivation reads (#2438 class)."""
+    person = PersonFactory(year_of_birth=1960)
+    _measurement(person, '718-7', 135, 'g/L')          # 13.5 g/dL
+    _measurement(person, '2160-0', 221, 'umol/L')      # 2.50 mg/dL
+    _measurement(person, '17861-6', 2.9, 'mmol/L')     # 11.6 mg/dL
+    _measurement(person, '1975-2', 20, 'umol/L')       # 1.2 mg/dL
+    _measurement(person, '1751-7', 40, 'g/L')          # 4.0 g/dL
+    _measurement(person, '6690-2', 6300, 'cells/uL')   # 6.3 10*3/uL
+
+    row = _fetch_omop_trial_row(person.person_id)
+
+    assert row['hemoglobin_g_dl'] == Decimal('13.5')
+    assert row['serum_creatinine_mg_dl'] == Decimal('2.50')
+    assert row['serum_calcium_mg_dl'] == Decimal('11.6')
+    assert row['bilirubin_total_mg_dl'] == Decimal('1.2')
+    assert row['albumin_g_dl'] == Decimal('4.0')
+    assert row['wbc_count_thousand_per_ul'] == Decimal('6.3')
+
+
+def test_an_unreadable_newest_unit_is_no_evidence():
+    person = PersonFactory(year_of_birth=1960)
+    _measurement(person, '2160-0', 1.0, 'mg/dL')
+    _measurement(person, '2160-0', 221, 'units-unknown')
+
+    assert _fetch_omop_trial_row(person.person_id)['serum_creatinine_mg_dl'] is None
