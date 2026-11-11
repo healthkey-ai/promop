@@ -744,10 +744,16 @@ class TestGenomicsWritability:
         assert 'vocabular' in entry['reason'].lower()
 
     def test_genetic_mutations_is_writable_once_the_genomics_vocabulary_is_loaded(self):
-        """The Genomics endpoint needs concept 0, a CDM event concept and both
-        actor type concepts; a gene LOINC alone is the retired list writer."""
+        """The Genomics endpoint needs concept 0, a CDM event concept, both
+        actor type concepts and the always-normalised status recipe; a gene
+        LOINC alone is the retired list writer."""
+        from omop_core.models import FieldConceptMapping
         from omop_core.services.genomics import ACTOR_TYPE_CONCEPT_IDS
 
+        # Migrations seed this recipe; --no-migrations tests must create it.
+        FieldConceptMapping.objects.create(
+            field_name='genetic_mutations.status', source_value='genomics:status',
+            omop_table='measurement', status='approved')
         VocabularyFactory(vocabulary_id='Type Concept')
         VocabularyFactory(vocabulary_id='CDM')
         ConceptFactory(concept_id=0, concept_code='0', vocabulary_id='Type Concept')

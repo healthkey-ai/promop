@@ -306,15 +306,21 @@ def _event_concept():
 ACTOR_TYPE_CONCEPT_IDS = (32817, 32865)
 
 
-def variants_writable(type_concept_ids=ACTOR_TYPE_CONCEPT_IDS):
+def variants_writable(type_concept_ids=ACTOR_TYPE_CONCEPT_IDS, *, status_recipe=None):
     """Whether `save_variant` can create a variant on this deployment.
 
     The descriptor asks this before offering Add/Edit. It mirrors the writer's
     hard requirements rather than the retired list-diff writer: concept 0 for
-    unmapped rows, a CDM measurement event concept, and the actor type concept
-    the patient and clinical callers use. A per-marker storage recipe is
-    reported separately by the catalog (`markers[].writable`).
+    unmapped rows, a CDM measurement event concept, the actor type concepts
+    the patient and clinical callers use, and the recipe every save needs for
+    its normalised status. Per-marker recipes are reported separately by the
+    catalog (`markers[].writable`).
     """
+    if status_recipe is None:
+        status_recipe = FieldConceptMapping.objects.filter(
+            field_name='genetic_mutations.status').first()
+    if not mapping_is_usable(status_recipe):
+        return False
     required = {0, *type_concept_ids}
     rows = Concept.objects.filter(
         Q(pk__in=required)

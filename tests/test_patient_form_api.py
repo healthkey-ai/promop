@@ -531,9 +531,13 @@ def test_shared_form_offers_genomics_editor_but_never_writes_it_through_the_form
     """`genetic_mutations` has its own endpoint, so it is writable for the host's
     Genomics editor once its vocabulary is loaded; the shared-form PATCH still
     refuses it. Without the vocabulary the descriptor says so (#2441/#2433)."""
+    from omop_core.models import FieldConceptMapping
     from omop_core.services.genomics import ACTOR_TYPE_CONCEPT_IDS
     record = PatientRecordFactory()
     client = _client()
+    FieldConceptMapping.objects.create(
+        field_name='genetic_mutations.status', source_value='genomics:status',
+        omop_table='measurement', status='approved')
     VocabularyFactory(vocabulary_id='Type Concept')
     VocabularyFactory(vocabulary_id='CDM')
     ConceptFactory(concept_id=0, concept_code='0', vocabulary_id='Type Concept')

@@ -1,6 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import axios from 'axios';
-import { patientFormForClient, patientFormRuntime, renewPatientFormForClient, retainPatientFormRuntime } from './patientFormRuntime';
+import { patientFormForClient, patientFormRuntime, renewPatientFormForClient, retainPatientFormRuntime, takeRetiredDraftCount } from './patientFormRuntime';
 
 afterEach(() => { vi.useRealTimers(); });
 
@@ -51,6 +51,23 @@ it('never hands out a retired store again', () => {
   const next = patientFormForClient(client, '/api');
   expect(next).not.toBe(original);
   expect(next.isRetired).toBe(false);
+});
+
+it('keeps a retired store\'s lost drafts for the next mounted surface', async () => {
+  const client = axios.create();
+  vi.spyOn(client, 'get').mockImplementation(async (url) => ({ data: url.includes('writable-fields')
+    ? { weight: { writable: true, target: 'patient_record' } }
+    : { patient_info: { person_id: 12, weight: 60 } } }));
+  const original = patientFormForClient(client, '/api');
+  await original.load();
+  original.enqueue('weight', 80);
+  // The store retires itself when a load finds another patient, before any
+  // provider can announce it. The next lookup evicts it.
+  original.retire();
+
+  expect(patientFormForClient(client, '/api')).not.toBe(original);
+  expect(takeRetiredDraftCount(client)).toBe(1);
+  expect(takeRetiredDraftCount(client)).toBe(0);
 });
 
 it('re-arms the idle watcher when a renewal swaps the store', async () => {

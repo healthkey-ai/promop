@@ -63,7 +63,13 @@ export function patientFormForClient(client: AxiosInstance, base = '', sessionKe
   // never handed out again. Every cache reads through here (the provider, the
   // editor session, the widget runtime's `store`, renewals), so evicting on
   // lookup keeps all of them off it.
-  if (store?.isRetired) { stores.delete(key); store = undefined; }
+  if (store?.isRetired) {
+    // A store retired by its own load (another patient answered) may still
+    // hold drafts nobody has surfaced. Move the count before evicting it.
+    noteRetiredDrafts(client, store);
+    stores.delete(key);
+    store = undefined;
+  }
   if (!store) {
     // A new connection key on the same client and base means the host
     // switched sign-in or impersonation on that client. A store under an

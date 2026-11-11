@@ -688,7 +688,8 @@ _WRITE_RECIPE_INCOMPLETE = {
     ),
 }
 
-def _curated_writes(choice_options=None, genomics_recipes=None, clinical_mappings=None):
+def _curated_writes(choice_options=None, genomics_recipes=None, clinical_mappings=None,
+                    genetic_recipes=None):
     """Editable entries built from reviewer-approved concept mappings.
 
     The curation interface records a decision per field; this is what acts on
@@ -719,6 +720,12 @@ def _curated_writes(choice_options=None, genomics_recipes=None, clinical_mapping
     )
     if genomics_recipes is not None:
         genomics_recipes.update({r.field_name: r for r in fetched if r.field_name.startswith('genomics_')})
+    if genetic_recipes is not None:
+        # The variant writer always normalises a status, so that recipe must be
+        # usable even when the caller sends only a gene. Collected from the
+        # same read as the rest.
+        genetic_recipes.update(
+            {r.field_name: r for r in fetched if r.field_name == 'genetic_mutations.status'})
     if clinical_mappings is not None:
         clinical_mappings.update({r.field_name: r for r in fetched if r.field_name in CLINICAL_INPUT_FIELDS})
     rows = [r for r in fetched if r.status == 'approved']
@@ -980,8 +987,10 @@ def build_writable_field_descriptor():
     }
     from omop_core.services.genomics import mapping_is_usable
     genomics_recipes = {}
+    genetic_recipes = {}
     clinical_mappings = {}
-    curated = _curated_writes(choice_options, genomics_recipes, clinical_mappings)
+    curated = _curated_writes(
+        choice_options, genomics_recipes, clinical_mappings, genetic_recipes)
 
     descriptor = {}
     line_options = None
@@ -1020,7 +1029,8 @@ def build_writable_field_descriptor():
             # Advertising Add regardless offered a control whose save could
             # only 400 (#2441/#2433).
             from omop_core.services.genomics import variants_writable
-            writable = variants_writable()
+            writable = variants_writable(
+                status_recipe=genetic_recipes.get('genetic_mutations.status'))
             descriptor[field] = {
                 'kind': KIND_EDITABLE, 'writable': writable, 'target': 'genomics',
                 'endpoint': '/api/v1/patient-records/{person_id}/genomics/',

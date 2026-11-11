@@ -3,9 +3,7 @@ import { createPortal } from 'react-dom';
 
 import PatientFieldEditor from './PatientFieldEditor';
 import { PatientFormRenewContext } from './PatientFormContext';
-import {
-  renewPatientFormForClient, takeRetiredDraftCount, type patientFormRuntime,
-} from './patientFormRuntime';
+import { renewPatientFormForClient, type patientFormRuntime } from './patientFormRuntime';
 import type { PatientFormResult } from './patientFormStore';
 import { hasNewSaveError } from './saveErrors';
 
@@ -29,12 +27,12 @@ export default function FieldSlots({ runtime, opts, slots }: {
   const [store, setStore] = useState(() => runtime.store);
   const [generation, setGeneration] = useState(0);
   const renew = useCallback(() => {
+    // retire() publishes the "Not sent" errors before this render swaps the
+    // store, so the subscription below tells the host once. Do not consume the
+    // runtime count here: a later provider mount owns the visible notice.
     setStore(renewPatientFormForClient(runtime.client, apiBase, '', store));
     setGeneration((count) => count + 1);
-    // The old store's unsent drafts will never be sent. Tell the host, which
-    // has a slot for exactly this; there is no other surface on this card.
-    if (takeRetiredDraftCount(runtime.client)) onSaveError?.();
-  }, [runtime, apiBase, store, onSaveError]);
+  }, [runtime, apiBase, store]);
   useEffect(() => { void store.load(); }, [store]);
   useEffect(() => onPatientUpdated ? store.onUpdated(onPatientUpdated) : undefined,
     [store, onPatientUpdated]);
