@@ -445,3 +445,65 @@ def test_the_pair_day_is_server_managed_and_not_exposed(lab):
     record.refresh_from_db()
     assert record.pending_source_pair_dates == {
         'hemoglobin_level': TODAY.isoformat()}
+
+
+def test_a_changed_pair_after_a_dated_answer_is_dated_today(lab):
+    draw = TODAY - timedelta(days=6)
+    _patch_pair(lab, 120, 'G/L', draw)
+
+    # A new number without a date is a new result, not a retry of the old one.
+    _patch_pair(lab, 130, 'G/L')
+
+    record = lab['record']
+    record.refresh_from_db()
+    assert record.pending_source_pair_dates == {
+        'hemoglobin_level': TODAY.isoformat()}
+    rows = _hemoglobin_rows(lab, SELF_REPORT_TYPE).order_by('measurement_date')
+    assert [row.measurement_date for row in rows] == [draw, TODAY]
+    assert rows.last().value_as_number == 13
+
+
+def test_a_changed_unit_after_a_dated_answer_is_dated_today(lab):
+    draw = TODAY - timedelta(days=7)
+    _patch_pair(lab, 12, 'G/DL', draw)
+
+    # The number is unchanged; the unit the reader chose is not, so the pair is
+    # a new assertion and must not inherit the old draw date.
+    _patch_pair(lab, 12, 'G/L')
+
+    record = lab['record']
+    record.refresh_from_db()
+    assert record.pending_source_pair_dates == {
+        'hemoglobin_level': TODAY.isoformat()}
+    rows = _hemoglobin_rows(lab, SELF_REPORT_TYPE).order_by('measurement_date')
+    assert [row.measurement_date for row in rows] == [draw, TODAY]
+
+
+def test_an_echo_of_a_legacy_pair_does_not_invent_a_day(lab):
+    record = lab['record']
+    record.hemoglobin_level = Decimal('120')
+    record.hemoglobin_level_units = 'G/L'
+    record.hemoglobin_g_dl = Decimal('12.0')
+    record.user_edited_fields = ['hemoglobin_level', 'hemoglobin_level_units']
+    record.save()
+
+    _patch_pair(lab, 120, 'G/L')
+
+    record.refresh_from_db()
+    # The resend is an echo; the record never knew the day, so it records none.
+    assert record.pending_source_pair_dates == {}
+    assert {'hemoglobin_level', 'hemoglobin_level_units'} <= set(
+        record.user_edited_fields or [])
+
+
+def test_a_clear_of_a_dated_pair_is_dated_today(lab):
+    draw = TODAY - timedelta(days=8)
+    _patch_pair(lab, 120, 'G/L', draw)
+
+    _patch_pair(lab, None, 'G/L')
+
+    record = lab['record']
+    record.refresh_from_db()
+    assert record.pending_source_pair_dates == {
+        'hemoglobin_level': TODAY.isoformat()}
+    assert record.hemoglobin_g_dl is None

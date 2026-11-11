@@ -1460,8 +1460,9 @@ def refresh_patient_record(person: Person) -> PatientRecord:
                 # acknowledged columns. The extractor mirrors the canonical
                 # into the legacy alias in g/dL, so a numerical match would
                 # clear a g/dL pair but keep the equivalent g/L pair pending.
-                # Only an explicit canonical import retires it (recompute);
-                # the chosen unit is the reader's declaration.
+                # A numerical match does not retire it either: only an explicit
+                # canonical event (recompute) or a strictly newer result above
+                # does, because the chosen unit is the reader's declaration.
                 matches = False
             elif field == _DIRECT_PAIR_FIELD:
                 # Direct bilirubin has no canonical, so the pair is confirmed

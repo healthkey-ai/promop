@@ -45,6 +45,7 @@ from omop_core.services.blood_count_source_pairs import (
 from omop_core.services import direct_bilirubin_units
 from omop_core.services.source_pair_dates import (
     SOURCE_PAIR_CANONICALS,
+    SOURCE_PAIR_FIELDS,
     pair_sources_in,
     remember_dates,
     stored_dates,
@@ -464,12 +465,14 @@ def patient_form_descriptors(descriptor=None, *, readable_fields=None, writable=
 def _authored_pair_dates(direct, pair_pending, fact_dates, record):
     """The clinical day to remember for each source pair this form wrote (#2426).
 
-    A dated edit names its day. An unchanged re-send of a pending pair is a
-    retry, not a new result: it keeps the day the pair was first entered,
-    rather than moving the answer to today on every autosave echo. Any other
-    undated edit is a new result and projects onto today, as it always did.
+    Called before the submitted values are written to ``record``, so an
+    unchanged re-send is recognised as one: it keeps the day the pair was first
+    entered rather than moving the answer to today on every autosave echo. A
+    changed number or unit is a new result and dates from today; a legacy pair
+    with no recorded day stays undated. A dated edit names its day.
     """
-    sources = pair_sources_in(set(direct) | set(pair_pending))
+    sent = set(direct) | set(pair_pending)
+    sources = pair_sources_in(sent)
     if not sources:
         return {}
     stored = stored_dates(record)
@@ -479,16 +482,29 @@ def _authored_pair_dates(direct, pair_pending, fact_dates, record):
     for source in sources:
         canonical = SOURCE_PAIR_CANONICALS[source]
         day = fact_dates.get(source) or fact_dates.get(canonical)
-        if day is None:
-            current = getattr(record, source, None)
-            value = direct.get(source, current)
-            if source in pending and source in stored and value == current:
-                day = stored[source]
-            else:
-                day = today
-            # The canonical projection carries the date; without this a retry
-            # would write the answer on the day it is retried.
-            fact_dates[canonical] = day
+        if day is not None:
+            fact_dates.setdefault(canonical, day)
+            dates[source] = day
+            continue
+        fields = SOURCE_PAIR_FIELDS[source] & sent
+        changed = any(
+            (direct.get(field) if field in direct else getattr(record, field, None))
+            != getattr(record, field, None)
+            for field in fields
+        )
+        if not changed and source in pending and source in stored:
+            day = stored[source]
+        elif changed:
+            # The canonical projection carries the date; without this a new
+            # answer would be written on the day it is retried instead.
+            day = today
+        else:
+            # Either an unchanged autosave echo of a pair whose day was never
+            # recorded, or an echo of a value that is not pending. Neither is
+            # evidence of a day, and guessing one would let a later import
+            # retire a legacy answer (or date an untouched derived value).
+            continue
+        fact_dates[canonical] = day
         dates[source] = day
     return dates
 
@@ -1427,6 +1443,10 @@ def _apply_patient_form_patch(person, changes, *, allowed_fields=None, descripto
                 profile_changes.setdefault('longitude', None)
     if direct:
         previous_direct = {name: getattr(record, name, None) for name in direct}
+        # Before the write: an unchanged pair is only an echo, and comparing
+        # after `setattr` would make every write look like one (#2426).
+        pair_date_values = _authored_pair_dates(
+            direct, pair_pending, fact_dates, record)
         for name, value in direct.items():
             setattr(record, name, value)
         unit_fields = set()
@@ -1439,10 +1459,7 @@ def _apply_patient_form_patch(person, changes, *, allowed_fields=None, descripto
         clinical_direct = set(direct) - set(profile_changes)
         record.user_edited_fields = sorted(
             set(record.user_edited_fields or []) | clinical_direct | pair_pending)
-        remember_dates(
-            record,
-            _authored_pair_dates(direct, pair_pending, fact_dates, record),
-        )
+        remember_dates(record, pair_date_values)
         record.save(update_fields=sorted(set(direct) | unit_fields)
                     + ['user_edited_fields', 'pending_source_pair_dates'])
         from omop_core.services.patient_record_revisions import write_record_revisions
