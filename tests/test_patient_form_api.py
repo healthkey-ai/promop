@@ -529,9 +529,16 @@ def test_native_patch_keeps_a_pinned_answer_pending_like_the_shared_form():
 
 def test_shared_form_offers_genomics_editor_but_never_writes_it_through_the_form():
     """`genetic_mutations` has its own endpoint, so it is writable for the host's
-    Genomics editor; the shared-form PATCH still refuses it."""
+    Genomics editor once its vocabulary is loaded; the shared-form PATCH still
+    refuses it. Without the vocabulary the descriptor says so (#2441/#2433)."""
+    from omop_core.services.field_write_service import PATIENT_REPORTED_TYPE_CONCEPT_ID
     record = PatientRecordFactory()
     client = _client()
+    VocabularyFactory(vocabulary_id='Type Concept')
+    VocabularyFactory(vocabulary_id='LOINC')
+    ConceptFactory(concept_id=PATIENT_REPORTED_TYPE_CONCEPT_ID,
+                   concept_code='32865', vocabulary_id='Type Concept')
+    ConceptFactory(concept_code='21636-6', vocabulary_id='LOINC')
     shared = client.get('/api/v1/patient-records/writable-fields/', {'person_id': record.person_id},
                         HTTP_X_PATIENT_FORM='1').data
     assert shared['genetic_mutations']['writable'] is True
