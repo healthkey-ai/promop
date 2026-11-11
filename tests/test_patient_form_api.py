@@ -643,3 +643,27 @@ def test_the_plain_descriptor_is_field_only_and_the_envelope_is_opt_in():
     read_only = reader.get(url, {'person_id': record.person_id}).data
     assert '__descriptor__' not in read_only
     assert not any(entry['writable'] for entry in read_only.values())
+
+
+class TestMeReportsWriteAccess:
+    """The shared form reads `write_enabled` from /patient-info/me/ (#2441)."""
+
+    def _patient(self):
+        from rest_framework.test import APIClient
+        client = APIClient()
+        client.force_authenticate(
+            Identity.objects.create_user(email='self-patient@example.test'))
+        return client
+
+    def test_a_caller_with_write_access_is_enabled(self):
+        response = self._patient().get('/api/patient-info/me/')
+        assert response.status_code == 200, response.data
+        assert response.data['write_enabled'] is True
+
+    def test_a_read_only_caller_is_not(self, monkeypatch):
+        import patient_portal.api.views as views
+
+        monkeypatch.setattr(views, '_caller_may_write_patient', lambda request, person_id: False)
+        response = self._patient().get('/api/patient-info/me/')
+        assert response.status_code == 200, response.data
+        assert response.data['write_enabled'] is False

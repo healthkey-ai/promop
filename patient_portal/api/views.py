@@ -1839,6 +1839,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 'patient_info': patient_serializer.data,  # legacy wire format — preserved for frontend/federation host compatibility
                 'user': user_serializer.data,
                 'patient_name': full_name,
+                # The shared form gates its controls on this flag before the
+                # descriptor arrives. Emitted here by the same rule the writes
+                # enforce, so a host proxy no longer has to add it; a caller
+                # without write access gets read-only controls even if the
+                # descriptor could not be fetched (#2441).
+                'write_enabled': _caller_may_write_patient(request, person.person_id),
             })
 
         response = self._patch_record(request, person, patient_info)
