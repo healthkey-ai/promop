@@ -309,3 +309,15 @@ def test_an_empty_unit_concept_code_is_not_a_missing_unit():
     )
 
     assert _fetch_omop_trial_row(person.person_id)['hemoglobin_g_dl'] is None
+
+
+def test_an_unproven_converted_count_is_no_evidence():
+    """Without the sent number, a stored count in another unit cannot be read."""
+    person = PersonFactory(year_of_birth=1960)
+    MeasurementFactory(
+        person=person, measurement_source_value='6690-2',
+        value_as_number=6.3, unit_source_value='cells/uL',
+        unit_concept=_ucum('10*3/uL'),
+    )
+
+    assert _fetch_omop_trial_row(person.person_id)['wbc_count_thousand_per_ul'] is None
