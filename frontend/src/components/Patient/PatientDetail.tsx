@@ -487,6 +487,7 @@ export default function PatientDetail({
       const { patient_name: _echoed, ...info } = data.info as Record<string, unknown>;
       const renamed = !!data.name && data.name !== patientNameRef.current;
       const patchFields: Record<string, unknown> = {};
+      const sentDates: Record<string, string> = {};
 
       for (const [f, v] of Object.entries(info)) {
         if (f === 'no_pre_existing_conditions' || f === 'preexisting_conditions') continue;
@@ -500,6 +501,7 @@ export default function PatientDetail({
           // Unknown to the descriptor (e.g. custom fields) — PATCH them too.
           patchFields[f] = value;
         }
+        if (pendingDate) sentDates[f] = pendingDate;
       }
 
       // All fields ride the single PatientRecord PATCH.
@@ -512,7 +514,11 @@ export default function PatientDetail({
         for (const f of Object.keys(patchFields)) {
           if (patientInfoRef.current) patientInfoRef.current[f] = info[f];
           confirmedWritesRef.current[f] = info[f];
-          delete pendingDatesRef.current[f];
+          // A date changed while this PATCH was in flight belongs to the next
+          // save; only clear the date this response confirmed.
+          if (sentDates[f] && pendingDatesRef.current[f] === sentDates[f]) {
+            delete pendingDatesRef.current[f];
+          }
           if (pendingDataRef.current?.info[f] === info[f]) dirtyFieldsRef.current.delete(f);
         }
       }

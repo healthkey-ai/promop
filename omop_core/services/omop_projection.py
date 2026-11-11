@@ -559,6 +559,41 @@ def _projection_owned(instance):
     ).exists()
 
 
+def move_owned_fact_date(person, field_name, value, projection, fact_date, *,
+                         type_concept_id=None):
+    """Move the fact this projector owns to ``fact_date``, if it can.
+
+    Returns True when moved, None when there is no fact to move (the caller may
+    create one), and False when the newest fact is not ours to rewrite (an
+    import or a lab feed). A date-only correction must not add a second row and
+    leave the wrong-dated one active.
+    """
+    target = projection.get('omop_table')
+    concept_id = projection.get('concept_id')
+    source_value = projection.get('source_value')
+    if target not in _TARGET_CONFIG or concept_id is None or not source_value:
+        return False
+    model, pk_field, concept_field, date_field, type_field, src_field, val_num, _ = (
+        _TARGET_CONFIG[target])
+    if val_num is None and _is_empty(value):
+        return False
+    from omop_core.services.cancer_details import projection_scope
+    scope = projection_scope(person, field_name, model)
+    rows = model.objects.filter(
+        person=person, is_erroneous=False,
+        **{concept_field: concept_id, src_field: source_value}, **scope,
+    )
+    if type_concept_id is not None:
+        rows = rows.filter(**{type_field: type_concept_id})
+    row = rows.order_by('-' + date_field, '-' + pk_field).first()
+    if row is None:
+        return None
+    if not _projection_owned(row):
+        return False
+    model.objects.filter(pk=row.pk).update(**{date_field: fact_date})
+    return True
+
+
 def _record_projection_provenance(instance):
     from django.contrib.contenttypes.models import ContentType
     from omop_core.models import ProvenanceRecord

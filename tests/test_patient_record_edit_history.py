@@ -85,7 +85,25 @@ def test_a_dated_edit_projects_on_the_chosen_clinical_day(editor):
     assert record.hemoglobin_g_dl == 12
 
 
-def test_a_date_only_correction_still_projects_on_its_day(editor):
+def test_a_dated_source_pair_projects_on_the_chosen_day(editor):
+    record, client = editor
+    concept = hemoglobin()
+    day = timezone.localdate() - timedelta(days=20)
+
+    response = client.patch(
+        f'/api/patient-info/{record.person_id}/',
+        {'hemoglobin_level': {'value': 12, 'date': day.isoformat()},
+         'hemoglobin_level_units': 'G/DL'},
+        format='json',
+    )
+
+    assert response.status_code == 200, response.data
+    row = Measurement.objects.get(person=record.person, measurement_concept=concept)
+    assert row.measurement_date == day
+    assert row.value_as_number == 12
+
+
+def test_a_date_only_correction_moves_the_fact_instead_of_duplicating(editor):
     record, client = editor
     concept = hemoglobin()
     patch_field(editor, 'hemoglobin_g_dl', 12)  # today
@@ -98,9 +116,33 @@ def test_a_date_only_correction_still_projects_on_its_day(editor):
     )
 
     assert response.status_code == 200, response.data
-    assert Measurement.objects.filter(
-        person=record.person, measurement_concept=concept,
-        measurement_date=day, value_as_number=12).exists()
+    rows = Measurement.objects.filter(person=record.person, measurement_concept=concept)
+    assert rows.count() == 1
+    row = rows.get()
+    assert row.measurement_date == day
+    assert row.value_as_number == 12
+
+
+def test_a_date_only_correction_cannot_move_an_imported_fact(editor):
+    record, client = editor
+    concept = hemoglobin()
+    with suppress_patient_record_refresh():
+        MeasurementFactory(
+            person=record.person, measurement_concept=concept,
+            measurement_source_value='718-7', measurement_date=timezone.localdate(),
+            value_as_number=12)
+    record.hemoglobin_g_dl = 12
+    record.save(update_fields=['hemoglobin_g_dl'])
+    day = timezone.localdate() - timedelta(days=10)
+
+    response = client.patch(
+        f'/api/patient-info/{record.person_id}/',
+        {'hemoglobin_g_dl': {'value': 12, 'date': day.isoformat()}},
+        format='json',
+    )
+
+    assert response.status_code == 400, response.data
+    assert Measurement.objects.get(person=record.person).measurement_date == timezone.localdate()
 
 
 def test_a_date_on_a_non_dated_field_is_refused(editor):

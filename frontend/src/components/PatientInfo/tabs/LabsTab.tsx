@@ -144,16 +144,16 @@ export default function LabsTab({ formData, onChange }: Props) {
   const personId = (formData?.person_id ?? formData?.person) as number | undefined;
   const { descriptors, loading } = useWritableFields(personId);
   const { grouped: measurementGroups } = useLabMeasurements(personId);
-  const [date, setDate] = useState(today());
-  // A lab value and the date it was observed are one edit. The date control
-  // is shared across this tab, so a value edit carries the current date and a
-  // date change re-sends the value it belongs to (#2439).
-  const changeValue = (name: string, value: unknown) => onChange(name, value, date);
+  const [dates, setDates] = useState<Record<string, string>>({});
+  const dateFor = (name: string) => dates[name] ?? today();
+  // A lab value and the date it was observed are one edit. The date is per
+  // field: changing one result's date must not relabel its neighbours (#2439).
+  const changeValue = (name: string, value: unknown) => onChange(name, value, dateFor(name));
   const changeDate = (name: string, next: string) => {
-    setDate(next);
-    const current = formData?.[name];
-    if (current !== undefined && current !== null && current !== '') {
-      onChange(name, current, next);
+    setDates((current) => ({ ...current, [name]: next }));
+    const value = formData?.[name];
+    if (value !== undefined && value !== null && value !== '') {
+      onChange(name, value, next);
     }
   };
   const [chartDialog, setChartDialog] = useState<{
@@ -194,7 +194,7 @@ export default function LabsTab({ formData, onChange }: Props) {
                     value={formData?.[name]}
                     descriptor={descriptors[name]}
                     onChange={dated ? changeValue : onChange}
-                    date={dated ? date : undefined}
+                    date={dated ? dateFor(name) : undefined}
                     onDateChange={dated ? (next) => changeDate(name, next) : undefined}
                   />
                 </div>
