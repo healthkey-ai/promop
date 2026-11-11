@@ -36,6 +36,7 @@ or left for policy review.
 import hashlib
 import json
 import os
+import re
 from datetime import date, datetime, timezone as dt_timezone
 
 from django.core.management.base import BaseCommand, CommandError
@@ -157,7 +158,8 @@ def _tobacco_supports_true(row):
     if not value or not str(value).strip():
         return None
     first = str(value).strip().splitlines()[0].strip().casefold()
-    if first.startswith('never'):
+    if (first == 'never' or first in ('non-smoker', 'nonsmoker')
+            or re.match(r'^never[- ](smoker|smoked|used|tried|tobacco)\b', first)):
         return True
     if first.startswith(('former', 'current', 'smoker', 'yes')):
         return False

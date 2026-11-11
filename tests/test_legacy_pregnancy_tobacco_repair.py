@@ -150,6 +150,16 @@ def test_source_parsers_handle_lab_spellings_and_conflicts(tmp_path):
                        observation_source_value='72166-2',
                        value_as_string='Current smoker, never tried quitting')
     records['tobacco_text'] = tobacco_text
+    never_assessed = PatientRecordFactory(**{PREGNANCY: False, TOBACCO: True})
+    ObservationFactory(person=never_assessed.person,
+                       observation_source_value='72166-2',
+                       value_as_string='Never assessed')
+    records['never_assessed'] = never_assessed
+    never_smoker = PatientRecordFactory(**{PREGNANCY: False, TOBACCO: True})
+    ObservationFactory(person=never_smoker.person,
+                       observation_source_value='72166-2',
+                       value_as_string='Never smoker')
+    records['never_smoker'] = never_smoker
     for record in records.values():
         PatientRecord.objects.filter(pk=record.pk).update(
             **{PREGNANCY: True, TOBACCO: True})
@@ -164,6 +174,8 @@ def test_source_parsers_handle_lab_spellings_and_conflicts(tmp_path):
     assert by_id[records['blank'].pk]['fields'][PREGNANCY]['classification'] == 'source_unknown'
     assert by_id[records['tobacco_conflict'].pk]['fields'][TOBACCO]['classification'] == 'source_conflict'
     assert by_id[records['tobacco_text'].pk]['fields'][TOBACCO]['classification'] == 'source_conflict'
+    assert by_id[records['never_assessed'].pk]['fields'][TOBACCO]['classification'] == 'source_unknown'
+    assert by_id[records['never_smoker'].pk]['fields'][TOBACCO]['classification'] == 'source_backed_true'
 
 
 def test_a_pending_marker_does_not_override_a_recorded_false(tmp_path):
