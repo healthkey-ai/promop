@@ -68,7 +68,9 @@ export default function TherapyLinesPanel({ store, readOnly = false, onChanged, 
     store.beginBypassWrite();
     try {
       await retractTherapyLine(line.episode_id, connection);
-      await store.load();
+      // A read already in flight started before this write; sharing it would
+      // publish the pre-write record (#2433).
+      await store.load(true);
       onChanged?.();
     } catch {
       setError('Could not remove that line. Try again.');
@@ -84,7 +86,7 @@ export default function TherapyLinesPanel({ store, readOnly = false, onChanged, 
     store.beginBypassWrite();
     try {
       await setTherapyHistoryCompleteness(personId, next, connection);
-      await store.load();
+      await store.load(true);
       onChanged?.();
     } catch {
       setError('Could not update whether this history is complete.');
@@ -172,9 +174,10 @@ export default function TherapyLinesPanel({ store, readOnly = false, onChanged, 
       onAuthored={() => {
         setDialog(null);
         // The store reload and the host callback are part of the same bypass
-        // write: hold the listeners until both finish.
+        // write: hold the listeners until both finish. The reload supersedes
+        // any read that started before the write (#2433).
         store.beginBypassWrite();
-        void store.load()
+        void store.load(true)
           .then(() => onChanged?.())
           .finally(() => store.endBypassWrite());
       }}
