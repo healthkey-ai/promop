@@ -27065,8 +27065,8 @@ class MappingStatsTest(MappingHubTestBase):
 
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
-    def test_analyst_is_refused_stats(self):
-        """The mapping hub is curation an analyst does not reach (#2398)."""
+    def test_analyst_reads_stats(self):
+        """The mapping hub is the analyst's page (#2416; refused under #2398)."""
         analyst = Identity.objects.create_user(
             email='analyst-mapping@test.com', password='testpass',
         )
@@ -27075,7 +27075,7 @@ class MappingStatsTest(MappingHubTestBase):
         )
         self.client.force_authenticate(user=analyst)
         resp = self.client.get('/api/v1/mapping-stats/')
-        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
     def test_regular_user_forbidden(self):
         self.client.force_authenticate(user=self.regular)
