@@ -357,6 +357,9 @@ export default function PatientDetail({
   // A lab value's clinical date, keyed by field. It travels with the value in
   // the PATCH as {value, date}; a date-only change re-sends the value (#2439).
   const pendingDatesRef = useRef<Record<string, string>>({});
+  // The result id the last PATCH confirmed, per field. A later date-only edit
+  // names that exact result; a cached measurement list goes stale on save.
+  const confirmedFactIdsRef = useRef<Record<string, number>>({});
    
   const pendingDataRef = useRef<{ info: Record<string, unknown>; name: string } | null>(null);
    
@@ -494,7 +497,10 @@ export default function PatientDetail({
         const pendingDate = pendingDatesRef.current[f];
         if (LIFECYCLE.has(f) || (v === baseline[f] && !pendingDate)) continue;
         const desc = descriptors[f];
-        const value = pendingDate ? { value: v, date: pendingDate } : v;
+        const factId = v === baseline[f] ? confirmedFactIdsRef.current[f] : undefined;
+        const value = pendingDate
+          ? { value: v, date: pendingDate, ...(factId ? { fact_id: factId } : {}) }
+          : v;
         if (editableWithoutFormStore(desc) && desc?.target === 'patient_record') {
           patchFields[f] = value;
         } else if (!(f in descriptors)) {
@@ -506,10 +512,12 @@ export default function PatientDetail({
 
       // All fields ride the single PatientRecord PATCH.
       if (renamed || Object.keys(patchFields).length > 0) {
-        await api.patch(
+        const response = await api.patch(
           `/patient-info/${personId}/`,
           renamed ? { ...patchFields, patient_name: data.name } : patchFields,
         );
+        const returned = (response.data as { fact_ids?: Record<string, number> } | undefined)?.fact_ids;
+        if (returned) Object.assign(confirmedFactIdsRef.current, returned);
         saveRevisionRef.current += 1;
         for (const f of Object.keys(patchFields)) {
           if (patientInfoRef.current) patientInfoRef.current[f] = info[f];

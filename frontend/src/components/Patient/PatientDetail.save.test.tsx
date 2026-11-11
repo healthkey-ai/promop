@@ -229,6 +229,9 @@ describe('PatientDetail save — the edit, not the record', () => {
     await renderAndLoad();
     await openLabsTab();
     vi.useFakeTimers({ shouldAdvanceTime: true });
+    (api.patch as ReturnType<typeof vi.fn>).mockResolvedValue({
+      data: { fact_ids: { hemoglobin_g_dl: 55 } },
+    });
     fireEvent.change(screen.getByDisplayValue('12.5'), { target: { value: '9.5' } });
     await act(async () => { vi.advanceTimersByTime(2100); });
     await waitFor(() => expect(api.patch).toHaveBeenCalledTimes(1));
@@ -239,7 +242,7 @@ describe('PatientDetail save — the edit, not the record', () => {
 
     await waitFor(() => expect(api.patch).toHaveBeenCalledTimes(2));
     expect(patchBody()).toMatchObject({
-      hemoglobin_g_dl: { value: 9.5, date: '2026-10-01' },
+      hemoglobin_g_dl: { value: 9.5, date: '2026-10-01', fact_id: 55 },
     });
   });
 

@@ -106,13 +106,13 @@ def test_a_dated_source_pair_projects_on_the_chosen_day(editor):
 def test_a_date_only_correction_moves_the_fact_instead_of_duplicating(editor):
     record, client = editor
     concept = hemoglobin()
-    patch_field(editor, 'hemoglobin_g_dl', 12)  # today
-    row = Measurement.objects.get(person=record.person, measurement_concept=concept)
+    saved = patch_field(editor, 'hemoglobin_g_dl', 12)  # today
+    fact_id = saved.data['fact_ids']['hemoglobin_g_dl']
     day = timezone.localdate() - timedelta(days=10)
 
     response = client.patch(
         f'/api/patient-info/{record.person_id}/',
-        {'hemoglobin_g_dl': {'value': 12, 'date': day.isoformat()}},
+        {'hemoglobin_g_dl': {'value': 12, 'date': day.isoformat(), 'fact_id': fact_id}},
         format='json',
     )
 
@@ -139,7 +139,8 @@ def test_a_date_only_correction_cannot_move_an_imported_fact(editor):
 
     response = client.patch(
         f'/api/patient-info/{record.person_id}/',
-        {'hemoglobin_g_dl': {'value': 12, 'date': day.isoformat()}},
+        {'hemoglobin_g_dl': {'value': 12, 'date': day.isoformat(),
+                             'fact_id': imported.pk}},
         format='json',
     )
 
@@ -223,6 +224,38 @@ def test_a_newer_import_is_not_moved_by_an_older_owned_result(editor):
     owned = Measurement.objects.get(
         person=record.person, measurement_date=older)
     assert owned.value_as_number == 12
+
+
+def test_a_date_correction_keeps_the_result_when_another_has_equal_value(editor):
+    record, client = editor
+    concept = hemoglobin()
+    a_day = timezone.localdate() - timedelta(days=5)
+    b_day = timezone.localdate() - timedelta(days=10)
+
+    from omop_core.services.omop_projection import project_single_value
+    ConceptFactory(concept_id=32856)
+    projection = {
+        'omop_table': 'measurement', 'concept_id': concept.pk,
+        'source_value': '718-7', 'type_concept_id': 32856,
+    }
+    for day in (a_day, b_day):
+        assert project_single_value(
+            record.person, 'hemoglobin_g_dl', 12, projection, fact_date=day)
+    a = Measurement.objects.get(
+        person=record.person, measurement_concept=concept,
+        measurement_date=a_day).pk
+    b = Measurement.objects.get(
+        person=record.person, measurement_concept=concept,
+        measurement_date=b_day).pk
+    assert a != b
+    for day in (a_day - timedelta(days=1), a_day - timedelta(days=2)):
+        assert client.patch(
+            f'/api/patient-info/{record.person_id}/',
+            {'hemoglobin_g_dl': {'value': 12, 'date': day.isoformat(), 'fact_id': a}},
+            format='json').status_code == 200
+
+    assert Measurement.objects.get(pk=a).measurement_date == a_day - timedelta(days=2)
+    assert Measurement.objects.get(pk=b).measurement_date == b_day
 
 
 def test_a_date_on_a_non_dated_field_is_refused(editor):
