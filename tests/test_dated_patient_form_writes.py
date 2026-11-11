@@ -448,11 +448,12 @@ def test_an_undated_pair_refuses_a_result_date():
     assert PatientRecord.objects.get(person=person).hemoglobin_level is None
 
 
-def test_an_older_dated_pair_stays_the_current_answer():
-    """The pair is retained pending, so an older draw is still the answer (#2318).
+def test_an_older_import_does_not_retire_a_dated_pair():
+    """A pair newer than the imported result stays the answer (#2318, #2426).
 
-    The fact history shows the older draw; the record keeps the reader's pair
-    until an explicit canonical event, so the editor must not call it history.
+    The fact history shows both draws; the record keeps the reader's pair
+    until an explicit canonical event or a strictly newer result, so the editor
+    must not call it history.
     """
     person = _person_with_lab()
     concept = Concept.objects.get(concept_code=LOINC)
@@ -462,7 +463,7 @@ def test_an_older_dated_pair_stays_the_current_answer():
                    vocabulary=type_vocab)
     Measurement.objects.create(
         measurement_id=next_pk(Measurement, 'measurement_id'), person=person,
-        measurement_concept=concept, measurement_date=date(2026, 8, 1),
+        measurement_concept=concept, measurement_date=date(2026, 6, 1),
         measurement_type_concept_id=32817, value_as_number=12.0,
         unit_source_value='g/dL')
 
@@ -486,7 +487,7 @@ def test_an_older_dated_pair_stays_the_current_answer():
     assert record.hemoglobin_g_dl == Decimal('14.0')
     dates = sorted(Measurement.objects.filter(person=person).values_list(
         'measurement_date', flat=True))
-    assert dates == [date(2026, 7, 1), date(2026, 8, 1)]
+    assert dates == [date(2026, 6, 1), date(2026, 7, 1)]
 
     descriptors = patient_form_descriptors(
         build_writable_field_descriptor(), record=PatientRecord.objects.get(person=person))

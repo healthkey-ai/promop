@@ -876,6 +876,10 @@ def get_serializer_read_only_fields():
         return _CACHED_SERIALIZER_READ_ONLY
 
     read_only = set()
+    # Server-managed bookkeeping, never a clinical value (#2426): the day a
+    # pending source pair was entered. The pair write paths maintain it.
+    from omop_core.services.source_pair_dates import FIELD as _PAIR_DATES_FIELD
+    read_only.add(_PAIR_DATES_FIELD)
     # KIND_COMPUTED: episode-derived line fields
     read_only |= _EPISODE_COMPUTED_FIELDS
     # KIND_COMPUTED: wearable aggregates + KIND_UNMAPPED: wearable metadata

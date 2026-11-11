@@ -71,6 +71,13 @@ from omop_core.services.blood_count_source_pairs import (
     source_from_canonical as count_source_from_canonical,
 )
 from omop_core.services import direct_bilirubin_units
+from omop_core.services.source_pair_dates import (
+    SOURCE_PAIR_CANONICALS as _SOURCE_PAIR_CANONICALS,
+    forget_unedited_dates as _forget_unedited_pair_dates,
+    fields_for as _source_pair_fields,
+    stored_dates as _stored_pair_dates,
+    superseded_sources as _superseded_pair_sources,
+)
 from omop_core.services.chemistry_units import (
     PAIRS as _CHEMISTRY_PAIRS,
     canonical_from_pair as chemistry_canonical_from_pair,
@@ -1316,6 +1323,7 @@ def refresh_patient_record(person: Person) -> PatientRecord:
 
         # Populate all sections
         lab_derived_fields = set()
+        lab_dates = {}
         for section_fn in [
             _get_demographics,
             _get_blood_type_data,
@@ -1344,9 +1352,15 @@ def refresh_patient_record(person: Person) -> PatientRecord:
             _get_mm_specific_data,
             _get_sct_cytogenetic_data,
         ]:
-            section_values = section_fn(person, snapshot)
             if section_fn is _get_laboratory_data:
+                # The extractor's own selection names the day of the winning
+                # fact per field; a newer import retires an older pending pair
+                # (#2426) without re-implementing those rules here.
+                section_values = _get_laboratory_data(
+                    person, snapshot, dates_out=lab_dates)
                 lab_derived_fields = set(section_values)
+            else:
+                section_values = section_fn(person, snapshot)
             for field, value in section_values.items():
                 setattr(patient_info, field, value)
                 derived_fields.add(field)
@@ -1396,6 +1410,33 @@ def refresh_patient_record(person: Person) -> PatientRecord:
                 preserved.get(_DIRECT_UNIT_FIELD),
             )
         )
+        # A newer imported result retires an older patient-entered pair (#2426).
+        # The pair is the reader's assertion, so only derivation's own pick for
+        # the canonical field decides: a same-day result, an unusable one, or a
+        # pair whose entered day is unknown leaves it pending. Retire before
+        # restoring, or the old number and unit would win beside the new fact.
+        superseded_pairs = _superseded_pair_sources(
+            user_edited,
+            _stored_pair_dates(patient_info),
+            lab_dates,
+            {
+                canonical: getattr(patient_info, canonical, None)
+                for canonical in set(_SOURCE_PAIR_CANONICALS.values())
+            },
+        )
+        if superseded_pairs:
+            for source in superseded_pairs:
+                for field in _source_pair_fields(source):
+                    preserved.pop(field, None)
+                    preserved_units.discard(field)
+                    user_edited.discard(field)
+            if _forget_unedited_pair_dates(patient_info, user_edited):
+                logger.info(
+                    'Retired pending source pairs behind a newer result for '
+                    'person_id=%s: %s', person.person_id,
+                    ', '.join(sorted(superseded_pairs)),
+                )
+
         still_orphaned = []
         for field, value in preserved.items():
             if (field == _DIRECT_UNIT_FIELD
@@ -1695,6 +1736,9 @@ def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fiel
             for unit_field, unit in unit_updates.items():
                 setattr(patient_info, unit_field, unit)
     patient_info.user_edited_fields = sorted(pending_aliases)
+    # A pending pair's entered day lives only while the pair is pending: an
+    # explicit canonical write or import retires both together (#2426).
+    _forget_unedited_pair_dates(patient_info, pending_aliases)
     # Full refresh clears these before extraction. Direct edits need to clear
     # dependent results when an input is removed, without clearing other data.
     attested = attested_negative_fields(patient_info)

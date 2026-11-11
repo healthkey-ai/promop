@@ -4172,6 +4172,14 @@ class PatientRecord(models.Model):
             "field, and auto-cleans entries once an OMOP fact is projected."
         ),
     )
+    pending_source_pair_dates = models.JSONField(
+        default=dict, blank=True,
+        help_text=(
+            "Server-managed: the clinical day (YYYY-MM-DD) each pending source "
+            "pair was entered for, so a newer imported result retires the pair "
+            "(#2426). Never written by clients."
+        ),
+    )
     # Values for administrator-defined fields.  Runtime definitions cannot be
     # Django columns (that would require a schema migration for every field), so
     # the durable projection is a keyed JSON object instead.

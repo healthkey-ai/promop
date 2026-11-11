@@ -458,3 +458,64 @@ def test_a_read_only_companion_unit_uses_the_stored_unit():
     assert saved.albumin_level == Decimal('50')
     assert saved.albumin_level_units == 'G/L'
     assert saved.albumin_g_dl == Decimal('5.0')
+
+
+@pytest.mark.parametrize('case', CASES, ids=list(PAIR_CASES))
+def test_a_newer_dated_import_retires_the_pending_pair(api, case):
+    from omop_core.signals import suppress_patient_record_refresh
+
+    record = _record()
+    draw = date(2024, 1, 1)
+    _edit(api, record, {
+        case['pair']: {'value': case['value'], 'date': draw.isoformat()},
+        case['unit']: case['source_unit'],
+    })
+    assert record.pending_source_pair_dates == {case['pair']: draw.isoformat()}
+
+    with suppress_patient_record_refresh():
+        MeasurementFactory(
+            person=record.person,
+            measurement_concept=ConceptFactory(concept_code=case['code']),
+            measurement_source_value=case['code'],
+            measurement_date=date(2024, 2, 1),
+            value_as_number=case['value'],
+            unit_source_value=case['source_unit'],
+        )
+    refresh_patient_record(record.person)
+    record.refresh_from_db()
+
+    # The import is strictly newer, so the pair yields to it.
+    assert getattr(record, case['canonical']) == case['expected']
+    assert getattr(record, case['pair']) == Decimal(case['expected'])
+    assert case['pair'] not in (record.user_edited_fields or [])
+    assert record.pending_source_pair_dates == {}
+
+
+@pytest.mark.parametrize('case', CASES, ids=list(PAIR_CASES))
+def test_a_same_day_import_keeps_the_dated_pair(case):
+    from omop_core.signals import suppress_patient_record_refresh
+
+    record = _record()
+    draw = date(2024, 3, 1)
+    record.user_edited_fields = [case['pair'], case['unit']]
+    record.pending_source_pair_dates = {case['pair']: draw.isoformat()}
+    setattr(record, case['pair'], Decimal(case['value']))
+    setattr(record, case['unit'], case['source_unit'])
+    setattr(record, case['canonical'], case['expected'])
+    record.save()
+
+    with suppress_patient_record_refresh():
+        MeasurementFactory(
+            person=record.person,
+            measurement_concept=ConceptFactory(concept_code=case['code']),
+            measurement_source_value=case['code'],
+            measurement_date=draw,
+            value_as_number=case['value'],
+            unit_source_value=case['source_unit'],
+        )
+    refresh_patient_record(record.person)
+    record.refresh_from_db()
+
+    assert getattr(record, case['canonical']) == case['expected']
+    assert getattr(record, case['pair']) == Decimal(case['value'])
+    assert record.pending_source_pair_dates == {case['pair']: draw.isoformat()}

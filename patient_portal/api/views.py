@@ -216,6 +216,30 @@ def _propagate_pair_fact_dates(fact_dates, fact_ids):
             fact_ids[canonical] = fact_ids[source]
 
 
+def _authored_pair_dates(serializer, fact_dates):
+    """The clinical day to remember for each source pair this PATCH authored (#2426).
+
+    A dated edit names its day; an undated one projects onto today, as it always
+    did. Only pairs the serializer actually authored are here, so an autosave
+    echo cannot re-date a pending pair.
+    """
+    from django.utils import timezone
+    from omop_core.services.source_pair_dates import (
+        SOURCE_PAIR_CANONICALS, pair_sources_in,
+    )
+
+    sources = pair_sources_in(getattr(serializer, '_source_pairs', ()))
+    today = timezone.localdate()
+    dates = {}
+    for source in sources:
+        dates[source] = (
+            fact_dates.get(source)
+            or fact_dates.get(SOURCE_PAIR_CANONICALS[source])
+            or today
+        )
+    return dates
+
+
 def _patient_author(actor, person):
     """(is the caller the patient or their representative, project_single_value keywords).
 
@@ -1533,7 +1557,11 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     | set(getattr(serializer, '_source_pairs', ()))
                 )
                 patient_info.user_edited_fields = sorted(edited)
-                patient_info.save(update_fields=['user_edited_fields'])
+                from omop_core.services.source_pair_dates import remember_dates
+                remember_dates(
+                    patient_info, _authored_pair_dates(serializer, fact_dates))
+                patient_info.save(update_fields=[
+                    'user_edited_fields', 'pending_source_pair_dates'])
             _write_record_revisions(patient_info, previous_values, request)
 
             # Handle language skills (PersonLanguageSkill rows).

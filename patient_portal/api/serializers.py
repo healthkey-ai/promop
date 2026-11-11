@@ -1005,6 +1005,9 @@ class PatientRecordSerializer(serializers.ModelSerializer):
             if concept_ids else {}
         )
         data = super().to_representation(instance)
+        # Server-managed bookkeeping, not a clinical value the client reads or
+        # writes (#2426). `fields = '__all__'` would otherwise expose it.
+        data.pop('pending_source_pair_dates', None)
         return self._apply_demographic_redaction(instance, data)
 
     # PHR-S FM PH.1.2#05 — consent/preference-driven demographic rendering.

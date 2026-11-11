@@ -310,3 +310,138 @@ def test_a_dated_pair_keeps_the_draw_date_through_the_refresh(lab):
     assert record.hemoglobin_level == Decimal('120.00')
     assert record.hemoglobin_g_dl == Decimal('12.0')
     assert _hemoglobin_rows(lab, SELF_REPORT_TYPE).get().measurement_date == draw
+
+
+def test_a_newer_dated_import_retires_the_patient_pair(lab):
+    draw = TODAY - timedelta(days=2)
+    _patch_pair(lab, 120, 'G/L', draw)
+
+    record = lab['record']
+    record.refresh_from_db()
+    assert {'hemoglobin_level', 'hemoglobin_level_units'} <= set(
+        record.user_edited_fields or [])
+    assert record.pending_source_pair_dates == {
+        'hemoglobin_level': draw.isoformat()}
+
+    _import(lab, 8.0, 'g/dL', TODAY)
+
+    record.refresh_from_db()
+    # The newer result is now current, and the older pair no longer hides it.
+    assert record.hemoglobin_g_dl == Decimal('8.0')
+    assert record.hemoglobin_level == Decimal('8.00')
+    assert record.hemoglobin_level_units == 'G/DL'
+    assert not {'hemoglobin_level', 'hemoglobin_level_units'} & set(
+        record.user_edited_fields or [])
+    assert record.pending_source_pair_dates == {}
+    # The patient's own fact stays history; retirement does not delete it.
+    patient = _hemoglobin_rows(lab, SELF_REPORT_TYPE).get()
+    assert patient.measurement_date == draw
+
+
+def test_a_same_day_import_keeps_the_pair_and_its_day(lab):
+    _patch_pair(lab, 120, 'G/L', TODAY)
+
+    _import(lab, 11, 'g/dL', TODAY)
+
+    record = lab['record']
+    record.refresh_from_db()
+    assert record.hemoglobin_g_dl == Decimal('12.0')
+    assert record.hemoglobin_level == Decimal('120.00')
+    assert record.pending_source_pair_dates == {
+        'hemoglobin_level': TODAY.isoformat()}
+
+
+def test_a_legacy_pair_without_a_day_is_not_retired_by_a_newer_import(lab):
+    record = lab['record']
+    record.hemoglobin_level = Decimal('120')
+    record.hemoglobin_level_units = 'G/L'
+    record.hemoglobin_g_dl = Decimal('12.0')
+    record.user_edited_fields = ['hemoglobin_level', 'hemoglobin_level_units']
+    record.save()
+
+    _import(lab, 8.0, 'g/dL', TODAY)
+
+    record.refresh_from_db()
+    # No day was ever recorded, so the record does not guess one.
+    assert record.hemoglobin_g_dl == Decimal('12.0')
+    assert record.hemoglobin_level == Decimal('120.00')
+    assert {'hemoglobin_level', 'hemoglobin_level_units'} <= set(
+        record.user_edited_fields or [])
+    assert record.pending_source_pair_dates == {}
+
+
+def test_a_newer_unusable_result_keeps_the_pair_pending(lab):
+    draw = TODAY - timedelta(days=2)
+    _patch_pair(lab, 120, 'G/L', draw)
+
+    # A newer result in a unit this slice cannot read owns the field, but it
+    # cannot replace the patient's answer: derivation selects no value for it.
+    _import(lab, 120, 'mg/L', TODAY)
+
+    record = lab['record']
+    record.refresh_from_db()
+    assert record.hemoglobin_g_dl == Decimal('12.0')
+    assert record.hemoglobin_level == Decimal('120.00')
+    assert record.pending_source_pair_dates == {
+        'hemoglobin_level': draw.isoformat()}
+
+
+def test_a_failed_projection_keeps_the_day_and_a_retry_uses_it(lab):
+    # The mapping resolves, so the pair is datable, but the projection itself
+    # cannot write a fact without its type concept.
+    from omop_core.models import Concept
+    Concept.objects.filter(concept_id__in=(EHR_TYPE, SELF_REPORT_TYPE)).delete()
+    draw = TODAY - timedelta(days=5)
+    _patch_pair(lab, 120, 'G/L', draw)
+
+    record = lab['record']
+    assert 'hemoglobin_level' in (record.user_edited_fields or [])
+    assert record.pending_source_pair_dates == {
+        'hemoglobin_level': draw.isoformat()}
+    assert not _hemoglobin_rows(lab, SELF_REPORT_TYPE).exists()
+
+    ConceptFactory(concept_id=EHR_TYPE, concept_code='ehr-type')
+    ConceptFactory(concept_id=SELF_REPORT_TYPE, concept_code='patient-report-type')
+    # The retry is undated; it must land on the day first entered, not today.
+    _patch_pair(lab, 120, 'G/L')
+
+    patient = _hemoglobin_rows(lab, SELF_REPORT_TYPE).get()
+    assert patient.measurement_date == draw
+    assert record.pending_source_pair_dates == {
+        'hemoglobin_level': draw.isoformat()}
+
+
+def test_an_undated_echo_does_not_move_the_pair_day(lab):
+    draw = TODAY - timedelta(days=4)
+    _patch_pair(lab, 120, 'G/L', draw)
+
+    # The shared form resends the whole record; an unchanged pair is a retry,
+    # not a new result dated today.
+    _patch_pair(lab, 120, 'G/L')
+
+    record = lab['record']
+    record.refresh_from_db()
+    assert record.pending_source_pair_dates == {
+        'hemoglobin_level': draw.isoformat()}
+    assert _hemoglobin_rows(lab, SELF_REPORT_TYPE).get().measurement_date == draw
+
+
+def test_the_pair_day_is_server_managed_and_not_exposed(lab):
+    record = lab['record']
+    record.pending_source_pair_dates = {'hemoglobin_level': TODAY.isoformat()}
+    record.save()
+
+    response = lab['client'].get(
+        f"/api/v1/patient-records/{lab['person'].person_id}/")
+    assert response.status_code == 200
+    assert 'pending_source_pair_dates' not in response.data
+
+    response = lab['client'].patch(
+        f"/api/v1/patient-records/{lab['person'].person_id}/",
+        {'pending_source_pair_dates': {'hemoglobin_level': '2020-01-01'}},
+        format='json',
+    )
+    assert response.status_code == 200, response.data
+    record.refresh_from_db()
+    assert record.pending_source_pair_dates == {
+        'hemoglobin_level': TODAY.isoformat()}
