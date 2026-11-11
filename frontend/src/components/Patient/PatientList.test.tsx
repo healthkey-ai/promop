@@ -258,4 +258,8 @@ it('shows an analyst at a public demo org a de-identified, unopenable list (#246
   expect(navigate).not.toHaveBeenCalledWith('/patient/5');
   expect(screen.getByRole('button', { name: 'Code Mapping' })).toBeInTheDocument();
   expect(screen.queryByRole('button', { name: 'Upload' })).not.toBeInTheDocument();
+  // No name search and no name or age sort over fields the server withholds.
+  expect(screen.getByLabelText('Patient ID')).toHaveAttribute('placeholder', 'Search by ID, then press Enter');
+  expect(screen.queryByRole('option', { name: 'Name' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('option', { name: /Age:/ })).not.toBeInTheDocument();
 });

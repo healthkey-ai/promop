@@ -321,15 +321,14 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
   const isAllSelected =
     patients.length > 0 &&
     (selectAllMode || visibleSelectedCount === patients.length);
-  // Upload and the mapping hub are a curator's; a demo-org analyst gets
-  // Code Mapping, as the rest of the app gives it.
-  const canCurate = canOpenPatients(currentUser);
-  const canAdministerOrganizations = isStaffOrOrgAdmin(currentUser);
   // A reader who cannot open a patient -- an analyst browsing a public demo
   // org's sample patients (#1392, #2416) -- gets the rows de-identified by
   // the server and no way into the detail page, which would be 404 (#2460):
-  // no Name column, no row link.
+  // no Name column, no row link, no name or age sort. Upload and the mapping
+  // hub are that same curator's; a demo-org analyst gets Code Mapping.
   const canOpen = canOpenPatients(currentUser);
+  const canCurate = canOpen;
+  const canAdministerOrganizations = isStaffOrOrgAdmin(currentUser);
   const openPatient = (personId: number) =>
     canOpen ? () => navigate(`/patient/${personId}`) : undefined;
 
@@ -446,7 +445,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
             <option value="freshness">Oldest clinical result</option><option value="-gaps">Most key data gaps</option>
             <option value="gaps">Fewest key data gaps</option><option value="ecog">ECOG: low to high</option>
             <option value="-ecog">ECOG: high to low</option><option value="-lines">Most therapy lines</option>
-            <option value="name">Name</option><option value="age">Age: youngest first</option><option value="-age">Age: oldest first</option>
+            {canOpen && <><option value="name">Name</option><option value="age">Age: youngest first</option><option value="-age">Age: oldest first</option></>}
             <option value="disease">Disease</option><option value="stage">Stage</option><option value="status">Disease status</option>
             <option value="organization">Organization</option>
             <option value="unmapped_source_codes">Unmapped Source Codes: low to high</option>
@@ -459,11 +458,11 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
       <div className="mb-4 rounded-lg border border-border bg-background p-4 shadow-sm">
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
           <label className="flex flex-col gap-1.5 text-sm font-medium text-foreground">
-            Name or email
+            {canOpen ? 'Name or email' : 'Patient ID'}
             <input
               type="search"
               defaultValue={search}
-              placeholder="Search, then press Enter"
+              placeholder={canOpen ? 'Search, then press Enter' : 'Search by ID, then press Enter'}
               onBlur={(event) => {
                 const value = event.target.value.trim();
                 if (value !== search) { resetToFirstPage(); setSearch(value); }
@@ -650,7 +649,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
           <tbody>
             {patients.length === 0 ? (
               <tr>
-                <td colSpan={9 + extraColumns.length} className="py-12 text-center text-muted-foreground">
+                <td colSpan={(canOpen ? 9 : 8) + extraColumns.length} className="py-12 text-center text-muted-foreground">
                   {error
                     ? "Unable to load patients."
                     : patientCount === 0 &&

@@ -715,6 +715,13 @@ class PatientRecordSerializer(serializers.ModelSerializer):
         'country', 'region', 'city', 'postal_code', 'longitude', 'latitude',
         'patient_name', 'name',
     )
+    # What a reader with no curation access is withheld (#2460): the opt-in
+    # set plus every other direct identifier and free-text name the record
+    # carries. Gender stays: it is clinical here, not identifying.
+    WITHHELD_IDENTIFIER_FIELDS = REDACTED_DEMOGRAPHIC_FIELDS + (
+        'email', 'phone_number', 'death_date', 'date_of_birth_precision',
+        'race', 'ethnicity', 'insurance_type', 'facility_name', 'validated_by',
+    )
 
     def _apply_demographic_redaction(self, instance, data):
         """Redact selected demographics unless the reader is the account holder.
@@ -724,15 +731,15 @@ class PatientRecordSerializer(serializers.ModelSerializer):
         paths) no redaction is applied. Wiring redaction into every read path
         that omits serializer context is documented as deferred.
         """
-        # A reader without curation access (#2460) is treated as if every
-        # patient had opted in: the demo-org browse shows de-identified rows.
-        if not (getattr(instance, 'suppress_demographics_for_others', False)
-                or self.context.get('withhold_identifiers', False)):
+        # A reader without curation access (#2460) is withheld every
+        # patient's identifiers: the demo-org browse shows de-identified rows.
+        withheld = self.context.get('withhold_identifiers', False)
+        if not (getattr(instance, 'suppress_demographics_for_others', False) or withheld):
             return data
         request = self.context.get('request')
         if request is None or self._is_account_holder(request, instance):
             return data
-        for field in self.REDACTED_DEMOGRAPHIC_FIELDS:
+        for field in (self.WITHHELD_IDENTIFIER_FIELDS if withheld else self.REDACTED_DEMOGRAPHIC_FIELDS):
             if field in data:
                 data[field] = None
         data['demographics_redacted'] = True

@@ -131,13 +131,21 @@ def annotate_context(queryset):
     ))
 
 
-def visible_demographics(actor):
-    """Use the same opt-out semantics as the patient detail serializer."""
+def visible_demographics(actor, withheld=False):
+    """Use the same opt-out semantics as the patient detail serializer.
+
+    ``withheld`` is the reader with no curation access (#2460), whose rows
+    are de-identified: only their own record's demographics are visible, so
+    a name search, a location filter or a name or age ordering cannot act
+    as an oracle over what the serializer withholds.
+    """
     own = PatientUser.objects.filter(identity=actor).values('person_id') if actor and actor.is_authenticated else []
+    if withheld:
+        return Q(person_id__in=own)
     return Q(suppress_demographics_for_others=False) | Q(person_id__in=own)
 
 
-def filter_context(queryset, params, actor):
+def filter_context(queryset, params, actor, withheld=False):
     queryset = annotate_context(queryset)
     status = params.get('clinical_status', '').strip()
     if status and status != 'all':
@@ -181,7 +189,7 @@ def filter_context(queryset, params, actor):
                 query |= Q(**{f'{field}__icontains': term})
             queryset = queryset.filter(query)
             if param == 'location':
-                queryset = queryset.filter(visible_demographics(actor))
+                queryset = queryset.filter(visible_demographics(actor, withheld))
     contact = params.get('contact', 'all')
     if contact in {'available', 'missing'}:
         queryset = queryset.filter(contact_available=contact == 'available')
@@ -190,7 +198,7 @@ def filter_context(queryset, params, actor):
     return queryset
 
 
-def order_context(queryset, ordering, actor=None):
+def order_context(queryset, ordering, actor=None, withheld=False):
     key = ordering.lstrip('-')
     if key not in ORDER_FIELDS:
         raise ValidationError({'ordering': 'Unknown patient list ordering.'})
@@ -200,7 +208,7 @@ def order_context(queryset, ordering, actor=None):
         descending = not descending
     expression = F(ORDER_FIELDS[key])
     if key in {'age', 'name'}:
-        expression = Case(When(visible_demographics(actor), then=expression), default=Value(None))
+        expression = Case(When(visible_demographics(actor, withheld), then=expression), default=Value(None))
     return queryset.order_by(expression.desc(nulls_last=True) if descending else expression.asc(nulls_last=True), 'person_id')
 
 
