@@ -1425,7 +1425,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             # Match derivation's lock order and serialize the read/modify/write
             # of user_edited_fields as well as same-day OMOP projection.
             patient_info = PatientRecord.objects.select_for_update().get(pk=patient_info.pk)
-            serializer = PatientRecordSerializer(patient_info, data=patch_data, partial=True)
+            serializer = PatientRecordSerializer(
+                patient_info, data=patch_data, partial=True,
+                # A dated correction names its day even when the number and unit
+                # are unchanged, so its pair is still the reader's fact.
+                context={'dated_fields': set(fact_dates)},
+            )
             serializer.is_valid(raise_exception=True)
             # Validate location fields early, before serializer.save() writes
             # to PatientRecord — the model has a check constraint requiring

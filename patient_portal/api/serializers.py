@@ -852,10 +852,12 @@ class PatientRecordSerializer(serializers.ModelSerializer):
                 for source, spec in COUNT_SOURCE_PAIRS.items()
             ]
             authored = set()
+            dated = set(self.context.get('dated_fields') or ())
             for group in groups:
                 fields = group & self._source_pairs
                 if fields and any(
                         validated.get(field) != getattr(self.instance, field, None)
+                        or field in dated
                         for field in fields):
                     authored |= fields
             self._source_pairs = authored
