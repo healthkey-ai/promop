@@ -340,7 +340,9 @@ def _record_proposal(*, source_vocabulary_id, source_code, source_text,
         updates['first_seen'] = now
     named = _name_if_unnamed(mapping, source_text)
     if named:
+        # A sighting is a counter, not a change; naming the code is one (#2451).
         updates['source_code_description'] = named
+        updates['updated_at'] = now
     SourceCodeConceptMapping.objects.filter(pk=mapping.pk).update(**updates)
     mapping.refresh_from_db(fields=['occurrence_count', 'first_seen', 'last_seen', 'source_code_description'])
     return mapping

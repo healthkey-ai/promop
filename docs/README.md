@@ -118,6 +118,9 @@ The [FHIR import analysis plan](fhir_import_analysis_plan.md) defines the future
 batch ledger, Org Stats reporting, mapping work queue, and completeness feedback
 loop for ETL imports; implemented behavior will move to its companion
 `fhir_import_analysis_architecture.md` as it lands.
+The [provisional data plan](provisional_data_plan.md) specifies rows and
+patient-record values written from proposed, unapproved mappings, each marked
+with the confidence they were proposed at, and how approval promotes them.
 [Lab-result deduplication](lab-results-dedup-architecture.md) explains how repeated
 uploads share measurements while retaining upload ownership and deletion behavior.
 [Wearable-to-OMOP mapping](wearable-omop-mapping.md) covers device normalization,

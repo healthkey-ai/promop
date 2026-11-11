@@ -84,6 +84,27 @@ def test_existing_rows_are_overwritten_by_natural_key():
     assert Ethnicity.objects.count() == 1
 
 
+def test_a_copied_mapping_is_stamped_with_this_instances_clock():
+    """updated_at is auto_now, which bulk writes skip; a copied row carries the
+    source's clock in the payload, and a warehouse reading this instance's
+    updated_since delta would never see it (#2451)."""
+    from datetime import datetime, timezone as dt_timezone
+    from django.utils import timezone
+
+    long_ago = datetime(2020, 1, 1, tzinfo=dt_timezone.utc)
+    row = SourceCodeConceptMapping.objects.create(source_vocabulary_id='ICD10CM', source_code='Z00.0')
+    SourceCodeConceptMapping.objects.filter(pk=row.pk).update(updated_at=long_ago)
+    payload = read_reference('default')
+    assert payload  # the source's rows carry the old timestamp
+    before = timezone.now()
+
+    apply_reference(payload)  # overwrite ...
+    assert SourceCodeConceptMapping.objects.get(pk=row.pk).updated_at >= before
+    SourceCodeConceptMapping.objects.filter(pk=row.pk).delete()
+    apply_reference(payload)  # ... and create
+    assert SourceCodeConceptMapping.objects.get(source_code='Z00.0').updated_at >= before
+
+
 def test_therapy_links_and_outcome_diseases_follow_codes_not_ids():
     concept = ConceptFactory(concept_id=35_100_001, concept_code='R-CHOP', vocabulary=_hemonc())
     regimen = TherapyRegimen.objects.create(code='r-chop', title='R-CHOP', concept=concept)

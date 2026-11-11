@@ -231,26 +231,20 @@ def _claim_placeholder_access(
         issuer="urn:local",
     ).exclude(pk=identity.pk)
 
-    role_rank = {"org_admin": 3, "doctor": 2, "analyst": 1, "patient": 0}
     for placeholder in placeholders:
         if placeholder.has_usable_password():
             continue
 
+        # Roles are additive (#2416): a placeholder's grant moves to the
+        # verified identity unless it already holds that role at that scope.
         for grant in list(GroupAccess.objects.filter(identity=placeholder)):
-            existing = GroupAccess.objects.filter(
+            already_held = GroupAccess.objects.filter(
                 identity=identity,
                 org=grant.org,
                 group=grant.group,
-            ).first()
-            if existing:
-                if role_rank.get(existing.role, 0) < role_rank.get(grant.role, 0):
-                    existing.role = grant.role
-                    existing.granted_by = grant.granted_by
-                    existing.expires_at = grant.expires_at
-                    existing.redirect_url = grant.redirect_url if grant.role == "analyst" else ""
-                    existing.save(
-                        update_fields=["role", "granted_by", "expires_at", "redirect_url"]
-                    )
+                role=grant.role,
+            ).exists()
+            if already_held:
                 grant.delete()
             else:
                 grant.identity = identity

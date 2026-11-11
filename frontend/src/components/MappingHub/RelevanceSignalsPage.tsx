@@ -141,8 +141,8 @@ export default function RelevanceSignalsPage() {
     </div>
 
     {signals !== null && !rights.can_accept && <p className="mt-3 text-sm text-slate-600">{rights.can_reject
-      ? "Doctors can reject a signal or return a rejected one to proposed. Only organization admins can accept."
-      : "You can view the queue. Organization admins accept and reject signals; doctors can reject them."}</p>}
+      ? "Analysts can reject a signal or return a rejected one to proposed. Only organization admins can accept."
+      : "You can view the queue. Organization admins accept and reject signals; analysts can reject them."}</p>}
     {error && <p role="alert" className="mt-4 text-sm text-red-700">{error}</p>}
     {signals === null && <p role="status" className="mt-5 text-sm text-slate-600">Loading signals…</p>}
     {signals !== null && pairs.length === 0 && !error && <p className="mt-5 rounded border border-slate-200 bg-white p-4 text-sm text-slate-700">

@@ -1,18 +1,24 @@
 import type { User } from '@/hooks/useAuth';
 
 /**
- * What a signed-in professional may reach, mirroring the server's
- * `has_curation_access` / `has_professional_access` (omop_core/services/access.py).
+ * What a signed-in professional may reach, mirroring the server's role
+ * helpers in omop_core/services/access.py (`has_curation_access`,
+ * `has_mapping_read_access`, `has_mapping_write_access`,
+ * `has_org_admin_access`).
  *
  * The API enforces every rule independently; these only decide what the UI
- * offers. Three roles, three reaches:
+ * offers. Roles are additive (#2416): a user holds one grant per role at an
+ * org, and each grant adds its own reach.
  *
  * - staff and org_admin (a grant, or `is_org_admin` through a trust): everything;
- * - doctor: every curation page, and patient writes;
- * - analyst: the Code Mapping page (both tabs, the dialog, Suggest, Lock, Done,
- *   the accuracy pages) and read-only patient viewing -- nothing else (#2398).
+ * - doctor: patients (read and write), and every mapping page read-only;
+ * - analyst: every mapping page, writing (create, edit, propose, Suggest,
+ *   Lock, Done, priority, upload) and PRism analytics. No patient data,
+ *   except the sample patients of a public demo org it holds a grant at: a
+ *   demo org lists them to every grant there, whatever its role (#1392).
  */
-const CURATION_ROLES = ['org_admin', 'doctor'];
+const PATIENT_ROLES = ['org_admin', 'doctor'];
+const MAPPING_WRITE_ROLES = ['analyst'];
 const PROFESSIONAL_ROLES = ['org_admin', 'doctor', 'analyst'];
 
 const hasGrant = (user: User | null | undefined, roles: string[]): boolean =>
@@ -25,18 +31,35 @@ export function isStaffOrOrgAdmin(user: User | null | undefined): boolean {
   return !!(user?.is_staff || user?.is_org_admin);
 }
 
-/** Field mappings, therapy and disease-category reference, relevance signals,
- *  source systems, the mapping hub, uploads: staff, org_admin or doctor. */
-export function hasCurationRole(user: User | null | undefined): boolean {
-  return isStaffOrOrgAdmin(user) || hasGrant(user, CURATION_ROLES);
+/** Holds a professional grant at a public demo org, which lists its sample
+ *  patients to any role (`PatientRecordViewSet.get_queryset`). */
+const hasDemoOrgGrant = (user: User | null | undefined): boolean =>
+  !!user?.org_accesses?.some(
+    (a) => a.org_allows_patient_signup && PROFESSIONAL_ROLES.includes(a.role ?? ''),
+  );
+
+/** Reaches the patient list: staff, org_admin or doctor (the server's
+ *  `has_curation_access`), or any professional grant at a public demo org,
+ *  whose list every grant there sees. */
+export function canReadPatients(user: User | null | undefined): boolean {
+  return isStaffOrOrgAdmin(user) || hasGrant(user, PATIENT_ROLES) || hasDemoOrgGrant(user);
 }
 
-/** The Code Mapping page: every professional role, the analyst included. */
-export function hasCodeMappingRole(user: User | null | undefined): boolean {
-  return hasCurationRole(user) || hasGrant(user, PROFESSIONAL_ROLES);
+/** Opens the mapping pages (the hub, Code Mapping, field mappings, therapy
+ *  and disease-category reference, relevance signals, source systems):
+ *  staff, or any professional grant. A doctor reads them (#2416). */
+export function canViewMappings(user: User | null | undefined): boolean {
+  return isStaffOrOrgAdmin(user) || hasGrant(user, PROFESSIONAL_ROLES);
 }
 
-/** A professional whose only reach is the analyst's: patient pages are read-only. */
-export function isReadOnlyAnalyst(user: User | null | undefined): boolean {
-  return hasCodeMappingRole(user) && !hasCurationRole(user);
+/** Creates or changes a mapping: staff, org_admin, or an analyst grant. A
+ *  doctor without one reads the mapping pages but writes nothing (#2416). */
+export function canWriteMappings(user: User | null | undefined): boolean {
+  return isStaffOrOrgAdmin(user) || hasGrant(user, MAPPING_WRITE_ROLES);
+}
+
+/** A professional whose only reach is the analyst's: no patient pages, so
+ *  the app opens on Code Mapping instead of the patient list. */
+export function isAnalystOnly(user: User | null | undefined): boolean {
+  return canWriteMappings(user) && !canReadPatients(user) && !user?.is_patient;
 }

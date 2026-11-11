@@ -12,8 +12,6 @@ interface Props {
   // all wearable fields are read-only (derived from OMOP, not user-editable).
   onChange?: (field: string, value: unknown) => void;
   onRefresh?: () => void;
-  /** A viewer who may not upload: the drop zone ignores drops (#2398). */
-  readOnly?: boolean;
 }
 
 const METRIC_LABELS: Record<string, string> = {
@@ -86,7 +84,7 @@ function formatMetricValue(metric: string, value: number): string {
   return String(value);
 }
 
-export default function WearableTab({ formData, onRefresh, readOnly = false }: Props) {
+export default function WearableTab({ formData, onRefresh }: Props) {
   // Ask about *this* patient: whether a field may be edited depends on who is
   // asking and whose record it is, not only on whether the field is mapped.
   const personId = (formData?.person_id ?? formData?.person) as number | undefined;
@@ -231,10 +229,10 @@ export default function WearableTab({ formData, onRefresh, readOnly = false }: P
     e.preventDefault();
     e.stopPropagation();
     dragCounter.current += 1;
-    if (!readOnly && e.dataTransfer.types.includes('Files')) {
+    if (e.dataTransfer.types.includes('Files')) {
       setDragOver(true);
     }
-  }, [readOnly]);
+  }, []);
 
   const handleDragLeave = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -256,8 +254,7 @@ export default function WearableTab({ formData, onRefresh, readOnly = false }: P
     dragCounter.current = 0;
     setDragOver(false);
 
-    // A disabled fieldset stops the file button, not a drop on this div.
-    if (uploading || readOnly) return;
+    if (uploading) return;
 
     const files = Array.from(e.dataTransfer.files);
 
@@ -291,7 +288,7 @@ export default function WearableTab({ formData, onRefresh, readOnly = false }: P
 
     const deviceType = types.values().next().value as string;
     await uploadFiles(files, deviceType);
-  }, [uploading, uploadFiles, readOnly]);
+  }, [uploading, uploadFiles]);
 
   return (
     <div

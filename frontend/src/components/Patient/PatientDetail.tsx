@@ -27,7 +27,6 @@ import PatientSourceCodesTab from "./PatientSourceCodesTab";
 import { confirmRecord } from "@/api/clinicalFacts";
 import { mayBeUnitedStates } from "@/lib/usZip";
 import { FieldMappingLinksProvider } from "@/components/PatientInfo/fieldMappingLinks";
-import { isReadOnlyAnalyst, isStaffOrOrgAdmin } from "@/utils/roles";
 
 type SaveStatus = "idle" | "pending" | "saving" | "saved" | "error";
 
@@ -323,9 +322,6 @@ export default function PatientDetail({
   const params = useParams<{ personId: string }>();
   const personId = personIdOverride ?? params.personId;
   const navigate = useNavigate();
-  // An analyst views a record read-only (#2398): the API refuses the PATCH,
-  // so nothing here is offered for editing and no autosave is scheduled.
-  const readOnly = !patientMode && isReadOnlyAnalyst(user);
 
   const [loading, setLoading] = useState(true);
   const [fetchError, setFetchError] = useState<string | null>(null);
@@ -618,7 +614,6 @@ export default function PatientDetail({
 
    
   const scheduleAutoSave = useCallback((info: Record<string, unknown>, name: string) => {
-    if (readOnly) return;
     pendingDataRef.current = { info, name };
     if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current);
     setSaveStatus("pending");
@@ -626,7 +621,7 @@ export default function PatientDetail({
       autoSaveTimerRef.current = null;
       doSave();
     }, 2000);
-  }, [doSave, readOnly]);
+  }, [doSave]);
 
    
   // Re-read the record from the server. Used where an edit lands somewhere the
@@ -642,7 +637,6 @@ export default function PatientDetail({
   }, [personId, adoptServerRecord]);
 
   const handleFieldChange = useCallback((field: string, value: unknown, date?: string) => {
-    if (readOnly) return;
     const base = pendingDataRef.current?.info ?? editedInfoRef.current;
     const updated = { ...base, [field]: value };
     if (date) pendingDatesRef.current[field] = date;
@@ -661,14 +655,13 @@ export default function PatientDetail({
 
     setEditedInfo(updated);
     scheduleAutoSave(updated, editedNameRef.current);
-  }, [scheduleAutoSave, readOnly]);
+  }, [scheduleAutoSave]);
 
 
   const handleNameChange = useCallback((name: string) => {
-    if (readOnly) return;
     setEditedName(name);
     scheduleAutoSave(pendingDataRef.current?.info ?? editedInfoRef.current, name);
-  }, [scheduleAutoSave, readOnly]);
+  }, [scheduleAutoSave]);
 
   const handleInvite = useCallback(async () => {
     if (!personId) return;
@@ -777,7 +770,7 @@ export default function PatientDetail({
   // Build tab list dynamically — patient mode adds Allergies (after Labs) and Surveys (last).
   // Immunizations are shown inside the Treatment tab, not as a separate tab.
   // The disease-specific tab only appears when a recognised disease is selected.
-  const canViewOmop = !patientMode && isStaffOrOrgAdmin(user);
+  const canViewOmop = !patientMode && !!(user?.is_staff || user?.is_org_admin);
   const diseaseType = getDiseaseType();
   const showDiseaseTab = diseaseType !== "other";
   const coreTabs = ["General", ...(showDiseaseTab ? [getDiseaseTabLabel()] : []), "Treatment", "Labs", "Genomics"];
@@ -879,15 +872,7 @@ export default function PatientDetail({
             <div className="shrink-0">
               <SaveStatusIndicator status={saveStatus} onRetry={doSave} />
             </div>
-            {readOnly && (
-              <span
-                title="Your role can view this record but not edit it"
-                className="inline-flex shrink-0 items-center rounded-full border border-border bg-[#f5f7fa] px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-muted-foreground"
-              >
-                Read-only
-              </span>
-            )}
-            {!patientMode && !readOnly && (
+            {!patientMode && (
               <div className="flex shrink-0 items-center gap-2">
                 <button
                   onClick={handleInvite}
@@ -950,17 +935,7 @@ export default function PatientDetail({
                 <p className="mt-1 text-sm text-muted-foreground">{tabDescriptions[activeTab]}</p>
               </div>
 
-              {/* A disabled fieldset disables every native control inside it,
-                  so one wrapper makes the whole record read-only. The values
-                  keep their normal colour: they are what the viewer came for. */}
-              <fieldset
-                key={activeTab}
-                disabled={readOnly}
-                className="m-0 min-w-0 animate-tab-in border-0 pt-0 px-8 pb-10 [&_:disabled]:cursor-default [&_:disabled]:opacity-100 [&_input:disabled]:text-foreground [&_select:disabled]:text-foreground [&_textarea:disabled]:text-foreground"
-              >
-                {readOnly && (
-                  <legend className="sr-only">Read-only record: your role can view this patient but not edit it</legend>
-                )}
+              <div key={activeTab} className="animate-tab-in px-8 pb-10">
                 {activeTab === 0 && (
                   <>
                     {patientMode && (
@@ -1020,7 +995,6 @@ export default function PatientDetail({
                       formData={editedInfo}
                       onChange={handleFieldChange}
                       diseaseType={diseaseType}
-                      readOnly={readOnly}
                       onRecordRefreshed={(info) => {
                         // The server already re-derived and returned the record.
                         // Advancing the baseline too stops the next autosave
@@ -1037,15 +1011,15 @@ export default function PatientDetail({
                   </>
                 )}
                 {activeTab === labsIdx && <LabsTab formData={editedInfo} onChange={handleFieldChange} />}
-                {activeTab === genomicsIdx && <GenomicsTab formData={editedInfo} readOnly={readOnly} />}
+                {activeTab === genomicsIdx && <GenomicsTab formData={editedInfo} />}
                 {allergiesIdx >= 0 && activeTab === allergiesIdx && <AllergyList user={user ?? null} />}
                 {activeTab === behaviorIdx && <BehaviorTab formData={editedInfo} onChange={handleFieldChange} onRefresh={reloadPatientInfo} />}
-                {activeTab === wearablesIdx && <WearableTab formData={editedInfo} onChange={handleFieldChange} onRefresh={reloadPatientInfo} readOnly={readOnly} />}
+                {activeTab === wearablesIdx && <WearableTab formData={editedInfo} onChange={handleFieldChange} onRefresh={reloadPatientInfo} />}
                 {activeTab === summaryIdx && <ClinicalSummaryTab formData={editedInfo} onNavigateToLabs={() => setActiveTab(labsIdx)} />}
                 {surveysIdx >= 0 && activeTab === surveysIdx && <PatientSurveys user={user ?? null} />}
                 {sourceCodesIdx >= 0 && activeTab === sourceCodesIdx && personId && <PatientSourceCodesTab personId={personId} />}
                 {omopIdx >= 0 && activeTab === omopIdx && personId && <PatientOmopTab personId={personId} />}
-              </fieldset>
+              </div>
             </div>
           </>
         )}

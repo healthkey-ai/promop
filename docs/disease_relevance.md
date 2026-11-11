@@ -115,8 +115,8 @@ Roles follow the field and code mapping pages:
 | Role | Can |
 |---|---|
 | Staff, `org_admin` | Accept, reject, and return any decision to proposed. |
-| `doctor` | Reject a proposed signal, and return a rejected one to proposed. Cannot accept, or change an accepted one, just as a doctor cannot approve a mapping. |
-| `analyst` (curator in training) | View the queue only. |
+| `analyst` | Reject a proposed signal, and return a rejected one to proposed. Cannot accept, or change an accepted one, just as an analyst cannot approve a mapping. |
+| `doctor` (without the analyst grant) | View the queue only, as on every mapping page (#2416). |
 
 A decision applies to the `(disease, concept)` pair. Every period's report of
 that pair takes it, and so does any later report. Once rejected, a concept stays

@@ -12,6 +12,7 @@ import logging
 
 from django.core.management.base import BaseCommand
 from django.db.models import Q
+from django.utils import timezone
 
 from omop_core.models import Concept, SourceCodeConceptMapping, UmlsSourceCode
 from omop_core.services.mapping_suggestions import VOCAB_TO_UMLS_ROOT
@@ -114,6 +115,7 @@ class Command(BaseCommand):
                     changed = True
 
             if changed:
+                row.updated_at = timezone.now()  # bulk_update skips auto_now (#2451)
                 to_update.append(row)
 
         verb = 'Would update' if dry_run else 'Updated'
@@ -129,7 +131,7 @@ class Command(BaseCommand):
 
         SourceCodeConceptMapping.objects.bulk_update(
             to_update,
-            ['source_concept', 'source_code_description', 'umls_source_name'],
+            ['source_concept', 'source_code_description', 'umls_source_name', 'updated_at'],
             batch_size=batch_size,
         )
         self.stdout.write(self.style.SUCCESS('Done.'))

@@ -1318,10 +1318,15 @@ class GetVisibleOrgsTest(TestCase):
         self.assertIn(self.org_b, orgs)
         self.assertNotIn(self.org_a, orgs)
 
-    def test_direct_org_analyst_sees_their_org(self):
+    def test_direct_org_analyst_sees_no_org(self):
+        """An analyst grant reads no patient data, so it opens no org (#2416)."""
         analyst = Identity.objects.create_user(email='analyst@test.com', password='x')
         GroupAccess.objects.create(
             identity=analyst, org=self.org_b, role='analyst',
+        )
+        self.assertEqual(list(get_visible_orgs(analyst)), [])
+        GroupAccess.objects.create(
+            identity=analyst, org=self.org_b, role='doctor',
         )
         orgs = list(get_visible_orgs(analyst))
         self.assertIn(self.org_b, orgs)
