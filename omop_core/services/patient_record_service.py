@@ -6035,8 +6035,10 @@ def _apply_active_field_formulas(patient_info: PatientRecord) -> set[str]:
             value = evaluate_formula(field_formula.formula, values)
         except ValueError:
             # Invalid legacy rows are surfaced in the mapping UI and must not
-            # abort clinical refreshes.
-            logger.warning('Skipping invalid formula for %s', field_formula.field_name)
+            # abort clinical refreshes. The row id identifies the row without
+            # writing a clinical field name to the log (code scanning
+            # `py/clear-text-logging-sensitive-data`).
+            logger.warning('Skipping an invalid field formula (row %s)', field_formula.pk)
             continue
         if field_formula.field_name in custom_field_names:
             custom_fields[field_formula.field_name] = value
