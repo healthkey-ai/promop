@@ -181,6 +181,9 @@ def _latest_measurement_pair_subquery(concept_codes):
                 value='value_as_number',
                 unit='unit_source_value',
                 ucum=Case(When(unit_concept__vocabulary_id='UCUM', then='unit_concept__concept_code')),
+                concept_id='unit_concept_id',
+                concept_code='unit_concept__concept_code',
+                concept_vocabulary='unit_concept__vocabulary_id',
                 source_value='value_source_value',
             ),
         ).values('measurement_payload')[:1]
@@ -189,13 +192,15 @@ def _latest_measurement_pair_subquery(concept_codes):
 
 def _reading(payload):
     """The measurement shape ``canonical_units`` and ``_resolve_reported_unit`` read."""
-    ucum = payload.get('ucum')
+    concept_id = payload.get('concept_id')
     return SimpleNamespace(
         value_as_number=payload['value'],
         unit_source_value=payload['unit'],
-        unit_concept_id=1 if ucum else None,
-        unit_concept=(SimpleNamespace(vocabulary_id='UCUM', concept_code=ucum)
-                      if ucum else None),
+        unit_concept_id=concept_id,
+        unit_concept=(SimpleNamespace(
+            vocabulary_id=payload.get('concept_vocabulary'),
+            concept_code=payload.get('concept_code'),
+        ) if concept_id is not None else None),
         value_source_value=payload.get('source_value'),
     )
 
@@ -222,9 +227,18 @@ def _canonical_pair(payload, normalize, default_unit, from_pair):
 
 
 def _canonical_blood_count(payload):
+    """A count in thousands/µL, read the way the derivation does.
+
+    A converted row holds the stored count in ``unit_concept``'s unit and the
+    sent one in ``value_source_value``; ``count_unit`` then names the source
+    unit. Without a proven sent value the count is no evidence.
+    """
     if not payload:
         return None
-    return blood_count_to_canonical(payload['value'], count_unit(payload['unit'], payload['ucum']))
+    sent = value_in_source_unit(_reading(payload))
+    if sent is None:
+        return None
+    return blood_count_to_canonical(sent, count_unit(payload['unit'], payload['ucum']))
 
 
 def _latest_observation_text_subquery(concept_codes):

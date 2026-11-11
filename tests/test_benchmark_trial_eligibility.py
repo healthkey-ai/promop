@@ -274,3 +274,38 @@ def test_a_readable_lab_spelling_resolves_without_a_unit_concept():
     )
 
     assert _fetch_omop_trial_row(person.person_id)['hemoglobin_g_dl'] == Decimal('13.5')
+
+
+def test_a_converted_count_is_read_from_the_number_as_sent():
+    person = PersonFactory(year_of_birth=1960)
+    MeasurementFactory(
+        person=person, measurement_source_value='6690-2',
+        value_as_number=6.3, unit_source_value='cells/uL',
+        unit_concept=_ucum('10*3/uL'), value_source_value='6300',
+    )
+
+    assert _fetch_omop_trial_row(person.person_id)['wbc_count_thousand_per_ul'] == Decimal('6.3')
+
+
+def test_a_non_ucum_unit_concept_still_names_the_unit():
+    """A local vocabulary concept is not a reason to fall back to the default."""
+    VocabularyFactory(vocabulary_id='HK-Labs')
+    person = PersonFactory(year_of_birth=1960)
+    MeasurementFactory(
+        person=person, measurement_source_value='718-7',
+        value_as_number=135,
+        unit_concept=ConceptFactory(vocabulary_id='HK-Labs', concept_code='g/L'),
+    )
+
+    assert _fetch_omop_trial_row(person.person_id)['hemoglobin_g_dl'] == Decimal('13.5')
+
+
+def test_an_empty_unit_concept_code_is_not_a_missing_unit():
+    person = PersonFactory(year_of_birth=1960)
+    MeasurementFactory(
+        person=person, measurement_source_value='718-7',
+        value_as_number=135,
+        unit_concept=_ucum(''),
+    )
+
+    assert _fetch_omop_trial_row(person.person_id)['hemoglobin_g_dl'] is None
