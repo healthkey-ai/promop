@@ -38,9 +38,12 @@ def request_rebuild(apps, schema_editor):
             from omop_core.services import axis_variant_jobs
 
             axis_variant_jobs.publish(LiveModel.objects.get(pk=row.pk))
-        except Exception:
-            logger.warning('Axis variant refresh %s not published; the worker will publish it.',
-                           row.pk, exc_info=True)
+        except Exception as error:
+            # A fresh database has no broker; the row is durable and the worker
+            # sweep publishes it. One line, not a traceback.
+            logger.warning('Axis variant refresh %s not published (%s); the worker will publish it.',
+                           row.pk, error)
+            logger.debug('Axis variant refresh %s publish failed', row.pk, exc_info=True)
 
     transaction.on_commit(publish)
 
