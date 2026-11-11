@@ -1491,6 +1491,24 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     and serializer.validated_data.get(_direct_units.UNIT_FIELD)
                     != previous_values.get(_direct_units.UNIT_FIELD)):
                 direct_fields.add(_direct_units.PAIR_FIELD)
+            # A resend of a pending pair whose projection failed is a retry, not
+            # an authored edit, so the serializer drops it as an echo. Project
+            # it again on the day it was first entered, without dating it again
+            # (#2426); the shared form's retry has the same contract.
+            from omop_core.services.source_pair_dates import (
+                SOURCE_PAIR_CANONICALS, pair_sources_in, stored_dates,
+            )
+            pending_pair_dates = stored_dates(patient_info)
+            retried_pairs = {
+                source for source in pair_sources_in(serializer.validated_data)
+                if source in pending_pair_dates
+                and source in (patient_info.user_edited_fields or [])
+            }
+            for source in retried_pairs:
+                canonical = SOURCE_PAIR_CANONICALS[source]
+                if canonical in serializer.validated_data:
+                    direct_fields.add(canonical)
+                    fact_dates.setdefault(canonical, pending_pair_dates[source])
             _apply_patient_name(person, patient_name)
             if priority_edits:
                 from omop_core.services.genomics import replace_priority_fields

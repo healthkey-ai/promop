@@ -507,3 +507,63 @@ def test_a_clear_of_a_dated_pair_is_dated_today(lab):
     assert record.pending_source_pair_dates == {
         'hemoglobin_level': TODAY.isoformat()}
     assert record.hemoglobin_g_dl is None
+
+
+def test_an_echo_of_a_derived_pair_is_not_pending(lab):
+    _import(lab, 12.0, 'g/dL', TODAY - timedelta(days=3))
+    record = lab['record']
+    record.refresh_from_db()
+    assert not {'hemoglobin_level', 'hemoglobin_level_units'} & set(
+        record.user_edited_fields or [])
+
+    # The shared form resends the whole record, including the derived pair.
+    _patch_pair(lab, 12.0, 'G/dL')
+
+    record.refresh_from_db()
+    # An echo of a value derivation already backs is not the reader's edit.
+    assert 'hemoglobin_level' not in (record.user_edited_fields or [])
+    assert record.pending_source_pair_dates == {}
+    # It did not create a patient fact for a value nobody edited.
+    assert _hemoglobin_rows(lab, SELF_REPORT_TYPE).count() == 0
+
+    # A later import therefore still becomes the current answer.
+    _import(lab, 8.0, 'g/dL', TODAY - timedelta(days=1))
+    record.refresh_from_db()
+    assert record.hemoglobin_g_dl == Decimal('8.0')
+
+
+def _patch_native(lab, value, unit, when=None):
+    data = {'hemoglobin_level': value, 'hemoglobin_level_units': unit}
+    if when is not None:
+        data['hemoglobin_level'] = {'value': value, 'date': when.isoformat()}
+    response = lab['client'].patch(
+        f"/api/v1/patient-records/{lab['person'].person_id}/", data,
+        format='json',
+    )
+    assert response.status_code == 200, response.data
+    lab['record'].refresh_from_db()
+    return response
+
+
+def test_the_native_patch_retry_uses_the_stored_day(lab):
+    from omop_core.models import Concept
+    Concept.objects.filter(concept_id__in=(EHR_TYPE, SELF_REPORT_TYPE)).delete()
+    draw = TODAY - timedelta(days=5)
+    _patch_native(lab, 120, 'G/L', draw)
+
+    record = lab['record']
+    assert 'hemoglobin_level' in (record.user_edited_fields or [])
+    assert record.pending_source_pair_dates == {
+        'hemoglobin_level': draw.isoformat()}
+    assert not _hemoglobin_rows(lab, SELF_REPORT_TYPE).exists()
+
+    ConceptFactory(concept_id=EHR_TYPE, concept_code='ehr-type')
+    ConceptFactory(concept_id=SELF_REPORT_TYPE, concept_code='patient-report-type')
+    # The retry carries no date; it must land on the day first entered.
+    _patch_native(lab, 120, 'G/L')
+
+    patient = _hemoglobin_rows(lab, SELF_REPORT_TYPE).get()
+    assert patient.measurement_date == draw
+    record.refresh_from_db()
+    assert record.pending_source_pair_dates == {
+        'hemoglobin_level': draw.isoformat()}

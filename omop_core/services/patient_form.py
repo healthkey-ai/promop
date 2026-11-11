@@ -462,23 +462,28 @@ def patient_form_descriptors(descriptor=None, *, readable_fields=None, writable=
     return result
 
 
-def _authored_pair_dates(direct, pair_pending, fact_dates, record):
-    """The clinical day to remember for each source pair this form wrote (#2426).
+def _pair_write_plan(direct, pair_pending, fact_dates, record):
+    """The day to remember per source pair this form wrote, and unchanged echoes.
 
     Called before the submitted values are written to ``record``, so an
     unchanged re-send is recognised as one: it keeps the day the pair was first
     entered rather than moving the answer to today on every autosave echo. A
     changed number or unit is a new result and dates from today; a legacy pair
     with no recorded day stays undated. A dated edit names its day.
+
+    An unchanged pair that was **not** pending is an echo of a value derivation
+    already backs, not an edit: it is returned separately so the caller does not
+    protect it. Marking it pending would hide every later import behind a value
+    the reader never authored (#2426).
     """
     sent = set(direct) | set(pair_pending)
     sources = pair_sources_in(sent)
     if not sources:
-        return {}
+        return {}, set()
     stored = stored_dates(record)
     pending = set(record.user_edited_fields or [])
     today = timezone.localdate()
-    dates = {}
+    dates, echoes = {}, set()
     for source in sources:
         canonical = SOURCE_PAIR_CANONICALS[source]
         day = fact_dates.get(source) or fact_dates.get(canonical)
@@ -498,15 +503,17 @@ def _authored_pair_dates(direct, pair_pending, fact_dates, record):
             # The canonical projection carries the date; without this a new
             # answer would be written on the day it is retried instead.
             day = today
+        elif not changed and source not in pending:
+            echoes.add(source)
+            continue
         else:
-            # Either an unchanged autosave echo of a pair whose day was never
-            # recorded, or an echo of a value that is not pending. Neither is
-            # evidence of a day, and guessing one would let a later import
-            # retire a legacy answer (or date an untouched derived value).
+            # An unchanged autosave echo of a pair whose day was never
+            # recorded. It is not evidence of a day, and guessing one would let
+            # a later import retire a legacy answer.
             continue
         fact_dates[canonical] = day
         dates[source] = day
-    return dates
+    return dates, echoes
 
 
 @transaction.atomic
@@ -1445,8 +1452,17 @@ def _apply_patient_form_patch(person, changes, *, allowed_fields=None, descripto
         previous_direct = {name: getattr(record, name, None) for name in direct}
         # Before the write: an unchanged pair is only an echo, and comparing
         # after `setattr` would make every write look like one (#2426).
-        pair_date_values = _authored_pair_dates(
+        pair_date_values, echo_pairs = _pair_write_plan(
             direct, pair_pending, fact_dates, record)
+        echo_fields = set()
+        for source in echo_pairs:
+            echo_fields |= SOURCE_PAIR_FIELDS[source]
+            # The pair's canonical is injected from it, so an echo would write
+            # a fresh patient fact for a value nobody edited. Keep the derived
+            # read-model and its fact untouched.
+            canonical = SOURCE_PAIR_CANONICALS[source]
+            echo_fields.add(canonical)
+            side_effect_projections.pop(canonical, None)
         for name, value in direct.items():
             setattr(record, name, value)
         unit_fields = set()
@@ -1456,7 +1472,9 @@ def _apply_patient_form_patch(person, changes, *, allowed_fields=None, descripto
                 # the companion unit before Model.save computes BMI.
                 setattr(record, f'{field}_units', unit)
                 unit_fields.add(f'{field}_units')
-        clinical_direct = set(direct) - set(profile_changes)
+        # An echo is written but not protected: it is not the reader's edit.
+        clinical_direct = set(direct) - set(profile_changes) - echo_fields
+        pair_pending -= echo_fields
         record.user_edited_fields = sorted(
             set(record.user_edited_fields or []) | clinical_direct | pair_pending)
         remember_dates(record, pair_date_values)
@@ -1464,7 +1482,9 @@ def _apply_patient_form_patch(person, changes, *, allowed_fields=None, descripto
                     + ['user_edited_fields', 'pending_source_pair_dates'])
         from omop_core.services.patient_record_revisions import write_record_revisions
         write_record_revisions(record, previous_direct, changed_by=changed_by)
-        result.applied.extend(clinical_direct)
+        # An echo was written (it just matched what was there); report it as
+        # applied without making it pending, so a pure echo save is not a 400.
+        result.applied.extend(clinical_direct | (echo_fields & set(direct)))
         acknowledged = set(_project_side_effects(
             person, direct, side_effect_projections, authorship,
             dates=fact_dates, patient_author=patient_author))
