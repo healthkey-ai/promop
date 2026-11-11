@@ -323,7 +323,10 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
     || ['string', 'number', 'boolean'].includes(typeof item);
   const listed = Array.isArray(value) && value.every(primitive) ? value
     : field.multiple && typeof value === 'string' ? value.split(',') : undefined;
-  const items = listed?.map((item) => String(item).trim()).filter(Boolean);
+  // A null entry is absence, not the word "null": `String(null)` is truthy
+  // and a read-only list rendered it beside the real answers.
+  const items = listed?.filter((item) => item != null)
+    .map((item) => String(item).trim()).filter(Boolean);
   // A reviewed answer pair answers the row's own question: a read-only "No"
   // beside "HIV Positive" is a different sentence than "No HIV" (#5601).
   const formatted = value == null || value === '' || (items && !items.length) ? 'Unknown'

@@ -428,6 +428,18 @@ describe('read-only multiple answers', () => {
     expect(container).toHaveTextContent('R-CHOP');
   });
 
+  it('does not list a null entry as "null"', async () => {
+    const { store } = await setup({
+      planned_therapies: { writable: false, label: 'Planned therapies', multiple: true,
+        reason: 'Read-only.' },
+    }, { planned_therapies: [null, 'r_chop'] });
+    const { container } = render(<PatientFieldEditor store={store} name="planned_therapies" />);
+
+    expect(container.querySelector('[data-field="planned_therapies"] > div')?.textContent)
+      .toBe('Planned therapies: r_chop');
+    expect(container).not.toHaveTextContent('null');
+  });
+
   it('splits a comma-joined multiple answer', async () => {
     const { store } = await setup({
       stem_cell_transplant_history: { writable: true, target: 'patient_record', multiple: true,
