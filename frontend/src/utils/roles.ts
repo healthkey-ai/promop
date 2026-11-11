@@ -13,7 +13,9 @@ import type { User } from '@/hooks/useAuth';
  * - staff and org_admin (a grant, or `is_org_admin` through a trust): everything;
  * - doctor: patients (read and write), and every mapping page read-only;
  * - analyst: every mapping page, writing (create, edit, propose, Suggest,
- *   Lock, Done, priority, upload) and PRism analytics. No patient data at all.
+ *   Lock, Done, priority, upload) and PRism analytics. No patient data,
+ *   except the sample patients of a public demo org it holds a grant at: a
+ *   demo org lists them to every grant there, whatever its role (#1392).
  */
 const PATIENT_ROLES = ['org_admin', 'doctor'];
 const MAPPING_WRITE_ROLES = ['analyst'];
@@ -29,10 +31,18 @@ export function isStaffOrOrgAdmin(user: User | null | undefined): boolean {
   return !!(user?.is_staff || user?.is_org_admin);
 }
 
-/** Reads and writes patient data: staff, org_admin or doctor. The server's
- *  `has_curation_access`. */
+/** Holds a professional grant at a public demo org, which lists its sample
+ *  patients to any role (`PatientRecordViewSet.get_queryset`). */
+const hasDemoOrgGrant = (user: User | null | undefined): boolean =>
+  !!user?.org_accesses?.some(
+    (a) => a.org_allows_patient_signup && PROFESSIONAL_ROLES.includes(a.role ?? ''),
+  );
+
+/** Reaches the patient list: staff, org_admin or doctor (the server's
+ *  `has_curation_access`), or any professional grant at a public demo org,
+ *  whose list every grant there sees. */
 export function canReadPatients(user: User | null | undefined): boolean {
-  return isStaffOrOrgAdmin(user) || hasGrant(user, PATIENT_ROLES);
+  return isStaffOrOrgAdmin(user) || hasGrant(user, PATIENT_ROLES) || hasDemoOrgGrant(user);
 }
 
 /** Opens the mapping pages (the hub, Code Mapping, field mappings, therapy

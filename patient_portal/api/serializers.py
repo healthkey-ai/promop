@@ -138,6 +138,10 @@ class UserSerializer(serializers.ModelSerializer):
                 'org_name': org.name, 'org_slug': org.slug, 'role': grant.role,
                 'expires_at': grant.expires_at, 'access_via': ['explicit_grant'],
                 'group_name': grant.group.name if grant.group_id else None,
+                # A public demo org lists its patients to any grant there,
+                # an analyst's included (#1392, #2416); the UI opens the
+                # patient list for such a grant.
+                'org_allows_patient_signup': org.allows_patient_signup,
             })
         if obj.has_verified_email:
             for invitation in OrgInvitation.objects.filter(

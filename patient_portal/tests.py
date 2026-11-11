@@ -33629,9 +33629,10 @@ class AnalystRoleScopeTest(TestCase):
 
     def setUp(self):
         self.client = APIClient()
-        # A public demo org: the one org kind whose patients a plain (non-admin)
-        # grant lists, so an empty list here is the role, not the org.
-        self.org = Organization.objects.create(name='Analyst Org', slug='analyst-org', allows_patient_signup=True)
+        # A private org. A public demo org (allows_patient_signup) is the one
+        # org kind whose patients every grant there lists, an analyst's too;
+        # see test_an_analyst_browses_and_exports_a_public_demo_org.
+        self.org = Organization.objects.create(name='Analyst Org', slug='analyst-org')
         self.analyst = _make_user('analyst-scope@test.com')
         GroupAccess.objects.create(identity=self.analyst, org=self.org, role='analyst')
         self.person = Person.objects.create(person_id=9951)
@@ -33688,6 +33689,38 @@ class AnalystRoleScopeTest(TestCase):
             self.assertEqual(self._rows(resp), [], prefix)
             self.assertEqual(self.client.get(f'{prefix}{self.person.person_id}/').status_code,
                              status.HTTP_404_NOT_FOUND, prefix)
+
+    def test_an_analyst_browses_and_exports_a_public_demo_org(self):
+        """A public demo org hands out no individual access, so its role
+        restrictions do not matter: every grant there lists and CSV-exports
+        its sample patients, an analyst's included (#1392, #2416). The
+        private org's patient stays out of reach, and a detail is 404 as it
+        is for a patient-role grant at the demo org."""
+        demo_org = Organization.objects.create(
+            name='Public Demo', slug='public-demo', allows_patient_signup=True,
+        )
+        GroupAccess.objects.create(identity=self.analyst, org=demo_org, role='analyst')
+        sample = Person.objects.create(person_id=9952)
+        PatientRecord.objects.create(person=sample, organization=demo_org, disease='Breast Cancer')
+        for prefix in ('/api/patient-info/', '/api/v1/patient-records/'):
+            resp = self.client.get(prefix)
+            self.assertEqual(resp.status_code, status.HTTP_200_OK)
+            self.assertEqual([r['person_id'] for r in self._rows(resp)], [sample.person_id], prefix)
+        self.assertEqual(self.client.get(f'/api/v1/patient-records/{sample.person_id}/').status_code,
+                         status.HTTP_404_NOT_FOUND)
+        resp = self.client.get('/api/v1/patient-records/export-csv/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.content[:200])
+        import csv as _csv
+        import io
+        rows = list(_csv.DictReader(io.StringIO(resp.content.decode('utf-8'))))
+        self.assertEqual([r['person_id'] for r in rows], [str(sample.person_id)])
+        resp = self.client.get('/api/v1/patient-records/export-csv/',
+                               {'person_ids': str(self.person.person_id)})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(list(_csv.DictReader(io.StringIO(resp.content.decode('utf-8')))), [])
+        self.assertTrue(
+            self.client.get('/api/user/').data['user']['org_accesses'][-1]['org_allows_patient_signup'],
+        )
 
     def test_clinical_rows_and_patient_source_codes_are_not_found(self):
         pid = self.person.person_id
@@ -33755,6 +33788,12 @@ class AnalystRoleScopeTest(TestCase):
             self.assertEqual(self.client.get(url).status_code, status.HTTP_200_OK, url)
         self.assertEqual(self.client.get('/api/v1/relevance/signals/').data['permissions'],
                          {'can_accept': False, 'can_reject': False})
+        # A doctor reads the patients of a group the grant names; an
+        # org-level grant at a private org lists nothing.
+        from omop_core.models import PatientGroup, PatientGroupMembership
+        panel = PatientGroup.objects.create(organization=self.org, name='Panel', slug='panel')
+        PatientGroupMembership.objects.create(group=panel, person_id=self.person.person_id)
+        GroupAccess.objects.create(identity=doctor, group=panel, role='doctor')
         self.assertIn(self.person.person_id,
                       [r['person_id'] for r in self._rows(self.client.get('/api/patient-info/'))])
         # Reading is the whole of it: no mapping, synonym, choice, Suggest or lock.
@@ -33848,11 +33887,14 @@ class AnalystRoleScopeTest(TestCase):
         doctor there is an admin of no org that trusts the demo org. A domain
         trust is about the verified address and still applies (#1454, #2416)."""
         from omop_core.services.access import get_admin_orgs
+        demo_org = Organization.objects.create(
+            name='Public Demo', slug='public-demo', allows_patient_signup=True,
+        )
         granting = _make_org('Trusting Org', 'trusting-org')
-        OrgTrust.objects.create(granting_org=granting, trusted_org=self.org)
+        OrgTrust.objects.create(granting_org=granting, trusted_org=demo_org)
         demo_doctor = _make_user('demo-doctor@test.com')
         demo_doctor.mark_email_verified()
-        GroupAccess.objects.create(identity=demo_doctor, org=self.org, role='doctor')
+        GroupAccess.objects.create(identity=demo_doctor, org=demo_org, role='doctor')
         self.assertNotIn(granting, get_admin_orgs(demo_doctor))
         self.client.force_authenticate(user=demo_doctor)
         self.assertFalse(self.client.get('/api/user/').data['user']['is_org_admin'])

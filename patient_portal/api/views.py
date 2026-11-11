@@ -946,26 +946,28 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             # Org-admin access includes trust-derived admin orgs.
             admin_org_ids = list(get_admin_orgs(self.request.user).values_list('id', flat=True))
 
-            # An analyst grant lists nothing (#2416): the role is code
-            # mapping and PRism analytics, never a patient's data. The patient
-            # role is deliberately kept here: at a public demo org a
-            # self-signed-up patient browses the org's sample patients.
-            reading_grants = active_grants.exclude(role__in=MAPPING_WRITE_ROLES)
-
-            # Public demo orgs: patients can browse all org patients.
-            # Only direct org grants are checked — no trust expansion,
-            # no admin powers, no mapping curation access.
+            # Public demo orgs: every grant there, whatever its role, lists
+            # the org's sample patients (#1392). A public demo org hands out
+            # no individual access, so its role restrictions do not matter:
+            # a self-signed-up patient and an analyst browse it alike
+            # (#2416). Only direct org grants are checked -- no trust
+            # expansion, no admin powers, no mapping curation access. This
+            # is the one place an analyst grant reaches a patient list.
             demo_org_ids = list(
-                reading_grants.filter(
+                active_grants.filter(
                     org__isnull=False,
                     org__allows_patient_signup=True,
                 ).values_list('org_id', flat=True)
             )
             all_visible_org_ids = list(set(admin_org_ids) | set(demo_org_ids))
 
-            # Group grants: see patients in those groups
+            # Group grants: see patients in those groups. An analyst grant
+            # lists nothing here (#2416): the role is code mapping and PRism
+            # analytics, never a patient's data.
             actor_group_ids = list(
-                reading_grants.filter(group__isnull=False).values_list('group_id', flat=True)
+                active_grants.exclude(role__in=MAPPING_WRITE_ROLES)
+                             .filter(group__isnull=False)
+                             .values_list('group_id', flat=True)
             )
             if actor_group_ids:
                 group_pids = PatientGroupMembership.objects.filter(
