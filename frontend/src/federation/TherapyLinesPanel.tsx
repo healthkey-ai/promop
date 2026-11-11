@@ -169,7 +169,15 @@ export default function TherapyLinesPanel({ store, readOnly = false, onChanged, 
       diseaseCode={diseaseCode}
       connection={connection}
       onClose={() => setDialog(null)}
-      onAuthored={() => { setDialog(null); void store.load(); onChanged?.(); }}
+      onAuthored={() => {
+        setDialog(null);
+        // The store reload and the host callback are part of the same bypass
+        // write: hold the listeners until both finish.
+        store.beginBypassWrite();
+        void store.load()
+          .then(() => onChanged?.())
+          .finally(() => store.endBypassWrite());
+      }}
     />}
   </div>;
 }

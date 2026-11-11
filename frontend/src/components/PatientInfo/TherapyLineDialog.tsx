@@ -312,19 +312,18 @@ export default function TherapyLineDialog({
           : [],
         ...(knownComposition ? {} : { composition_unknown: true }),
       };
-      // The authoring endpoints bypass the save queue; hold the host's
-      // listeners until the write and its acknowledgement land.
+      // Keep the hold through `onAuthored`: the host reload and notification
+      // start there, and the dialog may be unmounted by the time they land.
       store?.beginBypassWrite();
-      let result;
       try {
-        result = episodeId !== null
+        const result = episodeId !== null
           ? await updateTherapyLine(episodeId, payload, connection)
           : await authorTherapyLine(payload, connection);
+        onAuthored(result.patient_info);
+        onClose();
       } finally {
         store?.endBypassWrite();
       }
-      onAuthored(result.patient_info);
-      onClose();
     } catch (err: unknown) {
       // The server's refusals are specific — an unknown drug concept, a line
       // with nothing in it, a missing Treatment Regimen concept — and each says
