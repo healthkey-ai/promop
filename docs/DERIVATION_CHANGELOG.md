@@ -7,6 +7,35 @@ whenever aggregation or computation logic changes, then add a row here.
 After bumping, review the entry's rollout constraints before any authorized
 `python manage.py backfill_patient_records` run to re-derive stale records.
 
+## Before a backfill: preview the value changes
+
+`backfill_patient_records --dry-run` only counts the stale records. To see what
+the re-derivation would actually change, run the preview with the same cohort
+options first and check the result against the version's row below:
+
+```bash
+python manage.py preview_rederivation [--organization <slug>] [--target-version N | --all]
+python manage.py preview_rederivation --person-id 101 --field disease --field stage
+python manage.py preview_rederivation --format json > preview.json   # or --format csv
+```
+
+It prints a summary (records scanned, records that would change, records
+changed per field) and one line per change: `person_id`, field, stored value →
+re-derived value. `--limit` caps the records scanned, `--max-rows` the lines
+printed (the counts still cover everything). A field that held a pending user
+edit is marked `[user-edited]`; the refresh keeps such an edit until OMOP backs
+it, so most pending edits show no change, and the preview reports exactly what
+the refresh does to the rest. Values of direct identifiers (email, phone, date
+of birth, city, postal code, coordinates, facility, validator) print as
+`[redacted]`; names are never printed.
+
+It is read-only: each record runs the real `refresh_patient_record` inside a
+transaction that is always rolled back, while a guard refuses any SQL other
+than reads and the `patient_record` update, and any Celery publish. A refused
+write is reported as an error for that person and the command exits non-zero.
+It does hold each record's row lock for the length of its refresh, as the
+backfill does.
+
 | Version | Date       | Description                                      |
 |---------|------------|--------------------------------------------------|
 | 1       | 2026-07-31 | Baseline — all existing derivation logic          |

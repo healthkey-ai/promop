@@ -11,7 +11,8 @@ Usage:
     # Re-derive every record regardless of version
     python manage.py backfill_patient_records --all
 
-    # Preview without modifying
+    # Preview without modifying (counts only; preview_rederivation shows the
+    # value changes per record and field)
     python manage.py backfill_patient_records --dry-run
 
     # Control batch size (default 100)
@@ -96,6 +97,9 @@ class Command(BaseCommand):
                 self.style.WARNING(
                     f"[dry-run] {total} record(s) matching {label} would be re-derived."
                 )
+            )
+            self.stdout.write(
+                "Run preview_rederivation with the same options to see the value changes."
             )
             return
 
