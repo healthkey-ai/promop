@@ -423,6 +423,26 @@ def test_the_pair_stays_pending_for_both_units(api, value, unit):
         record.user_edited_fields or [])
 
 
+def test_an_unchanged_pair_echo_is_not_authored(api):
+    """An autosave that echoes the whole record must not claim the lab.
+
+    An unchanged pair is not an edit: marking it pending would make a later
+    import look older than the reader's answer and hide it (#2426).
+    """
+    record = _record()
+    _edit(api, record, {'hemoglobin_level': 120, 'hemoglobin_level_units': 'g/L'})
+    PatientRecord.objects.filter(pk=record.pk).update(user_edited_fields=[])
+    record.refresh_from_db()
+
+    _edit(api, record, {
+        'hemoglobin_level': record.hemoglobin_level,
+        'hemoglobin_level_units': record.hemoglobin_level_units,
+        'weight': 70,
+    })
+
+    assert set(record.user_edited_fields or []) == {'weight'}
+
+
 
 def test_the_shared_form_cannot_write_a_withheld_pair(api):
     from omop_core.services.patient_form import apply_patient_form_patch

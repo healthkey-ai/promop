@@ -833,6 +833,32 @@ class PatientRecordSerializer(serializers.ModelSerializer):
                 validated[spec['unit_field']] = unit_code
                 self._source_pairs.add(spec['unit_field'])
             self._derived_from_pair.add(spec['canonical'])
+
+        # An equal echo of a source pair is not an authoring command: the record
+        # already holds those numbers, so marking the pair pending would hide a
+        # later import behind a value the reader never changed (#2426). A pair
+        # is authored as one unit: when either half differs, both halves stay.
+        if self._source_pairs:
+            groups = [
+                {pair, unit_field},
+                {CREATININE_PAIR, CREATININE_UNIT},
+                {direct_bilirubin_units.PAIR_FIELD, direct_bilirubin_units.UNIT_FIELD},
+            ]
+            groups += [
+                {spec['value'], spec['unit']} for spec in CHEMISTRY_SOURCE_PAIRS.values()
+            ]
+            groups += [
+                {source} | ({spec['unit_field']} if spec.get('unit_field') else set())
+                for source, spec in COUNT_SOURCE_PAIRS.items()
+            ]
+            authored = set()
+            for group in groups:
+                fields = group & self._source_pairs
+                if fields and any(
+                        validated.get(field) != getattr(self.instance, field, None)
+                        for field in fields):
+                    authored |= fields
+            self._source_pairs = authored
         return validated
 
     def get_supportive_therapy_courses(self, obj):
