@@ -9,7 +9,7 @@ import { PaginationControls } from "@/components/labs/PaginationControls";
 import { useLocalPagination } from "@/lib/pagination";
 
 import { loadPreferences, REVIEW_FILTER_DEFAULTS, VIEW_COLUMNS, type PatientView, type ReviewFilters } from './patientListViews';
-import { canReadPatients, isStaffOrOrgAdmin } from '@/utils/roles';
+import { canOpenPatients, canViewMappings, isStaffOrOrgAdmin } from '@/utils/roles';
 
 interface Patient {
   person_id: number;
@@ -321,11 +321,16 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
   const isAllSelected =
     patients.length > 0 &&
     (selectAllMode || visibleSelectedCount === patients.length);
-  // Every professional who reaches this list is a curator (an analyst-only
-  // account is routed to Code Mapping before it mounts, #2416), so the hub
-  // is the one mapping entry point here.
-  const canCurate = canReadPatients(currentUser);
+  // A reader who cannot open a patient -- an analyst browsing a public demo
+  // org's sample patients (#1392, #2416) -- gets the rows de-identified by
+  // the server and no way into the detail page, which would be 404 (#2460):
+  // no Name column, no row link, no name or age sort. Upload and the mapping
+  // hub are that same curator's; a demo-org analyst gets Code Mapping.
+  const canOpen = canOpenPatients(currentUser);
+  const canCurate = canOpen;
   const canAdministerOrganizations = isStaffOrOrgAdmin(currentUser);
+  const openPatient = (personId: number) =>
+    canOpen ? () => navigate(`/patient/${personId}`) : undefined;
 
   const handleLogout = () => {
     void logout();
@@ -364,13 +369,21 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
               </button>
             </>
           )}
-          {canCurate && (
+          {canCurate ? (
             <button
               onClick={() => navigate("/mappings")}
               className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
             >
               <Globe size={16} />
               Mappings
+            </button>
+          ) : canViewMappings(currentUser) && (
+            <button
+              onClick={() => navigate("/code-mappings")}
+              className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+            >
+              <Globe size={16} />
+              Code Mapping
             </button>
           )}
           {canCurate && (
@@ -432,7 +445,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
             <option value="freshness">Oldest clinical result</option><option value="-gaps">Most key data gaps</option>
             <option value="gaps">Fewest key data gaps</option><option value="ecog">ECOG: low to high</option>
             <option value="-ecog">ECOG: high to low</option><option value="-lines">Most therapy lines</option>
-            <option value="name">Name</option><option value="age">Age: youngest first</option><option value="-age">Age: oldest first</option>
+            {canOpen && <><option value="name">Name</option><option value="age">Age: youngest first</option><option value="-age">Age: oldest first</option></>}
             <option value="disease">Disease</option><option value="stage">Stage</option><option value="status">Disease status</option>
             <option value="organization">Organization</option>
             <option value="unmapped_source_codes">Unmapped Source Codes: low to high</option>
@@ -445,11 +458,11 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
       <div className="mb-4 rounded-lg border border-border bg-background p-4 shadow-sm">
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
           <label className="flex flex-col gap-1.5 text-sm font-medium text-foreground">
-            Name or email
+            {canOpen ? 'Name or email' : 'Patient ID'}
             <input
               type="search"
               defaultValue={search}
-              placeholder="Search, then press Enter"
+              placeholder={canOpen ? 'Search, then press Enter' : 'Search by ID, then press Enter'}
               onBlur={(event) => {
                 const value = event.target.value.trim();
                 if (value !== search) { resetToFirstPage(); setSearch(value); }
@@ -598,6 +611,11 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
         </div>
       )}
 
+      {!canOpen && (
+        <p role="status" className="mb-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-700 dark:bg-amber-950 dark:text-amber-100">
+          Read-only sample list: patient names and other demographics are withheld, and records cannot be opened.
+        </p>
+      )}
       <div className="overflow-x-auto rounded-lg border border-border bg-background shadow-sm">
         <table className="w-full text-left text-sm">
           <thead className="border-b border-border bg-muted/50">
@@ -611,7 +629,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
                 />
               </th>
               <th className="px-4 py-3 font-medium text-muted-foreground">ID</th>
-              <th className="w-36 px-4 py-3 font-medium text-muted-foreground">Name</th>
+              {canOpen && <th className="w-36 px-4 py-3 font-medium text-muted-foreground">Name</th>}
               <th className="px-4 py-3 font-medium text-muted-foreground">Age</th>
               <th className="px-4 py-3 font-medium text-muted-foreground">Disease</th>
               <th className="px-4 py-3 font-medium text-muted-foreground">Stage</th>
@@ -631,7 +649,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
           <tbody>
             {patients.length === 0 ? (
               <tr>
-                <td colSpan={9 + extraColumns.length} className="py-12 text-center text-muted-foreground">
+                <td colSpan={(canOpen ? 9 : 8) + extraColumns.length} className="py-12 text-center text-muted-foreground">
                   {error
                     ? "Unable to load patients."
                     : patientCount === 0 &&
@@ -649,7 +667,8 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
               patients.map((patient) => (
                 <tr
                   key={patient.person_id}
-                  className="border-b border-border last:border-0 hover:bg-muted/30 cursor-pointer"
+                  className={`border-b border-border last:border-0 ${canOpen ? 'hover:bg-muted/30 cursor-pointer' : 'cursor-default'}`}
+                  aria-disabled={canOpen ? undefined : true}
                 >
                   <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
                     <input
@@ -659,42 +678,42 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
                       className="h-4 w-4 rounded border-input"
                     />
                   </td>
-                  <td className="px-4 py-3" onClick={() => navigate(`/patient/${patient.person_id}`)}>
+                  <td className="px-4 py-3" onClick={openPatient(patient.person_id)}>
                     {patient.person_id}
                   </td>
-                  <td className="px-4 py-3 font-medium" onClick={() => navigate(`/patient/${patient.person_id}`)}>
+                  {canOpen && <td className="px-4 py-3 font-medium" onClick={openPatient(patient.person_id)}>
                     <span className="block w-28 truncate" title={patient.patient_name || undefined}>{patient.demographics_redacted ? 'Withheld' : patient.patient_name || 'Not recorded'}</span>
-                  </td>
-                  <td className="px-4 py-3" onClick={() => navigate(`/patient/${patient.person_id}`)}>
+                  </td>}
+                  <td className="px-4 py-3" onClick={openPatient(patient.person_id)}>
                     {patient.demographics_redacted ? 'Withheld' : patient.age ?? 'Not recorded'}
                   </td>
-                  <td className="px-4 py-3" onClick={() => navigate(`/patient/${patient.person_id}`)}>
+                  <td className="px-4 py-3" onClick={openPatient(patient.person_id)}>
                     {patient.disease || "Not recorded"}
                     {patient.subtype_biomarkers && <span className="mt-1 block max-w-56 truncate text-xs text-muted-foreground" title={patient.subtype_biomarkers}>{patient.subtype_biomarkers}</span>}
                   </td>
-                  <td className="px-4 py-3" onClick={() => navigate(`/patient/${patient.person_id}`)}>
+                  <td className="px-4 py-3" onClick={openPatient(patient.person_id)}>
                     {patient.stage || "N/A"}
                   </td>
-                  <td className="px-4 py-3 text-center tabular-nums" onClick={() => navigate(`/patient/${patient.person_id}`)}>
+                  <td className="px-4 py-3 text-center tabular-nums" onClick={openPatient(patient.person_id)}>
                     {patient.therapy_lines_count ?? "N/A"}
                   </td>
-                  {show('treatment') && <td className="px-4 py-3" onClick={() => navigate(`/patient/${patient.person_id}`)}>
+                  {show('treatment') && <td className="px-4 py-3" onClick={openPatient(patient.person_id)}>
                     {patient.treatment_summary ? <><span className="block max-w-56 truncate" title={patient.treatment_summary.name}>{patient.treatment_summary.name}</span>
                       <span className="block text-xs text-muted-foreground">Line {patient.treatment_summary.line} · Start: {formatDate(patient.treatment_summary.start_date)}</span>
                       <span className="block text-xs text-muted-foreground">End: {formatDate(patient.treatment_summary.end_date)}</span></> : 'Not recorded'}
                   </td>}
-                  {show('ecog') && <td className="px-4 py-3 tabular-nums" onClick={() => navigate(`/patient/${patient.person_id}`)}>{patient.ecog_performance_status ?? 'Not recorded'}
+                  {show('ecog') && <td className="px-4 py-3 tabular-nums" onClick={openPatient(patient.person_id)}>{patient.ecog_performance_status ?? 'Not recorded'}
                     {patient.ecog_performance_status != null && <span className="block whitespace-nowrap text-xs text-muted-foreground">Assessed: {formatDate(patient.ecog_assessment_date)}</span>}
                   </td>}
-                  {show('organization') && <td className="px-4 py-3" onClick={() => navigate(`/patient/${patient.person_id}`)}>{patient.organization_name || 'Not recorded'}</td>}
-                  {show('location') && <td className="px-4 py-3" onClick={() => navigate(`/patient/${patient.person_id}`)}>{patient.demographics_redacted ? 'Withheld' : patient.location_summary || 'Not recorded'}</td>}
-                  {show('contact') && <td className="px-4 py-3" onClick={() => navigate(`/patient/${patient.person_id}`)}>{patient.contact_available ? 'Recorded' : 'Not recorded'}</td>}
-                  {show('gaps') && <td className="px-4 py-3" onClick={() => navigate(`/patient/${patient.person_id}`)}>{patient.data_gaps?.length ? patient.data_gaps.join(', ') : patient.data_gaps ? 'No key gaps' : 'Not assessed'}</td>}
-                  {show('freshness') && <td className="whitespace-nowrap px-4 py-3" onClick={() => navigate(`/patient/${patient.person_id}`)}>{formatDate(patient.latest_result_date)}</td>}
-                  <td className="px-4 py-3" onClick={() => navigate(`/patient/${patient.person_id}`)}>
+                  {show('organization') && <td className="px-4 py-3" onClick={openPatient(patient.person_id)}>{patient.organization_name || 'Not recorded'}</td>}
+                  {show('location') && <td className="px-4 py-3" onClick={openPatient(patient.person_id)}>{patient.demographics_redacted ? 'Withheld' : patient.location_summary || 'Not recorded'}</td>}
+                  {show('contact') && <td className="px-4 py-3" onClick={openPatient(patient.person_id)}>{patient.contact_available ? 'Recorded' : 'Not recorded'}</td>}
+                  {show('gaps') && <td className="px-4 py-3" onClick={openPatient(patient.person_id)}>{patient.data_gaps?.length ? patient.data_gaps.join(', ') : patient.data_gaps ? 'No key gaps' : 'Not assessed'}</td>}
+                  {show('freshness') && <td className="whitespace-nowrap px-4 py-3" onClick={openPatient(patient.person_id)}>{formatDate(patient.latest_result_date)}</td>}
+                  <td className="px-4 py-3" onClick={openPatient(patient.person_id)}>
                     {formatDate(patient.updated_at)}
                   </td>
-                  <td className={`px-4 py-3 text-right tabular-nums${patient.unmapped_source_code_count === 0 ? ' text-red-600 dark:text-red-400' : ''}`} onClick={() => navigate(`/patient/${patient.person_id}`)}>
+                  <td className={`px-4 py-3 text-right tabular-nums${patient.unmapped_source_code_count === 0 ? ' text-red-600 dark:text-red-400' : ''}`} onClick={openPatient(patient.person_id)}>
                     {patient.unmapped_source_code_count ?? 'Not available'}
                   </td>
                 </tr>

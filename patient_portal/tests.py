@@ -33744,12 +33744,21 @@ class AnalystRoleScopeTest(TestCase):
             name='Public Demo', slug='public-demo', allows_patient_signup=True,
         )
         GroupAccess.objects.create(identity=self.analyst, org=demo_org, role='analyst')
-        sample = Person.objects.create(person_id=9952)
-        PatientRecord.objects.create(person=sample, organization=demo_org, disease='Breast Cancer')
+        sample = Person.objects.create(person_id=9952, given_name='Sam', family_name='Sample')
+        PatientRecord.objects.create(person=sample, organization=demo_org, disease='Breast Cancer',
+                                     date_of_birth=date(1970, 1, 1), city='Springfield',
+                                     email='sam@example.com', phone_number='555-0100')
         for prefix in ('/api/patient-info/', '/api/v1/patient-records/'):
             resp = self.client.get(prefix)
             self.assertEqual(resp.status_code, status.HTTP_200_OK)
-            self.assertEqual([r['person_id'] for r in self._rows(resp)], [sample.person_id], prefix)
+            rows = self._rows(resp)
+            self.assertEqual([r['person_id'] for r in rows], [sample.person_id], prefix)
+            # Names and other demographics are PHI the analyst never reads:
+            # withheld on the server, not hidden by the UI (#2460).
+            self.assertIsNone(rows[0]['patient_name'], prefix)
+            self.assertIsNone(rows[0]['age'], prefix)
+            self.assertTrue(rows[0]['demographics_redacted'], prefix)
+            self.assertEqual(rows[0]['disease'], 'Breast Cancer')
         self.assertEqual(self.client.get(f'/api/v1/patient-records/{sample.person_id}/').status_code,
                          status.HTTP_404_NOT_FOUND)
         resp = self.client.get('/api/v1/patient-records/export-csv/')
@@ -33758,10 +33767,78 @@ class AnalystRoleScopeTest(TestCase):
         import io
         rows = list(_csv.DictReader(io.StringIO(resp.content.decode('utf-8'))))
         self.assertEqual([r['person_id'] for r in rows], [str(sample.person_id)])
+        for column in ('patient_name', 'date_of_birth', 'city', 'email', 'phone_number'):
+            self.assertEqual(rows[0][column], '', column)
+        self.assertEqual(rows[0]['demographics_redacted'], 'true')
+        self.assertEqual(rows[0]['disease'], 'Breast Cancer')
+        # The paginated list, the one the UI reads, withholds the same.
+        page = self.client.get('/api/v1/patient-records/', {'page': 1, 'page_size': 10}).data['results']
+        self.assertIsNone(page[0]['patient_name'])
+        self.assertTrue(page[0]['demographics_redacted'])
+        # Neither search, the location filter nor a name or age ordering may
+        # act as an oracle over the withheld fields: a name or email search
+        # finds nothing, an id search still does, and ordering by name is
+        # ordering by id.
+        for params in ({'search': 'Sam'}, {'search': 'sam@'}, {'location': 'Springfield'}):
+            self.assertEqual(self._rows(self.client.get('/api/v1/patient-records/', params)), [], params)
+            self.assertEqual(
+                list(_csv.DictReader(io.StringIO(
+                    self.client.get('/api/v1/patient-records/export-csv/', params).content.decode('utf-8')))),
+                [], params)
+        self.assertEqual([r['person_id'] for r in self._rows(self.client.get('/api/v1/patient-records/', {'search': '9952'}))],
+                         [sample.person_id])
+        other = Person.objects.create(person_id=9953, given_name='Abe', family_name='Able')
+        PatientRecord.objects.create(person=other, organization=demo_org, date_of_birth=date(1990, 1, 1))
+        for ordering in ('name', '-name', 'age', '-age'):
+            self.assertEqual(
+                [r['person_id'] for r in self._rows(self.client.get('/api/v1/patient-records/', {'ordering': ordering}))],
+                [9952, 9953], ordering)
+        # A doctor at the demo org reads the same rows with their names.
+        doctor = _make_user('demo-reader@test.com')
+        GroupAccess.objects.create(identity=doctor, org=demo_org, role='doctor')
+        self.client.force_authenticate(user=doctor)
+        row = next(r for r in self._rows(self.client.get('/api/v1/patient-records/')) if r['person_id'] == 9952)
+        self.assertEqual(row['patient_name'], 'Sam Sample')
+        self.assertNotIn('demographics_redacted', row)
+        self.assertEqual(row['age'], 56)
+        self.client.force_authenticate(user=self.analyst)
         resp = self.client.get('/api/v1/patient-records/export-csv/',
                                {'person_ids': str(self.person.person_id)})
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(list(_csv.DictReader(io.StringIO(resp.content.decode('utf-8')))), [])
+
+    def test_a_patient_at_a_public_demo_org_keeps_only_their_own_demographics(self):
+        """The other reader without curation access: a patient-role grant at
+        the demo org browses the sample patients de-identified, while their
+        own row keeps its name in the list and the export (#2460)."""
+        demo_org = Organization.objects.create(
+            name='Public Demo', slug='public-demo', allows_patient_signup=True,
+        )
+        me = Person.objects.create(person_id=9954, given_name='Pat', family_name='Portal')
+        PatientRecord.objects.create(person=me, organization=demo_org, email='pat@example.com')
+        other = Person.objects.create(person_id=9955, given_name='Sam', family_name='Sample')
+        PatientRecord.objects.create(person=other, organization=demo_org, email='sam@example.com')
+        patient = _make_user('demo-patient@test.com')
+        PatientUser.objects.create(identity=patient, person=me)
+        GroupAccess.objects.create(identity=patient, org=demo_org, role='patient')
+        self.client.force_authenticate(user=patient)
+        rows = {r['person_id']: r for r in
+                self.client.get('/api/v1/patient-records/', {'page': 1, 'page_size': 10}).data['results']}
+        self.assertEqual(set(rows), {9954, 9955})
+        self.assertEqual(rows[9954]['patient_name'], 'Pat Portal')
+        self.assertNotIn('demographics_redacted', rows[9954])
+        self.assertIsNone(rows[9955]['patient_name'])
+        self.assertTrue(rows[9955]['demographics_redacted'])
+        self.assertEqual([r['person_id'] for r in self._rows(self.client.get('/api/v1/patient-records/', {'search': 'Pat'}))],
+                         [9954])
+        self.assertEqual(self._rows(self.client.get('/api/v1/patient-records/', {'search': 'Sam'})), [])
+        import csv as _csv
+        import io
+        exported = {r['person_id']: r for r in _csv.DictReader(io.StringIO(
+            self.client.get('/api/v1/patient-records/export-csv/').content.decode('utf-8')))}
+        self.assertEqual(exported['9954']['email'], 'pat@example.com')
+        self.assertEqual(exported['9955']['email'], '')
+        self.assertEqual(exported['9955']['patient_name'], '')
         self.assertTrue(
             self.client.get('/api/user/').data['user']['org_accesses'][-1]['org_allows_patient_signup'],
         )
