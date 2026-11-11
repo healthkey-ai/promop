@@ -124,8 +124,8 @@ from omop_core.mapping.therapy import (
 )
 from omop_core.services.concept_cache import concept_by_id as _cc_by_id, concept_by_loinc as _cc_by_loinc, concept_by_name_ilike as _cc_by_name, concept_by_vocab as _cc_by_vocab
 from omop_core.services.access import (
-    PROFESSIONAL_ROLES, get_visible_orgs, build_trusting_map, get_admin_orgs,
-    has_org_admin_access, has_professional_access, has_curation_access,
+    MAPPING_WRITE_ROLES, PROFESSIONAL_ROLES, get_visible_orgs, build_trusting_map, get_admin_orgs,
+    has_org_admin_access, has_mapping_read_access, has_mapping_write_access, has_curation_access,
 )
 from datetime import date as _date, datetime, timedelta
 from django.utils.timezone import localdate, make_aware, is_naive
@@ -946,9 +946,13 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             # Org-admin access includes trust-derived admin orgs.
             admin_org_ids = list(get_admin_orgs(self.request.user).values_list('id', flat=True))
 
-            # Public demo orgs: patients can browse all org patients.
-            # Only direct org grants are checked — no trust expansion,
-            # no admin powers, no mapping curation access.
+            # Public demo orgs: every grant there, whatever its role, lists
+            # the org's sample patients (#1392). A public demo org hands out
+            # no individual access, so its role restrictions do not matter:
+            # a self-signed-up patient and an analyst browse it alike
+            # (#2416). Only direct org grants are checked -- no trust
+            # expansion, no admin powers, no mapping curation access. This
+            # is the one place an analyst grant reaches a patient list.
             demo_org_ids = list(
                 active_grants.filter(
                     org__isnull=False,
@@ -957,9 +961,13 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             )
             all_visible_org_ids = list(set(admin_org_ids) | set(demo_org_ids))
 
-            # Group grants: see patients in those groups
+            # Group grants: see patients in those groups. An analyst grant
+            # lists nothing here (#2416): the role is code mapping and PRism
+            # analytics, never a patient's data.
             actor_group_ids = list(
-                active_grants.filter(group__isnull=False).values_list('group_id', flat=True)
+                active_grants.exclude(role__in=MAPPING_WRITE_ROLES)
+                             .filter(group__isnull=False)
+                             .values_list('group_id', flat=True)
             )
             if actor_group_ids:
                 group_pids = PatientGroupMembership.objects.filter(
@@ -1204,7 +1212,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 return Response({'error': 'Patient not found'}, status=status.HTTP_404_NOT_FOUND)
             if not can_write_patient(request.user, person.person_id):
                 return Response(
-                    {'error': 'Analysts have read-only access. Contact a doctor or org admin to update patient data.'},
+                    {'error': 'You have read-only access to this patient. Contact a doctor or org admin to update patient data.'},
                     status=status.HTTP_403_FORBIDDEN,
                 )
 
@@ -5190,16 +5198,16 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         if not can_access_patient(request.user, person_id):
                             errors.append("Person not found.")
                             continue
-                        # can_access_patient grants the analyst role, which is read-only
-                        # (omop_core.authorization: 'analyst' is in _READ_ROLES, not
-                        # _WRITE_ROLES) — so the read predicate alone would let an analyst
-                        # delete patients. The read-denial above stays a "not found" so the
-                        # endpoint is not an existence oracle; here the caller demonstrably
-                        # can read the patient, so hiding existence buys nothing and an
-                        # explicit reason is more useful than a false "not found".
+                        # The read predicate alone once let an analyst (then a
+                        # reader, never a writer) delete patients, so the write
+                        # predicate is checked on its own. The read-denial above
+                        # stays a "not found" so the endpoint is not an existence
+                        # oracle; here the caller demonstrably can read the
+                        # patient, so hiding existence buys nothing and an explicit
+                        # reason is more useful than a false "not found".
                         if not can_write_patient(request.user, person_id):
                             errors.append(
-                                "Analysts have read-only access. Contact a doctor or org admin to delete patient data."
+                                "You have read-only access to this patient. Contact a doctor or org admin to delete patient data."
                             )
                             continue
                     with transaction.atomic():
@@ -5730,8 +5738,8 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
         could be written by someone permitted to write them.
 
         That distinction matters because a field being mapped is not the same as
-        the reader being allowed to edit it. Analysts have read-only access to
-        every patient, and a caller may have no access to a given person at all —
+        the reader being allowed to edit it. A caller may read a patient without
+        being allowed to write them, or have no access to a given person at all —
         so a descriptor that reported those fields writable would put a typeable
         box in front of someone whose every save is refused. The point of asking
         before rendering is to be told the truth for the person doing the
@@ -6672,7 +6680,7 @@ class PersonViewSet(viewsets.GenericViewSet):
                     return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
                 if not can_write_patient(request.user, person.person_id):
                     return Response(
-                        {'detail': 'Analysts have read-only access. Contact a doctor or org admin to update patient data.'},
+                        {'detail': 'You have read-only access to this patient. Contact a doctor or org admin to update patient data.'},
                         status=status.HTTP_403_FORBIDDEN,
                     )
 
@@ -9172,12 +9180,11 @@ class EpisodeEventViewSet(viewsets.ModelViewSet):
                 if episode is None or not can_access_patient(self.request.user, episode.person_id):
                     raise PermissionDenied('Access denied.')
                 # Creating an episode event is a clinical write, and can_access_patient
-                # is only the read predicate — the analyst role satisfies it but is not
-                # in _WRITE_ROLES. Without this an analyst could append treatment-line
-                # events to any episode they are allowed to read.
+                # is only the read predicate. Without the write check a reader could
+                # append treatment-line events to any episode they are allowed to read.
                 if not can_write_patient(self.request.user, episode.person_id):
                     raise PermissionDenied(
-                        'Analysts have read-only access. Contact a doctor or org admin to update patient data.'
+                        'You have read-only access to this patient. Contact a doctor or org admin to update patient data.'
                     )
         serializer.save()
 
@@ -10317,10 +10324,9 @@ def mapping_stats(request):
 
     GET /api/v1/mapping-stats/
     Returns counts for field mappings, code mappings, and therapy reference data.
-    Staff, org_admin and doctor can view; an analyst's curation is the Code
-    Mapping page alone (#2398).
+    Every professional role reads it (#2416).
     """
-    if not has_curation_access(request.user):
+    if not _can_view_mappings(request.user):
         return Response({'detail': 'Not authorized'}, status=status.HTTP_403_FORBIDDEN)
 
     from omop_core.models import FieldConceptMapping
@@ -12200,37 +12206,35 @@ class VocabSnapshotView(APIView):
 # Field Concept Mapping (staff and organization-admin concept assignment interface)
 # =============================================================================
 
-def _can_manage_field_mappings(user):
-    """Whether a user may access the curation pages other than Code Mapping.
+def _can_view_mappings(user):
+    """Whether a user may open the mapping pages (#2416).
 
-    Field mappings and their synonyms, choices and custom fields, therapy and
-    disease-category reference, relevance signals, source systems and the
-    mapping hub are for staff, org admins and doctors. An analyst is a
-    code-mapping curator and a read-only patient viewer (#2398), so this
-    gate refuses the role -- see ``_can_manage_code_mappings`` for the one
-    curation surface it keeps. Approval is narrower still: see
-    ``_can_approve_mappings``.
+    The hub, Code Mapping (both tabs, the accuracy pages, suggest-run logs),
+    field mappings with their synonyms, choices and custom fields, therapy
+    and disease-category reference, relevance signals and source systems.
+    Staff and every professional role: org_admin, doctor and analyst. A
+    doctor reads; see ``_can_manage_mappings`` for who writes.
     """
-    return bool(getattr(user, 'is_staff', False) or has_curation_access(user))
+    return bool(getattr(user, 'is_staff', False) or has_mapping_read_access(user))
 
 
-def _can_manage_code_mappings(user):
-    """Whether a user may use the Code Mapping page (#2398).
+def _can_manage_mappings(user):
+    """Whether a user may create or change a mapping (#2398, #2416).
 
-    Both tabs -- Code to Concept and Concept to Code -- with the mapping
-    dialog, Suggest, Lock, Done, priority, axis variants, LOINC axes and the
-    accuracy pages. Every professional role may propose here, the analyst
-    included; approval still needs ``_can_approve_mappings``, and the CSV
-    upload and source-system registry stay behind
-    ``_can_manage_field_mappings``.
+    Creating, editing, proposing and uploading code and field mappings,
+    synonyms, choices and custom fields, Suggest, Lock, Done, priority, axis
+    variants, LOINC axes, SNOMED attributes, concept minting and source-system
+    facility review. Staff, org admins and analysts; a doctor needs an analyst
+    grant as well, since roles are additive and mapping is the analyst's.
+    Approval is narrower still: ``_can_approve_mappings``.
     """
-    return bool(getattr(user, 'is_staff', False) or has_professional_access(user))
+    return bool(getattr(user, 'is_staff', False) or has_mapping_write_access(user))
 
 
 def _can_read_mappings(request):
     """Whether the caller may read the code-mapping table (#2340).
 
-    A human needs a professional role, as for every curation page. A service
+    A human needs a professional role, as for every mapping page. A service
     credential is a machine with no role, so it is admitted on the safe verbs
     only, and only with ``system/*.read``: mapping rows are curated reference
     data, the same class as the vocabulary releases that scope already reads
@@ -12240,7 +12244,7 @@ def _can_read_mappings(request):
     """
     if is_service_token(request):
         return has_system_read_grant(request)
-    return _can_manage_code_mappings(request.user)
+    return _can_view_mappings(request.user)
 
 
 def _without_source_samples(mappings):
@@ -12259,8 +12263,8 @@ def _without_source_samples(mappings):
 def _can_approve_mappings(user):
     """Whether a user may set a mapping's status to 'approved'.
 
-    Only staff and org-admin users can approve.  Doctors and analysts may
-    propose or reject mappings but cannot approve them.
+    Only staff and org-admin users can approve.  An analyst may propose or
+    reject code mappings and a doctor field mappings, but neither approves.
     """
     return bool(getattr(user, 'is_staff', False) or has_org_admin_access(user))
 
@@ -12918,7 +12922,7 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None, person_id=Non
         if status_value == 'approved':
             raise serializers.ValidationError({
                 'status': 'Only org admins and staff can approve mappings. '
-                          'Doctors and analysts may propose mappings for review.'
+                          'Analysts may propose mappings for review.'
             })
         if mapping is not None and mapping.status == 'approved' and status_value != 'approved':
             raise serializers.ValidationError({
@@ -13321,7 +13325,7 @@ def code_mapping_group(request):
     are split across Unmapped and Mapped is two entries, and expanding either
     must not show the other's rows.
     """
-    if not _can_manage_code_mappings(request.user):
+    if not _can_view_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     from omop_core.services.athena_mapping_guard import without_icd10_athena_duplicates
@@ -13399,7 +13403,7 @@ def _group_job_rows(data):
 
 def _lock_group_job(request, *, mode, action='', destination=None):
     """Preflight and lock a complete batch before dispatching any mutation."""
-    if not _can_manage_code_mappings(request.user):
+    if not _can_manage_mappings(request.user):
         return None, Response({'detail': 'Organization admin access required.'}, status=403)
     if action == 'approve' and not _can_approve_mappings(request.user):
         return None, Response({'detail': 'Only org admins and staff can approve mappings.'}, status=403)
@@ -13540,7 +13544,7 @@ def code_mapping_group_suggest(request):
 @permission_classes([IsAuthenticated])
 def code_mapping_upload(request):
     """Atomically add/update source-code queue metadata from a small CSV."""
-    if not _can_manage_field_mappings(request.user):
+    if not _can_manage_mappings(request.user):
         return Response(
             {'detail': 'Code Mapping access required.'},
             status=status.HTTP_403_FORBIDDEN,
@@ -13699,6 +13703,8 @@ def code_mapping_list(request):
     """GET: list curated source-code-to-OMOP-concept mappings. POST: create one."""
     if not _can_read_mappings(request):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
+    if request.method != 'GET' and not _can_manage_mappings(request.user):
+        return Response({'detail': 'Mapping curator access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     if request.method == 'GET':
         from omop_core.services.mapping_source_units import SourceUnits
@@ -13808,6 +13814,8 @@ def code_mapping_detail(request, mapping_id):
     """
     if not _can_read_mappings(request):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
+    if request.method != 'GET' and not _can_manage_mappings(request.user):
+        return Response({'detail': 'Mapping curator access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     mappings = SourceCodeConceptMapping.objects.filter(id=mapping_id).select_related(
         'target_concept', 'created_by', 'reviewer', 'locked_by', 'organization')
@@ -13935,7 +13943,7 @@ def code_mapping_lock(request, mapping_id):
     POST: acquire (or refresh) the lock.  Idempotent for the same user.
     DELETE: release the lock.  Only the holder or staff may release.
     """
-    if not _can_manage_code_mappings(request.user):
+    if not _can_manage_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     with transaction.atomic():
@@ -14001,7 +14009,7 @@ def code_mapping_suggest(request):
     nothing on the tabs with an actual backlog.  ``manage.py
     enqueue_unmapped_source_codes`` does that scan as a batch job.
     """
-    if not _can_manage_code_mappings(request.user):
+    if not _can_manage_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     # New path: source_vocabulary_id. Legacy path: destination_vocabulary_id.
@@ -14204,7 +14212,7 @@ def code_mapping_latest_suggest_run(request):
                          page can seed its candidates panel without a
                          second round-trip.
     """
-    if not _can_manage_code_mappings(request.user):
+    if not _can_view_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'},
                         status=status.HTTP_403_FORBIDDEN)
     qs = SuggestRun.objects.filter(direction='forward').exclude(
@@ -14226,7 +14234,7 @@ def code_mapping_latest_suggest_run(request):
 @permission_classes([IsAuthenticated])
 def code_mapping_suggest_run(request, run_id):
     """Progress of one queued Suggest run."""
-    if not _can_manage_code_mappings(request.user):
+    if not _can_view_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'},
                         status=status.HTTP_403_FORBIDDEN)
     run = SuggestRun.objects.filter(pk=run_id).first()
@@ -14240,7 +14248,7 @@ def code_mapping_suggest_run(request, run_id):
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def code_mapping_suggest_one(request):
-    if not _can_manage_code_mappings(request.user):
+    if not _can_manage_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
     source_code = str(request.data.get('source_code') or '').strip()
     omop_table = normalize_omop_table(request.data.get('omop_table'))
@@ -14388,7 +14396,7 @@ def code_mapping_check_umls(request):
     rather than a text search, so it confirms the exact code a curator entered.
     An OMOP source concept is returned when that vocabulary is loaded too.
     """
-    if not _can_manage_code_mappings(request.user):
+    if not _can_manage_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     source_code = str(request.data.get('source_code') or '').strip()
@@ -14439,7 +14447,7 @@ def code_mapping_reference(request):
     concepts, and deriving the list from what happens to be loaded would block
     a curator from recording a mapping they can already make correctly.
     """
-    if not _can_manage_code_mappings(request.user):
+    if not _can_view_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
     return Response(_code_mapping_reference_payload())
 
@@ -14499,7 +14507,7 @@ def _suggestion_version_key(version):
 @permission_classes([IsAuthenticated])
 def code_mapping_accuracy(request):
     """Suggestion quality, grouped by incoming source vocabulary and overall."""
-    if not _can_manage_code_mappings(request.user):
+    if not _can_view_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
     from collections import Counter, defaultdict
     from omop_core.services.mapping_browse import canonical_source
@@ -14551,7 +14559,7 @@ def code_mapping_accuracy(request):
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def code_mapping_accuracy_dashboard(request):
-    if not _can_manage_code_mappings(request.user):
+    if not _can_view_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
     from collections import Counter, defaultdict
     counts = defaultdict(Counter)
@@ -14629,7 +14637,7 @@ def code_mapping_accuracy_analytics(request):
     is the row's current state and the outcome its first disposition, both
     read as they stand at the time of the request. One grouped query.
     """
-    if not _can_manage_code_mappings(request.user):
+    if not _can_view_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
     from collections import Counter
 
@@ -14835,7 +14843,7 @@ def code_mapping_vocabularies(request):
     wrapper that asserts on django.http.HttpRequest and 500 on every call --
     an alias kept for compatibility that raises is worse than no alias.
     """
-    if not _can_manage_code_mappings(request.user):
+    if not _can_view_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
     return Response(_code_mapping_reference_payload())
 
@@ -15127,7 +15135,7 @@ def custom_patient_field_list(request):
         )
         return Response(CustomPatientFieldSerializer(fields, many=True).data)
 
-    if not _can_manage_field_mappings(request.user):
+    if not _can_manage_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     serializer = CustomPatientFieldCreateSerializer(
@@ -15142,8 +15150,10 @@ def custom_patient_field_list(request):
 @permission_classes([IsAuthenticated])
 def field_mapping_list(request):
     """GET: list all field descriptors.  POST: create a new mapping."""
-    if not _can_manage_field_mappings(request.user):
+    if not _can_view_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
+    if request.method != 'GET' and not _can_manage_mappings(request.user):
+        return Response({'detail': 'Mapping curator access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     if request.method == 'GET':
         from omop_core.mapping.field import get_all_field_descriptors
@@ -15176,8 +15186,10 @@ def field_mapping_list(request):
 @permission_classes([IsAuthenticated])
 def field_mapping_detail(request, pk):
     """GET/PATCH/DELETE a single FieldConceptMapping."""
-    if not _can_manage_field_mappings(request.user):
+    if not _can_view_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
+    if request.method != 'GET' and not _can_manage_mappings(request.user):
+        return Response({'detail': 'Mapping curator access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     from omop_core.models import FieldConceptMapping
     try:
@@ -15231,7 +15243,7 @@ def propose_all_mappings(request):
     suggestion code cannot be resolved (concept not in DB) are silently skipped.
     Returns the count of newly created mappings.
     """
-    if not _can_manage_field_mappings(request.user):
+    if not _can_manage_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     from omop_core.models import FieldConceptMapping, Concept
@@ -15318,8 +15330,10 @@ def propose_all_mappings(request):
 @permission_classes([IsAuthenticated])
 def field_synonyms(request, field_name):
     """GET: merged custom + OMOP synonyms.  POST: create a custom synonym."""
-    if not _can_manage_field_mappings(request.user):
+    if not _can_view_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
+    if request.method != 'GET' and not _can_manage_mappings(request.user):
+        return Response({'detail': 'Mapping curator access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     from omop_core.models import FieldSynonym, FieldConceptMapping, ConceptSynonym
 
@@ -15363,7 +15377,7 @@ def field_synonyms(request, field_name):
 @permission_classes([IsAuthenticated])
 def field_synonym_detail(request, pk):
     """DELETE a custom synonym."""
-    if not _can_manage_field_mappings(request.user):
+    if not _can_manage_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     from omop_core.models import FieldSynonym
@@ -15384,7 +15398,7 @@ def field_synonyms_batch(request):
     GET /api/v1/field-synonyms/batch/?fields=field1,field2,...
     Returns {field_name: [synonym_text, ...]} with max 5 per field.
     """
-    if not _can_manage_field_mappings(request.user):
+    if not _can_view_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
 
     fields_param = request.query_params.get('fields', '')
@@ -15454,7 +15468,7 @@ def field_choice_list(request):
             qs = qs.filter(field_name=field_name)
         return Response(FieldChoiceSerializer(qs, many=True).data)
 
-    if not _can_manage_field_mappings(request.user):
+    if not _can_manage_mappings(request.user):
         return Response({'detail': 'Organization admin access required to manage field choices.'}, status=status.HTTP_403_FORBIDDEN)
     serializer = FieldChoiceSerializer(data=request.data, context={'request': request})
     serializer.is_valid(raise_exception=True)
@@ -15477,7 +15491,7 @@ def field_choice_detail(request, pk):
     if request.method == 'GET':
         return Response(FieldChoiceSerializer(choice).data)
 
-    if not _can_manage_field_mappings(request.user):
+    if not _can_manage_mappings(request.user):
         return Response({'detail': 'Organization admin access required to manage field choices.'}, status=status.HTTP_403_FORBIDDEN)
 
     if request.method == 'DELETE':
@@ -15499,7 +15513,7 @@ def field_choice_codes(request, choice_pk):
 
     from omop_core.models import FieldChoice
     from .serializers import FieldChoiceCodeSerializer
-    if not _can_manage_field_mappings(request.user):
+    if not _can_manage_mappings(request.user):
         return Response({'detail': 'Organization admin access required to manage field choices.'}, status=status.HTTP_403_FORBIDDEN)
     try:
         choice = FieldChoice.objects.get(pk=choice_pk)

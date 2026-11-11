@@ -12,7 +12,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from omop_core.models import HospitalCodeImport, SourceCodeConceptMapping, SourceSystemFacility
-from omop_core.services.access import has_curation_access
+from omop_core.services.access import has_mapping_read_access, has_mapping_write_access
 
 
 PAGE_SIZE = 50
@@ -22,8 +22,11 @@ PAGE_SIZE = 50
 @permission_classes([IsAuthenticated])
 def source_system_facilities(request):
     """Browse and review associations without rewriting imported FHIR identity."""
-    if not (request.user.is_staff or has_curation_access(request.user)):
+    if not (request.user.is_staff or has_mapping_read_access(request.user)):
         return Response({'detail': 'Organization admin access required.'},
+                        status=status.HTTP_403_FORBIDDEN)
+    if request.method != 'GET' and not (request.user.is_staff or has_mapping_write_access(request.user)):
+        return Response({'detail': 'Mapping curator access required.'},
                         status=status.HTTP_403_FORBIDDEN)
 
     if request.method == 'POST':

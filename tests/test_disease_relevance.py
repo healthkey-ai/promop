@@ -214,10 +214,10 @@ def test_accepted_signal_joins_the_set_and_decisions_carry_to_later_periods(djan
     assert curator.get(SIGNALS).data['results'] == []
 
 
-def test_an_analyst_does_not_reach_relevance_signals(django_user_model):
-    """Relevance signals are a curation page an analyst does not reach (#2398)."""
-    user = django_user_model.objects.create_user(email='analyst@test.com')
-    GroupAccess.objects.create(identity=user, org=OrganizationFactory(), role='analyst')
+def test_a_patient_does_not_reach_relevance_signals(django_user_model):
+    """Relevance signals are a mapping page; a patient grant opens nothing there."""
+    user = django_user_model.objects.create_user(email='patient-signals@test.com')
+    GroupAccess.objects.create(identity=user, org=OrganizationFactory(), role='patient')
     proposed = RelevanceSignal.objects.create(source='cdew', disease='MM', concept_id=ConceptFactory().concept_id,
                                               period='2026-10', document_count=5)
     api = APIClient()
@@ -226,8 +226,10 @@ def test_an_analyst_does_not_reach_relevance_signals(django_user_model):
     assert api.patch(f'{SIGNALS}{proposed.id}/', {'status': 'rejected'}, format='json').status_code == 403
 
 
+# Every professional reads the queue; the analyst grant rejects as it may
+# reject a proposed mapping; a doctor decides nothing (#2416).
 @pytest.mark.parametrize('role,can_accept,can_reject', (
-    ('org_admin', True, True), ('doctor', False, True),
+    ('org_admin', True, True), ('analyst', False, True), ('doctor', False, False),
 ))
 def test_signal_rights_follow_the_mapping_page_roles(django_user_model, role, can_accept, can_reject):
     user = django_user_model.objects.create_user(email=f'{role}@test.com')

@@ -43,7 +43,7 @@ async function showExisting(dialog: HTMLElement = screen.getByRole('dialog')) {
 }
 
 async function selectConcept(canApprove = true) {
-  render(<ConceptToCodeTab canApprove={canApprove} />);
+  render(<ConceptToCodeTab canWrite canApprove={canApprove} />);
   fireEvent.click(await screen.findByRole('button', { name: 'Serum albumin' }));
   await showExisting();
   await screen.findByText('SNOMED:S1');
@@ -51,7 +51,7 @@ async function selectConcept(canApprove = true) {
 
 describe('concept-first curation', () => {
   it('links to the mapping accuracy analytics page from the top of the tab (#2383)', async () => {
-    render(<ConceptToCodeTab canApprove />);
+    render(<ConceptToCodeTab canWrite canApprove />);
     const link = await screen.findByRole('link', { name: 'Mapping accuracy analytics' });
     expect(link).toHaveAttribute('href', '/code-mappings/accuracy/analytics');
   });
@@ -62,7 +62,7 @@ describe('concept-first curation', () => {
     }));
     get.mockImplementation((url: string) => url === '/v1/concept-to-code/'
       ? Promise.resolve({ data: page(concepts) }) : Promise.reject(new Error('Unavailable')));
-    render(<ConceptToCodeTab canApprove />);
+    render(<ConceptToCodeTab canWrite canApprove />);
     const trigger = await screen.findByRole('button', { name: 'Serum albumin' });
     expect(trigger).toHaveAttribute('aria-haspopup', 'dialog');
     fireEvent.click(trigger);
@@ -80,7 +80,7 @@ describe('concept-first curation', () => {
 
   it('supports keyboard opening, traps focus, and returns focus on Escape', async () => {
     const user = userEvent.setup();
-    render(<ConceptToCodeTab canApprove />);
+    render(<ConceptToCodeTab canWrite canApprove />);
     const trigger = await screen.findByRole('button', { name: 'Serum albumin' });
     trigger.focus();
     await user.keyboard('{Enter}');
@@ -123,7 +123,7 @@ describe('concept-first curation', () => {
     post.mockImplementationOnce(() => new Promise(resolve => { finishFirst = resolve; }));
     get.mockImplementation((url: string) => Promise.resolve({ data: url === '/v1/concept-to-code/'
       ? page([concept]) : page([source, { ...source, mapping_id: 8, source_code: 'S2' }]) }));
-    render(<ConceptToCodeTab canApprove onWritingChange={onWritingChange} />);
+    render(<ConceptToCodeTab canWrite canApprove onWritingChange={onWritingChange} />);
     fireEvent.click(await screen.findByRole('button', { name: 'Serum albumin' }));
     await showExisting();
     await screen.findByText('SNOMED:S1');
@@ -146,7 +146,7 @@ describe('concept-first curation', () => {
   });
 
   it('shows distinct concept coverage and searches by scope and domain', async () => {
-    render(<ConceptToCodeTab canApprove />);
+    render(<ConceptToCodeTab canWrite canApprove />);
     const table = await screen.findByRole('table', { name: 'Standard concept coverage' });
     await screen.findByRole('button', { name: 'Serum albumin' });
     expect(within(table).getByText('10')).toBeInTheDocument();
@@ -216,7 +216,7 @@ describe('concept-first curation', () => {
     ];
     get.mockImplementation((url: string, config?: { params?: { status?: string } }) => Promise.resolve({ data: url === '/v1/concept-to-code/'
       ? page([concept]) : { ...page(rows.filter(row => row.status === config?.params?.status)), status_counts: { approved: 2, proposed: 1, rejected: 1 } } }));
-    render(<ConceptToCodeTab canApprove />);
+    render(<ConceptToCodeTab canWrite canApprove />);
     fireEvent.click(await screen.findByRole('button', { name: 'Serum albumin' }));
     await showExisting();
     await screen.findByText('SNOMED:MAYBE');
@@ -253,7 +253,7 @@ describe('concept-first curation', () => {
       if (config?.params?.status === 'approved' && approvedFails) return Promise.reject(new Error('Unavailable'));
       return Promise.resolve({ data: { ...page(config?.params?.status === 'proposed' ? [source] : []), status_counts: counts } });
     });
-    render(<ConceptToCodeTab canApprove />);
+    render(<ConceptToCodeTab canWrite canApprove />);
     fireEvent.click(await screen.findByRole('button', { name: 'Serum albumin' }));
     await showExisting();
     await screen.findByText('SNOMED:S1');
@@ -552,7 +552,7 @@ describe('suggestion confidence', () => {
   });
 
   async function openScored() {
-    render(<ConceptToCodeTab canApprove />);
+    render(<ConceptToCodeTab canWrite canApprove />);
     fireEvent.click(await screen.findByRole('button', { name: 'Serum albumin' }));
     await showExisting();
     return screen.findByText('SNOMED:HIGH');
@@ -658,7 +658,7 @@ describe('opening a linked concept', () => {
 
   it('opens the concept\'s source codes ready to suggest more, by id', async () => {
     const handled = vi.fn();
-    render(<ConceptToCodeTab canApprove initialConceptId={123} onInitialConceptHandled={handled} />);
+    render(<ConceptToCodeTab canWrite canApprove initialConceptId={123} onInitialConceptHandled={handled} />);
     const dialog = await screen.findByRole('dialog', { name: 'Source codes for Serum albumin' });
     expect(within(dialog).getByRole('button', { name: 'Suggested Codes' })).toHaveAttribute('aria-pressed', 'true');
     expect(get).toHaveBeenCalledWith('/v1/concept-to-code/123/');
@@ -670,14 +670,14 @@ describe('opening a linked concept', () => {
 
   it('explains a concept with no source-code view', async () => {
     const handled = vi.fn();
-    render(<ConceptToCodeTab canApprove initialConceptId={999} onInitialConceptHandled={handled} />);
+    render(<ConceptToCodeTab canWrite canApprove initialConceptId={999} onInitialConceptHandled={handled} />);
     expect(await screen.findByText(/Concept 999 is not a current standard concept/)).toBeInTheDocument();
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(handled).toHaveBeenCalledTimes(1);
   });
 
   it('opens a concept clicked in the list on Suggested Codes, with Mapped Codes a click away (#2010)', async () => {
-    render(<ConceptToCodeTab canApprove />);
+    render(<ConceptToCodeTab canWrite canApprove />);
     fireEvent.click(await screen.findByRole('button', { name: 'Serum albumin' }));
     const dialog = screen.getByRole('dialog', { name: 'Source codes for Serum albumin' });
     expect(within(dialog).getByRole('button', { name: 'Suggested Codes' })).toHaveAttribute('aria-pressed', 'true');
@@ -842,7 +842,7 @@ describe('suggestions without a confidence score (#1915)', () => {
   it('leaves existing mappings visible whether or not they were scored', async () => {
     get.mockImplementation((url: string) => Promise.resolve({ data: url === '/v1/concept-to-code/'
       ? page([concept]) : page(candidates) }));
-    render(<ConceptToCodeTab canApprove />);
+    render(<ConceptToCodeTab canWrite canApprove />);
     fireEvent.click(await screen.findByRole('button', { name: 'Serum albumin' }));
     await showExisting();
     expect(await screen.findByText('SNOMED:SCORED')).toBeInTheDocument();
@@ -862,7 +862,7 @@ describe('concept priority (#1914)', () => {
   const moved = () => post.mock.calls.filter(([url]) => url === '/v1/concept-to-code/priority/').map(([, body]) => body);
 
   it('shows each concept\'s priority and ranks one by typing its number', async () => {
-    render(<ConceptToCodeTab canApprove />);
+    render(<ConceptToCodeTab canWrite canApprove />);
     const calcium = await screen.findByLabelText('Priority for Calcium');
     expect(screen.getByLabelText('Priority for Albumin')).toHaveValue(1);
     expect(calcium).toHaveValue(null);
@@ -877,7 +877,7 @@ describe('concept priority (#1914)', () => {
   });
 
   it('unranks a concept when its number is cleared, and ignores an invalid number', async () => {
-    render(<ConceptToCodeTab canApprove />);
+    render(<ConceptToCodeTab canWrite canApprove />);
     const albumin = await screen.findByLabelText('Priority for Albumin');
     fireEvent.change(albumin, { target: { value: '0' } });
     fireEvent.blur(albumin);
@@ -891,7 +891,7 @@ describe('concept priority (#1914)', () => {
   });
 
   it('moves one step with the arrow buttons, and an unranked concept up to the end of the list', async () => {
-    render(<ConceptToCodeTab canApprove />);
+    render(<ConceptToCodeTab canWrite canApprove />);
     expect(await screen.findByRole('button', { name: 'Move Albumin up' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Move Bilirubin down' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Move Calcium down' })).toBeDisabled();
@@ -902,7 +902,7 @@ describe('concept priority (#1914)', () => {
   });
 
   it('drops a dragged concept at the position of the ranked concept it lands on', async () => {
-    render(<ConceptToCodeTab canApprove />);
+    render(<ConceptToCodeTab canWrite canApprove />);
     const creatinine = await screen.findByTestId('concept-row-4');
     const albumin = screen.getByTestId('concept-row-1');
     fireEvent.dragStart(creatinine);
@@ -912,7 +912,7 @@ describe('concept priority (#1914)', () => {
   });
 
   it('drops onto an unranked concept at the end of the priority list', async () => {
-    render(<ConceptToCodeTab canApprove />);
+    render(<ConceptToCodeTab canWrite canApprove />);
     const albumin = await screen.findByTestId('concept-row-1');
     fireEvent.dragStart(albumin);
     fireEvent.drop(screen.getByTestId('concept-row-3'));
@@ -920,7 +920,7 @@ describe('concept priority (#1914)', () => {
   });
 
   it('shows more concepts per page and only ranked ones on request', async () => {
-    render(<ConceptToCodeTab canApprove />);
+    render(<ConceptToCodeTab canWrite canApprove />);
     await screen.findByLabelText('Priority for Albumin');
     fireEvent.change(screen.getByRole('combobox', { name: 'Concepts per page' }), { target: { value: '250' } });
     await waitFor(() => expect(get).toHaveBeenCalledWith('/v1/concept-to-code/', expect.objectContaining({
@@ -932,7 +932,7 @@ describe('concept priority (#1914)', () => {
 
   it('marks a concept Done from the Priority cell, which then reads Done in italics and offers Not done (#2388)', async () => {
     list = [named(1, 'Albumin', 1), { ...named(2, 'Bilirubin'), done: true }];
-    render(<ConceptToCodeTab canApprove />);
+    render(<ConceptToCodeTab canWrite canApprove />);
     // A click on the cell around the number opens the menu; the number input keeps its own behaviour.
     const albuminCell = (await screen.findByLabelText('Priority for Albumin')).parentElement!;
     fireEvent.click(albuminCell);
@@ -963,7 +963,7 @@ describe('concept priority (#1914)', () => {
             { ...named(3, 'Calcium'), lock: { username: 'me@healthtree.org', mine: true } }];
     post.mockImplementation((url: string) => Promise.resolve({ data: url.endsWith('/lock/')
       ? { concept_id: 1, lock: { username: 'me@healthtree.org', mine: true } } : page([source]) }));
-    render(<ConceptToCodeTab canApprove />);
+    render(<ConceptToCodeTab canWrite canApprove />);
     fireEvent.click(await screen.findByRole('button', { name: 'Lock Albumin' }));
     await waitFor(() => expect(post).toHaveBeenCalledWith('/v1/concept-to-code/1/lock/'));
     expect(await screen.findByText('Locked Albumin for you.')).toBeInTheDocument();
@@ -983,7 +983,7 @@ describe('concept priority (#1914)', () => {
     list = [named(1, 'Albumin', 1), { ...named(2, 'Bilirubin'), note: { text: 'Ask Lisa first', updated_by: 'lisa@healthtree.org' },
                                       lock: { username: 'lisa@healthtree.org', mine: false } }];
     put.mockReset();
-    render(<ConceptToCodeTab canApprove />);
+    render(<ConceptToCodeTab canWrite canApprove />);
     const add = await screen.findByRole('button', { name: 'Add a note for Albumin' });
     expect(add).toHaveAttribute('data-has-note', 'false');
     // The icon sits between the concept's name and its lock.
@@ -1048,7 +1048,7 @@ describe('concept priority (#1914)', () => {
 
   it('reports a failed move and keeps the list as it was', async () => {
     post.mockRejectedValue({ response: { status: 403, data: { detail: 'Professional access required.' } } });
-    render(<ConceptToCodeTab canApprove />);
+    render(<ConceptToCodeTab canWrite canApprove />);
     const calcium = await screen.findByLabelText('Priority for Calcium');
     fireEvent.change(calcium, { target: { value: '1' } });
     fireEvent.blur(calcium);
@@ -1121,7 +1121,7 @@ describe('concept priority (#1914)', () => {
     get.mockImplementation((url: string) => url === '/v1/concept-to-code/' ? Promise.resolve({ data: page([concept]) })
       : url.endsWith('/estimate/') ? Promise.resolve({ data: { total: 1, timed_out: false } })
         : fail ? Promise.reject(new Error('Unavailable')) : Promise.resolve({ data: page([source]) }));
-    render(<ConceptToCodeTab canApprove />);
+    render(<ConceptToCodeTab canWrite canApprove />);
     fireEvent.click(await screen.findByRole('button', { name: 'Serum albumin' }));
     await showExisting();
     expect(await screen.findByRole('alert')).toHaveTextContent('Could not load source codes.');

@@ -42,8 +42,8 @@ The role a self-signup receives depends on why the org was offered to that visit
 
 | Org is reachable because | `GroupAccess` role |
 |---|---|
-| `allows_patient_signup` (public demo org) | `analyst` |
-| it trusts the email domain (`OrgTrust.trusted_domain`) | `patient`, promoted to `analyst` when the address is verified |
+| `allows_patient_signup` (public demo org) | `doctor` (#2416; `analyst` before) |
+| it trusts the email domain (`OrgTrust.trusted_domain`) | `patient`, promoted to `doctor` when the address is verified (#2416; `analyst` before) |
 | a pending `OrgInvitation` only | `patient` |
 
 A public org's role comes from that org's policy. The other two depend on who the

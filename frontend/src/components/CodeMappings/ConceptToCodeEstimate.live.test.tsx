@@ -31,7 +31,7 @@ describeLive('Suggest source codes estimate against a live backend', () => {
     const before = await estimate();
     expect(before.total).toBeGreaterThan(25);
 
-    render(<ConceptToCodeTab canApprove />);
+    render(<ConceptToCodeTab canWrite canApprove />);
     // The concept need not back a patient field.
     fireEvent.change(await screen.findByRole('combobox', { name: 'Concept scope' }), { target: { value: 'all' } });
     fireEvent.change(await screen.findByRole('textbox', { name: 'Search standard concepts' }), { target: { value: CONCEPT } });

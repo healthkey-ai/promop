@@ -832,7 +832,8 @@ def test_permissions_and_forward_run_separation(client, concept, django_user_mod
     client.force_authenticate(django_user_model.objects.create_user(email='patient@test.com'))
     assert client.get(BASE).status_code == 403
     row = source('A')
-    with patch('patient_portal.api.views._can_manage_code_mappings', return_value=True):
+    with patch('patient_portal.api.views._can_view_mappings', return_value=True), \
+            patch('patient_portal.api.views._can_manage_mappings', return_value=True):
         assert apply(client, concept, row).status_code == 200
         row.refresh_from_db()
         assert apply(client, concept, row, status='approved').status_code == 400

@@ -304,7 +304,7 @@ def accept_patient_invitation(request):
                 GroupAccess.objects.get_or_create(
                     identity=identity,
                     org=pr.organization,
-                    defaults={'role': 'patient'},
+                    role='patient',
                 )
 
             invitation.accepted_at = timezone.now()

@@ -12,11 +12,17 @@ import {
   deleteDiseaseCategoryMapping,
   type DiseaseCategoryMappingItem,
 } from '@/api/mappingHub';
+import { useAuth } from '@/hooks/useAuth';
+import { isStaffOrOrgAdmin } from '@/utils/roles';
 
 interface CategoryOption { value: string; label: string }
 
 export default function DiseaseCategoryPage() {
   const navigate = useNavigate();
+  const { currentUser } = useAuth();
+  // Disease-category reference writes are org_admin-only on the API
+  // (`_require_mapping_admin`); every other professional reads (#2416).
+  const canEdit = isStaffOrOrgAdmin(currentUser);
   const [categories, setCategories] = useState<CategoryOption[]>([]);
   const [items, setItems] = useState<DiseaseCategoryMappingItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -141,18 +147,24 @@ export default function DiseaseCategoryPage() {
 
       {error && <div className="mb-4 rounded-md bg-destructive/10 p-3 text-sm text-destructive">{error}</div>}
 
+      {!canEdit && (
+        <p role="status" className="mb-4 text-sm text-muted-foreground">Read-only: editing reference data needs the org admin role.</p>
+      )}
+
       {/* Categories management */}
       <div className="mb-4 rounded-lg border border-border bg-background p-4">
         <div className="mb-2 flex items-center justify-between">
           <h3 className="text-sm font-medium text-foreground">Categories</h3>
-          <button
-            className="inline-flex items-center gap-1 rounded-md border border-input px-2 py-1 text-xs hover:bg-accent"
-            onClick={() => setShowNewCat(!showNewCat)}
-          >
-            <Plus size={14} /> New Category
-          </button>
+          {canEdit && (
+            <button
+              className="inline-flex items-center gap-1 rounded-md border border-input px-2 py-1 text-xs hover:bg-accent"
+              onClick={() => setShowNewCat(!showNewCat)}
+            >
+              <Plus size={14} /> New Category
+            </button>
+          )}
         </div>
-        {showNewCat && (
+        {showNewCat && canEdit && (
           <div className="mb-3 flex flex-wrap items-end gap-2 rounded border border-dashed border-border p-3">
             <div>
               <label htmlFor="new-cat-code" className="mb-1 block text-xs font-medium text-muted-foreground">Code</label>
@@ -190,21 +202,23 @@ export default function DiseaseCategoryPage() {
             <span key={cat.value} className="inline-flex items-center gap-1.5 rounded-full border border-border bg-muted/50 px-2.5 py-1 text-xs">
               <span className="font-medium">{cat.value}</span>
               <span className="text-muted-foreground">{cat.label}</span>
-              <button
-                className="ml-0.5 rounded-full p-0.5 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-                onClick={() => void handleDeleteCategory(cat.value)}
-                aria-label={`Delete category ${cat.value}`}
-                title="Delete category"
-              >
-                <Trash2 size={12} />
-              </button>
+              {canEdit && (
+                <button
+                  className="ml-0.5 rounded-full p-0.5 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                  onClick={() => void handleDeleteCategory(cat.value)}
+                  aria-label={`Delete category ${cat.value}`}
+                  title="Delete category"
+                >
+                  <Trash2 size={12} />
+                </button>
+              )}
             </span>
           ))}
         </div>
       </div>
 
       {/* Add mapping form */}
-      <div className="mb-4 flex flex-wrap items-end gap-2 rounded-lg border border-border bg-background p-4">
+      {canEdit && <div className="mb-4 flex flex-wrap items-end gap-2 rounded-lg border border-border bg-background p-4">
         <div className="flex-1 min-w-[200px]">
           <label htmlFor="new-disease-name" className="mb-1 block text-xs font-medium text-muted-foreground">Disease Name</label>
           <input
@@ -234,7 +248,7 @@ export default function DiseaseCategoryPage() {
         >
           <Plus size={16} /> Add
         </button>
-      </div>
+      </div>}
 
       {/* Search */}
       <div className="mb-4 flex gap-2">
@@ -261,38 +275,44 @@ export default function DiseaseCategoryPage() {
               <tr>
                 <th className="px-4 py-2 text-left font-medium text-muted-foreground">Disease Name</th>
                 <th className="px-4 py-2 text-left font-medium text-muted-foreground">Category</th>
-                <th className="w-16 px-4 py-2" />
+                {canEdit && <th className="w-16 px-4 py-2" />}
               </tr>
             </thead>
             <tbody className="divide-y divide-border">
               {items.length === 0 && (
-                <tr><td colSpan={3} className="px-4 py-6 text-center text-muted-foreground">No mappings found.</td></tr>
+                <tr><td colSpan={canEdit ? 3 : 2} className="px-4 py-6 text-center text-muted-foreground">No mappings found.</td></tr>
               )}
               {items.map(item => (
                 <tr key={item.id} className="hover:bg-muted/30">
                   <td className="px-4 py-2">{item.disease_name}</td>
                   <td className="px-4 py-2">
-                    <select
-                      className="rounded border border-input bg-background px-2 py-1 text-sm"
-                      value={item.category}
-                      onChange={e => void handleCategoryChange(item, e.target.value)}
-                    >
-                      {categories.map(c => <option key={c.value} value={c.value}>{c.value} — {c.label}</option>)}
-                      {/* Show current value even if its category was removed */}
-                      {!categories.some(c => c.value === item.category) && (
-                        <option value={item.category}>{item.category}</option>
-                      )}
-                    </select>
+                    {canEdit ? (
+                      <select
+                        className="rounded border border-input bg-background px-2 py-1 text-sm"
+                        value={item.category}
+                        onChange={e => void handleCategoryChange(item, e.target.value)}
+                      >
+                        {categories.map(c => <option key={c.value} value={c.value}>{c.value} — {c.label}</option>)}
+                        {/* Show current value even if its category was removed */}
+                        {!categories.some(c => c.value === item.category) && (
+                          <option value={item.category}>{item.category}</option>
+                        )}
+                      </select>
+                    ) : (
+                      <span>{categories.find(c => c.value === item.category)?.label ?? item.category}</span>
+                    )}
                   </td>
-                  <td className="px-4 py-2 text-center">
-                    <button
-                      className="rounded p-1 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
-                      onClick={() => void handleDelete(item)}
-                      aria-label={`Delete ${item.disease_name}`}
-                    >
-                      <Trash2 size={16} />
-                    </button>
-                  </td>
+                  {canEdit && (
+                    <td className="px-4 py-2 text-center">
+                      <button
+                        className="rounded p-1 text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                        onClick={() => void handleDelete(item)}
+                        aria-label={`Delete ${item.disease_name}`}
+                      >
+                        <Trash2 size={16} />
+                      </button>
+                    </td>
+                  )}
                 </tr>
               ))}
             </tbody>

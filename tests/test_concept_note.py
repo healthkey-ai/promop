@@ -104,8 +104,9 @@ def test_note_endpoint_is_for_code_mapping_users_and_standard_concepts(alice, co
     assert put(patient, concept, 'x').status_code == 403
     assert patient.delete(f'{BASE}{concept.pk}/note/').status_code == 403
     assert not ConceptMappingNote.objects.exists()
-    # Every professional role uses the tab, the analyst included (#2398).
+    # The tab is the analyst's (#2398, #2416); a doctor needs that grant too.
     assert put(curator(django_user_model, 'analyst@test.com', role='analyst'), concept, 'x').status_code == 200
+    assert put(curator(django_user_model, 'doctor@test.com', role='doctor'), concept, 'x').status_code == 403
     nonstandard = ConceptFactory(standard_concept=None)
     assert put(alice, nonstandard, 'x').status_code == 404
     assert alice.post(f'{BASE}{concept.pk}/note/', {'note': 'x'}, format='json').status_code == 405

@@ -18,7 +18,7 @@ import secrets
 from django.conf import settings
 from django.core.mail import send_mail
 from django.core.validators import URLValidator
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Count, F, Q
 from django.core.exceptions import ValidationError
 from django.utils import timezone
@@ -161,8 +161,6 @@ def _get_or_create_invitee_identity(email):
     return Identity.objects.create_user(email=email, password=None)
 
 
-ROLE_RANK = {'org_admin': 3, 'doctor': 2, 'analyst': 1, 'patient': 0}
-
 NONCONFORMING_VOCABULARIES = frozenset({'LOCAL', 'FHIR', 'sct'})
 
 VOCABULARY_USAGE_SOURCES = (
@@ -291,30 +289,23 @@ def _normalize_redirect_url(role, redirect_url):
 
 
 def _grant_org_access(identity, org, role, granted_by, redirect_url=''):
+    """Add *role* at *org* for *identity*, or refresh the row it already has.
+
+    Roles are additive (#2416): a doctor invited as an analyst holds both rows
+    afterwards, and nothing is ever upgraded or downgraded in place. An
+    existing row of the same role only has its redirect site refreshed.
+    """
     normalized_redirect_url = _normalize_redirect_url(role, redirect_url)
-    existing = GroupAccess.objects.filter(identity=identity, org=org).first()
-    if existing:
-        changed_fields = []
-        if ROLE_RANK.get(existing.role, 0) < ROLE_RANK.get(role, 0):
-            existing.role = role
-            existing.granted_by = granted_by
-            changed_fields.extend(['role', 'granted_by'])
-
-        desired_redirect_url = normalized_redirect_url if existing.role == 'analyst' else ''
-        if existing.redirect_url != desired_redirect_url:
-            existing.redirect_url = desired_redirect_url
-            changed_fields.append('redirect_url')
-
-        if changed_fields:
-            existing.save(update_fields=changed_fields)
-        return existing
-    return GroupAccess.objects.create(
-        identity=identity,
-        org=org,
-        role=role,
-        redirect_url=normalized_redirect_url if role == 'analyst' else '',
-        granted_by=granted_by,
+    # get_or_create, so two concurrent grants of one role converge on one row
+    # instead of the loser raising on uq_identity_org_role.
+    grant, created = GroupAccess.objects.get_or_create(
+        identity=identity, org=org, role=role,
+        defaults={'redirect_url': normalized_redirect_url, 'granted_by': granted_by},
     )
+    if not created and grant.redirect_url != normalized_redirect_url:
+        grant.redirect_url = normalized_redirect_url
+        grant.save(update_fields=['redirect_url'])
+    return grant
 
 
 # ---------------------------------------------------------------------------
@@ -576,10 +567,9 @@ def confirm_invitation(request):
             if (target.email or '').lower() == invitation.email.lower():
                 target.mark_email_verified()
 
-        # Grant access — use get_or_create rather than update_or_create to avoid
-        # silently downgrading an existing higher-privilege role (e.g. org_admin → doctor).
-        # If the grant already exists, leave it unchanged; the invitation is still
-        # marked confirmed so it can't be replayed.
+        # Grant access. Roles are additive (#2416): the invited role is added
+        # beside any the invitee already holds, never replacing one. The
+        # invitation is marked confirmed either way so it can't be replayed.
         grants = [
             _grant_org_access(
                 target,
@@ -591,6 +581,18 @@ def confirm_invitation(request):
             for target in grant_targets
         ]
         grant = grants[0]
+
+        # The token proved the address, so the invitee's own signup rows no
+        # longer wait on verification: a trusted-domain signup is promoted (or,
+        # now that the invited role exists beside it, dropped -- #2416), and
+        # any remaining gate is cleared, as verify_email does.
+        from patient_portal.api.email_verification import promote_trusted_domain_grants
+        for target in grant_targets:
+            if target.has_verified_email:
+                promote_trusted_domain_grants(target)
+                GroupAccess.objects.filter(
+                    identity=target, pending_email_verification=True,
+                ).update(pending_email_verification=False)
 
         # For patient invites, create the PatientUser link
         if invitation.role == 'patient':
@@ -704,12 +706,66 @@ class OrgTrustDetailView(APIView):
 # ---------------------------------------------------------------------------
 
 class OrgAccessListView(APIView):
-    permission_classes = [IsStaffOrAccessAdmin]
+    def get_permissions(self):
+        if self.request.method == 'POST':
+            return [IsStaffOrAccessAdmin(), OrgAdminTokenScopePermission()]
+        return [IsStaffOrAccessAdmin()]
 
     def get(self, request, slug):
         org = _get_org(slug)
         grants = GroupAccess.objects.filter(org=org).select_related('identity').order_by('id')
         return Response(GroupAccessSerializer(grants, many=True).data)
+
+    def post(self, request, slug):
+        """Add a second role for an account that already holds a grant here.
+
+        Roles are additive (#2416, #2457): a doctor who should also map codes
+        gets an ``analyst`` row beside the ``doctor`` one, and the Role select
+        on a row swaps rather than adds. ``{"email": ..., "role": ...}`` adds
+        the row; the account must already hold a professional grant at this
+        org (a new account is invited instead, which proves its address), and
+        an org_admin needs no other role. 409 when the role is already held.
+        """
+        org = _get_org(slug)
+        email = (request.data.get('email') or '').strip().lower()
+        role = request.data.get('role')
+        if not email:
+            return Response({'error': 'email is required'}, status=status.HTTP_400_BAD_REQUEST)
+        if role not in ('doctor', 'analyst'):
+            return Response({'error': "role must be 'doctor' or 'analyst'"},
+                            status=status.HTTP_400_BAD_REQUEST)
+        held = list(GroupAccess.objects.filter(
+            org=org, identity__email__iexact=email,
+        ).select_related('identity').order_by('id'))
+        if not held:
+            return Response(
+                {'error': 'This user holds no grant here; invite them instead.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        roles = {grant.role for grant in held}
+        if 'org_admin' in roles:
+            return Response(
+                {'error': 'An org admin already has every role; nothing to add.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not roles & {'doctor', 'analyst'}:
+            return Response(
+                {'error': 'This user holds only a patient grant here; invite them instead.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if role in roles:
+            return Response(
+                {'error': f'This user already holds the {role} role here.'},
+                status=status.HTTP_409_CONFLICT,
+            )
+        try:
+            normalized_redirect_url = _normalize_redirect_url(role, request.data.get('redirect_url', ''))
+        except ValidationError:
+            return Response({'error': 'redirect_url must be a valid http(s) URL.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        grant = _grant_org_access(held[0].identity, org, role, request.user,
+                                  redirect_url=normalized_redirect_url)
+        return Response(GroupAccessSerializer(grant).data, status=status.HTTP_201_CREATED)
 
 
 class OrgAccessDetailView(APIView):
@@ -745,6 +801,16 @@ class OrgAccessDetailView(APIView):
                     {'error': "role must be 'doctor' or 'analyst'"},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
+            if new_role != grant.role and GroupAccess.objects.filter(
+                identity=grant.identity, org=org, role=new_role,
+            ).exists():
+                # Roles are additive (#2416): the user already holds that
+                # role in its own row, so this one is simply surplus.
+                return Response(
+                    {'error': f"This user already holds the {new_role} role here; "
+                              "revoke this grant instead."},
+                    status=status.HTTP_409_CONFLICT,
+                )
             grant.role = new_role
             changed_grant.append('role')
             normalized_redirect_url = _normalize_redirect_url(new_role, grant.redirect_url)
@@ -760,7 +826,16 @@ class OrgAccessDetailView(APIView):
             changed_identity.append('is_premium')
 
         if changed_grant:
-            grant.save(update_fields=changed_grant)
+            try:
+                with transaction.atomic():
+                    grant.save(update_fields=changed_grant)
+            except IntegrityError:
+                # Lost a race with a grant of the same role made meanwhile.
+                return Response(
+                    {'error': f"This user already holds the {grant.role} role here; "
+                              "revoke this grant instead."},
+                    status=status.HTTP_409_CONFLICT,
+                )
         if changed_identity:
             grant.identity.save(update_fields=changed_identity)
 
@@ -943,24 +1018,24 @@ class OrgPatientSignupView(APIView):
                 from omop_core.services.patient_record_service import refresh_patient_record
                 refresh_patient_record(person)
 
-                # Grant access to this org.  A public demo org gives 'analyst' so
+                # Grant access to this org.  A public demo org gives 'doctor' so
                 # the user can browse its sample patients; that depends on the
-                # org's policy, not on who the user says they are.
+                # org's policy, not on who the user says they are. It used to
+                # give 'analyst', but that role no longer reads any patient
+                # (#2416); accounts granted it before keep it.
                 #
-                # An org that trusts the email domain should give 'analyst' too
+                # An org that trusts the email domain should give 'doctor' too
                 # (#1454) -- but at this moment the address is only something the
                 # user typed. So it starts as 'patient' (self-access only) and
                 # verify_email promotes it once the address is proved. Invitation-
                 # only signups stay 'patient'; the invited role is claimed with
                 # the invitation token through accept-invite.
-                signup_role = 'analyst' if org.allows_patient_signup else 'patient'
+                signup_role = 'doctor' if org.allows_patient_signup else 'patient'
                 GroupAccess.objects.get_or_create(
                     identity=identity,
                     org=org,
-                    defaults={
-                        'role': signup_role,
-                        'pending_email_verification': True,
-                    },
+                    role=signup_role,
+                    defaults={'pending_email_verification': True},
                 )
         except Exception:
             logger.exception('Unexpected error during patient signup for %s', email)

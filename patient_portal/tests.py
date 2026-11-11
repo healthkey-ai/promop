@@ -8363,13 +8363,14 @@ class OrgDiseaseStatsTest(TestCase):
         self.assertIn('org-b', slugs)
         self.assertNotIn('org-a', slugs)
 
-    def test_direct_org_navigator_sees_aggregated_org_data(self):
-        navigator = Identity.objects.create_user(email='navigator@t.com', password='x')
-        GroupAccess.objects.create(identity=navigator, org=self.org_b, role='analyst')
-        resp = self._get(navigator)
+    def test_direct_org_analyst_sees_no_org_data(self):
+        """An analyst grant opens no org's patients, aggregated or not (#2416)."""
+        analyst = Identity.objects.create_user(email='navigator@t.com', password='x')
+        GroupAccess.objects.create(identity=analyst, org=self.org_b, role='analyst')
+        resp = self._get(analyst)
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         slugs = {o['org_slug'] for o in resp.data}
-        self.assertIn('org-b', slugs)
+        self.assertNotIn('org-b', slugs)
         self.assertNotIn('org-a', slugs)
 
     def test_no_grants_returns_empty_list(self):
@@ -9777,8 +9778,11 @@ class OrgInvitationFlowTest(TestCase):
 
         self.assertEqual(resp.status_code, 201)
         self.assertTrue(resp.data['access_granted'])
-        partner_grant = GroupAccess.objects.get(identity=partner, org=self.org)
-        self.assertEqual(partner_grant.role, 'doctor')
+        # Roles are additive (#2416): the doctor row joins the analyst row.
+        self.assertEqual(
+            sorted(GroupAccess.objects.filter(identity=partner, org=self.org).values_list('role', flat=True)),
+            ['analyst', 'doctor'],
+        )
         self.assertFalse(GroupAccess.objects.filter(identity=placeholder).exists())
 
     def test_unverified_partner_email_does_not_claim_placeholder_access(self):
@@ -9929,7 +9933,10 @@ class OrgInvitationFlowTest(TestCase):
             GroupAccess.objects.filter(identity=invitee, org=self.org, role='analyst').exists()
         )
 
-    def test_invite_existing_user_updates_existing_org_role(self):
+    def test_invite_existing_user_adds_a_role_beside_the_existing_one(self):
+        """Roles are additive (#2416): the analyst row is kept, with its redirect
+        site, and a doctor row is added. A repeat invite for a held role only
+        refreshes that row."""
         invitee = Identity.objects.create_user(email='role-update@example.com', password='pass', email_verified_at=timezone.now())
         GroupAccess.objects.create(
             identity=invitee,
@@ -9943,11 +9950,21 @@ class OrgInvitationFlowTest(TestCase):
         })
         self.assertEqual(resp.status_code, 201)
         self.assertTrue(resp.data['access_granted'])
-        grant = GroupAccess.objects.get(identity=invitee, org=self.org)
-        self.assertEqual(grant.role, 'doctor')
-        self.assertEqual(grant.redirect_url, '')
+        grants = {g.role: g for g in GroupAccess.objects.filter(identity=invitee, org=self.org)}
+        self.assertEqual(sorted(grants), ['analyst', 'doctor'])
+        self.assertEqual(grants['analyst'].redirect_url, 'https://analytics.healthkey.ai/old')
+        self.assertEqual(grants['doctor'].redirect_url, '')
+        resp = self.client.post('/api/orgs/invite-org/invite/', {
+            'email': 'role-update@example.com',
+            'role': 'analyst',
+            'redirect_url': 'https://analytics.healthkey.ai/new',
+        })
+        self.assertEqual(resp.status_code, 201)
+        self.assertEqual(GroupAccess.objects.filter(identity=invitee, org=self.org).count(), 2)
+        self.assertEqual(GroupAccess.objects.get(identity=invitee, org=self.org, role='analyst').redirect_url,
+                         'https://analytics.healthkey.ai/new')
 
-    def test_invite_existing_user_does_not_downgrade_org_admin(self):
+    def test_invite_existing_org_admin_as_doctor_keeps_the_admin_row(self):
         invitee = Identity.objects.create_user(email='admin-role@example.com', password='pass', email_verified_at=timezone.now())
         GroupAccess.objects.create(identity=invitee, org=self.org, role='org_admin')
         resp = self.client.post('/api/orgs/invite-org/invite/', {
@@ -9956,8 +9973,10 @@ class OrgInvitationFlowTest(TestCase):
         })
         self.assertEqual(resp.status_code, 201)
         self.assertTrue(resp.data['access_granted'])
-        grant = GroupAccess.objects.get(identity=invitee, org=self.org)
-        self.assertEqual(grant.role, 'org_admin')
+        self.assertEqual(
+            sorted(GroupAccess.objects.filter(identity=invitee, org=self.org).values_list('role', flat=True)),
+            ['doctor', 'org_admin'],
+        )
 
     def test_list_invitations(self):
         from django.utils import timezone
@@ -10179,6 +10198,62 @@ class OrgAccessAPITest(TestCase):
         self.grant.refresh_from_db()
         self.assertEqual(self.grant.role, 'analyst')
         self.assertEqual(self.grant.redirect_url, 'https://analytics.healthkey.ai')
+
+    def test_patch_access_grant_into_a_role_already_held_is_a_conflict(self):
+        """Roles are additive (#2416): the user already has an analyst row, so
+        this doctor row cannot become a second one; it is revoked instead."""
+        GroupAccess.objects.create(identity=self.grant.identity, org=self.grant.org, role='analyst')
+        resp = self.client.patch(
+            f'/api/orgs/access-org/access/{self.grant.id}/',
+            {'role': 'analyst'},
+            format='json',
+        )
+        self.assertEqual(resp.status_code, 409, resp.data)
+        self.grant.refresh_from_db()
+        self.assertEqual(self.grant.role, 'doctor')
+
+    def test_add_a_second_role_for_a_user_who_holds_a_grant(self):
+        """Roles are additive (#2416): POST adds the analyst row beside the
+        doctor one (#2457), and a repeat is a 409."""
+        resp = self.client.post('/api/v1/orgs/access-org/access/',
+                                {'email': 'Grantee@example.com', 'role': 'analyst'}, format='json')
+        self.assertEqual(resp.status_code, 201, resp.data)
+        self.assertEqual(resp.data['role'], 'analyst')
+        self.assertEqual(resp.data['redirect_url'], 'https://analytics.healthkey.ai')
+        self.assertEqual(
+            sorted(GroupAccess.objects.filter(identity=self.grantee, org=self.org).values_list('role', flat=True)),
+            ['analyst', 'doctor'],
+        )
+        resp = self.client.post('/api/v1/orgs/access-org/access/',
+                                {'email': 'grantee@example.com', 'role': 'analyst'}, format='json')
+        self.assertEqual(resp.status_code, 409, resp.data)
+        self.assertEqual(GroupAccess.objects.filter(identity=self.grantee, org=self.org).count(), 2)
+
+    def test_add_role_is_refused_for_org_admins_patients_and_strangers(self):
+        url = '/api/v1/orgs/access-org/access/'
+        self.assertEqual(self.client.post(url, {'email': 'grantee@example.com', 'role': 'org_admin'},
+                                          format='json').status_code, 400)
+        self.assertEqual(self.client.post(url, {'email': 'nobody@example.com', 'role': 'doctor'},
+                                          format='json').status_code, 404)
+        admin = _make_user('admin@example.com')
+        GroupAccess.objects.create(identity=admin, org=self.org, role='org_admin')
+        resp = self.client.post(url, {'email': 'admin@example.com', 'role': 'doctor'}, format='json')
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn('org admin', resp.data['error'])
+        patient = _make_user('patient@example.com')
+        GroupAccess.objects.create(identity=patient, org=self.org, role='patient')
+        resp = self.client.post(url, {'email': 'patient@example.com', 'role': 'doctor'}, format='json')
+        self.assertEqual(resp.status_code, 400, resp.data)
+        self.assertIn('invite', resp.data['error'])
+        self.assertEqual(GroupAccess.objects.filter(org=self.org).count(), 3)
+
+    def test_add_role_needs_an_explicit_org_admin(self):
+        doctor = _make_user('doc-only@example.com')
+        GroupAccess.objects.create(identity=doctor, org=self.org, role='doctor')
+        self.client.force_authenticate(user=doctor)
+        resp = self.client.post('/api/v1/orgs/access-org/access/',
+                                {'email': 'grantee@example.com', 'role': 'analyst'}, format='json')
+        self.assertEqual(resp.status_code, 403)
 
     def test_patch_access_grant_clears_redirect_url_when_switching_to_doctor(self):
         self.grant.role = 'analyst'
@@ -15523,7 +15598,7 @@ class OrgPatientSignupTest(TestCase):
         self.assertTrue(PatientUser.objects.filter(identity=identity).exists())
         self.assertTrue(
             GroupAccess.objects.filter(
-                identity=identity, org=self.org, role='analyst',
+                identity=identity, org=self.org, role='doctor',
                 pending_email_verification=True,
             ).exists()
         )
@@ -15540,9 +15615,10 @@ class OrgPatientSignupTest(TestCase):
             )
         return private_org
 
-    def test_signup_trusted_domain_gets_analyst_role_once_the_email_is_verified(self):
-        """#1454 + email verification: a trusted domain earns analyst, but only
-        for an address the account has proved it owns."""
+    def test_signup_trusted_domain_gets_doctor_role_once_the_email_is_verified(self):
+        """#1454 + email verification: a trusted domain earns doctor (the role that
+        reads the trusting org's patients, since an analyst reads none -- #2416),
+        but only for an address the account has proved it owns."""
         import re
         from django.core import mail
         from omop_core.models import OrgTrust
@@ -15582,7 +15658,7 @@ class OrgPatientSignupTest(TestCase):
         verified = APIClient().post('/api/v1/auth/verify-email/', {'token': token})
         self.assertEqual(verified.status_code, 200)
 
-        self.assertEqual(roles(), ['analyst'])
+        self.assertEqual(roles(), ['doctor'])
         # Re-authenticate with a fresh identity — force_authenticate caches the
         # model instance, so the stale one still has email_verified_at=None.
         identity.refresh_from_db()
@@ -15591,6 +15667,37 @@ class OrgPatientSignupTest(TestCase):
         self.assertFalse(user['is_patient'])
         self.assertTrue(user['email_verified'])
         self.assertEqual(client.get('/api/v1/patient-records/77801/').status_code, 200)
+
+    def test_verification_after_a_doctor_invitation_drops_the_pending_row(self):
+        """Signup at a trusted-domain org, accept a doctor invitation there, then
+        follow the verification link: the pending patient row has nothing to
+        become (the doctor row exists), so it is dropped, not duplicated (#2416)."""
+        from omop_core.models import OrgTrust
+        from patient_portal.api.email_verification import promote_trusted_domain_grants
+        private_org = self._private_org_with_patients()
+        OrgTrust.objects.create(granting_org=private_org, trusted_domain='private-clinic.com')
+        resp = APIClient().post('/api/v1/orgs/private-clinic/patient-signup/', {
+            'email': 'late@private-clinic.com', 'password': 'Str0ng!Pass99',
+        })
+        self.assertEqual(resp.status_code, 201)
+        identity = Identity.objects.get(email='late@private-clinic.com')
+        admin = Identity.objects.create_user(email='late-admin@private-clinic.com', is_staff=True)
+        token = _secrets.token_hex(32)
+        OrgInvitation.objects.create(
+            org=private_org, email=identity.email, role='doctor', token=token,
+            invited_by=admin, expires_at=timezone.now() + timedelta(days=1),
+        )
+        resp = APIClient().post('/api/orgs/confirm-invitation/', {'token': token, 'password': 'Str0ng!Pass99'})
+        self.assertEqual(resp.status_code, 200, resp.data)
+        identity.refresh_from_db()
+        self.assertTrue(identity.has_verified_email)
+        self.assertEqual(
+            list(GroupAccess.objects.filter(identity=identity, org=private_org).values_list('role', flat=True)),
+            ['doctor'],
+        )
+        self.assertFalse(GroupAccess.objects.filter(identity=identity, pending_email_verification=True).exists())
+        # A later promotion (the signup's own link, a password reset) is a no-op.
+        self.assertEqual(promote_trusted_domain_grants(identity), 0)
 
     def test_signup_invitation_only_gets_patient_role(self):
         """An invitation alone does not make a self-signup an analyst.
@@ -16771,22 +16878,21 @@ class ClinicalSessionAuthorizationTest(TestCase):
         self.assertEqual(create_resp.status_code, status.HTTP_201_CREATED)
         self.assertTrue(Observation.objects.filter(observation_id=452011).exists())
 
-    def test_org_analyst_grant_is_read_only(self):
+    def test_org_analyst_grant_reaches_no_patient(self):
+        """An analyst maps codes and sees no patient data (#2416)."""
         from omop_core.authorization import (
             can_access_patient, can_write_patient, get_actor_role,
         )
 
         pid = self.patient_person.person_id
-        self.assertTrue(can_access_patient(self.analyst, pid))
+        self.assertFalse(can_access_patient(self.analyst, pid))
         self.assertFalse(can_write_patient(self.analyst, pid))
-        self.assertEqual(get_actor_role(self.analyst, pid), 'analyst')
+        self.assertIsNone(get_actor_role(self.analyst, pid))
 
         client = self._client(self.analyst)
         list_resp = client.get('/api/observations/', {'person_id': pid})
         self.assertEqual(list_resp.status_code, status.HTTP_200_OK)
-        self.assertEqual(
-            [row['observation_id'] for row in list_resp.data], [452010],
-        )
+        self.assertEqual(list_resp.data, [])
 
         create_resp = client.post(
             '/api/observations/',
@@ -16835,13 +16941,13 @@ class ClinicalSessionAuthorizationTest(TestCase):
 # ---------------------------------------------------------------------------
 
 class AnalystWriteGateTest(TestCase):
-    """Analysts may read patient data but must not write it (issue #745).
+    """Analysts must not write patient data (issue #745).
 
-    ``can_access_patient`` grants the ``analyst`` role, ``can_write_patient``
-    does not (``omop_core.authorization``: ``_READ_ROLES`` vs ``_WRITE_ROLES``).
-    Three write endpoints previously authorized on the read predicate alone, so
-    an analyst could delete patients, rewrite demographics, and create episode
-    events. Each test below asserts both the refusal and that nothing was
+    When this was written ``can_access_patient`` granted the ``analyst`` role
+    and ``can_write_patient`` did not; three write endpoints authorized on the
+    read predicate alone, so an analyst could delete patients, rewrite
+    demographics, and create episode events. The role now reads nothing
+    either (#2416), so the refusals below hold at both predicates. Each test below asserts both the refusal and that nothing was
     written — a 403 that still mutated would be the same bug wearing a status
     code.
     """
@@ -16910,11 +17016,11 @@ class AnalystWriteGateTest(TestCase):
         client.credentials(HTTP_AUTHORIZATION=f'Bearer {token}')
         return client
 
-    def test_analyst_can_read_the_patient_they_cannot_write(self):
-        """Baseline: the refusals below are about the verb, not visibility."""
+    def test_analyst_neither_reads_nor_writes_the_patient(self):
+        """Baseline (#2416): the refusals below hold at the read predicate too."""
         from omop_core.authorization import can_access_patient, can_write_patient
 
-        self.assertTrue(can_access_patient(self.analyst, self.person.person_id))
+        self.assertFalse(can_access_patient(self.analyst, self.person.person_id))
         self.assertFalse(can_write_patient(self.analyst, self.person.person_id))
 
     def test_session_auth_cannot_reach_bulk_delete_at_all(self):
@@ -16946,8 +17052,10 @@ class AnalystWriteGateTest(TestCase):
 
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
         self.assertEqual(resp.data['deleted_count'], 0)
+        # The analyst no longer reads the patient either (#2416), so the
+        # refusal reads as "not found" rather than "read-only".
         self.assertTrue(
-            any('read-only' in e for e in resp.data['errors']),
+            any('not found' in e.lower() for e in resp.data['errors']),
             resp.data['errors'],
         )
         self.assertTrue(
@@ -16975,7 +17083,8 @@ class AnalystWriteGateTest(TestCase):
             format='json',
         )
 
-        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        # 404 since #2416: the analyst cannot even see the person.
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
         self.person.refresh_from_db()
         self.assertEqual(self.person.given_name, 'Original')
 
@@ -25821,11 +25930,12 @@ class FhirUploadDeniedWriteRollbackTest(TestCase):
 
     # -- precondition -----------------------------------------------------
 
-    def test_analyst_can_read_but_not_write_this_patient(self):
-        """Documents the precondition: the refusal is about the verb, not visibility."""
+    def test_analyst_cannot_write_this_patient(self):
+        """Documents the precondition: the analyst token is refused at the gate,
+        the doctor's is not. (The role reads nothing either since #2416.)"""
         from omop_core.authorization import can_access_patient, can_write_patient
 
-        self.assertTrue(can_access_patient(self.analyst, self.person.person_id))
+        self.assertFalse(can_access_patient(self.analyst, self.person.person_id))
         self.assertFalse(can_write_patient(self.analyst, self.person.person_id))
         self.assertTrue(can_write_patient(self.doctor, self.person.person_id))
 
@@ -26998,8 +27108,8 @@ class MappingStatsTest(MappingHubTestBase):
 
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
-    def test_analyst_is_refused_stats(self):
-        """The mapping hub is curation an analyst does not reach (#2398)."""
+    def test_analyst_reads_stats(self):
+        """The mapping hub is the analyst's page (#2416; refused under #2398)."""
         analyst = Identity.objects.create_user(
             email='analyst-mapping@test.com', password='testpass',
         )
@@ -27008,7 +27118,7 @@ class MappingStatsTest(MappingHubTestBase):
         )
         self.client.force_authenticate(user=analyst)
         resp = self.client.get('/api/v1/mapping-stats/')
-        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
     def test_regular_user_forbidden(self):
         self.client.force_authenticate(user=self.regular)
@@ -27216,8 +27326,10 @@ class VocabScopeAndSuggestedCodesTest(TestCase):
 # =============================================================================
 
 class MappingApprovalRoleTest(TestCase):
-    """Verify that doctors and analysts can access mapping pages but cannot
-    approve mappings — only staff and org_admin can approve.
+    """Verify that every professional reads the mapping pages, that writing
+    them is the analyst grant's (a doctor without one creates, edits and
+    deletes nothing, #2416), and that nobody but staff and org_admin
+    approves.
 
     Also checks that non-admins cannot un-approve (change approved→proposed),
     delete approved mappings, or create field mappings as approved.
@@ -27289,18 +27401,48 @@ class MappingApprovalRoleTest(TestCase):
         resp = self.client.get('/api/v1/code-mappings/')
         self.assertEqual(resp.status_code, status.HTTP_200_OK)
 
-    # ---- Doctor CANNOT create field mapping as approved ----
-
-    def test_doctor_cannot_create_field_mapping_as_approved(self):
+    def test_doctor_without_analyst_grant_reads_code_mappings_and_creates_none(self):
         self.client.force_authenticate(user=self.doctor)
-        resp = self.client.post('/api/v1/field-mappings/', {
+        self.assertEqual(self.client.get('/api/v1/code-mappings/').status_code, status.HTTP_200_OK)
+        resp = self.client.post('/api/v1/code-mappings/', {
+            'source_vocabulary_id': 'HK-Labs', 'source_code': 'doc-1',
+            'source_code_description': 'Doctor tries', 'target_concept': self.concept.concept_id,
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(resp.data['detail'], 'Mapping curator access required.')
+        self.client.force_authenticate(user=self.org_admin_user)
+        self.assertEqual(self.client.get('/api/v1/code-mappings/').status_code, status.HTTP_200_OK)
+
+    # ---- Doctor CANNOT create field mappings; an analyst creates, not as approved ----
+
+    def test_doctor_cannot_create_field_mapping(self):
+        self.client.force_authenticate(user=self.doctor)
+        payload = {
+            'field_name': 'weight',
+            'concept_id': self.concept.concept_id,
+            'concept_code': self.concept.concept_code,
+            'vocabulary_id': self.concept.vocabulary.vocabulary_id,
+            'status': 'proposed',
+        }
+        resp = self.client.post('/api/v1/field-mappings/', payload, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(resp.data['detail'], 'Mapping curator access required.')
+        self.assertFalse(FieldConceptMapping.objects.filter(field_name='weight').exists())
+
+    def test_analyst_cannot_create_field_mapping_as_approved(self):
+        self.client.force_authenticate(user=self.analyst)
+        payload = {
             'field_name': 'weight',
             'concept_id': self.concept.concept_id,
             'concept_code': self.concept.concept_code,
             'vocabulary_id': self.concept.vocabulary.vocabulary_id,
             'status': 'approved',
-        }, format='json')
+        }
+        resp = self.client.post('/api/v1/field-mappings/', payload, format='json')
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        resp = self.client.post('/api/v1/field-mappings/', {**payload, 'status': 'proposed'}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        FieldConceptMapping.objects.filter(field_name='weight').delete()
 
     # ---- Org admin CAN create field mapping as approved ----
 
@@ -27332,6 +27474,7 @@ class MappingApprovalRoleTest(TestCase):
             'status': 'approved',
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(resp.data['detail'], 'Mapping curator access required.')
         mapping.refresh_from_db()
         self.assertEqual(mapping.status, 'proposed')
         mapping.delete()
@@ -27351,6 +27494,7 @@ class MappingApprovalRoleTest(TestCase):
             'status': 'proposed',
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(resp.data['detail'], 'Mapping curator access required.')
         mapping.refresh_from_db()
         self.assertEqual(mapping.status, 'approved')
         mapping.delete()
@@ -27373,7 +27517,7 @@ class MappingApprovalRoleTest(TestCase):
 
     # ---- Doctor CAN delete proposed field mapping ----
 
-    def test_doctor_can_delete_proposed_field_mapping(self):
+    def test_analyst_can_delete_proposed_field_mapping_and_doctor_cannot(self):
         mapping = FieldConceptMapping.objects.create(
             field_name='diastolic_blood_pressure',
             concept=self.concept,
@@ -27382,6 +27526,11 @@ class MappingApprovalRoleTest(TestCase):
             status='proposed',
         )
         self.client.force_authenticate(user=self.doctor)
+        self.assertEqual(self.client.get(f'/api/v1/field-mappings/{mapping.pk}/').status_code, status.HTTP_200_OK)
+        resp = self.client.delete(f'/api/v1/field-mappings/{mapping.pk}/')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertTrue(FieldConceptMapping.objects.filter(pk=mapping.pk).exists())
+        self.client.force_authenticate(user=self.analyst)
         resp = self.client.delete(f'/api/v1/field-mappings/{mapping.pk}/')
         self.assertEqual(resp.status_code, status.HTTP_204_NO_CONTENT)
         self.assertFalse(FieldConceptMapping.objects.filter(pk=mapping.pk).exists())
@@ -27403,7 +27552,8 @@ class MappingApprovalRoleTest(TestCase):
         resp = self.client.patch(f'/api/v1/code-mappings/{mapping.pk}/', {
             'status': 'approved',
         }, format='json')
-        self.assertIn(resp.status_code, [status.HTTP_400_BAD_REQUEST, status.HTTP_403_FORBIDDEN])
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(resp.data['detail'], 'Mapping curator access required.')
         mapping.refresh_from_db()
         self.assertEqual(mapping.status, 'proposed')
         mapping.delete()
@@ -27425,7 +27575,8 @@ class MappingApprovalRoleTest(TestCase):
         resp = self.client.patch(f'/api/v1/code-mappings/{mapping.pk}/', {
             'status': 'proposed',
         }, format='json')
-        self.assertIn(resp.status_code, [status.HTTP_400_BAD_REQUEST, status.HTTP_403_FORBIDDEN])
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(resp.data['detail'], 'Mapping curator access required.')
         mapping.refresh_from_db()
         self.assertEqual(mapping.status, 'approved')
         mapping.delete()
@@ -27448,6 +27599,55 @@ class MappingApprovalRoleTest(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
         self.assertTrue(SourceCodeConceptMapping.objects.filter(pk=mapping.pk).exists())
         mapping.delete()
+
+    # ---- Analyst passes the write gate and stops at the approval gate ----
+
+    def _approval_refused(self, resp):
+        # The field-mapping view refuses with 403; the code-mapping serializer
+        # with 400. Either way the message names the approval gate.
+        self.assertIn(resp.status_code, (status.HTTP_400_BAD_REQUEST, status.HTTP_403_FORBIDDEN), resp.data)
+        self.assertIn('org admin', str(resp.data).lower(), resp.data)
+
+    def test_analyst_cannot_approve_unapprove_or_delete_approved_field_mapping(self):
+        """A doctor is refused at the write gate before approval is ever
+        considered; the analyst is the caller who reaches it (#2416)."""
+        proposed = FieldConceptMapping.objects.create(
+            field_name='ecog_performance_status', concept=self.concept,
+            concept_code=self.concept.concept_code,
+            vocabulary_id=self.concept.vocabulary.vocabulary_id, status='proposed',
+        )
+        approved = FieldConceptMapping.objects.create(
+            field_name='bmi', concept=self.concept, concept_code=self.concept.concept_code,
+            vocabulary_id=self.concept.vocabulary.vocabulary_id, status='approved',
+        )
+        self.client.force_authenticate(user=self.analyst)
+        self._approval_refused(self.client.patch(
+            f'/api/v1/field-mappings/{proposed.pk}/', {'status': 'approved'}, format='json'))
+        self._approval_refused(self.client.patch(
+            f'/api/v1/field-mappings/{approved.pk}/', {'status': 'proposed'}, format='json'))
+        self._approval_refused(self.client.delete(f'/api/v1/field-mappings/{approved.pk}/'))
+        proposed.refresh_from_db(); approved.refresh_from_db()
+        self.assertEqual((proposed.status, approved.status), ('proposed', 'approved'))
+        proposed.delete(); approved.delete()
+
+    def test_analyst_cannot_approve_unapprove_or_delete_approved_code_mapping(self):
+        def row(code, row_status):
+            return SourceCodeConceptMapping.objects.create(
+                source_vocabulary_id='', source_code=code, source_code_description='x',
+                target_concept=self.concept, destination_vocabulary_id='HK-Labs',
+                omop_table='measurement', status=row_status, origin='import',
+            )
+        proposed = row('ANALYST-APPROVE', 'proposed')
+        approved = row('ANALYST-UNAPPROVE', 'approved')
+        self.client.force_authenticate(user=self.analyst)
+        self._approval_refused(self.client.patch(
+            f'/api/v1/code-mappings/{proposed.pk}/', {'status': 'approved'}, format='json'))
+        self._approval_refused(self.client.patch(
+            f'/api/v1/code-mappings/{approved.pk}/', {'status': 'proposed'}, format='json'))
+        self._approval_refused(self.client.delete(f'/api/v1/code-mappings/{approved.pk}/'))
+        proposed.refresh_from_db(); approved.refresh_from_db()
+        self.assertEqual((proposed.status, approved.status), ('proposed', 'approved'))
+        proposed.delete(); approved.delete()
 
     # ---- Staff CAN approve field mapping ----
 
@@ -33460,48 +33660,32 @@ class TherapyComponentDetailTest(MappingHubTestBase):
 
 
 class AnalystRoleScopeTest(TestCase):
-    """An analyst reaches three things and nothing else (#2398).
+    """An analyst reaches two things and nothing else (#2398, #2416).
 
-    Code mapping on both tabs, read-only patient viewing, and PRism (a separate
-    app that shares the identity table, so nothing here). Every other
-    professional surface is a 403, and an organization trust does not make an
-    analyst an admin of the granting org the way it does a doctor.
+    The mapping pages, which it alone (with staff and org_admin) writes, and
+    PRism (a separate app that shares the identity table, so nothing here).
+    No individual patient's data, on any surface, and neither kind of trust
+    makes an analyst-only account an admin of the granting org. Roles are
+    additive: a doctor reads every mapping page and writes one only when also
+    granted analyst.
     """
 
     def setUp(self):
         self.client = APIClient()
-        # A public demo org: the signup path that hands out the analyst role,
-        # and the one org kind whose patients a plain (non-admin) grant lists.
-        self.org = Organization.objects.create(name='Analyst Org', slug='analyst-org', allows_patient_signup=True)
+        # A private org. A public demo org (allows_patient_signup) is the one
+        # org kind whose patients every grant there lists, an analyst's too;
+        # see test_an_analyst_browses_and_exports_a_public_demo_org.
+        self.org = Organization.objects.create(name='Analyst Org', slug='analyst-org')
         self.analyst = _make_user('analyst-scope@test.com')
         GroupAccess.objects.create(identity=self.analyst, org=self.org, role='analyst')
         self.person = Person.objects.create(person_id=9951)
         self.record = PatientRecord.objects.create(person=self.person, organization=self.org)
         self.client.force_authenticate(user=self.analyst)
 
+    def _rows(self, resp):
+        return resp.data['results'] if isinstance(resp.data, dict) else resp.data
+
     # -- allowed -------------------------------------------------------------
-
-    def test_patient_list_and_detail_are_readable(self):
-        resp = self.client.get('/api/patient-info/')
-        self.assertEqual(resp.status_code, status.HTTP_200_OK)
-        rows = resp.data['results'] if isinstance(resp.data, dict) else resp.data
-        self.assertIn(self.person.person_id, [r['person_id'] for r in rows])
-        resp = self.client.get(f'/api/patient-info/{self.person.person_id}/')
-        self.assertEqual(resp.status_code, status.HTTP_200_OK)
-
-    def test_an_ordinary_org_grant_lists_no_patients(self):
-        """The list shows demo-org, admin-org and group patients only; a plain
-        grant at an ordinary org sees an empty list, for an analyst as for a doctor."""
-        plain = _make_org('Plain Org', 'plain-org')
-        Person.objects.create(person_id=9952)
-        PatientRecord.objects.create(person_id=9952, organization=plain)
-        for role in ('analyst', 'doctor'):
-            user = _make_user(f'{role}-plain@test.com')
-            GroupAccess.objects.create(identity=user, org=plain, role=role)
-            self.client.force_authenticate(user=user)
-            resp = self.client.get('/api/patient-info/')
-            rows = resp.data['results'] if isinstance(resp.data, dict) else resp.data
-            self.assertEqual([r['person_id'] for r in rows], [], role)
 
     def test_code_to_concept_tab_is_reachable(self):
         resp = self.client.get('/api/v1/code-mappings/')
@@ -33523,32 +33707,6 @@ class AnalystRoleScopeTest(TestCase):
         self.assertEqual(self.client.delete(f'/api/v1/concept-to-code/{concept.pk}/lock/').status_code,
                          status.HTTP_200_OK)
 
-    # -- denied --------------------------------------------------------------
-
-    def test_patient_write_is_refused(self):
-        resp = self.client.patch(
-            f'/api/patient-info/{self.person.person_id}/', {'ecog_score': '1'}, format='json',
-        )
-        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
-
-    def test_field_mappings_are_refused(self):
-        self.assertEqual(self.client.get('/api/v1/field-mappings/').status_code, status.HTTP_403_FORBIDDEN)
-        # Field choices are read by the patient form, so GET stays open; the write is not.
-        resp = self.client.post('/api/v1/field-choices/', {'field_name': 'ecog_score', 'value': 'x'}, format='json')
-        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
-
-    def test_mapping_hub_is_refused(self):
-        self.assertEqual(self.client.get('/api/v1/mapping-stats/').status_code, status.HTTP_403_FORBIDDEN)
-
-    def test_relevance_signals_are_refused(self):
-        self.assertEqual(self.client.get('/api/v1/relevance/signals/').status_code, status.HTTP_403_FORBIDDEN)
-
-    def test_source_systems_and_code_mapping_upload_are_refused(self):
-        self.assertEqual(self.client.get('/api/v1/code-mappings/source-systems/').status_code,
-                         status.HTTP_403_FORBIDDEN)
-        resp = self.client.post('/api/v1/code-mappings/upload/', {}, format='multipart')
-        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN)
-
     def test_mapping_approval_is_refused_but_a_proposal_is_not(self):
         concept = _make_test_concept(2_100_009_002, 'Analyst destination', 'ANALYST-DEST', 'Measurement')
         body = {
@@ -33562,34 +33720,227 @@ class AnalystRoleScopeTest(TestCase):
         resp = self.client.post('/api/v1/code-mappings/', body, format='json')
         self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
 
-    def test_doctor_keeps_the_curation_pages(self):
+    # -- no patient data -----------------------------------------------------
+
+    def test_patient_list_is_empty_and_detail_is_not_found(self):
+        from omop_core.authorization import can_access_patient, get_actor_role
+        self.assertFalse(can_access_patient(self.analyst, self.person.person_id))
+        self.assertIsNone(get_actor_role(self.analyst, self.person.person_id))
+        for prefix in ('/api/patient-info/', '/api/v1/patient-records/'):
+            resp = self.client.get(prefix)
+            self.assertEqual(resp.status_code, status.HTTP_200_OK)
+            self.assertEqual(self._rows(resp), [], prefix)
+            self.assertEqual(self.client.get(f'{prefix}{self.person.person_id}/').status_code,
+                             status.HTTP_404_NOT_FOUND, prefix)
+
+    def test_an_analyst_browses_and_exports_a_public_demo_org(self):
+        """A public demo org hands out no individual access, so its role
+        restrictions do not matter: every grant there lists and CSV-exports
+        its sample patients, an analyst's included (#1392, #2416). The
+        private org's patient stays out of reach, and a detail is 404 as it
+        is for a patient-role grant at the demo org."""
+        demo_org = Organization.objects.create(
+            name='Public Demo', slug='public-demo', allows_patient_signup=True,
+        )
+        GroupAccess.objects.create(identity=self.analyst, org=demo_org, role='analyst')
+        sample = Person.objects.create(person_id=9952)
+        PatientRecord.objects.create(person=sample, organization=demo_org, disease='Breast Cancer')
+        for prefix in ('/api/patient-info/', '/api/v1/patient-records/'):
+            resp = self.client.get(prefix)
+            self.assertEqual(resp.status_code, status.HTTP_200_OK)
+            self.assertEqual([r['person_id'] for r in self._rows(resp)], [sample.person_id], prefix)
+        self.assertEqual(self.client.get(f'/api/v1/patient-records/{sample.person_id}/').status_code,
+                         status.HTTP_404_NOT_FOUND)
+        resp = self.client.get('/api/v1/patient-records/export-csv/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.content[:200])
+        import csv as _csv
+        import io
+        rows = list(_csv.DictReader(io.StringIO(resp.content.decode('utf-8'))))
+        self.assertEqual([r['person_id'] for r in rows], [str(sample.person_id)])
+        resp = self.client.get('/api/v1/patient-records/export-csv/',
+                               {'person_ids': str(self.person.person_id)})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(list(_csv.DictReader(io.StringIO(resp.content.decode('utf-8')))), [])
+        self.assertTrue(
+            self.client.get('/api/user/').data['user']['org_accesses'][-1]['org_allows_patient_signup'],
+        )
+
+    def test_clinical_rows_and_patient_source_codes_are_not_found(self):
+        pid = self.person.person_id
+        Observation.objects.create(
+            observation_id=9951001, person=self.person, observation_concept_id=0,
+            observation_date=date(2024, 1, 1), observation_type_concept_id=0,
+        )
+        resp = self.client.get('/api/v1/observations/', {'person_id': pid})
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertEqual(self._rows(resp), [])
+        self.assertEqual(self.client.get(f'/api/v1/patient-records/{pid}/source-codes/').status_code,
+                         status.HTTP_404_NOT_FOUND)
+
+    def test_break_glass_is_refused(self):
+        resp = self.client.post('/api/v1/break-glass/',
+                                {'person_id': self.person.person_id, 'reason': 'audit'}, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_403_FORBIDDEN, resp.data)
+        doctor = _make_user('glass-doctor@test.com')
+        GroupAccess.objects.create(identity=doctor, org=self.org, role='doctor')
+        self.client.force_authenticate(user=doctor)
+        resp = self.client.post('/api/v1/break-glass/',
+                                {'person_id': self.person.person_id, 'reason': 'audit'}, format='json')
+        self.assertNotEqual(resp.status_code, status.HTTP_403_FORBIDDEN, resp.data)
+
+    def test_patient_write_is_refused(self):
+        resp = self.client.patch(
+            f'/api/patient-info/{self.person.person_id}/', {'ecog_performance_status': 1}, format='json',
+        )
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+        self.record.refresh_from_db()
+        self.assertIsNone(self.record.ecog_performance_status)
+
+    def test_aggregated_org_stats_show_no_org(self):
+        resp = self.client.get('/api/stats/org-disease/')
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
+        self.assertNotIn('analyst-org', {o['org_slug'] for o in resp.data})
+
+    # -- the other mapping pages are the analyst's too ------------------------
+
+    def test_every_mapping_page_is_reachable_and_writable(self):
+        for url in ('/api/v1/field-mappings/', '/api/v1/mapping-stats/', '/api/v1/relevance/signals/',
+                    '/api/v1/code-mappings/source-systems/'):
+            self.assertEqual(self.client.get(url).status_code, status.HTTP_200_OK, url)
+        self.assertEqual(self.client.get('/api/v1/relevance/signals/').data['permissions'],
+                         {'can_accept': False, 'can_reject': True})
+        resp = self.client.post('/api/v1/field-choices/', {
+            'field_name': 'disease', 'display': 'Analyst choice', 'sort_order': 0,
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(self.client.delete(f"/api/v1/field-choices/{resp.data['id']}/").status_code,
+                         status.HTTP_204_NO_CONTENT)
+        # The upload is a write the analyst may make; an empty one is a 400, not a 403.
+        resp = self.client.post('/api/v1/code-mappings/upload/', {}, format='multipart')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST, resp.data)
+
+    # -- additive roles ------------------------------------------------------
+
+    def test_a_doctor_reads_every_mapping_page_and_writes_only_with_the_analyst_grant_too(self):
         doctor = _make_user('doctor-scope@test.com')
         GroupAccess.objects.create(identity=doctor, org=self.org, role='doctor')
         self.client.force_authenticate(user=doctor)
-        self.assertEqual(self.client.get('/api/v1/field-mappings/').status_code, status.HTTP_200_OK)
-        self.assertEqual(self.client.get('/api/v1/mapping-stats/').status_code, status.HTTP_200_OK)
+        for url in ('/api/v1/field-mappings/', '/api/v1/mapping-stats/', '/api/v1/code-mappings/',
+                    '/api/v1/concept-to-code/', '/api/v1/code-mappings/reference/',
+                    '/api/v1/relevance/signals/', '/api/v1/code-mappings/source-systems/'):
+            self.assertEqual(self.client.get(url).status_code, status.HTTP_200_OK, url)
+        self.assertEqual(self.client.get('/api/v1/relevance/signals/').data['permissions'],
+                         {'can_accept': False, 'can_reject': False})
+        # A doctor reads the patients of a group the grant names; an
+        # org-level grant at a private org lists nothing.
+        from omop_core.models import PatientGroup, PatientGroupMembership
+        panel = PatientGroup.objects.create(organization=self.org, name='Panel', slug='panel')
+        PatientGroupMembership.objects.create(group=panel, person_id=self.person.person_id)
+        GroupAccess.objects.create(identity=doctor, group=panel, role='doctor')
+        self.assertIn(self.person.person_id,
+                      [r['person_id'] for r in self._rows(self.client.get('/api/patient-info/'))])
+        # Reading is the whole of it: no mapping, synonym, choice, Suggest or lock.
+        self.assertEqual(self.client.post('/api/v1/code-mappings/', {
+            'source_vocabulary_id': 'HK-Labs', 'source_code': 'doc-2', 'source_code_description': 'x',
+        }, format='json').status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(self.client.post('/api/v1/code-mappings/suggest/', {}, format='json').status_code,
+                         status.HTTP_403_FORBIDDEN)
+        self.assertEqual(self.client.post('/api/v1/field-mappings/weight/synonyms/', {'synonym_text': 'mass'},
+                                          format='json').status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(self.client.post('/api/v1/concept-to-code/priority/', {}, format='json').status_code,
+                         status.HTTP_403_FORBIDDEN)
+        self.assertEqual(self.client.post('/api/v1/code-mappings/upload/', {}, format='multipart').status_code,
+                         status.HTTP_403_FORBIDDEN)
+        # A second row, not a replacement: the doctor keeps patients and gains the writes.
+        GroupAccess.objects.create(identity=doctor, org=self.org, role='analyst')
+        concept = _make_test_concept(2_100_009_003, 'Doctor-analyst destination', 'DOC-DEST', 'Measurement')
+        resp = self.client.post('/api/v1/code-mappings/', {
+            'source_vocabulary_id': 'VendorLab', 'source_code': 'doc-2', 'source_code_description': 'x',
+            'omop_table': 'measurement', 'target_concept_id': concept.pk,
+        }, format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(self.client.get(f'/api/patient-info/{self.person.person_id}/').status_code,
+                         status.HTTP_200_OK)
+
+    def test_an_org_admin_reaches_the_code_mapping_page_to_approve(self):
+        admin = _make_user('admin-scope@test.com')
+        GroupAccess.objects.create(identity=admin, org=self.org, role='org_admin')
+        self.client.force_authenticate(user=admin)
         self.assertEqual(self.client.get('/api/v1/code-mappings/').status_code, status.HTTP_200_OK)
+
+    def test_one_row_per_identity_org_and_role(self):
+        from django.db import IntegrityError, transaction
+        with self.assertRaises(IntegrityError), transaction.atomic():
+            GroupAccess.objects.create(identity=self.analyst, org=self.org, role='analyst')
+        GroupAccess.objects.create(identity=self.analyst, org=self.org, role='doctor')
+        self.assertEqual(GroupAccess.objects.filter(identity=self.analyst, org=self.org).count(), 2)
 
     # -- trusts --------------------------------------------------------------
 
     def test_organization_trust_does_not_make_an_analyst_an_admin(self):
         from omop_core.services.access import get_admin_orgs
         granting = _make_org('Granting Org', 'granting-org')
+        plain = _make_org('Plain Clinic', 'plain-clinic')
         OrgTrust.objects.create(granting_org=granting, trusted_org=self.org)
+        OrgTrust.objects.create(granting_org=granting, trusted_org=plain)
         self.assertNotIn(granting, get_admin_orgs(self.analyst))
         resp = self.client.get('/api/user/')
         self.assertFalse(resp.data['user']['is_org_admin'])
+        analyst_at_plain = _make_user('plain-analyst@test.com')
+        GroupAccess.objects.create(identity=analyst_at_plain, org=plain, role='analyst')
+        self.assertNotIn(granting, get_admin_orgs(analyst_at_plain))
         doctor = _make_user('trusted-doctor@test.com')
-        GroupAccess.objects.create(identity=doctor, org=self.org, role='doctor')
+        GroupAccess.objects.create(identity=doctor, org=plain, role='doctor')
         self.assertIn(granting, get_admin_orgs(doctor))
 
-    def test_a_domain_trusted_analyst_is_the_admin_the_trust_makes_them(self):
-        """Domain trust is unchanged (#1454): a trusted-domain self-signup is
-        promoted to analyst and that is how it reaches the trusting org at all,
-        so the curation pages open for it as ``is_org_admin`` says."""
+    def test_domain_trust_does_not_make_an_analyst_only_account_an_admin(self):
+        """A domain trust still makes a verified no-grant account, or a doctor,
+        an admin of the trusting org; an account whose only grant is analyst
+        gets nothing from it (#2416)."""
+        from omop_core.services.access import get_admin_orgs
         granting = _make_org('Domain Org', 'domain-org')
         OrgTrust.objects.create(granting_org=granting, trusted_domain='test.com')
         self.analyst.mark_email_verified()
         resp = self.client.get('/api/user/')
-        self.assertTrue(resp.data['user']['is_org_admin'])
-        self.assertEqual(self.client.get('/api/v1/mapping-stats/').status_code, status.HTTP_200_OK)
+        self.assertFalse(resp.data['user']['is_org_admin'])
+        self.assertNotIn(granting, get_admin_orgs(self.analyst))
+        nobody = _make_user('nobody@test.com')
+        nobody.mark_email_verified()
+        self.assertIn(granting, get_admin_orgs(nobody))
+        plain = _make_org('Plain Clinic', 'plain-clinic')
+        doctor = _make_user('domain-doctor@test.com')
+        doctor.mark_email_verified()
+        GroupAccess.objects.create(identity=doctor, org=plain, role='doctor')
+        self.assertIn(granting, get_admin_orgs(doctor))
+
+    def test_an_expired_or_revoked_analyst_grant_is_not_no_grant(self):
+        """The domain trust's no-grant branch is for accounts that never held a
+        grant; losing an analyst grant must not turn into admin authority."""
+        from omop_core.services.access import get_admin_orgs
+        granting = _make_org('Domain Org', 'domain-org')
+        OrgTrust.objects.create(granting_org=granting, trusted_domain='test.com')
+        self.analyst.mark_email_verified()
+        grant = GroupAccess.objects.get(identity=self.analyst)
+        grant.expires_at = timezone.now() - timedelta(seconds=1)
+        grant.save(update_fields=['expires_at'])
+        self.assertNotIn(granting, get_admin_orgs(self.analyst))
+
+    def test_a_demo_org_grant_expands_no_organization_trust(self):
+        """A self-signup grant at a public demo org is a sandbox credential: a
+        doctor there is an admin of no org that trusts the demo org. A domain
+        trust is about the verified address and still applies (#1454, #2416)."""
+        from omop_core.services.access import get_admin_orgs
+        demo_org = Organization.objects.create(
+            name='Public Demo', slug='public-demo', allows_patient_signup=True,
+        )
+        granting = _make_org('Trusting Org', 'trusting-org')
+        OrgTrust.objects.create(granting_org=granting, trusted_org=demo_org)
+        demo_doctor = _make_user('demo-doctor@test.com')
+        demo_doctor.mark_email_verified()
+        GroupAccess.objects.create(identity=demo_doctor, org=demo_org, role='doctor')
+        self.assertNotIn(granting, get_admin_orgs(demo_doctor))
+        self.client.force_authenticate(user=demo_doctor)
+        self.assertFalse(self.client.get('/api/user/').data['user']['is_org_admin'])
+        domain_org = _make_org('Domain Org', 'domain-org')
+        OrgTrust.objects.create(granting_org=domain_org, trusted_domain='test.com')
+        self.assertEqual(set(get_admin_orgs(demo_doctor)), {domain_org})

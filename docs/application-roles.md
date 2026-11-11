@@ -9,25 +9,29 @@ an operation.
 ## How to read the hierarchy
 
 Staff has platform authority. Org Admin administers particular organizations.
-Doctor has clinical write access in assigned organizations or patient groups.
-Analyst has clinical read access in those scopes. Patient has access to their
-own linked record.
+Doctor has clinical read and write access in assigned organizations or patient
+groups, and reads the mapping pages. Analyst writes mappings and sees no
+individual patient's data (#2398, #2416). Patient has access to their own
+linked record.
 
 The order expresses administrative authority, not automatic inheritance of every
 permission. In particular, a Patient can edit their own supported clinical fields,
-while an Analyst cannot edit clinical records through an analyst grant. A Doctor
-in organization A has no authority over a patient in organization B merely because
-Doctor appears above Patient.
+while an Analyst reaches no clinical record at all through an analyst grant. A
+Doctor in organization A has no authority over a patient in organization B merely
+because Doctor appears above Patient.
 
-Roles can coexist and combine within their respective scopes. An analyst who
-also has a patient link can edit their own record through that link. A doctor
-who administers another organization has Doctor privileges in the first scope and
+**Roles are additive** (#2416). A `GroupAccess` row is one role at one scope,
+unique on identity, organization and role (and identity, group and role), so an
+identity holds one row per role and each row adds its own reach: a doctor who
+should also map codes is given an analyst row beside the doctor row, and an
+analyst who should also see patients is given a doctor row. Inviting an existing
+member with another role adds a row; revoking a row removes that role; changing
+a grant into a role the identity already holds there is refused (409). There is
+no rank between roles and no invitation can downgrade one. An analyst who also
+has a patient link can edit their own record through that link. A doctor who
+administers another organization has Doctor privileges in the first scope and
 Org Admin privileges in the second. Being an Org Admin never makes someone Staff.
-
-For organization invitation upgrades, `ROLE_RANK` orders `org_admin > doctor >
-analyst > patient` and prevents an invitation from downgrading an existing higher
-grant. Staff is stored separately as `Identity.is_staff`; that rank is not the
-general API authorization algorithm.
+Staff is stored separately as `Identity.is_staff`.
 
 ## Privilege matrix
 
@@ -38,16 +42,17 @@ operation's validation, authentication, and scope requirements.
 
 | Privilege | Staff | Org Admin | Doctor | Analyst | Patient |
 |---|---|---|---|---|---|
-| Read patient clinical records | Across organizations | In administered orgs / assigned patient groups | In assigned orgs / patient groups | In assigned orgs / patient groups | Own linked record |
-| Edit supported clinical fields and use permitted clinical write endpoints | Across organizations | In scope | In scope | No clinical writes through this role | Own linked record |
-| Export a permitted patient's FHIR record | Across organizations | In scope | In scope | In scope, with read authorization | Own linked record |
+| Read patient clinical records | Across organizations | In administered orgs / assigned patient groups | In assigned orgs / patient groups | No (empty list, 404 detail) | Own linked record |
+| Edit supported clinical fields and use permitted clinical write endpoints | Across organizations | In scope | In scope | No | Own linked record |
+| Export a permitted patient's FHIR record | Across organizations | In scope | In scope | No | Own linked record |
 | Use **Upload → FHIR or CSV**, including creating patients by import | Yes | Yes, into an active administered org | No | No | No |
 | View the administrative **OMOP** tab | Yes | Accessible patients, with admin authority | No | No | No |
 | Use administrative patient deletion (`admin-delete`) | Yes | Only if all owning orgs are administered | No | No | No; separate self-service deletion exists |
 | Edit organization settings, including patient self-signup policy | Any org | Administered orgs | No | No | No |
 | Invite org users; list/revoke org invitations and access grants; manage org trusts | Any org | Administered orgs | No | No | No |
 | Create/delete organizations or change their active status | Yes | No | No | No | No |
-| View and propose field/code mappings; work with unapproved proposals | Yes | Yes, subject to curation eligibility below | Yes | Yes | No |
+| View the mapping pages (hub, Code Mapping, field mappings, therapy and disease-category reference, relevance signals, source systems) | Yes | Yes | Yes, read-only | Yes | No |
+| Create, edit, propose, upload or delete unapproved field/code mappings; synonyms, choices, custom fields; Suggest, Lock, Done, priority; source-system facility review; reject relevance signals | Yes | With org-admin authority | No | Yes | No |
 | Approve mappings or delete approved mappings | Yes | With org-admin authority | No | No | No |
 | Maintain therapy reference definitions and links | Yes | With org-admin authority | No | No | No |
 | Manage service applications and issue/revoke their tokens | Yes | No | No | No | No |
@@ -97,26 +102,34 @@ also do not move existing patients between organizations. See
 Doctor is a clinical professional role. An active organization grant covers
 patients owned by that organization; an active group grant covers patients in
 that group. Doctors can read and update authorized clinical records through the
-supported clinical endpoints, export readable records, and contribute field/code
-mapping proposals.
+supported clinical endpoints and export readable records. They open every
+mapping page read-only: the API answers every mapping write verb with 403
+"Mapping curator access required." and the pages hide their write controls
+(`canWriteMappings` in `frontend/src/utils/roles.ts`). A doctor who should map
+is given an analyst grant beside the doctor one.
 
 Doctor alone does not grant organization administration, the bulk FHIR/CSV Upload
-flow, mapping approval, or token administration. Patient-facing sync or clinical
+flow, mapping writes or approval, or token administration. Patient-facing sync or clinical
 editing is distinct from administrative file upload. An organization may grant a
 doctor additional Org Admin authority explicitly or through a trust.
 
 ### Analyst
 
-Analyst has read-only clinical access to patients in the assigned organization
-or groups, including authorized exports. “Read-only” describes clinical records:
-analysts can still participate in field/code mapping curation, including proposals,
-without gaining mapping-approval authority. Their account/profile operations are
-also separate from their clinical role.
+Analyst is the mapping curator role (#2398, #2416). It opens every mapping page
+and writes them: creating, editing, proposing, uploading and deleting unapproved
+code and field mappings, synonyms, choices and custom fields, Suggest, Lock,
+Done, priority, axis variants, LOINC axes, SNOMED attributes, concept minting,
+source-system facility review and rejecting relevance signals, without
+mapping-approval authority. It also reaches PRism analytics, a separate app
+that shares the identity table.
 
-An Analyst cannot use administrative Upload, edit another patient's clinical
-record through the analyst grant, or manage organizations/tokens. An optional
-analytics redirect is stored on the grant; it changes the post-login destination,
-not authorization. Analyst replaced the former Navigator role.
+An analyst sees **no individual patient's health data**: the patient list is
+empty, a patient detail is 404, clinical rows, source codes, exports and
+aggregated organization statistics are out of reach, and so is break-glass. The
+UI opens an analyst-only account on Code Mapping. An Analyst cannot use
+administrative Upload or manage organizations/tokens. An optional analytics
+redirect is stored on the grant; it changes the post-login destination, not
+authorization. Analyst replaced the former Navigator role.
 
 ### Patient
 
@@ -136,9 +149,9 @@ a patient membership alone cannot do so.
 ## Scope and endpoint rules
 
 `can_access_patient()` accepts Staff, the linked patient themselves, verified
-personal representation, active professional grants, or scoped organization-admin
-authority. `can_write_patient()` uses the same access paths but excludes Analyst
-from professional write roles. Grants with an `expires_at` in the past no longer
+personal representation, active `org_admin` or `doctor` grants, or scoped
+organization-admin authority. `can_write_patient()` uses the same access paths.
+Analyst is in neither (`omop_core/authorization.py`). Grants with an `expires_at` in the past no longer
 supply access. Public aggregate-data visibility is a separate organization policy;
 it does not create a SODAP role or patient-write authority.
 
@@ -152,29 +165,37 @@ is not a universal grant to every endpoint.
 Mapping curation operates on shared reference data, not an organization's private
 patient records. Its current eligibility checks are deliberately worth separating:
 
-- Field/code curation entry points use `_can_manage_field_mappings()`: Staff or
-  an active professional `GroupAccess` grant (`org_admin`, `doctor`, or `analyst`).
+- Reads use `_can_view_mappings()`: Staff, any active professional `GroupAccess`
+  grant (`org_admin`, `doctor` or `analyst`), or org-admin authority through a
+  trust (`has_mapping_read_access`).
+- Writes use `_can_manage_mappings()`: Staff, an active `analyst` grant, or
+  org-admin authority by grant or trust (`has_mapping_write_access`). A doctor
+  without an analyst grant reads and writes nothing.
 - Approval checks use `_can_approve_mappings()`: Staff or effective org-admin
-  authority, including qualifying trusts. A trust alone is not a professional
-  `GroupAccess` row, so a domain-trust-only admin may pass the approval helper but
-  still fail the separate field/code curation entry gate.
+  authority, including qualifying trusts.
 - Therapy reference mutations have their own organization-admin check. Field/code
   proposal privileges do not authorize therapy reference administration.
 
-The patient-list toolbar currently exposes Mappings and Upload to Staff/Org Admin.
-Doctor/Analyst mapping routes are available through `/mappings`, `/field-mappings`,
-and `/code-mappings`; a hidden toolbar button is not the API permission model.
+The patient-list toolbar exposes Mappings and Upload to every professional who
+reaches the list. The mapping routes (`/mappings`, `/field-mappings`,
+`/code-mappings` and the rest) open for every professional role; a hidden
+button is not the API permission model.
 
 ## Organization-admin trusts
 
 Both trust types intentionally grant **org_admin** authority in the
 **granting organization**:
 
-- If Hospital A trusts Clinic B, an active professional organization-level
-  grant in B confers org-admin access to A. The inherited role expires when
-  its source grant expires.
-- If Hospital A trusts an email domain, matching users receive org-admin
-  access to A under the existing domain-trust rules.
+- If Hospital A trusts Clinic B, an active `org_admin` or `doctor`
+  organization-level grant in B, at an organization that is not a public demo
+  org, confers org-admin access to A. An analyst or patient grant confers
+  nothing (#2399, #2416). The inherited role expires when its source grant
+  expires.
+- If Hospital A trusts an email domain, a verified matching address receives
+  org-admin access to A when it holds an active `org_admin` or `doctor` grant
+  anywhere, or has never held a grant (a federated login or a trusted-domain
+  self-signup, which is granted `doctor` on verification). An address whose
+  grants are all analyst or patient, expired or revoked, receives nothing.
 
 Trusts do not confer staff or superuser status. Inheritance is one hop; it does
 not recursively expand through a chain of trusts. Existing patient-only
@@ -242,7 +263,7 @@ Use these entry points when updating this privilege reference:
 | Organization grants and stored role choices | [models.py](../omop_core/models.py) (`GroupAccess`) |
 | Endpoint permissions and OAuth/service scopes | [permissions.py](../patient_portal/api/permissions.py) |
 | Upload role gate and organization selection | [bulk_upload.py](../patient_portal/api/bulk_upload.py) |
-| Organization lifecycle, invitations, role rank, grants and trusts | [org_views.py](../patient_portal/api/org_views.py) |
+| Organization lifecycle, invitations, grants and trusts | [org_views.py](../patient_portal/api/org_views.py) |
 | Patient exports/deletion, clinical APIs and mapping privileges | [views.py](../patient_portal/api/views.py) |
 | Audit visibility and verified proxy-grant reporting | [audit_views.py](../patient_portal/api/audit_views.py), [representatives.py](../patient_portal/api/representatives.py) |
 | Staff-only service-token management | [service_applications.py](../patient_portal/api/service_applications.py) |

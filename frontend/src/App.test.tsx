@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { vi, describe, it, expect, beforeEach } from "vitest";
 import App from "./App";
@@ -104,9 +104,13 @@ describe("App role-gated routing", () => {
     expect(screen.getByText("CODE_MAPPINGS")).toBeInTheDocument();
   });
 
-  // An analyst curates code mappings and views patients read-only; every
-  // other curation page sends them home (#2398).
-  const analyst = { id: 3, org_accesses: [{ org_slug: 'acme', org_name: 'Acme', role: 'analyst', expires_at: null }] };
+  // Roles are additive (#2416). An analyst curates mappings and sees no
+  // patient data: its home is the Code Mapping page, and every patient page
+  // sends it back there. A doctor keeps the patient pages and reads every
+  // mapping page; the pages hide their write controls from it.
+  const grant = (role: string) => ({ org_slug: 'acme', org_name: 'Acme', role, expires_at: null });
+  const analyst = { id: 3, org_accesses: [grant('analyst')] };
+  const doctor = { id: 4, org_accesses: [grant('doctor')] };
 
   it("allows an analyst on the code mapping page", () => {
     mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: analyst });
@@ -114,17 +118,47 @@ describe("App role-gated routing", () => {
     expect(screen.getByText("CODE_MAPPINGS")).toBeInTheDocument();
   });
 
-  it("sends an analyst home from field mappings", () => {
+  it.each(["/", "/patient/42"])("sends an analyst to code mapping from %s", (path) => {
+    mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: analyst });
+    renderAt(path);
+    expect(screen.getByText("CODE_MAPPINGS")).toBeInTheDocument();
+    expect(screen.queryByText("PROVIDER_LIST")).not.toBeInTheDocument();
+  });
+
+  it("lets an analyst open field mappings", () => {
     mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: analyst });
     renderAt("/field-mappings");
-    expect(screen.queryByText("FIELD_MAPPINGS")).not.toBeInTheDocument();
+    expect(screen.getByText("FIELD_MAPPINGS")).toBeInTheDocument();
+  });
+
+  it("lets a doctor keep field mappings and the patient list", () => {
+    mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: doctor });
+    renderAt("/field-mappings");
+    expect(screen.getByText("FIELD_MAPPINGS")).toBeInTheDocument();
+    cleanup();
+    renderAt("/");
     expect(screen.getByText("PROVIDER_LIST")).toBeInTheDocument();
   });
 
-  it("lets a doctor keep field mappings", () => {
-    mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: { ...analyst, org_accesses: [{ ...analyst.org_accesses[0], role: 'doctor' }] } });
-    renderAt("/field-mappings");
-    expect(screen.getByText("FIELD_MAPPINGS")).toBeInTheDocument();
+  it("lets a doctor without the analyst grant open code mapping", () => {
+    mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: doctor });
+    renderAt("/code-mappings");
+    expect(screen.getByText("CODE_MAPPINGS")).toBeInTheDocument();
+  });
+
+  it("sends a patient-only account home from code mapping", () => {
+    mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: { id: 6, org_accesses: [grant('patient')] } });
+    renderAt("/code-mappings");
+    expect(screen.queryByText("CODE_MAPPINGS")).not.toBeInTheDocument();
+  });
+
+  it("lets a doctor who also holds the analyst grant map codes and see patients", () => {
+    mockUseAuth.mockReturnValue({ ...baseAuth, currentUser: { id: 5, org_accesses: [grant('doctor'), grant('analyst')] } });
+    renderAt("/code-mappings");
+    expect(screen.getByText("CODE_MAPPINGS")).toBeInTheDocument();
+    cleanup();
+    renderAt("/");
+    expect(screen.getByText("PROVIDER_LIST")).toBeInTheDocument();
   });
 });
 
