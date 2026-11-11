@@ -1430,6 +1430,13 @@ def refresh_patient_record(person: Person) -> PatientRecord:
                     preserved.pop(field, None)
                     preserved_units.discard(field)
                     user_edited.discard(field)
+                # A legacy row can still carry a canonical marker from before
+                # the pair owned it; restoring it would put the old read-model
+                # back over the newer result this retirement is accepting.
+                canonical = _SOURCE_PAIR_CANONICALS[source]
+                if canonical != source:
+                    preserved.pop(canonical, None)
+                    user_edited.discard(canonical)
             if _forget_unedited_pair_dates(patient_info, user_edited):
                 logger.info(
                     'Retired pending source pairs behind a newer result for '

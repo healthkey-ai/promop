@@ -661,3 +661,24 @@ def test_a_native_pair_write_drops_a_stale_canonical_marker(lab):
     _import(lab, 8.0, 'g/dL', TODAY)
     record.refresh_from_db()
     assert record.hemoglobin_g_dl == Decimal('8.0')
+
+
+def test_a_retired_pair_also_drops_a_legacy_canonical_marker(lab):
+    # Rows written before the pair owned its canonical can carry both markers.
+    record = lab['record']
+    draw = TODAY - timedelta(days=3)
+    record.hemoglobin_level = Decimal('120')
+    record.hemoglobin_level_units = 'G/L'
+    record.hemoglobin_g_dl = Decimal('12.0')
+    record.user_edited_fields = [
+        'hemoglobin_level', 'hemoglobin_level_units', 'hemoglobin_g_dl']
+    record.pending_source_pair_dates = {'hemoglobin_level': draw.isoformat()}
+    record.save()
+
+    _import(lab, 8.0, 'g/dL', TODAY)
+
+    record.refresh_from_db()
+    assert record.hemoglobin_g_dl == Decimal('8.0')
+    assert not {'hemoglobin_level', 'hemoglobin_level_units',
+                'hemoglobin_g_dl'} & set(record.user_edited_fields or [])
+    assert record.pending_source_pair_dates == {}
