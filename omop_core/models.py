@@ -4173,7 +4173,7 @@ class PatientRecord(models.Model):
         ),
     )
     pending_source_pair_dates = models.JSONField(
-        default=dict, blank=True,
+        default=dict, blank=True, null=True,
         help_text=(
             "Server-managed: the clinical day (YYYY-MM-DD) each pending source "
             "pair was entered for, so a newer imported result retires the pair "
