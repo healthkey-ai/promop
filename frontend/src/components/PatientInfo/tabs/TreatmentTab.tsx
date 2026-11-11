@@ -59,6 +59,7 @@ export default function TreatmentTab({ formData, onChange, diseaseType, onRecord
     if (personId === null) return;
     setHistoryError('');
     setConfirmingHistory(true);
+    formStore?.beginBypassWrite();
     try {
       const result = await setTherapyHistoryCompleteness(personId, complete);
       invalidateWritableFieldsCache();
@@ -66,6 +67,7 @@ export default function TreatmentTab({ formData, onChange, diseaseType, onRecord
     } catch {
       setHistoryError('Could not save the confirmation. Reopen this tab to retry.');
     } finally {
+      formStore?.endBypassWrite();
       setConfirmingHistory(false);
     }
   };
@@ -78,6 +80,7 @@ export default function TreatmentTab({ formData, onChange, diseaseType, onRecord
     if (!window.confirm(`Remove ${label} from the treatment history? This records that the line did not happen.`)) return;
     setRetractError('');
     setRetracting(line.episode_id);
+    formStore?.beginBypassWrite();
     try {
       const result = await retractTherapyLine(line.episode_id);
       invalidateWritableFieldsCache();
@@ -85,6 +88,7 @@ export default function TreatmentTab({ formData, onChange, diseaseType, onRecord
     } catch {
       setRetractError('Could not remove the line. Reopen this tab to retry.');
     } finally {
+      formStore?.endBypassWrite();
       setRetracting(null);
     }
   };
