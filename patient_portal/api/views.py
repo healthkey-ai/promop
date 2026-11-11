@@ -13617,6 +13617,76 @@ def code_mapping_unit_search(request):
     return Response({'results': results})
 
 
+CODE_MAPPING_MAX_PAGE_SIZE = 1000
+
+
+class _CodeMappingPage:
+    """One page of the plain code-mapping list (#2451).
+
+    Two ways through the table. ``page=N`` is the offset paging the curation
+    UI uses, in (vocabulary, code, id) order. ``ordering=id`` with
+    ``after=<mapping_id>`` is a keyset cursor for a client reading the whole
+    table: a row written while it pages gets a higher id than any it has
+    read, and a deleted one leaves no gap to skip over, so a full read neither
+    repeats nor misses a row that existed throughout. The next link carries
+    ``after=`` and there is no prev link. ``page_size`` is honoured on both,
+    up to ``CODE_MAPPING_MAX_PAGE_SIZE``; HealthTree's table is 863k rows, and
+    at 100 a page that is 8,600 requests.
+    """
+
+    SOURCE_ORDER = ('source_vocabulary_id', 'source_code', 'id')
+
+    def __init__(self, request, mappings):
+        from rest_framework.pagination import PageNumberPagination
+        from rest_framework.utils.urls import remove_query_param, replace_query_param
+        from omop_core.services.mapping_browse import PAGE_SIZE
+        from omop_core.services.mapping_destinations import with_destination_counts
+        params = request.query_params
+        page_size = self._int(params, 'page_size', PAGE_SIZE, 1, CODE_MAPPING_MAX_PAGE_SIZE)
+        ordering = params.get('ordering', 'source')
+        if ordering not in ('source', 'id'):
+            raise ValidationError({'ordering': 'Choose one of source, id.'})
+        after = self._int(params, 'after', None, 0, None)
+        mappings = with_destination_counts(mappings)
+        self.headers = {'X-Page-Size': str(page_size)}
+        self.links = []
+        if after is None and ordering == 'source':
+            paginator = PageNumberPagination()
+            paginator.page_size = page_size
+            self.rows = list(paginator.paginate_queryset(mappings.order_by(*self.SOURCE_ORDER), request))
+            self.headers['X-Total-Count'] = str(paginator.page.paginator.count)
+            self.headers['X-Page'] = str(paginator.page.number)
+            for relation, url in (('next', paginator.get_next_link()), ('prev', paginator.get_previous_link())):
+                if url:
+                    self.links.append((relation, url))
+            return
+        if 'page' in params:
+            raise ValidationError({'page': 'Use after=<mapping_id> with ordering=id, not page.'})
+        self.headers['X-Total-Count'] = str(mappings.order_by().count())
+        window = mappings.order_by('id')
+        if after is not None:
+            window = window.filter(id__gt=after)
+        self.rows = list(window[:page_size])
+        if len(self.rows) == page_size:
+            url = replace_query_param(request.build_absolute_uri(), 'after', self.rows[-1].pk)
+            url = replace_query_param(url, 'ordering', 'id')
+            self.links.append(('next', remove_query_param(url, 'page')))
+
+    @staticmethod
+    def _int(params, name, default, low, high):
+        raw = params.get(name)
+        if raw in (None, ''):
+            return default
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            value = None
+        if value is None or value < low or (high is not None and value > high):
+            bound = f'between {low} and {high}' if high is not None else f'at least {low}'
+            raise ValidationError({name: f'An integer {bound} is required.'})
+        return value
+
+
 @api_view(['GET', 'POST'])
 @permission_classes([IsAuthenticated])
 def code_mapping_list(request):
@@ -13662,17 +13732,24 @@ def code_mapping_list(request):
             mappings = mappings.filter(organization__isnull=True)
         elif organization_filter:
             mappings = mappings.filter(organization__slug=organization_filter)
-        from rest_framework.pagination import PageNumberPagination
-        from omop_core.services.mapping_browse import PAGE_SIZE
-        from omop_core.services.mapping_destinations import with_destination_counts
-        paginator = PageNumberPagination()
-        paginator.page_size = PAGE_SIZE
-        mappings = paginator.paginate_queryset(
-            with_destination_counts(mappings).order_by('source_vocabulary_id', 'source_code', 'id'), request,
-        )
+        updated_since = request.query_params.get('updated_since')
+        if updated_since:
+            from django.utils import timezone
+            from django.utils.dateparse import parse_datetime
+            since = parse_datetime(updated_since)
+            if since is None:
+                return Response({'updated_since': 'An ISO 8601 datetime is required.'},
+                                status=status.HTTP_400_BAD_REQUEST)
+            if timezone.is_naive(since):
+                since = timezone.make_aware(since, _dt.timezone.utc)
+            mappings = mappings.filter(updated_at__gte=since)
+        try:
+            page = _CodeMappingPage(request, mappings)
+        except ValidationError as exc:
+            return Response(exc.detail, status=status.HTTP_400_BAD_REQUEST)
         from omop_core.services.source_retirement import mapping_source_retirement
         from omop_core.services.mapping_samples import attach_source_samples
-        mappings = list(mappings)
+        mappings = page.rows
         attach_source_samples(mappings)
         if is_service_token(request):
             _without_source_samples(mappings)
@@ -13685,15 +13762,8 @@ def code_mapping_list(request):
             for mapping in mappings
         ]
         # Preserve the legacy array shape while exposing navigation and totals.
-        response = Response(rows, headers={
-            'X-Total-Count': str(paginator.page.paginator.count),
-            'X-Page': str(paginator.page.number),
-            'X-Page-Size': str(PAGE_SIZE),
-        })
-        links = []
-        for relation, url in (('next', paginator.get_next_link()), ('prev', paginator.get_previous_link())):
-            if url:
-                links.append(f'<{url}>; rel="{relation}"')
+        response = Response(rows, headers=page.headers)
+        links = [f'<{url}>; rel="{relation}"' for relation, url in page.links]
         if links:
             response['Link'] = ', '.join(links)
         return response

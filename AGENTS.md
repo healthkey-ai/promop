@@ -1574,6 +1574,25 @@ retrieval needs all standard concepts embedded, not just the queue's candidates.
 
 ---
 
+## Code Mapping List — paging for a full read
+
+`GET /api/v1/code-mappings/` (a `system/*.read` service token may read it,
+#2340) pages two ways (#2451, `_CodeMappingPage` in `views.py`):
+
+| Params | Order | Use |
+|---|---|---|
+| `page=N` (default) | vocabulary, code, id | the curation UI; offset paging, so a row inserted or deleted mid-read shifts later pages |
+| `ordering=id` + `after=<mapping_id>` | id | a client reading the whole table: a row written mid-read has a higher id than any read, a deleted one leaves no gap, so nothing repeats or is skipped. The `Link` next URL carries `after=`; there is no prev. `page` with `after` is a 400 |
+
+`page_size` is honoured on both, 1 to `CODE_MAPPING_MAX_PAGE_SIZE` (1000;
+out of range is a 400, not a silent cap). The ceiling is the request budget:
+at ~1s per 100 rows on HealthTree, 5,000 would outrun gunicorn's 30s.
+`updated_since=<ISO 8601>` (naive means UTC) narrows to rows whose
+`updated_at` is at or after it, for a nightly delta; `X-Total-Count` counts
+the filtered set. `Link` URLs are absolute, so behind a proxy they are
+`https://` only when `SECURE_PROXY_SSL_HEADER` is trusted: automatic on
+Render and Cloud Run (`K_SERVICE`), `TRUST_PROXY_SSL_HEADER=true` elsewhere.
+
 ## Code Mapping Lookup — Unit Conversion
 
 `POST /api/v1/code-mappings/lookup/` accepts optional unit fields per code entry
