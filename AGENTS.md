@@ -1923,6 +1923,40 @@ same request fails the same way, so it is not a retry (#2101).
 
 A row with no `source_value` or no date has no identity and is always inserted.
 
+### Source record key (`source_record_key`, #2453)
+
+The content identity breaks when the producer's code choice changes: a curator
+approves a mapping, the ETL picks another code for the same reading, and the
+next import no longer matches. A measurement or observation row may therefore
+carry the producer's own id for the record (`{issuer}:{facility}/{resourceType}/{id}`),
+unique per person and table (a partial unique index, unkeyed rows exempt).
+Printable ASCII, no whitespace, at most 512; anything else is a 400.
+
+- **Matched by key first**, entered-in-error rows included. The stored row is
+  rewritten from the incoming one: every column the serializer accepts except
+  `person`, `is_erroneous` and `erroneous_reason`, so `value_source_value` and
+  the unit columns move with the value (a stale one fails the #2249 read check).
+  Rewritten measurements are unit-normalized like inserted ones.
+- **No key match: the content match, against unkeyed rows only.** Exactly one
+  unkeyed row for one incoming key gets the key stamped and is rewritten. Several
+  candidates of different attribution, or several incoming keys on one row, is
+  ambiguous: nothing is stamped, the last of those rows maps to the stored row as
+  an unkeyed row would, the others are inserted, and their request indices come
+  back in `key_ambiguous` (always present for these two tables, usually `[]`).
+- Keyed rows never merge with each other by content, and a content collapse
+  never deletes a keyed row. A key repeated within one batch is one row, last
+  occurrence winning.
+- `?upsert=false` turns off only the content match. The single-row POST matches
+  by key the same way; `bulk_update` may set or change a key (a collision is 409).
+- **Concurrent requests with one key converge to one row.** The plan locks the
+  keyed rows it found; the INSERT is `ON CONFLICT DO NOTHING`, and a key another
+  request inserted in between is re-read and applied as a key match.
+- With `X-Provenance-Organization-ID`, a key held by another hospital's row is a
+  409. A key match records provenance when a source is sent, naming the
+  hospital only on a row already attributed to it.
+- A row relocated between the two tables keeps its key, unless the patient's
+  destination table already holds it; the copy then goes without it.
+
 ### Source hospital (`X-Provenance-Organization-ID`, #1690)
 
 One ETL credential reads several hospitals, and a hospital-scoped mapping only
