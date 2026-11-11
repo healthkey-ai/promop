@@ -15,6 +15,9 @@ interface Runtime {
    *  patient changed) is what mount helpers and retirement see next. */
   readonly store: PatientFormStore;
   references: number; retirement?: ReturnType<typeof setTimeout>; watchIdle?: () => void;
+  /** Re-check the *current* store after a renewal swaps it under a retained
+   *  runtime (the waiter's subscription belongs to the old store). */
+  rearm?: () => void;
 }
 const widgets = new Map<string, Runtime>();
 
@@ -78,7 +81,14 @@ export function renewPatientFormForClient(
   const key = `${base}\u0000${sessionKey}`;
   if (stores?.get(key) === stale) stores.delete(key);
   stale.retire();
-  return patientFormForClient(client, base, sessionKey);
+  const fresh = patientFormForClient(client, base, sessionKey);
+  // A retained runtime that was waiting on the retired store must watch the
+  // fresh one; otherwise its 30 s clean-up never runs and the runtime (with
+  // its credentials) is retained for the life of the page.
+  for (const runtime of widgets.values()) {
+    if (runtime.client === client && runtime.references === 0) runtime.rearm?.();
+  }
+  return fresh;
 }
 
 /** Credentials are captured, never changed on a queue that still has edits.
@@ -111,18 +121,29 @@ export function retainPatientFormRuntime(connection: PatientFormConnection) {
   runtime.watchIdle = undefined;
   return () => {
     if (--runtime.references > 0) return;
+    let watched = runtime.store;
     const retireWhenIdle = () => {
-      const state = runtime.store.getSnapshot();
+      const current = runtime.store;
+      if (current !== watched) {
+        // A renewal swapped the store while this runtime waited. The old
+        // subscription will never see the new store's queue drain.
+        runtime.watchIdle?.();
+        watched = current;
+        runtime.watchIdle = current.subscribe(retireWhenIdle);
+      }
+      const state = current.getSnapshot();
       if (state.saving || Object.keys(state.pending).length) return;
       runtime.watchIdle?.();
       runtime.watchIdle = undefined;
+      runtime.rearm = undefined;
       runtime.retirement = setTimeout(() => {
         if (runtime.references) return;
         for (const [key, value] of widgets) if (value === runtime) widgets.delete(key);
         runtime.queryClient.clear();
       }, 30_000);
     };
-    runtime.watchIdle = runtime.store.subscribe(retireWhenIdle);
+    runtime.rearm = retireWhenIdle;
+    runtime.watchIdle = watched.subscribe(retireWhenIdle);
     retireWhenIdle();
   };
 }
