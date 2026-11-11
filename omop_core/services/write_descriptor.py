@@ -939,8 +939,13 @@ def build_writable_field_descriptor():
 
     Query cost is flat: two lookups total, not one per field.
     """
+    # The genomics writer needs at least one reviewed gene LOINC; resolving the
+    # gene codes in the same query keeps the descriptor's cost flat (#2441).
+    from omop_core.services.patient_record_service import _GENETIC_MUTATION_LOINCS
+    genetic_gene_codes = {code for code, gene in _GENETIC_MUTATION_LOINCS.items() if gene}
     loinc_ids = _resolve_concept_ids(
-        {code for code, _unit, _display in LAB_FIELD_TO_LOINC.values()}, 'LOINC'
+        {code for code, _unit, _display in LAB_FIELD_TO_LOINC.values()}
+        | genetic_gene_codes, 'LOINC'
     )
     unit_ids = _resolve_concept_ids(
         {unit for _code, unit, _display in LAB_FIELD_TO_LOINC.values()}
@@ -956,11 +961,13 @@ def build_writable_field_descriptor():
         spec['concept_id'] for spec in _MYELOMA_RELATED_DISORDER_PROJECTIONS.values()
         if spec.get('concept_id')
     }
+    from omop_core.services.field_write_service import PATIENT_REPORTED_TYPE_CONCEPT_ID
     concept_by_id = {
         concept.concept_id: concept
         for concept in Concept.objects.filter(
             concept_id__in=myeloma_concept_ids
-            | {CONCEPT_LARGEST_LYMPH_NODE_DIMENSION, CONCEPT_EHR_TYPE},
+            | {CONCEPT_LARGEST_LYMPH_NODE_DIMENSION, CONCEPT_EHR_TYPE,
+               PATIENT_REPORTED_TYPE_CONCEPT_ID},
         ).only('concept_id', 'concept_code', 'concept_name', 'vocabulary_id')
     }
     largest_lymph_node_concept = concept_by_id.get(CONCEPT_LARGEST_LYMPH_NODE_DIMENSION)
@@ -1013,10 +1020,24 @@ def build_writable_field_descriptor():
             }
             continue
         if field == 'genetic_mutations':
+            # The list-diff writer refuses without the patient-report type and
+            # at least one reviewed gene LOINC. Advertising it writable anyway
+            # offered an Add control whose save could only 400 (#2441/#2433).
+            # Both conditions come from this build's bulk reads, so the check
+            # costs no extra query; it mirrors
+            # `field_write_service._genetic_mutations_writable`.
+            writable = (PATIENT_REPORTED_TYPE_CONCEPT_ID in concept_by_id
+                        and bool(genetic_gene_codes & loinc_ids.keys()))
             descriptor[field] = {
-                'kind': KIND_EDITABLE, 'writable': True, 'target': 'genomics',
+                'kind': KIND_EDITABLE, 'writable': writable, 'target': 'genomics',
                 'endpoint': '/api/v1/patient-records/{person_id}/genomics/',
-                'reason': 'Edit individual variants in the Genomics tab; each variant writes linked OMOP facts.',
+                'reason': (
+                    'Edit individual variants in the Genomics tab; each variant '
+                    'writes linked OMOP facts.'
+                    if writable else
+                    'Genetic mutation vocabularies are not loaded; variants cannot '
+                    'be stored yet.'
+                ),
             }
             continue
         if field in _AUTHORABLE_LINE_FIELDS:

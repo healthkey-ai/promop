@@ -734,3 +734,25 @@ class TestListShape:
         entry = descriptor_fields()['stem_cell_transplant_history']
         assert entry.get('multiple') is True
         assert 'options' not in entry
+
+
+class TestGenomicsWritability:
+    def test_genetic_mutations_is_read_only_without_the_vocabulary(self):
+        """Advertising Add on a stack with no genomics vocab only offers a 400 (#2441)."""
+        entry = descriptor_fields()['genetic_mutations']
+        assert entry['writable'] is False
+        assert 'vocabular' in entry['reason'].lower()
+
+    def test_genetic_mutations_is_writable_once_the_vocabulary_is_loaded(self):
+        from omop_core.services.field_write_service import PATIENT_REPORTED_TYPE_CONCEPT_ID
+
+        VocabularyFactory(vocabulary_id='Type Concept')
+        VocabularyFactory(vocabulary_id='LOINC')
+        ConceptFactory(concept_id=PATIENT_REPORTED_TYPE_CONCEPT_ID,
+                       concept_code='32865', vocabulary_id='Type Concept')
+        # A reviewed gene LOINC: 21636-6 is BRCA1 in `_GENETIC_MUTATION_LOINCS`.
+        ConceptFactory(concept_code='21636-6', vocabulary_id='LOINC')
+
+        entry = descriptor_fields()['genetic_mutations']
+        assert entry['writable'] is True
+        assert 'vocabular' not in entry['reason'].lower()
