@@ -69,6 +69,7 @@ describe('therapy lines editor', () => {
   it('tells the host after a mutation, because the store load alone does not', async () => {
     const { store } = await setup({ therapy_lines_count: '1', lines_of_therapy: [], therapy_history_complete: false });
     const onChanged = vi.fn();
+    const load = vi.spyOn(store, 'load');
 
     render(<TherapyLinesPanel store={store} onChanged={onChanged} />);
     fireEvent.click(screen.getByLabelText('Treatment history is complete'));
@@ -77,6 +78,9 @@ describe('therapy lines editor', () => {
     // the module-level transport the app owns.
     await waitFor(() => expect(completeTherapyHistory).toHaveBeenCalledWith(12, true, undefined));
     await waitFor(() => expect(onChanged).toHaveBeenCalled());
+    // The mutation bypassed the queue, so a read that started before it must
+    // not be reused: the reload has to supersede it (#2433).
+    expect(load).toHaveBeenCalledWith(true);
   });
 
   it('shows the line count as a lower bound until the history is confirmed', async () => {

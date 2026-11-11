@@ -343,6 +343,31 @@ describe('a retired store', () => {
     expect(store.getSnapshot().errors.weight).toMatch(/no longer belongs/);
   });
 
+  it('reports only drafts that will never be sent, not the batch in flight', async () => {
+    const { store, patch } = setup();
+    await store.load();
+    patch.mockImplementationOnce(() => new Promise(() => {}));
+    store.enqueue('weight', 80);
+    await vi.advanceTimersByTimeAsync(500);   // dispatched, still in flight
+    expect(store.getSnapshot().pending.weight).toBe(80);
+
+    store.retire();
+
+    // The in-flight PATCH settles as usual; only the queued/failed drafts are lost.
+    expect(store.takeRetiredDrafts()).toBe(0);
+    expect(store.takeRetiredDrafts()).toBe(0);
+  });
+
+  it('reports queued and previously failed drafts once', async () => {
+    const { store } = setup();
+    await store.load();
+    store.enqueue('weight', 80);
+    store.retire();
+
+    expect(store.takeRetiredDrafts()).toBe(1);
+    expect(store.takeRetiredDrafts()).toBe(0);
+  });
+
   it('never looks writable again, even after a load the server answers', async () => {
     const { store, patch } = setup();
     await store.load();

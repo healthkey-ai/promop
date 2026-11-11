@@ -119,7 +119,9 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
             // Hold the host listeners until the reload/notification lands: the
             // reader can leave the tab while it runs.
             store.beginBypassWrite();
-            void store.load()
+            // A read already in flight started before this write; sharing it
+            // would publish the pre-write record. Start a new one.
+            void store.load(true)
               .then(() => store.announceUpdated())
               .finally(() => store.endBypassWrite());
           }} />}
@@ -129,7 +131,9 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
         {tabKey === 'genomics' && <GenomicsTab formData={editedInfo} readOnly={locked}
           onChanged={() => {
             store.beginBypassWrite();
-            void store.load()
+            // A read already in flight started before this write; sharing it
+            // would publish the pre-write record. Start a new one.
+            void store.load(true)
               .then(() => store.announceUpdated())
               .finally(() => store.endBypassWrite());
           }} />}

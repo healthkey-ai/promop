@@ -281,11 +281,11 @@ class TestCost:
         # One batch lookup per source table (LOINC codes, UCUM units, attributed
         # codes), plus the approved-mapping table and one read per *distinct*
         # answer vocabulary those mappings name — four fields sharing a set cost
-        # one query, not four. The therapy-line catalog and the pre-existing
-        # condition categories are two more, each a single read per build.
-        # Constant in the number of fields either way; the bound guards the
-        # shape, not the exact number.
-        assert len(ctx) <= 8, [q['sql'][:80] for q in ctx]
+        # one query, not four. The therapy-line catalog, the pre-existing
+        # condition categories and the genomics endpoint's readiness check are
+        # single reads per build. Constant in the number of fields either way;
+        # the bound guards the shape, not the exact number.
+        assert len(ctx) <= 9, [q['sql'][:80] for q in ctx]
 
 
 class TestEndpoint:
@@ -703,3 +703,66 @@ class TestProfilePayloadField:
             assert entry['payload_field'] in accepted, (
                 f"{field} payload_field '{entry['payload_field']}' not in accepted set"
             )
+
+
+class TestListShape:
+    def test_multiple_survives_an_unloaded_vocabulary(self):
+        """A list field is a list even when its picker vocabulary is absent.
+
+        `multiple` used to be emitted only beside `options`, so a client saw a
+        single select for a JSON list and wrote a scalar over it (#2441).
+        """
+        from omop_core.models import FieldConceptMapping
+
+        VocabularyFactory(vocabulary_id='SNOMED')
+        concept = ConceptFactory(concept_code='SCT-LIST', vocabulary_id='SNOMED')
+        FieldConceptMapping.objects.update_or_create(
+            field_name='stem_cell_transplant_history',
+            defaults={
+                'concept': concept,
+                'vocabulary_id': 'SNOMED',
+                'concept_code': 'SCT-LIST',
+                'omop_table': 'observation',
+                'source_value': 'sct-list',
+                'value_kind': 'string',
+                'type_concept_id': 32817,
+                'status': 'approved',
+                'multiple': True,
+                'value_vocabulary': 'VocabularyThatIsNotLoaded',
+            },
+        )
+        entry = descriptor_fields()['stem_cell_transplant_history']
+        assert entry.get('multiple') is True
+        assert 'options' not in entry
+
+
+class TestGenomicsWritability:
+    def test_genetic_mutations_is_read_only_without_the_vocabulary(self):
+        """Advertising Add on a stack with no genomics vocab only offers a 400 (#2441)."""
+        entry = descriptor_fields()['genetic_mutations']
+        assert entry['writable'] is False
+        assert 'vocabular' in entry['reason'].lower()
+
+    def test_genetic_mutations_is_writable_once_the_genomics_vocabulary_is_loaded(self):
+        """The Genomics endpoint needs concept 0, a CDM event concept, both
+        actor type concepts and the always-normalised status recipe; a gene
+        LOINC alone is the retired list writer."""
+        from omop_core.models import FieldConceptMapping
+        from omop_core.services.genomics import ACTOR_TYPE_CONCEPT_IDS
+
+        # Migrations seed this recipe; --no-migrations tests must create it.
+        FieldConceptMapping.objects.create(
+            field_name='genetic_mutations.status', source_value='genomics:status',
+            omop_table='measurement', status='approved')
+        VocabularyFactory(vocabulary_id='Type Concept')
+        VocabularyFactory(vocabulary_id='CDM')
+        ConceptFactory(concept_id=0, concept_code='0', vocabulary_id='Type Concept')
+        for concept_id in ACTOR_TYPE_CONCEPT_IDS:
+            ConceptFactory(concept_id=concept_id, concept_code=str(concept_id),
+                           vocabulary_id='Type Concept')
+        ConceptFactory(concept_id=9_500_001, concept_code='measurement.measurement_id',
+                       vocabulary_id='CDM', concept_name='measurement.measurement_id')
+
+        entry = descriptor_fields()['genetic_mutations']
+        assert entry['writable'] is True
+        assert 'vocabular' not in entry['reason'].lower()

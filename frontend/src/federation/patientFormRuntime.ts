@@ -15,6 +15,9 @@ interface Runtime {
    *  patient changed) is what mount helpers and retirement see next. */
   readonly store: PatientFormStore;
   references: number; retirement?: ReturnType<typeof setTimeout>; watchIdle?: () => void;
+  /** Re-check the *current* store after a renewal swaps it under a retained
+   *  runtime (the waiter's subscription belongs to the old store). */
+  rearm?: () => void;
 }
 const widgets = new Map<string, Runtime>();
 
@@ -28,6 +31,24 @@ export function patientFormStoreId(store: PatientFormStore): number {
   return id;
 }
 const clients = new WeakMap<AxiosInstance, Map<string, PatientFormStore>>();
+/** Drafts lost when a store was retired, per client, until a mounted surface
+ *  can tell the reader. The provider may remount between the switch and the
+ *  notice, so this cannot live in its local state. */
+const retiredDrafts = new WeakMap<AxiosInstance, number>();
+
+/** Retire a store and remember any drafts that will never be sent. */
+export function noteRetiredDrafts(client: AxiosInstance, store: PatientFormStore) {
+  store.retire();
+  const count = store.takeRetiredDrafts();
+  if (count) retiredDrafts.set(client, (retiredDrafts.get(client) ?? 0) + count);
+}
+
+/** Consume the drafts lost since the last call, for a one-time notice. */
+export function takeRetiredDraftCount(client: AxiosInstance) {
+  const count = retiredDrafts.get(client) ?? 0;
+  retiredDrafts.delete(client);
+  return count;
+}
 
 export function patientFormForClient(client: AxiosInstance, base = '', sessionKey = '') {
   let stores = clients.get(client);
@@ -42,7 +63,13 @@ export function patientFormForClient(client: AxiosInstance, base = '', sessionKe
   // never handed out again. Every cache reads through here (the provider, the
   // editor session, the widget runtime's `store`, renewals), so evicting on
   // lookup keeps all of them off it.
-  if (store?.isRetired) { stores.delete(key); store = undefined; }
+  if (store?.isRetired) {
+    // A store retired by its own load (another patient answered) may still
+    // hold drafts nobody has surfaced. Move the count before evicting it.
+    noteRetiredDrafts(client, store);
+    stores.delete(key);
+    store = undefined;
+  }
   if (!store) {
     // A new connection key on the same client and base means the host
     // switched sign-in or impersonation on that client. A store under an
@@ -53,7 +80,7 @@ export function patientFormForClient(client: AxiosInstance, base = '', sessionKe
       for (const [otherKey, other] of stores) {
         const [otherBase, otherSession] = otherKey.split('\u0000');
         if (otherBase === base && otherSession && otherSession !== sessionKey) {
-          other.retire();
+          noteRetiredDrafts(client, other);
           stores.delete(otherKey);
         }
       }
@@ -77,8 +104,15 @@ export function renewPatientFormForClient(
   const stores = clients.get(client);
   const key = `${base}\u0000${sessionKey}`;
   if (stores?.get(key) === stale) stores.delete(key);
-  stale.retire();
-  return patientFormForClient(client, base, sessionKey);
+  noteRetiredDrafts(client, stale);
+  const fresh = patientFormForClient(client, base, sessionKey);
+  // A retained runtime that was waiting on the retired store must watch the
+  // fresh one; otherwise its 30 s clean-up never runs and the runtime (with
+  // its credentials) is retained for the life of the page.
+  for (const runtime of widgets.values()) {
+    if (runtime.client === client && runtime.references === 0) runtime.rearm?.();
+  }
+  return fresh;
 }
 
 /** Credentials are captured, never changed on a queue that still has edits.
@@ -111,18 +145,29 @@ export function retainPatientFormRuntime(connection: PatientFormConnection) {
   runtime.watchIdle = undefined;
   return () => {
     if (--runtime.references > 0) return;
+    let watched = runtime.store;
     const retireWhenIdle = () => {
-      const state = runtime.store.getSnapshot();
+      const current = runtime.store;
+      if (current !== watched) {
+        // A renewal swapped the store while this runtime waited. The old
+        // subscription will never see the new store's queue drain.
+        runtime.watchIdle?.();
+        watched = current;
+        runtime.watchIdle = current.subscribe(retireWhenIdle);
+      }
+      const state = current.getSnapshot();
       if (state.saving || Object.keys(state.pending).length) return;
       runtime.watchIdle?.();
       runtime.watchIdle = undefined;
+      runtime.rearm = undefined;
       runtime.retirement = setTimeout(() => {
         if (runtime.references) return;
         for (const [key, value] of widgets) if (value === runtime) widgets.delete(key);
         runtime.queryClient.clear();
       }, 30_000);
     };
-    runtime.watchIdle = runtime.store.subscribe(retireWhenIdle);
+    runtime.rearm = retireWhenIdle;
+    runtime.watchIdle = watched.subscribe(retireWhenIdle);
     retireWhenIdle();
   };
 }

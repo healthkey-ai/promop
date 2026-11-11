@@ -301,6 +301,46 @@ def _event_concept():
     return concept.pk
 
 
+#: The authoring type `_genomics_type_concept` selects between: patient self
+#: report and the clinical/import path.
+ACTOR_TYPE_CONCEPT_IDS = (32817, 32865)
+
+
+def variants_writable(type_concept_ids=ACTOR_TYPE_CONCEPT_IDS, *, status_recipe=None):
+    """Whether `save_variant` can create a variant on this deployment.
+
+    The descriptor asks this before offering Add/Edit. It mirrors the writer's
+    hard requirements rather than the retired list-diff writer: concept 0 for
+    unmapped rows, a CDM measurement event concept, the actor type concepts
+    the patient and clinical callers use, and the recipe every save needs for
+    its normalised status. Per-marker recipes are reported separately by the
+    catalog (`markers[].writable`).
+    """
+    if status_recipe is None:
+        status_recipe = FieldConceptMapping.objects.filter(
+            field_name='genetic_mutations.status').first()
+    if not mapping_is_usable(status_recipe):
+        return False
+    required = {0, *type_concept_ids}
+    rows = Concept.objects.filter(
+        Q(pk__in=required)
+        | Q(vocabulary_id='CDM', concept_code='measurement.measurement_id')
+        | Q(vocabulary_id='CDM', concept_name='measurement.measurement_id',
+            standard_concept='S')
+    ).values_list('pk', 'vocabulary_id', 'concept_code', 'concept_name',
+                  'standard_concept', 'invalid_reason')
+    loaded = set()
+    has_event = False
+    for pk, vocabulary_id, code, name, standard, invalid in rows:
+        if pk in required:
+            loaded.add(pk)
+        if (vocabulary_id == 'CDM' and invalid is None
+                and (code == 'measurement.measurement_id'
+                     or (name == 'measurement.measurement_id' and standard == 'S'))):
+            has_event = True
+    return required <= loaded and has_event
+
+
 def _note_context(parent_id):
     return f'genomics:overflow:{parent_id}'
 

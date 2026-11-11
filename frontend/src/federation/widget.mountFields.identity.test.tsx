@@ -22,7 +22,8 @@ afterEach(async () => {
 });
 
 it('renews the store from a slot Retry after the patient changed', async () => {
-  const context = { apiBase: '/api', token: 'mount-fields-identity', readOnly: false };
+  const onSaveError = vi.fn();
+  const context = { apiBase: '/api', token: 'mount-fields-identity', readOnly: false, onSaveError };
   const runtime = patientFormRuntime(context);
   let person = 1;
   vi.spyOn(runtime.client, 'get').mockImplementation(async (url: string) => ({
@@ -42,6 +43,8 @@ it('renews the store from a slot Retry after the patient changed', async () => {
   expect(await screen.findByDisplayValue('170')).toBeInTheDocument();
   const original = runtime.store;
 
+  // An edit is queued when the client starts answering for another patient.
+  fireEvent.change(screen.getByDisplayValue('170'), { target: { value: '180' } });
   person = 2;
   await act(async () => { await original.load(); });
   fireEvent.click(await screen.findByRole('button', { name: 'Retry' }));
@@ -49,4 +52,7 @@ it('renews the store from a slot Retry after the patient changed', async () => {
   expect(await screen.findByDisplayValue('182')).toBeInTheDocument();
   expect(runtime.store).not.toBe(original);
   expect(original.getSnapshot().personId).toBe(1);
+  // The retirement's own error publish tells the host once; the renewal must
+  // not deliver the same lost draft a second time.
+  expect(onSaveError).toHaveBeenCalledTimes(1);
 });

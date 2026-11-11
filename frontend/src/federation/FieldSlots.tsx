@@ -23,14 +23,17 @@ export default function FieldSlots({ runtime, opts, slots }: {
   runtime: ReturnType<typeof patientFormRuntime>; opts: FieldSlotsOptions; slots: HTMLElement[];
 }) {
   const apiBase = (opts.apiBase ?? '').replace(/\/+$/, '');
+  const { onPatientUpdated, onSaveError } = opts;
   const [store, setStore] = useState(() => runtime.store);
   const [generation, setGeneration] = useState(0);
   const renew = useCallback(() => {
+    // retire() publishes the "Not sent" errors before this render swaps the
+    // store, so the subscription below tells the host once. Do not consume the
+    // runtime count here: a later provider mount owns the visible notice.
     setStore(renewPatientFormForClient(runtime.client, apiBase, '', store));
     setGeneration((count) => count + 1);
   }, [runtime, apiBase, store]);
   useEffect(() => { void store.load(); }, [store]);
-  const { onPatientUpdated, onSaveError } = opts;
   useEffect(() => onPatientUpdated ? store.onUpdated(onPatientUpdated) : undefined,
     [store, onPatientUpdated]);
   useEffect(() => {

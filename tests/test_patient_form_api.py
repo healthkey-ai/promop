@@ -529,9 +529,23 @@ def test_native_patch_keeps_a_pinned_answer_pending_like_the_shared_form():
 
 def test_shared_form_offers_genomics_editor_but_never_writes_it_through_the_form():
     """`genetic_mutations` has its own endpoint, so it is writable for the host's
-    Genomics editor; the shared-form PATCH still refuses it."""
+    Genomics editor once its vocabulary is loaded; the shared-form PATCH still
+    refuses it. Without the vocabulary the descriptor says so (#2441/#2433)."""
+    from omop_core.models import FieldConceptMapping
+    from omop_core.services.genomics import ACTOR_TYPE_CONCEPT_IDS
     record = PatientRecordFactory()
     client = _client()
+    FieldConceptMapping.objects.create(
+        field_name='genetic_mutations.status', source_value='genomics:status',
+        omop_table='measurement', status='approved')
+    VocabularyFactory(vocabulary_id='Type Concept')
+    VocabularyFactory(vocabulary_id='CDM')
+    ConceptFactory(concept_id=0, concept_code='0', vocabulary_id='Type Concept')
+    for concept_id in ACTOR_TYPE_CONCEPT_IDS:
+        ConceptFactory(concept_id=concept_id, concept_code=str(concept_id),
+                       vocabulary_id='Type Concept')
+    ConceptFactory(concept_id=9_500_001, concept_code='measurement.measurement_id',
+                   vocabulary_id='CDM', concept_name='measurement.measurement_id')
     shared = client.get('/api/v1/patient-records/writable-fields/', {'person_id': record.person_id},
                         HTTP_X_PATIENT_FORM='1').data
     assert shared['genetic_mutations']['writable'] is True
@@ -643,3 +657,50 @@ def test_the_plain_descriptor_is_field_only_and_the_envelope_is_opt_in():
     read_only = reader.get(url, {'person_id': record.person_id}).data
     assert '__descriptor__' not in read_only
     assert not any(entry['writable'] for entry in read_only.values())
+
+
+class TestMeReportsWriteAccess:
+    """The shared form reads `write_enabled` from /patient-info/me/ (#2441)."""
+
+    def _patient(self):
+        from rest_framework.test import APIClient
+        client = APIClient()
+        client.force_authenticate(
+            Identity.objects.create_user(email='self-patient@example.test'))
+        return client
+
+    def test_a_caller_with_write_access_is_enabled(self):
+        response = self._patient().get('/api/patient-info/me/')
+        assert response.status_code == 200, response.data
+        assert response.data['write_enabled'] is True
+
+    def test_a_read_only_caller_is_not(self, monkeypatch):
+        import patient_portal.api.views as views
+
+        monkeypatch.setattr(views, '_caller_may_write_patient', lambda request, person_id: False)
+        response = self._patient().get('/api/patient-info/me/')
+        assert response.status_code == 200, response.data
+        assert response.data['write_enabled'] is False
+
+    def test_a_read_only_oauth_token_is_not(self):
+        """Patient access is not enough: the token itself must carry a write
+        scope, or its PATCH is refused by ScopedTokenPermission."""
+        from datetime import timedelta
+        from oauth2_provider.models import AccessToken, Application
+
+        identity = Identity.objects.create_user(email='read-only-token@example.test')
+        app = Application.objects.create(
+            name='Read-only client', client_id='test-read-only-form-client',
+            client_type=Application.CLIENT_CONFIDENTIAL,
+            authorization_grant_type=Application.GRANT_PASSWORD, user=identity)
+        token = AccessToken.objects.create(
+            application=app, user=identity, token='test-read-only-form-token',
+            scope='patient/*.read', expires=timezone.now() + timedelta(hours=1))
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.token}')
+
+        response = client.get('/api/patient-info/me/')
+        assert response.status_code == 200, response.data
+        assert response.data['write_enabled'] is False
+        patch = client.patch('/api/patient-info/me/', {'weight': 80}, format='json')
+        assert patch.status_code in (401, 403), patch.data

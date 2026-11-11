@@ -172,6 +172,22 @@ export default function TrialEditors({
   const listener = useMemo(() => () => { changed.current?.(); }, []);
   useEffect(() => store.onUpdated(listener), [store, listener]);
 
+  // Whether `renderFieldEditor` actually draws a scalar slot for this row.
+  // `fieldEditorOwnsValue` must answer exactly this: claiming a row whose
+  // editor renders null (an unresolved binding, an attestation, a negated
+  // yes/no, genomics) suppressed EXACT's own value for a row nobody painted
+  // (#2433).
+  const scalarSlotRendered = (field: string) => {
+    // Therapy rows get a pencil only, and genomics its own dialog.
+    if (isTherapyTrialRow(field) || isGenomicsTrialRow(field)) return false;
+    if (!bindings.ready || !bindings.canResolve(field)) return false;
+    // Attestations and inverted yes/no rows carry their own dialog, snapshot
+    // and polarity; EXACT wires those itself (#750, #5663). A field slot here
+    // would draw a read-only note or a plain select and suppress that door.
+    const kind = bindings.entryFor(field)?.kind;
+    return kind !== 'explicit-answer' && kind !== 'negated';
+  };
+
   const slots: TrialEditorSlots = {
     renderFieldEditor: ({ field, label }) => {
       if (isTherapyTrialRow(field)) {
@@ -187,14 +203,7 @@ export default function TrialEditors({
           />
         );
       }
-      // Genomics has its own dialog, opened by `renderGenomicsEditor`.
-      if (isGenomicsTrialRow(field)) return null;
-      if (!bindings.ready || !bindings.canResolve(field)) return null;
-      // Attestations and inverted yes/no rows carry their own dialog, snapshot
-      // and polarity; EXACT wires those itself (#750, #5663). A field slot here
-      // would draw a read-only note or a plain select and suppress that door.
-      const kind = bindings.entryFor(field)?.kind;
-      if (kind === 'explicit-answer' || kind === 'negated') return null;
+      if (!scalarSlotRendered(field)) return null;
       return (
         <PatientFieldEditorSlot
           key={`field:${field}`}
@@ -208,10 +217,9 @@ export default function TrialEditors({
         />
       );
     },
-    // The scalar slot draws the value too; the therapy slot is only a pencil,
-    // so EXACT keeps painting the value on those rows.
-    fieldEditorOwnsValue: ({ field }) =>
-      !isTherapyTrialRow(field) && !isGenomicsTrialRow(field),
+    // Only the scalar slot paints the value. The therapy pencil and the rows
+    // EXACT keeps for itself must leave its own rendering in place.
+    fieldEditorOwnsValue: ({ field }) => scalarSlotRendered(field),
     renderGenomicsEditor: ({ onClose }) => (
       <GenomicsEditor
         apiClient={apiClient}

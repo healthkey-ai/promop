@@ -148,6 +148,7 @@ from .permissions import (
     PatientDeletePermission, PatientSelfScopePermission, ScopedTokenPermission,
     VocabReadPermission, LabSyncPermission, EtlProvisionPermission,
     get_request_org, is_service_token, is_machine_request, has_system_read_grant,
+    credential_allows_write,
 )
 from .providers.base import TokenClaims
 from .therapy_line_import import (
@@ -1839,6 +1840,16 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 'patient_info': patient_serializer.data,  # legacy wire format — preserved for frontend/federation host compatibility
                 'user': user_serializer.data,
                 'patient_name': full_name,
+                # The shared form gates its controls on this flag before the
+                # descriptor arrives. Emitted here by the same rules the writes
+                # enforce — patient access *and* the credential's write scope,
+                # so a read-only OAuth/service token is not offered controls
+                # whose PATCH is refused. A host proxy no longer has to add it
+                # (#2441).
+                'write_enabled': (
+                    credential_allows_write(request)
+                    and _caller_may_write_patient(request, person.person_id)
+                ),
             })
 
         response = self._patch_record(request, person, patient_info)

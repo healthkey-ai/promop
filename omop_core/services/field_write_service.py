@@ -492,14 +492,25 @@ def owned_writable_fields(descriptor=None):
 
 def _genetic_mutations_writable():
     """True when genetic_mutations can round-trip: the patient-report type concept AND at least one
-    reviewed gene LOINC are loaded. Keeps editable_fields honest on a stack with a partial vocab."""
+    reviewed gene LOINC are loaded. Keeps editable_fields honest on a stack with a partial vocab.
+
+    Both halves are read in one query: the descriptor build calls this for every
+    request and its cost must stay flat (#2441).
+    """
+    from django.db.models import Q
     from omop_core.services.patient_record_service import _GENETIC_MUTATION_LOINCS
-    if not Concept.objects.filter(
-            concept_id=PATIENT_REPORTED_TYPE_CONCEPT_ID, vocabulary_id='Type Concept').exists():
-        return False
     reviewed_gene_codes = [code for code, gene in _GENETIC_MUTATION_LOINCS.items() if gene]
-    return Concept.objects.filter(
-        concept_code__in=reviewed_gene_codes, vocabulary_id='LOINC').exists()
+    loaded = Concept.objects.filter(
+        Q(concept_id=PATIENT_REPORTED_TYPE_CONCEPT_ID, vocabulary_id='Type Concept')
+        | Q(concept_code__in=reviewed_gene_codes, vocabulary_id='LOINC')
+    ).values_list('concept_id', 'vocabulary_id')
+    has_type = has_gene = False
+    for concept_id, vocabulary_id in loaded:
+        if vocabulary_id == 'Type Concept' and concept_id == PATIENT_REPORTED_TYPE_CONCEPT_ID:
+            has_type = True
+        elif vocabulary_id == 'LOINC':
+            has_gene = True
+    return has_type and has_gene
 
 
 def _clean_location_value(field, value):

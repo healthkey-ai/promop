@@ -1,6 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import axios from 'axios';
-import { patientFormForClient, patientFormRuntime, retainPatientFormRuntime } from './patientFormRuntime';
+import { patientFormForClient, patientFormRuntime, renewPatientFormForClient, retainPatientFormRuntime, takeRetiredDraftCount } from './patientFormRuntime';
 
 afterEach(() => { vi.useRealTimers(); });
 
@@ -51,4 +51,43 @@ it('never hands out a retired store again', () => {
   const next = patientFormForClient(client, '/api');
   expect(next).not.toBe(original);
   expect(next.isRetired).toBe(false);
+});
+
+it('keeps a retired store\'s lost drafts for the next mounted surface', async () => {
+  const client = axios.create();
+  vi.spyOn(client, 'get').mockImplementation(async (url) => ({ data: url.includes('writable-fields')
+    ? { weight: { writable: true, target: 'patient_record' } }
+    : { patient_info: { person_id: 12, weight: 60 } } }));
+  const original = patientFormForClient(client, '/api');
+  await original.load();
+  original.enqueue('weight', 80);
+  // The store retires itself when a load finds another patient, before any
+  // provider can announce it. The next lookup evicts it.
+  original.retire();
+
+  expect(patientFormForClient(client, '/api')).not.toBe(original);
+  expect(takeRetiredDraftCount(client)).toBe(1);
+  expect(takeRetiredDraftCount(client)).toBe(0);
+});
+
+it('re-arms the idle watcher when a renewal swaps the store', async () => {
+  vi.useFakeTimers();
+  const context = { apiBase: '/api', token: 'captured', sessionKey: 'runtime-renewal' };
+  const runtime = patientFormRuntime(context);
+  const release = retainPatientFormRuntime(context);
+  vi.spyOn(runtime.client, 'get').mockImplementation(async (url) => ({ data: url.includes('writable-fields')
+    ? { weight: { writable: true, target: 'patient_record' } }
+    : { patient_info: { person_id: 12, weight: 60 } } }));
+  await runtime.store.load();
+  runtime.store.enqueue('weight', 80);
+  release();
+  await vi.advanceTimersByTimeAsync(31_000);
+  expect(patientFormRuntime(context)).toBe(runtime);
+
+  // A renewal (the linked patient changed) retires the store this runtime is
+  // subscribed to. The fresh store is idle, but without re-arming the old
+  // subscription the clean-up never fires and the runtime keeps credentials.
+  renewPatientFormForClient(runtime.client, '/api', '', runtime.store);
+  await vi.advanceTimersByTimeAsync(30_000);
+  expect(patientFormRuntime(context)).not.toBe(runtime);
 });

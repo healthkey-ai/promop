@@ -151,6 +151,62 @@ describe('patient identity with a reused client', () => {
     }
   });
 
+  it('tells the reader that the previous patient\'s unsent edit was dropped', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const view = render(form('session-a'));
+      await typeFirst();
+
+      signedIn = 262;
+      view.rerender(form('session-b'));
+
+      expect(await screen.findByRole('status')).toHaveTextContent(
+        '1 unsent edit for the previous patient was not saved.');
+      fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));
+      expect(screen.queryByText(/unsent edit/)).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not announce an in-flight save as lost when the patient switches', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const view = render(form('session-a'));
+      await typeFirst();
+      // The debounce fired, so the PATCH is in flight (the mock never settles)
+      // rather than queued: it settles as usual and is not an unsent draft.
+      await act(async () => { await vi.advanceTimersByTimeAsync(500); });
+      expect(patches).toHaveLength(1);
+
+      signedIn = 262;
+      view.rerender(form('session-b'));
+
+      expect(await screen.findByDisplayValue('second@example.org')).toBeInTheDocument();
+      expect(screen.queryByText(/unsent edit/)).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('announces the lost draft even when the provider remounts', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const view = render(form('session-a'));
+      await typeFirst();
+      view.unmount();
+
+      signedIn = 262;
+      render(form('session-b'));
+
+      expect(await screen.findByDisplayValue('second@example.org')).toBeInTheDocument();
+      expect(await screen.findByRole('status')).toHaveTextContent(
+        '1 unsent edit for the previous patient was not saved.');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('does not send it either when the form remounts under a new key', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {

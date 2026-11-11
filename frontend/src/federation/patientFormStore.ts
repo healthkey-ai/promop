@@ -113,6 +113,10 @@ export class PatientFormStore {
   private readRevision = 0;
   /** This store's client now speaks for someone else; see `retire()`. */
   private retired = false;
+  /** Drafts `retire()` dropped without sending, consumed once by the caller
+   *  that tells the reader. An in-flight save settles as usual and is not
+   *  counted here. */
+  private retiredDrafts = 0;
 
   constructor(private client: AxiosInstance, private base: string) {}
 
@@ -301,6 +305,9 @@ export class PatientFormStore {
     const pending = { ...this.snapshot.pending };
     const failed = { ...this.snapshot.failed };
     const errors = { ...this.snapshot.errors };
+    // A draft already in the failed map is lost too. A batch in `pending` has
+    // been dispatched; it settles as usual, so it is not counted as unsent.
+    this.retiredDrafts = Object.keys(failed).length + Object.keys(this.queue).length;
     for (const [name, value] of Object.entries(this.queue)) {
       delete pending[name];
       failed[name] = value;
@@ -308,6 +315,14 @@ export class PatientFormStore {
     }
     this.queue = {};
     this.publish({ pending, failed, errors, writable: false });
+  };
+
+  /** The drafts this store lost on retirement, read once by the caller that
+   *  surfaces the notice. */
+  takeRetiredDrafts = () => {
+    const count = this.retiredDrafts;
+    this.retiredDrafts = 0;
+    return count;
   };
 
   /** An edit offered to a retired store is refused visibly, never dropped. */
