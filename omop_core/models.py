@@ -1304,6 +1304,9 @@ class Measurement(models.Model):
     value_source_value = models.CharField(max_length=50, null=True, blank=True)
     measurement_event_id = models.BigIntegerField(null=True, blank=True)
     meas_event_field_concept = models.ForeignKey(Concept, on_delete=models.PROTECT, related_name='measurement_event_fields', db_column='meas_event_field_concept_id', null=True, blank=True)
+    # #2453: the producer's stable id for the source record (e.g. a FHIR
+    # resource), so a re-import matches the row even when its code changed.
+    source_record_key = models.CharField(max_length=512, null=True, blank=True)
     # PHR-S FM PH.1.1#06 — entered-in-error (retain, exclude from normal reads).
     is_erroneous = models.BooleanField(default=False, help_text="Marked entered-in-error; retained but excluded from normal reads")
     erroneous_reason = models.TextField(null=True, blank=True, help_text="Why this record was marked erroneous")
@@ -1322,6 +1325,12 @@ class Measurement(models.Model):
             models.Index(
                 fields=['person', 'is_erroneous', 'measurement_date'],
                 name='ix_meas_person_err_date',
+            ),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['person', 'source_record_key'],
+                name='uq_measurement_person_source_record_key',
             ),
         ]
 
@@ -1370,6 +1379,9 @@ class Observation(models.Model):
     value_source_value = models.CharField(max_length=50, null=True, blank=True)
     observation_event_id = models.BigIntegerField(null=True, blank=True)
     obs_event_field_concept = models.ForeignKey(Concept, on_delete=models.PROTECT, related_name='observation_event_fields', db_column='obs_event_field_concept_id', null=True, blank=True)
+    # #2453: the producer's stable id for the source record (e.g. a FHIR
+    # resource), so a re-import matches the row even when its code changed.
+    source_record_key = models.CharField(max_length=512, null=True, blank=True)
     # PHR-S FM PH.1.1#06 — entered-in-error (retain, exclude from normal reads).
     is_erroneous = models.BooleanField(default=False, help_text="Marked entered-in-error; retained but excluded from normal reads")
     erroneous_reason = models.TextField(null=True, blank=True, help_text="Why this record was marked erroneous")
@@ -1381,6 +1393,12 @@ class Observation(models.Model):
             models.Index(
                 fields=['person', 'is_erroneous', 'observation_date'],
                 name='ix_obs_person_err_date',
+            ),
+        ]
+        constraints = [
+            models.UniqueConstraint(
+                fields=['person', 'source_record_key'],
+                name='uq_observation_person_source_record_key',
             ),
         ]
 
