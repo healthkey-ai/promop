@@ -1736,6 +1736,14 @@ def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fiel
                 unit_updates.pop(_CHEMISTRY_PAIRS[canonical]['unit'], None)
             for unit_field, unit in unit_updates.items():
                 setattr(patient_info, unit_field, unit)
+    # A pending pair owns its canonical read-model: the pair is the reader's
+    # input and the canonical follows it, so a canonical marker left by an
+    # older edit must not outlive it. Otherwise, once a newer import retires
+    # the pair, that stale marker would restore the old canonical over the new
+    # result (#2426).
+    for source, canonical in _SOURCE_PAIR_CANONICALS.items():
+        if canonical != source and source in pending_aliases:
+            pending_aliases.discard(canonical)
     patient_info.user_edited_fields = sorted(pending_aliases)
     # A pending pair's entered day lives only while the pair is pending: an
     # explicit canonical write or import retires both together (#2426).

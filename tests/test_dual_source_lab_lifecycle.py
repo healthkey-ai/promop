@@ -623,3 +623,40 @@ def test_a_failed_shared_form_projection_leaves_no_canonical_pending(lab):
     assert not {'hemoglobin_level', 'hemoglobin_level_units'} & set(
         record.user_edited_fields or [])
     assert record.pending_source_pair_dates == {}
+
+
+def test_a_pair_write_drops_a_stale_canonical_marker(lab):
+    record = lab['record']
+    record.hemoglobin_g_dl = Decimal('9.0')
+    record.user_edited_fields = ['hemoglobin_g_dl']
+    record.save()
+
+    draw = TODAY - timedelta(days=2)
+    _patch_pair(lab, 120, 'G/L', draw)
+
+    record.refresh_from_db()
+    # The pair is the reader's input; its canonical is a derived read-model and
+    # cannot keep an independent pending marker that would later mask a newer
+    # import once the pair is retired.
+    assert 'hemoglobin_g_dl' not in (record.user_edited_fields or [])
+
+    _import(lab, 8.0, 'g/dL', TODAY)
+    record.refresh_from_db()
+    assert record.hemoglobin_g_dl == Decimal('8.0')
+
+
+def test_a_native_pair_write_drops_a_stale_canonical_marker(lab):
+    record = lab['record']
+    record.hemoglobin_g_dl = Decimal('9.0')
+    record.user_edited_fields = ['hemoglobin_g_dl']
+    record.save()
+
+    draw = TODAY - timedelta(days=2)
+    _patch_native(lab, 120, 'G/L', draw)
+
+    record.refresh_from_db()
+    assert 'hemoglobin_g_dl' not in (record.user_edited_fields or [])
+
+    _import(lab, 8.0, 'g/dL', TODAY)
+    record.refresh_from_db()
+    assert record.hemoglobin_g_dl == Decimal('8.0')
