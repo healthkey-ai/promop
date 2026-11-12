@@ -61,6 +61,7 @@ def _creatinine(
     (80, 'umol/L', None, Decimal('0.90')),
     (80, 'µmol/L', None, Decimal('0.90')),
     (80, 'micromoles/liter', None, Decimal('0.90')),
+    (80, 'micromol/L', None, Decimal('0.90')),
     (221, 'umol/L', None, Decimal('2.50')),
     (1.1, 'mg/dL', None, Decimal('1.10')),
     (1.1, 'MG/DL', None, Decimal('1.10')),
@@ -253,7 +254,7 @@ def test_renal_adequacy_reads_si_creatinine_in_mg_dl(value, stored, adequate):
 
 @pytest.mark.django_db
 @pytest.mark.parametrize('newest_value, newest_unit', [
-    (3.4, 'mg'), (90, 'mg/L'), (90, 'micromol/L'),
+    (3.4, 'mg'), (90, 'mg/L'), (90, 'zorkles'),
 ])
 def test_a_blocked_newest_result_stays_unknown_through_refresh(newest_value, newest_unit):
     """The extractor blocks an unreadable newest unit; the approved mapping

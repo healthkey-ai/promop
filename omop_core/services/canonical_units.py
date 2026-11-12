@@ -136,6 +136,7 @@ _UNIT_WORDS = {
     'microliters': 'uL', 'microliter': 'uL', 'microlitres': 'uL', 'microlitre': 'uL',
     'liters': 'L', 'liter': 'L', 'litres': 'L', 'litre': 'L',
     'millimoles': 'mmol', 'millimole': 'mmol', 'micromoles': 'umol', 'micromole': 'umol',
+    'micromols': 'umol', 'micromol': 'umol',
     'nanomoles': 'nmol', 'nanomole': 'nmol', 'per': '/',
 }
 _UNIT_WORD = re.compile(r'[a-z]+')
