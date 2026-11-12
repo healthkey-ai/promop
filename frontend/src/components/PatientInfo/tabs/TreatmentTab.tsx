@@ -12,7 +12,7 @@ import TherapyLineDialog from '../TherapyLineDialog';
 import SupportiveTherapyDialog from '../SupportiveTherapyDialog';
 import type { SupportiveTherapyCourse } from '@/api/supportiveTherapies';
 import { usePatientFormStore } from '@/federation/PatientFormContext';
-import { diseaseToDiseaseCode } from '@/api/therapyContext';
+import { diseaseToDiseaseCode, lastRecordedTherapyLine, plannedTherapyRound } from '@/api/therapyContext';
 
 interface Props {
   formData: Record<string, unknown>;
@@ -107,12 +107,6 @@ export default function TreatmentTab({ formData, onChange, diseaseType, onRecord
     />
   );
 
-  const linesCount = (() => {
-    const v = String(formData?.therapy_lines_count ?? '');
-    if (v === '3+') return 3;
-    return parseInt(v) || 0;
-  })();
-
   const therapyLines = Array.isArray(formData?.lines_of_therapy)
     ? (formData.lines_of_therapy as EditableTherapyLine[])
     : [];
@@ -123,16 +117,12 @@ export default function TreatmentTab({ formData, onChange, diseaseType, onRecord
   // derived `therapy_lines_count`: an imported patient can have a non-zero
   // count with no line rows to edit, and Math.max(count, ...[]) then opened
   // "Record a line" at 2 when nothing had been recorded (#1969 follow-up).
-  const lastRecordedLine = therapyLines.reduce(
-    (max, line) => Math.max(max, Number(line.line) || 0), 0);
-  const authoringLine = lastRecordedLine + 1;
+  const authoringLine = lastRecordedTherapyLine(therapyLines) + 1;
   // The planned-regimen catalog still uses the derived count: a count of 1
   // means one line has already been given, so the next planned round is
-  // second-line even when the imported line rows are not readable here.
-  const plannedLine = Math.max(linesCount, lastRecordedLine) + 1;
-  const nextRound = plannedLine === 1 ? 'first_line_therapy'
-    : plannedLine === 2 ? 'second_line_therapy'
-    : 'later_line_therapy';
+  // second-line even when the imported line rows are not readable here. The
+  // federated store asks the same question through the same helper.
+  const nextRound = plannedTherapyRound(formData?.therapy_lines_count, therapyLines);
   const [plannedRegimens, setPlannedRegimens] = useState<TherapyRegimen[]>([]);
   const [loadingPlanned, setLoadingPlanned] = useState(false);
 
