@@ -53,6 +53,18 @@ def stale_answer_formula_allowed(db):
     """
     from django.db import connection
 
+    drop_explicit_answer_check(connection)
+
+
+def drop_explicit_answer_check(connection):
+    """Drop the explicit-answer CHECK, only where the drop will roll back.
+
+    A transactional test (``transactional_db``) commits, so the DDL would
+    outlive the test and silently weaken every later one; refuse it there.
+    """
+    assert connection.in_atomic_block, (
+        'stale_answer_formula_allowed needs a test transaction to roll the '
+        'constraint drop back; it cannot be used with transactional_db.')
     with connection.cursor() as cursor:
         cursor.execute(
             'ALTER TABLE field_formula '

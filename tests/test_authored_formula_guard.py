@@ -69,3 +69,19 @@ def test_the_database_refuses_an_active_formula_for_every_authored_answer(field_
 
     with pytest.raises(IntegrityError), transaction.atomic():
         FieldFormula.objects.create(field_name=field_name, formula='true', is_active=True)
+
+
+@pytest.mark.django_db(transaction=True)
+def test_the_stale_schema_fixture_refuses_a_committing_test():
+    """The constraint drop is undone only by the test's rollback; outside a
+    transaction it would leak into every later test (#2489 review)."""
+    from django.db import IntegrityError, connection
+
+    from tests.conftest import drop_explicit_answer_check
+
+    with pytest.raises(AssertionError, match='transactional_db'):
+        drop_explicit_answer_check(connection)
+    # The constraint is still there for the next test.
+    with pytest.raises(IntegrityError):
+        FieldFormula.objects.create(
+            field_name='no_pre_existing_conditions', formula='true', is_active=True)
