@@ -21,8 +21,9 @@ python manage.py preview_rederivation --format json > preview.json   # or --form
 
 It prints a summary (records scanned, records that would change, records
 changed per field, changes per kind) and one line per change: `person_id`,
-field, and how it changes -- `set` (null -> value), `cleared` (value -> null)
-or `changed`, with `up`/`down` for a number. `--limit` caps the records
+field, and how it changes -- `set` (empty -> value), `cleared` (value -> empty;
+empty is null, `""`, `[]` or `{}`, as for the derivation) or `changed`, with
+`up`/`down` for a number (not for a flag: its direction would be its value). `--limit` caps the records
 scanned, `--max-rows` the lines printed (the counts still cover everything). A
 field that held a pending user edit is marked `[user-edited]`; the refresh
 keeps such an edit until OMOP backs it, so most pending edits show no change,
@@ -31,12 +32,15 @@ accepts a `PatientRecord` field name or `custom_fields.<key>` and refuses
 anything else.
 
 It prints no values, neither stored nor re-derived, and no names; rows carry
-`person_id` only. To look at a value, read that record in the admin, under its
-access controls. A record that cannot be previewed is reported, and logged, by
-error type, plus SQLSTATE and constraint name for a database error -- never the
-error message, which for a constraint violation quotes the whole row. The
-refresh's own log lines are not filtered: run it with the same log handling as
-the backfill.
+`person_id` only. A `custom_fields` key with no `CustomPatientField`
+definition prints as `custom_fields.<undefined>`, since such a key is whatever
+was written into the JSON. To look at a value, read that record in the admin,
+under its access controls. A record that cannot be previewed is reported, and
+logged, by error type, plus SQLSTATE and constraint name for a database error
+-- never the error message, which for a constraint violation quotes the whole
+row. The refresh's own log lines are dropped while it runs: they quote what
+they diagnose (a unit's source text, an overflowing value). The backfill, which
+runs the same refresh for real, still logs them.
 
 It is read-only: each record runs the real `refresh_patient_record` inside a
 transaction that is always rolled back, while a guard refuses any SQL other

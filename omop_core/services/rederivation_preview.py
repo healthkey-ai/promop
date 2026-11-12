@@ -30,6 +30,8 @@ import contextlib
 import dataclasses
 import decimal
 import importlib.util
+import logging
+import math
 import re
 from typing import Iterator
 from unittest import mock
@@ -55,8 +57,11 @@ SET, CLEARED, CHANGED = 'set', 'cleared', 'changed'
 UP, DOWN = 'up', 'down'
 
 # custom_fields is one JSON column holding one value per custom field; each key
-# is reported as a field of its own.
+# is reported as a field of its own -- by name only when an administrator
+# defined it (CustomPatientField). A key with no definition is whatever was
+# written into the JSON, so it is reported under this placeholder instead.
 _EXPANDED_JSON_FIELDS = ('custom_fields',)
+UNDEFINED_CUSTOM_FIELD = 'custom_fields.<undefined>'
 
 _ALLOWED_WRITE = re.compile(r'^\s*UPDATE\s+"?patient_record"?\s', re.IGNORECASE)
 _READ_OR_CONTROL = re.compile(
@@ -88,7 +93,7 @@ class PreviewWriteBlocked(RuntimeError):
 class FieldChange:
     person_id: int
     field: str
-    change: str             # SET (null -> value), CLEARED (value -> null), CHANGED
+    change: str             # SET (empty -> value), CLEARED (value -> empty), CHANGED
     direction: str | None   # UP or DOWN for a number that changed, else None
     user_edited: bool
 
@@ -164,19 +169,88 @@ def _values(record: PatientRecord) -> dict[str, object]:
     return values
 
 
+def _is_empty(value) -> bool:
+    """The derivation's own "no data" values (patient_record_service._is_empty).
+
+    0 and False are answers, not absences.
+    """
+    return value is None or value == '' or value == [] or value == {}
+
+
 def _is_number(value) -> bool:
     return isinstance(value, (int, float, decimal.Decimal)) and not isinstance(value, bool)
 
 
+def _is_nan(value) -> bool:
+    return _is_number(value) and value != value
+
+
+def same_value(before, after) -> bool:
+    """Equality as the stored JSON or column sees it.
+
+    Python's == calls True equal to 1 and False to 0, and NaN unequal to
+    itself; a flag that becomes a number is a change, and NaN staying NaN is
+    not.
+    """
+    if isinstance(before, bool) or isinstance(after, bool):
+        return type(before) is type(after) and before == after
+    if _is_nan(before) or _is_nan(after):
+        return _is_nan(before) and _is_nan(after)
+    if isinstance(before, (list, tuple)) and isinstance(after, (list, tuple)):
+        return len(before) == len(after) and all(map(same_value, before, after))
+    if isinstance(before, dict) and isinstance(after, dict):
+        return before.keys() == after.keys() and all(
+            same_value(before[key], after[key]) for key in before)
+    return before == after
+
+
 def describe_change(before, after) -> tuple[str, str | None]:
-    """How a value changed, without the values: (change, direction)."""
-    if before is None:
+    """How a value changed, without the values: (change, direction).
+
+    SET and CLEARED use the derivation's emptiness, so a refresh that empties
+    a list of genomic findings is a wipe, not an edit. Only a number has a
+    direction: a flag's direction would be its value.
+    """
+    if _is_empty(before):
         return SET, None
-    if after is None:
+    if _is_empty(after):
         return CLEARED, None
-    if _is_number(before) and _is_number(after):
+    if (_is_number(before) and _is_number(after)
+            and math.isfinite(before) and math.isfinite(after)):
         return CHANGED, UP if after > before else DOWN
     return CHANGED, None
+
+
+def _custom_field_names() -> frozenset[str]:
+    from omop_core.models import CustomPatientField
+
+    return frozenset(
+        f'custom_fields.{name}'
+        for name in CustomPatientField.objects.values_list('field_name', flat=True))
+
+
+def _reported_name(field: str, defined: frozenset[str]) -> str:
+    if field.startswith('custom_fields.') and field not in defined:
+        return UNDEFINED_CUSTOM_FIELD
+    return field
+
+
+@contextlib.contextmanager
+def _refresh_logging_silenced():
+    """Drop every log record while the refresh runs.
+
+    The refresh's own diagnostics quote what they diagnose -- a source unit's
+    text, an overflowing value -- next to the person_id, and with no handler
+    configured Python prints them on the operator's stderr. They belong to
+    the backfill, which runs the same refresh for real; the preview reports
+    its failures itself, by type (see the command).
+    """
+    previous = logging.root.manager.disable
+    logging.disable(logging.CRITICAL)
+    try:
+        yield
+    finally:
+        logging.disable(previous)
 
 
 def preview_record(record: PatientRecord) -> list[FieldChange]:
@@ -207,7 +281,8 @@ def preview_record(record: PatientRecord) -> list[FieldChange]:
                     stored_record = PatientRecord.objects.select_for_update().get(pk=record.pk)
                     stored = _values(stored_record)
                     pending = set(stored_record.user_edited_fields or [])
-                    refresh_patient_record(stored_record.person)
+                    with _refresh_logging_silenced():
+                        refresh_patient_record(stored_record.person)
                     rederived = _values(PatientRecord.objects.get(pk=record.pk))
                 finally:
                     transaction.set_rollback(True)
@@ -220,15 +295,16 @@ def preview_record(record: PatientRecord) -> list[FieldChange]:
     if refusals:
         raise PreviewWriteBlocked(f'preview refused {refusals[0]}')
 
+    defined = _custom_field_names()
     changes = []
     for field in sorted(stored.keys() | rederived.keys()):
         before, after = stored.get(field), rederived.get(field)
-        if before == after:
+        if same_value(before, after):
             continue
         change, direction = describe_change(before, after)
         changes.append(FieldChange(
             person_id=stored_record.person_id,
-            field=field,
+            field=_reported_name(field, defined),
             change=change,
             direction=direction,
             user_edited=field in pending,

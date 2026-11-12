@@ -23,9 +23,12 @@ Usage:
     python manage.py preview_rederivation --format csv > changes.csv
 
 No values are printed, stored or re-derived: a row says which field of which
-person_id would change and how -- set (null -> value), cleared (value -> null)
-or changed, plus up/down for a number -- and whether it held a pending user
-edit. No names either: rows carry person_id only. Needs the writable primary: see
+person_id would change and how -- set (empty -> value), cleared (value ->
+empty; empty is null, "", [] or {}) or changed, plus up/down for a number (not
+for a flag: its direction would be its value) -- and whether it held a pending
+user edit. A custom_fields key with no CustomPatientField definition prints as
+custom_fields.<undefined>. The refresh's own log lines are dropped while it
+runs. No names either: rows carry person_id only. Needs the writable primary: see
 "Before a backfill" in docs/DERIVATION_CHANGELOG.md.
 """
 

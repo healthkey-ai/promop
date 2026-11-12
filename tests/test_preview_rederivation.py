@@ -17,7 +17,7 @@ from omop_core.services.patient_record_service import (
     DERIVATION_VERSION, refresh_patient_record,
 )
 from omop_core.services.rederivation_preview import (
-    PreviewWriteBlocked, _statement_is_allowed, describe_change, preview_record,
+    PreviewWriteBlocked, _statement_is_allowed, describe_change, preview_record, same_value,
 )
 from tests.factories import MeasurementFactory, OrganizationFactory, PatientRecordFactory
 
@@ -95,10 +95,29 @@ def test_a_derived_number_is_compared_as_stored():
     (1, 2, ('changed', 'up')),
     (2.5, Decimal('1.0'), ('changed', 'down')),
     (False, True, ('changed', None)),   # a flag has no direction
-    ([], ['race'], ('changed', None)),
+    ([], ['race'], ('set', None)),      # empty is the derivation's empty
+    ([{'variant': 'x'}], [], ('cleared', None)),
+    ('M', '', ('cleared', None)),
+    ({}, {'a': 1}, ('set', None)),
+    (0, 1, ('changed', 'up')),          # 0 is an answer, not empty
+    (float('nan'), 80.0, ('changed', None)),
+    (Decimal('NaN'), Decimal('1'), ('changed', None)),
 ])
 def test_a_change_is_described_without_its_values(before, after, expected):
     assert describe_change(before, after) == expected
+
+
+@pytest.mark.parametrize('before, after, same', [
+    (1, True, False),
+    (0, False, False),
+    ([1], [True], False),
+    ({'a': 0}, {'a': False}, False),
+    (float('nan'), float('nan'), True),
+    (1, 1.0, True),
+    ({'a': [1, 2]}, {'a': [1, 2]}, True),
+])
+def test_a_flag_is_not_its_number_and_nan_is_itself(before, after, same):
+    assert same_value(before, after) is same
 
 
 def test_a_value_appearing_from_null_is_set():
@@ -113,7 +132,7 @@ def test_a_value_appearing_from_null_is_set():
     }]
 
 
-def test_no_value_is_printed_in_any_format(monkeypatch):
+def test_no_value_is_printed_in_any_format(monkeypatch, capsys, caplog):
     """Round 3 printed source text through disease, stage, race and an
     unchecked choices field; round 2 through genomic findings. No value of any
     field reaches the output, whatever the field."""
@@ -121,9 +140,12 @@ def test_no_value_is_printed_in_any_format(monkeypatch):
     record = _settled()
     _stale(record, email='jane@example.org', phone_number='555-0100',
            death_date='2024-03-01', latitude=45.123987, longitude=-73.654321,
-           custom_fields={'note': secret, 'mrn': 4815162342})
+           custom_fields={'note': secret, 'mrn': 4815162342, secret: 3})
 
     def derived(person, snapshot=None):
+        # The refresh's own diagnostics quote what they diagnose.
+        logging.getLogger('omop_core.services.patient_record_service').warning(
+            'unit_source_value=%r', secret)
         return {'blood_type': None, 'tobacco_use_details': secret, 'planned_therapies': secret}
 
     monkeypatch.setattr(patient_record_service, '_get_blood_type_data', derived)
@@ -131,7 +153,11 @@ def test_no_value_is_printed_in_any_format(monkeypatch):
         disease=secret, disease_slug=secret, stage=secret, race=secret,
         ethnicity=secret, genetic_mutations=[{'variant': secret}])
 
-    outputs = [_run(*args) for args in ((), ('--format', 'json'), ('--format', 'csv'))]
+    caplog.set_level(logging.DEBUG)
+    outputs = [_run(*args) for args in (
+        (), ('--format', 'json'), ('--format', 'csv'), ('--max-rows', '0'))]
+    captured = capsys.readouterr()
+    outputs.append((captured.out + caplog.text, captured.err))
 
     assert _json()['summary']['changes'] >= 10
     for out, err in outputs:
@@ -172,7 +198,7 @@ def test_a_pending_edit_that_omop_now_backs_resolves():
 
     assert rows == [{
         'person_id': record.person_id, 'field': 'user_edited_fields',
-        'change': 'changed', 'direction': None, 'user_edited': False,
+        'change': 'cleared', 'direction': None, 'user_edited': False,
     }]
 
 
@@ -214,15 +240,25 @@ def test_field_filter_and_row_limit():
 
 
 def test_custom_fields_are_compared_per_key():
+    from omop_core.models import CustomPatientField, FieldConceptMapping
+    mapping = FieldConceptMapping.objects.create(
+        field_name='stale_custom_answer', omop_table='observation',
+        source_value='phr:stale-custom-answer', value_kind='number', status='approved')
+    CustomPatientField.objects.create(
+        field_name='stale_custom_answer', display_name='Stale', tab='disease',
+        field_type='number', mode='editable', mapping=mapping)
     record = _settled()
-    _stale(record, custom_fields={'stale_custom_answer': 3})
+    _stale(record, custom_fields={'stale_custom_answer': 3, 'Jane Doe MRN 77': 1})
 
     rows = _json('--field', 'custom_fields')['changes']
 
-    assert rows == [{
-        'person_id': record.person_id, 'field': 'custom_fields.stale_custom_answer',
-        'change': 'cleared', 'direction': None, 'user_edited': False,
-    }]
+    # A key nobody defined is whatever was written into the JSON: no name.
+    assert sorted(rows, key=lambda row: row['field']) == [
+        {'person_id': record.person_id, 'field': 'custom_fields.<undefined>',
+         'change': 'cleared', 'direction': None, 'user_edited': False},
+        {'person_id': record.person_id, 'field': 'custom_fields.stale_custom_answer',
+         'change': 'cleared', 'direction': None, 'user_edited': False},
+    ]
 
 
 def test_text_output():
