@@ -28,8 +28,10 @@ scanned, `--max-rows` the lines printed (the counts still cover everything). A
 field that held a pending user edit is marked `[user-edited]`; the refresh
 keeps such an edit until OMOP backs it, so most pending edits show no change,
 and the preview reports exactly what the refresh does to the rest. `--field`
-accepts a `PatientRecord` field name or `custom_fields.<key>` and refuses
-anything else.
+accepts a `PatientRecord` field name, `custom_fields.<key>` of a defined custom
+field or `custom_fields.<undefined>`, and refuses anything else. A change
+between two empty values (`""` -> null) is not reported: the derivation treats
+them as equal too.
 
 It prints no values, neither stored nor re-derived, and no names; rows carry
 `person_id` only. A `custom_fields` key with no `CustomPatientField`

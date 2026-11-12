@@ -27,7 +27,7 @@ person_id would change and how -- set (empty -> value), cleared (value ->
 empty; empty is null, "", [] or {}) or changed, plus up/down for a number (not
 for a flag: its direction would be its value) -- and whether it held a pending
 user edit. A custom_fields key with no CustomPatientField definition prints as
-custom_fields.<undefined>. The refresh's own log lines are dropped while it
+custom_fields.<undefined> (and --field takes that name). The refresh's own log lines are dropped while it
 runs. No names either: rows carry person_id only. Needs the writable primary: see
 "Before a backfill" in docs/DERIVATION_CHANGELOG.md.
 """
@@ -42,7 +42,9 @@ from django.db import DatabaseError
 
 from omop_core.models import PatientRecord
 from omop_core.services.patient_record_service import DERIVATION_VERSION
-from omop_core.services.rederivation_preview import preview_record
+from omop_core.services.rederivation_preview import (
+    UNDEFINED_CUSTOM_FIELD, custom_field_names, preview_record,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -132,7 +134,8 @@ class Command(BaseCommand):
             default=None,
             help=(
                 "Report only this field (repeatable). custom_fields.<key> names one "
-                "custom field; custom_fields names all of them."
+                "defined custom field, custom_fields.<undefined> every key without a "
+                "definition, custom_fields all of them."
             ),
         )
         parser.add_argument(
@@ -184,14 +187,15 @@ class Command(BaseCommand):
         qs, label = self._cohort(options)
         wanted = set(options["fields"] or ())
         known = _known_fields()
+        defined = custom_field_names()
         unknown = sorted(
             field for field in wanted
-            if field not in known and not field.startswith("custom_fields.")
+            if field not in known and field not in defined and field != UNDEFINED_CUSTOM_FIELD
         )
         if unknown:
             raise CommandError(
-                f"Unknown field(s): {', '.join(unknown)}. Use a PatientRecord field name "
-                "or custom_fields.<key>."
+                f"Unknown field(s): {', '.join(unknown)}. Use a PatientRecord field name, "
+                f"custom_fields.<key> of a defined custom field, or {UNDEFINED_CUSTOM_FIELD}."
             )
         max_rows = options["max_rows"]
 
@@ -205,7 +209,7 @@ class Command(BaseCommand):
         for record in qs.only("pk", "person_id").iterator(chunk_size=options["batch_size"]):
             scanned += 1
             try:
-                changes = preview_record(record)
+                changes = preview_record(record, defined)
             except Exception as exc:
                 failure = _failure(record.person_id, exc)
                 errors.append(failure)
@@ -219,8 +223,9 @@ class Command(BaseCommand):
             changes = [c for c in changes if self._selected(c.field, wanted)]
             if changes:
                 changed_records += 1
+            # Records, not rows: undefined custom keys share one name.
+            per_field.update({change.field for change in changes})
             for change in changes:
-                per_field[change.field] += 1
                 per_kind[change.change] += 1
                 total_rows += 1
                 if max_rows is None or len(rows) < max_rows:

@@ -215,13 +215,18 @@ def describe_change(before, after) -> tuple[str, str | None]:
         return SET, None
     if _is_empty(after):
         return CLEARED, None
-    if (_is_number(before) and _is_number(after)
-            and math.isfinite(before) and math.isfinite(after)):
+    if _is_number(before) and _is_number(after) and _finite(before) and _finite(after):
         return CHANGED, UP if after > before else DOWN
     return CHANGED, None
 
 
-def _custom_field_names() -> frozenset[str]:
+def _finite(value) -> bool:
+    if isinstance(value, int):
+        return True  # math.isfinite overflows on an int beyond float range
+    return math.isfinite(value)
+
+
+def custom_field_names() -> frozenset[str]:
     from omop_core.models import CustomPatientField
 
     return frozenset(
@@ -253,7 +258,8 @@ def _refresh_logging_silenced():
         logging.disable(previous)
 
 
-def preview_record(record: PatientRecord) -> list[FieldChange]:
+def preview_record(record: PatientRecord,
+                   defined: frozenset[str] | None = None) -> list[FieldChange]:
     """The changes ``refresh_patient_record`` would make to ``record``, unsaved.
 
     ``user_edited`` marks a field that held a pending user edit before the
@@ -261,6 +267,9 @@ def preview_record(record: PatientRecord) -> list[FieldChange]:
     pending edits produce no change; one that does change shows what the
     refresh actually does to it, and the edit marker's own removal is reported
     under ``user_edited_fields``.
+
+    ``defined`` is ``custom_field_names()``; a caller previewing many records
+    passes it once.
 
     The stored side is read under the same row lock the refresh takes, so a
     save that lands while the preview runs cannot pose as a derivation change.
@@ -295,11 +304,14 @@ def preview_record(record: PatientRecord) -> list[FieldChange]:
     if refusals:
         raise PreviewWriteBlocked(f'preview refused {refusals[0]}')
 
-    defined = _custom_field_names()
+    if defined is None:
+        defined = custom_field_names()
     changes = []
-    for field in sorted(stored.keys() | rederived.keys()):
+    for field in stored.keys() | rederived.keys():
         before, after = stored.get(field), rederived.get(field)
-        if same_value(before, after):
+        if same_value(before, after) or (_is_empty(before) and _is_empty(after)):
+            # '' -> null is no change to the derivation either
+            # (_derived_value_matches).
             continue
         change, direction = describe_change(before, after)
         changes.append(FieldChange(
@@ -309,4 +321,6 @@ def preview_record(record: PatientRecord) -> list[FieldChange]:
             direction=direction,
             user_edited=field in pending,
         ))
-    return changes
+    # Sorted by the reported name: sorting by the raw key would place an
+    # undefined key's row by its text among the defined ones.
+    return sorted(changes, key=lambda change: (change.field, change.change, change.user_edited))

@@ -102,6 +102,7 @@ def test_a_derived_number_is_compared_as_stored():
     (0, 1, ('changed', 'up')),          # 0 is an answer, not empty
     (float('nan'), 80.0, ('changed', None)),
     (Decimal('NaN'), Decimal('1'), ('changed', None)),
+    (10 ** 400, 1, ('changed', 'down')),  # beyond float range: no OverflowError
 ])
 def test_a_change_is_described_without_its_values(before, after, expected):
     assert describe_change(before, after) == expected
@@ -118,6 +119,38 @@ def test_a_change_is_described_without_its_values(before, after, expected):
 ])
 def test_a_flag_is_not_its_number_and_nan_is_itself(before, after, same):
     assert same_value(before, after) is same
+
+
+def test_an_empty_string_becoming_null_is_not_a_change():
+    record = _settled()
+    _stale(record, stage='', tobacco_use_details='')
+
+    rows = _json('--field', 'stage', '--field', 'tobacco_use_details')['changes']
+
+    assert rows == []
+
+
+def test_undefined_custom_keys_count_records_and_sort_without_their_text():
+    from omop_core.models import CustomPatientField, FieldConceptMapping
+    for name in ('a_score', 'm_flag'):
+        mapping = FieldConceptMapping.objects.create(
+            field_name=name, omop_table='observation', source_value=f'phr:{name}',
+            value_kind='number', status='approved')
+        CustomPatientField.objects.create(
+            field_name=name, display_name=name, tab='disease', field_type='number',
+            mode='editable', mapping=mapping)
+    record = _settled()
+    _stale(record, custom_fields={'a_score': 1, 'k_name': 1, 'm_flag': 1, 'zed': 1, 'B': 1})
+
+    document = _json('--field', 'custom_fields')
+
+    assert [row['field'] for row in document['changes']] == [
+        'custom_fields.<undefined>', 'custom_fields.<undefined>', 'custom_fields.<undefined>',
+        'custom_fields.a_score', 'custom_fields.m_flag']
+    assert document['summary']['fields']['custom_fields.<undefined>'] == 1
+    assert _json('--field', 'custom_fields.<undefined>')['summary']['changes'] == 3
+    with pytest.raises(CommandError):
+        _run('--field', 'custom_fields.k_name')
 
 
 def test_a_value_appearing_from_null_is_set():
@@ -427,8 +460,9 @@ def test_an_unknown_field_is_refused():
 
     with pytest.raises(CommandError, match='Unknown field.*disese'):
         _run('--field', 'disese')
-    # A custom field's key is not known in advance.
-    assert _json('--field', 'custom_fields.anything')['changes'] == []
+    # Only a defined custom field has a name to ask for.
+    with pytest.raises(CommandError, match='Unknown field.*custom_fields.anything'):
+        _run('--field', 'custom_fields.anything')
 
 
 @pytest.mark.parametrize('sql', [
