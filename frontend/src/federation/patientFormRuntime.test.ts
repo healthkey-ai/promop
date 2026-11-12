@@ -91,3 +91,8 @@ it('re-arms the idle watcher when a renewal swaps the store', async () => {
   await vi.advanceTimersByTimeAsync(30_000);
   expect(patientFormRuntime(context)).not.toBe(runtime);
 });
+
+it('gives the widget query client the provider defaults', () => {
+  const runtime = patientFormRuntime({ apiBase: '/api', token: 'query-defaults' });
+  expect(runtime.queryClient.getDefaultOptions().queries).toMatchObject({ staleTime: 30_000, retry: 1 });
+});

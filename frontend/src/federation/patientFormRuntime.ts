@@ -157,7 +157,12 @@ export function patientFormRuntime(connection: PatientFormConnection): Runtime {
       ...(connection.impToken ? { 'X-Imp-Token': connection.impToken } : {}),
     } });
     runtime = {
-      client, queryClient: new QueryClient(), references: 0,
+      // The same defaults PatientInfoProvider gives its own client: library
+      // defaults (staleTime 0, three retries) refetch on every remount and
+      // hold a failing request for seconds before the error shows.
+      client, queryClient: new QueryClient({
+        defaultOptions: { queries: { staleTime: 30_000, retry: 1 } },
+      }), references: 0,
       get store() { return patientFormForClient(client, apiBase); },
     };
     widgets.set(key, runtime);
