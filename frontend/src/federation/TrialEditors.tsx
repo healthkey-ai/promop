@@ -91,10 +91,13 @@ function TherapyRowEditor({
       </span>
       <Dialog.Portal>
           {/* Below the nested line editor (z-50): that dialog portals to the
-              body and must sit above this panel, not behind it. */}
+              body and must sit above this panel, not behind it. Centred by
+              auto margins, not translate utilities: a Tailwind 3 host sets
+              `transform` for those while ours sets `translate`, and both
+              moves apply (see ui-labs/dialog.tsx). */}
           <Dialog.Overlay className="fixed inset-0 z-40 bg-black/40" />
           <Dialog.Content
-            className="promop-root fixed left-1/2 top-1/2 z-[41] max-h-[85vh] w-[min(42rem,calc(100%-2rem))] -translate-x-1/2 -translate-y-1/2 space-y-4 overflow-y-auto rounded-xl bg-background p-6 shadow-xl"
+            className="promop-root fixed inset-0 z-[41] m-auto h-fit max-h-[85vh] w-[min(42rem,calc(100%-2rem))] space-y-4 overflow-y-auto rounded-xl bg-background p-6 shadow-xl"
             onInteractOutside={(event) => event.preventDefault()}
             onEscapeKeyDown={(event) => event.preventDefault()}
           >

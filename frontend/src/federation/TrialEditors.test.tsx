@@ -172,7 +172,10 @@ describe('the shared trial editor adapter', () => {
     renderAdapter();
     fireEvent.click(await screen.findByRole('button', { name: 'Edit Prior Therapy' }));
 
-    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    const dialog = screen.getByRole('dialog');
+    // Centred without translate utilities, which a Tailwind 3 host doubles.
+    expect(dialog).toHaveClass('inset-0', 'm-auto', 'h-fit');
+    expect(dialog).not.toHaveClass('-translate-x-1/2', '-translate-y-1/2');
     expect(await screen.findByText(/Line 1:/)).toBeInTheDocument();
   });
 
