@@ -179,7 +179,7 @@ def test_failed_backup_flush_rolls_back_db_and_leftover_file_is_not_a_commit(tmp
     manifest, sha = audit(tmp_path)
     def fail_flush(_):
         raise OSError('simulated flush failure')
-    monkeypatch.setattr('omop_core.management.commands.repair_pre_existing_conditions.os.fsync', fail_flush)
+    monkeypatch.setattr('omop_core.management.guarded_repair.os.fsync', fail_flush)
     with pytest.raises(CommandError, match='persist the private backup'):
         apply(tmp_path, manifest, sha)
     ambiguous.refresh_from_db()
@@ -201,7 +201,7 @@ def test_failed_directory_flush_aborts_apply(tmp_path, ready, monkeypatch):
         if len(calls) == 2:
             raise OSError('simulated directory flush failure')
         original(fd)
-    monkeypatch.setattr('omop_core.management.commands.repair_pre_existing_conditions.os.fsync', flush)
+    monkeypatch.setattr('omop_core.management.guarded_repair.os.fsync', flush)
     with pytest.raises(CommandError, match='persist the private backup'):
         apply(tmp_path, manifest, sha)
     assert len(calls) == 2

@@ -4,22 +4,20 @@ No remote operation is authorized by shipping this command. Default execution is
 a read-only dry-run. Apply requires a pinned audit, a separately verified authoring
 path, an explicitly identified local/staging target, and a new private backup.
 """
-import hashlib
-import ipaddress
 import json
-import os
 import re
 import uuid
-from datetime import datetime
-from urllib.parse import unquote, urlsplit
 
 from django.core.management.base import BaseCommand, CommandError
-from django.core.serializers.json import DjangoJSONEncoder
 from django.db import connection, transaction
 from django.db.migrations.recorder import MigrationRecorder
 from django.utils import timezone
 
 from omop_core.management.commands.audit_pre_existing_conditions import Command as Audit, approval_digest
+from omop_core.management.guarded_repair import (
+    canonical, digest, lock_tables, make_transaction_read_only, read_json, receipt,
+    target_guard, write_private,
+)
 from omop_core.models import (
     FieldFormula, PatientRecord, PreexistingConditionsAttestation, RecordRevision,
 )
@@ -32,23 +30,6 @@ REQUIRED = {
     ('omop_core', '0305_patientrecord_pre_existing_flag_guard'),
     ('omop_core', '0306_preexisting_conditions_attestation'),
 }
-
-
-class BackupEncoder(DjangoJSONEncoder):
-    def default(self, value):
-        # DjangoJSONEncoder truncates datetimes to milliseconds. Repair backups
-        # must retain the original confirmation time, including microseconds.
-        if isinstance(value, datetime):
-            return value.isoformat()
-        return super().default(value)
-
-
-def canonical(value):
-    return json.dumps(value, cls=BackupEncoder, sort_keys=True, separators=(',', ':'))
-
-
-def digest(value):
-    return hashlib.sha256(canonical(value).encode()).hexdigest()
 
 
 def snapshot(record):
@@ -70,37 +51,6 @@ def snapshot(record):
     }))
 
 
-def read_json(path):
-    try:
-        with open(path, encoding='utf-8') as stream:
-            data = json.load(stream)
-        if not isinstance(data, dict):
-            raise ValueError('Expected an object')
-        return data
-    except (OSError, ValueError) as exc:
-        raise CommandError('Cannot read the manifest/backup as a JSON object.') from exc
-
-
-def write_private(path, payload):
-    # Exclusive create, restrictive permissions, fsync BEFORE committing DB data.
-    # A leftover file after a failed transaction is not evidence of a commit: the
-    # rollback additionally verifies the durable DB ledger for every entry.
-    try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, 'w', encoding='utf-8') as stream:
-            stream.write(canonical(payload) + '\n')
-            stream.flush()
-            os.fsync(stream.fileno())
-        parent_fd = os.open(os.path.dirname(os.path.abspath(path)),
-                            os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0))
-        try:
-            os.fsync(parent_fd)
-        finally:
-            os.close(parent_fd)
-    except OSError as exc:
-        raise CommandError('Cannot exclusively create and persist the private backup.') from exc
-
-
 class Command(BaseCommand):
     help = 'Dry-run ambiguous condition-answer repair; explicit guarded apply/rollback only'
 
@@ -115,48 +65,8 @@ class Command(BaseCommand):
                             help='Operator attests deployed UI/API verification; not granted by a PR merge')
         parser.add_argument('--environment', choices=['local', 'staging'], default='local')
 
-    def _target_guard(self, environment):
-        cfg = connection.settings_dict
-        target = (str(cfg.get('HOST') or ''), str(cfg.get('PORT') or '5432'), str(cfg['NAME']))
-
-        def identity(url):
-            parts = urlsplit(url)
-            return (parts.hostname or '', str(parts.port or 5432), unquote(parts.path.lstrip('/')))
-
-        prod = os.environ.get('PROD_DATABASE_URL')
-        if prod and identity(prod) == target:
-            raise CommandError('Production writes are forbidden.')
-        if (not target[0] or cfg.get('OPTIONS', {}).get('service') or os.environ.get('PGSERVICE')):
-            raise CommandError('Apply requires explicit HOST configuration without connection services.')
-        if cfg.get('OPTIONS', {}).get('hostaddr') or os.environ.get('PGHOSTADDR'):
-            raise CommandError('Host-address overrides are forbidden for apply.')
-        connection.ensure_connection()
-        info = connection.connection.info
-        effective = (info.host, str(info.port), info.dbname)
-        if effective != target:
-            raise CommandError('Effective connection does not match the configured target.')
-        if environment == 'local':
-            if target[0] not in ('localhost', '127.0.0.1', '::1'):
-                raise CommandError('Local apply requires an explicitly configured loopback database.')
-            try:
-                local_peer = ipaddress.ip_address(info.hostaddr).is_loopback
-            except (AttributeError, ValueError):
-                local_peer = False
-            if not local_peer:
-                raise CommandError('Local apply requires a verified loopback peer address.')
-        else:
-            staging = os.environ.get('STAGING_DATABASE_URL')
-            if not staging or identity(staging) != target:
-                raise CommandError('Staging target must exactly match STAGING_DATABASE_URL.')
-
     def _lock(self):
-        if connection.vendor != 'postgresql':
-            raise CommandError('Apply requires PostgreSQL.')
-        tables = [PatientRecord, RecordRevision, PreexistingConditionsAttestation, FieldFormula]
-        with connection.cursor() as cursor:
-            cursor.execute("SET LOCAL lock_timeout = '5s'")
-            names = ', '.join(connection.ops.quote_name(model._meta.db_table) for model in tables)
-            cursor.execute(f'LOCK TABLE {names} IN SHARE ROW EXCLUSIVE MODE')
+        lock_tables((PatientRecord, RecordRevision, PreexistingConditionsAttestation, FieldFormula))
 
     def _ready(self):
         if FieldFormula.objects.filter(field_name=FLAG, is_active=True).exists():
@@ -182,14 +92,14 @@ class Command(BaseCommand):
         if applying:
             if not options['authoring_verified'] or not options['backup']:
                 raise CommandError('Apply requires --authoring-verified and a new --backup path.')
-            self._target_guard(options['environment'])
+            target_guard(options['environment'])
         owns = not connection.in_atomic_block
         with transaction.atomic():
             if applying:
                 self._lock()
                 self._ready()
             elif owns:
-                Audit()._make_transaction_read_only()
+                make_transaction_read_only()
             live = Audit()._collect(summary_only=False)
             if options['rollback']:
                 output = self._rollback(supplied, live, options['expect_sha'], applying)
@@ -235,7 +145,7 @@ class Command(BaseCommand):
                 entries.append({'before': before, 'after': after, 'ledger_id': ledger.pk})
             else:
                 entries.append({'before': before})
-        return self._receipt('repair', run, live['database'], expected, entries)
+        return receipt('repair', run, live['database'], expected, entries)
 
     def _rollback(self, supplied, live, expected, applying):
         unsigned = {key: value for key, value in supplied.items() if key != 'backup_sha256'}
@@ -276,11 +186,4 @@ class Command(BaseCommand):
                 entries.append({'before': entry['after'], 'after': restored})
             else:
                 entries.append({'before': entry['after']})
-        return self._receipt('rollback', run, live['database'], expected, entries)
-
-    @staticmethod
-    def _receipt(operation, run, database, expected, entries):
-        payload = {'receipt_version': 1, 'operation': operation, 'run_id': run,
-                   'database': database, 'input_sha256': expected, 'entries': entries}
-        payload['backup_sha256'] = digest(payload)
-        return payload
+        return receipt('rollback', run, live['database'], expected, entries)
