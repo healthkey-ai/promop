@@ -284,6 +284,10 @@ def _retire_source_pairs(person, applied):
     pass a changed-field set to the recompute. Clearing the pair's pending
     markers first lets the refresh re-derive the source from the new canonical
     instead of preserving the old number and unit beside it.
+
+    Returns the values that were pending, so the caller can record the
+    retirement in the revision history once the refresh has written the new
+    ones (#2426 review).
     """
     retired = {
         field
@@ -304,18 +308,22 @@ def _retire_source_pairs(person, applied):
             if spec.get('unit_field'):
                 retired.add(spec['unit_field'])
     if not retired:
-        return
+        return {}
     record = PatientRecord.objects.filter(person=person).first()
     if record is None:
-        return
+        return {}
     pending = set(record.user_edited_fields or [])
     if not pending & retired:
-        return
+        return {}
+    retired_values = {
+        field: getattr(record, field, None) for field in retired if field in pending
+    }
     record.user_edited_fields = sorted(pending - retired)
     # The entered day describes a pending pair only; it must not outlive it and
     # later make a fresh pair look older than it is (#2426).
     forget_dates(record, pair_sources_in(retired))
     record.save(update_fields=['user_edited_fields', 'pending_source_pair_dates'])
+    return retired_values
 
 
 @transaction.atomic
@@ -472,15 +480,31 @@ def apply_field_writes(person, changes, today=None, descriptor=None, dates=None,
     # A canonical import supersedes its source pair in every refresh path,
     # including a mixed batch whose clinical inputs refresh through
     # write_clinical_inputs and a caller-supplied `refresh=False`.
+    retired_values = {}
     if result.applied:
-        _retire_source_pairs(person, result.applied)
+        retired_values = _retire_source_pairs(person, result.applied)
     # write_clinical_inputs derives for its readback, from the fully-applied
     # state, so a batch that carries a clinical field must not derive twice.
+    record = None
     if refresh and result.applied and not clinical:
-        refresh_patient_record(person)
+        record = refresh_patient_record(person)
     if clinical:
-        write_clinical_inputs(person, clinical, today=today)
+        record = write_clinical_inputs(person, clinical, today=today)
         result.applied.extend(clinical)
+    elif retired_values and record is None:
+        # `refresh=False` skipped the derivation a retirement needs: without
+        # it the pair columns keep the old entry, and a later refresh has no
+        # marker left to audit through. Derive now; the values must follow the
+        # new fact either way.
+        record = refresh_patient_record(person)
+    if retired_values:
+        # After the refresh, so the revision compares the entry the patient had
+        # with the value the import replaced it with (#2426 review).
+        from omop_core.services.patient_record_revisions import write_record_revisions
+        if record is None:
+            record = PatientRecord.objects.filter(person=person).first()
+        if record is not None:
+            write_record_revisions(record, retired_values, changed_by='system')
     return result
 
 

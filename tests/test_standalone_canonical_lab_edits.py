@@ -12,7 +12,7 @@ from decimal import Decimal
 import pytest
 from rest_framework.test import APIClient
 
-from omop_core.models import PatientRecord
+from omop_core.models import PatientRecord, RecordRevision
 from omop_core.services.write_descriptor import build_writable_field_descriptor
 from patient_portal.models import Identity
 from tests.factories import PatientRecordFactory
@@ -71,6 +71,15 @@ def test_a_native_canonical_write_retires_a_pending_hemoglobin_pair(staff):
     assert float(record.hemoglobin_level) == 9.5
     assert record.hemoglobin_level_units == 'G/DL'
     assert not {'hemoglobin_level', 'hemoglobin_level_units'} & set(record.user_edited_fields or [])
+    # The retire-by-canonical path keeps the lost entry in the history too.
+    assert [
+        (row.field, row.old_value, row.new_value) for row in
+        RecordRevision.objects.filter(
+            patient_record=record, changed_by='system').order_by('field')
+    ] == [
+        ('hemoglobin_level', '120.00', '9.50'),
+        ('hemoglobin_level_units', 'G/L', 'G/DL'),
+    ]
 
 
 def test_a_caller_without_write_access_sees_them_read_only():

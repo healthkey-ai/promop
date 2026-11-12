@@ -9,7 +9,7 @@ from decimal import Decimal
 import pytest
 from rest_framework.test import APIClient
 
-from omop_core.models import Measurement, PatientRecord, Person
+from omop_core.models import Measurement, PatientRecord, Person, RecordRevision
 from omop_core.services.patient_record_service import refresh_patient_record
 from omop_core.services.write_descriptor import build_writable_field_descriptor
 from patient_portal.models import Identity
@@ -168,6 +168,12 @@ def test_a_canonical_import_retires_the_source_pair(api):
     assert float(record.absolute_neutrophile_count) == 2500
     assert not ({'absolute_neutrophile_count', 'absolute_neutrophile_count_units'}
                 & set(record.user_edited_fields or []))
+    # The canonical write retires the pair and records the lost entry. The unit
+    # column keeps CELLS/UL, so only the changed value gets a row.
+    assert [
+        (row.field, Decimal(row.old_value), Decimal(row.new_value)) for row in
+        RecordRevision.objects.filter(patient_record=record, changed_by='system')
+    ] == [('absolute_neutrophile_count', Decimal('1550'), Decimal('2500'))]
 
 
 def test_the_shared_form_normalises_the_count_pair(api):
