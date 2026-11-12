@@ -111,6 +111,32 @@ def test_the_shipped_migration_deactivates_the_formula(stale_answer_formula_allo
     assert formula.is_active is False
 
 
+def test_0341_deactivates_the_flag_formula_before_its_check(stale_answer_formula_allowed):
+    """0341 adds the flag to the explicit-answer CHECK; an active row left
+    since 0304 would make AddConstraint fail, so its data step deactivates it
+    first and leaves other formulas alone (#2489)."""
+    from importlib import import_module
+
+    from django.apps import apps as django_apps
+    from django.db import connection, migrations
+
+    migration = import_module('omop_core.migrations.0341_authored_answer_formula_check')
+    FieldFormula.objects.create(
+        field_name='no_pre_existing_conditions', formula='1', is_active=True)
+    FieldFormula.objects.create(field_name='bmi', formula='1', is_active=True)
+    add = next(op for op in migration.Migration.operations
+               if isinstance(op, migrations.AddConstraint))
+    with connection.cursor() as cursor:
+        # The rows' deferred FK checks must fire before the ALTER TABLE.
+        cursor.execute('SET CONSTRAINTS ALL IMMEDIATE')
+
+    with connection.schema_editor(atomic=False) as editor:
+        migration.deactivate_formula(django_apps, editor)
+        editor.add_constraint(FieldFormula, add.constraint)
+
+    assert FieldFormula.objects.get(field_name='no_pre_existing_conditions').is_active is False
+    assert FieldFormula.objects.get(field_name='bmi').is_active is True
+
 def test_the_shipped_curation_keeps_the_formula_inactive():
     """A curation re-import must not re-enable it (#1988)."""
     import json
