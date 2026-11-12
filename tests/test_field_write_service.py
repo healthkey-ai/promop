@@ -60,6 +60,37 @@ def test_editable_lab_writes_a_measurement_and_rederives():
     assert float(refresh_patient_record(person).hemoglobin_g_dl) == pytest.approx(12.5)
 
 
+def test_a_canonical_import_retires_a_pending_pair_and_records_it():
+    # The descriptor-driven applier writes the canonical fact and clears the
+    # pair markers before deriving. The entry the patient loses must still
+    # reach the revision history (#2426 review).
+    from decimal import Decimal
+
+    from omop_core.models import PatientRecord, RecordRevision
+    person = _person_with_loinc('718-7', 'Hemoglobin [Mass/volume] in Blood')
+    record = PatientRecord.objects.get(person=person)
+    record.hemoglobin_level = Decimal('120.00')
+    record.hemoglobin_level_units = 'G/L'
+    record.hemoglobin_g_dl = Decimal('12.00')
+    record.user_edited_fields = ['hemoglobin_level', 'hemoglobin_level_units']
+    record.pending_source_pair_dates = {'hemoglobin_level': '2026-08-01'}
+    record.save()
+
+    apply_field_writes(person, {'hemoglobin_g_dl': 13.0}, today=date(2026, 8, 23))
+
+    record.refresh_from_db()
+    assert record.pending_source_pair_dates == {}
+    rows = {
+        row.field: row for row in RecordRevision.objects.filter(
+            patient_record=record, changed_by='system')
+    }
+    assert set(rows) == {'hemoglobin_level', 'hemoglobin_level_units'}
+    assert Decimal(rows['hemoglobin_level'].old_value) == Decimal('120.00')
+    assert Decimal(rows['hemoglobin_level'].new_value) == Decimal('13.00')
+    assert (rows['hemoglobin_level_units'].old_value,
+            rows['hemoglobin_level_units'].new_value) == ('G/L', 'G/DL')
+
+
 def test_same_day_re_edit_upserts_not_duplicates():
     # A same-day correction updates the existing dated fact rather than appending a second row.
     person = _person_with_loinc('718-7', 'Hemoglobin [Mass/volume] in Blood')
