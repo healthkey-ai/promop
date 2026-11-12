@@ -24,7 +24,7 @@ ops_logger = logging.getLogger('omop.ops')
 # router registrations at once, and promop's OWN React SPA is still the largest
 # consumer of them - frontend/src/api/axios.ts sets `baseURL: '/api'`, so 78 of its
 # 96 call sites resolve to the legacy prefix, including the module-federation
-# remote (frontend/src/federation/patientInfoApi.ts) that ht-phr renders. Cutting
+# remote (frontend/src/federation/patientFormStore.ts) that ht-phr renders. Cutting
 # on the old date would have broken promop's own UI and the federated tab with it.
 # Tracked as #666; consumer tickets soc#261 and HealthTree/ht-phr#95.
 #
