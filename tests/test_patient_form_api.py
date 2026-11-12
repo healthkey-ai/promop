@@ -778,6 +778,9 @@ def test_an_internal_value_error_is_logged_without_values_and_answered_generical
     logged = ' '.join(r.getMessage() for r in caplog.records)
     assert f'person_id={record.person_id}' in logged
     assert "'weight'" in logged
+    # Where it was raised, so the log is actionable without the text (#2489).
+    assert 'ValueError at test_patient_form_api:' in logged
+    assert '(broken)' in logged
     assert '98765' not in logged and '80' not in logged.replace(str(record.person_id), '')
     record.refresh_from_db()
     assert record.weight is None

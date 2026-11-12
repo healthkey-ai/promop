@@ -556,11 +556,28 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
         raise ValidationError(str(exc)) from exc
     except ValueError as exc:
         logger.warning(
-            'Shared-form write failed (%s) for person_id=%s, fields=%s',
-            type(exc).__name__, getattr(person, 'pk', None),
+            'Shared-form write failed (%s at %s) for person_id=%s, fields=%s',
+            type(exc).__name__, _raise_site(exc), getattr(person, 'pk', None),
             sorted(str(name) for name in (changes or {})),
         )
         raise ValidationError(UNSAVED_MESSAGE) from exc
+
+
+def _raise_site(exc):
+    """``module:lineno (function)`` of the frame that raised, for the log.
+
+    Only the location: never the exception's text or the source line, which
+    may carry a value.
+    """
+    import os
+    import traceback
+
+    frames = traceback.extract_tb(exc.__traceback__)
+    if not frames:
+        return 'unknown'
+    frame = frames[-1]
+    module = os.path.splitext(os.path.basename(frame.filename))[0]
+    return f'{module}:{frame.lineno} ({frame.name})'
 
 
 def _apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor=None,
