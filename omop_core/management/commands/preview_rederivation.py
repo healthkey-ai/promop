@@ -1,5 +1,5 @@
 """
-Show, value by value, what `backfill_patient_records` would change.
+Show, field by field, what `backfill_patient_records` would change.
 
 Selects the same records as the backfill and runs the same refresh for each,
 then rolls it back: nothing is written, no task is queued, nothing is
@@ -22,9 +22,10 @@ Usage:
     python manage.py preview_rederivation --format json --max-rows 1000
     python manage.py preview_rederivation --format csv > changes.csv
 
-Values of identifiers, the person's own dates and free text are printed as
-[redacted] (a null still as null); that they change is still reported. No
-names are printed: rows carry person_id only. Needs the writable primary: see
+No values are printed, stored or re-derived: a row says which field of which
+person_id would change and how -- set (null -> value), cleared (value -> null)
+or changed, plus up/down for a number -- and whether it held a pending user
+edit. No names either: rows carry person_id only. Needs the writable primary: see
 "Before a backfill" in docs/DERIVATION_CHANGELOG.md.
 """
 
@@ -41,17 +42,6 @@ from omop_core.services.patient_record_service import DERIVATION_VERSION
 from omop_core.services.rederivation_preview import preview_record
 
 logger = logging.getLogger(__name__)
-
-
-def _jsonable(value):
-    if value is None or isinstance(value, (bool, int, float, str)):
-        return value
-    if isinstance(value, (list, tuple)):
-        return [_jsonable(item) for item in value]
-    if isinstance(value, dict):
-        return {str(key): _jsonable(item) for key, item in value.items()}
-    # Decimal, date, datetime: their string form is exact.
-    return str(value)
 
 
 def _failure(person_id, exc):
@@ -81,9 +71,9 @@ def _known_fields():
     return {field.name for field in PatientRecord._meta.concrete_fields} - IGNORED_FIELDS
 
 
-def _text(value):
-    """One unambiguous token: null, "" and "None" stay distinct."""
-    return json.dumps(_jsonable(value), ensure_ascii=False, sort_keys=True)
+def _describe(row):
+    """change, e.g. "changed (up)", "cleared"."""
+    return f"{row.change} ({row.direction})" if row.direction else row.change
 
 
 class Command(BaseCommand):
@@ -205,6 +195,7 @@ class Command(BaseCommand):
         scanned = 0
         changed_records = 0
         per_field = Counter()
+        per_kind = Counter()
         total_rows = 0
         rows = []
         errors = []
@@ -227,6 +218,7 @@ class Command(BaseCommand):
                 changed_records += 1
             for change in changes:
                 per_field[change.field] += 1
+                per_kind[change.change] += 1
                 total_rows += 1
                 if max_rows is None or len(rows) < max_rows:
                     rows.append(change)
@@ -240,6 +232,7 @@ class Command(BaseCommand):
             "changes_shown": len(rows),
             "errors": len(errors),
             "fields": dict(sorted(per_field.items(), key=lambda item: (-item[1], item[0]))),
+            "changes_by_kind": dict(sorted(per_kind.items())),
         }
 
         writer = {"text": self._write_text, "json": self._write_json, "csv": self._write_csv}
@@ -256,7 +249,8 @@ class Command(BaseCommand):
                   f"({summary['cohort']}). Nothing was written.")
         out.write(f"Records scanned: {summary['records_scanned']}")
         out.write(f"Records that would change: {summary['records_changed']}")
-        out.write(f"Field changes: {summary['changes']}")
+        out.write(f"Field changes: {summary['changes']}"
+                  + "".join(f", {kind} {count}" for kind, count in summary["changes_by_kind"].items()))
         if summary["errors"]:
             out.write(self.style.ERROR(f"Errors: {summary['errors']}"))
         if summary["fields"]:
@@ -269,8 +263,7 @@ class Command(BaseCommand):
             out.write("")
             for row in rows:
                 mark = "  [user-edited]" if row.user_edited else ""
-                out.write(f"person_id={row.person_id} {row.field}: "
-                          f"{_text(row.stored)} -> {_text(row.rederived)}{mark}")
+                out.write(f"person_id={row.person_id} {row.field}: {_describe(row)}{mark}")
             if summary["changes_shown"] < summary["changes"]:
                 out.write(f"... {summary['changes'] - summary['changes_shown']} more row(s) not shown (--max-rows)")
         for error in errors:
@@ -284,10 +277,9 @@ class Command(BaseCommand):
                 {
                     "person_id": row.person_id,
                     "field": row.field,
-                    "stored": _jsonable(row.stored),
-                    "rederived": _jsonable(row.rederived),
+                    "change": row.change,
+                    "direction": row.direction,
                     "user_edited": row.user_edited,
-                    "redacted": row.redacted,
                 }
                 for row in rows
             ],
@@ -297,11 +289,10 @@ class Command(BaseCommand):
 
     def _write_csv(self, summary, rows, errors):
         writer = csv.writer(self.stdout, lineterminator="\n")
-        writer.writerow(["person_id", "field", "stored", "rederived", "user_edited", "redacted"])
+        writer.writerow(["person_id", "field", "change", "direction", "user_edited"])
         for row in rows:
             writer.writerow([
-                row.person_id, row.field, _text(row.stored), _text(row.rederived),
+                row.person_id, row.field, row.change, row.direction or "",
                 "true" if row.user_edited else "false",
-                "true" if row.redacted else "false",
             ])
         self.stderr.write(json.dumps({"summary": summary, "errors": errors}, ensure_ascii=False))

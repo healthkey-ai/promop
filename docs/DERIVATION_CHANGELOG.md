@@ -20,25 +20,23 @@ python manage.py preview_rederivation --format json > preview.json   # or --form
 ```
 
 It prints a summary (records scanned, records that would change, records
-changed per field) and one line per change: `person_id`, field, stored value →
-re-derived value. `--limit` caps the records scanned, `--max-rows` the lines
-printed (the counts still cover everything). A field that held a pending user
-edit is marked `[user-edited]`; the refresh keeps such an edit until OMOP backs
-it, so most pending edits show no change, and the preview reports exactly what
-the refresh does to the rest. `--field` accepts a `PatientRecord` field name or
-`custom_fields.<key>` and refuses anything else.
+changed per field, changes per kind) and one line per change: `person_id`,
+field, and how it changes -- `set` (null -> value), `cleared` (value -> null)
+or `changed`, with `up`/`down` for a number. `--limit` caps the records
+scanned, `--max-rows` the lines printed (the counts still cover everything). A
+field that held a pending user edit is marked `[user-edited]`; the refresh
+keeps such an edit until OMOP backs it, so most pending edits show no change,
+and the preview reports exactly what the refresh does to the rest. `--field`
+accepts a `PatientRecord` field name or `custom_fields.<key>` and refuses
+anything else.
 
-Values are redacted by default. They are printed only for numbers, booleans,
-fields with fixed choices, vocabulary-term text (`disease`, `disease_slug`,
-`stage`, `race`, `ethnicity`) and `user_edited_fields`; coordinates and an age
-over 89 are redacted all the same. Every other column -- free text, every date,
-every JSON document (genomic findings keep the source report text), text values
-of custom fields -- prints `[redacted]`, and a new column is redacted until it
-is classified. That such a field changes is still reported, and a null still
-prints as null, so a value being cleared shows as `"[redacted]" -> null`. Names are never printed; rows carry
-`person_id` only. A record that cannot be previewed is reported, and logged, by
+It prints no values, neither stored nor re-derived, and no names; rows carry
+`person_id` only. To look at a value, read that record in the admin, under its
+access controls. A record that cannot be previewed is reported, and logged, by
 error type, plus SQLSTATE and constraint name for a database error -- never the
-error message, which for a constraint violation quotes the whole row.
+error message, which for a constraint violation quotes the whole row. The
+refresh's own log lines are not filtered: run it with the same log handling as
+the backfill.
 
 It is read-only: each record runs the real `refresh_patient_record` inside a
 transaction that is always rolled back, while a guard refuses any SQL other

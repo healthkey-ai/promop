@@ -28,12 +28,12 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import decimal
 import importlib.util
 import re
 from typing import Iterator
 from unittest import mock
 
-from django.core.exceptions import FieldDoesNotExist
 from django.db import connections, transaction
 
 from omop_core.models import PatientRecord
@@ -45,28 +45,14 @@ IGNORED_FIELDS = frozenset({
     'created_at', 'updated_at',
 })
 
-# Default-deny: a change is always reported, but its VALUES are shown only
-# for fields that cannot carry identifying text or a personal date: numbers,
-# booleans, coded fields with fixed choices, and user_edited_fields (a list of
-# field names). Everything else -- free text, every date, every JSON column
-# (genomic findings keep the source report text), custom-field text -- shows
-# "[redacted]" instead. A null is still shown as null, so a field being wiped
-# stays visible. A deny-list of "identifying" columns could never be complete;
-# this inverts it.
-_SHOWN_TYPES = frozenset({
-    'BooleanField', 'NullBooleanField', 'IntegerField', 'SmallIntegerField',
-    'BigIntegerField', 'PositiveIntegerField', 'PositiveSmallIntegerField',
-    'PositiveBigIntegerField', 'FloatField', 'DecimalField',
-})
-# Explicitly shown: field names, not values (which columns hold a pending user
-# edit), and text columns that hold a vocabulary term, not free text -- the
-# diagnosis and demographics a derivation change most often moves.
-SHOWN_FIELDS = frozenset({
-    'user_edited_fields', 'disease', 'disease_slug', 'stage', 'race', 'ethnicity',
-})
-# Numbers that are identifiers all the same.
-NEVER_SHOWN_FIELDS = frozenset({'latitude', 'longitude'})
-REDACTED = '[redacted]'
+# The preview prints no values, stored or re-derived: only which field of
+# which person_id would change, and how (set, cleared, changed, and for a
+# number whether it goes up or down). Three review rounds each found another
+# column printing identifying text through a list of "safe" fields -- unknown
+# diagnoses kept verbatim, race and stage source text, unchecked choices -- so
+# the question of which values are safe to print is not answered here at all.
+SET, CLEARED, CHANGED = 'set', 'cleared', 'changed'
+UP, DOWN = 'up', 'down'
 
 # custom_fields is one JSON column holding one value per custom field; each key
 # is reported as a field of its own.
@@ -102,10 +88,9 @@ class PreviewWriteBlocked(RuntimeError):
 class FieldChange:
     person_id: int
     field: str
-    stored: object
-    rederived: object
+    change: str             # SET (null -> value), CLEARED (value -> null), CHANGED
+    direction: str | None   # UP or DOWN for a number that changed, else None
     user_edited: bool
-    redacted: bool
 
 
 def _statement_is_allowed(sql: str) -> bool:
@@ -179,38 +164,19 @@ def _values(record: PatientRecord) -> dict[str, object]:
     return values
 
 
-def value_is_shown(field: str) -> bool:
-    """Whether a PatientRecord field's values may be printed (see above)."""
-    if field in NEVER_SHOWN_FIELDS:
-        return False
-    if field in SHOWN_FIELDS:
-        return True
-    try:
-        model_field = PatientRecord._meta.get_field(field)
-    except FieldDoesNotExist:
-        return False
-    if getattr(model_field, 'choices', None):
-        return True
-    return model_field.get_internal_type() in _SHOWN_TYPES
+def _is_number(value) -> bool:
+    return isinstance(value, (int, float, decimal.Decimal)) and not isinstance(value, bool)
 
 
-def _redacted(field: str, value) -> bool:
-    if value is None:
-        return False
-    if field.startswith('custom_fields.'):
-        # A custom field's numbers and flags are shown; anything else is not.
-        return not isinstance(value, (bool, int, float))
-    if field == 'patient_age':
-        # An age over 89 is itself a Safe Harbor identifier.
-        try:
-            return float(value) > 89
-        except (TypeError, ValueError):
-            return True
-    return not value_is_shown(field)
-
-
-def _shown(field: str, value):
-    return REDACTED if _redacted(field, value) else value
+def describe_change(before, after) -> tuple[str, str | None]:
+    """How a value changed, without the values: (change, direction)."""
+    if before is None:
+        return SET, None
+    if after is None:
+        return CLEARED, None
+    if _is_number(before) and _is_number(after):
+        return CHANGED, UP if after > before else DOWN
+    return CHANGED, None
 
 
 def preview_record(record: PatientRecord) -> list[FieldChange]:
@@ -259,12 +225,12 @@ def preview_record(record: PatientRecord) -> list[FieldChange]:
         before, after = stored.get(field), rederived.get(field)
         if before == after:
             continue
+        change, direction = describe_change(before, after)
         changes.append(FieldChange(
             person_id=stored_record.person_id,
             field=field,
-            stored=_shown(field, before),
-            rederived=_shown(field, after),
+            change=change,
+            direction=direction,
             user_edited=field in pending,
-            redacted=_redacted(field, before) or _redacted(field, after),
         ))
     return changes

@@ -4,6 +4,7 @@ import io
 import json
 import logging
 import threading
+from decimal import Decimal
 
 import pytest
 from django.core.management import call_command
@@ -16,7 +17,7 @@ from omop_core.services.patient_record_service import (
     DERIVATION_VERSION, refresh_patient_record,
 )
 from omop_core.services.rederivation_preview import (
-    PreviewWriteBlocked, _statement_is_allowed, preview_record,
+    PreviewWriteBlocked, _statement_is_allowed, describe_change, preview_record,
 )
 from tests.factories import MeasurementFactory, OrganizationFactory, PatientRecordFactory
 
@@ -47,7 +48,7 @@ def _json(*args):
     return json.loads(out)
 
 
-def test_a_changed_value_is_reported_with_its_before_and_after():
+def test_a_change_is_reported_by_field_and_kind():
     record = _settled()
     _stale(record, race='Black or African American')
 
@@ -55,12 +56,12 @@ def test_a_changed_value_is_reported_with_its_before_and_after():
 
     assert document['changes'] == [{
         'person_id': record.person_id, 'field': 'race',
-        'stored': 'Black or African American', 'rederived': 'White',
-        'user_edited': False, 'redacted': False,
+        'change': 'changed', 'direction': None, 'user_edited': False,
     }]
     assert document['summary']['records_scanned'] == 1
     assert document['summary']['records_changed'] == 1
     assert document['summary']['fields'] == {'race': 1}
+    assert document['summary']['changes_by_kind'] == {'changed': 1}
     assert PatientRecord.objects.get(pk=record.pk).race == 'Black or African American'
 
 
@@ -83,63 +84,60 @@ def test_a_derived_number_is_compared_as_stored():
 
     # The extractors find no weight or height facts, so refresh clears all
     # three, and save() has no inputs left to compute a BMI from.
-    assert rows['bmi']['stored'] == 99.0 and rows['bmi']['rederived'] is None
-    assert rows['weight']['stored'] == 80 and rows['weight']['rederived'] is None
+    assert rows['bmi']['change'] == 'cleared'
+    assert rows['weight']['change'] == 'cleared'
 
 
-def test_identifier_values_are_redacted_but_their_change_is_reported():
-    record = _settled()
-    _stale(record, email='someone@example.org', phone_number='555-0100', race='Asian')
-
-    out, _ = _run()
-    rows = {row['field']: row for row in _json()['changes']}
-
-    assert 'someone@example.org' not in out and '555-0100' not in out
-    # Person carries no email, so refresh clears it: the wipe stays visible.
-    assert rows['email'] == {
-        'person_id': record.person_id, 'field': 'email', 'stored': '[redacted]',
-        'rederived': None, 'user_edited': False, 'redacted': True,
-    }
-    assert rows['phone_number']['redacted'] is True
-    assert rows['race']['stored'] == 'Asian'
+@pytest.mark.parametrize('before, after, expected', [
+    (None, 'x', ('set', None)),
+    ('x', None, ('cleared', None)),
+    ('x', 'y', ('changed', None)),
+    (1, 2, ('changed', 'up')),
+    (2.5, Decimal('1.0'), ('changed', 'down')),
+    (False, True, ('changed', None)),   # a flag has no direction
+    ([], ['race'], ('changed', None)),
+])
+def test_a_change_is_described_without_its_values(before, after, expected):
+    assert describe_change(before, after) == expected
 
 
-def test_a_redacted_value_appearing_from_null_shows_the_null():
+def test_a_value_appearing_from_null_is_set():
     record = _settled()
     Person.objects.filter(pk=record.person_id).update(email='someone@example.org')
 
     rows = _json('--field', 'email')['changes']
 
     assert rows == [{
-        'person_id': record.person_id, 'field': 'email', 'stored': None,
-        'rederived': '[redacted]', 'user_edited': False, 'redacted': True,
+        'person_id': record.person_id, 'field': 'email',
+        'change': 'set', 'direction': None, 'user_edited': False,
     }]
 
 
-def test_personal_dates_and_free_text_are_redacted(monkeypatch):
+def test_no_value_is_printed_in_any_format(monkeypatch):
+    """Round 3 printed source text through disease, stage, race and an
+    unchecked choices field; round 2 through genomic findings. No value of any
+    field reaches the output, whatever the field."""
+    secret = 'Jane Doe Qzx'
     record = _settled()
-    _stale(record, death_date='2024-03-01', validation_date='2024-02-01',
-           custom_fields={'note': 'Jane Doe called', 'score': 7})
-    # Free text is not cleared by refresh; have an extractor derive some.
-    monkeypatch.setattr(patient_record_service, '_get_blood_type_data', lambda person, snapshot=None: {
-        'blood_type': None, 'tobacco_use_details': 'Told Dr Smith he quit',
-        'planned_therapies': 'per Jane',
-    })
+    _stale(record, email='jane@example.org', phone_number='555-0100',
+           death_date='2024-03-01', latitude=45.123987, longitude=-73.654321,
+           custom_fields={'note': secret, 'mrn': 4815162342})
 
-    out, _ = _run()
-    rows = {row['field']: row for row in _json()['changes']}
+    def derived(person, snapshot=None):
+        return {'blood_type': None, 'tobacco_use_details': secret, 'planned_therapies': secret}
 
-    for value in ('2024-03-01', '2024-02-01', 'Smith', 'Jane'):
-        assert value not in out
-    for field in ('death_date', 'validation_date', 'custom_fields.note'):
-        assert (rows[field]['stored'], rows[field]['rederived'], rows[field]['redacted']) == (
-            '[redacted]', None, True), field
-    for field in ('tobacco_use_details', 'planned_therapies'):
-        assert (rows[field]['stored'], rows[field]['rederived'], rows[field]['redacted']) == (
-            None, '[redacted]', True), field
-    # A custom field's number is a value, not free text.
-    assert rows['custom_fields.score']['stored'] == 7
-    assert rows['custom_fields.score']['redacted'] is False
+    monkeypatch.setattr(patient_record_service, '_get_blood_type_data', derived)
+    PatientRecord.objects.filter(pk=record.pk).update(
+        disease=secret, disease_slug=secret, stage=secret, race=secret,
+        ethnicity=secret, genetic_mutations=[{'variant': secret}])
+
+    outputs = [_run(*args) for args in ((), ('--format', 'json'), ('--format', 'csv'))]
+
+    assert _json()['summary']['changes'] >= 10
+    for out, err in outputs:
+        for value in ('Jane', 'Doe', 'Qzx', 'jane@', '555-0100', '2024-03-01',
+                      '45.123987', '73.654321', '4815162342'):
+            assert value not in out + err, value
 
 
 def test_a_pending_edit_the_refresh_keeps_is_not_a_change():
@@ -160,12 +158,9 @@ def test_a_pending_edit_the_refresh_overrides_is_reported_and_marked():
 
     assert rows['languages_skills'] == {
         'person_id': record.person_id, 'field': 'languages_skills',
-        # Free text: the value is redacted; the cleared side stays visible.
-        'stored': '[redacted]', 'rederived': None,
-        'user_edited': True, 'redacted': True,
+        'change': 'cleared', 'direction': None, 'user_edited': True,
     }
-    assert rows['user_edited_fields']['stored'] == ['languages_skills', 'race']
-    assert rows['user_edited_fields']['rederived'] == ['race']
+    assert rows['user_edited_fields']['change'] == 'changed'
     assert 'race' not in rows
 
 
@@ -177,7 +172,7 @@ def test_a_pending_edit_that_omop_now_backs_resolves():
 
     assert rows == [{
         'person_id': record.person_id, 'field': 'user_edited_fields',
-        'stored': ['race'], 'rederived': [], 'user_edited': False, 'redacted': False,
+        'change': 'changed', 'direction': None, 'user_edited': False,
     }]
 
 
@@ -226,7 +221,7 @@ def test_custom_fields_are_compared_per_key():
 
     assert rows == [{
         'person_id': record.person_id, 'field': 'custom_fields.stale_custom_answer',
-        'stored': 3, 'rederived': None, 'user_edited': False, 'redacted': False,
+        'change': 'cleared', 'direction': None, 'user_edited': False,
     }]
 
 
@@ -239,7 +234,9 @@ def test_text_output():
     assert 'Records scanned: 1' in out
     assert 'Records that would change: 1' in out
     assert 'Nothing was written.' in out
-    assert f'person_id={record.person_id} race: "Asian" -> "White"' in out
+    assert 'Field changes: 1, changed 1' in out
+    assert f'person_id={record.person_id} race: changed' in out
+    assert 'Asian' not in out and 'White' not in out
 
 
 def test_csv_output_keeps_the_summary_off_stdout():
@@ -250,10 +247,10 @@ def test_csv_output_keeps_the_summary_off_stdout():
 
     rows = list(csv.DictReader(io.StringIO(out)))
     assert rows == [
-        {'person_id': str(record.person_id), 'field': 'languages_skills', 'stored': '"[redacted]"',
-         'rederived': 'null', 'user_edited': 'true', 'redacted': 'true'},
-        {'person_id': str(record.person_id), 'field': 'race', 'stored': '"Asian"',
-         'rederived': '"White"', 'user_edited': 'false', 'redacted': 'false'},
+        {'person_id': str(record.person_id), 'field': 'languages_skills', 'change': 'cleared',
+         'direction': '', 'user_edited': 'true'},
+        {'person_id': str(record.person_id), 'field': 'race', 'change': 'changed',
+         'direction': '', 'user_edited': 'false'},
     ]
     assert json.loads(err)['summary']['records_changed'] == 1
 
@@ -508,40 +505,3 @@ def test_a_refused_task_the_refresh_swallows_still_fails_the_preview(monkeypatch
 
     with pytest.raises(PreviewWriteBlocked, match='Celery'):
         preview_record(record)
-
-
-# ---------------------------------------------------------------------------
-# Default-deny redaction (round-2 review: genomic report text leaked)
-# ---------------------------------------------------------------------------
-
-def test_no_free_text_date_or_json_column_shows_its_values():
-    """Every PatientRecord column that can hold free text, a personal date or a
-    JSON document is redacted unless it is explicitly listed as a vocabulary
-    term or field-name list. A new column is redacted by default."""
-    from omop_core.models import PatientRecord
-    from omop_core.services.rederivation_preview import SHOWN_FIELDS, value_is_shown
-    for field in PatientRecord._meta.concrete_fields:
-        kind = field.get_internal_type()
-        risky = kind in ('JSONField', 'DateField', 'DateTimeField') or (
-            kind in ('CharField', 'TextField') and not field.choices)
-        if risky and field.name not in SHOWN_FIELDS:
-            assert not value_is_shown(field.name), field.name
-
-
-@pytest.mark.parametrize('field, value, shown', [
-    ('genetic_mutations', [{'gene': 'BRCA1', 'variant': 'Jane Doe report'}], False),
-    ('genomics_brca1', {'variant': 'Jane Doe report'}, False),
-    ('molecular_markers', 'Jane Doe report', False),
-    ('diagnosis_date', '2024-01-01', False),
-    ('latitude', 45.5, False),
-    ('patient_age', 90, False),
-    ('patient_age', 64, True),
-    ('bmi', 24.2, True),
-    ('disease', 'Multiple Myeloma', True),
-    ('custom_fields.note', 'Jane Doe', False),
-    ('custom_fields.score', 3, True),
-])
-def test_values_are_shown_only_for_non_identifying_fields(field, value, shown):
-    from omop_core.services.rederivation_preview import REDACTED, _shown
-    assert (_shown(field, value) != REDACTED) is shown
-
