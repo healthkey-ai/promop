@@ -426,6 +426,9 @@ def test_a_count_whose_canonical_overflows_the_column_is_refused(api):
     (99999.9995, '10*3/uL', False),
     (100000, '10*3/uL', False),
     (-1, 'cells/uL', False),
+    # Past the decimal context: quantize raised InvalidOperation (#2489).
+    ('1e40', 'cells/uL', False),
+    ('1e40', '10*3/uL', False),
 ])
 def test_canonical_from_source_refuses_what_the_column_cannot_hold(value, unit, recognised):
     from omop_core.services.blood_count_source_pairs import canonical_from_source
@@ -466,3 +469,18 @@ def test_a_newer_dated_import_retires_the_source_pair(api):
                  'absolute_neutrophile_count_units'} & set(
                      record.user_edited_fields or []))
     assert record.pending_source_pair_dates == {}
+
+
+def test_a_count_past_the_decimal_context_is_a_400_on_the_shared_form(api):
+    """`quantize` raised InvalidOperation for a huge count: a 500 (#2489)."""
+    record = _record()
+    response = api.patch(
+        f'/api/v1/patient-records/{record.person.person_id}/',
+        {'absolute_neutrophile_count': '1e40'},
+        format='json', HTTP_X_PATIENT_FORM='1',
+    )
+
+    assert response.status_code == 400, response.data
+    assert 'absolute_neutrophile_count' in response.data['rejected']
+    record.refresh_from_db()
+    assert record.anc_thousand_per_ul is None
