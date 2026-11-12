@@ -239,6 +239,7 @@ class Command(BaseCommand):
             "changes": total_rows,
             "changes_shown": len(rows),
             "errors": len(errors),
+            "field_filter": sorted(wanted),
             "fields": dict(sorted(per_field.items(), key=lambda item: (-item[1], item[0]))),
             "changes_by_kind": dict(sorted(per_kind.items())),
         }
@@ -252,12 +253,13 @@ class Command(BaseCommand):
             )
 
     def _write_text(self, summary, rows, errors):
+        scope = " in the selected fields" if summary["field_filter"] else ""
         out = self.stdout
         out.write(f"Preview of re-derivation to version {summary['derivation_version']} "
                   f"({summary['cohort']}). Nothing was written.")
         out.write(f"Records scanned: {summary['records_scanned']}")
-        out.write(f"Records that would change: {summary['records_changed']}")
-        out.write(f"Field changes: {summary['changes']}"
+        out.write(f"Records that would change{scope}: {summary['records_changed']}")
+        out.write(f"Field changes{scope}: {summary['changes']}"
                   + "".join(f", {kind} {count}" for kind, count in summary["changes_by_kind"].items()))
         if summary["errors"]:
             out.write(self.style.ERROR(f"Errors: {summary['errors']}"))
@@ -272,8 +274,11 @@ class Command(BaseCommand):
             for row in rows:
                 mark = "  [user-edited]" if row.user_edited else ""
                 out.write(f"person_id={row.person_id} {row.field}: {_describe(row)}{mark}")
-            if summary["changes_shown"] < summary["changes"]:
-                out.write(f"... {summary['changes'] - summary['changes_shown']} more row(s) not shown (--max-rows)")
+        if summary["changes_shown"] < summary["changes"]:
+            # Outside the `if rows` block: --max-rows 0 and a filter that matches
+            # nothing both suppress rows, and the count they suppressed must
+            # still be visible.
+            out.write(f"... {summary['changes'] - summary['changes_shown']} more row(s) not shown (--max-rows)")
         for error in errors:
             detail = " ".join(f"{key}={value}" for key, value in error.items() if key != "person_id")
             out.write(self.style.ERROR(f"person_id={error['person_id']} not previewed: {detail}"))

@@ -272,6 +272,19 @@ def test_field_filter_and_row_limit():
     assert limited['summary']['fields'] == {'ethnicity': 2, 'race': 2}
 
 
+def test_text_qualifies_a_field_filter_and_keeps_the_suppressed_count():
+    first, second = _settled(), _settled()
+    for record in (first, second):
+        _stale(record, race='Asian', ethnicity='Hispanic or Latino')
+
+    filtered, _ = _run('--field', 'ethnicity')
+    assert 'Records that would change in the selected fields: 2' in filtered
+    assert 'Field changes in the selected fields: 2' in filtered
+
+    limited, _ = _run('--max-rows', '0')
+    assert '4 more row(s) not shown (--max-rows)' in limited
+
+
 def test_custom_fields_are_compared_per_key():
     from omop_core.models import CustomPatientField, FieldConceptMapping
     mapping = FieldConceptMapping.objects.create(
