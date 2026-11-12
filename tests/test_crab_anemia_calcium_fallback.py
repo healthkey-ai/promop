@@ -111,11 +111,10 @@ def test_a_conventional_calcium_without_a_unit_takes_mg_dl():
 
 
 @pytest.mark.parametrize('code, value, unit', [
-    ('718-7', -1.0, 'g/dL'),
-    ('17861-6', -1.0, 'mg/dL'),
+    ('718-7', -1.0, 'g/dL'),        # meets every "< N" threshold
+    ('17861-6', 1200.0, 'mg/dL'),   # beyond the column, still "> 11"
 ])
 def test_an_out_of_range_value_is_not_evidence(code, value, unit):
-    """A negative concentration meets every "< N" threshold."""
     person = PersonFactory()
     _measure(person, code, value, unit)
     assert _crab(person) is None

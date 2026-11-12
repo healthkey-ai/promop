@@ -4743,7 +4743,8 @@ def _get_mm_specific_data(person: Person, snapshot: OmopSnapshot = None) -> dict
             ``defaults`` maps each LOINC to the unit a unitless row is read in;
             None means a row of that code needs a unit of its own. Molar
             LOINCs get None: a unitless 59260-0 hemoglobin of 8 mmol/L read as
-            8 g/dL is a false anemia, and every normal molar value is below 10.
+            8 g/dL is a false anemia, and almost every normal molar value is
+            below 10.
             A value outside the canonical column's range (a negative one would
             meet every "< N" threshold) is no evidence either.
             """
