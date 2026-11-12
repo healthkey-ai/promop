@@ -408,3 +408,34 @@ describe("adding a second role on the Access Grants tab (#2457)", () => {
     expect(await screen.findByText(/already holds the analyst role here/)).toBeInTheDocument();
   });
 });
+
+describe("roles reference (#2473)", () => {
+  it("links the Access Grants tab to the roles page and explains each shown role", async () => {
+    setupMocks();
+    mockGet.mockImplementation((url: string) => {
+      if (url.includes("/orgs/acme/access/")) return Promise.resolve({ data: [
+        { id: 7, email: "doc@test.com", name: "", is_premium: false, org_slug: "acme", group_name: null,
+          role: "doctor", redirect_url: null, expires_at: null, granted_at: "2024-01-01" },
+        { id: 8, email: "boss@test.com", name: "", is_premium: false, org_slug: "acme", group_name: null,
+          role: "org_admin", redirect_url: null, expires_at: null, granted_at: "2024-01-01" },
+      ] });
+      if (url.includes("/orgs/acme/trusts/") || url.includes("/orgs/acme/invitations/")) return Promise.resolve({ data: [] });
+      if (url.includes("/orgs/acme/vocabulary/")) return Promise.resolve({ data: VOCABULARY_DATA });
+      if (url.includes("/orgs/acme/")) return Promise.resolve({ data: ORG_DATA });
+      return Promise.resolve({ data: [] });
+    });
+    renderOrgDetail();
+    await screen.findByText("Acme Clinic");
+    fireEvent.click(screen.getByText("Access Grants"));
+    const links = await screen.findAllByRole("link", { name: "What each role can do" });
+    expect(links.length).toBeGreaterThanOrEqual(2);
+    expect(links[0]).toHaveAttribute("href", "/roles");
+    // The invite form's role select also says "Org Admin"; the grant row's label carries the tooltip.
+    const badge = screen.getAllByText("Org Admin").find((el) => el.closest("table"))!;
+    fireEvent.mouseEnter(badge);
+    expect(screen.getByRole("tooltip")).toHaveTextContent(/Includes what Doctor and Analyst can do/);
+    // Beside the Doctor select only the info link, not a second "Doctor".
+    expect(screen.getByRole("link", { name: "What the Doctor role can do" })).toHaveAttribute("href", "/roles");
+    expect(screen.getAllByText("Doctor").every((el) => el.tagName === "OPTION")).toBe(true);
+  });
+});
