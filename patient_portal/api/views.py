@@ -5993,10 +5993,12 @@ def _explicit_answer_write(request, person):
     """``(403 response or None, attestation source)`` for a deliberate answer.
 
     The answer endpoints (pre-existing conditions, negative answers) share one
-    write check. ``_caller_may_write_patient`` alone is not it: on the org path
-    it answers from the record's organization only, so a signed-in non-staff
-    human is also checked against ``can_write_patient``. A host credential
-    attests as ``host-explicit``; a person as their role.
+    write check. The second ``can_write_patient`` call does not change the
+    outcome today: ``_caller_may_write_patient`` takes its org path only for a
+    client_credentials token, which ``is_machine_request`` skips here, and
+    for every other non-staff caller it already asks ``can_write_patient``.
+    It is kept as a guard should either rule change. A host credential attests
+    as ``host-explicit``; a person as their role.
     """
     read_only = Response({'detail': 'You have read-only access to this patient.'}, status=403)
     if not _caller_may_write_patient(request, person.person_id):
