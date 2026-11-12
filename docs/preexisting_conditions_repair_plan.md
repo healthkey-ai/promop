@@ -41,8 +41,9 @@ review the manifest and receive explicit approval for that cohort.
    run: apply locks the audited records and their person rows (`SELECT … FOR
    UPDATE`), so those patients' writes wait while unrelated patients continue,
    but an evidence row the audit filtered out can change unseen. A serializable
-   transaction aborts on a concurrent change to evidence the run has read, and a
-   post-loop re-read rolls back anything that landed. Acquisition has a
+   transaction detects serialization anomalies and a post-loop re-read sees the
+   classification changes visible to it, but neither guarantees that every
+   concurrent change aborts, so the write pause is the gate. Acquisition has a
    five-second timeout; this is not a zero-downtime bulk job.
 
 ## Read-only sizing (deployment owner/operator)
