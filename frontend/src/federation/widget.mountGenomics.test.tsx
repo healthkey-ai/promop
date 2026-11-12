@@ -166,6 +166,30 @@ describe("mountGenomics", () => {
     expect(seen).toEqual([[{ genomic_feature: "TP53" }]]);
   });
 
+  it("shows a host callback failure instead of leaving it unhandled", async () => {
+    const onPatientUpdated = vi.fn(() => { throw new Error("host refresh broke"); });
+    const { client } = await mount({ onPatientUpdated });
+
+    await vi.waitFor(() => expect(button("Add genomic finding")).toBeTruthy());
+    await act(async () => { button("Add genomic finding")!.click(); });
+    const gene = [...document.querySelectorAll("label")]
+      .find((l) => l.textContent?.startsWith("Genomic feature"))?.querySelector("input");
+    const featureType = [...document.querySelectorAll("label")]
+      .find((l) => l.textContent?.startsWith("Feature type"))?.querySelector("select");
+    await act(async () => {
+      fireEvent.change(gene!, { target: { value: "TP53" } });
+      fireEvent.change(featureType!, { target: { value: "Gene" } });
+    });
+    await act(async () => { button("Save genomic finding")!.click(); });
+
+    await vi.waitFor(() => expect(onPatientUpdated).toHaveBeenCalled());
+    expect(client.post).toHaveBeenCalled();
+    // Reported in the dialog the way the write's own failure is, as it was
+    // before the store reload moved the callback behind a promise.
+    await vi.waitFor(() => expect(document.body.textContent)
+      .toContain("Could not save genomics changes. Please try again."));
+  });
+
   it("passes the host's dismissal through so it can unmount", async () => {
     const onClose = vi.fn();
     await mount({ onClose });

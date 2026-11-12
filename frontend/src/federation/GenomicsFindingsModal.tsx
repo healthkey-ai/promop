@@ -35,14 +35,15 @@ export default function GenomicsFindingsModal({ store, client, apiBase, readOnly
   // The findings endpoints bypass the store's save queue, so the store still
   // holds the pre-write record. Re-read it before telling the host, as the
   // therapy panel and the Genomics tab do: other surfaces on this connection
-  // render from the store. Listeners are held until the read lands.
-  const changed = useCallback(() => {
-    store.beginBypassWrite();
+  // render from the store. The promise goes back to GenomicsFindings, which
+  // awaits it inside its write: the store's listeners stay held (its bypass
+  // spans the await) and a host callback that throws is shown as the write's
+  // error instead of escaping as an unhandled rejection.
+  const changed = useCallback(
     // A read already in flight started before this write; start a new one.
-    void store.load(true)
-      .then(() => onChanged())
-      .finally(() => store.endBypassWrite());
-  }, [store, onChanged]);
+    () => store.load(true).then(() => onChanged()),
+    [store, onChanged],
+  );
 
   if (state.loading) {
     return <GenomicsDialogShell title="Genomic findings" onClose={onClose}>
