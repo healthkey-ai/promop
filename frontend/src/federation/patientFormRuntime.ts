@@ -92,6 +92,29 @@ export function patientFormForClient(client: AxiosInstance, base = '', sessionKe
 }
 
 /**
+ * Renewals per connection (client, base, sessionKey). Every surface holding a
+ * store for that connection — field slots, the trial adapter's host listener,
+ * the therapy and genomics editors, the full form — memoizes it, so a renewal
+ * started by one of them must be visible to all of them. A hook-local counter
+ * moved only the surface whose Retry was pressed; the rest stayed on the
+ * retired store, where their own Retry met the identity guard again.
+ */
+const renewalGenerations = new WeakMap<AxiosInstance, Map<string, number>>();
+const renewalListeners = new Set<() => void>();
+
+/** For `useSyncExternalStore`: called after any connection renews. */
+export function subscribePatientFormRenewals(listener: () => void) {
+  renewalListeners.add(listener);
+  return () => { renewalListeners.delete(listener); };
+}
+
+/** How many times this connection's store was renewed. A changed value means
+ *  the cache entry was replaced and must be read again. */
+export function patientFormRenewalGeneration(client: AxiosInstance, base = '', sessionKey = '') {
+  return renewalGenerations.get(client)?.get(`${base}\u0000${sessionKey}`) ?? 0;
+}
+
+/**
  * Replace the store for this connection with a fresh one, but only if it is
  * still `stale`: the store a caller saw answer for another patient. The old
  * store is not reused or retargeted; it keeps its own patient and queue. A
@@ -106,6 +129,13 @@ export function renewPatientFormForClient(
   if (stores?.get(key) === stale) stores.delete(key);
   noteRetiredDrafts(client, stale);
   const fresh = patientFormForClient(client, base, sessionKey);
+  // Bump even when a concurrent renewal (or a lookup that evicted the retired
+  // store) already replaced the entry: this caller still holds `stale` and
+  // has to re-read. Re-reading an unchanged entry returns the same store.
+  let generations = renewalGenerations.get(client);
+  if (!generations) { generations = new Map(); renewalGenerations.set(client, generations); }
+  generations.set(key, (generations.get(key) ?? 0) + 1);
+  renewalListeners.forEach((listener) => listener());
   // A retained runtime that was waiting on the retired store must watch the
   // fresh one; otherwise its 30 s clean-up never runs and the runtime (with
   // its credentials) is retained for the life of the page.

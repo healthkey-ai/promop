@@ -13,6 +13,7 @@ import {
   renewPatientFormForClient, takeRetiredDraftCount,
 } from './patientFormRuntime';
 import type { PatientFormStore } from './patientFormStore';
+import { usePatientFormRenewals } from './editorSession';
 
 injectStyles();
 assertLabsTokens();
@@ -92,9 +93,10 @@ export function PatientInfoProvider({
 
   const qc = externalQC ?? internalQC;
   // Keyed by client, base and the host's connection key. A renewal after the
-  // linked patient changed bumps `renewals`, which re-reads the cache entry
-  // that renewPatientFormForClient replaced.
-  const [renewals, setRenewals] = useState(0);
+  // linked patient changed — from this form's Retry or from an editor mounted
+  // elsewhere on the same connection — bumps the connection's generation,
+  // which re-reads the cache entry that renewPatientFormForClient replaced.
+  const renewals = usePatientFormRenewals(apiClient, apiBasePath, connectionKey);
   // Unsent edits live on the *old* store after a renewal. It is unmounted with
   // the patient it belongs to, so without this the reader never learns the
   // draft was dropped. The count travels through the runtime, because the
@@ -109,7 +111,6 @@ export function PatientInfoProvider({
   );
   const renew = useCallback(() => {
     renewPatientFormForClient(apiClient, apiBasePath, connectionKey, store);
-    setRenewals((count) => count + 1);
   }, [apiClient, apiBasePath, connectionKey, store]);
   // A different store on the same client and base means the identity inside
   // that client changed (a new connectionKey, or a renewal). The previous
