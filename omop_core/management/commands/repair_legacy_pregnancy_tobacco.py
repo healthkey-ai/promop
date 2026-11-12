@@ -114,7 +114,7 @@ class Command(BaseCommand):
         }))
 
     def _repair(self, supplied, live, expected, applying):
-        if (supplied.get('manifest_version') != 1
+        if (supplied.get('manifest_version') != 2
                 or supplied.get('approval_sha256') != expected
                 or approval_digest(supplied) != expected
                 or expected != live['approval_sha256']

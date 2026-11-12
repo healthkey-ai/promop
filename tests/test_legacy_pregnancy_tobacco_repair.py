@@ -118,6 +118,26 @@ def test_audit_classifies_each_kind_of_evidence(tmp_path):
     assert field('unknown')['classification'] == 'unanswered'
 
 
+def test_the_audit_publishes_the_revision_coverage_the_clear_review_needs(tmp_path):
+    """A True answered before RecordRevision existed cannot be told apart from
+    the default, so the audit has to publish what history it does have."""
+    names = cohort()
+    manifest, _sha = audit(tmp_path)
+    data = json.loads(open(manifest).read())
+
+    assert data['manifest_version'] == 2
+    evidence = data['totals']['evidence']
+    assert evidence['revisions_total'] == 2              # authored + rewritten
+    assert evidence['earliest_revision_at']
+    assert evidence['records_with_any_revision'] == 2
+    assert evidence['records_without_any_revision'] == data['totals']['records'] - 2
+    assert evidence['clear_candidates'] == 2             # the unattributed record, both fields
+    assert evidence['clear_candidates_with_revision_history'] == 0
+    rows = {row['id']: row for row in data['records']}
+    assert rows[names['authored'].pk]['has_any_revision'] is True
+    assert rows[names['unattributed'].pk]['has_any_revision'] is False
+
+
 def test_apply_locks_only_the_rows_it_clears(tmp_path, ready):
     """The repair used to hold SHARE ROW EXCLUSIVE on the whole table and block
     every patient write for the loop (#2450 review)."""

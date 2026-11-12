@@ -30,7 +30,8 @@ Classification, in priority order:
 ``unattributed_true`` True with no evidence at all: the legacy default.
 
 Only ``unattributed_true`` is recommended for clearing. Everything else is kept
-or left for policy review.
+or left for policy review. The pre-apply review, including the revision coverage
+this audit publishes, is in ``docs/legacy_pregnancy_tobacco_repair_plan.md``.
 """
 
 import hashlib
@@ -40,7 +41,7 @@ from datetime import date, datetime, timezone as dt_timezone
 
 from django.core.management.base import BaseCommand, CommandError
 from django.db import connection, transaction
-from django.db.models import Q
+from django.db.models import Min, Q
 
 from omop_core.management.guarded_repair import (
     approval_digest, as_bool, make_transaction_read_only, refuse_existing_manifest,
@@ -338,6 +339,9 @@ class Command(BaseCommand):
     def _collect(self, summary_only):
         histories = {field: _revisions(field) for field in FIELDS}
         source_states = _source_state()
+        revision_rows = RecordRevision.objects.all()
+        revision_total = revision_rows.count()
+        earliest_revision = revision_rows.aggregate(first=Min('changed_at'))['first']
         queryset = (
             PatientRecord.objects
             .order_by('pk')
@@ -347,6 +351,9 @@ class Command(BaseCommand):
 
         records = []
         totals = 0
+        records_with_any_revision = 0
+        clear_candidates = 0
+        clear_candidates_with_revision_history = 0
         by_field = {
             field: {
                 'by_classification': {name: 0 for name in CLASSIFICATIONS},
@@ -363,6 +370,9 @@ class Command(BaseCommand):
             values = dict(zip(FIELDS, row[3:5]))
             edited = row[5] if isinstance(row[5], list) else []
             derivation_version, derived_at = row[6], row[7]
+            has_any_revision = any(histories[field].get(pk) for field in FIELDS)
+            if has_any_revision:
+                records_with_any_revision += 1
             fields = {}
             for field in FIELDS:
                 revisions = histories[field].get(pk, [])
@@ -371,6 +381,10 @@ class Command(BaseCommand):
                 classification = classify(
                     values[field], revisions, pending_edit, source_state)
                 action = ACTIONS[classification]
+                if action == 'clear':
+                    clear_candidates += 1
+                    if has_any_revision:
+                        clear_candidates_with_revision_history += 1
                 by_field[field]['by_classification'][classification] += 1
                 by_field[field]['by_action'][action] = (
                     by_field[field]['by_action'].get(action, 0) + 1)
@@ -396,6 +410,7 @@ class Command(BaseCommand):
                     'id': pk,
                     'person_id': person_id,
                     'organization_id': organization_id,
+                    'has_any_revision': has_any_revision,
                     'fields': fields,
                     'derivation_version': derivation_version,
                     'derived_at': derived_at.isoformat() if derived_at else None,
@@ -412,12 +427,28 @@ class Command(BaseCommand):
             'totals': {
                 'records': totals,
                 'by_field': by_field,
+                # A genuine answer entered before RecordRevision existed (0125),
+                # or by a path that wrote neither a revision nor a pending
+                # marker, cannot be told apart from the legacy default. The
+                # operator judges that from these counts and the manifest, so
+                # they are published with the audit rather than left to SQL.
+                'evidence': {
+                    'revisions_total': revision_total,
+                    'earliest_revision_at': (
+                        earliest_revision.isoformat() if earliest_revision else None),
+                    'records_with_any_revision': records_with_any_revision,
+                    'records_without_any_revision': totals - records_with_any_revision,
+                    'clear_candidates': clear_candidates,
+                    'clear_candidates_with_revision_history': (
+                        clear_candidates_with_revision_history),
+                },
             },
             'records': records,
             'manifest_sha256': hashed.hexdigest(),
-            'manifest_version': 1,
+            'manifest_version': 2,
             'manifest_scope': 'canonical JSON per record: id, per-field value, classification, '
-                              'revision count, pending edit, source-backed evidence',
+                              'revision count, pending edit, source-backed evidence; totals '
+                              'carry the revision-history coverage the clear review relies on',
         }
         payload['approval_sha256'] = approval_digest(payload)
         return payload
@@ -436,4 +467,17 @@ class Command(BaseCommand):
             if actions:
                 self.stdout.write('    actions: ' + ', '.join(
                     f'{name}={count}' for name, count in sorted(actions.items())))
+        evidence = payload['totals']['evidence']
+        self.stdout.write(
+            'revision history: '
+            f'{evidence["revisions_total"]} row(s), earliest '
+            f'{evidence["earliest_revision_at"] or "never"}, '
+            f'{evidence["records_with_any_revision"]} of {payload["totals"]["records"]} '
+            'record(s) carry any')
+        if evidence['clear_candidates']:
+            self.stdout.write(self.style.WARNING(
+                f'{evidence["clear_candidates"]} clear candidate(s) have no revision for the '
+                'field: an answer entered before RecordRevision existed (0125), or by a path '
+                'that recorded neither revision nor pending marker, is indistinguishable from '
+                'the legacy default. Review the manifest before --apply.'))
         self.stdout.write(f'approval_sha256: {payload["approval_sha256"]}')
