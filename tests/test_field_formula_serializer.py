@@ -21,7 +21,7 @@ def test_reactivating_a_formula_for_a_non_computed_field_is_refused():
     assert 'field_name' in serializer.errors
 
 
-def test_deactivating_a_stale_formula_is_still_allowed():
+def test_deactivating_a_stale_formula_is_still_allowed(stale_answer_formula_allowed):
     formula = FieldFormula.objects.create(
         field_name='no_pre_existing_conditions',
         formula='@count(preexisting_conditions) == 0',
@@ -74,7 +74,7 @@ def test_editing_an_inactive_formula_is_not_an_activation():
     assert serializer.save().is_active is False
 
 
-def test_editing_an_active_formula_still_checks_its_target():
+def test_editing_an_active_formula_still_checks_its_target(stale_answer_formula_allowed):
     formula = FieldFormula.objects.create(
         field_name='no_pre_existing_conditions', formula='true', is_active=True,
     )

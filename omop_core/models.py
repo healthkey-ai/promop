@@ -16,6 +16,7 @@ import uuid
 from pgvector.django import VectorField
 
 from omop_core.services import source_labels, source_vocabularies
+from omop_core.services.authored_answers import AUTHORED_ANSWER_FORMULA_FIELDS
 
 
 # Person.year_of_birth values that mean "not known" rather than a birth year.
@@ -4835,15 +4836,14 @@ class FieldFormula(models.Model):
     class Meta:
         db_table = 'field_formula'
         constraints = [
-            # #5666: these two fields are explicit answers. A formula may be
+            # #5666: these fields are explicit answers. A formula may be
             # seeded or re-activated only by mistake; the database refuses an
             # active row rather than letting the next refresh overwrite an
-            # attestation.
+            # attestation. Built from the one authored-answer set so the two
+            # cannot drift again (#2489); sorted so the migration is stable.
             models.CheckConstraint(
                 condition=(
-                    ~Q(field_name__in=('no_active_infection_status',
-                                       'no_other_active_malignancies',
-                                       'no_pregnancy_or_lactation_status'))
+                    ~Q(field_name__in=tuple(sorted(AUTHORED_ANSWER_FORMULA_FIELDS)))
                     | Q(is_active=False)
                 ),
                 name='field_formula_explicit_answer_inactive',

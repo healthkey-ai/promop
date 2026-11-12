@@ -73,7 +73,7 @@ def test_a_deactivated_pre_existing_formula_leaves_the_flag_unknown():
     assert record.no_pre_existing_conditions is None
 
 
-def test_an_active_answer_formula_cannot_reproduce_the_defect():
+def test_an_active_answer_formula_cannot_reproduce_the_defect(stale_answer_formula_allowed):
     """The evaluator skips authored answers even when a row is left active.
 
     The database constraint and the import guard also refuse it, but an older
@@ -92,7 +92,7 @@ def test_an_active_answer_formula_cannot_reproduce_the_defect():
     assert record.no_pre_existing_conditions is None
 
 
-def test_the_shipped_migration_deactivates_the_formula():
+def test_the_shipped_migration_deactivates_the_formula(stale_answer_formula_allowed):
     from importlib import import_module
 
     from django.apps import apps as django_apps
