@@ -130,9 +130,11 @@ grounds that their security-relevant values are pinned by tests, and the pinning
 tests are themselves inside `CONTROL_PATHS` — so a file and the assertion
 constraining it cannot be relaxed in the same ungated change. The pins are:
 
-- `tests/test_web_startup.py` — the exact command sequence in `start.sh`,
-  including `manage.py check --deploy --fail-level ERROR`, and that `start.sh`
-  leaves `DJANGO_SETTINGS_MODULE` unset so the gated selectors in
+- `tests/test_web_startup.py` — the command sequence `start.sh` triggers:
+  `start.sh` runs `scripts/prepare-deployment.sh`, which holds
+  `manage.py check --deploy --fail-level ERROR`. That script is ungated, and
+  the test pins the sequence it emits, plus that `start.sh` leaves
+  `DJANGO_SETTINGS_MODULE` unset so the gated selectors in
   `promop/wsgi.py` and `manage.py` decide which settings production loads.
 - `tests/test_render_blueprint_invariants.py` — stated over the whole blueprint
   rather than per named service, so an appended service does not arrive
@@ -149,7 +151,8 @@ constraining it cannot be relaxed in the same ungated change. The pins are:
   in the Render dashboard and the blueprint cannot see it. Production declares
   both `ALLOWED_HOSTS` and `CORS_ALLOWED_ORIGINS` that way, so **their production
   values are not reviewed by anything in this repository** — the test rejects
-  only a wildcard written into the blueprint, which is what staging does. What
+  only a wildcard written into the blueprint; staging declares its hosts in the
+  blueprint, so those are checked, production's are not. What
   does hold for production is weaker: `tests/test_render_staging_blueprint.py`
   asserts the keys are declared at all, and `tests/test_render_production_settings.py`
   asserts the application refuses to boot when either is missing (for
