@@ -4782,7 +4782,8 @@ def _get_mm_specific_data(person: Person, snapshot: OmopSnapshot = None) -> dict
             lambda value: chemistry_canonical_in_range('serum_calcium_mg_dl', value),
         )
 
-        crab_anemia = hgb is not None and hgb < 10.0
+        # 0 g/dL fits the column but is no blood count: an ETL placeholder.
+        crab_anemia = hgb is not None and 0 < hgb < 10.0
         crab_calcium = calcium is not None and calcium > 11.0
         # Clearance is the preferred renal fact; serum creatinine > 2 mg/dL is
         # the recorded alternative, matching derive_meets_crab().

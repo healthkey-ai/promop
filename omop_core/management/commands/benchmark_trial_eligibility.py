@@ -362,7 +362,9 @@ def _fetch_omop_trial_row(person_id):
             ),
             ecog_performance_status=_latest_observation_number_name_subquery(['ecog'], IntegerField()),
             karnofsky_performance_score=_latest_observation_number_name_subquery(['karnofsky'], IntegerField()),
-            hemoglobin_g_dl=_latest_measurement_pair_subquery(['718-7', '59260-0']),
+            # Not 59260-0: it is moles/volume, the canonical field does not read
+            # it, and a unitless one in the g/dL default is a false anemia.
+            hemoglobin_g_dl=_latest_measurement_pair_subquery(['718-7']),
             platelet_count_thousand_per_ul=_latest_blood_count_subquery('777-3'),
             anc_thousand_per_ul=_latest_blood_count_subquery('751-8'),
             wbc_count_thousand_per_ul=_latest_blood_count_subquery('6690-2'),
