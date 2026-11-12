@@ -7503,6 +7503,11 @@ def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances,
             f'{sv_field}__in': {k[0] for k in keyed},
             f'{date_field}__in': {k[1] for k in keyed},
         })
+        if any(source_keys):
+            # A keyed row may stamp its key on one of these. Lock them so a
+            # concurrent request with another key re-reads the row once the
+            # first commits, sees it keyed, and inserts instead of overwriting.
+            rows = rows.select_for_update(of=('self',))
         rows = with_attribution(rows).order_by(pk_field).values_list(*columns, ATTRIBUTION)
         n_extra = len(extra_fields)
         for row in rows:

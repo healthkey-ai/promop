@@ -260,6 +260,21 @@ def test_a_key_inserted_concurrently_becomes_an_update(api, monkeypatch):
     assert _rows(api.person).get().value_as_number == Decimal('37.8')
 
 
+def test_a_stamp_candidate_is_locked(api):
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+
+    api.post([api.row(key=None)])
+    with CaptureQueriesContext(connection) as ctx:
+        resp = api.post([api.row()])
+
+    assert resp.status_code == 201, resp.content
+    # A concurrent request with another key waits on this lock, then sees the
+    # row keyed and inserts instead of overwriting the stamp.
+    assert any('"measurement_source_value" IN' in q['sql'] and 'FOR UPDATE' in q['sql']
+               for q in ctx.captured_queries)
+
+
 def test_bulk_update_may_set_a_key_and_a_collision_is_409(api, client):
     a, b = api.post([api.row(key=None, value='36.1'),
                      api.row(key=None, value='36.2')]).json()['ids']
