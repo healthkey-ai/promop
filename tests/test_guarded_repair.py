@@ -28,7 +28,10 @@ pytestmark = pytest.mark.django_db
 
 def _target_url(user='reader'):
     cfg = connection.settings_dict
-    return f"postgresql://{user}@{cfg['HOST']}:{cfg['PORT'] or 5432}/{cfg['NAME']}"
+    host = cfg['HOST']
+    if ':' in host:  # an IPv6 literal needs brackets in a URL
+        host = f'[{host}]'
+    return f"postgresql://{user}@{host}:{cfg['PORT'] or 5432}/{cfg['NAME']}"
 
 
 @pytest.fixture
@@ -100,6 +103,18 @@ def test_local_requires_a_loopback_peer(clean_env, monkeypatch):
         host=cfg['HOST'], port=int(cfg['PORT'] or 5432), dbname=cfg['NAME'],
         hostaddr='192.0.2.1')))
     with pytest.raises(CommandError, match='loopback peer'):
+        target_guard('local')
+
+
+def test_local_requires_a_configured_loopback_host(clean_env, monkeypatch):
+    # A remote host whose peer happens to be loopback (a tunnel, a proxy) is
+    # still not a configured local database.
+    cfg = connection.settings_dict
+    monkeypatch.setitem(cfg, 'HOST', 'db.example.test')
+    monkeypatch.setattr(connection, 'connection', SimpleNamespace(info=SimpleNamespace(
+        host='db.example.test', port=int(cfg['PORT'] or 5432), dbname=cfg['NAME'],
+        hostaddr='127.0.0.1')))
+    with pytest.raises(CommandError, match='explicitly configured loopback'):
         target_guard('local')
 
 
