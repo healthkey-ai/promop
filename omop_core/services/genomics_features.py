@@ -42,6 +42,11 @@ def is_gene_level(finding, marker=None):
         return False
     if marker is not None and marker.get('kind') != 'gene':
         return False
+    if category == 'Sequence variant':
+        # An explicit category wins over the text heuristic, as a structural
+        # one does above: an in-frame "exon 19 deletion" is a sequence variant
+        # when the source says so (#2489).
+        return True
     text = ' '.join(str(finding.get(key) or '') for key in ('variant', 'variant_name', 'mutation'))
     if _HGVS.search(text):
         # HGVS spelling names a sequence variant even when the description also

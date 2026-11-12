@@ -72,7 +72,7 @@ describe('therapy lines editor', () => {
     const load = vi.spyOn(store, 'load');
 
     render(<TherapyLinesPanel store={store} onChanged={onChanged} />);
-    fireEvent.click(screen.getByLabelText('Treatment history is complete'));
+    fireEvent.click(screen.getByLabelText('This is the complete treatment history.'));
 
     // No explicit connection: the standalone treatment tab leaves the helper on
     // the module-level transport the app owns.
@@ -88,8 +88,11 @@ describe('therapy lines editor', () => {
 
     render(<TherapyLinesPanel store={store} />);
 
-    expect(screen.getByLabelText('Treatment history is complete')).not.toBeChecked();
-    expect(screen.getByText(/counts as a minimum/i)).toBeInTheDocument();
+    // Named by the sentence a sighted reader sees (WCAG 2.5.3, label in
+    // name), with the lower-bound hint as its description.
+    const box = screen.getByRole('checkbox', { name: 'This is the complete treatment history.' });
+    expect(box).not.toBeChecked();
+    expect(box).toHaveAccessibleDescription(/counts as a minimum/i);
   });
 });
 

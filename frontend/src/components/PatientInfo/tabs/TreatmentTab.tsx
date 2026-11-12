@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 import { Pencil, Plus, Trash2 } from 'lucide-react';
 import { useWritableFields, invalidateWritableFieldsCache } from '@/hooks/useWritableFields';
 import {
@@ -12,7 +12,7 @@ import TherapyLineDialog from '../TherapyLineDialog';
 import SupportiveTherapyDialog from '../SupportiveTherapyDialog';
 import type { SupportiveTherapyCourse } from '@/api/supportiveTherapies';
 import { usePatientFormStore } from '@/federation/PatientFormContext';
-import { diseaseToDiseaseCode } from '@/api/therapyContext';
+import { diseaseToDiseaseCode, lastRecordedTherapyLine, plannedTherapyRound } from '@/api/therapyContext';
 
 interface Props {
   formData: Record<string, unknown>;
@@ -52,6 +52,7 @@ export default function TreatmentTab({ formData, onChange, diseaseType, onRecord
   // Until confirmed, the recorded line count is a lower bound; the confirmation
   // is the patient's statement that the list is complete (#1924).
   const historyComplete = formData?.therapy_history_complete === true;
+  const historyId = useId();
   const [confirmingHistory, setConfirmingHistory] = useState(false);
   const [historyError, setHistoryError] = useState('');
 
@@ -109,12 +110,6 @@ export default function TreatmentTab({ formData, onChange, diseaseType, onRecord
     />
   );
 
-  const linesCount = (() => {
-    const v = String(formData?.therapy_lines_count ?? '');
-    if (v === '3+') return 3;
-    return parseInt(v) || 0;
-  })();
-
   const therapyLines = Array.isArray(formData?.lines_of_therapy)
     ? (formData.lines_of_therapy as EditableTherapyLine[])
     : [];
@@ -125,16 +120,12 @@ export default function TreatmentTab({ formData, onChange, diseaseType, onRecord
   // derived `therapy_lines_count`: an imported patient can have a non-zero
   // count with no line rows to edit, and Math.max(count, ...[]) then opened
   // "Record a line" at 2 when nothing had been recorded (#1969 follow-up).
-  const lastRecordedLine = therapyLines.reduce(
-    (max, line) => Math.max(max, Number(line.line) || 0), 0);
-  const authoringLine = lastRecordedLine + 1;
+  const authoringLine = lastRecordedTherapyLine(therapyLines) + 1;
   // The planned-regimen catalog still uses the derived count: a count of 1
   // means one line has already been given, so the next planned round is
-  // second-line even when the imported line rows are not readable here.
-  const plannedLine = Math.max(linesCount, lastRecordedLine) + 1;
-  const nextRound = plannedLine === 1 ? 'first_line_therapy'
-    : plannedLine === 2 ? 'second_line_therapy'
-    : 'later_line_therapy';
+  // second-line even when the imported line rows are not readable here. The
+  // federated store asks the same question through the same helper.
+  const nextRound = plannedTherapyRound(formData?.therapy_lines_count, therapyLines);
   const [plannedRegimens, setPlannedRegimens] = useState<TherapyRegimen[]>([]);
   const [loadingPlanned, setLoadingPlanned] = useState(false);
 
@@ -263,12 +254,15 @@ export default function TreatmentTab({ formData, onChange, diseaseType, onRecord
             checked={historyComplete}
             disabled={readOnly || confirmingHistory || personId === null}
             onChange={(e) => void setHistoryComplete(e.target.checked)}
-            aria-label="Treatment history is complete"
+            // Named by the visible sentence, not a differently worded
+            // aria-label (WCAG 2.5.3); the hint is a description.
+            aria-labelledby={`${historyId}-label`}
+            aria-describedby={`${historyId}-hint`}
             className="mt-0.5"
           />
           <span>
-            <span className="font-medium">This is my complete treatment history</span>
-            <span className="mt-0.5 block text-xs text-muted-foreground">
+            <span id={`${historyId}-label`} className="font-medium">This is my complete treatment history</span>
+            <span id={`${historyId}-hint`} className="mt-0.5 block text-xs text-muted-foreground">
               Until you confirm this, the number of prior lines is treated as a minimum
               rather than an exact count.
             </span>

@@ -1139,6 +1139,31 @@ describe('planned-therapy options survive a dated descriptor reload', () => {
 });
 
 describe('planned-therapy options follow a disease change', () => {
+  it.each([
+    ['a line row without a number', [{ regimen: 'R-CHOP' }]],
+    ['a null line row', [null]],
+    ['a non-numeric line', [{ line: 'unknown' }]],
+  ])('asks for the next round past %s instead of later-line', async (_case, lines) => {
+    const get = vi.fn(async (url: string) => {
+      if (url.includes('writable-fields')) return { data: {
+        planned_therapies: { writable: true, target: 'patient_record', multiple: true,
+          options_source: 'therapy_regimens' },
+      } };
+      if (url.includes('therapy-regimens')) return { data: [{ title: 'FCR', value: 'fcr' }] };
+      return { data: { patient_info: { person_id: 12, disease: 'CLL',
+        therapy_lines_count: '1', lines_of_therapy: lines }, write_enabled: true } };
+    });
+    const store = new PatientFormStore({ get } as unknown as AxiosInstance, '/api');
+    await store.load();
+
+    // One line given (the derived count), so the next planned round is second
+    // line, the same answer the Treatment tab computes for this record.
+    expect(get).toHaveBeenCalledWith('/api/v1/therapy-regimens/',
+      { params: { disease: 'C2987', round: 'second_line_therapy' } });
+    expect(store.getSnapshot().fields.planned_therapies.options)
+      .toEqual([{ value: 'fcr', label: 'FCR' }]);
+  });
+
   it('re-enriches the catalog after an ordinary disease PATCH', async () => {
     let catalogCalls = 0;
     const get = vi.fn(async (url: string) => {

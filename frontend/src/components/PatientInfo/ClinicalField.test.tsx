@@ -110,6 +110,29 @@ describe('ClinicalField federated editor', () => {
 });
 
 describe('ClinicalField writability', () => {
+  it('sends a dated value without a date until one is picked (#2454)', () => {
+    const onChange = vi.fn();
+    render(
+      <ClinicalField
+        label="Ki-67" name="ki67_proliferation_index" type="number"
+        value={20}
+        descriptor={{
+          kind: 'direct', writable: true, target: 'patient_record',
+          value_kind: 'number', dated: true,
+        } as FieldDescriptor}
+        onChange={onChange}
+      />,
+    );
+
+    fireEvent.change(screen.getByDisplayValue('20'), { target: { value: '25' } });
+    expect(onChange).toHaveBeenCalledWith('ki67_proliferation_index', 25);
+
+    fireEvent.change(document.getElementById('ki67_proliferation_index-date')!,
+      { target: { value: '2026-10-01' } });
+    expect(onChange).toHaveBeenLastCalledWith(
+      'ki67_proliferation_index', 20, '2026-10-01');
+  });
+
   it('edits a normalised canonical lab without the form store (#2425)', () => {
     const canonical = {
       kind: 'computed', writable: false, target: 'patient_record', inputs: ['hemoglobin_level'],

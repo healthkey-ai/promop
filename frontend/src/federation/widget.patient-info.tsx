@@ -14,7 +14,6 @@ import { StrictMode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
 import { PatientInfo } from "./PatientInfo";
-import { PatientFormContext } from "./PatientFormContext";
 import { injectStyles } from "./injectStyles";
 import { patientFormRuntime, retainPatientFormRuntime, type PatientFormConnection } from './patientFormRuntime';
 import { subscribeSaveState, type SaveState } from './patientFormStore';
@@ -22,6 +21,7 @@ import FieldSlots from './FieldSlots';
 import { __resetWritableFieldsCache } from '@/hooks/useWritableFields';
 import TherapyLinesPanel from './TherapyLinesPanel';
 import GenomicsFindingsModal from './GenomicsFindingsModal';
+import RuntimeStoreScope from './RuntimeStoreScope';
 import type { PatientFormResult } from './patientFormStore';
 
 export interface MountOptions extends PatientFormConnection {
@@ -34,11 +34,19 @@ export interface MountOptions extends PatientFormConnection {
   readOnly?: boolean;
   infoHref?: string;
   onPatientUpdated?: (result?: PatientFormResult) => unknown;
-  onSaveError?: () => unknown;
   /** Host-visible aggregate save state. `pending` covers the PATCH queue and
    *  every bypass write; `failed` stays true until a later successful write.
    *  Callers must not treat `pending: false` alone as acknowledgement. */
   onSaveStateChange?: (state: SaveState) => void;
+}
+
+/** `mountFields` only. Its slots are bare controls in the host's card, with no
+ *  room for the form's own "could not be saved" banner, so the host is told
+ *  instead. The full form shows that banner itself, and the therapy and
+ *  genomics editors write outside the save queue and show their errors inline;
+ *  neither calls this, so their options do not offer it. */
+export interface FieldsMountOptions extends MountOptions {
+  onSaveError?: () => unknown;
 }
 
 /** Subscribe one mount to the store's save state; emits the initial state and
@@ -111,7 +119,7 @@ export function mount(el: HTMLElement, opts: MountOptions = {}): () => void {
 /** One remote React root/queue for all patient-value slots in a host card.
  * The host supplies only field identifiers and empty DOM targets, not controls
  * or clinical metadata. Portals retain the same recursive form context. */
-export function mountFields(el: HTMLElement, opts: MountOptions = {}): () => void {
+export function mountFields(el: HTMLElement, opts: FieldsMountOptions = {}): () => void {
   unmount(el);
   injectStyles();
   const runtime = patientFormRuntime(opts);
@@ -144,14 +152,15 @@ export function mountTherapyLines(el: HTMLElement, opts: MountOptions = {}): () 
     releaseRuntime();
     __resetWritableFieldsCache();
   });
-  void runtime.store.load();
   const root = createRoot(el);
   roots.set(el, root);
   root.render(
     <StrictMode>
-      <PatientFormContext.Provider value={runtime.store}>
+      {/* Follows renewals on this runtime (a mountFields card's or the form's
+          Retry) instead of holding the store it found at mount. */}
+      <RuntimeStoreScope runtime={runtime} apiBase={apiBasePath}>{(store) =>
         <TherapyLinesPanel
-          store={runtime.store}
+          store={store}
           // The panel takes the connection explicitly: two mounted widgets
           // must not act through a shared module-level transport.
           connection={{ client: runtime.client, basePath: apiBasePath }}
@@ -160,8 +169,8 @@ export function mountTherapyLines(el: HTMLElement, opts: MountOptions = {}): () 
           // alone never reaches the host's `onUpdated` listeners. The host
           // still has to invalidate its own queries and re-render the row.
           onChanged={() => { void opts.onPatientUpdated?.(); }}
-        />
-      </PatientFormContext.Provider>
+        />}
+      </RuntimeStoreScope>
     </StrictMode>,
   );
   return () => unmount(el);
@@ -188,13 +197,13 @@ export function mountGenomics(el: HTMLElement, opts: GenomicsMountOptions = {}):
     // mount must ask again.
     __resetWritableFieldsCache();
   });
-  void runtime.store.load();
   const root = createRoot(el);
   roots.set(el, root);
   root.render(
     <StrictMode>
+      <RuntimeStoreScope runtime={runtime} apiBase={apiBasePath}>{(store) =>
       <GenomicsFindingsModal
-        store={runtime.store}
+        store={store}
         client={runtime.client}
         apiBase={apiBasePath}
         readOnly={opts.readOnly ?? true}
@@ -203,7 +212,8 @@ export function mountGenomics(el: HTMLElement, opts: GenomicsMountOptions = {}):
         // never reaches the host's `onUpdated` listeners. The host still has to
         // invalidate its own trial queries and re-render the row.
         onChanged={() => { void opts.onPatientUpdated?.(); }}
-      />
+      />}
+      </RuntimeStoreScope>
     </StrictMode>,
   );
   return () => unmount(el);

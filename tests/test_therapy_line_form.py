@@ -351,3 +351,29 @@ def test_an_invalid_line_date_is_a_field_error_not_a_500(patient, bad_date):
     _, result = apply_patient_form_patch(patient, {'later_therapy': 'vrd', 'later_date': bad_date})
     assert 'not a valid date' in result.rejected['later_date']
     assert not _lines(patient, 3).exists()
+
+
+@pytest.mark.parametrize('field,value', [
+    ('later_therapy', ['vrd']),
+    ('later_therapy', {'code': 'vrd'}),
+    ('later_therapy', 1.5),
+    ('later_outcome', ['Partial Response']),
+    ('later_outcome', {'value': 'Partial Response'}),
+])
+def test_a_wrong_typed_line_value_is_a_400_not_a_500(patient, field, value):
+    """A list, object or float raised AttributeError/TypeError in the echo
+    comparison or the authoring step: the shared form answered 500 (#2489)."""
+    user = get_user_model().objects.create_superuser(
+        email='provider-wrong-type@example.com', password='x')
+    client = APIClient()
+    client.force_authenticate(user=user)
+
+    response = client.patch(
+        f'/api/v1/patient-records/{patient.pk}/',
+        {field: value, 'later_date': '2024-05-01'},
+        format='json', HTTP_X_PATIENT_FORM='1',
+    )
+
+    assert response.status_code == 400, response.content
+    assert field in response.data['rejected']
+    assert not _lines(patient, 3).exists()

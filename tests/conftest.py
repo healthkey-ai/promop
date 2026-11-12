@@ -39,3 +39,33 @@ def lab_field_mappings(db):
     apply_payload({'mappings': rows}, tables=('mappings',))
     run_data_migration('0285_approve_lab_extractor_aliases', 'approve_aliases')
     return resolve_lab_code_fields()
+
+
+@pytest.fixture
+def stale_answer_formula_allowed(db):
+    """A database whose CHECK does not yet refuse an active answer formula.
+
+    0341 extends ``field_formula_explicit_answer_inactive`` to every
+    authored-answer field (#2489). Tests of what the evaluator, the serializer
+    and the repair command do with a row left active by an older schema need
+    that row; dropping the constraint inside the test's transaction recreates
+    the older schema and is rolled back with it.
+    """
+    from django.db import connection
+
+    drop_explicit_answer_check(connection)
+
+
+def drop_explicit_answer_check(connection):
+    """Drop the explicit-answer CHECK, only where the drop will roll back.
+
+    A transactional test (``transactional_db``) commits, so the DDL would
+    outlive the test and silently weaken every later one; refuse it there.
+    """
+    assert connection.in_atomic_block, (
+        'stale_answer_formula_allowed needs a test transaction to roll the '
+        'constraint drop back; it cannot be used with transactional_db.')
+    with connection.cursor() as cursor:
+        cursor.execute(
+            'ALTER TABLE field_formula '
+            'DROP CONSTRAINT field_formula_explicit_answer_inactive')

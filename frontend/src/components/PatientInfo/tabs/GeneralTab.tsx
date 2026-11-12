@@ -9,7 +9,8 @@ import { Input } from '@/components/shadcn/input';
 import { usePatientFormReadOnly } from '@/federation/PatientFormContext';
 import SelectControl from '../controls/SelectControl';
 import { today } from '@/api/clinicalFacts';
-import PreexistingConditionsAnswer, { type ConditionsAnswer } from '../PreexistingConditionsAnswer';import {
+import PreexistingConditionsAnswer, { type ConditionsAnswer } from '../PreexistingConditionsAnswer';
+import {
   COUNTRY_OPTIONS, US_STATES,
   ECOG_OPTIONS, KARNOFSKY_OPTIONS,
 } from '../patientConstants';
@@ -108,7 +109,7 @@ export default function GeneralTab({
     // projection alone is not enough (#2439).
     const dated = descriptor?.dated === true;
     const changeWithDate = (field: string, value: unknown) => (
-      dated ? onChange(field, value, dateFor(field)) : onChange(field, value)
+      dated && dates[field] ? onChange(field, value, dates[field]) : onChange(field, value)
     );
     const changeDate = (field: string, next: string) => {
       setDates((current) => ({ ...current, [field]: next }));

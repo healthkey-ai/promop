@@ -1,6 +1,6 @@
 import type { AxiosInstance } from 'axios';
 import type { FieldDescriptor } from '@/hooks/useWritableFields';
-import { diseaseToDiseaseCode } from '@/api/therapyContext';
+import { diseaseToDiseaseCode, plannedTherapyRound } from '@/api/therapyContext';
 import { parseWritableDescriptor } from './descriptorVersion';
 
 /**
@@ -272,10 +272,7 @@ export class PatientFormStore {
     const disease = diseaseToDiseaseCode(values.disease);
     try {
       if (!disease) throw new Error('Select a disease to see available therapies.');
-      const lines = Array.isArray(values.lines_of_therapy) ? values.lines_of_therapy : [];
-      const count = values.therapy_lines_count === '3+' ? 3 : parseInt(String(values.therapy_lines_count)) || 0;
-      const next = Math.max(count, ...lines.map((line: { line: number }) => line.line)) + 1;
-      const round = next === 1 ? 'first_line_therapy' : next === 2 ? 'second_line_therapy' : 'later_line_therapy';
+      const round = plannedTherapyRound(values.therapy_lines_count, values.lines_of_therapy);
       const regimens = await this.client.get<Array<{ title: string; value?: string }>>(
         `${this.base}/v1/therapy-regimens/`, { params: { disease, round } });
       enriched.planned_therapies = { ...enriched.planned_therapies,

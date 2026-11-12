@@ -1,11 +1,12 @@
 import { useMemo } from 'react';
 
-import { PatientFormContext } from './PatientFormContext';
+import { PatientFormContext, PatientFormRenewContext } from './PatientFormContext';
+import { patientFormStoreId } from './patientFormRuntime';
 import TherapyLinesPanel from './TherapyLinesPanel';
 import {
   editorBasePath,
   editorIdentity,
-  useEditorSession,
+  useRenewableEditorSession,
   type EditorConnection,
 } from './editorSession';
 
@@ -35,10 +36,13 @@ export default function TherapyLinesEditor({
   readOnly = false,
   onChanged,
 }: TherapyLinesEditorProps) {
-  const store = useEditorSession({ apiClient, apiBasePath, connectionKey });
+  // Renewable: when the client starts answering for another patient, the
+  // panel's Retry starts a fresh store instead of reloading the retired one.
+  const { store, renew } = useRenewableEditorSession({ apiClient, apiBasePath, connectionKey });
   // A new connection is a new patient context: an open line dialog would still
-  // hold the previous patient's episode. Keyed so React remounts it.
-  const identity = editorIdentity({ apiClient, apiBasePath, connectionKey });
+  // hold the previous patient's episode. Keyed so React remounts it. A renewed
+  // store is a new patient context too.
+  const identity = `${editorIdentity({ apiClient, apiBasePath, connectionKey })}#${patientFormStoreId(store)}`;
   // Stable identity: the panel keys its catalog callbacks on it, and a new
   // object each render would re-run their effects on every render.
   const connection = useMemo(
@@ -49,6 +53,7 @@ export default function TherapyLinesEditor({
     // The dialog reads the store from context to hold the host listeners
     // while it authors a line outside the save queue.
     <PatientFormContext.Provider value={store}>
+    <PatientFormRenewContext.Provider value={renew}>
       <TherapyLinesPanel
         key={identity}
         store={store}
@@ -56,6 +61,7 @@ export default function TherapyLinesEditor({
         onChanged={onChanged}
         connection={connection}
       />
+    </PatientFormRenewContext.Provider>
     </PatientFormContext.Provider>
   );
 }

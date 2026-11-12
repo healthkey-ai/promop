@@ -183,6 +183,19 @@ describe('GeneralTab', () => {
     expect(dates).toHaveLength(measurements.length);
   });
 
+  it('sends a value edit without a date unless the user picked one (#2454)', async () => {
+    const onChange = vi.fn();
+    await renderTab({ weight: 70 }, onChange);
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+
+    fireEvent.change(screen.getByDisplayValue('70'), { target: { value: '72' } });
+    expect(onChange).toHaveBeenCalledWith('weight', 72);
+
+    fireEvent.change(document.getElementById('weight-date')!,
+      { target: { value: '2026-10-01' } });
+    expect(onChange).toHaveBeenLastCalledWith('weight', 70, '2026-10-01');
+  });
+
   it('renders a writable Person attribute as an editable control', async () => {
     // Gender carries curated options from the descriptor, and GeneralTab passes
     // no local list of its own -- the server's set is the only source. Which set

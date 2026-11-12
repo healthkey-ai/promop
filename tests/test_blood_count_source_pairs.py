@@ -9,7 +9,7 @@ from decimal import Decimal
 import pytest
 from rest_framework.test import APIClient
 
-from omop_core.models import Measurement, PatientRecord, Person
+from omop_core.models import Measurement, PatientRecord, Person, RecordRevision
 from omop_core.services.patient_record_service import refresh_patient_record
 from omop_core.services.write_descriptor import build_writable_field_descriptor
 from patient_portal.models import Identity
@@ -168,6 +168,12 @@ def test_a_canonical_import_retires_the_source_pair(api):
     assert float(record.absolute_neutrophile_count) == 2500
     assert not ({'absolute_neutrophile_count', 'absolute_neutrophile_count_units'}
                 & set(record.user_edited_fields or []))
+    # The canonical write retires the pair and records the lost entry. The unit
+    # column keeps CELLS/UL, so only the changed value gets a row.
+    assert [
+        (row.field, Decimal(row.old_value), Decimal(row.new_value)) for row in
+        RecordRevision.objects.filter(patient_record=record, changed_by='system')
+    ] == [('absolute_neutrophile_count', Decimal('1550'), Decimal('2500'))]
 
 
 def test_the_shared_form_normalises_the_count_pair(api):
@@ -426,6 +432,12 @@ def test_a_count_whose_canonical_overflows_the_column_is_refused(api):
     (99999.9995, '10*3/uL', False),
     (100000, '10*3/uL', False),
     (-1, 'cells/uL', False),
+    # Past the decimal context: quantize raised InvalidOperation (#2489).
+    ('1e40', 'cells/uL', False),
+    ('1e40', '10*3/uL', False),
+    # The unit factor itself overflows the exponent: decimal.Overflow, which
+    # is neither ValueError nor InvalidOperation (#2489 review).
+    ('1e1000003', 'cells/uL', False),
 ])
 def test_canonical_from_source_refuses_what_the_column_cannot_hold(value, unit, recognised):
     from omop_core.services.blood_count_source_pairs import canonical_from_source
@@ -466,3 +478,39 @@ def test_a_newer_dated_import_retires_the_source_pair(api):
                  'absolute_neutrophile_count_units'} & set(
                      record.user_edited_fields or []))
     assert record.pending_source_pair_dates == {}
+
+
+@pytest.mark.parametrize('value', ['1e40', '1e1000003'])
+def test_a_count_past_the_decimal_context_is_a_400_on_the_shared_form(api, value):
+    """`quantize` raised InvalidOperation (1e40) and the unit conversion
+    raised decimal.Overflow (1e1000003) for a huge count: a 500 (#2489)."""
+    record = _record()
+    response = api.patch(
+        f'/api/v1/patient-records/{record.person.person_id}/',
+        {'absolute_neutrophile_count': value},
+        format='json', HTTP_X_PATIENT_FORM='1',
+    )
+
+    assert response.status_code == 400, response.data
+    assert 'absolute_neutrophile_count' in response.data['rejected']
+    record.refresh_from_db()
+    assert record.anc_thousand_per_ul is None
+
+
+@pytest.mark.parametrize('value', ['1e-1000010', '1e-30', '0.0000001'])
+def test_a_vanishingly_small_count_is_refused_and_stores_nothing(api, value):
+    """A tiny count converts without error (1e-1000010 cells/µL is
+    1E-1000013 thousands/µL); the source column's own precision refuses it,
+    so it is a 400 with a field sentence, never a 500 or a stored zero."""
+    record = _record()
+    response = api.patch(
+        f'/api/v1/patient-records/{record.person.person_id}/',
+        {'absolute_neutrophile_count': value},
+        format='json', HTTP_X_PATIENT_FORM='1',
+    )
+
+    assert response.status_code == 400, response.data
+    assert response.data['detail'].startswith('absolute_neutrophile_count: ')
+    record.refresh_from_db()
+    assert record.absolute_neutrophile_count is None
+    assert record.anc_thousand_per_ul is None

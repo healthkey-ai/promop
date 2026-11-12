@@ -30,7 +30,7 @@ from omop_core.services.mappings import (
     CONCEPT_DRUG_EXPOSURE_FIELD,
 )
 from omop_oncology.models import Episode, EpisodeEvent
-from omop_core.services.therapy_errors import TherapyLineValidationError
+from omop_core.services.therapy_errors import MESSAGES, TherapyLineValidationError
 from omop_core.services.therapy_transactions import (
     TherapyLineRejected, lock_therapy_patients, run_therapy_write,
 )
@@ -575,9 +575,9 @@ def author_therapy_lines(
                     )
                 except TherapyLineValidationError as exc:
                     # The bulk endpoint reports which submitted line failed; the
-                    # catalog text stays the message, never the exception's own
-                    # fields beyond the index.
-                    raise TherapyLineRejected(str(exc), index=index) from exc
+                    # catalog text is the message. ``str(exc)`` would add the
+                    # ``[detail]`` suffix, which is for logs and Python callers.
+                    raise TherapyLineRejected(MESSAGES[exc.code], index=index) from exc
                 if result.episode is None:
                     transaction.set_rollback(True)
                     return None

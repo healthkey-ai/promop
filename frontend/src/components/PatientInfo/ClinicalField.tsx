@@ -78,12 +78,16 @@ export default function ClinicalField({
   // report's do, can leave it out and get a date per field rather than one date
   // pretending to cover all of them.
   const [ownDate, setOwnDate] = useState(today());
+  // The date shown is a default, not an instruction: only a date the user
+  // picked travels with the value, so a value reverted before autosave sends
+  // nothing (#2454).
+  const [datePicked, setDatePicked] = useState(false);
   const eventDate = date ?? ownDate;
   // A field the server marks `dated` is an event: its value and the date it was
   // observed are one edit. Tabs that share one date pass `onDateChange`; a tab
   // that leaves the date per field still reports it here (#2439).
   const change = (field: string, next: unknown) => {
-    if (descriptor?.dated && !onDateChange) onChange(field, next, eventDate);
+    if (descriptor?.dated && !onDateChange && datePicked) onChange(field, next, eventDate);
     else onChange(field, next);
   };
   // Both the tabbed profile and embedded Trial Details use the same control,
@@ -164,6 +168,7 @@ export default function ClinicalField({
               if (onDateChange) onDateChange(next);
               else {
                 setOwnDate(next);
+                setDatePicked(true);
                 if (value !== undefined && value !== null && value !== '') {
                   onChange(name, value, next);
                 }

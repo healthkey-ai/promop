@@ -71,6 +71,7 @@ from omop_core.services.blood_count_source_pairs import (
     source_from_canonical as count_source_from_canonical,
 )
 from omop_core.services import direct_bilirubin_units
+from omop_core.services.patient_record_revisions import write_record_revisions
 from omop_core.services.source_pair_dates import (
     SOURCE_PAIR_CANONICALS as _SOURCE_PAIR_CANONICALS,
     forget_unedited_dates as _forget_unedited_pair_dates,
@@ -1429,9 +1430,15 @@ def refresh_patient_record(person: Person) -> PatientRecord:
                 for canonical in set(_SOURCE_PAIR_CANONICALS.values())
             },
         )
+        # The entry a retirement removes leaves the record, so the change
+        # history has to keep it (#2426 review). `preserved` is the only copy
+        # of the old values: _clear_derived_fields already reset the columns.
+        retired_values = {}
         if superseded_pairs:
             for source in superseded_pairs:
                 for field in _source_pair_fields(source):
+                    if field in preserved:
+                        retired_values[field] = preserved[field]
                     preserved.pop(field, None)
                     preserved_units.discard(field)
                     user_edited.discard(field)
@@ -1440,6 +1447,8 @@ def refresh_patient_record(person: Person) -> PatientRecord:
                 # back over the newer result this retirement is accepting.
                 canonical = _SOURCE_PAIR_CANONICALS[source]
                 if canonical != source:
+                    if canonical in preserved:
+                        retired_values[canonical] = preserved[canonical]
                     preserved.pop(canonical, None)
                     user_edited.discard(canonical)
             if _forget_unedited_pair_dates(patient_info, user_edited):
@@ -1512,12 +1521,15 @@ def refresh_patient_record(person: Person) -> PatientRecord:
 
         patient_info.derivation_version = DERIVATION_VERSION
         patient_info.derived_at = timezone.now()
-        return recompute_patient_record_fields(
+        record = recompute_patient_record_fields(
             patient_info,
             changed_fields=(
                 user_edited & {'flipi_score_options', 'gelf_criteria_options'}
             ) | ({'disease'} if 'disease' in user_edited else set()),
         )
+        if retired_values:
+            write_record_revisions(record, retired_values, changed_by='system')
+        return record
 
 
 def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fields=(),
@@ -1531,6 +1543,15 @@ def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fiel
         contradicts_no_pre_existing_conditions,
         supersede_no_preexisting_conditions,
     )
+    # An explicit canonical write retires a pending source pair here, not in a
+    # full refresh. Snapshot the pair columns before this function overwrites
+    # them, so the entry it removes still leaves a revision row (#2426 review).
+    pending_fields = set(patient_info.user_edited_fields or ())
+    pair_entry_values = {
+        field: getattr(patient_info, field, None)
+        for field in _SOURCE_PAIR_FIELDS
+        if field in pending_fields
+    }
     # The category list is the evidence; an explicit "no conditions" answer cannot
     # stand beside it (#1988). Invalidate the answer rather than delete the list.
     if contradicts_no_pre_existing_conditions(
@@ -1835,6 +1856,13 @@ def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fiel
             updates['custom_fields'] = patient_info.custom_fields
         updates['updated_at'] = timezone.now()
         PatientRecord.objects.filter(pk=patient_info.pk).update(**updates)
+    pending_fields = set(patient_info.user_edited_fields or ())
+    retired_pairs = {
+        field: value for field, value in pair_entry_values.items()
+        if field not in pending_fields
+    }
+    if retired_pairs:
+        write_record_revisions(patient_info, retired_pairs, changed_by='system')
     return patient_info
 
 

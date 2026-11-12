@@ -31,12 +31,15 @@ Exit status is 0 even when findings exist (they are expected on an unprepared da
 
 import hashlib
 import json
-import os
 from datetime import datetime, timezone as dt_timezone
 
 from django.core.management.base import BaseCommand, CommandError
 from django.db import connection, transaction
 
+from omop_core.management.guarded_repair import (
+    approval_digest, as_bool, make_transaction_read_only, refuse_existing_manifest,
+    write_manifest,
+)
 from omop_core.models import (
     FieldFormula, PatientRecord, PreexistingConditionsAttestation, RecordRevision,
 )
@@ -45,6 +48,10 @@ from omop_core.services.pre_existing_conditions import (
 )
 
 FLAG_FIELD = 'no_pre_existing_conditions'
+#: The #1989 migrations this audit reports on, by exact name: other
+#: `0304_*`/`0305_*` migrations exist, so a prefix proves nothing.
+MIGRATION_0304 = '0304_deactivate_pre_existing_condition_formula'
+MIGRATION_0305 = '0305_patientrecord_pre_existing_flag_guard'
 CATEGORY_FIELD = 'preexisting_conditions'
 CLASSIFICATIONS = (
     'contradiction',
@@ -64,24 +71,6 @@ ACTIONS = {
     'explicit_false': 'keep',
     'unanswered': 'none',
 }
-
-_TRUE_TEXT = {'true', 't', '1', 'yes', 'y', 'on'}
-_FALSE_TEXT = {'false', 'f', '0', 'no', 'n', 'off'}
-
-
-def _as_bool(text):
-    """Interpret a ``RecordRevision`` textual value, or None when it is blank."""
-    if text is None:
-        return None
-    normalized = str(text).strip().casefold()
-    if normalized in _TRUE_TEXT:
-        return True
-    if normalized in _FALSE_TEXT:
-        return False
-    if normalized == '':
-        return None
-    return None
-
 
 def _category_state(value):
     if value is None:
@@ -124,7 +113,7 @@ def classify(flag, categories, revisions=(), pending_edit=False, attested=False)
     if attested:
         return 'authored_true'
     if revisions:
-        latest = _as_bool(revisions[-1]['new'])
+        latest = as_bool(revisions[-1]['new'])
         if latest is False:
             # Something wrote "not none" and the current value is True again: the most
             # likely writer is the formula, but it is an inference, not a fact.
@@ -139,14 +128,6 @@ def _record_line(pk, flag, categories, revisions, pending_edit, attestation):
         'flag_history': revisions, 'pending_edit': pending_edit,
         'attestation': attestation,
     }, sort_keys=True, separators=(',', ':'))
-
-
-def approval_digest(payload):
-    """Authenticate the reviewable document, not just its underlying data state."""
-    stable = {key: value for key, value in payload.items()
-              if key not in ('generated_at', 'approval_sha256')}
-    return hashlib.sha256(json.dumps(
-        stable, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
 
 class Command(BaseCommand):
@@ -171,18 +152,14 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
-        if options['output'] and os.path.exists(options['output']):
-            raise CommandError(
-                f'{options["output"]} already exists; refusing to overwrite an audit '
-                'manifest (choose a new path)')
+        refuse_existing_manifest(options['output'])
 
-        # Inside a caller's transaction (pytest, tests) ``SET TRANSACTION READ ONLY``
-        # is illegal because statements already ran; the command's own reads are the
-        # only operations either way, so the guard is best-effort by design.
+        # Inside a caller's transaction SET TRANSACTION is illegal; see
+        # make_transaction_read_only.
         owns_transaction = not connection.in_atomic_block
         with transaction.atomic():
             if owns_transaction:
-                self._make_transaction_read_only()
+                make_transaction_read_only()
             payload = self._collect(summary_only=options['summary_only'])
 
         manifest = payload['manifest_sha256']
@@ -192,19 +169,7 @@ class Command(BaseCommand):
             self._print_summary(payload)
 
         if options['output']:
-            directory = os.path.dirname(os.path.abspath(options['output']))
-            os.makedirs(directory, exist_ok=True)
-            # Person ids and their categories: owner-only, like the repair
-            # command's backup. O_EXCL also closes the exists-check race above.
-            try:
-                fd = os.open(options['output'], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            except FileExistsError as exc:
-                raise CommandError(
-                    f'{options["output"]} already exists; refusing to overwrite an audit '
-                    'manifest.') from exc
-            with os.fdopen(fd, 'w', encoding='utf-8') as handle:
-                json.dump(payload, handle, indent=2, sort_keys=True)
-                handle.write('\n')
+            write_manifest(options['output'], payload)
             self.stdout.write(self.style.SUCCESS(
                 f'manifest written to {options["output"]} ({manifest})'))
 
@@ -216,13 +181,6 @@ class Command(BaseCommand):
             if found:
                 raise CommandError(
                     f'finding gate: records classified as {", ".join(found)}')
-
-    def _make_transaction_read_only(self):
-        """Ask Postgres to reject writes for this transaction, as a second guard."""
-        if connection.vendor != 'postgresql':
-            return
-        with connection.cursor() as cursor:
-            cursor.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY')
 
     def _collect(self, summary_only):
         queryset = (
@@ -325,13 +283,13 @@ class Command(BaseCommand):
                 with connection.cursor() as cursor:
                     cursor.execute(
                         "SELECT name FROM django_migrations WHERE app = 'omop_core' "
-                        "AND name LIKE '03%'")
+                        "AND name IN (%s, %s)", [MIGRATION_0304, MIGRATION_0305])
                     applied = {row[0] for row in cursor.fetchall()}
         return {
             'definitions': formulas,
             'active': any(f['is_active'] for f in formulas),
-            'migration_0304_applied': any(n.startswith('0304') for n in applied),
-            'migration_0305_applied': any(n.startswith('0305') for n in applied),
+            'migration_0304_applied': MIGRATION_0304 in applied,
+            'migration_0305_applied': MIGRATION_0305 in applied,
         }
 
     def _print_summary(self, payload):

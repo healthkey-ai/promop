@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import type { AxiosInstance } from 'axios';
 
@@ -64,9 +64,12 @@ function hostClient() {
     return { data: [] };
   });
   const patch = vi.fn(async (_url: string, values: Record<string, unknown>) => ({
-    data: { patient_info: { person_id: 12, ...values }, write: { applied: Object.keys(values) } },
+    data: {
+      patient_info: { person_id: patient.person_id, ...values },
+      write: { applied: Object.keys(values) },
+    },
   }));
-  return { get, patch, client: { get, patch } as unknown as AxiosInstance };
+  return { get, patch, patient, client: { get, patch } as unknown as AxiosInstance };
 }
 
 function renderAdapter(
@@ -180,7 +183,10 @@ describe('the shared trial editor adapter', () => {
     renderAdapter();
     fireEvent.click(await screen.findByRole('button', { name: 'Edit Prior Therapy' }));
 
-    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    const dialog = screen.getByRole('dialog');
+    // Centred without translate utilities, which a Tailwind 3 host doubles.
+    expect(dialog).toHaveClass('inset-0', 'm-auto', 'h-fit');
+    expect(dialog).not.toHaveClass('-translate-x-1/2', '-translate-y-1/2');
     expect(await screen.findByText(/Line 1:/)).toBeInTheDocument();
   });
 
@@ -232,5 +238,37 @@ describe('the shared trial editor adapter', () => {
     // notification, not one per row.
     expect(onChanged).toHaveBeenCalledTimes(1);
     await waitFor(() => expect(host.patch).toHaveBeenCalled());
+  });
+
+  it('moves every editor on the connection to the store one slot renewed', async () => {
+    const onChanged = vi.fn();
+    const host = renderAdapter(onChanged);
+    await screen.findByRole('spinbutton', { name: 'Height' });
+
+    // The host's client now answers for another patient. The shared store
+    // finds out on its next read and retires.
+    host.patient.person_id = 13;
+    host.patient.height = 165;
+    const stale = patientFormForClient(host.client, '');
+    await act(async () => { await stale.load(true); });
+    const scalar = within(screen.getByTestId('scalar'));
+    expect(scalar.getByRole('alert')).toHaveTextContent('The linked patient changed');
+
+    // Retry on one slot starts a fresh store for the connection.
+    fireEvent.click(scalar.getByRole('button', { name: 'Retry' }));
+    expect(await scalar.findByRole('spinbutton', { name: 'Height' })).toHaveValue(165);
+    // The other slot follows without its own Retry, instead of staying on the
+    // retired store where Retry would only meet the identity guard again.
+    expect(await within(screen.getByTestId('scalar-two'))
+      .findByRole('spinbutton', { name: 'Weight' })).toHaveValue(60);
+
+    // The adapter's host listener moved too: a save on the fresh store
+    // reaches the host.
+    const fresh = patientFormForClient(host.client, '');
+    expect(fresh).not.toBe(stale);
+    await act(async () => { fresh.enqueue('height', 181); await fresh.flush(); });
+    expect(onChanged).toHaveBeenCalledTimes(1);
+    expect(host.patch).toHaveBeenCalledWith(
+      expect.stringContaining('/13/'), { height: 181 }, expect.anything());
   });
 });

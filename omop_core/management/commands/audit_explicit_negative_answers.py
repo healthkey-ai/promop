@@ -8,6 +8,7 @@ be surfaced for review rather than silently overwriting the answer.
 This command reports; it never writes. Repair is an explicit, reviewed action.
 """
 from django.core.management.base import BaseCommand
+from django.db.models import Exists, OuterRef, Subquery
 
 from omop_core.models import ExplicitNegativeAnswer, PatientRecord
 
@@ -19,25 +20,33 @@ class Command(BaseCommand):
         parser.add_argument('--limit', type=int, default=20, help='Sample rows to print.')
 
     def handle(self, *args, **options):
+        # One query: the record's two source columns ride along with each
+        # confirmation instead of a lookup per attestation (#2489).
+        record = PatientRecord.objects.filter(person_id=OuterRef('person_id'))
         rows = (
             ExplicitNegativeAnswer.objects
             .filter(answer=True)
-            .values_list('person_id', 'field')
+            .annotate(
+                has_record=Exists(record),
+                active_infection_status=Subquery(
+                    record.values('active_infection_status')[:1]),
+                active_malignancies=Subquery(
+                    record.values('active_malignancies')[:1]),
+            )
+            .values_list('person_id', 'field', 'has_record',
+                         'active_infection_status', 'active_malignancies')
             .order_by('person_id', 'field')
         )
         conflicts = []
         checked = 0
-        for person_id, field in rows.iterator():
+        for person_id, field, has_record, infection, malignancies in rows.iterator():
             checked += 1
-            record = PatientRecord.objects.filter(person_id=person_id).only(
-                'active_infection_status', 'active_malignancies',
-            ).first()
-            if record is None:
+            if not has_record:
                 conflicts.append((person_id, field, 'missing patient record'))
-            elif field == 'no_active_infection_status' and record.active_infection_status is True:
+            elif field == 'no_active_infection_status' and infection is True:
                 conflicts.append((person_id, field, 'active infection is recorded'))
             elif (field == 'no_other_active_malignancies'
-                  and len(record.active_malignancies or []) > 1):
+                  and len(malignancies or []) > 1):
                 conflicts.append((person_id, field, 'more than one active malignancy is recorded'))
 
         self.stdout.write('explicit negative answers (read-only audit)')

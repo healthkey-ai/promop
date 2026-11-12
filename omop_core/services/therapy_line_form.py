@@ -55,7 +55,9 @@ def _regimen_concept_id(value):
     from omop_core.models import TherapyRegimen
 
     rows = TherapyRegimen.objects.filter(concept__isnull=False).order_by('id')
-    if isinstance(value, bool):
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        # A list, object or float names no regimen; it must be a refusal, not
+        # an AttributeError on `.isdigit()` (#2489).
         return None
     if isinstance(value, int):
         row = rows.filter(concept_id=value).first()
@@ -108,6 +110,10 @@ def _same_line_value(name, value, current, disease=None):
             return False
         return parsed == _line_date(current)
     if part == 'outcome':
+        if not isinstance(value, str):
+            # Not a catalog spelling (and possibly unhashable): an instruction
+            # author_lines_from_form refuses, never an echo (#2489).
+            return False
         aliases = _outcome_aliases(disease)
         return aliases.get(value, value) == aliases.get(current, current)
     if part == 'therapy':
@@ -208,7 +214,9 @@ def author_lines_from_form(person, changes, *, disease=None):
                 refusal = (names, MESSAGES['regimen_clear_requires_assertion'])
             else:
                 concept_id = _regimen_concept_id(code)
-                if concept_id is None:
+                if concept_id is None and not isinstance(code, (int, str)):
+                    refusal = (names, 'Choose a therapy from the list.')
+                elif concept_id is None:
                     refusal = (names, f'Unknown therapy: {code}. Choose one from the list.')
                 else:
                     kwargs['regimen_concept_id'] = concept_id
@@ -233,7 +241,7 @@ def author_lines_from_form(person, changes, *, disease=None):
             # derivation reads the line as having no recorded outcome.
             if value in (None, ''):
                 kwargs['outcome'] = ''
-            elif value not in aliases:
+            elif not isinstance(value, str) or value not in aliases:
                 refusal = (names, 'Select an outcome for this disease.')
             else:
                 kwargs['outcome'] = aliases[value]
