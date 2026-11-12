@@ -14,7 +14,9 @@ from django.contrib.contenttypes.models import ContentType
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from omop_core.models import Measurement, PatientRecord, ProvenanceRecord
+from omop_core.models import (
+    Measurement, PatientRecord, ProvenanceRecord, RecordRevision,
+)
 from omop_core.services.patient_record_service import refresh_patient_record
 from omop_core.signals import suppress_patient_record_refresh
 from patient_portal.models import Identity, PatientUser
@@ -337,6 +339,15 @@ def test_a_newer_dated_import_retires_the_patient_pair(lab):
     # The patient's own fact stays history; retirement does not delete it.
     patient = _hemoglobin_rows(lab, SELF_REPORT_TYPE).get()
     assert patient.measurement_date == draw
+    # An entry that leaves the record leaves a revision row (#2426 review).
+    assert [
+        (row.field, row.old_value, row.new_value) for row in
+        RecordRevision.objects.filter(
+            patient_record=record, changed_by='system').order_by('field')
+    ] == [
+        ('hemoglobin_level', '120.00', '8.00'),
+        ('hemoglobin_level_units', 'G/L', 'G/DL'),
+    ]
 
 
 def test_a_same_day_import_keeps_the_pair_and_its_day(lab):
@@ -350,6 +361,9 @@ def test_a_same_day_import_keeps_the_pair_and_its_day(lab):
     assert record.hemoglobin_level == Decimal('120.00')
     assert record.pending_source_pair_dates == {
         'hemoglobin_level': TODAY.isoformat()}
+    # A pair that stays pending is not retired, so derivation writes no history.
+    assert not RecordRevision.objects.filter(
+        patient_record=record, changed_by='system').exists()
 
 
 def test_a_legacy_pair_without_a_day_is_not_retired_by_a_newer_import(lab):
@@ -369,6 +383,9 @@ def test_a_legacy_pair_without_a_day_is_not_retired_by_a_newer_import(lab):
     assert {'hemoglobin_level', 'hemoglobin_level_units'} <= set(
         record.user_edited_fields or [])
     assert record.pending_source_pair_dates == {}
+    # A legacy pair has no day, so the refresh does not retire it or audit one.
+    assert not RecordRevision.objects.filter(
+        patient_record=record, changed_by='system').exists()
 
 
 def test_a_newer_unusable_result_keeps_the_pair_pending(lab):
