@@ -74,3 +74,48 @@ def test_an_unreadable_newest_unit_is_not_evidence():
     _measure(person, '718-7', 7.0, 'g/dL', day=OLD)
     _measure(person, '718-7', 5.0, 'units-unknown', day=NEW)
     assert _crab(person) is None
+
+
+def test_a_unitless_molar_hemoglobin_is_not_anemia():
+    """59260-0 is moles/volume: 8 mmol/L (about 13 g/dL) read in the g/dL
+    default was anemia, and every normal molar value is below 10 (#2418)."""
+    person = PersonFactory()
+    _measure(person, '59260-0', 8.0, '')
+    assert _crab(person) is None
+
+
+def test_a_row_under_the_molar_hemoglobin_code_counts_with_a_readable_unit():
+    person = PersonFactory()
+    _measure(person, '59260-0', 8.5, 'g/dL')
+    assert _crab(person) is True
+
+
+def test_a_molar_hemoglobin_in_mmol_per_litre_is_no_evidence_yet():
+    """hemoglobin_units has no reviewed mmol/L factor: 5 mmol/L (about 8 g/dL)
+    is not read, rather than read as 5 g/dL."""
+    person = PersonFactory()
+    _measure(person, '59260-0', 5.0, 'mmol/L')
+    assert _crab(person) is None
+
+
+def test_a_unitless_row_under_the_second_calcium_code_is_not_evidence():
+    person = PersonFactory()
+    _measure(person, '2000-0', 12.0, '')
+    assert _crab(person) is None
+
+
+def test_a_conventional_calcium_without_a_unit_takes_mg_dl():
+    person = PersonFactory()
+    _measure(person, '17861-6', 11.6, '')
+    assert _crab(person) is True
+
+
+@pytest.mark.parametrize('code, value, unit', [
+    ('718-7', -1.0, 'g/dL'),
+    ('17861-6', -1.0, 'mg/dL'),
+])
+def test_an_out_of_range_value_is_not_evidence(code, value, unit):
+    """A negative concentration meets every "< N" threshold."""
+    person = PersonFactory()
+    _measure(person, code, value, unit)
+    assert _crab(person) is None

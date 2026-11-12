@@ -4732,41 +4732,61 @@ def _get_mm_specific_data(person: Person, snapshot: OmopSnapshot = None) -> dict
             if m.value_as_number is not None
         }.values())
 
-        def newest_canonical(codes, normalize, default_unit, from_pair):
+        def newest_canonical(defaults, normalize, from_pair, in_range):
             """The newest row's value in the canonical unit, or None.
 
             The snapshot holds each value in its reported unit (#2249), so a
             raw 8.1 mmol/L hemoglobin is 13 g/dL — not anemia. An unreadable
             newest unit is no evidence, not a reason to fall back to an older
             result with a different unit.
+
+            ``defaults`` maps each LOINC to the unit a unitless row is read in;
+            None means a row of that code needs a unit of its own. Molar
+            LOINCs get None: a unitless 59260-0 hemoglobin of 8 mmol/L read as
+            8 g/dL is a false anemia, and every normal molar value is below 10.
+            A value outside the canonical column's range (a negative one would
+            meet every "< N" threshold) is no evidence either.
             """
-            rows = list({
-                m.measurement_id: m
-                for m in (_rows_by_codes(snapshot, codes)
-                          + _rows_by_sources(snapshot, codes))
-                if m.value_as_number is not None
-            }.values())
+            rows = {}
+            for code, default in defaults.items():
+                for m in (_rows_by_codes(snapshot, (code,))
+                          + _rows_by_sources(snapshot, (code,))):
+                    if m.value_as_number is None:
+                        continue
+                    # A row matching two codes takes the stricter default.
+                    known = rows.get(m.measurement_id)
+                    rows[m.measurement_id] = (
+                        m, None if known is not None and known[1] is None else default)
             if not rows:
                 return None
-            newest = sorted(rows, key=_fact_recency_key, reverse=True)[0]
+            newest, default_unit = sorted(
+                rows.values(), key=lambda pair: _fact_recency_key(pair[0]), reverse=True)[0]
             _reported_unit, unit_code = _resolve_reported_unit(
                 newest, normalize, default_unit)
             if unit_code is None:
                 return None
             recognised, canonical = from_pair(newest.value_as_number, unit_code)
-            return canonical if recognised else None
+            if not recognised or canonical is None or not in_range(canonical):
+                return None
+            return canonical
 
         hgb = newest_canonical(
-            ('718-7', '59260-0'), normalize_hemoglobin_unit,
-            HEMOGLOBIN_DEFAULT_UNIT,
+            # 718-7 is mass/volume; 59260-0 is moles/volume.
+            {'718-7': HEMOGLOBIN_DEFAULT_UNIT, '59260-0': None},
+            normalize_hemoglobin_unit,
             hemoglobin_canonical_from_pair,
+            hemoglobin_canonical_in_range,
         )
+        # 17861-6 is mass/volume. 2000-0 is kept from dev but is not a LOINC
+        # code (the moles/volume one is 2000-8, #2467); whatever an ETL files
+        # under it counts only with a unit of its own.
         calcium = newest_canonical(
-            ('17861-6', '2000-0'),
+            {'17861-6': _CHEMISTRY_PAIRS['serum_calcium_mg_dl']['default_unit'],
+             '2000-0': None},
             lambda unit: normalize_chemistry_unit('serum_calcium_mg_dl', unit),
-            _CHEMISTRY_PAIRS['serum_calcium_mg_dl']['default_unit'],
             lambda value, unit: chemistry_canonical_from_pair(
                 'serum_calcium_mg_dl', value, unit),
+            lambda value: chemistry_canonical_in_range('serum_calcium_mg_dl', value),
         )
 
         crab_anemia = hgb is not None and hgb < 10.0
