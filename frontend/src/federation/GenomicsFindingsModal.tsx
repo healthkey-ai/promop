@@ -1,8 +1,8 @@
-import { useCallback, useMemo } from 'react';
+import { useCallback, useContext, useMemo } from 'react';
 import type { AxiosInstance } from 'axios';
 
 import GenomicsFindings, { GenomicsDialogShell } from '@/components/PatientInfo/GenomicsFindings';
-import { PatientFormContext, usePatientFormSnapshot } from './PatientFormContext';
+import { PatientFormContext, PatientFormRenewContext, usePatientFormSnapshot } from './PatientFormContext';
 import type { PatientFormStore } from './patientFormStore';
 
 /**
@@ -27,6 +27,7 @@ export default function GenomicsFindingsModal({ store, client, apiBase, readOnly
   onChanged: () => void;
 }) {
   const state = usePatientFormSnapshot(store);
+  const renew = useContext(PatientFormRenewContext);
   const base = apiBase.replace(/\/+$/, '');
   // A fresh arrow every render would re-run the findings load on every state
   // change; the editor keys its effect on the resolved URL string instead.
@@ -51,8 +52,13 @@ export default function GenomicsFindingsModal({ store, client, apiBase, readOnly
   if (state.error || !state.personId) {
     return <GenomicsDialogShell title="Genomic findings" onClose={onClose}>
       <div role="alert">
-        Could not load the patient record, so genomic findings cannot be edited.
-        {' '}<button type="button" className="underline" onClick={() => void store.load()}>Retry</button>
+        {state.identityChanged && renew
+          ? 'The linked patient changed. Retry to load the current patient.'
+          : 'Could not load the patient record, so genomic findings cannot be edited.'}
+        {' '}<button type="button" className="underline" onClick={() => {
+          // Another patient answered: a fresh store, not a reload of this one.
+          if (state.identityChanged && renew) renew(); else void store.load();
+        }}>Retry</button>
       </div>
     </GenomicsDialogShell>;
   }

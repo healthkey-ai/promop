@@ -73,6 +73,57 @@ function hostClient(fixtures: Fixtures = {}) {
 }
 
 describe('the PROMOP editors for a host that shares the React tree', () => {
+  /** A host whose client starts answering for person 13 when `switch()` runs. */
+  function switchingHost() {
+    let person = 12;
+    const host = hostClient({
+      onGet: (url) => url.endsWith('/patient-info/me/') ? {
+        patient_info: {
+          person_id: person, disease: 'Multiple Myeloma', therapy_lines_count: '1',
+          lines_of_therapy: [{ line: 1, episode_id: person, regimen: person === 12 ? 'VRd' : 'KRd',
+            start_date: '2024-01-01' }],
+        },
+        write_enabled: true,
+      } : undefined,
+    });
+    return { ...host, switch: async () => {
+      person = 13;
+      // The shared store finds out on its next read and retires.
+      await act(async () => { await patientFormForClient(host.client, '').load(true); });
+    } };
+  }
+
+  it('recovers a lone therapy editor from its own Retry after the patient changed', async () => {
+    const host = switchingHost();
+    render(<TherapyLinesEditor apiClient={host.client} apiBasePath="" readOnly={false} />);
+    expect(await screen.findByText(/VRd/)).toBeInTheDocument();
+
+    await host.switch();
+    expect(screen.getByRole('alert')).toHaveTextContent('The linked patient changed');
+    // No field slot beside it to renew the store: its own Retry must, or it
+    // reloads the retired store and meets the identity guard again.
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+
+    expect(await screen.findByText(/KRd/)).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('recovers a lone genomics editor from its own Retry after the patient changed', async () => {
+    const host = switchingHost();
+    render(
+      <GenomicsEditor apiClient={host.client} apiBasePath="" readOnly={false} onChanged={() => {}} />,
+    );
+    expect(await screen.findByText(/0 genomic finding records/)).toBeInTheDocument();
+
+    await host.switch();
+    expect(screen.getByRole('alert')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+
+    expect(await screen.findByText(/0 genomic finding records/)).toBeInTheDocument();
+    expect(host.get).toHaveBeenCalledWith('/v1/patient-records/13/genomics/');
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
   it('reads the therapy lines through the host client at its own base path', async () => {
     const host = hostClient();
     render(

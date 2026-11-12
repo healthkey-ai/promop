@@ -1,4 +1,4 @@
-import { useId, useState } from 'react';
+import { useContext, useId, useState } from 'react';
 import { Pencil, Plus, Trash2 } from 'lucide-react';
 
 import { diseaseToDiseaseCode } from '@/api/therapyContext';
@@ -9,7 +9,7 @@ import {
   type TherapyConnection,
 } from '@/api/therapyLines';
 import TherapyLineDialog from '@/components/PatientInfo/TherapyLineDialog';
-import { usePatientFormSnapshot } from './PatientFormContext';
+import { PatientFormRenewContext, usePatientFormSnapshot } from './PatientFormContext';
 import type { PatientFormStore } from './patientFormStore';
 
 interface Props {
@@ -34,6 +34,7 @@ interface Props {
  */
 export default function TherapyLinesPanel({ store, readOnly = false, onChanged, connection }: Props) {
   const state = usePatientFormSnapshot(store);
+  const renew = useContext(PatientFormRenewContext);
   const [dialog, setDialog] = useState<{ mode: 'add' } | { mode: 'edit'; line: EditableTherapyLine } | null>(null);
   const [busy, setBusy] = useState(false);
   const completeId = useId();
@@ -59,7 +60,11 @@ export default function TherapyLinesPanel({ store, readOnly = false, onChanged, 
   if (state.loading) return <p role="status" className="text-sm text-muted-foreground">Loading therapy lines…</p>;
   if (state.error) {
     return <div role="alert" className="text-sm text-red-600">
-      {state.error} <button type="button" className="underline" onClick={() => void store.load()}>Retry</button>
+      {state.error} <button type="button" className="underline" onClick={() => {
+        // The client now speaks for another patient: reloading this store
+        // only meets the identity guard again. Start a fresh one instead.
+        if (state.identityChanged && renew) renew(); else void store.load();
+      }}>Retry</button>
     </div>;
   }
 
