@@ -4362,23 +4362,34 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     # --- New UI fields via display-name source_value (legacy/generator path) ---
     unfound = {f for (f, _) in code_fields.values() if f not in data}
     if unfound:
+        # Serum creatinine keeps the newest result across all of its display-name
+        # spellings. The loop below takes the first spelling that yields a value,
+        # which would let an older convertible row mask a newer unreadable one;
+        # snapshot.measurements is already ordered by -date, -id.
+        if 'serum_creatinine_mg_dl' in unfound and not creatinine_blocked:
+            for m in snapshot.measurements:
+                if m.value_as_number is None:
+                    continue
+                if _SOURCE_VALUE_LAB_FIELDS.get(m.measurement_source_value) != 'serum_creatinine_mg_dl':
+                    continue
+                creatinine = _creatinine_mg_dl(m)
+                if creatinine is not None:
+                    data['serum_creatinine_mg_dl'] = float(creatinine)
+                break
         for source_value, field in _SOURCE_VALUE_LAB_FIELDS.items():
+            if field == 'serum_creatinine_mg_dl':
+                # Selected above, across every spelling, so an older spelling
+                # cannot stand in for the newest result.
+                continue
             if field not in unfound:
                 continue
             if field == 'wbc_count_thousand_per_ul' and wbc_projection_blocked:
                 continue
             if field in data or field in _FLC_FIELDS or field in BLOOD_COUNT_FIELDS:
                 continue
-            if field == 'serum_creatinine_mg_dl' and creatinine_blocked:
-                continue
             for m in snapshot.meas_by_source.get(source_value, ()):
                 if m.value_as_number is not None:
-                    if field == 'serum_creatinine_mg_dl':
-                        creatinine = _creatinine_mg_dl(m)
-                        if creatinine is not None:
-                            data[field] = float(creatinine)
-                    else:
-                        data[field] = float(m.value_as_number)
+                    data[field] = float(m.value_as_number)
                     break
 
     # A blocked creatinine is an explicit unknown, not an absent key: absent,

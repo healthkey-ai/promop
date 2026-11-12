@@ -202,6 +202,29 @@ def test_unreadable_display_name_creatinine_is_unknown():
     assert _get_laboratory_data(person).get('serum_creatinine_mg_dl') is None
 
 
+@pytest.mark.django_db
+def test_the_newest_display_name_spelling_owns_the_field():
+    """An older row under another spelling must not mask a newer unreadable one."""
+    person = PersonFactory()
+    no_match = ConceptFactory(
+        concept_code='0', concept_name='No matching concept',
+        vocabulary=VocabularyFactory(vocabulary_id='LOINC'),
+    )
+    MeasurementFactory(
+        person=person, measurement_concept=no_match,
+        measurement_source_value='Creatinine [Mass/volume] in Serum or Plasma',
+        measurement_date='2024-01-01', value_as_number=1.0,
+        unit_source_value='mg/dL',
+    )
+    MeasurementFactory(
+        person=person, measurement_concept=no_match,
+        measurement_source_value='Creatinine', measurement_date='2024-06-01',
+        value_as_number=3.4, unit_source_value='mg',
+    )
+
+    assert _get_laboratory_data(person).get('serum_creatinine_mg_dl') is None
+
+
 # ---------------------------------------------------------------------------
 # Derivation: what reads the canonical value
 # ---------------------------------------------------------------------------
