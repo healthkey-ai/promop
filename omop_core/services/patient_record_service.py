@@ -106,8 +106,13 @@ _UNIT_PAIR_SELECTED_FIELDS = _CHEMISTRY_SELECTED_FIELDS | {HEMOGLOBIN_CANONICAL}
 
 
 def _concept_unit_code(measurement):
-    """The unit concept's code, 'unknown' for a dangling one, None for none."""
-    if measurement.unit_concept_id is None:
+    """The unit concept's code, 'unknown' for a dangling one, None for none.
+
+    Concept 0 is OMOP's "No matching concept": the ETL's way of saying the row
+    has no unit concept, not a unit. Reading its code blocked hemoglobin and
+    the chemistry pairs on unitless rows that dev reads (#2418 review).
+    """
+    if not measurement.unit_concept_id:
         return None
     try:
         concept = measurement.unit_concept
