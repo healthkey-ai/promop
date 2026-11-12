@@ -1892,10 +1892,12 @@ timeout, or a re-parse converges instead of duplicating. Semantics per key:
 event already present → left in place, its concept updated when it changed and
 any stacked historical duplicates collapsed onto the earliest row; otherwise
 inserted. Repeats within one batch collapse to a single row (last occurrence
-wins). Only the concept column is rewritten on a matched row — every other
-column is left as stored, so a re-run cannot quietly overwrite a corrected
-value. Only inserted rows get a `ProvenanceRecord`. `?upsert=false` restores
-append-only writes.
+wins). Only the concept column is rewritten on a content-matched row — every
+other column is left as stored, so a re-run cannot quietly overwrite a corrected
+value; a key match rewrites the columns the serializer accepts, as below. Only
+inserted rows get a `ProvenanceRecord`. `?upsert=false` restores append-only
+writes for unkeyed rows; a row carrying a source record key is still matched by
+key.
 
 | Model | Event identity |
 |---|---|
@@ -1936,7 +1938,8 @@ Printable ASCII, no whitespace, at most 512; anything else is a 400.
   rewritten from the incoming one: every column the serializer accepts except
   `person`, `is_erroneous` and `erroneous_reason`, so `value_source_value` and
   the unit columns move with the value (a stale one fails the #2249 read check).
-  Rewritten measurements are unit-normalized like inserted ones.
+  Rewritten measurements follow the same unit handling as inserted ones; see
+  [`docs/canonical_units_architecture.md`](docs/canonical_units_architecture.md).
 - **No key match: the content match, against unkeyed rows only.** Exactly one
   unkeyed row for one incoming key gets the key stamped and is rewritten. Several
   candidates of different attribution, or several incoming keys on one row, is
