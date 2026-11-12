@@ -42,40 +42,15 @@ import logging
 from collections import Counter
 
 from django.core.management.base import BaseCommand, CommandError
-from django.db import DatabaseError
 
 from omop_core.models import PatientRecord
 from omop_core.services.patient_record_service import DERIVATION_VERSION
 from omop_core.services.rederivation_preview import (
-    IGNORED_FIELDS, UNDEFINED_CUSTOM_FIELD, PreviewWriteBlocked, custom_field_names,
-    preview_record, stale_record_cohort,
+    IGNORED_FIELDS, UNDEFINED_CUSTOM_FIELD, custom_field_names, describe_failure,
+    failure_detail, preview_record, stale_record_cohort,
 )
 
 logger = logging.getLogger(__name__)
-
-
-def _failure(person_id, exc):
-    """What can be said about a failed preview without quoting the record.
-
-    Not the message or the traceback: a constraint violation's message carries
-    PostgreSQL's "Failing row contains (...)", which is every column of the
-    patient's record. A database error is described by its SQLSTATE and
-    constraint name only.
-    """
-    failure = {"person_id": person_id, "error": type(exc).__name__}
-    if isinstance(exc, PreviewWriteBlocked):
-        # Built from the statement's verb and table only (see read_only_guard).
-        failure["refused"] = str(exc).removeprefix("preview refused ")
-    cause = exc if isinstance(exc, DatabaseError) else None
-    while cause is not None and not hasattr(cause, "sqlstate"):
-        cause = cause.__cause__
-    if cause is not None:
-        if cause.sqlstate:
-            failure["sqlstate"] = cause.sqlstate
-        constraint = getattr(getattr(cause, "diag", None), "constraint_name", None)
-        if constraint:
-            failure["constraint"] = constraint
-    return failure
 
 
 def _known_fields():
@@ -209,13 +184,11 @@ class Command(BaseCommand):
             try:
                 changes = preview_record(record, defined)
             except Exception as exc:
-                failure = _failure(record.person_id, exc)
+                failure = describe_failure(record.person_id, exc)
                 errors.append(failure)
-                # No exc_info: see _failure.
+                # No exc_info: see describe_failure.
                 logger.error(
-                    "Preview failed for person_id=%s: %s",
-                    record.person_id,
-                    " ".join(f"{key}={value}" for key, value in failure.items() if key != "person_id"),
+                    "Preview failed for person_id=%s: %s", record.person_id, failure_detail(failure),
                 )
                 continue
             changes = [c for c in changes if self._selected(c.field, wanted)]

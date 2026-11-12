@@ -32,11 +32,13 @@ import decimal
 import importlib.util
 import logging
 import math
+import os
 import re
+import traceback
 from typing import Iterator
 from unittest import mock
 
-from django.db import connections, transaction
+from django.db import DatabaseError, connections, transaction
 
 from omop_core.models import PatientRecord
 
@@ -181,6 +183,42 @@ def _values(record: PatientRecord) -> dict[str, object]:
             continue
         values[field.name] = getattr(record, field.attname)
     return values
+
+
+def describe_failure(person_id: int, exc: BaseException) -> dict:
+    """What can be said about a failed refresh without quoting the record.
+
+    Not the message or the traceback: a constraint violation's message carries
+    PostgreSQL's "Failing row contains (...)", which is every column of the
+    patient's record. A database error is described by its SQLSTATE and
+    constraint name, a refused preview write by its verb and table. Shared by
+    preview_rederivation and backfill_patient_records.
+    """
+    failure = {'person_id': person_id, 'error': type(exc).__name__}
+    # Where it was raised -- file, line, function, never a value -- so a code
+    # bug can still be found without the traceback.
+    frames = traceback.extract_tb(exc.__traceback__)
+    if frames:
+        frame = frames[-1]
+        failure['at'] = f'{os.path.basename(frame.filename)}:{frame.lineno} in {frame.name}'
+    if isinstance(exc, PreviewWriteBlocked):
+        # Built from the statement's verb and table only (see read_only_guard).
+        failure['refused'] = str(exc).removeprefix('preview refused ')
+    cause = exc if isinstance(exc, DatabaseError) else None
+    while cause is not None and not hasattr(cause, 'sqlstate'):
+        cause = cause.__cause__
+    if cause is not None:
+        if cause.sqlstate:
+            failure['sqlstate'] = cause.sqlstate
+        constraint = getattr(getattr(cause, 'diag', None), 'constraint_name', None)
+        if constraint:
+            failure['constraint'] = constraint
+    return failure
+
+
+def failure_detail(failure: dict) -> str:
+    """``key=value`` pairs of a describe_failure() result, person_id aside."""
+    return ' '.join(f'{key}={value}' for key, value in failure.items() if key != 'person_id')
 
 
 def _is_empty(value) -> bool:

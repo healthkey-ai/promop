@@ -27,7 +27,9 @@ from omop_core.services.patient_record_service import (
     DERIVATION_VERSION,
     refresh_patient_record,
 )
-from omop_core.services.rederivation_preview import stale_record_cohort
+from omop_core.services.rederivation_preview import (
+    describe_failure, failure_detail, stale_record_cohort,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -104,11 +106,15 @@ class Command(BaseCommand):
                 success += 1
                 if success % batch_size == 0:
                     self.stdout.write(f"  ... {success}/{total}")
-            except Exception:
+            except Exception as exc:
                 errors += 1
-                logger.exception(
-                    "Failed to refresh PatientRecord for person_id=%s",
+                # No exc_info and no message: a constraint violation's message
+                # quotes the patient's whole row ("Failing row contains ..."),
+                # and an ERROR log line reaches Sentry.
+                logger.error(
+                    "Failed to refresh PatientRecord for person_id=%s: %s",
                     record.person_id,
+                    failure_detail(describe_failure(record.person_id, exc)),
                 )
 
         self.stdout.write(

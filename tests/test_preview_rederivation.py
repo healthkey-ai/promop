@@ -3,6 +3,7 @@ import csv
 import io
 import json
 import logging
+import re
 import threading
 from decimal import Decimal
 
@@ -475,11 +476,36 @@ def test_a_failure_is_logged_without_the_row(caplog, capsys):
         assert value not in logged, value
         assert value not in out.getvalue(), value
     assert all(r.exc_info is None for r in caplog.records)
-    assert json.loads(out.getvalue())['errors'] == [{
+    errors = json.loads(out.getvalue())['errors']
+    assert re.fullmatch(r'\w+\.py:\d+ in \w+', errors[0].pop('at'))
+    assert errors == [{
         'person_id': record.person_id, 'error': 'IntegrityError',
         'sqlstate': '23514', 'constraint': 'patientrecord_latitude_range',
     }]
     assert 'sqlstate=23514 constraint=patientrecord_latitude_range' in caplog.text
+
+
+def test_a_backfill_failure_is_logged_without_the_row(caplog, capsys):
+    """The backfill the preview leads to logged the exception, whose message
+    quotes the whole row, at ERROR, which Sentry forwards."""
+    record = _settled()
+    Location.objects.create(location_id=8802, latitude=500, longitude=10, zip='02139')
+    Person.objects.filter(pk=record.person_id).update(location_id=8802, email='someone@example.org')
+    _stale(record, email='someone@example.org', phone_number='555-0100')
+
+    out = io.StringIO()
+    with caplog.at_level(logging.DEBUG):
+        call_command('backfill_patient_records', stdout=out)
+
+    captured = capsys.readouterr()
+    logged = caplog.text + out.getvalue() + captured.out + captured.err + ''.join(
+        str(r.exc_info) + str(r.exc_text) for r in caplog.records)
+    for value in ('someone@example.org', '555-0100', '02139', 'Failing row', 'Traceback'):
+        assert value not in logged, value
+    assert all(r.exc_info is None for r in caplog.records)
+    assert (f'person_id={record.person_id}: error=IntegrityError at=' in caplog.text
+            and 'sqlstate=23514 constraint=patientrecord_latitude_range' in caplog.text)
+    assert '1 error(s)' in out.getvalue()
 
 
 def test_an_unknown_field_is_refused():
@@ -550,6 +576,7 @@ def test_a_write_outside_the_record_is_refused_and_rolled_back(monkeypatch):
     document = json.loads(out.getvalue())
 
     table = RecordRevision._meta.db_table
+    document['errors'][0].pop('at')
     assert document['errors'] == [{
         'person_id': record.person_id, 'error': 'PreviewWriteBlocked',
         'refused': f'a write outside patient_record: INSERT INTO "{table}"',
