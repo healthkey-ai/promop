@@ -346,13 +346,39 @@ def evidence_keys():
     return keys
 
 
-def _patient_rows_for(scoped=False):
-    """Per-patient rows of the outer mapping's code: same vocabulary and
-    code, exactly, which is what the rows' index answers (a case-insensitive
-    match would scan the table once per mapping); with ``scoped``, only the
-    mapping's hospital's patients."""
-    from django.db.models import CharField, ExpressionWrapper, OuterRef, Q
+def _is_truncated(source_code):
+    """Whether a mapping holds its code cut at the column's limit, so that
+    its patient rows are those whose code starts with it."""
+    return len(source_code or '') >= _source_code_limit()
+
+
+def _truncated_mappings(truncated):
+    """The mappings whose code is (or is not) held cut at the limit: the
+    set-based form of :func:`_is_truncated`, to pair with
+    ``_patient_rows_for(truncated=...)``."""
+    from django.db.models import Q
     from django.db.models.functions import Length
+    from django.db.models.lookups import GreaterThanOrEqual, LessThan
+
+    lookup = GreaterThanOrEqual if truncated else LessThan
+    return Q(lookup(Length('source_code'), _source_code_limit()))
+
+
+def _patient_rows_for(scoped=False, truncated=False, code=None):
+    """Per-patient rows of the outer mapping's code: same vocabulary, and
+    the same code exactly or, with ``truncated``, every code it is the cut
+    of; with ``scoped``, only the mapping's hospital's patients. ``code``
+    is the mapping's code when the caller holds the one mapping, so the
+    match reads a literal instead of the outer row.
+
+    The caller picks exact or prefix per mapping (:func:`_is_truncated`,
+    :func:`_truncated_mappings`) rather than this OR-ing both: an OR with a
+    prefix pattern taken from the outer row is a filter no index answers,
+    so the rows were scanned in full once per mapping (#2492). The
+    exact match is an index lookup on ``source_value``; the prefix one is
+    too when ``code`` is a literal; set-based, it still reads the rows once
+    per mapping, but only for the few mappings whose code was cut."""
+    from django.db.models import CharField, ExpressionWrapper, OuterRef, Q
 
     from omop_core.models import PatientSourceCode
     from omop_core.services.source_vocabularies import VOCABULARY_OID_ALIASES
@@ -361,12 +387,11 @@ def _patient_rows_for(scoped=False):
     for canonical in set(VOCABULARY_OID_ALIASES.values()):
         spellings = _vocabulary_spellings(canonical)
         vocabulary |= Q(source_vocabulary_id__in=spellings, _mapping_vocabulary__in=spellings)
+    mapping_code = OuterRef('source_code') if code is None else code
     rows = PatientSourceCode.objects.annotate(
         _mapping_vocabulary=ExpressionWrapper(OuterRef('source_vocabulary_id'), output_field=CharField()),
-        _mapping_code_length=Length(OuterRef('source_code')),
     ).filter(vocabulary).filter(
-        Q(source_value=OuterRef('source_code'))
-        | Q(_mapping_code_length__gte=_source_code_limit(), source_value__startswith=OuterRef('source_code')))
+        Q(source_value__startswith=mapping_code) if truncated else Q(source_value=mapping_code))
     if scoped:
         rows = rows.filter(person__patient_record__organization_id=OuterRef('organization_id'))
     return rows
@@ -391,7 +416,8 @@ def rebuild_seen_counts(keys=None):
     per-patient rows are keyed per vocabulary, code and table, so each coding
     system gets its own sum: the rows on the mapping's table, or on any table
     for a mapping with none; a hospital-scoped mapping counts its hospital's
-    patients only. Codes match exactly, as the rows' index allows. Set-based, four statements, so it costs the same whatever
+    patients only. Codes match exactly, as the rows' index allows, and a
+    code held cut at the limit by prefix. Set-based, eight statements, so it costs the same whatever
     the walk's key set; a code with no rows here keeps its count. The
     extract's label-group figure is cleared on the rows rebuilt, since it no
     longer describes the members' counts. ``keys`` limits the pass to those
@@ -412,15 +438,17 @@ def rebuild_seen_counts(keys=None):
     match = _seen_key_filter(keys) if keys is not None else None
     updated = 0
     for scoped in (False, True):
-        rows = _patient_rows_for(scoped)
-        on_table = rows.filter(omop_table=OuterRef('omop_table'))
-        mappings = SourceCodeConceptMapping.objects.filter(organization__isnull=not scoped)
-        if match is not None:
-            mappings = mappings.filter(match)
-        updated += mappings.filter(omop_table='').filter(Exists(rows)).update(
-            occurrence_count=total(rows), source_group_occurrence_count=None)
-        updated += mappings.exclude(omop_table='').filter(Exists(on_table)).update(
-            occurrence_count=total(on_table), source_group_occurrence_count=None)
+        for truncated in (False, True):
+            rows = _patient_rows_for(scoped, truncated)
+            on_table = rows.filter(omop_table=OuterRef('omop_table'))
+            mappings = SourceCodeConceptMapping.objects.filter(
+                _truncated_mappings(truncated), organization__isnull=not scoped)
+            if match is not None:
+                mappings = mappings.filter(match)
+            updated += mappings.filter(omop_table='').filter(Exists(rows)).update(
+                occurrence_count=total(rows), source_group_occurrence_count=None)
+            updated += mappings.exclude(omop_table='').filter(Exists(on_table)).update(
+                occurrence_count=total(on_table), source_group_occurrence_count=None)
     return updated
 
 
@@ -439,7 +467,9 @@ def rebuilt_seen_keys(keys=None):
     mappings = SourceCodeConceptMapping.objects.all()
     if keys is not None:
         mappings = mappings.filter(_seen_key_filter(keys))
-    return set(mappings.filter(Exists(_patient_rows_for())).values_list('source_vocabulary_id', 'source_code'))
+    return {key for truncated in (False, True)
+            for key in mappings.filter(_truncated_mappings(truncated), Exists(_patient_rows_for(truncated=truncated)))
+            .values_list('source_vocabulary_id', 'source_code')}
 
 
 def _specimen_systems(mapping):
