@@ -31,8 +31,9 @@ script](../../.github/scripts/security-review.cjs). It checks PR labels, closing
 and issue references in the PR title/body, plus security-sensitive files (including
 renamed-away paths). `security`, case-insensitive `security:` and `security-` labels
 count. Test-only paths do not trigger file-based review, except where they fall inside
-one of the exceptions enumerated below; a security label still requires approval. The
-script lists the exact file patterns.
+one of the exceptions listed below and in the policy script's comments — notably
+`promop/**` and `ctomop/**`, which match before the test exemption; a security
+label still requires approval. The script lists the exact file patterns.
 
 The proposed ruleset has **zero** global approvals, global last-push approval
 **disabled**, and code-owner approval **disabled**. It requires `Security review` from
@@ -194,7 +195,10 @@ as covering more than it does:
   hold here: both can move together, unreviewed.
 - `.dockerignore` has no pin, so a change to what enters the build context is
   unreviewed.
-- No test constrains a service's `buildCommand`.
+- No test pins a `buildCommand` as a whole: `tests/test_render_staging_blueprint.py`
+  executes the production ones and asserts that `pip install -r requirements.txt`,
+  the source-catalog verifier and `collectstatic`-last survive;
+  `tests/test_athena_browser_build.py` asserts a negative on one.
 - Production `ALLOWED_HOSTS` and `CORS_ALLOWED_ORIGINS` are dashboard-supplied,
   so their values change outside this repository and outside this control
   entirely. Only their absence is caught, at boot.
