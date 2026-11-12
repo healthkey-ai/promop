@@ -11,6 +11,7 @@ runs as it does on a new instance. A subprocess rather than the executor on a
 second connection: a migration that reaches for ``django.db.connection``
 would otherwise read or write the test database instead.
 """
+import importlib
 import json
 import os
 import subprocess
@@ -22,7 +23,10 @@ from urllib.parse import urlsplit
 
 import psycopg
 import pytest
+from django.apps import apps
 from psycopg import sql
+
+from omop_core.models import CustomPatientField, FieldConceptMapping
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = REPO_ROOT / 'omop_core' / 'data' / 'field_curation_v1.json'
@@ -41,6 +45,10 @@ _MAPPING_COLUMNS = (
 _RESOLVED_FIXTURE_KEYS = {
     'concept_id', 'concept_vocabulary_id', 'concept_code_resolved',
 }
+
+seed = importlib.import_module(
+    'omop_core.migrations.0240_seed_field_curation_fixture',
+).seed
 
 
 def _server_url(database_url: str, name: str) -> str:
@@ -168,3 +176,39 @@ def test_a_hung_migrate_keeps_its_output(monkeypatch):
     monkeypatch.setattr(subprocess, 'run', fake_run)
     with pytest.raises(pytest.fail.Exception, match='0312_stuck'):
         _run_migrate('postgresql:///unused')
+
+
+@pytest.mark.django_db
+def test_an_existing_custom_field_is_left_alone_and_an_orphan_is_skipped():
+    """The only new branch in 0240: existing custom fields are not overwritten."""
+    mapping = FieldConceptMapping.objects.create(field_name='existing_mapping')
+    created_field = CustomPatientField.objects.create(
+        field_name='existing_field', display_name='Original',
+        field_type='text', mode='editable', mapping=mapping,
+    )
+    before = (created_field.display_name, created_field.tab,
+              created_field.field_type, created_field.mode)
+    data = {
+        'tables': ['custom_fields'],
+        'custom_fields': [
+            {   # already exists: must keep its values
+                'field_name': 'existing_field',
+                'mapping_field_name': 'existing_mapping',
+                'display_name': 'Replaced', 'tab': 'labs',
+                'field_type': 'number', 'mode': 'computed',
+            },
+            {   # no mapping in this database: skipped, not created
+                'field_name': 'orphan_field',
+                'mapping_field_name': 'missing_mapping',
+                'display_name': 'Orphan', 'tab': 'labs',
+                'field_type': 'text', 'mode': 'editable',
+            },
+        ],
+    }
+
+    created = seed(apps, 'default', data)
+
+    assert created == 0
+    field = CustomPatientField.objects.get(field_name='existing_field')
+    assert (field.display_name, field.tab, field.field_type, field.mode) == before
+    assert not CustomPatientField.objects.filter(field_name='orphan_field').exists()
