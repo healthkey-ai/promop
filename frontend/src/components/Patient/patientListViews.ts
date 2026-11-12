@@ -11,7 +11,7 @@ export const DEFAULT_ORDERING = '-updated';
 const ORDERINGS = /^-?(updated|age|name|disease|stage|ecog|lines|status|unmapped_source_codes|freshness|gaps|organization)$/;
 
 /** The columns beside the base set follow the reader's roles, not a chosen
- *  preset (#2463). Clinical context (latest line, ECOG) for everyone who
+ *  preset (#2470). Clinical context (latest line, ECOG) for everyone who
  *  reaches the list; the outreach columns (location, whether contact
  *  information is recorded) for staff and org admins, whose work spans the
  *  org's patients; Organization only when the list spans more than one. */

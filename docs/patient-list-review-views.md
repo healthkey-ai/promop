@@ -1,7 +1,7 @@
 # Patient list review columns
 
 The patient list shows the same base columns to everyone who reaches it, and
-decides the columns beside them from the reader's roles (#2463). There is no
+decides the columns beside them from the reader's roles (#2470). There is no
 view to choose: the Doctor, Foundation and Analyst presets of #1254 are gone,
 and a saved preset's clinical filters and sort carry over as the reader's one
 saved set. The column headings sort the list: a first click takes the column's natural
