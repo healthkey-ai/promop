@@ -4,7 +4,7 @@ import { ArrowLeft, Trash2, X } from 'lucide-react';
 import api from '@/api/axios';
 import { Link } from 'react-router-dom';
 import RoleHint from '@/components/Roles/RoleHint';
-import { ROLES_PAGE_PATH } from '@/utils/roleDescriptions';
+import { ROLE_LABELS, ROLES_PAGE_PATH } from '@/utils/roleDescriptions';
 
 const DEFAULT_ANALYST_REDIRECT_URL = 'https://analytics.healthkey.ai';
 
@@ -802,17 +802,17 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
                         {g.role === 'org_admin' ? (
                           <RoleHint role="org_admin" className="text-xs px-2 py-0.5 rounded bg-purple-100 text-purple-700 font-medium" />
                         ) : (
-                          <RoleHint role={g.role} className="text-xs text-gray-500 mr-2" />
-                        )}
-                        {g.role !== 'org_admin' && (
-                          <select
-                            value={g.role}
-                            onChange={e => handleUpdateGrant(g.id, { role: e.target.value })}
-                            className="border border-gray-300 rounded px-2 py-1 text-xs"
-                          >
-                            <option value="doctor">Doctor</option>
-                            <option value="analyst">Analyst</option>
-                          </select>
+                          <>
+                            <select
+                              value={g.role}
+                              onChange={e => handleUpdateGrant(g.id, { role: e.target.value })}
+                              className="border border-gray-300 rounded px-2 py-1 text-xs"
+                            >
+                              <option value="doctor">{ROLE_LABELS.doctor}</option>
+                              <option value="analyst">{ROLE_LABELS.analyst}</option>
+                            </select>
+                            <RoleHint role={g.role} hideLabel className="ml-1" />
+                          </>
                         )}
                       </td>
                       <td className="px-4 py-3 text-gray-700">
@@ -853,7 +853,7 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
                             aria-label={`Also grant the ${addableRole(g)} role to ${g.email}`}
                             title={`Also grant the ${addableRole(g)} role to ${g.email}`}
                           >
-                            + {addableRole(g) === 'doctor' ? 'Doctor' : 'Analyst'}
+                            + {ROLE_LABELS[addableRole(g)!]}
                           </button>
                         )}
                         <button
@@ -900,10 +900,10 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
                 }}
                 className="border border-gray-300 rounded px-2 py-1.5 text-sm"
               >
-                <option value="org_admin">Org Admin</option>
-                <option value="doctor">Doctor</option>
-                <option value="analyst">Analyst</option>
-                <option value="patient">Patient</option>
+                <option value="org_admin">{ROLE_LABELS.org_admin}</option>
+                <option value="doctor">{ROLE_LABELS.doctor}</option>
+                <option value="analyst">{ROLE_LABELS.analyst}</option>
+                <option value="patient">{ROLE_LABELS.patient}</option>
               </select>
               <button
                 onClick={handleInvite}

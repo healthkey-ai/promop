@@ -434,6 +434,8 @@ describe("roles reference (#2473)", () => {
     const badge = screen.getAllByText("Org Admin").find((el) => el.closest("table"))!;
     fireEvent.mouseEnter(badge);
     expect(screen.getByRole("tooltip")).toHaveTextContent(/Includes what Doctor and Analyst can do/);
-    expect(screen.getByRole("link", { name: "What a Doctor can do" })).toHaveAttribute("href", "/roles");
+    // Beside the Doctor select only the info link, not a second "Doctor".
+    expect(screen.getByRole("link", { name: "What the Doctor role can do" })).toHaveAttribute("href", "/roles");
+    expect(screen.getAllByText("Doctor").every((el) => el.tagName === "OPTION")).toBe(true);
   });
 });

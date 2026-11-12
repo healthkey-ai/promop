@@ -31,7 +31,19 @@ describe('RoleHint', () => {
     expect(screen.queryByRole('tooltip')).not.toBeInTheDocument();
     fireEvent.mouseEnter(screen.getByText('Analyst'));
     expect(screen.getByRole('tooltip')).toHaveTextContent(/proposes them; sees no individual patient data/);
-    fireEvent.click(screen.getByRole('link', { name: 'What a Analyst can do' }));
+    // The open tooltip repeats the label, so leave from the first "Analyst", the trigger's.
+    fireEvent.mouseLeave(screen.getAllByText('Analyst')[0]);
+    expect(screen.queryByRole('tooltip')).not.toBeInTheDocument();
+    // Keyboard: focusing the link opens it and describes the link; Escape and blur close it.
+    const link = screen.getByRole('link', { name: 'What the Analyst role can do' });
+    fireEvent.focus(link);
+    expect(link).toHaveAttribute('aria-describedby', screen.getByRole('tooltip').id);
+    fireEvent.keyDown(link, { key: 'Escape' });
+    expect(screen.queryByRole('tooltip')).not.toBeInTheDocument();
+    fireEvent.focus(link);
+    fireEvent.blur(link);
+    expect(screen.queryByRole('tooltip')).not.toBeInTheDocument();
+    fireEvent.click(link);
     expect(screen.getByRole('heading', { name: 'Roles' })).toBeInTheDocument();
   });
 
@@ -39,5 +51,11 @@ describe('RoleHint', () => {
     render(<MemoryRouter><RoleHint role="viewer" /></MemoryRouter>);
     expect(screen.getByText('viewer')).toBeInTheDocument();
     expect(screen.queryByRole('link')).not.toBeInTheDocument();
+  });
+
+  it('keeps only the info link beside a control that already names the role', () => {
+    render(<MemoryRouter><RoleHint role="doctor" hideLabel /></MemoryRouter>);
+    expect(screen.queryByText('Doctor')).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'What the Doctor role can do' })).toBeInTheDocument();
   });
 });
