@@ -48,6 +48,10 @@ from omop_core.services.pre_existing_conditions import (
 )
 
 FLAG_FIELD = 'no_pre_existing_conditions'
+#: The #1989 migrations this audit reports on, by exact name: other
+#: `0304_*`/`0305_*` migrations exist, so a prefix proves nothing.
+MIGRATION_0304 = '0304_deactivate_pre_existing_condition_formula'
+MIGRATION_0305 = '0305_patientrecord_pre_existing_flag_guard'
 CATEGORY_FIELD = 'preexisting_conditions'
 CLASSIFICATIONS = (
     'contradiction',
@@ -279,13 +283,13 @@ class Command(BaseCommand):
                 with connection.cursor() as cursor:
                     cursor.execute(
                         "SELECT name FROM django_migrations WHERE app = 'omop_core' "
-                        "AND name LIKE '03%'")
+                        "AND name IN (%s, %s)", [MIGRATION_0304, MIGRATION_0305])
                     applied = {row[0] for row in cursor.fetchall()}
         return {
             'definitions': formulas,
             'active': any(f['is_active'] for f in formulas),
-            'migration_0304_applied': any(n.startswith('0304') for n in applied),
-            'migration_0305_applied': any(n.startswith('0305') for n in applied),
+            'migration_0304_applied': MIGRATION_0304 in applied,
+            'migration_0305_applied': MIGRATION_0305 in applied,
         }
 
     def _print_summary(self, payload):
