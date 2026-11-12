@@ -7,7 +7,8 @@ nullable and deactivated the pregnancy formula.
 
 It clears only ``unattributed_true`` (a pure legacy default). Authored,
 source-backed, source-conflict and rewritten True values are never touched;
-those need a person's answer or a policy review.
+those need a person's answer or a policy review. The pre-apply review and the
+rollback procedure are in ``docs/legacy_pregnancy_tobacco_repair_plan.md``.
 """
 import json
 import uuid
@@ -21,7 +22,7 @@ from omop_core.management.commands.audit_legacy_pregnancy_tobacco import (
     Command as Audit, FIELDS, approval_digest,
 )
 from omop_core.management.guarded_repair import (
-    canonical, digest, lock_tables, make_transaction_read_only, read_json, receipt,
+    canonical, digest, lock_rows, make_transaction_read_only, read_json, receipt,
     target_guard, write_private,
 )
 from omop_core.models import FieldFormula, PatientRecord, RecordRevision
@@ -58,8 +59,23 @@ class Command(BaseCommand):
         parser.add_argument('--backup', help='New private backup file (required on apply)')
         parser.add_argument('--environment', choices=['local', 'staging'], default='local')
 
-    def _lock(self):
-        lock_tables((PatientRecord, RecordRevision))
+    def _lock(self, live, supplied, rolling_back):
+        """Lock only the rows this run can write, after the audit chose them.
+
+        The audit runs before the lock, so a value that changes in between is
+        caught by the per-record re-read in `_repair`/`_rollback`, which aborts
+        the transaction. A row that becomes a candidate after the audit is not
+        in the manifest and waits for the next run, never silently written.
+        """
+        lock_rows(PatientRecord, self._target_ids(live, supplied, rolling_back))
+
+    @staticmethod
+    def _target_ids(live, supplied, rolling_back):
+        if rolling_back:
+            return [entry['before']['id'] for entry in supplied.get('entries', [])]
+        return [row['id'] for row in live['records']
+                if any(row['fields'][field]['recommended_action'] == 'clear'
+                       for field in FIELDS)]
 
     def _ready(self):
         if FieldFormula.objects.filter(
@@ -79,12 +95,12 @@ class Command(BaseCommand):
             target_guard(options['environment'])
         owns = not connection.in_atomic_block
         with transaction.atomic():
-            if applying:
-                self._lock()
-                self._ready()
-            elif owns:
+            if not applying and owns:
                 make_transaction_read_only()
             live = Audit()._collect(summary_only=False)
+            if applying:
+                self._lock(live, supplied, rolling_back=bool(options['rollback']))
+                self._ready()
             if options['rollback']:
                 output = self._rollback(supplied, live, options['expect_sha'], applying)
             else:

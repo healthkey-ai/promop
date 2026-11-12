@@ -15,7 +15,7 @@ from django.utils import timezone
 
 from omop_core.management.commands.audit_pre_existing_conditions import Command as Audit, approval_digest
 from omop_core.management.guarded_repair import (
-    canonical, digest, lock_tables, make_transaction_read_only, read_json, receipt,
+    canonical, digest, lock_rows, make_transaction_read_only, read_json, receipt,
     target_guard, write_private,
 )
 from omop_core.models import (
@@ -65,8 +65,21 @@ class Command(BaseCommand):
                             help='Operator attests deployed UI/API verification; not granted by a PR merge')
         parser.add_argument('--environment', choices=['local', 'staging'], default='local')
 
-    def _lock(self):
-        lock_tables((PatientRecord, RecordRevision, PreexistingConditionsAttestation, FieldFormula))
+    def _lock(self, live, supplied, rolling_back):
+        """Lock only the rows this run can write (#2450 review).
+
+        The audit runs first, so a change between audit and lock is caught by
+        `_repair`/`_rollback` re-reading the row; a new candidate waits for the
+        next audit instead of being written without review.
+        """
+        lock_rows(PatientRecord, self._target_ids(live, supplied, rolling_back))
+
+    @staticmethod
+    def _target_ids(live, supplied, rolling_back):
+        if rolling_back:
+            return [entry['before']['id'] for entry in supplied.get('entries', [])]
+        return [row['id'] for row in live['records']
+                if row['classification'] in ('unattributed_true', 'rewritten_true')]
 
     def _ready(self):
         if FieldFormula.objects.filter(field_name=FLAG, is_active=True).exists():
@@ -95,12 +108,12 @@ class Command(BaseCommand):
             target_guard(options['environment'])
         owns = not connection.in_atomic_block
         with transaction.atomic():
-            if applying:
-                self._lock()
-                self._ready()
-            elif owns:
+            if not applying and owns:
                 make_transaction_read_only()
             live = Audit()._collect(summary_only=False)
+            if applying:
+                self._lock(live, supplied, rolling_back=bool(options['rollback']))
+                self._ready()
             if options['rollback']:
                 output = self._rollback(supplied, live, options['expect_sha'], applying)
             else:

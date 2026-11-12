@@ -118,6 +118,22 @@ def test_audit_classifies_each_kind_of_evidence(tmp_path):
     assert field('unknown')['classification'] == 'unanswered'
 
 
+def test_apply_locks_only_the_rows_it_clears(tmp_path, ready):
+    """The repair used to hold SHARE ROW EXCLUSIVE on the whole table and block
+    every patient write for the loop (#2450 review)."""
+    from django.test.utils import CaptureQueriesContext
+
+    names = cohort()
+    manifest, sha = audit(tmp_path)
+    with CaptureQueriesContext(connection) as captured:
+        apply(tmp_path, manifest, sha)
+
+    statements = [query['sql'] for query in captured.captured_queries]
+    assert not any('LOCK TABLE' in sql for sql in statements)
+    assert any('FOR UPDATE' in sql and str(names['unattributed'].pk) in sql
+               for sql in statements)
+
+
 def test_fail_on_makes_defaults_a_release_gate(tmp_path):
     cohort()
     with pytest.raises(CommandError, match='finding gate'):

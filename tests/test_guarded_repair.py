@@ -180,9 +180,40 @@ def test_as_bool(text, expected):
 def test_every_audit_repair_command_uses_the_shared_guards():
     for module in (repair_legacy_pregnancy_tobacco, repair_pre_existing_conditions):
         for name in ('target_guard', 'write_private', 'read_json', 'canonical', 'digest',
-                     'receipt', 'lock_tables', 'make_transaction_read_only'):
+                     'receipt', 'lock_rows', 'make_transaction_read_only'):
             assert getattr(module, name) is getattr(guarded_repair, name), (module, name)
     for module in (audit_legacy_pregnancy_tobacco, audit_pre_existing_conditions):
         for name in ('approval_digest', 'as_bool', 'make_transaction_read_only',
                      'refuse_existing_manifest', 'write_manifest'):
             assert getattr(module, name) is getattr(guarded_repair, name), (module, name)
+
+
+def test_lock_rows_locks_the_given_rows_instead_of_the_table():
+    """A table lock blocked every patient write for the repair's whole loop."""
+    from django.db import transaction
+    from django.test.utils import CaptureQueriesContext
+
+    from omop_core.models import PatientRecord
+    from tests.factories import PatientRecordFactory
+
+    record = PatientRecordFactory()
+    with transaction.atomic():
+        with CaptureQueriesContext(connection) as captured:
+            guarded_repair.lock_rows(PatientRecord, [record.pk])
+    statements = [query['sql'] for query in captured.captured_queries]
+    assert any('FOR UPDATE' in sql for sql in statements)
+    assert not any('LOCK TABLE' in sql for sql in statements)
+    assert any('FOR UPDATE' in sql and str(record.pk) in sql for sql in statements)
+
+
+def test_lock_rows_with_no_candidates_does_not_lock_anything():
+    from django.db import transaction
+    from django.test.utils import CaptureQueriesContext
+
+    from omop_core.models import PatientRecord
+
+    with transaction.atomic():
+        with CaptureQueriesContext(connection) as captured:
+            guarded_repair.lock_rows(PatientRecord, [])
+    assert not [query for query in captured.captured_queries
+                if 'FOR UPDATE' in query['sql']]
