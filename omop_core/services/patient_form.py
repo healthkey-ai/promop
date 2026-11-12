@@ -18,6 +18,7 @@ from omop_core.services.patient_record_service import (
     recompute_patient_record_fields,
 )
 from omop_core.services.write_descriptor import build_writable_field_descriptor
+from omop_core.services.write_refusal import WriteRefused
 from omop_core.services.boolean_answers import BOOLEAN_ANSWERS
 from omop_core.services.creatinine_units import (
     CANONICAL_FIELD as CREATININE_CANONICAL,
@@ -107,7 +108,7 @@ def parse_fact_date(raw, field):
     """The clinical date carried by a dated edit; raises on a refused date."""
     parsed, error = fact_date_or_error(raw, field)
     if error is not None:
-        raise ValueError(error)
+        raise WriteRefused(error)
     return parsed
 
 
@@ -516,6 +517,11 @@ def _pair_write_plan(direct, pair_pending, fact_dates, record):
     return dates, echoes
 
 
+#: The 400 sentence for a write that failed for a reason that is not a
+#: deliberate refusal; the cause is logged, not sent (#2489).
+UNSAVED_MESSAGE = 'The changes could not be saved. No value was changed.'
+
+
 @transaction.atomic
 def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor=None,
                              authorship=None, patient_author=False, changed_by='system'):
@@ -531,10 +537,13 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
     pinned current-state fields are skipped, while other fields keep the
     recipe type, matching the native PATCH.
 
-    A refusal is a ``ValidationError`` whatever its depth: every ``ValueError``
-    a step of the write raises for a bad value is restated as one here, so the
-    API layer can answer with ``exc.messages`` and never has to forward the text
-    of a caught exception (code scanning `py/stack-trace-exposure`).
+    A refusal is a ``ValidationError`` whatever its depth. A deliberate refusal
+    (``WriteRefused``, worded for the reader) is restated as one with its own
+    message. Any other ``ValueError`` is internal: it is logged with the person
+    and the submitted field names only, never values or the exception's text,
+    and answered with a generic sentence (#2489). The API layer answers with
+    ``exc.messages`` and never forwards a caught exception's text (code
+    scanning `py/stack-trace-exposure`).
     """
     try:
         return _apply_patient_form_patch(
@@ -543,8 +552,15 @@ def apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor
         )
     except ValidationError:
         raise
-    except ValueError as exc:
+    except WriteRefused as exc:
         raise ValidationError(str(exc)) from exc
+    except ValueError as exc:
+        logger.warning(
+            'Shared-form write failed (%s) for person_id=%s, fields=%s',
+            type(exc).__name__, getattr(person, 'pk', None),
+            sorted(str(name) for name in (changes or {})),
+        )
+        raise ValidationError(UNSAVED_MESSAGE) from exc
 
 
 def _apply_patient_form_patch(person, changes, *, allowed_fields=None, descriptor=None,
@@ -597,7 +613,7 @@ def _apply_patient_form_patch(person, changes, *, allowed_fields=None, descripto
     from omop_core.services.field_write_service import split_dated_edits
     changes, fact_dates, refusal = split_dated_edits(changes, descriptor)
     if refusal is not None:
-        raise ValueError(refusal)
+        raise WriteRefused(refusal)
     # Hemoglobin's source pair (#2318): the form writer must apply the same
     # validation and normalisation as the native serializer, because the
     # descriptor now offers `hemoglobin_level` and its unit rather than the
@@ -1233,7 +1249,7 @@ def _apply_patient_form_patch(person, changes, *, allowed_fields=None, descripto
                 try:
                     person._meta.get_field(key).clean(text, person)
                 except ValidationError as exc:
-                    raise ValueError(f'{name}: {"; ".join(exc.messages)}') from exc
+                    raise WriteRefused(f'{name}: {"; ".join(exc.messages)}') from exc
                 setattr(person, key, text)
                 person_changes.add(key)
             result.applied.append(name)
@@ -1243,9 +1259,9 @@ def _apply_patient_form_patch(person, changes, *, allowed_fields=None, descripto
             try:
                 birth_changes[name] = record._meta.get_field(name).clean(None if value == '' else value, record)
             except ValidationError as exc:
-                raise ValueError(f'{name}: {"; ".join(exc.messages)}') from exc
+                raise WriteRefused(f'{name}: {"; ".join(exc.messages)}') from exc
             if name == 'date_of_birth' and birth_changes[name] and birth_changes[name] > timezone.localdate():
-                raise ValueError('date_of_birth: Date of birth cannot be in the future.')
+                raise WriteRefused('date_of_birth: Date of birth cannot be in the future.')
             result.applied.append(name)
             profile_applied.add(name)
             continue
@@ -1253,7 +1269,7 @@ def _apply_patient_form_patch(person, changes, *, allowed_fields=None, descripto
             try:
                 value = record._meta.get_field(name).clean(None if value == '' else value, record)
             except ValidationError as exc:
-                raise ValueError(f'{name}: {"; ".join(exc.messages)}') from exc
+                raise WriteRefused(f'{name}: {"; ".join(exc.messages)}') from exc
             value = value.strip() if isinstance(value, str) else value
             updates = {name: value}
             setattr(record, name, value)
@@ -1316,7 +1332,7 @@ def _apply_patient_form_patch(person, changes, *, allowed_fields=None, descripto
                     and value is not None and len(str(value)) > 60):
                 # Keep the legacy scalar contract: a rejected edit is better
                 # than a successful, silently truncated clinical assertion.
-                raise ValueError(
+                raise WriteRefused(
                     f'{name}: this scalar write supports at most 60 characters; '
                     'no value was saved.')
             from omop_core.services.clinical_field_validation import normalize_clinical_field
@@ -1341,9 +1357,9 @@ def _apply_patient_form_patch(person, changes, *, allowed_fields=None, descripto
                     # date must not become today and a future date is not a
                     # fact; a date before birth is not this person's.
                     if direct[name] > timezone.localdate():
-                        raise ValueError('death_date: Death date cannot be in the future.')
+                        raise WriteRefused('death_date: Death date cannot be in the future.')
             except ValidationError as exc:
-                raise ValueError(f'{name}: {"; ".join(exc.messages)}') from exc
+                raise WriteRefused(f'{name}: {"; ".join(exc.messages)}') from exc
         else:
             # The legacy scalar applier's string column is 60 characters. A
             # rejected edit is preferable to a successful, silently truncated
@@ -1351,7 +1367,7 @@ def _apply_patient_form_patch(person, changes, *, allowed_fields=None, descripto
             if ((entry.get('projection') or entry.get('kind') == 'editable')
                     and entry.get('value_kind') != 'number'
                     and value is not None and len(str(value)) > 60):
-                raise ValueError(f'{name}: this scalar write supports at most 60 characters; no value was saved.')
+                raise WriteRefused(f'{name}: this scalar write supports at most 60 characters; no value was saved.')
             facts[name] = value
     # Validate the EFFECTIVE pair, not the stored birth date alone: a PATCH
     # may submit a new DOB and a death date together (the native serializer
@@ -1364,7 +1380,7 @@ def _apply_patient_form_patch(person, changes, *, allowed_fields=None, descripto
                                                       record.date_of_birth_precision)
     effective_death = direct.get('death_date', record.death_date)
     if effective_death and dob and effective_death < dob:
-        raise ValueError('death_date: Death date cannot precede date of birth.')
+        raise WriteRefused('death_date: Death date cannot precede date of birth.')
     # PatientRecordSerializer's transformation rules, which the shared form
     # skipped: field.clean() is model validation only. Judged on the effective
     # record, and only when this request touches one of the three fields, so an
@@ -1373,13 +1389,13 @@ def _apply_patient_form_patch(person, changes, *, allowed_fields=None, descripto
                         ('sct_date', 'SCT date')):
         value = direct.get(name)
         if value is not None and value > timezone.localdate():
-            raise ValueError(f'{name}: {label} cannot be in the future.')
+            raise WriteRefused(f'{name}: {label} cannot be in the future.')
     outcome = direct.get('post_transformation_outcome')
     if outcome:
         from omop_core.models import PostTransformationOutcome
         allowed = set(PostTransformationOutcome.objects.values_list('title', flat=True))
         if outcome not in allowed:
-            raise ValueError(
+            raise WriteRefused(
                 f'post_transformation_outcome: Unrecognized value {outcome!r}. '
                 f'Allowed: {sorted(allowed)}')
     transformation_fields = ('transformed_to_dlbcl', 'dlbcl_transformation_date',
@@ -1391,7 +1407,7 @@ def _apply_patient_form_patch(person, changes, *, allowed_fields=None, descripto
                 effective['dlbcl_transformation_date']
                 or effective['post_transformation_outcome']):
             touched = next(name for name in transformation_fields if name in direct)
-            raise ValueError(
+            raise WriteRefused(
                 f'{touched}: dlbcl_transformation_date and post_transformation_outcome '
                 'require transformed_to_dlbcl to be true.')
     if birth_changes:
