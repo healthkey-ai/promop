@@ -197,20 +197,13 @@ def _propagate_pair_fact_dates(fact_dates, fact_ids):
     """Copy a source pair's date and result id onto its canonical read-model (#2397).
 
     A pair editor dates the source field; the projection that writes the fact
-    is on the canonical field. Both must carry the same clinical day.
+    is on the canonical field. Both must carry the same clinical day. The pair
+    inventory is ``SOURCE_PAIR_CANONICALS``, the one the shared form and
+    derivation read; direct bilirubin maps to itself there, which is a no-op.
     """
-    from omop_core.services.blood_count_source_pairs import PAIRS as COUNT_PAIRS
-    from omop_core.services.chemistry_units import PAIRS as CHEMISTRY_PAIRS
-    from omop_core.services.creatinine_units import (
-        CANONICAL_FIELD as CREATININE_CANONICAL, PAIR_FIELD as CREATININE_PAIR,
-    )
-    from omop_core.services.hemoglobin_units import (
-        CANONICAL_FIELD as HEMOGLOBIN_CANONICAL, PAIR_FIELD as HEMOGLOBIN_PAIR,
-    )
-    pairs = {HEMOGLOBIN_PAIR: HEMOGLOBIN_CANONICAL, CREATININE_PAIR: CREATININE_CANONICAL}
-    pairs.update({spec['value']: canonical for canonical, spec in CHEMISTRY_PAIRS.items()})
-    pairs.update({source: spec['canonical'] for source, spec in COUNT_PAIRS.items()})
-    for source, canonical in pairs.items():
+    from omop_core.services.source_pair_dates import SOURCE_PAIR_CANONICALS
+
+    for source, canonical in SOURCE_PAIR_CANONICALS.items():
         if source in fact_dates and canonical not in fact_dates:
             fact_dates[canonical] = fact_dates[source]
         if source in fact_ids and canonical not in fact_ids:
