@@ -1485,6 +1485,13 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             }
             derived_from_pair = set(getattr(serializer, '_derived_from_pair', ()))
             date_only_fields = {
+                # A date with an unchanged value is a correction, not a new
+                # result: `move_owned_fact_date` moves the fact this projector
+                # owns, with the named one when the client sends a fact_id and
+                # the newest matching one otherwise. When no owned fact
+                # matches, the projection below records a new result instead
+                # of refusing (an equal value on another day is legitimate,
+                # #2454 review).
                 field for field in fact_dates
                 if field in serializer.validated_data
                 and serializer.validated_data[field] == previous_values.get(field)

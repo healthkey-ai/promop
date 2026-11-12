@@ -575,12 +575,13 @@ def move_owned_fact_date(person, field_name, value, projection, fact_date, *,
     """Move the fact this projector owns to ``fact_date``, if it can.
 
     Returns the fact's primary key when it is already on that day or was moved,
-    None when there is no fact for this field (the caller may create one), and
-    False when the fact is not ours, its value no longer matches, a different
-    result already occupies the target day, or its author type is not the one
-    this edit may change. ``fact_id`` is the id a previous PATCH returned for
-    this result; without it the active (newest) fact is the only candidate, and
-    a correction never guesses between equal results.
+    None when no fact this edit may move matches (the caller may create one),
+    and False when an owned fact cannot move: a different result already
+    occupies the target day. ``fact_id`` is the id a previous PATCH returned for
+    this result; without it the active (newest) fact is the candidate, and an
+    unnamed edit falls through to a new result when that fact is not ours — an
+    equal value on another day is legitimate (#2454 review). A named fact that
+    does not move is a refused correction.
     """
     target = projection.get('omop_table')
     concept_id = projection.get('concept_id')
@@ -605,14 +606,14 @@ def move_owned_fact_date(person, field_name, value, projection, fact_date, *,
     fact_type = getattr(current, type_field)
     if type_concept_id is not None:
         if fact_type != type_concept_id:
-            return False
+            return None if fact_id is None else False
     elif fact_type == PATIENT_SELF_REPORT_TYPE and (
             projection.get('type_concept_id') or 32817) != PATIENT_SELF_REPORT_TYPE:
-        return False
+        return None if fact_id is None else False
     if not _projection_owned(current):
-        return False
+        return None if fact_id is None else False
     if not _same_projection_value(current, value, val_num, val_str):
-        return False
+        return None if fact_id is None else False
     if getattr(current, date_field) == fact_date:
         return current.pk
     siblings = model.objects.filter(
