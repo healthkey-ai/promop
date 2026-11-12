@@ -431,18 +431,19 @@ def test_the_baseline_is_read_under_the_row_lock(monkeypatch):
     assert PatientRecord.objects.get(pk=record.pk).race == 'White'
 
 
-def test_a_failure_is_logged_without_the_row(caplog):
+def test_a_failure_is_logged_without_the_row(caplog, capsys):
     """A CHECK violation's message quotes the whole row: it must not reach the log."""
     record = _settled()
     Location.objects.create(location_id=8801, latitude=500, longitude=10, zip='02139')
     Person.objects.filter(pk=record.person_id).update(location_id=8801, email='someone@example.org')
     _stale(record, email='someone@example.org', phone_number='555-0100')
 
-    out = io.StringIO()
+    out, err = io.StringIO(), io.StringIO()
     with caplog.at_level(logging.DEBUG), pytest.raises(CommandError):
-        call_command('preview_rederivation', '--format', 'json', stdout=out)
+        call_command('preview_rederivation', '--format', 'json', stdout=out, stderr=err)
 
-    logged = caplog.text + ''.join(
+    captured = capsys.readouterr()
+    logged = caplog.text + err.getvalue() + captured.out + captured.err + ''.join(
         str(r.exc_info) + str(r.exc_text) for r in caplog.records)
     for value in ('someone@example.org', '555-0100', '02139', 'Failing row', 'Traceback'):
         assert value not in logged, value
