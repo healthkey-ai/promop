@@ -170,13 +170,10 @@ def test_a_canonical_import_retires_the_source_pair(api):
                 & set(record.user_edited_fields or []))
     # The canonical write retires the pair and records the lost entry. The unit
     # column keeps CELLS/UL, so only the changed value gets a row.
-    rows = {
-        row.field: row for row in RecordRevision.objects.filter(
-            patient_record=record, changed_by='system')
-    }
-    assert set(rows) == {'absolute_neutrophile_count'}
-    assert Decimal(rows['absolute_neutrophile_count'].old_value) == Decimal('1550')
-    assert Decimal(rows['absolute_neutrophile_count'].new_value) == Decimal('2500')
+    assert [
+        (row.field, Decimal(row.old_value), Decimal(row.new_value)) for row in
+        RecordRevision.objects.filter(patient_record=record, changed_by='system')
+    ] == [('absolute_neutrophile_count', Decimal('1550'), Decimal('2500'))]
 
 
 def test_the_shared_form_normalises_the_count_pair(api):

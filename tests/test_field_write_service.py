@@ -80,15 +80,43 @@ def test_a_canonical_import_retires_a_pending_pair_and_records_it():
 
     record.refresh_from_db()
     assert record.pending_source_pair_dates == {}
-    rows = {
-        row.field: row for row in RecordRevision.objects.filter(
-            patient_record=record, changed_by='system')
-    }
-    assert set(rows) == {'hemoglobin_level', 'hemoglobin_level_units'}
-    assert Decimal(rows['hemoglobin_level'].old_value) == Decimal('120.00')
-    assert Decimal(rows['hemoglobin_level'].new_value) == Decimal('13.00')
-    assert (rows['hemoglobin_level_units'].old_value,
-            rows['hemoglobin_level_units'].new_value) == ('G/L', 'G/DL')
+    assert sorted(
+        (row.field, row.old_value, row.new_value) for row in
+        RecordRevision.objects.filter(patient_record=record, changed_by='system')
+    ) == [
+        ('hemoglobin_level', '120.00', '13.00'),
+        ('hemoglobin_level_units', 'G/L', 'G/DL'),
+    ]
+
+
+def test_a_canonical_import_without_a_refresh_still_retires_and_records_it():
+    # `refresh=False` skips the derivation the retirement needs, so the applier
+    # derives anyway rather than leaving the pair columns stale and unmarked.
+    from decimal import Decimal
+
+    from omop_core.models import PatientRecord, RecordRevision
+    person = _person_with_loinc('718-7', 'Hemoglobin [Mass/volume] in Blood')
+    record = PatientRecord.objects.get(person=person)
+    record.hemoglobin_level = Decimal('120.00')
+    record.hemoglobin_level_units = 'G/L'
+    record.hemoglobin_g_dl = Decimal('12.00')
+    record.user_edited_fields = ['hemoglobin_level', 'hemoglobin_level_units']
+    record.pending_source_pair_dates = {'hemoglobin_level': '2026-08-01'}
+    record.save()
+
+    apply_field_writes(
+        person, {'hemoglobin_g_dl': 13.0}, today=date(2026, 8, 23), refresh=False)
+
+    record.refresh_from_db()
+    assert not {'hemoglobin_level', 'hemoglobin_level_units'} & set(
+        record.user_edited_fields or [])
+    assert sorted(
+        (row.field, row.old_value, row.new_value) for row in
+        RecordRevision.objects.filter(patient_record=record, changed_by='system')
+    ) == [
+        ('hemoglobin_level', '120.00', '13.00'),
+        ('hemoglobin_level_units', 'G/L', 'G/DL'),
+    ]
 
 
 def test_same_day_re_edit_upserts_not_duplicates():

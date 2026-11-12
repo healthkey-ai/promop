@@ -484,16 +484,24 @@ def apply_field_writes(person, changes, today=None, descriptor=None, dates=None,
         retired_values = _retire_source_pairs(person, result.applied)
     # write_clinical_inputs derives for its readback, from the fully-applied
     # state, so a batch that carries a clinical field must not derive twice.
+    record = None
     if refresh and result.applied and not clinical:
-        refresh_patient_record(person)
+        record = refresh_patient_record(person)
     if clinical:
-        write_clinical_inputs(person, clinical, today=today)
+        record = write_clinical_inputs(person, clinical, today=today)
         result.applied.extend(clinical)
+    elif retired_values and record is None:
+        # `refresh=False` skipped the derivation a retirement needs: without
+        # it the pair columns keep the old entry, and a later refresh has no
+        # marker left to audit through. Derive now; the values must follow the
+        # new fact either way.
+        record = refresh_patient_record(person)
     if retired_values:
         # After the refresh, so the revision compares the entry the patient had
         # with the value the import replaced it with (#2426 review).
         from omop_core.services.patient_record_revisions import write_record_revisions
-        record = PatientRecord.objects.filter(person=person).first()
+        if record is None:
+            record = PatientRecord.objects.filter(person=person).first()
         if record is not None:
             write_record_revisions(record, retired_values, changed_by='system')
     return result

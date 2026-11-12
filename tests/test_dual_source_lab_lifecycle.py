@@ -348,6 +348,37 @@ def test_a_newer_dated_import_retires_the_patient_pair(lab):
         ('hemoglobin_level', '120.00', '8.00'),
         ('hemoglobin_level_units', 'G/L', 'G/DL'),
     ]
+    # A second derivation sees no pending pair and must not duplicate the rows.
+    refresh_patient_record(lab['person'])
+    assert RecordRevision.objects.filter(
+        patient_record=record, changed_by='system').count() == 2
+
+
+def test_a_legacy_canonical_marker_is_recorded_at_retirement(lab):
+    # Before the pair owned its canonical, a user edit could leave both marked.
+    # The retirement clears that marker too, so it must be in the history.
+    draw = TODAY - timedelta(days=2)
+    record = lab['record']
+    record.hemoglobin_level = Decimal('120.00')
+    record.hemoglobin_level_units = 'G/L'
+    record.hemoglobin_g_dl = Decimal('12.00')
+    record.user_edited_fields = [
+        'hemoglobin_level', 'hemoglobin_level_units', 'hemoglobin_g_dl']
+    record.pending_source_pair_dates = {'hemoglobin_level': draw.isoformat()}
+    record.save()
+
+    _import(lab, 8.0, 'g/dL', TODAY)
+
+    record.refresh_from_db()
+    assert record.hemoglobin_g_dl == Decimal('8.0')
+    assert sorted(
+        (row.field, row.old_value, row.new_value) for row in
+        RecordRevision.objects.filter(patient_record=record, changed_by='system')
+    ) == [
+        ('hemoglobin_g_dl', '12.0', '8.0'),
+        ('hemoglobin_level', '120.00', '8.00'),
+        ('hemoglobin_level_units', 'G/L', 'G/DL'),
+    ]
 
 
 def test_a_same_day_import_keeps_the_pair_and_its_day(lab):

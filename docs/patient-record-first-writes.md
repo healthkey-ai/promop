@@ -281,10 +281,15 @@ the pair is retired when the result derivation now selects for the field's
 canonical is *strictly later* than the day the pair was entered. A same-day
 result leaves it pending, an unusable or unproven newer result leaves it pending
 (the extractor records no day for one), and a pair whose entered day is unknown
-does too. The old projected fact stays history; nothing is deleted. The
-retirement writes a `RecordRevision` row (`changed_by='system'`) for every pair
-column it changes, so the entry that leaves the record is still in its history:
-the pair value, its unit, and a canonical marker the patient had edited.
+does too. The old projected fact stays history; nothing is deleted.
+
+Every retirement path writes one `RecordRevision` row (`changed_by='system'`)
+per pair column whose stored value changes: the full refresh above, an explicit
+canonical write through `recompute_patient_record_fields()` or the
+descriptor-driven `_retire_source_pairs()`, so the entry that leaves the record
+is still in its history — the pair value, its unit, and a canonical marker the
+patient had edited. A pair column that was not marked pending is derived, not a
+patient entry, and gets no row.
 
 The pair is also the dated target (#2397): a patient-entered lab result carries
 the day it was drawn, not the day it was typed, and the canonical projection is

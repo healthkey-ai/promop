@@ -1546,10 +1546,11 @@ def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fiel
     # An explicit canonical write retires a pending source pair here, not in a
     # full refresh. Snapshot the pair columns before this function overwrites
     # them, so the entry it removes still leaves a revision row (#2426 review).
+    pending_fields = set(patient_info.user_edited_fields or ())
     pair_entry_values = {
         field: getattr(patient_info, field, None)
         for field in _SOURCE_PAIR_FIELDS
-        if field in set(patient_info.user_edited_fields or ())
+        if field in pending_fields
     }
     # The category list is the evidence; an explicit "no conditions" answer cannot
     # stand beside it (#1988). Invalidate the answer rather than delete the list.
@@ -1855,9 +1856,10 @@ def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fiel
             updates['custom_fields'] = patient_info.custom_fields
         updates['updated_at'] = timezone.now()
         PatientRecord.objects.filter(pk=patient_info.pk).update(**updates)
+    pending_fields = set(patient_info.user_edited_fields or ())
     retired_pairs = {
         field: value for field, value in pair_entry_values.items()
-        if field not in set(patient_info.user_edited_fields or ())
+        if field not in pending_fields
     }
     if retired_pairs:
         write_record_revisions(patient_info, retired_pairs, changed_by='system')
