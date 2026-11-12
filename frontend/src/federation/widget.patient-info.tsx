@@ -210,8 +210,9 @@ export function mountGenomics(el: HTMLElement, opts: GenomicsMountOptions = {}):
         onClose={opts.onClose}
         // The findings endpoints bypass the store's save queue, so `store.load()`
         // never reaches the host's `onUpdated` listeners. The host still has to
-        // invalidate its own trial queries and re-render the row.
-        onChanged={() => { void opts.onPatientUpdated?.(); }}
+        // invalidate its own trial queries and re-render the row. Return the
+        // promise: the dialog awaits it and holds the bypass until it settles.
+        onChanged={() => opts.onPatientUpdated?.()}
       />}
       </RuntimeStoreScope>
     </StrictMode>,
