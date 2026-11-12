@@ -58,7 +58,7 @@ def test_it_reports_the_historical_classes():
     assert report['counts']['alias_mismatch'] == 1
     assert report['counts']['orphan_alias'] == 1
     assert report['samples']['alias_mismatch'][0]['person_id'] == stale_alias.person_id
-    assert 'should be 0.58 mg/dL' in report['samples']['alias_mismatch'][0]['detail']
+    assert 'does not match' in report['samples']['alias_mismatch'][0]['detail']
 
 
 def test_a_pending_alias_is_reported_without_being_touched():
@@ -188,3 +188,54 @@ def test_the_newest_measurement_decides_the_projection_class():
 def test_a_negative_limit_is_a_command_error():
     with pytest.raises(CommandError):
         call_command('audit_direct_bilirubin', '--limit', '-1')
+
+
+def test_samples_carry_person_ids_and_no_lab_values():
+    """The docstring promises person ids only; samples printed the value,
+    unit, alias and the expected number (#2489)."""
+    record = PatientRecordFactory()
+    _set_pair(record, Decimal('10.00'), 'UMOL/L', Decimal('10.00'))
+    unknown = PatientRecordFactory()
+    _set_pair(unknown, Decimal('3.21'), 'MG/L', Decimal('3.21'))
+
+    report = _audit()
+    text = io.StringIO()
+    call_command('audit_direct_bilirubin', stdout=text)
+
+    for rows in report['samples'].values():
+        for row in rows:
+            assert set(row) == {'person_id', 'detail'}
+    output = json.dumps(report) + text.getvalue()
+    for value in ('10.00', '0.58', '3.21', 'MG/L', 'UMOL/L'):
+        assert value not in output
+
+
+def test_a_full_run_bounds_measurements_with_a_subquery():
+    """A full run inlined every scanned person id into `IN (...)` (#2489)."""
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+
+    records = [PatientRecordFactory() for _ in range(3)]
+    for record in records:
+        _set_pair(record, Decimal('1.20'), 'MG/DL', Decimal('1.20'))
+
+    with CaptureQueriesContext(connection) as queries:
+        _audit()
+
+    measurement_sql = [q['sql'] for q in queries.captured_queries
+                       if '"measurement"' in q['sql']]
+    assert measurement_sql
+    for sql in measurement_sql:
+        assert 'IN (SELECT' in sql.upper().replace('IN(SELECT', 'IN (SELECT')
+        for record in records:
+            assert f'IN ({record.person_id}' not in sql
+
+
+def test_limit_scans_only_the_first_records():
+    for _ in range(3):
+        _set_pair(PatientRecordFactory(), Decimal('1.20'), None, Decimal('1.20'))
+
+    report = _audit('--limit', '2')
+
+    assert report['scanned'] == 2
+    assert report['counts']['pair_without_unit'] == 2
