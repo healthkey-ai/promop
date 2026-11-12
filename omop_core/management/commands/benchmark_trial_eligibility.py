@@ -47,6 +47,7 @@ from omop_core.services.chemistry_units import (
 from omop_core.services.canonical_units import value_in_source_unit
 from omop_core.services.clinical_units import blood_count_to_canonical, count_unit
 from omop_core.services.creatinine_units import (
+    DEFAULT_UNIT as CREATININE_DEFAULT_UNIT,
     canonical_from_pair as creatinine_canonical_from_pair,
     normalize_unit as normalize_creatinine_unit,
 )
@@ -419,7 +420,7 @@ def _fetch_omop_trial_row(person_id):
         'wbc_count_thousand_per_ul': _canonical_blood_count(row['wbc_count_thousand_per_ul']),
         'serum_creatinine_mg_dl': _canonical_pair(
             row['serum_creatinine_mg_dl'], normalize_creatinine_unit,
-            'MG/DL', creatinine_canonical_from_pair),
+            CREATININE_DEFAULT_UNIT, creatinine_canonical_from_pair),
         'creatinine_clearance_ml_min': row['creatinine_clearance_ml_min'],
         'serum_calcium_mg_dl': _canonical_pair(
             row['serum_calcium_mg_dl'],

@@ -236,6 +236,21 @@ def test_an_unreadable_newest_unit_is_no_evidence():
     assert _fetch_omop_trial_row(person.person_id)['serum_creatinine_mg_dl'] is None
 
 
+def test_a_unitless_row_reads_in_its_field_default_unit():
+    """No unit at all falls to the field default, and that default is the
+    units module's constant: pinning it here keeps a wrong default (a display
+    label instead of the stored code, or another module's) from silently
+    emptying the benchmark column."""
+    person = PersonFactory(year_of_birth=1960)
+    _measurement(person, '2160-0', 1.0, None)
+    _measurement(person, '718-7', 12.4, None)
+
+    row = _fetch_omop_trial_row(person.person_id)
+
+    assert row['serum_creatinine_mg_dl'] == Decimal('1.00')
+    assert row['hemoglobin_g_dl'] == Decimal('12.40')
+
+
 def _ucum(code):
     VocabularyFactory(vocabulary_id='UCUM')
     return ConceptFactory(vocabulary_id='UCUM', concept_code=code)
