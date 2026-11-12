@@ -369,7 +369,9 @@ def _patient_rows_for(scoped=False, truncated=False, code=None):
     the same code exactly or, with ``truncated``, every code it is the cut
     of; with ``scoped``, only the mapping's hospital's patients. ``code``
     is the mapping's code when the caller holds the one mapping, so the
-    match reads a literal instead of the outer row.
+    match reads a literal instead of the outer row. It must be that outer
+    mapping's own ``source_code``: vocabulary and hospital still come from
+    the outer row, so another code would silently mix two mappings.
 
     The caller picks exact or prefix per mapping (:func:`_is_truncated`,
     :func:`_truncated_mappings`) rather than this OR-ing both: an OR with a

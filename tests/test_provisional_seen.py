@@ -138,6 +138,16 @@ def test_a_short_code_matches_its_rows_exactly_never_by_prefix():
     assert _all_entry_points(mapping) == (True, True, True, 4)
 
 
+def test_a_code_one_short_of_the_limit_is_still_whole():
+    """The threshold is held twice (Python for one mapping, SQL for the set);
+    one character under it, neither may read the code as cut (#2492)."""
+    code = 'y' * (code_resolution.SOURCE_CODE_MAX - 2) + '%'
+    mapping = SourceCodeConceptMapping.objects.create(source_vocabulary_id=LAB, source_code=code,
+                                                      omop_table='measurement')
+    rows(code=code + '-longer', n=7)
+    assert _all_entry_points(mapping) == (False, False, False, 1000)
+
+
 @pytest.mark.parametrize('scoped', [False, True])
 def test_a_truncated_code_matches_the_full_code_and_every_longer_one(scoped):
     """The cut code answers for its exact rows and every row it is a prefix
