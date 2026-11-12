@@ -244,8 +244,9 @@ def _has_patient_rows(mapping):
     vocabulary stored under its canonical id also answers for the OID the
     rows may carry; a code the mapping holds truncated answers by prefix."""
     from django.db.models import Exists
-    from omop_core.mapping.axis_variants import _patient_rows_for
-    rows = _patient_rows_for(scoped=mapping.organization_id is not None)
+    from omop_core.mapping.axis_variants import _is_truncated, _patient_rows_for
+    rows = _patient_rows_for(scoped=mapping.organization_id is not None,
+                             truncated=_is_truncated(mapping.source_code), code=mapping.source_code)
     if mapping.omop_table:
         rows = rows.filter(omop_table=mapping.omop_table)
     return SourceCodeConceptMapping.objects.filter(pk=mapping.pk).filter(Exists(rows)).exists()
