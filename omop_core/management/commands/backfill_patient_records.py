@@ -23,11 +23,11 @@ import logging
 
 from django.core.management.base import BaseCommand
 
-from omop_core.models import PatientRecord
 from omop_core.services.patient_record_service import (
     DERIVATION_VERSION,
     refresh_patient_record,
 )
+from omop_core.services.rederivation_preview import stale_record_cohort
 
 logger = logging.getLogger(__name__)
 
@@ -74,18 +74,8 @@ class Command(BaseCommand):
         dry_run = options["dry_run"]
         organization = options["organization"]
 
-        if backfill_all:
-            qs = PatientRecord.objects.select_related("person").all()
-            label = "all"
-        else:
-            qs = PatientRecord.objects.select_related("person").filter(
-                derivation_version__lt=target,
-            )
-            label = f"derivation_version < {target}"
-
-        if organization:
-            qs = qs.filter(organization__slug=organization)
-            label += f" in organization {organization}"
+        qs, label = stale_record_cohort(target, backfill_all, organization)
+        qs = qs.select_related("person")
 
         total = qs.count()
         if total == 0:

@@ -122,6 +122,21 @@ def _statement_is_allowed(sql: str) -> bool:
     return False
 
 
+_STATEMENT_TARGET = re.compile(
+    r'^\s*(INSERT\s+INTO|UPDATE|DELETE\s+FROM|TRUNCATE(?:\s+TABLE)?|COPY)\s+("?[\w.]+"?)',
+    re.IGNORECASE,
+)
+
+
+def _statement_kind(sql: str) -> str:
+    """The statement's verb and table, never its text: a literal could be a value."""
+    match = _STATEMENT_TARGET.match(sql)
+    if match:
+        return f'{" ".join(match.group(1).upper().split())} {match.group(2)}'
+    word = sql.split(None, 1)[0].upper() if sql.strip() else ''
+    return word if word.isalpha() else 'statement'
+
+
 @contextlib.contextmanager
 def read_only_guard() -> Iterator[list[str]]:
     """Refuse every write except the PatientRecord update, and every task send.
@@ -138,8 +153,7 @@ def read_only_guard() -> Iterator[list[str]]:
 
     def write_guard(execute, sql, params, many, context):
         if not _statement_is_allowed(sql):
-            # Only the leading keywords: the statement can carry values.
-            refuse(f'a write outside patient_record: {" ".join(sql.split(None, 3)[:3])} ...')
+            refuse(f'a write outside patient_record: {_statement_kind(sql)}')
         return execute(sql, params, many, context)
 
     def refuse_task(*args, **kwargs):
@@ -170,11 +184,29 @@ def _values(record: PatientRecord) -> dict[str, object]:
 
 
 def _is_empty(value) -> bool:
-    """The derivation's own "no data" values (patient_record_service._is_empty).
+    """The derivation's own "no data" values: 0 and False are answers."""
+    from omop_core.services.patient_record_service import _is_empty as derivation_is_empty
 
-    0 and False are answers, not absences.
+    return derivation_is_empty(value)
+
+
+def stale_record_cohort(target_version: int, every_record: bool = False,
+                        organization: str | None = None):
+    """``(queryset, label)``: the PatientRecords a backfill re-derives.
+
+    One definition for backfill_patient_records and preview_rederivation, so
+    the preview cannot quietly report on a different cohort.
     """
-    return value is None or value == '' or value == [] or value == {}
+    qs = PatientRecord.objects.all()
+    if every_record:
+        label = 'all'
+    else:
+        qs = qs.filter(derivation_version__lt=target_version)
+        label = f'derivation_version < {target_version}'
+    if organization:
+        qs = qs.filter(organization__slug=organization)
+        label += f' in organization {organization}'
+    return qs, label
 
 
 def _is_number(value) -> bool:

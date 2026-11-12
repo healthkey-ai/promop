@@ -44,14 +44,20 @@ row. The refresh's own log lines are dropped while it runs: they quote what
 they diagnose (a unit's source text, an overflowing value). The backfill, which
 runs the same refresh for real, still logs them.
 
-It is read-only: each record runs the real `refresh_patient_record` inside a
+It keeps nothing, but it is not read-only: each record runs the real
+`refresh_patient_record`, including its `UPDATE` of `patient_record`, inside a
 transaction that is always rolled back, while a guard refuses any SQL other
 than reads and the `patient_record` update (and, within reads, sequence,
 advisory-lock, setting and `SELECT ... INTO` calls), and any Celery publish.
 The guard catches accidental writes by the refresh code; it is not a sandbox,
 so run it as a role with SELECT plus UPDATE on `patient_record` only. A
-refused write is reported as an error for that person and the command exits
-non-zero. Operational costs:
+refused write is reported, by statement verb and table, as an error for that
+person and the command exits non-zero.
+
+**Run it on staging, or on a restored copy of production -- never against
+`PROD_DATABASE_URL`.** Production is for read-only checks (see AGENTS.md), and
+this takes row locks and executes updates there before rolling them back.
+Operational costs:
 
 - It must run against the writable primary, as a role that may `UPDATE
   patient_record`: the refresh really executes its update before the rollback,

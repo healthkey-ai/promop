@@ -549,7 +549,11 @@ def test_a_write_outside_the_record_is_refused_and_rolled_back(monkeypatch):
         call_command('preview_rederivation', '--format', 'json', stdout=out)
     document = json.loads(out.getvalue())
 
-    assert document['errors'] == [{'person_id': record.person_id, 'error': 'PreviewWriteBlocked'}]
+    table = RecordRevision._meta.db_table
+    assert document['errors'] == [{
+        'person_id': record.person_id, 'error': 'PreviewWriteBlocked',
+        'refused': f'a write outside patient_record: INSERT INTO "{table}"',
+    }]
     assert RecordRevision.objects.count() == revisions
     assert Measurement.objects.count() == measurements
     assert PatientRecord.objects.get(pk=record.pk).race == 'Asian'
@@ -602,3 +606,28 @@ def test_a_refused_task_the_refresh_swallows_still_fails_the_preview(monkeypatch
 
     with pytest.raises(PreviewWriteBlocked, match='Celery'):
         preview_record(record)
+
+
+@pytest.mark.parametrize('sql, kind', [
+    ('INSERT INTO "record_revision" ("field") VALUES (%s)', 'INSERT INTO "record_revision"'),
+    ('update person set given_name = \'Jane\' where id = 1', 'UPDATE person'),
+    ('DELETE FROM "measurement" WHERE id = 1', 'DELETE FROM "measurement"'),
+    ("SELECT set_config('app.name', 'Jane Doe', true)", 'SELECT'),
+    ("'Jane Doe'", 'statement'),
+])
+def test_a_refusal_names_the_statement_kind_never_its_text(sql, kind):
+    from omop_core.services.rederivation_preview import _statement_kind
+    assert _statement_kind(sql) == kind
+
+
+def test_the_preview_and_the_backfill_select_the_same_cohort():
+    org = OrganizationFactory(slug='acme')
+    records = [_settled(organization=org), _settled(), _settled(organization=org)]
+    PatientRecord.objects.filter(pk=records[1].pk).update(derivation_version=DERIVATION_VERSION)
+
+    out = io.StringIO()
+    call_command('backfill_patient_records', '--dry-run', '--organization', 'acme', stdout=out)
+    preview = _json('--organization', 'acme')
+
+    assert '2 record(s) matching derivation_version' in out.getvalue()
+    assert preview['summary']['records_scanned'] == 2

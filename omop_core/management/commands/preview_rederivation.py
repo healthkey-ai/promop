@@ -28,8 +28,12 @@ empty; empty is null, "", [] or {}) or changed, plus up/down for a number (not
 for a flag: its direction would be its value) -- and whether it held a pending
 user edit. A custom_fields key with no CustomPatientField definition prints as
 custom_fields.<undefined> (and --field takes that name). The refresh's own log lines are dropped while it
-runs. No names either: rows carry person_id only. Needs the writable primary: see
-"Before a backfill" in docs/DERIVATION_CHANGELOG.md.
+runs. No names either: rows carry person_id only.
+
+It keeps nothing but is not read-only: the refresh's UPDATE runs and is rolled
+back, under row locks. Run it on staging or a restored copy of production,
+never against PROD_DATABASE_URL; it needs the writable primary. See "Before a
+backfill" in docs/DERIVATION_CHANGELOG.md.
 """
 
 import csv
@@ -43,7 +47,8 @@ from django.db import DatabaseError
 from omop_core.models import PatientRecord
 from omop_core.services.patient_record_service import DERIVATION_VERSION
 from omop_core.services.rederivation_preview import (
-    UNDEFINED_CUSTOM_FIELD, custom_field_names, preview_record,
+    IGNORED_FIELDS, UNDEFINED_CUSTOM_FIELD, PreviewWriteBlocked, custom_field_names,
+    preview_record, stale_record_cohort,
 )
 
 logger = logging.getLogger(__name__)
@@ -58,6 +63,9 @@ def _failure(person_id, exc):
     constraint name only.
     """
     failure = {"person_id": person_id, "error": type(exc).__name__}
+    if isinstance(exc, PreviewWriteBlocked):
+        # Built from the statement's verb and table only (see read_only_guard).
+        failure["refused"] = str(exc).removeprefix("preview refused ")
     cause = exc if isinstance(exc, DatabaseError) else None
     while cause is not None and not hasattr(cause, "sqlstate"):
         cause = cause.__cause__
@@ -71,8 +79,6 @@ def _failure(person_id, exc):
 
 
 def _known_fields():
-    from omop_core.services.rederivation_preview import IGNORED_FIELDS
-
     return {field.name for field in PatientRecord._meta.concrete_fields} - IGNORED_FIELDS
 
 
@@ -153,15 +159,7 @@ class Command(BaseCommand):
 
     def _cohort(self, options):
         target = options["target_version"] if options["target_version"] is not None else DERIVATION_VERSION
-        qs = PatientRecord.objects.all()
-        if options["preview_all"]:
-            label = "all"
-        else:
-            qs = qs.filter(derivation_version__lt=target)
-            label = f"derivation_version < {target}"
-        if options["organization"]:
-            qs = qs.filter(organization__slug=options["organization"])
-            label += f" in organization {options['organization']}"
+        qs, label = stale_record_cohort(target, options["preview_all"], options["organization"])
         if options["person_ids"]:
             qs = qs.filter(person_id__in=options["person_ids"])
             label += f" for {len(set(options['person_ids']))} person_id(s)"
