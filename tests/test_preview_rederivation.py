@@ -170,22 +170,22 @@ def test_no_value_is_printed_in_any_format(monkeypatch, capsys, caplog):
     """Round 3 printed source text through disease, stage, race and an
     unchecked choices field; round 2 through genomic findings. No value of any
     field reaches the output, whatever the field."""
-    secret = 'Jane Doe Qzx'
+    marker = 'Jane Doe Qzx'
     record = _settled()
     _stale(record, email='jane@example.org', phone_number='555-0100',
            death_date='2024-03-01', latitude=45.123987, longitude=-73.654321,
-           custom_fields={'note': secret, 'mrn': 4815162342, secret: 3})
+           custom_fields={'note': marker, 'mrn': 4815162342, marker: 3})
 
     def derived(person, snapshot=None):
         # The refresh's own diagnostics quote what they diagnose.
         logging.getLogger('omop_core.services.patient_record_service').warning(
-            'unit_source_value=%r', secret)
-        return {'blood_type': None, 'tobacco_use_details': secret, 'planned_therapies': secret}
+            'unit_source_value=%r', marker)
+        return {'blood_type': None, 'tobacco_use_details': marker, 'planned_therapies': marker}
 
     monkeypatch.setattr(patient_record_service, '_get_blood_type_data', derived)
     PatientRecord.objects.filter(pk=record.pk).update(
-        disease=secret, disease_slug=secret, stage=secret, race=secret,
-        ethnicity=secret, genetic_mutations=[{'variant': secret}])
+        disease=marker, disease_slug=marker, stage=marker, race=marker,
+        ethnicity=marker, genetic_mutations=[{'variant': marker}])
 
     caplog.set_level(logging.DEBUG)
     outputs = [_run(*args) for args in (
