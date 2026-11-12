@@ -107,10 +107,17 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
   // Columns follow the roles (#2470): the outreach columns are an org
   // admin's, and Organization appears once the list spans several real
   // organizations (the Unassigned entry is not one).
+  // A primitive, not `filterOptions.orgs`: the response replaces that array on
+  // every fetch, so a memo keyed on it would re-create `activeFilters`, then
+  // `fetchPatients`, and the fetch effect would re-run for ever.
+  const multiOrg = useMemo(
+    () => filterOptions.orgs.filter((org) => org.value !== '__unassigned__').length > 1,
+    [filterOptions.orgs],
+  );
   const extraColumns = useMemo(() => columnsFor({
     outreach: canAdministerOrganizations,
-    multiOrg: filterOptions.orgs.filter((org) => org.value !== '__unassigned__').length > 1,
-  }), [canAdministerOrganizations, filterOptions.orgs]);
+    multiOrg,
+  }), [canAdministerOrganizations, multiOrg]);
   const show = (column: ExtraColumn) => extraColumns.includes(column);
   // A filter whose control the reader does not see is not applied: a record
   // saved under the old Foundation preset could otherwise narrow a doctor's
