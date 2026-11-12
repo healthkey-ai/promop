@@ -72,15 +72,24 @@ export default function TherapyLinesPanel({ store, readOnly = false, onChanged, 
     if (typeof line.episode_id !== 'number') return;
     setBusy(true); setError('');
     store.beginBypassWrite();
+    let saved = false;
     try {
       await retractTherapyLine(line.episode_id, connection);
       // A read already in flight started before this write; sharing it would
       // publish the pre-write record (#2433).
       await store.load(true);
+      saved = true;
       onChanged?.();
     } catch {
-      setError('Could not remove that line. Try again.');
-      store.failBypassWrite('Could not remove that therapy line.');
+      if (saved) {
+        // The line was removed; only the host refresh failed. Reporting a
+        // failed write here would hold the host's save state for a write the
+        // server accepted.
+        setError('The line was removed, but this screen could not refresh the record. Reload to see the current value.');
+      } else {
+        setError('Could not remove that line. Try again.');
+        store.failBypassWrite('Could not remove that therapy line.');
+      }
     } finally {
       store.endBypassWrite();
       setBusy(false);
@@ -91,13 +100,19 @@ export default function TherapyLinesPanel({ store, readOnly = false, onChanged, 
     if (personId === null) return;
     setBusy(true); setError('');
     store.beginBypassWrite();
+    let saved = false;
     try {
       await setTherapyHistoryCompleteness(personId, next, connection);
       await store.load(true);
+      saved = true;
       onChanged?.();
     } catch {
-      setError('Could not update whether this history is complete.');
-      store.failBypassWrite('Could not update whether this treatment history is complete.');
+      if (saved) {
+        setError('The completeness setting was saved, but this screen could not refresh the record. Reload to see the current value.');
+      } else {
+        setError('Could not update whether this history is complete.');
+        store.failBypassWrite('Could not update whether this treatment history is complete.');
+      }
     } finally {
       store.endBypassWrite();
       setBusy(false);
