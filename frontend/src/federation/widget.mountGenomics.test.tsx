@@ -13,7 +13,9 @@ const storeRef: { current?: PatientFormStore } = {};
 const clientRef: { current?: Record<string, unknown> } = {};
 const disposers: Array<() => void> = [];
 
-vi.mock("./patientFormRuntime", () => ({
+vi.mock("./patientFormRuntime", async (importOriginal) => ({
+  // Renewals and store ids stay real; only the runtime is replaced.
+  ...await importOriginal<typeof import("./patientFormRuntime")>(),
   patientFormRuntime: () => ({
     // The findings modal must talk through the widget's own client, not a
     // module-level transport that another mounted widget could have replaced.

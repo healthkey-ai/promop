@@ -45,7 +45,9 @@ function runtimeFor(apiBase = '') {
   return mounted;
 }
 
-vi.mock('./patientFormRuntime', () => ({
+vi.mock('./patientFormRuntime', async (importOriginal) => ({
+  // Renewals and store ids stay real; only the runtime is replaced.
+  ...await importOriginal<typeof import('./patientFormRuntime')>(),
   patientFormRuntime: (opts: { apiBase?: string }) => {
     const mounted = runtimeFor(opts.apiBase ?? '');
     return { client: mounted.client, queryClient: new QueryClient(), store: mounted.store };
