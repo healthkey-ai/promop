@@ -74,3 +74,9 @@ def test_a_unitless_creatinine_with_unit_concept_zero_is_read_in_mg_dl():
     MeasurementFactory(person=person, measurement_source_value='2160-0', measurement_date=NEW,
                        value_as_number=2.5, unit_source_value='', unit_concept=zero)
     assert _crab(person) is True
+
+
+def test_a_creatinine_beyond_its_column_is_not_renal_evidence():
+    person = PersonFactory()
+    _creatinine(person, 5000, 'mg/dL')
+    assert _crab(person) is None

@@ -118,3 +118,16 @@ def test_an_out_of_range_value_is_not_evidence(code, value, unit):
     person = PersonFactory()
     _measure(person, code, value, unit)
     assert _crab(person) is None
+
+
+@pytest.mark.parametrize('concept_code, source', [('718-7', '59260-0'), ('59260-0', '718-7')])
+def test_a_row_under_both_hemoglobin_codes_takes_the_stricter_default(concept_code, source):
+    """A unitless row matching the mass code one way and the molar code the
+    other is read as the molar one: no default, no evidence."""
+    from tests.factories import ConceptFactory
+    person = PersonFactory()
+    MeasurementFactory(
+        person=person, measurement_concept=ConceptFactory(concept_code=concept_code),
+        measurement_source_value=source, measurement_date=NEW,
+        value_as_number=8.0, unit_source_value='')
+    assert _crab(person) is None
