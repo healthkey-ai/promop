@@ -1950,7 +1950,13 @@ Printable ASCII, no whitespace, at most 512; anything else is a 400.
   by key the same way; `bulk_update` may set or change a key (a collision is 409).
 - **Concurrent requests with one key converge to one row.** The plan locks the
   keyed rows it found; the INSERT is `ON CONFLICT DO NOTHING`, and a key another
-  request inserted in between is re-read and applied as a key match.
+  request inserted in between is re-read and applied as a key match. Any other
+  conflict hidden by it (an id taken, the blocking row deleted before the
+  re-read) is a 409, safe to retry.
+- **A replay overwrites manual edits.** A key match rewrites the row from the
+  source, so a curator's `PATCH` to a keyed row lasts only until the producer
+  sends that record again, and a column the producer never sends is cleared. Fix
+  a keyed row at the source, or mark it entered in error (that flag is kept).
 - With `X-Provenance-Organization-ID`, a key held by another hospital's row is a
   409. A key match records provenance when a source is sent, naming the
   hospital only on a row already attributed to it.
