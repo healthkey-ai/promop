@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useCallback, useMemo } from 'react';
 import type { AxiosInstance } from 'axios';
 
 import GenomicsFindings, { GenomicsDialogShell } from '@/components/PatientInfo/GenomicsFindings';
@@ -31,6 +31,17 @@ export default function GenomicsFindingsModal({ store, client, apiBase, readOnly
   // A fresh arrow every render would re-run the findings load on every state
   // change; the editor keys its effect on the resolved URL string instead.
   const url = useMemo(() => (path: string) => `${base}${path}`, [base]);
+  // The findings endpoints bypass the store's save queue, so the store still
+  // holds the pre-write record. Re-read it before telling the host, as the
+  // therapy panel and the Genomics tab do: other surfaces on this connection
+  // render from the store. Listeners are held until the read lands.
+  const changed = useCallback(() => {
+    store.beginBypassWrite();
+    // A read already in flight started before this write; start a new one.
+    void store.load(true)
+      .then(() => onChanged())
+      .finally(() => store.endBypassWrite());
+  }, [store, onChanged]);
 
   if (state.loading) {
     return <GenomicsDialogShell title="Genomic findings" onClose={onClose}>
@@ -54,7 +65,7 @@ export default function GenomicsFindingsModal({ store, client, apiBase, readOnly
       client={client}
       url={url}
       onClose={onClose}
-      onChanged={onChanged}
+      onChanged={changed}
     />
   </PatientFormContext.Provider>;
 }
