@@ -252,6 +252,64 @@ def test_a_date_only_edit_moves_the_owned_result_without_a_fact_id(editor):
     assert rows.get().measurement_date == second
 
 
+def test_an_ambiguous_unnamed_correction_is_refused(editor):
+    """Two owned results with the same value and no fact_id: refuse rather than
+    move a result the user may not mean (#2454 review)."""
+    record, client = editor
+    concept = hemoglobin()
+    first = timezone.localdate() - timedelta(days=30)
+    second = timezone.localdate() - timedelta(days=20)
+    third = timezone.localdate() - timedelta(days=25)
+    for value, day in ((12, first), (9, second), (12, third)):
+        assert client.patch(
+            f'/api/patient-info/{record.person_id}/',
+            {'hemoglobin_g_dl': {'value': value, 'date': day.isoformat()}},
+            format='json').status_code == 200
+
+    response = client.patch(
+        f'/api/patient-info/{record.person_id}/',
+        {'hemoglobin_g_dl': {'value': 12,
+                             'date': (first - timedelta(days=2)).isoformat()}},
+        format='json',
+    )
+
+    assert response.status_code == 400, response.data
+    rows = Measurement.objects.filter(person=record.person, measurement_concept=concept)
+    assert rows.count() == 3
+    assert set(rows.values_list('measurement_date', flat=True)) == {first, second, third}
+
+
+def test_a_date_only_edit_finds_the_owned_result_behind_a_newer_one(editor):
+    """A newer owned result with another value must not hide the one being
+    corrected; otherwise the correction duplicates instead of moving (#2454)."""
+    record, client = editor
+    concept = hemoglobin()
+    later = timezone.localdate() - timedelta(days=3)
+    earlier = timezone.localdate() - timedelta(days=20)
+    for value, day in ((9, later), (12, earlier + timedelta(days=9))):
+        assert client.patch(
+            f'/api/patient-info/{record.person_id}/',
+            {'hemoglobin_g_dl': {'value': value, 'date': day.isoformat()}},
+            format='json').status_code == 200
+    assert client.patch(
+        f'/api/patient-info/{record.person_id}/',
+        {'hemoglobin_g_dl': {'value': 12, 'date': earlier.isoformat()}},
+        format='json').status_code == 200
+
+    response = client.patch(
+        f'/api/patient-info/{record.person_id}/',
+        {'hemoglobin_g_dl': {'value': 12,
+                             'date': (earlier - timedelta(days=3)).isoformat()}},
+        format='json',
+    )
+
+    assert response.status_code == 200, response.data
+    rows = Measurement.objects.filter(person=record.person, measurement_concept=concept)
+    assert rows.count() == 2
+    assert rows.get(value_as_number=9).measurement_date == later
+    assert rows.get(value_as_number=12).measurement_date == earlier - timedelta(days=3)
+
+
 def test_a_same_value_result_on_another_day_is_a_new_result(editor):
     """Without a fact_id the client names no result, so an equal value on another
     day is a new result rather than a refused date correction (#2454)."""
@@ -281,9 +339,14 @@ def test_a_same_value_result_on_another_day_is_a_new_result(editor):
     imported = Measurement.objects.get(
         person=record.person, measurement_date=timezone.localdate())
     assert imported.value_as_number == 12
+    assert Measurement.objects.filter(
+        person=record.person, measurement_date=timezone.localdate(),
+        value_as_number=12).count() == 1
     created = Measurement.objects.get(
         person=record.person, measurement_date=chosen, value_as_number=12)
     assert created.measurement_source_value == '718-7'
+    assert Measurement.objects.filter(
+        person=record.person, measurement_date=chosen).count() == 1
     assert Measurement.objects.get(
         person=record.person, measurement_date=older).value_as_number == 12
 

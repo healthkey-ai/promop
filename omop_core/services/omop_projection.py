@@ -570,6 +570,10 @@ def _same_projection_value(row, value, val_num, val_str):
     return False
 
 
+class AmbiguousFactDateError(Exception):
+    """More than one owned result holds the value an unnamed correction dates."""
+
+
 def move_owned_fact_date(person, field_name, value, projection, fact_date, *,
                          type_concept_id=None, fact_id=None):
     """Move the fact this projector owns to ``fact_date``, if it can.
@@ -578,10 +582,13 @@ def move_owned_fact_date(person, field_name, value, projection, fact_date, *,
     None when no fact this edit may move matches (the caller may create one),
     and False when an owned fact cannot move: a different result already
     occupies the target day. ``fact_id`` is the id a previous PATCH returned for
-    this result; without it the active (newest) fact is the candidate, and an
-    unnamed edit falls through to a new result when that fact is not ours — an
-    equal value on another day is legitimate (#2454 review). A named fact that
-    does not move is a refused correction.
+    this result; without it the newest fact is the candidate when it holds the
+    value being dated, and a newer fact with another value cannot hide an owned
+    result that does (the record may have been edited without a re-derive); two
+    owned results with that value cannot be told apart, so the correction is
+    refused. An unnamed edit falls through to a new result when nothing movable
+    matches (an equal value on another day is legitimate, #2454 review). A named
+    fact that does not move is a refused correction.
     """
     target = projection.get('omop_table')
     concept_id = projection.get('concept_id')
@@ -600,19 +607,39 @@ def move_owned_fact_date(person, field_name, value, projection, fact_date, *,
     )
     if fact_id is not None:
         rows = rows.filter(pk=fact_id)
-    current = rows.order_by('-' + date_field, '-' + pk_field).first()
+    ordered = list(rows.order_by('-' + date_field, '-' + pk_field))
+    if not ordered:
+        return None if fact_id is None else False
+    newest = ordered[0]
+
+    def movable(candidate):
+        candidate_type = getattr(candidate, type_field)
+        if type_concept_id is not None:
+            if candidate_type != type_concept_id:
+                return False
+        elif candidate_type == PATIENT_SELF_REPORT_TYPE and (
+                projection.get('type_concept_id') or 32817) != PATIENT_SELF_REPORT_TYPE:
+            return False
+        return (_projection_owned(candidate)
+                and _same_projection_value(candidate, value, val_num, val_str))
+
+    if _same_projection_value(newest, value, val_num, val_str):
+        # The value on screen is the newest fact: correct that one or, when it
+        # is not ours, let the projection record a new result. An older owned
+        # result with the same value is not what the user is dating (#2454).
+        current = newest if movable(newest) else None
+    else:
+        # The newest fact holds another value (the record was edited without a
+        # re-derive). Find the owned fact with the value being corrected; when
+        # several do, an unnamed edit cannot know which one the user means, so
+        # it refuses instead of moving the wrong result (#2454 review).
+        candidates = [candidate for candidate in ordered if movable(candidate)]
+        if len(candidates) > 1:
+            raise AmbiguousFactDateError(
+                'More than one result holds this value, so an unnamed correction cannot '
+                'tell them apart.')
+        current = candidates[0] if candidates else None
     if current is None:
-        return None if fact_id is None else False
-    fact_type = getattr(current, type_field)
-    if type_concept_id is not None:
-        if fact_type != type_concept_id:
-            return None if fact_id is None else False
-    elif fact_type == PATIENT_SELF_REPORT_TYPE and (
-            projection.get('type_concept_id') or 32817) != PATIENT_SELF_REPORT_TYPE:
-        return None if fact_id is None else False
-    if not _projection_owned(current):
-        return None if fact_id is None else False
-    if not _same_projection_value(current, value, val_num, val_str):
         return None if fact_id is None else False
     if getattr(current, date_field) == fact_date:
         return current.pk

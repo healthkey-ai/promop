@@ -1737,12 +1737,17 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     # overwrite today's clinical fact. Keep the record value.
                     continue
                 if field in date_only_fields:
-                    from omop_core.services.omop_projection import move_owned_fact_date
-                    moved = move_owned_fact_date(
-                        person, field, patch_data[field], projection, fact_dates[field],
-                        type_concept_id=authorship.get('type_concept_id'),
-                        fact_id=known_fact_ids.get(field),
+                    from omop_core.services.omop_projection import (
+                        AmbiguousFactDateError, move_owned_fact_date,
                     )
+                    try:
+                        moved = move_owned_fact_date(
+                            person, field, patch_data[field], projection, fact_dates[field],
+                            type_concept_id=authorship.get('type_concept_id'),
+                            fact_id=known_fact_ids.get(field),
+                        )
+                    except AmbiguousFactDateError as exc:
+                        raise ValidationError({field: str(exc)}) from exc
                     if moved is False:
                         raise ValidationError({field: (
                             'This result was not written here, so its date cannot be '
