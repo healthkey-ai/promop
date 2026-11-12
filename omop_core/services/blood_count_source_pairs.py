@@ -10,7 +10,7 @@ This is the count counterpart of `hemoglobin_units`: one place owns the unit
 spellings and the factor, and the serializer, derivation and both form writers
 use it.
 """
-from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal
 
 from omop_core.services.clinical_units import blood_count_to_canonical
 
@@ -117,14 +117,16 @@ def canonical_from_source(source, value, unit=None):
         code = normalize_unit(unit)
     if code is None:
         return False, None
-    canonical = blood_count_to_canonical(value, code)
-    if canonical is None:
-        return False, None
     try:
+        canonical = blood_count_to_canonical(value, code)
+        if canonical is None:
+            return False, None
         rounded = canonical.quantize(CANONICAL_QUANTUM, rounding=ROUND_HALF_UP)
-    except InvalidOperation:
-        # More digits than the decimal context holds (e.g. 1e40 cells/µL):
-        # far past the column, so it is refused like any other overflow.
+    except ArithmeticError:
+        # Past the decimal context: the unit factor overflows the exponent
+        # (`decimal.Overflow` for 1e1000003) or quantize needs more digits
+        # than the context holds (InvalidOperation for 1e40). Either is far
+        # past the column, so it is refused like any other overflow.
         return False, None
     if rounded > CANONICAL_LIMIT:
         return False, None
