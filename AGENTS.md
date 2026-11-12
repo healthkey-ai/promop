@@ -1892,12 +1892,13 @@ timeout, or a re-parse converges instead of duplicating. Semantics per key:
 event already present → left in place, its concept updated when it changed and
 any stacked historical duplicates collapsed onto the earliest row; otherwise
 inserted. Repeats within one batch collapse to a single row (last occurrence
-wins). Only the concept column is rewritten on a content-matched row — every
-other column is left as stored, so a re-run cannot quietly overwrite a corrected
-value; a key match rewrites the columns the serializer accepts, as below. Only
-inserted rows get a `ProvenanceRecord`. `?upsert=false` restores append-only
-writes for unkeyed rows; a row carrying a source record key is still matched by
-key.
+wins). A content match rewrites only the concept column — every other column is
+left as stored, so a re-run cannot quietly overwrite a corrected value — unless
+the incoming row carries a source record key: the key is then stamped on the
+unkeyed row it matched and the columns the serializer accepts are rewritten, as
+below. Inserted rows and key matches get a `ProvenanceRecord` when a source is
+sent. `?upsert=false` restores append-only writes for unkeyed rows; a row
+carrying a source record key is still matched by key.
 
 | Model | Event identity |
 |---|---|
