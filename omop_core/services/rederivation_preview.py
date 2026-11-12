@@ -34,6 +34,7 @@ import logging
 import math
 import os
 import re
+import sysconfig
 import traceback
 from typing import Iterator
 from unittest import mock
@@ -125,9 +126,39 @@ def _statement_is_allowed(sql: str) -> bool:
 
 
 _STATEMENT_TARGET = re.compile(
-    r'^\s*(INSERT\s+INTO|UPDATE|DELETE\s+FROM|TRUNCATE(?:\s+TABLE)?|COPY)\s+("?[\w.]+"?)',
+    r'^\s*(INSERT\s+INTO|UPDATE(?:\s+ONLY)?|DELETE\s+FROM(?:\s+ONLY)?'
+    r'|TRUNCATE(?:\s+TABLE)?(?:\s+ONLY)?|COPY)\s+((?:"?\w+"?\.)?"?\w+"?)',
     re.IGNORECASE,
 )
+
+
+def _refusal_reason(sql: str) -> str:
+    """Why _statement_is_allowed refused ``sql``, in the same order it checks."""
+    body = sql.strip().rstrip(';').rstrip()
+    if ';' in body:
+        return 'more than one statement'
+    if _SIDE_EFFECT_FUNCTION.search(body):
+        return 'a call that outlives the rollback'
+    return 'a write outside patient_record'
+
+
+def _app_location(frames) -> str | None:
+    """``file:line in function`` of the innermost frame of promop's own code.
+
+    Not a library frame (psycopg's cursor is where every database error is
+    raised) and not this module's guard or re-raise.
+    """
+    for frame in reversed(frames):
+        path = frame.filename
+        if ('site-packages' in path or path.startswith(_STDLIB)
+                or os.path.abspath(path) == _THIS_FILE):
+            continue
+        return f'{os.path.basename(path)}:{frame.lineno} in {frame.name}'
+    return None
+
+
+_STDLIB = sysconfig.get_paths()['stdlib']
+_THIS_FILE = os.path.abspath(__file__)
 
 
 def _statement_kind(sql: str) -> str:
@@ -155,7 +186,11 @@ def read_only_guard() -> Iterator[list[str]]:
 
     def write_guard(execute, sql, params, many, context):
         if not _statement_is_allowed(sql):
-            refuse(f'a write outside patient_record: {_statement_kind(sql)}')
+            # Where the refresh issued it: the exception that reaches the
+            # caller is re-raised here, far from the code that wrote.
+            at = _app_location(traceback.extract_stack())
+            refuse(f'{_refusal_reason(sql)}: {_statement_kind(sql)}'
+                   + (f' (at {at})' if at else ''))
         return execute(sql, params, many, context)
 
     def refuse_task(*args, **kwargs):
@@ -195,12 +230,14 @@ def describe_failure(person_id: int, exc: BaseException) -> dict:
     preview_rederivation and backfill_patient_records.
     """
     failure = {'person_id': person_id, 'error': type(exc).__name__}
-    # Where it was raised -- file, line, function, never a value -- so a code
-    # bug can still be found without the traceback.
-    frames = traceback.extract_tb(exc.__traceback__)
-    if frames:
-        frame = frames[-1]
-        failure['at'] = f'{os.path.basename(frame.filename)}:{frame.lineno} in {frame.name}'
+    # Where promop's code raised it -- file, line, function, never a value --
+    # so a bug can still be found without the traceback.
+    # A refusal names its own place (see read_only_guard); its traceback ends
+    # in the re-raise, not at the write.
+    at = (None if isinstance(exc, PreviewWriteBlocked)
+          else _app_location(traceback.extract_tb(exc.__traceback__)))
+    if at:
+        failure['at'] = at
     if isinstance(exc, PreviewWriteBlocked):
         # Built from the statement's verb and table only (see read_only_guard).
         failure['refused'] = str(exc).removeprefix('preview refused ')

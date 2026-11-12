@@ -477,7 +477,9 @@ def test_a_failure_is_logged_without_the_row(caplog, capsys):
         assert value not in out.getvalue(), value
     assert all(r.exc_info is None for r in caplog.records)
     errors = json.loads(out.getvalue())['errors']
-    assert re.fullmatch(r'\w+\.py:\d+ in \w+', errors[0].pop('at'))
+    at = errors[0].pop('at')
+    # promop's own frame, not psycopg's cursor where every DB error is raised.
+    assert re.fullmatch(r'\w+\.py:\d+ in \w+', at) and not at.startswith('cursor.py'), at
     assert errors == [{
         'person_id': record.person_id, 'error': 'IntegrityError',
         'sqlstate': '23514', 'constraint': 'patientrecord_latitude_range',
@@ -505,6 +507,7 @@ def test_a_backfill_failure_is_logged_without_the_row(caplog, capsys):
     assert all(r.exc_info is None for r in caplog.records)
     assert (f'person_id={record.person_id}: error=IntegrityError at=' in caplog.text
             and 'sqlstate=23514 constraint=patientrecord_latitude_range' in caplog.text)
+    assert 'at=cursor.py' not in caplog.text
     assert '1 error(s)' in out.getvalue()
 
 
@@ -576,11 +579,13 @@ def test_a_write_outside_the_record_is_refused_and_rolled_back(monkeypatch):
     document = json.loads(out.getvalue())
 
     table = RecordRevision._meta.db_table
-    document['errors'][0].pop('at')
-    assert document['errors'] == [{
-        'person_id': record.person_id, 'error': 'PreviewWriteBlocked',
-        'refused': f'a write outside patient_record: INSERT INTO "{table}"',
-    }]
+    [error] = document['errors']
+    assert 'at' not in error  # the re-raise is not where the write was
+    assert (error['person_id'], error['error']) == (record.person_id, 'PreviewWriteBlocked')
+    # Where the refresh tried the write: this test's patched extractor.
+    assert re.fullmatch(
+        rf'a write outside patient_record: INSERT INTO "{table}" '
+        r'\(at test_preview_rederivation\.py:\d+ in writes\)', error['refused']), error
     assert RecordRevision.objects.count() == revisions
     assert Measurement.objects.count() == measurements
     assert PatientRecord.objects.get(pk=record.pk).race == 'Asian'
@@ -641,20 +646,53 @@ def test_a_refused_task_the_refresh_swallows_still_fails_the_preview(monkeypatch
     ('DELETE FROM "measurement" WHERE id = 1', 'DELETE FROM "measurement"'),
     ("SELECT set_config('app.name', 'Jane Doe', true)", 'SELECT'),
     ("'Jane Doe'", 'statement'),
+    ('INSERT INTO "public"."record_revision" ("field") VALUES (%s)',
+     'INSERT INTO "public"."record_revision"'),
+    ('UPDATE ONLY "person" SET "x" = %s', 'UPDATE ONLY "person"'),
 ])
 def test_a_refusal_names_the_statement_kind_never_its_text(sql, kind):
     from omop_core.services.rederivation_preview import _statement_kind
     assert _statement_kind(sql) == kind
 
 
-def test_the_preview_and_the_backfill_select_the_same_cohort():
-    org = OrganizationFactory(slug='acme')
-    records = [_settled(organization=org), _settled(), _settled(organization=org)]
-    PatientRecord.objects.filter(pk=records[1].pk).update(derivation_version=DERIVATION_VERSION)
+@pytest.mark.parametrize('args, expected', [
+    (('--organization', 'acme'), {'acme stale'}),
+    ((), {'acme stale', 'other stale'}),
+    (('--all',), {'acme stale', 'acme current', 'other stale', 'other current'}),
+    (('--all', '--organization', 'acme'), {'acme stale', 'acme current'}),
+    (('--target-version', '0'), set()),
+    (('--target-version', '1'), {'acme stale', 'other stale'}),
+])
+def test_the_preview_and_the_backfill_select_the_same_cohort(args, expected):
+    """A current insider and a stale outsider: dropping either filter shows."""
+    acme = OrganizationFactory(slug='acme')
+    records = {
+        'acme stale': _settled(organization=acme), 'acme current': _settled(organization=acme),
+        'other stale': _settled(), 'other current': _settled(),
+    }
+    for name in ('acme current', 'other current'):
+        PatientRecord.objects.filter(pk=records[name].pk).update(
+            derivation_version=DERIVATION_VERSION)
+    for name in records:
+        _stale(records[name], race='Asian')  # every record has a change to report
+    names = {record.person_id: name for name, record in records.items()}
 
     out = io.StringIO()
-    call_command('backfill_patient_records', '--dry-run', '--organization', 'acme', stdout=out)
-    preview = _json('--organization', 'acme')
+    call_command('backfill_patient_records', '--dry-run', *args, stdout=out)
+    preview = _json(*args)
 
-    assert '2 record(s) matching derivation_version' in out.getvalue()
-    assert preview['summary']['records_scanned'] == 2
+    if expected:
+        assert f'{len(expected)} record(s) matching' in out.getvalue()
+    else:
+        assert 'No stale records found.' in out.getvalue()
+    assert {names[row['person_id']] for row in preview['changes']} == expected
+
+
+@pytest.mark.parametrize('sql, reason', [
+    ('UPDATE "patient_record" SET "a" = 1; DELETE FROM "x"', 'more than one statement'),
+    ('UPDATE "patient_record" SET "a" = nextval(%s)', 'a call that outlives the rollback'),
+    ('INSERT INTO "x" VALUES (1)', 'a write outside patient_record'),
+])
+def test_a_refusal_says_why(sql, reason):
+    from omop_core.services.rederivation_preview import _refusal_reason
+    assert _refusal_reason(sql) == reason
