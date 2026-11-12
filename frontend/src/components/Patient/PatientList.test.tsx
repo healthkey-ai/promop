@@ -302,4 +302,42 @@ it('shows an analyst at a public demo org a de-identified, unopenable list (#246
   // No name search and no name or age sort over fields the server withholds.
   expect(screen.getByLabelText('Patient ID')).toHaveAttribute('placeholder', 'Search by ID, then press Enter');
   expect(screen.queryByRole('button', { name: 'Name' })).not.toBeInTheDocument();
+  expect(screen.queryByRole('button', { name: 'Age' })).not.toBeInTheDocument();
+});
+
+it('does not apply a saved contact or location filter whose control the reader cannot see', async () => {
+  localStorage.setItem('promop-patient-list:session', JSON.stringify({
+    view: 'foundation', views: { foundation: { filters: { contact: 'missing', location: 'Portland', ecog: '1' }, ordering: '-freshness' } },
+  }));
+  mockUseAuth.mockReturnValue({ currentUser: { org_accesses: [{ role: 'doctor', org_name: 'Example', org_slug: 'example', expires_at: null }] } });
+  vi.mocked(api.get).mockResolvedValue({ data: cohort });
+  render(<MemoryRouter><PatientList /></MemoryRouter>);
+  await screen.findByText('Recorded regimen');
+  expect(api.get).toHaveBeenLastCalledWith('/patient-info/', expect.objectContaining({ params: expect.objectContaining({ contact: 'all', location: '', ecog: '1' }) }));
+  // "Clear clinical filters" keeps the heading sort.
+  fireEvent.click(screen.getByText('Clear clinical filters'));
+  await waitFor(() => expect(api.get).toHaveBeenLastCalledWith('/patient-info/', expect.objectContaining({ params: expect.objectContaining({ ecog: 'all', ordering: '-freshness' }) })));
+});
+
+it('falls back from a saved name sort for a reader whose names are withheld, and still sorts by another heading', async () => {
+  localStorage.setItem('promop-patient-list:session', JSON.stringify({ filters: {}, ordering: '-name' }));
+  mockUseAuth.mockReturnValue({
+    currentUser: { org_accesses: [{ role: 'analyst', org_name: 'Demo', org_slug: 'demo', expires_at: null, org_allows_patient_signup: true }] },
+  });
+  vi.mocked(api.get).mockResolvedValue({ data: { count: 1, results: [{ person_id: 5, patient_name: null, disease: 'Breast Cancer', therapy_lines_count: 1, unmapped_source_code_count: 2 }] } });
+  render(<MemoryRouter><PatientList /></MemoryRouter>);
+  await screen.findByText('Breast Cancer');
+  expect(api.get).toHaveBeenLastCalledWith('/patient-info/', expect.objectContaining({ params: expect.objectContaining({ ordering: '-updated' }) }));
+  expect(screen.getByRole('columnheader', { name: /Last Updated/ })).toHaveAttribute('aria-sort', 'descending');
+  fireEvent.click(screen.getByRole('button', { name: 'Disease' }));
+  await waitFor(() => expect(api.get).toHaveBeenLastCalledWith('/patient-info/', expect.objectContaining({ params: expect.objectContaining({ ordering: 'disease' }) })));
+});
+
+it('does not count unassigned patients as a second organization', async () => {
+  vi.mocked(api.get).mockResolvedValue({ data: { ...cohort, filter_options: {
+    orgs: [{ value: 'example', label: 'Example' }, { value: '__unassigned__', label: 'Unassigned' }], diseases: [], stages: [],
+  } } });
+  render(<MemoryRouter><PatientList /></MemoryRouter>);
+  await screen.findByText('Recorded regimen');
+  expect(screen.queryByRole('columnheader', { name: 'Organization' })).not.toBeInTheDocument();
 });

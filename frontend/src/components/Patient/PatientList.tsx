@@ -8,7 +8,7 @@ import type { ResolveRunStatus } from "@/types/sourceCodes";
 import { PaginationControls } from "@/components/labs/PaginationControls";
 import { useLocalPagination } from "@/lib/pagination";
 
-import { columnsFor, DEFAULT_ORDERING, loadPreferences, REVIEW_FILTER_DEFAULTS, type ReviewFilters } from './patientListViews';
+import { columnsFor, DEFAULT_ORDERING, loadPreferences, REVIEW_FILTER_DEFAULTS, type ExtraColumn, type ReviewFilters } from './patientListViews';
 import { canOpenPatients, canViewMappings, isStaffOrOrgAdmin } from '@/utils/roles';
 
 interface Patient {
@@ -82,7 +82,17 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
   const preferenceKey = `promop-patient-list:${currentUser?.id ?? 'session'}`;
   const [preferences, setPreferences] = useState(() => loadPreferences(preferenceKey));
   const reviewFilters = preferences.filters;
-  const ordering = preferences.ordering;
+  // A reader who cannot open a patient -- an analyst browsing a public demo
+  // org's sample patients (#1392, #2416) -- gets the rows de-identified by
+  // the server and no way into the detail page, which would be 404 (#2460):
+  // no Name column, no row link, no name or age sort. Upload and the mapping
+  // hub are that same curator's; a demo-org analyst gets Code Mapping.
+  const canOpen = canOpenPatients(currentUser);
+  const canCurate = canOpen;
+  const canAdministerOrganizations = isStaffOrOrgAdmin(currentUser);
+  // A saved name or age sort means nothing to a reader whose names and ages
+  // the server withholds, and no heading would show it: back to the default.
+  const ordering = !canOpen && /^-?(name|age)$/.test(preferences.ordering) ? DEFAULT_ORDERING : preferences.ordering;
   useEffect(() => {
     try { localStorage.setItem(preferenceKey, JSON.stringify(preferences)); } catch { /* Storage may be disabled. */ }
   }, [preferenceKey, preferences]);
@@ -94,6 +104,22 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
     diseases: [],
     stages: ["I", "II", "III", "IV"],
   });
+  // Columns follow the roles (#2470): the outreach columns are an org
+  // admin's, and Organization appears once the list spans several real
+  // organizations (the Unassigned entry is not one).
+  const extraColumns = useMemo(() => columnsFor({
+    outreach: canAdministerOrganizations,
+    multiOrg: filterOptions.orgs.filter((org) => org.value !== '__unassigned__').length > 1,
+  }), [canAdministerOrganizations, filterOptions.orgs]);
+  const show = (column: ExtraColumn) => extraColumns.includes(column);
+  // A filter whose control the reader does not see is not applied: a record
+  // saved under the old Foundation preset could otherwise narrow a doctor's
+  // list by a contact or location filter nothing on screen shows.
+  const activeFilters: ReviewFilters = useMemo(() => ({
+    ...reviewFilters,
+    ...(extraColumns.includes('contact') ? {} : { contact: REVIEW_FILTER_DEFAULTS.contact }),
+    ...(extraColumns.includes('location') ? {} : { location: REVIEW_FILTER_DEFAULTS.location }),
+  }), [reviewFilters, extraColumns]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
@@ -126,7 +152,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
           disease: diseaseFilter,
           stage: stageFilter,
           date: dateFilter,
-          ...reviewFilters,
+          ...activeFilters,
           ordering,
         },
       });
@@ -145,7 +171,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
     } finally {
       setLoading(false);
     }
-  }, [page, pageSize, orgFilter, search, diseaseCategoryFilter, diseaseFilter, stageFilter, dateFilter, reviewFilters, ordering]);
+  }, [page, pageSize, orgFilter, search, diseaseCategoryFilter, diseaseFilter, stageFilter, dateFilter, activeFilters, ordering]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount
@@ -198,7 +224,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
       setDeleting(true);
       if (selectAllMode) {
         await api.delete("/patient-info/bulk_delete_filtered/", {
-          params: { org: orgFilter, search, disease_category: diseaseCategoryFilter, disease: diseaseFilter, stage: stageFilter, date: dateFilter, ...reviewFilters },
+          params: { org: orgFilter, search, disease_category: diseaseCategoryFilter, disease: diseaseFilter, stage: stageFilter, date: dateFilter, ...activeFilters },
         });
       } else {
         await api.delete("/patient-info/bulk_delete/", {
@@ -225,7 +251,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
         ? { select_all: true }
         : { person_ids: Array.from(selectedIds) };
       const params = selectAllMode
-        ? { org: orgFilter, search, disease_category: diseaseCategoryFilter, disease: diseaseFilter, stage: stageFilter, date: dateFilter, ...reviewFilters }
+        ? { org: orgFilter, search, disease_category: diseaseCategoryFilter, disease: diseaseFilter, stage: stageFilter, date: dateFilter, ...activeFilters }
         : undefined;
       const res = await api.post<{ run_id: string; total: number }>(
         "/v1/patient-records/bulk-resolve-source-codes/",
@@ -258,7 +284,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
     try {
       setDownloading(true);
       const params = selectAllMode
-        ? { org: orgFilter, search, disease_category: diseaseCategoryFilter, disease: diseaseFilter, stage: stageFilter, date: dateFilter, ...reviewFilters, ordering }
+        ? { org: orgFilter, search, disease_category: diseaseCategoryFilter, disease: diseaseFilter, stage: stageFilter, date: dateFilter, ...activeFilters, ordering }
         : { person_ids: Array.from(selectedIds).join(",") };
       const response = await api.get<Blob>("/v1/patient-records/export-csv/", { params, responseType: "blob" });
       const disposition = String(response.headers?.["content-disposition"] ?? "");
@@ -313,18 +339,9 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
   const isAllSelected =
     patients.length > 0 &&
     (selectAllMode || visibleSelectedCount === patients.length);
-  // A reader who cannot open a patient -- an analyst browsing a public demo
-  // org's sample patients (#1392, #2416) -- gets the rows de-identified by
-  // the server and no way into the detail page, which would be 404 (#2460):
-  // no Name column, no row link, no name or age sort. Upload and the mapping
-  // hub are that same curator's; a demo-org analyst gets Code Mapping.
-  const canOpen = canOpenPatients(currentUser);
-  const canCurate = canOpen;
-  const canAdministerOrganizations = isStaffOrOrgAdmin(currentUser);
-  // Columns follow the roles (#2470): the outreach columns are an org
-  // admin's, and Organization appears once the list spans several.
-  const extraColumns = columnsFor({ outreach: canAdministerOrganizations, multiOrg: filterOptions.orgs.length > 1 });
-  const show = (column: string) => extraColumns.includes(column);
+  const plainHeader = (key: string, label: string) => (
+    <th key={key} className="whitespace-nowrap px-4 py-3 font-medium text-muted-foreground">{label}</th>
+  );
   // The column headings are the sort: a first click takes the column's
   // natural direction (newest, most, A to Z), a second reverses it.
   const sortHeader = (key: string, label: string, descendingFirst: boolean, className = '') => {
@@ -339,6 +356,17 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
         </button>
       </th>
     );
+  };
+  const extraHeader = (column: ExtraColumn) => {
+    switch (column) {
+      case 'treatment': return plainHeader('treatment', 'Latest Recorded Line');
+      case 'ecog': return sortHeader('ecog', 'ECOG', false);
+      case 'gaps': return sortHeader('gaps', 'Key Data Gaps', true);
+      case 'freshness': return sortHeader('freshness', 'Latest Clinical Result', true);
+      case 'location': return plainHeader('location', 'Location');
+      case 'contact': return plainHeader('contact', 'Contact Info');
+      case 'organization': return sortHeader('organization', 'Organization', false);
+    }
   };
   const openPatient = (personId: number) =>
     canOpen ? () => navigate(`/patient/${personId}`) : undefined;
@@ -586,7 +614,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
         <p className="mt-3 text-xs text-muted-foreground">Key gaps track stage, ECOG, and genomic data. A recorded negative result counts as data. Clinical freshness uses result dates, not record update times.</p>
         <button type="button" className="mt-2 text-sm underline" onClick={() => {
           resetToFirstPage();
-          setPreferences({ filters: { ...REVIEW_FILTER_DEFAULTS }, ordering: DEFAULT_ORDERING });
+          setPreferences((previous) => ({ ...previous, filters: { ...REVIEW_FILTER_DEFAULTS } }));
         }}>Clear clinical filters</button>
       </details>
 
@@ -619,19 +647,11 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
               </th>
               <th className="px-4 py-3 font-medium text-muted-foreground">ID</th>
               {canOpen && sortHeader('name', 'Name', false, 'w-36')}
-              {sortHeader('age', 'Age', true)}
+              {canOpen ? sortHeader('age', 'Age', true) : plainHeader('age', 'Age')}
               {sortHeader('disease', 'Disease', false)}
               {sortHeader('stage', 'Stage', false)}
               {sortHeader('lines', 'Num Lines', true, 'text-center')}
-              {extraColumns.map((column) => ({
-                treatment: <th key="treatment" className="whitespace-nowrap px-4 py-3 font-medium text-muted-foreground">Latest Recorded Line</th>,
-                ecog: sortHeader('ecog', 'ECOG', false),
-                gaps: sortHeader('gaps', 'Key Data Gaps', true),
-                freshness: sortHeader('freshness', 'Latest Clinical Result', true),
-                location: <th key="location" className="whitespace-nowrap px-4 py-3 font-medium text-muted-foreground">Location</th>,
-                contact: <th key="contact" className="whitespace-nowrap px-4 py-3 font-medium text-muted-foreground">Contact Info</th>,
-                organization: sortHeader('organization', 'Organization', false),
-              }[column]))}
+              {extraColumns.map(extraHeader)}
               {sortHeader('updated', 'Last Updated', true)}
               {sortHeader('unmapped_source_codes', 'Unmapped Source Codes', false, 'text-right')}
             </tr>
@@ -648,7 +668,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
                   diseaseFilter === ALL_FILTER_VALUE &&
                   stageFilter === ALL_FILTER_VALUE &&
                   dateFilter === ALL_FILTER_VALUE &&
-                  Object.entries(reviewFilters).every(([key, value]) => value === REVIEW_FILTER_DEFAULTS[key as keyof ReviewFilters])
+                  Object.entries(activeFilters).every(([key, value]) => value === REVIEW_FILTER_DEFAULTS[key as keyof ReviewFilters])
                     ? "No patients found. Upload a CSV or FHIR file to get started."
                     : "No patients match the selected filters."}
                 </td>

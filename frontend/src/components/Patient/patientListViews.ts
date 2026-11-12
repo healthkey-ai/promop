@@ -8,18 +8,20 @@ export interface Preferences {
   ordering: string;
 }
 export const DEFAULT_ORDERING = '-updated';
-const ORDERINGS = /^-?(updated|age|name|disease|stage|ecog|lines|status|unmapped_source_codes|freshness|gaps|organization)$/;
+// Every key a heading can sort by; 'status' had a dropdown option and no column.
+const ORDERINGS = /^-?(updated|age|name|disease|stage|ecog|lines|unmapped_source_codes|freshness|gaps|organization)$/;
 
 /** The columns beside the base set follow the reader's roles, not a chosen
  *  preset (#2470). Clinical context (latest line, ECOG) for everyone who
  *  reaches the list; the outreach columns (location, whether contact
  *  information is recorded) for staff and org admins, whose work spans the
  *  org's patients; Organization only when the list spans more than one. */
-export function columnsFor({ outreach, multiOrg }: { outreach: boolean; multiOrg: boolean }): readonly string[] {
+export type ExtraColumn = 'treatment' | 'ecog' | 'organization' | 'location' | 'contact' | 'gaps' | 'freshness';
+export function columnsFor({ outreach, multiOrg }: { outreach: boolean; multiOrg: boolean }): readonly ExtraColumn[] {
   return [
     'treatment', 'ecog',
-    ...(multiOrg ? ['organization'] : []),
-    ...(outreach ? ['location', 'contact'] : []),
+    ...(multiOrg ? ['organization' as const] : []),
+    ...(outreach ? ['location' as const, 'contact' as const] : []),
     'gaps', 'freshness',
   ];
 }

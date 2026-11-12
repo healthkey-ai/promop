@@ -166,7 +166,7 @@ The [PHR architecture](phrs-fm-architecture.md) connects the patient account,
 own-record access, consent, messaging, and clinical lists; [consent model v2](consent-v2.md)
 keeps consent wording as versioned data and every answer as history. [PROlog surveys](prolog-surveys.md)
 describes the current survey runner and migration from the old survey feature.
-[Patient list review views](patient-list-review-views.md) covers review workflows;
+[Patient list review columns](patient-list-review-views.md) covers review workflows;
 the [organization disease-statistics design](superpowers/specs/2026-06-20-org-disease-stats-design.md)
 provides the original reporting design context.
 
