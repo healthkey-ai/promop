@@ -94,8 +94,9 @@ function TherapyRowEditor({
               body and must sit above this panel, not behind it. Centred by
               auto margins, not translate utilities: a Tailwind 3 host sets
               `transform` for those while ours sets `translate`, and both
-              moves apply (see ui-labs/dialog.tsx). */}
-          <Dialog.Overlay className="fixed inset-0 z-40 bg-black/40" />
+              moves apply (see ui-labs/dialog.tsx). No Dialog.Overlay: Radix
+              renders it only for a modal root, so under modal={false} it is
+              always null. */}
           <Dialog.Content
             className="promop-root fixed inset-0 z-[41] m-auto h-fit max-h-[85vh] w-[min(42rem,calc(100%-2rem))] space-y-4 overflow-y-auto rounded-xl bg-background p-6 shadow-xl"
             onInteractOutside={(event) => event.preventDefault()}
