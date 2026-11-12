@@ -84,3 +84,52 @@ def test_editing_an_active_formula_still_checks_its_target(stale_answer_formula_
 
     assert not serializer.is_valid()
     assert 'field_name' in serializer.errors
+
+
+@pytest.mark.parametrize('is_active', [False, 'false'])
+def test_the_editor_payload_can_edit_an_inactive_authored_formula(is_active):
+    """FormulaEditDialog always sends field_name with is_active, and
+    validate_field_name refused the field before `validate` could see the
+    effective state, so the UI still could not edit the formula (#2489)."""
+    formula = FieldFormula.objects.create(
+        field_name='no_pre_existing_conditions',
+        formula='@count(preexisting_conditions) == 0',
+        is_active=False,
+    )
+
+    serializer = FieldFormulaSerializer(formula, data={
+        'field_name': 'no_pre_existing_conditions',
+        'formula': '@count(preexisting_conditions) == 1',
+        'is_active': is_active,
+    }, partial=True)
+
+    assert serializer.is_valid(), serializer.errors
+    assert serializer.save().is_active is False
+
+
+def test_the_editor_payload_cannot_activate_an_authored_formula():
+    formula = FieldFormula.objects.create(
+        field_name='no_pre_existing_conditions',
+        formula='@count(preexisting_conditions) == 0',
+        is_active=False,
+    )
+
+    serializer = FieldFormulaSerializer(formula, data={
+        'field_name': 'no_pre_existing_conditions',
+        'formula': '@count(preexisting_conditions) == 0',
+        'is_active': True,
+    }, partial=True)
+
+    assert not serializer.is_valid()
+    assert 'field_name' in serializer.errors
+
+
+def test_creating_an_inactive_authored_formula_is_still_refused():
+    serializer = FieldFormulaSerializer(data={
+        'field_name': 'no_pre_existing_conditions',
+        'formula': '@count(preexisting_conditions) == 0',
+        'is_active': False,
+    })
+
+    assert not serializer.is_valid()
+    assert 'field_name' in serializer.errors

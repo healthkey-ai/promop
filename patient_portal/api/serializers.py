@@ -2246,8 +2246,26 @@ class FieldFormulaSerializer(serializers.ModelSerializer):
         return attrs
 
     def validate_field_name(self, value):
+        # Field-level validation runs before `validate` and sees the raw
+        # payload. The formula editor always sends field_name with is_active,
+        # so an edit of an inactive formula must not be refused here as if it
+        # activated it (#2489). Creation is always checked.
+        if self.instance is not None and self._requested_is_active() is False:
+            return value
         self._assert_computable(value)
         return value
+
+    def _requested_is_active(self):
+        """The is_active this update leaves in place: the submitted value,
+        else the stored one. An unparseable value counts as active; the field's
+        own validation reports it."""
+        data = getattr(self, 'initial_data', None) or {}
+        if 'is_active' not in data:
+            return self.instance.is_active
+        try:
+            return serializers.BooleanField().to_internal_value(data['is_active'])
+        except serializers.ValidationError:
+            return True
 
     @staticmethod
     def _assert_computable(field_name):
