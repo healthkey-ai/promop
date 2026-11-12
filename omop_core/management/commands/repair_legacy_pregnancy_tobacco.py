@@ -22,8 +22,8 @@ from omop_core.management.commands.audit_legacy_pregnancy_tobacco import (
     Command as Audit, FIELDS, _revisions, _source_state, approval_digest, classify,
 )
 from omop_core.management.guarded_repair import (
-    canonical, digest, lock_rows, make_transaction_read_only, read_json, receipt,
-    target_guard, write_private,
+    canonical, digest, lock_rows, make_transaction_read_only,
+    make_transaction_serializable, read_json, receipt, target_guard, write_private,
 )
 from omop_core.models import FieldFormula, PatientRecord, Person, RecordRevision
 
@@ -111,7 +111,10 @@ class Command(BaseCommand):
             target_guard(options['environment'])
         owns = not connection.in_atomic_block
         with transaction.atomic():
-            if not applying and owns:
+            if applying:
+                if owns:
+                    make_transaction_serializable()
+            elif owns:
                 make_transaction_read_only()
             live = Audit()._collect(summary_only=False)
             if applying:
@@ -193,7 +196,40 @@ class Command(BaseCommand):
                                 'fields': fields, 'ledger_id': ledger.pk})
             else:
                 entries.append({'before': before, 'fields': fields})
+        if applying:
+            self._verify_post_write(candidates)
         return receipt('repair', run, live['database'], expected, entries)
+
+    def _verify_post_write(self, candidates):
+        """The loop ran under the locks; prove no evidence appeared while it did.
+
+        Row locks block inserts, and a serializable transaction blocks an
+        in-place update of an evidence row. This last read catches an update
+        that committed inside the loop's window; any finding rolls the whole
+        transaction back, which is the guarantee the command is built on.
+        """
+        ids = [row['id'] for row in candidates]
+        if not ids:
+            return
+        histories = {field: _revisions(field, ids=ids) for field in FIELDS}
+        source_states = _source_state(ids={row['person_id'] for row in candidates})
+        for row in candidates:
+            record = PatientRecord.objects.filter(pk=row['id']).first()
+            if record is None:
+                raise CommandError(
+                    f'Record {row["id"]} disappeared during the run; nothing written.')
+            edited = (record.user_edited_fields
+                      if isinstance(record.user_edited_fields, list) else [])
+            for field in FIELDS:
+                if row['fields'][field]['recommended_action'] != 'clear':
+                    continue
+                if (histories[field].get(record.pk) or field in edited
+                        or source_states[field].get(record.person_id) is not None):
+                    raise CommandError(
+                        f'Record {record.pk} gained evidence during the run; nothing written.')
+                if getattr(record, field) is not None:
+                    raise CommandError(
+                        f'Record {record.pk} was changed during the run; nothing written.')
 
     def _rollback(self, supplied, live, expected, applying):
         unsigned = {key: value for key, value in supplied.items() if key != 'backup_sha256'}

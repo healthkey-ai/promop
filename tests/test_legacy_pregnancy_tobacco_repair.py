@@ -30,12 +30,14 @@ def cohort():
     unattributed = PatientRecordFactory(**{PREGNANCY: True, TOBACCO: True})
     authored = PatientRecordFactory(**{PREGNANCY: True, TOBACCO: False})
     RecordRevision.objects.create(
-        patient_record=authored, field=PREGNANCY, old_value='None', new_value='True')
+        patient_record=authored, field=PREGNANCY, old_value='None', new_value='True',
+        changed_by='patient@example.test')
     pending = PatientRecordFactory(
         **{PREGNANCY: False, TOBACCO: True}, user_edited_fields=[TOBACCO])
     rewritten = PatientRecordFactory(**{PREGNANCY: True, TOBACCO: False})
     RecordRevision.objects.create(
-        patient_record=rewritten, field=PREGNANCY, old_value='True', new_value='False')
+        patient_record=rewritten, field=PREGNANCY, old_value='True', new_value='False',
+        changed_by='patient@example.test')
     tobacco_source = PatientRecordFactory(**{PREGNANCY: False, TOBACCO: True})
     ObservationFactory(person=tobacco_source.person,
                        observation_source_value='266919005')
@@ -127,12 +129,12 @@ def test_the_audit_publishes_the_revision_coverage_the_clear_review_needs(tmp_pa
 
     assert data['manifest_version'] == 2
     evidence = data['totals']['evidence']
-    assert evidence['revisions_total_all_fields'] == 2      # authored + rewritten
-    assert evidence['earliest_revision_at_all_fields']
-    assert evidence['records_with_any_revision'] == 2
-    assert evidence['records_without_any_revision'] == data['totals']['records'] - 2
+    assert evidence['authored_revisions_total'] == 2      # authored + rewritten
+    assert evidence['earliest_authored_revision_at']
+    assert evidence['records_with_any_authored_revision'] == 2
+    assert evidence['records_without_any_authored_revision'] == data['totals']['records'] - 2
     assert evidence['clear_candidates'] == 2             # the unattributed record, both fields
-    assert evidence['clear_candidates_in_revised_records'] == 0
+    assert evidence['clear_candidates_in_authored_records'] == 0
     rows = {row['id']: row for row in data['records']}
     assert rows[names['authored'].pk]['has_any_revision'] is True
     assert rows[names['unattributed'].pk]['has_any_revision'] is False
@@ -144,16 +146,33 @@ def test_revision_coverage_counts_a_revision_on_any_field(tmp_path):
     record = PatientRecordFactory(**{PREGNANCY: True, TOBACCO: True})
     RecordRevision.objects.create(
         patient_record=record, field='email', old_value='old@example.test',
-        new_value='new@example.test')
+        new_value='new@example.test', changed_by='patient@example.test')
     manifest, _sha = audit(tmp_path)
     data = json.loads(open(manifest).read())
 
     evidence = data['totals']['evidence']
-    assert evidence['records_with_any_revision'] == 1
+    assert evidence['records_with_any_authored_revision'] == 1
     assert evidence['clear_candidates'] == 2
-    assert evidence['clear_candidates_in_revised_records'] == 2
-    assert (evidence['clear_candidates']
-            - evidence['clear_candidates_in_revised_records']) == 0
+    assert evidence['clear_candidates_in_authored_records'] == 2
+
+
+def test_machine_written_revisions_do_not_count_as_authored_history(tmp_path):
+    """0321 and the default 'system' author write a revision for nearly every
+    legacy record; counting them would report full coverage and never warn."""
+    record = PatientRecordFactory(**{PREGNANCY: True, TOBACCO: True})
+    for author in ('system', 'migration:0321', None):
+        RecordRevision.objects.create(
+            patient_record=record, field='no_hiv_status',
+            old_value='None', new_value='True', changed_by=author)
+    manifest, _sha = audit(tmp_path)
+    data = json.loads(open(manifest).read())
+
+    evidence = data['totals']['evidence']
+    assert evidence['authored_revisions_total'] == 0
+    assert evidence['earliest_authored_revision_at'] is None
+    assert evidence['records_with_any_authored_revision'] == 0
+    assert evidence['clear_candidates'] == 2
+    assert evidence['clear_candidates_in_authored_records'] == 0
 
 
 

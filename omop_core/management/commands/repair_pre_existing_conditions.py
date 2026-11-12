@@ -14,11 +14,12 @@ from django.db.migrations.recorder import MigrationRecorder
 from django.utils import timezone
 
 from omop_core.management.commands.audit_pre_existing_conditions import (
-    Command as Audit, _flag_revisions, approval_digest, classify,
+    Command as Audit, REPAIRABLE_CLASSIFICATIONS, _flag_revisions, approval_digest,
+    classify,
 )
 from omop_core.management.guarded_repair import (
-    canonical, digest, lock_rows, make_transaction_read_only, read_json, receipt,
-    target_guard, write_private,
+    canonical, digest, lock_rows, make_transaction_read_only,
+    make_transaction_serializable, read_json, receipt, target_guard, write_private,
 )
 from omop_core.models import (
     FieldFormula, PatientRecord, Person, PreexistingConditionsAttestation, RecordRevision,
@@ -98,7 +99,7 @@ class Command(BaseCommand):
                 ids.append(before['id'])
             return ids
         return [row['id'] for row in live['records']
-                if row['classification'] in ('unattributed_true', 'rewritten_true')]
+                if row['classification'] in REPAIRABLE_CLASSIFICATIONS]
 
     def _ready(self):
         if FieldFormula.objects.filter(field_name=FLAG, is_active=True).exists():
@@ -127,7 +128,10 @@ class Command(BaseCommand):
             target_guard(options['environment'])
         owns = not connection.in_atomic_block
         with transaction.atomic():
-            if not applying and owns:
+            if applying:
+                if owns:
+                    make_transaction_serializable()
+            elif owns:
                 make_transaction_read_only()
             live = Audit()._collect(summary_only=False)
             if applying:
@@ -156,7 +160,7 @@ class Command(BaseCommand):
         run = f'repair:1988:{uuid.uuid4()}'
         candidates = [
             row for row in live['records']
-            if row['classification'] in ('unattributed_true', 'rewritten_true')
+            if row['classification'] in REPAIRABLE_CLASSIFICATIONS
         ]
         ids = [row['id'] for row in candidates]
         # Re-derive the evidence under the row locks: the audit ran before the
@@ -217,7 +221,36 @@ class Command(BaseCommand):
                 entries.append({'before': before, 'after': after, 'ledger_id': ledger.pk})
             else:
                 entries.append({'before': before})
+        if applying:
+            self._verify_post_write(candidates)
         return receipt('repair', run, live['database'], expected, entries)
+
+    def _verify_post_write(self, candidates):
+        """The loop ran under the locks; prove no answer appeared while it did.
+
+        Row locks block inserts and a serializable transaction blocks an
+        in-place update of the flag or attestation; this last read catches an
+        update committed inside the loop's window and rolls everything back.
+        """
+        ids = [row['id'] for row in candidates]
+        if not ids:
+            return
+        person_ids = set(
+            PatientRecord.objects.filter(pk__in=ids).values_list('person_id', flat=True))
+        if PreexistingConditionsAttestation.objects.filter(
+                person_id__in=person_ids,
+                source__in=EXPLICIT_ATTESTATION_SOURCES).exists():
+            raise CommandError(
+                'An explicit attestation was recorded during the run; nothing written.')
+        for row in candidates:
+            record = PatientRecord.objects.filter(pk=row['id']).first()
+            if record is None:
+                raise CommandError(
+                    f'Record {row["id"]} disappeared during the run; nothing written.')
+            if (record.no_pre_existing_conditions is not None
+                    or record.preexisting_conditions not in (None, [])):
+                raise CommandError(
+                    f'Record {record.pk} was changed during the run; nothing written.')
 
     def _rollback(self, supplied, live, expected, applying):
         unsigned = {key: value for key, value in supplied.items() if key != 'backup_sha256'}

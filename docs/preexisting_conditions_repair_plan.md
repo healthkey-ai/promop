@@ -38,9 +38,11 @@ review the manifest and receive explicit approval for that cohort.
    The dedicated GET snapshot avoids widening the frozen general projection.
 7. Confirm backups, maintenance window, write pause, expected cohort size and
    rollback ownership. Benchmark a representative local clone first: apply locks
-   only the audited rows (`SELECT … FOR UPDATE`), so unrelated patient writes
-   continue while those rows wait. Acquisition has a five-second timeout; this is
-   not a zero-downtime bulk job.
+   the audited records and their person rows (`SELECT … FOR UPDATE`), so those
+   patients' writes wait until commit while unrelated patients continue; an
+   in-place update of an evidence row is caught by the serializable transaction
+   and the post-loop re-read. Acquisition has a five-second timeout; this is not
+   a zero-downtime bulk job.
 
 ## Read-only sizing (deployment owner/operator)
 

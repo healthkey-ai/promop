@@ -59,6 +59,23 @@ def make_transaction_read_only():
         cursor.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY')
 
 
+def make_transaction_serializable():
+    """Make the applying transaction serializable, when the command owns it.
+
+    Row locks cover inserts (their FK takes a key-share lock on the parent) but
+    not an in-place update of an evidence row: updating an existing observation
+    keeps its person FK and never touches the locked rows. SERIALIZABLE makes
+    PostgreSQL abort one of the two transactions when such an update races the
+    read this repair relies on, which is the safe outcome for an all-or-nothing
+    run. Inside a caller's transaction (tests) the isolation level is already
+    fixed, so this is skipped there, like the read-only guard.
+    """
+    if connection.vendor != 'postgresql':
+        return
+    with connection.cursor() as cursor:
+        cursor.execute('SET TRANSACTION ISOLATION LEVEL SERIALIZABLE')
+
+
 def refuse_existing_manifest(path):
     """Fail early, before the audit reads anything, when ``path`` already exists."""
     if path and os.path.exists(path):

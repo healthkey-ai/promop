@@ -63,11 +63,13 @@ CLASSIFICATIONS = (
 )
 
 #: Recommended next step per classification. Only the repair command acts on these.
+#: The classifications the repair may clear, when the categories are empty.
+REPAIRABLE_CLASSIFICATIONS = ('unattributed_true', 'rewritten_true')
 ACTIONS = {
     'contradiction': 'clear_flag',
     'authored_true': 'keep',
-    'rewritten_true': 'needs_policy',
-    'unattributed_true': 'needs_policy',
+    'rewritten_true': 'clear',
+    'unattributed_true': 'clear',
     'explicit_false': 'keep',
     'unanswered': 'none',
 }

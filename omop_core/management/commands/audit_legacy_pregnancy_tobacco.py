@@ -357,16 +357,22 @@ class Command(BaseCommand):
     def _collect(self, summary_only):
         histories = {field: _revisions(field) for field in FIELDS}
         source_states = _source_state()
-        revisions = RecordRevision.objects.aggregate(
+        authored = RecordRevision.objects.exclude(
+            Q(changed_by__isnull=True)
+            | Q(changed_by='')
+            | Q(changed_by='system')
+            | Q(changed_by__startswith='migration:')
+            | Q(changed_by__startswith='repair:')
+            | Q(changed_by__startswith='rollback:'))
+        revision_totals = authored.aggregate(
             total=Count('pk'), first=Min('changed_at'))
-        revision_total = revisions['total']
-        earliest_revision = revisions['first']
-        # Coverage is about the patient's history as a whole: a record edited
-        # before 0125 predates revisions entirely, which is the risk the clear
-        # review judges. The two audited fields' histories stay the evidence
-        # for the classification itself.
+        revision_total = revision_totals['total']
+        earliest_revision = revision_totals['first']
+        # Coverage counts person-authored revisions only: migrations (0321) and
+        # the service's 'system' writes record rows for every legacy patient, so
+        # counting them would report full coverage and hide the risk entirely.
         revised_records = set(
-            RecordRevision.objects.values_list('patient_record_id', flat=True).distinct())
+            authored.order_by().values_list('patient_record_id', flat=True).distinct())
         queryset = (
             PatientRecord.objects
             .order_by('pk')
@@ -458,13 +464,14 @@ class Command(BaseCommand):
                 # operator judges that from these counts and the manifest, so
                 # they are published with the audit rather than left to SQL.
                 'evidence': {
-                    'revisions_total_all_fields': revision_total,
-                    'earliest_revision_at_all_fields': (
+                    'authored_revisions_total': revision_total,
+                    'earliest_authored_revision_at': (
                         earliest_revision.isoformat() if earliest_revision else None),
-                    'records_with_any_revision': records_with_any_revision,
-                    'records_without_any_revision': totals - records_with_any_revision,
+                    'records_with_any_authored_revision': records_with_any_revision,
+                    'records_without_any_authored_revision': (
+                        totals - records_with_any_revision),
                     'clear_candidates': clear_candidates,
-                    'clear_candidates_in_revised_records': (
+                    'clear_candidates_in_authored_records': (
                         clear_candidates_in_revised_records),
                 },
             },
@@ -494,18 +501,18 @@ class Command(BaseCommand):
                     f'{name}={count}' for name, count in sorted(actions.items())))
         evidence = payload['totals']['evidence']
         self.stdout.write(
-            'revision history (all fields): '
-            f'{evidence["revisions_total_all_fields"]} row(s), earliest '
-            f'{evidence["earliest_revision_at_all_fields"] or "never"}; '
-            f'{evidence["records_with_any_revision"]} of {payload["totals"]["records"]} '
-            'record(s) carry any')
+            'person-authored revision history: '
+            f'{evidence["authored_revisions_total"]} row(s), earliest '
+            f'{evidence["earliest_authored_revision_at"] or "never"}; '
+            f'{evidence["records_with_any_authored_revision"]} of '
+            f'{payload["totals"]["records"]} record(s) carry any')
         without_history = (evidence['clear_candidates']
-                           - evidence['clear_candidates_in_revised_records'])
+                           - evidence['clear_candidates_in_authored_records'])
         if without_history:
             self.stdout.write(self.style.WARNING(
                 f'{without_history} of {evidence["clear_candidates"]} clear candidate(s) '
-                'belong to records with no revision history: an answer entered before '
-                'RecordRevision existed (0125), or by a path that recorded neither revision '
+                'belong to records with no person-authored revision history: an answer entered '
+                'before RecordRevision existed (0125), or by a path that recorded neither revision '
                 'nor pending marker, is indistinguishable from the legacy default. Review '
                 'the manifest before --apply.'))
         self.stdout.write(f'approval_sha256: {payload["approval_sha256"]}')

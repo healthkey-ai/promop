@@ -29,22 +29,28 @@ rewritten values; those stay for a person's answer or policy review.
    ```
 
 2. **Judge the revision coverage.** `totals.evidence` publishes
-   `revisions_total_all_fields`, `earliest_revision_at_all_fields`,
-   `records_with_any_revision` / `records_without_any_revision`, and the number
-   of clear candidates (`clear_candidates`,
-   `clear_candidates_in_revised_records`). A genuine `True` answered
-   **before `RecordRevision` existed** (0125, while the columns date from 0002),
-   or entered by a path that wrote neither a revision nor a pending marker, is
-   indistinguishable from the default and would be cleared. No code can tell
-   them apart: the manifest review is the mitigation. Spot-check the records and
-   compare the counts with staging's revision history before approving.
+   `authored_revisions_total`, `earliest_authored_revision_at`,
+   `records_with_any_authored_revision` / `records_without_any_authored_revision`,
+   and the number of clear candidates (`clear_candidates`,
+   `clear_candidates_in_authored_records`). Only person-authored revisions count:
+   migration `0321` and the service's `system` writes stamp a revision on nearly
+   every legacy record, so including them would report full coverage and hide the
+   risk. A genuine `True` answered **before `RecordRevision` existed** (0125,
+   while the columns date from 0002), or entered by a path that wrote neither a
+   revision nor a pending marker, is indistinguishable from the default and would
+   be cleared. No code can tell them apart: the manifest review is the mitigation.
+   Spot-check the records and compare the counts with staging's history before
+   approving.
 3. **Approve `approval_sha256` out of band** (the full-document hash, not the
    `manifest_sha256` data fingerprint). A summary-only manifest is not accepted
    for repair.
-4. **Pick a window.** Apply locks the candidate records, their person rows (so a
-   revision, attestation or recorded fact cannot land mid-run) and the pregnancy
-   formula row; unrelated patients stay writable. `lock_timeout` for acquiring
-   those rows is 5 s and is reset before the writes.
+4. **Pick a window.** Apply locks the candidate records, their person rows and the
+   pregnancy formula row. A writer for one of those patients waits until commit;
+   unrelated patients stay writable. In-place updates of an existing evidence row
+   (an observation or measurement patched without touching its person row) are not
+   blocked by a row lock, so a serializable transaction (when the command owns it)
+   turns such a race into an abort, and a final re-read verifies nothing landed.
+   `lock_timeout` for acquiring the locks is 5 s and is reset before the writes.
 
 ## Dry-run
 
@@ -76,10 +82,12 @@ Guards, unchanged by this run:
 - The whole run is one transaction. It locks the **candidate rows**, their
   person rows and the pregnancy formula row with `SELECT … FOR UPDATE` rather
   than `LOCK TABLE patient_record`; unrelated patient writes are no longer
-  blocked for the loop. The audit runs before the locks, so the repair
-  re-derives each candidate's classification under them and aborts the run when
-  it is no longer a pure default or the record disappeared. A register that
-  fails digest, cohort or target check aborts before any write.
+  blocked for the loop. Inserted evidence (a revision, attestation or recorded
+  fact) takes a key-share lock on the parent and waits; an in-place update of an
+  existing evidence row does not, so the transaction is SERIALIZABLE when the
+  command owns it, and the repair re-derives each candidate's classification
+  under the locks and re-reads the evidence after the loop, aborting the whole
+  run on any change or a disappeared record.
 - `RecordRevision` per cleared field (`changed_by='repair:2432:<uuid>'`) plus one
   ledger revision with before/after hashes; `user_edited_fields` is untouched.
   The backup is exclusive, mode 0600, fsynced before commit.

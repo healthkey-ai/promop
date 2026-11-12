@@ -109,7 +109,7 @@ def test_the_summary_counts_every_record_once(tmp_path):
     assert totals['by_classification']['unattributed_true'] == 2
     assert totals['by_classification']['contradiction'] == 1
     assert totals['by_classification']['unanswered'] == 1
-    assert totals['by_recommended_action']['needs_policy'] == 2
+    assert totals['by_recommended_action']['clear'] == 2
 
 
 def test_the_manifest_pins_the_data_and_the_evidence(tmp_path):
