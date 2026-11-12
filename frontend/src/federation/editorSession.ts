@@ -80,6 +80,16 @@ export function editorIdentity(connection: EditorConnection): string {
 }
 
 /**
+ * The renewal generation of one connection, as React state. Any surface's
+ * renewal (a field slot's Retry, the full form's) changes it for every hook
+ * reading the same (client, base, key), so they all leave the retired store.
+ */
+export function usePatientFormRenewals(client: AxiosInstance, base: string, sessionKey: string): number {
+  const read = () => patientFormRenewalGeneration(client, base, sessionKey);
+  return useSyncExternalStore(subscribePatientFormRenewals, read, read);
+}
+
+/**
  * The patient-form store for one connection, loaded on mount.
  *
  * The store is shared per (client, base, connectionKey) by
@@ -93,16 +103,6 @@ export function editorIdentity(connection: EditorConnection): string {
  * two editors on one page cannot inherit each other's connection, and
  * unmounting one cannot leave a helper pointed at the wrong host.
  */
-/**
- * The renewal generation of one connection, as React state. Any surface's
- * renewal (a field slot's Retry, the full form's) changes it for every hook
- * reading the same (client, base, key), so they all leave the retired store.
- */
-export function usePatientFormRenewals(client: AxiosInstance, base: string, sessionKey: string): number {
-  const read = () => patientFormRenewalGeneration(client, base, sessionKey);
-  return useSyncExternalStore(subscribePatientFormRenewals, read, read);
-}
-
 export function useEditorSession(connection: EditorConnection): PatientFormStore {
   return useRenewableEditorSession(connection).store;
 }
