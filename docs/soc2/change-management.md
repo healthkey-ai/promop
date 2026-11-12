@@ -114,7 +114,7 @@ endpoint stops reading any of them closely. These path groups were removed:
 
 | Removed | Reason |
 |---|---|
-| `**/*urls.py` | Every new data endpoint tripped the gate. The two project URLconfs (`promop/urls.py`, `ctomop/urls.py`) stay gated, as part of their packages. The seven app URLconfs carry no permission decisions today, and are reached only through the gated project URLconf, under a DRF `DEFAULT_PERMISSION_CLASSES` of `['IsAuthenticated']` — a convention rather than a guarantee, since a plain Django view added to one would have no permission default either. |
+| `**/*urls.py` | Every new data endpoint tripped the gate. The two project URLconfs (`promop/urls.py`, `ctomop/urls.py`) stay gated, as part of their packages. The nine app URLconfs outside those packages are ungated. Seven hang off the gated project URLconf and carry no permission decisions of their own, under a DRF `DEFAULT_PERMISSION_CLASSES` of `['IsAuthenticated']` — a convention rather than a guarantee, since a plain Django view added to one would have no permission default either. The other two are accepted risks: `patient_portal/urls.py` is mounted nowhere, and `omop_core/api/urls.py` is mounted by an embedding host and does carry `permission_classes([IsAuthenticated])`. |
 | `.env*`, `**/.env*` | Secrets are not committed — `.gitignore` excludes `.env` and `.env.*` with an explicit exception for `.env.example`, whose values are documented placeholders. |
 | `render.yaml`, `start*.sh`, `ops/artemis/Dockerfile` | Operational, and pinned by the tests named below. |
 | `**/Dockerfile*` (root and `.gcp`), `docker-compose*.yml` | Operational, and **not** pinned. See accepted risks. |
@@ -172,7 +172,11 @@ constraining it cannot be relaxed in the same ungated change. The pins are:
 which are therefore both ungated and unpinned. Stated so this list is not read
 as covering more than it does:
 
-- **`nixpacks.toml` and `Procfile` were removed in this change.** No deploy
+- **`omop_core/api/urls.py`** — a route table with an explicit
+  `permission_classes([IsAuthenticated])`, meant to be mounted by an embedding
+  host outside this repository, so it is not reached through the gated project
+  URLconf. `patient_portal/urls.py` is ungated as well, but mounted nowhere.
+- **`nixpacks.toml` and `Procfile` were removed in #1598 (2026-11-12).** No deploy
   target used them: Render starts through `start.sh`/`start-worker.sh` and Cloud
   Run uses `Dockerfile.gcp`. Removing them closes the sharpest accepted risk
   (a start command that skipped `check --deploy` and ran `seed_omop_concepts`).

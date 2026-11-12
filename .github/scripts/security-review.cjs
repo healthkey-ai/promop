@@ -136,14 +136,17 @@ const SECURITY_PATHS = [
   'patient_portal/api/permissions.py', 'patient_portal/api/permissions/**',
   'patient_portal/api/middleware.py', 'patient_portal/api/middleware/**',
   'patient_portal/api/providers/**',
-  // The seven app URLconfs are deliberately out of scope, and promop/urls.py
-  // is not one of them: it is covered by `promop/**` above. The app ones carry
-  // no permission decisions — their views do, and DEFAULT_PERMISSION_CLASSES
-  // is ['IsAuthenticated'] here, so a DRF route added to one fails closed.
-  // That is a convention rather than a guarantee, since a plain Django view
-  // added to any of them would have no permission default either; what makes
-  // them different is reachability — patient_portal/urls.py is mounted
-  // nowhere, and the rest hang off promop/urls.py, which is gated.
+  // The app URLconfs are deliberately out of scope, and promop/urls.py is not
+  // one of them: it is covered by `promop/**` above. Seven hang off
+  // promop/urls.py and carry no permission decisions of their own — their
+  // views do, and DEFAULT_PERMISSION_CLASSES is ['IsAuthenticated'] here, so a
+  // DRF route added to one fails closed. That is a convention rather than a
+  // guarantee, since a plain Django view added to any of them would have no
+  // permission default either. The other two are not reached through it:
+  // patient_portal/urls.py is mounted nowhere, and omop_core/api/urls.py is
+  // mounted by an embedding host and does carry
+  // permission_classes([IsAuthenticated]). Both are accepted risks in
+  // docs/soc2/change-management.md.
   // The settings-module selector that makes DEFAULT_PERMISSION_CLASSES true at
   // all lives in promop/wsgi.py, and is gated there for the same reason.
   //
