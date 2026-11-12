@@ -2,6 +2,9 @@ import PageTitle from '@/components/Branding/PageTitle';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowLeft, Trash2, X } from 'lucide-react';
 import api from '@/api/axios';
+import { Link } from 'react-router-dom';
+import RoleHint from '@/components/Roles/RoleHint';
+import { ROLES_PAGE_PATH } from '@/utils/roleDescriptions';
 
 const DEFAULT_ANALYST_REDIRECT_URL = 'https://analytics.healthkey.ai';
 
@@ -767,7 +770,10 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
       {/* Access grants */}
       {org.can_manage_access && activeSection === 'admins' && (
         <div className="space-y-4">
-          <h2 className="font-medium text-gray-900">Access Grants</h2>
+          <div className="flex items-baseline justify-between">
+            <h2 className="font-medium text-gray-900">Access Grants</h2>
+            <Link to={ROLES_PAGE_PATH} className="text-sm text-blue-600 hover:text-blue-800">What each role can do</Link>
+          </div>
           {accessError && <p className="text-sm text-red-500">{accessError}</p>}
           {accessGrants.length === 0 ? (
             <p className="text-sm text-gray-500">No access grants.</p>
@@ -794,8 +800,11 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
                       </td>
                       <td className="px-4 py-3">
                         {g.role === 'org_admin' ? (
-                          <span className="text-xs px-2 py-0.5 rounded bg-purple-100 text-purple-700 font-medium">Org Admin</span>
+                          <RoleHint role="org_admin" className="text-xs px-2 py-0.5 rounded bg-purple-100 text-purple-700 font-medium" />
                         ) : (
+                          <RoleHint role={g.role} className="text-xs text-gray-500 mr-2" />
+                        )}
+                        {g.role !== 'org_admin' && (
                           <select
                             value={g.role}
                             onChange={e => handleUpdateGrant(g.id, { role: e.target.value })}
@@ -864,7 +873,7 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
 
           {/* Invite form */}
           <div className="space-y-2 max-w-sm">
-            <h3 className="text-sm font-medium text-gray-700">Invite user</h3>
+            <h3 className="text-sm font-medium text-gray-700">Invite user <Link to={ROLES_PAGE_PATH} className="ml-2 text-xs font-normal text-blue-600 hover:text-blue-800">What each role can do</Link></h3>
             {inviteError && <p className="text-sm text-red-500">{inviteError}</p>}
             {inviteSuccess && <p className="text-sm text-green-600">{inviteSuccess}</p>}
             <input
@@ -991,7 +1000,7 @@ export default function OrgDetail({ slug, isStaff, onBack }: OrgDetailProps) {
                 <li key={inv.id} className="flex items-center justify-between px-4 py-2">
                   <span className="text-sm">
                     <span className="font-medium">{inv.email}</span>
-                    <span className="text-gray-400 ml-2">({inv.role})</span>
+                    <span className="text-gray-400 ml-2">(<RoleHint role={inv.role} />)</span>
                     {inv.role === 'patient' && inv.person_id && (
                       <span className="text-gray-400 ml-1">#{inv.person_id}</span>
                     )}

@@ -3,10 +3,9 @@ import { useNavigate } from 'react-router-dom';
 import { ArrowLeft } from 'lucide-react';
 import { useAuth, type EffectiveRole } from '@/hooks/useAuth';
 
-const ROLE_LABELS: Record<string, string> = {
-  staff: 'Staff', org_admin: 'Org Admin', doctor: 'Doctor',
-  analyst: 'Analyst', patient: 'Patient',
-};
+import RoleHint from '@/components/Roles/RoleHint';
+import { ROLE_LABELS } from '@/utils/roleDescriptions';
+
 const SOURCE_LABELS: Record<EffectiveRole['source'], string> = {
   staff_flag: 'Staff account', patient_link: 'Linked patient account',
   org_grant: 'Organization grant', group_grant: 'Group grant',
@@ -59,7 +58,7 @@ export default function UserProfilePage() {
                 </tr></thead>
                 <tbody>{roles.map((role, index) => (
                   <tr key={index} className="border-t border-gray-100">
-                    <td className="py-2 pr-4">{ROLE_LABELS[role.role]}</td>
+                    <td className="py-2 pr-4">{role.role === 'staff' ? ROLE_LABELS.staff : <RoleHint role={role.role} />}</td>
                     <td className="py-2 pr-4">{scopeLabel(role)}</td>
                     <td className="py-2 pr-4">{SOURCE_LABELS[role.source]}
                       {role.source_org_name ? ` from ${role.source_org_name}` : ''}
