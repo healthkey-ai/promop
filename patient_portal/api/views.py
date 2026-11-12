@@ -5989,6 +5989,28 @@ def _csv_row_write_error(request, person_id: int, upload_org=None) -> str | None
     return 'caller does not have write access to this patient'
 
 
+def _explicit_answer_write(request, person):
+    """``(403 response or None, attestation source)`` for a deliberate answer.
+
+    The answer endpoints (pre-existing conditions, negative answers) share one
+    write check. ``_caller_may_write_patient`` alone is not it: on the org path
+    it answers from the record's organization only, so a signed-in non-staff
+    human is also checked against ``can_write_patient``. A host credential
+    attests as ``host-explicit``; a person as their role.
+    """
+    read_only = Response({'detail': 'You have read-only access to this patient.'}, status=403)
+    if not _caller_may_write_patient(request, person.person_id):
+        return read_only, None
+    machine = is_machine_request(request)
+    if not machine and not getattr(request.user, 'is_staff', False):
+        from omop_core.authorization import can_write_patient
+        if not can_write_patient(request.user, person.person_id):
+            return read_only, None
+    source = ('host-explicit' if machine
+              else f'{_attestation_source(request, person)}-explicit')
+    return None, source
+
+
 class PatientRecordV1ViewSet(PatientRecordViewSet):
     """v1-only PatientRecord surface.
 
@@ -6060,15 +6082,10 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
         if request.method == 'GET':
             return Response({'no_pre_existing_conditions': record.no_pre_existing_conditions,
                              'preexisting_conditions': record.preexisting_conditions})
-        if not _caller_may_write_patient(request, person.person_id):
-            return Response({'detail': 'You have read-only access to this patient.'}, status=403)
-        if not is_machine_request(request) and not getattr(request.user, 'is_staff', False):
-            from omop_core.authorization import can_write_patient
-            if not can_write_patient(request.user, person.person_id):
-                return Response({'detail': 'You have read-only access to this patient.'}, status=403)
+        denied, source = _explicit_answer_write(request, person)
+        if denied is not None:
+            return denied
         from .preexisting_conditions import write_answer
-        source = ('host-explicit' if is_machine_request(request)
-                  else f'{_attestation_source(request, person)}-explicit')
         return write_answer(request, record, source=source,
                             revision_writer=_write_record_revisions)
 
@@ -6094,14 +6111,9 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
                 'confirmed': attested,
                 'source': source_value(record, field),
             })
-        if not _caller_may_write_patient(request, person.person_id):
-            return Response({'detail': 'You have read-only access to this patient.'}, status=403)
-        if not is_machine_request(request) and not getattr(request.user, 'is_staff', False):
-            from omop_core.authorization import can_write_patient
-            if not can_write_patient(request.user, person.person_id):
-                return Response({'detail': 'You have read-only access to this patient.'}, status=403)
-        source = ('host-explicit' if is_machine_request(request)
-                  else f'{_attestation_source(request, person)}-explicit')
+        denied, source = _explicit_answer_write(request, person)
+        if denied is not None:
+            return denied
         return write_answer(request, record, source=source,
                             revision_writer=_write_record_revisions)
 
