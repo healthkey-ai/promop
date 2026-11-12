@@ -277,6 +277,31 @@ describe('PatientDetail save — the edit, not the record', () => {
     });
   });
 
+  it('sends a changed lab value without an implicit date (#2454)', async () => {
+    await renderAndLoad();
+    await openLabsTab();
+    await editAndSave('12.5', '9.5');
+
+    await waitFor(() => expect(api.patch).toHaveBeenCalled());
+    // Only a date the user chose is an instruction; changing a value alone
+    // records it on today by backend default.
+    expect(patchBody().hemoglobin_g_dl).toBe(9.5);
+  });
+
+  it('sends nothing when a lab value is reverted before autosave (#2454)', async () => {
+    await renderAndLoad();
+    await openLabsTab();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+
+    fireEvent.change(screen.getByDisplayValue('12.5'), { target: { value: '9.5' } });
+    fireEvent.change(screen.getByDisplayValue('9.5'), { target: { value: '12.5' } });
+    await act(async () => { vi.advanceTimersByTime(2100); });
+
+    // The value is back to the committed one and no date was chosen: nothing
+    // is an instruction, so nothing is sent (and nothing can be refused).
+    expect(api.patch).not.toHaveBeenCalled();
+  });
+
   it('never sends an alias in the PATCH', async () => {
     await renderAndLoad();
     await openLabsTab();

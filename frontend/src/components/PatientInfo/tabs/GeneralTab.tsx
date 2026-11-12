@@ -109,7 +109,7 @@ export default function GeneralTab({
     // projection alone is not enough (#2439).
     const dated = descriptor?.dated === true;
     const changeWithDate = (field: string, value: unknown) => (
-      dated ? onChange(field, value, dateFor(field)) : onChange(field, value)
+      dated && dates[field] ? onChange(field, value, dates[field]) : onChange(field, value)
     );
     const changeDate = (field: string, next: string) => {
       setDates((current) => ({ ...current, [field]: next }));

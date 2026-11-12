@@ -148,7 +148,13 @@ export default function LabsTab({ formData, onChange }: Props) {
   const dateFor = (name: string) => dates[name] ?? today();
   // A lab value and the date it was observed are one edit. The date is per
   // field: changing one result's date must not relabel its neighbours (#2439).
-  const changeValue = (name: string, value: unknown) => onChange(name, value, dateFor(name));
+  // Only a date the user chose is an instruction. An unchanged value sent with
+  // today's date is not a correction the client named, so the backend records
+  // it as a new result; either way it asks for a fact nobody asserted, so a
+  // value reverted before autosave sends nothing (#2454).
+  const changeValue = (name: string, value: unknown) => (
+    dates[name] ? onChange(name, value, dates[name]) : onChange(name, value)
+  );
   const changeDate = (name: string, next: string) => {
     setDates((current) => ({ ...current, [name]: next }));
     const value = formData?.[name];

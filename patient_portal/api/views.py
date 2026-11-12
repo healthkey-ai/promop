@@ -1485,6 +1485,13 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             }
             derived_from_pair = set(getattr(serializer, '_derived_from_pair', ()))
             date_only_fields = {
+                # A date with an unchanged value is a correction, not a new
+                # result: `move_owned_fact_date` moves the fact this projector
+                # owns, with the named one when the client sends a fact_id and
+                # the newest matching one otherwise. When no owned fact
+                # matches, the projection below records a new result instead
+                # of refusing (an equal value on another day is legitimate,
+                # #2454 review).
                 field for field in fact_dates
                 if field in serializer.validated_data
                 and serializer.validated_data[field] == previous_values.get(field)
@@ -1730,12 +1737,17 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     # overwrite today's clinical fact. Keep the record value.
                     continue
                 if field in date_only_fields:
-                    from omop_core.services.omop_projection import move_owned_fact_date
-                    moved = move_owned_fact_date(
-                        person, field, patch_data[field], projection, fact_dates[field],
-                        type_concept_id=authorship.get('type_concept_id'),
-                        fact_id=known_fact_ids.get(field),
+                    from omop_core.services.omop_projection import (
+                        AmbiguousFactDateError, move_owned_fact_date,
                     )
+                    try:
+                        moved = move_owned_fact_date(
+                            person, field, patch_data[field], projection, fact_dates[field],
+                            type_concept_id=authorship.get('type_concept_id'),
+                            fact_id=known_fact_ids.get(field),
+                        )
+                    except AmbiguousFactDateError as exc:
+                        raise ValidationError({field: str(exc)}) from exc
                     if moved is False:
                         raise ValidationError({field: (
                             'This result was not written here, so its date cannot be '
