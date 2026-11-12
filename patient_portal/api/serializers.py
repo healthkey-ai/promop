@@ -2238,7 +2238,10 @@ class FieldFormulaSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         # Partial updates can activate a formula without validate_field_name.
-        if self.instance is not None and attrs.get('is_active') is not False:
+        # Judge the effective state: a PATCH that omits is_active keeps the
+        # stored value, so editing an inactive formula is not an activation.
+        if self.instance is not None and attrs.get(
+                'is_active', self.instance.is_active) is not False:
             self._assert_computable(attrs.get('field_name', self.instance.field_name))
         return attrs
 

@@ -56,3 +56,31 @@ def test_every_field_the_check_covers_is_a_400_not_a_500(field_name):
 
     assert not serializer.is_valid()
     assert 'field_name' in serializer.errors
+
+
+def test_editing_an_inactive_formula_is_not_an_activation():
+    """A PATCH without is_active kept the stored False, but validate read the
+    missing key as an activation and refused the edit (#2489)."""
+    formula = FieldFormula.objects.create(
+        field_name='no_pre_existing_conditions',
+        formula='@count(preexisting_conditions) == 0',
+        is_active=False,
+    )
+
+    serializer = FieldFormulaSerializer(
+        formula, data={'formula': '@count(preexisting_conditions) == 1'}, partial=True)
+
+    assert serializer.is_valid(), serializer.errors
+    assert serializer.save().is_active is False
+
+
+def test_editing_an_active_formula_still_checks_its_target():
+    formula = FieldFormula.objects.create(
+        field_name='no_pre_existing_conditions', formula='true', is_active=True,
+    )
+
+    serializer = FieldFormulaSerializer(
+        formula, data={'formula': '@count(preexisting_conditions) == 1'}, partial=True)
+
+    assert not serializer.is_valid()
+    assert 'field_name' in serializer.errors
