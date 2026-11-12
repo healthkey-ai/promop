@@ -13,7 +13,8 @@ reports the classes that need a human review before any repair:
   signature of the old projection), or with no/unknown unit.
 
 It never writes. `--json` emits the counts and up to `--sample` rows per class
-(person ids only), which is what a review or a dry-run plan consumes.
+(person ids only), which is what a review or a dry-run plan consumes. No lab
+value, unit text or date is printed: a reviewer opens the record by its id.
 """
 import json
 from collections import defaultdict
@@ -38,7 +39,11 @@ def _same_number(left, right):
 
 
 def _latest_direct_measurements(person_ids):
-    """person_id -> newest non-erroneous direct-bilirubin Measurement."""
+    """person_id -> newest non-erroneous direct-bilirubin Measurement.
+
+    ``person_ids`` is a queryset of the scanned records' ids, so the bound is a
+    subquery rather than every id inlined into ``IN (...)`` on a full run.
+    """
     rows = (
         Measurement.objects
         .filter(is_erroneous=False)
@@ -85,9 +90,9 @@ class Command(BaseCommand):
             records = records.filter(person_id=options['person_id'])
         if options['limit']:
             records = records[:options['limit']]
-        # Bound the Measurement query to the rows this run will actually scan.
-        selected_ids = set(records.values_list('person_id', flat=True))
-        latest = _latest_direct_measurements(selected_ids)
+        # Bound the Measurement query to the rows this run will actually scan,
+        # as a subquery: a full run must not inline every person id (#2489).
+        latest = _latest_direct_measurements(records.values('person_id'))
 
         counts = defaultdict(int)
         samples = defaultdict(list)
@@ -96,13 +101,10 @@ class Command(BaseCommand):
         def flag(bucket, record, detail=None):
             counts[bucket] += 1
             if len(samples[bucket]) < sample_size:
+                # Person id and the class's reason only: the docstring's
+                # contract, so a shared report carries no lab values (#2489).
                 samples[bucket].append({
                     'person_id': record.person_id,
-                    'value': str(record.serum_bilirubin_level_direct)
-                    if record.serum_bilirubin_level_direct is not None else None,
-                    'unit': record.serum_bilirubin_level_direct_units,
-                    'alias': str(record.serum_bilirubin_level)
-                    if record.serum_bilirubin_level is not None else None,
                     'detail': detail,
                 })
 
@@ -123,7 +125,7 @@ class Command(BaseCommand):
                 flag('pair_without_unit', record,
                      'no unit; the old reader assumes mg/dL')
             elif value is not None and (unit or '').strip() and code is None:
-                flag('unknown_unit', record, f'unit {unit!r} is not convertible')
+                flag('unknown_unit', record, 'the unit is not convertible')
             if value is None and alias is not None:
                 flag('orphan_alias', record,
                      'alias set without a source pair; scale is not established')
@@ -131,7 +133,7 @@ class Command(BaseCommand):
                 recognised, expected = units.alias_from_pair(value, code)
                 if recognised and not _same_number(alias, expected):
                     flag('alias_mismatch', record,
-                         f'alias should be {expected} mg/dL')
+                         'the alias does not match the pair in mg/dL')
             measurement = latest.get(record.person_id)
             if measurement is None or value is None:
                 continue
@@ -145,14 +147,13 @@ class Command(BaseCommand):
                      'latest Measurement carries no unit')
             elif measured_code is None:
                 flag('projection_unknown_unit', record,
-                     f'latest Measurement unit {measured_unit!r} is not convertible')
+                     'latest Measurement unit is not convertible')
             elif (code == 'UMOL/L' and measured_code == 'MG/DL'
                   and _same_number(measurement['value_as_number'], value)):
                 flag('projection_raw_unit', record,
-                     'latest Measurement %s (%s) keeps the raw number under '
+                     'latest Measurement %s keeps the raw number under '
                      'mg/dL; the old projection likely wrote it'
-                     % (measurement['measurement_id'],
-                        measurement['measurement_date']))
+                     % measurement['measurement_id'])
 
         report = {
             'scanned': scanned,
@@ -171,6 +172,4 @@ class Command(BaseCommand):
             self.stdout.write(f'{bucket}: {counts[bucket]}')
             for row in samples[bucket]:
                 self.stdout.write(
-                    f"  person_id={row['person_id']} value={row['value']} "
-                    f"unit={row['unit']} alias={row['alias']} "
-                    f"({row['detail']})")
+                    f"  person_id={row['person_id']} ({row['detail']})")

@@ -8,6 +8,7 @@ guard covers the derived negatives and the pregnancy self-assessment.
 import pytest
 
 from omop_core.models import FieldFormula
+from omop_core.services.authored_answers import AUTHORED_ANSWER_FORMULA_FIELDS
 from omop_core.services.field_curation_transfer import apply_payload
 from omop_core.services.patient_record_service import _apply_active_field_formulas
 from tests.factories import PatientRecordFactory
@@ -31,7 +32,7 @@ def test_an_import_cannot_reactivate_an_authored_answer_formula():
     assert any('authored-answer' in warning for warning in stats.warnings)
 
 
-def test_the_evaluator_skips_a_stale_active_answer_formula():
+def test_the_evaluator_skips_a_stale_active_answer_formula(stale_answer_formula_allowed):
     record = PatientRecordFactory()
     record.no_pre_existing_conditions = None
     record.preexisting_conditions = []
@@ -58,3 +59,29 @@ def test_the_guard_covers_the_other_authored_answers():
         'no_other_active_malignancies',
         'no_pregnancy_or_lactation_status',
     } <= set(AUTHORED_ANSWER_FORMULA_FIELDS)
+
+
+@pytest.mark.parametrize('field_name', sorted(AUTHORED_ANSWER_FORMULA_FIELDS))
+def test_the_database_refuses_an_active_formula_for_every_authored_answer(field_name):
+    """The CHECK listed three fields; `no_pre_existing_conditions` is the
+    fourth, and the database accepted an active formula for it (#2489)."""
+    from django.db import IntegrityError, transaction
+
+    with pytest.raises(IntegrityError), transaction.atomic():
+        FieldFormula.objects.create(field_name=field_name, formula='true', is_active=True)
+
+
+@pytest.mark.django_db(transaction=True)
+def test_the_stale_schema_fixture_refuses_a_committing_test():
+    """The constraint drop is undone only by the test's rollback; outside a
+    transaction it would leak into every later test (#2489 review)."""
+    from django.db import IntegrityError, connection
+
+    from tests.conftest import drop_explicit_answer_check
+
+    with pytest.raises(AssertionError, match='transactional_db'):
+        drop_explicit_answer_check(connection)
+    # The constraint is still there for the next test.
+    with pytest.raises(IntegrityError):
+        FieldFormula.objects.create(
+            field_name='no_pre_existing_conditions', formula='true', is_active=True)

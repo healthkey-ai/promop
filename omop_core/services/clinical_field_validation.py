@@ -6,6 +6,7 @@ the shared path from accepting a value the native PATCH would reject.
 """
 from omop_core.services import flipi
 from omop_core.services.sample_disease_profiles import GELF_FACTORS
+from omop_core.services.write_refusal import WriteRefused
 
 
 def normalize_gelf_criteria_options(value):
@@ -14,7 +15,7 @@ def normalize_gelf_criteria_options(value):
         return None
     selected = {part.strip() for part in str(value).split(',') if part.strip()}
     if selected - GELF_FACTORS.keys():
-        raise ValueError('Select recognized GELF criteria.')
+        raise WriteRefused('Select recognized GELF criteria.')
     return ','.join(key for key in GELF_FACTORS if key in selected)
 
 

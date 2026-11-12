@@ -36,6 +36,7 @@ from omop_core.services.genomic_concepts import (
     normalise_origin,
 )
 from omop_core.services.pk import next_pk
+from omop_core.services.write_refusal import WriteRefused
 from omop_core.services.write_descriptor import (
     build_writable_field_descriptor,
     KIND_EDITABLE,
@@ -71,7 +72,7 @@ def _invert_inverse_assertion(field, value, source_value=None, concept_code=None
             return False
         if normalized in _FALSY:
             return True
-        raise ValueError(
+        raise WriteRefused(
             f'{field} requires a boolean value; got {value!r}')
     return not bool(value)
 
@@ -335,7 +336,7 @@ def apply_field_writes(person, changes, today=None, descriptor=None, dates=None,
         descriptor = build_writable_field_descriptor()
     changes, envelope_dates, refusal = split_dated_edits(changes, descriptor)
     if refusal is not None:
-        raise ValueError(refusal)
+        raise WriteRefused(refusal)
     dates = {**envelope_dates, **(dates or {})}
 
     result = FieldWriteResult()
@@ -544,14 +545,14 @@ def _clean_location_value(field, value):
         try:
             value = Decimal(str(value))
         except (InvalidOperation, TypeError, ValueError):
-            raise ValueError(f'{field}: expected a number, got {value!r}')
+            raise WriteRefused(f'{field}: expected a number, got {value!r}')
         # NaN parses as a Decimal but makes the range comparison raise
         # InvalidOperation — reject non-finite (NaN/Inf) as a 400, not a 500.
         if not value.is_finite():
-            raise ValueError(f'{field}: expected a finite number, got {value!r}')
+            raise WriteRefused(f'{field}: expected a finite number, got {value!r}')
         lo, hi = _LOCATION_RANGE[field]
         if not (lo <= value <= hi):
-            raise ValueError(f'{field}: must be between {lo} and {hi}')
+            raise WriteRefused(f'{field}: must be between {lo} and {hi}')
         return value
     value = str(value).strip()
     max_len = _LOCATION_MAXLEN[column]
@@ -559,7 +560,7 @@ def _clean_location_value(field, value):
         # Match the persons endpoint: a too-long value is a 400, not a
         # truncated write or a Postgres DataError (e.g. a full state name into
         # varchar(2)).
-        raise ValueError(f'{field}: at most {max_len} characters (OMOP Location.{column})')
+        raise WriteRefused(f'{field}: at most {max_len} characters (OMOP Location.{column})')
     return value
 
 
@@ -607,7 +608,7 @@ def validate_location_pair(person, changes, record=None):
     final_lng = updates.get('longitude', existing_lng)
     if (final_lat is None) != (final_lng is None):
         missing = 'longitude' if final_lng is None else 'latitude'
-        raise ValueError(
+        raise WriteRefused(
             f"'{missing}': the record requires both coordinates or neither.")
 
 
@@ -700,17 +701,17 @@ def _coerce_value(value, value_kind):
     PATCH fails closed rather than silently storing a null-valued fact.
     """
     if value is None:
-        raise ValueError('cannot write a null value as a fact (clears are not a fact write)')
+        raise WriteRefused('cannot write a null value as a fact (clears are not a fact write)')
     if value_kind == 'number':
         try:
             number = Decimal(str(value))
         except (InvalidOperation, TypeError, ValueError):
-            raise ValueError(f'expected a number, got {value!r}')
+            raise WriteRefused(f'expected a number, got {value!r}')
         # value_as_number is DecimalField(15,5): guard the integer magnitude so an out-of-range
         # value is a 400, not a Postgres numeric overflow (500). Fractional scale beyond 5 places
         # is harmlessly rounded by PG.
         if not number.is_finite() or abs(number) >= _VALUE_MAX:
-            raise ValueError(f'value {value!r} is out of range for a measurement')
+            raise WriteRefused(f'value {value!r} is out of range for a measurement')
         return number, None
     return None, str(value)[:60]
 
@@ -827,7 +828,7 @@ def _write_genetic_mutations(person, mutations, today):
             if key is not None and key in mapping else None
         )
         if concept is None:
-            raise ValueError(
+            raise WriteRefused(
                 f'genetic_mutations ({gene}): {kind} {raw!r} is not a supported/loaded value')
         return concept
 
@@ -846,7 +847,7 @@ def _write_genetic_mutations(person, mutations, today):
         # — the mutation would vanish from the record silently. Require the variant; fail closed instead.
         variant = str(mut.get('mutation') or '').strip()
         if not variant:
-            raise ValueError(f'genetic_mutations ({gene}): a variant value is required')
+            raise WriteRefused(f'genetic_mutations ({gene}): a variant value is required')
         # source_value is a KEY (the ownership sentinel), so the upsert & retire only ever match rows we
         # authored — never an imported gene fact that happens to share the 32865 type.
         keys = {'person': person, 'measurement_concept': concept,
@@ -880,7 +881,7 @@ def _write_genetic_mutations(person, mutations, today):
     # the reconcile below would otherwise read the empty written_codes as "remove everything" and wipe
     # the patient's existing mutations from a malformed request. An intentional clear is an empty list.
     if mutations and not written_codes:
-        raise ValueError(
+        raise WriteRefused(
             'genetic_mutations: no recognized gene in the submitted list; send [] to clear all mutations')
 
     # Reconcile removals: OUR authored mutation rows (the ownership sentinel) for genes no longer sent →

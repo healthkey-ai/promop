@@ -53,7 +53,11 @@ def attest_no_preexisting_conditions(person, *, source='patient'):
     if person is None:
         raise ValueError('A pre-existing-conditions answer needs a patient.')
     record = _record_for(person)
-    if record is not None and condition_categories(record.preexisting_conditions):
+    # The 0305 CHECK's predicate, not "distinct non-blank codes": a junk value
+    # such as `[""]` or `{}` would otherwise reach the save as an
+    # IntegrityError (#2489).
+    if record is not None and contradicts_no_pre_existing_conditions(
+            True, record.preexisting_conditions):
         raise ValueError(
             'Recorded pre-existing conditions contradict a "none" answer.')
     attestation, _ = PreexistingConditionsAttestation.objects.update_or_create(
@@ -87,8 +91,9 @@ def sync_no_preexisting_conditions(record, *, source='patient'):
     """
     if record is None:
         return None
-    if record.no_pre_existing_conditions is True and not condition_categories(
-            record.preexisting_conditions):
+    if (record.no_pre_existing_conditions is True
+            and not contradicts_no_pre_existing_conditions(
+                True, record.preexisting_conditions)):
         return attest_no_preexisting_conditions(record.person, source=source)
     PreexistingConditionsAttestation.objects.filter(person_id=record.person_id).delete()
     return None

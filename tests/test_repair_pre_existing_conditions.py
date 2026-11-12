@@ -119,7 +119,7 @@ def test_changed_data_evidence_or_manifest_is_refused(tmp_path, ready, change):
     assert not (tmp_path / 'backup.json').exists()
 
 
-def test_formula_still_active_blocks_apply(tmp_path, ready):
+def test_formula_still_active_blocks_apply(tmp_path, ready, stale_answer_formula_allowed):
     cohort()
     FieldFormula.objects.create(field_name='no_pre_existing_conditions', formula='1', is_active=True)
     manifest, sha = audit(tmp_path)

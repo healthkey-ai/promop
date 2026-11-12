@@ -2238,13 +2238,34 @@ class FieldFormulaSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         # Partial updates can activate a formula without validate_field_name.
-        if self.instance is not None and attrs.get('is_active') is not False:
+        # Judge the effective state: a PATCH that omits is_active keeps the
+        # stored value, so editing an inactive formula is not an activation.
+        if self.instance is not None and attrs.get(
+                'is_active', self.instance.is_active) is not False:
             self._assert_computable(attrs.get('field_name', self.instance.field_name))
         return attrs
 
     def validate_field_name(self, value):
+        # Field-level validation runs before `validate` and sees the raw
+        # payload. The formula editor always sends field_name with is_active,
+        # so an edit of an inactive formula must not be refused here as if it
+        # activated it (#2489). Creation is always checked.
+        if self.instance is not None and self._requested_is_active() is False:
+            return value
         self._assert_computable(value)
         return value
+
+    def _requested_is_active(self):
+        """The is_active this update leaves in place: the submitted value,
+        else the stored one. An unparseable value counts as active; the field's
+        own validation reports it."""
+        data = getattr(self, 'initial_data', None) or {}
+        if 'is_active' not in data:
+            return self.instance.is_active
+        try:
+            return serializers.BooleanField().to_internal_value(data['is_active'])
+        except serializers.ValidationError:
+            return True
 
     @staticmethod
     def _assert_computable(field_name):

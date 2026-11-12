@@ -746,3 +746,51 @@ class TestMeReportsWriteAccess:
         assert response.data['write_enabled'] is False
         patch = client.patch('/api/patient-info/me/', {'weight': 80}, format='json')
         assert patch.status_code in (401, 403), patch.data
+
+
+def test_an_internal_value_error_is_logged_without_values_and_answered_generically(
+        monkeypatch, caplog):
+    """Only a deliberate refusal reaches the client (#2489).
+
+    `apply_patient_form_patch` restated every ValueError as the 400 message,
+    so any internal error's text (a value, an id, a column) was sent to the
+    caller. Anything that is not a WriteRefused is now logged with the person
+    and field names only and answered with a fixed sentence.
+    """
+    import logging
+
+    from omop_core.services import patient_form
+
+    def broken(*args, **kwargs):
+        raise ValueError('internal detail 98765 secret-value')
+
+    monkeypatch.setattr(patient_form, 'recompute_patient_record_fields', broken)
+    record = PatientRecordFactory()
+
+    with caplog.at_level(logging.WARNING, logger='omop_core.services.patient_form'):
+        response = _client().patch(
+            f'/api/v1/patient-records/{record.person_id}/',
+            {'weight': 80}, format='json', HTTP_X_PATIENT_FORM='1')
+
+    assert response.status_code == 400, response.data
+    assert '98765' not in str(response.data)
+    assert response.data['detail'] == patient_form.UNSAVED_MESSAGE
+    logged = ' '.join(r.getMessage() for r in caplog.records)
+    assert f'person_id={record.person_id}' in logged
+    assert "'weight'" in logged
+    # Where it was raised, so the log is actionable without the text (#2489).
+    assert 'ValueError at test_patient_form_api:' in logged
+    assert '(broken)' in logged
+    assert '98765' not in logged and '80' not in logged.replace(str(record.person_id), '')
+    record.refresh_from_db()
+    assert record.weight is None
+
+
+def test_a_deliberate_refusal_raised_deep_in_the_write_keeps_its_sentence():
+    from omop_core.services.patient_form import apply_patient_form_patch
+
+    record = PatientRecordFactory()
+    with pytest.raises(ValidationError) as exc:
+        apply_patient_form_patch(record.person, {'gelf_criteria_options': 'not-a-factor'})
+
+    assert exc.value.messages == ['Select recognized GELF criteria.']

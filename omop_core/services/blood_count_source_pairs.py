@@ -117,10 +117,18 @@ def canonical_from_source(source, value, unit=None):
         code = normalize_unit(unit)
     if code is None:
         return False, None
-    canonical = blood_count_to_canonical(value, code)
-    if canonical is None:
+    try:
+        canonical = blood_count_to_canonical(value, code)
+        if canonical is None:
+            return False, None
+        rounded = canonical.quantize(CANONICAL_QUANTUM, rounding=ROUND_HALF_UP)
+    except ArithmeticError:
+        # Past the decimal context: the unit factor overflows the exponent
+        # (`decimal.Overflow` for 1e1000003) or quantize needs more digits
+        # than the context holds (InvalidOperation for 1e40). Either is far
+        # past the column, so it is refused like any other overflow.
         return False, None
-    if canonical.quantize(CANONICAL_QUANTUM, rounding=ROUND_HALF_UP) > CANONICAL_LIMIT:
+    if rounded > CANONICAL_LIMIT:
         return False, None
     return True, canonical
 

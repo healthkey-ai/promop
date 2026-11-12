@@ -197,20 +197,13 @@ def _propagate_pair_fact_dates(fact_dates, fact_ids):
     """Copy a source pair's date and result id onto its canonical read-model (#2397).
 
     A pair editor dates the source field; the projection that writes the fact
-    is on the canonical field. Both must carry the same clinical day.
+    is on the canonical field. Both must carry the same clinical day. The pair
+    inventory is ``SOURCE_PAIR_CANONICALS``, the one the shared form and
+    derivation read; direct bilirubin maps to itself there, which is a no-op.
     """
-    from omop_core.services.blood_count_source_pairs import PAIRS as COUNT_PAIRS
-    from omop_core.services.chemistry_units import PAIRS as CHEMISTRY_PAIRS
-    from omop_core.services.creatinine_units import (
-        CANONICAL_FIELD as CREATININE_CANONICAL, PAIR_FIELD as CREATININE_PAIR,
-    )
-    from omop_core.services.hemoglobin_units import (
-        CANONICAL_FIELD as HEMOGLOBIN_CANONICAL, PAIR_FIELD as HEMOGLOBIN_PAIR,
-    )
-    pairs = {HEMOGLOBIN_PAIR: HEMOGLOBIN_CANONICAL, CREATININE_PAIR: CREATININE_CANONICAL}
-    pairs.update({spec['value']: canonical for canonical, spec in CHEMISTRY_PAIRS.items()})
-    pairs.update({source: spec['canonical'] for source, spec in COUNT_PAIRS.items()})
-    for source, canonical in pairs.items():
+    from omop_core.services.source_pair_dates import SOURCE_PAIR_CANONICALS
+
+    for source, canonical in SOURCE_PAIR_CANONICALS.items():
         if source in fact_dates and canonical not in fact_dates:
             fact_dates[canonical] = fact_dates[source]
         if source in fact_ids and canonical not in fact_ids:
@@ -5996,6 +5989,30 @@ def _csv_row_write_error(request, person_id: int, upload_org=None) -> str | None
     return 'caller does not have write access to this patient'
 
 
+def _explicit_answer_write(request, person):
+    """``(403 response or None, attestation source)`` for a deliberate answer.
+
+    The answer endpoints (pre-existing conditions, negative answers) share one
+    write check. The second ``can_write_patient`` call does not change the
+    outcome today: ``_caller_may_write_patient`` takes its org path only for a
+    client_credentials token, which ``is_machine_request`` skips here, and
+    for every other non-staff caller it already asks ``can_write_patient``.
+    It is kept as a guard should either rule change. A host credential attests
+    as ``host-explicit``; a person as their role.
+    """
+    read_only = Response({'detail': 'You have read-only access to this patient.'}, status=403)
+    if not _caller_may_write_patient(request, person.person_id):
+        return read_only, None
+    machine = is_machine_request(request)
+    if not machine and not getattr(request.user, 'is_staff', False):
+        from omop_core.authorization import can_write_patient
+        if not can_write_patient(request.user, person.person_id):
+            return read_only, None
+    source = ('host-explicit' if machine
+              else f'{_attestation_source(request, person)}-explicit')
+    return None, source
+
+
 class PatientRecordV1ViewSet(PatientRecordViewSet):
     """v1-only PatientRecord surface.
 
@@ -6067,15 +6084,10 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
         if request.method == 'GET':
             return Response({'no_pre_existing_conditions': record.no_pre_existing_conditions,
                              'preexisting_conditions': record.preexisting_conditions})
-        if not _caller_may_write_patient(request, person.person_id):
-            return Response({'detail': 'You have read-only access to this patient.'}, status=403)
-        if not is_machine_request(request) and not getattr(request.user, 'is_staff', False):
-            from omop_core.authorization import can_write_patient
-            if not can_write_patient(request.user, person.person_id):
-                return Response({'detail': 'You have read-only access to this patient.'}, status=403)
+        denied, source = _explicit_answer_write(request, person)
+        if denied is not None:
+            return denied
         from .preexisting_conditions import write_answer
-        source = ('host-explicit' if is_machine_request(request)
-                  else f'{_attestation_source(request, person)}-explicit')
         return write_answer(request, record, source=source,
                             revision_writer=_write_record_revisions)
 
@@ -6101,14 +6113,9 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
                 'confirmed': attested,
                 'source': source_value(record, field),
             })
-        if not _caller_may_write_patient(request, person.person_id):
-            return Response({'detail': 'You have read-only access to this patient.'}, status=403)
-        if not is_machine_request(request) and not getattr(request.user, 'is_staff', False):
-            from omop_core.authorization import can_write_patient
-            if not can_write_patient(request.user, person.person_id):
-                return Response({'detail': 'You have read-only access to this patient.'}, status=403)
-        source = ('host-explicit' if is_machine_request(request)
-                  else f'{_attestation_source(request, person)}-explicit')
+        denied, source = _explicit_answer_write(request, person)
+        if denied is not None:
+            return denied
         return write_answer(request, record, source=source,
                             revision_writer=_write_record_revisions)
 

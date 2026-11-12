@@ -231,3 +231,46 @@ def test_a_manifest_that_appears_mid_run_is_refused_cleanly(tmp_path, monkeypatc
     with pytest.raises(CommandError, match='already exists'):
         call_command('audit_pre_existing_conditions', '--output', str(path), stdout=StringIO())
     assert path.read_text() == '{}'
+
+
+def _django_migrations(names):
+    """A django_migrations table holding exactly these omop_core names.
+
+    pytest runs with --no-migrations, so the table may not exist; the test's
+    transaction rolls back whatever is created or written here.
+    """
+    from django.db import connection
+    from django.db.migrations.recorder import MigrationRecorder
+
+    recorder = MigrationRecorder(connection)
+    recorder.ensure_schema()
+    recorder.migration_qs.filter(app='omop_core').delete()
+    for name in names:
+        recorder.record_applied('omop_core', name)
+
+
+def test_other_0304_0305_migrations_do_not_count_as_the_guard(tmp_path):
+    """`dev` has other 0304_*/0305_* migrations; a prefix match reported the
+    #1989 guard as applied when it was not (#2489)."""
+    _django_migrations([
+        '0304_axis_variant_refresh_progress_at',
+        '0305_merge_20261025_0053',
+        '0305_reverse_suggest_decline',
+    ])
+
+    formula = _audit(tmp_path / 'manifest.json')['formula']
+
+    assert formula['migration_0304_applied'] is False
+    assert formula['migration_0305_applied'] is False
+
+
+def test_the_guard_migrations_are_recognised_by_name(tmp_path):
+    _django_migrations([
+        '0304_deactivate_pre_existing_condition_formula',
+        '0305_patientrecord_pre_existing_flag_guard',
+    ])
+
+    formula = _audit(tmp_path / 'manifest.json')['formula']
+
+    assert formula['migration_0304_applied'] is True
+    assert formula['migration_0305_applied'] is True

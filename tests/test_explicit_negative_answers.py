@@ -254,3 +254,35 @@ def test_formula_api_refuses_an_explicit_answer_field():
         'is_active': False,
     })
     assert not serializer.is_valid()
+
+
+def test_audit_classifies_every_confirmation_in_one_query():
+    """The audit fetched the PatientRecord once per attestation (#2489)."""
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+    from django.utils import timezone
+
+    def run():
+        out = StringIO()
+        with CaptureQueriesContext(connection) as queries:
+            call_command('audit_explicit_negative_answers', stdout=out)
+        return len(queries.captured_queries), out.getvalue()
+
+    infected = PatientRecordFactory(active_infection_status=True)
+    ExplicitNegativeAnswer.objects.create(
+        person=infected.person, field=INFECTION, confirmed_at=timezone.now())
+    baseline, _ = run()
+
+    two_cancers = PatientRecordFactory(active_malignancies=['a', 'b'])
+    clean = PatientRecordFactory(active_infection_status=False)
+    for record, field in ((two_cancers, MALIGNANCIES), (clean, INFECTION)):
+        ExplicitNegativeAnswer.objects.create(
+            person=record.person, field=field, confirmed_at=timezone.now())
+    count, output = run()
+
+    assert count == baseline
+    assert f'person={infected.person_id} {INFECTION}: active infection is recorded' in output
+    assert (f'person={two_cancers.person_id} {MALIGNANCIES}: '
+            'more than one active malignancy is recorded') in output
+    assert f'person={clean.person_id}' not in output
+    assert '2 conflict(s) out of 3' in output

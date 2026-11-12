@@ -10,7 +10,7 @@ import pytest
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from omop_core.models import PreexistingConditionsAttestation
+from omop_core.models import PatientRecord, PreexistingConditionsAttestation
 from omop_core.services.patient_record_service import recompute_patient_record_fields
 from omop_core.services.pre_existing_conditions import (
     attest_no_preexisting_conditions, is_no_preexisting_conditions_attested,
@@ -52,6 +52,24 @@ def test_an_answer_is_refused_while_categories_are_recorded():
 
     assert not PreexistingConditionsAttestation.objects.filter(
         person=record.person).exists()
+
+
+@pytest.mark.parametrize('junk', [[''], {}, '   ', [None]])
+def test_an_answer_is_refused_beside_a_junk_category_value(junk):
+    """The 0305 CHECK permits only NULL, `[]` and JSON null beside True. The
+    distinct-code test let these through to the save: an IntegrityError (a
+    500) instead of the refusal (#2489)."""
+    record = PatientRecordFactory(no_pre_existing_conditions=None)
+    PatientRecord.objects.filter(pk=record.pk).update(preexisting_conditions=junk)
+    record.person.refresh_from_db()
+
+    with pytest.raises(ValueError, match='contradict'):
+        attest_no_preexisting_conditions(record.person)
+
+    assert not PreexistingConditionsAttestation.objects.filter(
+        person=record.person).exists()
+    record.refresh_from_db()
+    assert record.no_pre_existing_conditions is None
 
 
 def test_withdrawing_the_answer_makes_the_flag_unknown_not_false():
