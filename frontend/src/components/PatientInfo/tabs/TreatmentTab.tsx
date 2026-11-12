@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 import { Pencil, Plus, Trash2 } from 'lucide-react';
 import { useWritableFields, invalidateWritableFieldsCache } from '@/hooks/useWritableFields';
 import {
@@ -52,6 +52,7 @@ export default function TreatmentTab({ formData, onChange, diseaseType, onRecord
   // Until confirmed, the recorded line count is a lower bound; the confirmation
   // is the patient's statement that the list is complete (#1924).
   const historyComplete = formData?.therapy_history_complete === true;
+  const historyId = useId();
   const [confirmingHistory, setConfirmingHistory] = useState(false);
   const [historyError, setHistoryError] = useState('');
 
@@ -251,12 +252,15 @@ export default function TreatmentTab({ formData, onChange, diseaseType, onRecord
             checked={historyComplete}
             disabled={readOnly || confirmingHistory || personId === null}
             onChange={(e) => void setHistoryComplete(e.target.checked)}
-            aria-label="Treatment history is complete"
+            // Named by the visible sentence, not a differently worded
+            // aria-label (WCAG 2.5.3); the hint is a description.
+            aria-labelledby={`${historyId}-label`}
+            aria-describedby={`${historyId}-hint`}
             className="mt-0.5"
           />
           <span>
-            <span className="font-medium">This is my complete treatment history</span>
-            <span className="mt-0.5 block text-xs text-muted-foreground">
+            <span id={`${historyId}-label`} className="font-medium">This is my complete treatment history</span>
+            <span id={`${historyId}-hint`} className="mt-0.5 block text-xs text-muted-foreground">
               Until you confirm this, the number of prior lines is treated as a minimum
               rather than an exact count.
             </span>

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useId, useState } from 'react';
 import { Pencil, Plus, Trash2 } from 'lucide-react';
 
 import { diseaseToDiseaseCode } from '@/api/therapyContext';
@@ -36,6 +36,7 @@ export default function TherapyLinesPanel({ store, readOnly = false, onChanged, 
   const state = usePatientFormSnapshot(store);
   const [dialog, setDialog] = useState<{ mode: 'add' } | { mode: 'edit'; line: EditableTherapyLine } | null>(null);
   const [busy, setBusy] = useState(false);
+  const completeId = useId();
   const [error, setError] = useState('');
 
   const personId = state.personId ?? null;
@@ -151,12 +152,15 @@ export default function TherapyLinesPanel({ store, readOnly = false, onChanged, 
         checked={complete}
         disabled={!editable || busy}
         onChange={(event) => void setComplete(event.target.checked)}
-        aria-label="Treatment history is complete"
+        // Named by the visible sentence, not a differently worded aria-label
+        // (WCAG 2.5.3); the hint is a description, not part of the name.
+        aria-labelledby={`${completeId}-label`}
+        aria-describedby={complete ? undefined : `${completeId}-hint`}
         className="mt-0.5"
       />
       <span>
-        This is the complete treatment history.
-        {!complete && <span className="block text-xs text-muted-foreground">
+        <span id={`${completeId}-label`}>This is the complete treatment history.</span>
+        {!complete && <span id={`${completeId}-hint`} className="block text-xs text-muted-foreground">
           Until confirmed, the number of prior lines counts as a minimum.
         </span>}
       </span>

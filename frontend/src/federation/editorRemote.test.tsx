@@ -101,7 +101,7 @@ describe('the PROMOP editors for a host that shares the React tree', () => {
     // The completeness flag is one of the writes that used to go through the
     // global transport. It must land on the host's client at the host's base.
     await act(async () => {
-      screen.getByRole('checkbox', { name: 'Treatment history is complete' }).click();
+      screen.getByRole('checkbox', { name: 'This is the complete treatment history.' }).click();
     });
     await waitFor(() => expect(host.post).toHaveBeenCalledWith(
       '/fed/v1/therapy-history/completeness/',

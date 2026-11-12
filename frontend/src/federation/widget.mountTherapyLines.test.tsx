@@ -67,7 +67,7 @@ afterEach(async () => {
 
 const complete = (root: HTMLElement) =>
   root.querySelector<HTMLInputElement>(
-    'input[aria-label="Treatment history is complete"]',
+    'input[type="checkbox"]',
   )!;
 
 describe('mountTherapyLines', () => {
