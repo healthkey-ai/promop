@@ -23,7 +23,10 @@ boundary for every measurement—not just white blood cell counts.
 4. **Conversions are explicit and allowlisted.** A projection may convert only
    recognized source-unit expressions. Missing or unrecognized units fail closed:
    the derived value is omitted and a warning is recorded. Source data remains
-   available for repair.
+   available for repair. An exception has to be named in the projection's own
+   section: `serum_creatinine_mg_dl` reads an absent unit — including
+   `unit_concept_id = 0` — as mg/dL, the unit every canonical creatinine value
+   has been recorded in.
 5. **Unit changes require a migration plan.** Adding a canonical unit or changing
    a conversion must include source-unit tests, boundary/range tests, documented
    backwards compatibility, and a repair/backfill plan for affected derived data.
