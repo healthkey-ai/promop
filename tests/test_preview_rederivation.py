@@ -285,6 +285,19 @@ def test_text_qualifies_a_field_filter_and_keeps_the_suppressed_count():
     assert '4 more row(s) not shown (--max-rows)' in limited
 
 
+def test_a_post_save_formula_update_is_reported():
+    """The preview reads the record after the refresh, including the formula
+    update that runs after PatientRecord.save()."""
+    from omop_core.models import FieldFormula
+    record = _settled()
+    _stale(record, bmi=Decimal('1.00'))
+    FieldFormula.objects.create(field_name='bmi', formula='42', is_active=True)
+
+    bmi = [row for row in _json()['changes'] if row['field'] == 'bmi']
+
+    assert bmi and bmi[0]['direction'] == 'up'
+
+
 def test_custom_fields_are_compared_per_key():
     from omop_core.models import CustomPatientField, FieldConceptMapping
     mapping = FieldConceptMapping.objects.create(
