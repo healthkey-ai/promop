@@ -9,7 +9,9 @@ from django.db.migrations.recorder import MigrationRecorder
 from django.utils import timezone
 
 from omop_core.management.commands.repair_pre_existing_conditions import CONSTRAINT, REQUIRED
-from omop_core.models import FieldFormula, PreexistingConditionsAttestation, RecordRevision
+from omop_core.models import (
+    FieldFormula, PatientRecord, PreexistingConditionsAttestation, RecordRevision,
+)
 from tests.factories import PatientRecordFactory
 
 pytestmark = pytest.mark.django_db
@@ -87,6 +89,49 @@ def test_apply_only_ambiguous_and_preserves_original_in_db_and_private_file(tmp_
         record.refresh_from_db()
         assert record.no_pre_existing_conditions is expected
     assert not PreexistingConditionsAttestation.objects.filter(person=ambiguous.person).exists()
+
+
+def test_apply_aborts_when_an_attestation_lands_between_audit_and_lock(
+        tmp_path, ready, monkeypatch):
+    """The audit runs before the lock, so the repair must re-derive the evidence
+    under the lock: a person confirming "none" before the write is not a default."""
+    from omop_core.management.commands import repair_pre_existing_conditions as module
+
+    ambiguous, *_ = cohort()
+    manifest, sha = audit(tmp_path)
+    original = module.Command._lock
+
+    def lock_after_an_explicit_answer(self, live, supplied, rolling_back):
+        PreexistingConditionsAttestation.objects.create(
+            person=ambiguous.person, source='patient-explicit', confirmed_at=timezone.now())
+        original(self, live, supplied, rolling_back)
+
+    monkeypatch.setattr(module.Command, '_lock', lock_after_an_explicit_answer)
+    with pytest.raises(CommandError, match='changed after the audit'):
+        apply(tmp_path, manifest, sha)
+
+    ambiguous.refresh_from_db()
+    assert ambiguous.no_pre_existing_conditions is True
+    assert not RecordRevision.objects.filter(
+        changed_by__startswith='repair:1988:').exists()
+
+
+def test_apply_aborts_when_the_flag_changes_between_audit_and_lock(
+        tmp_path, ready, monkeypatch):
+    from omop_core.management.commands import repair_pre_existing_conditions as module
+
+    ambiguous, *_ = cohort()
+    manifest, sha = audit(tmp_path)
+    original = module.Command._lock
+
+    def lock_after_the_answer_changed(self, live, supplied, rolling_back):
+        PatientRecord.objects.filter(pk=ambiguous.pk).update(
+            no_pre_existing_conditions=False)
+        original(self, live, supplied, rolling_back)
+
+    monkeypatch.setattr(module.Command, '_lock', lock_after_the_answer_changed)
+    with pytest.raises(CommandError, match='changed after the audit'):
+        apply(tmp_path, manifest, sha)
 
 
 @pytest.mark.parametrize('change', ['flag', 'categories', 'evidence', 'digest', 'target', 'classification', 'id'])

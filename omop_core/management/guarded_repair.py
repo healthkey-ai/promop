@@ -202,6 +202,9 @@ def lock_rows(model, pks):
         # select_for_update locks on read; the values are not needed.
         list(model.objects.select_for_update().filter(pk__in=batch)
              .order_by('pk').values_list('pk', flat=True))
+    # The timeout bounds acquisition only; the writes that follow wait normally.
+    with connection.cursor() as cursor:
+        cursor.execute('SET LOCAL lock_timeout = 0')
 
 
 def receipt(operation, run, database, expected, entries):

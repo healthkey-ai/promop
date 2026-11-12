@@ -88,8 +88,8 @@ DATABASE_URL="${STAGING_DATABASE_URL:?}" python manage.py repair_pre_existing_co
   --backup "$PRIVATE_DIR/conditions-repair-backup.json"
 ```
 
-The transaction rechecks the approved cohort and readiness under write-excluding
-locks. Selected flags become NULL; legacy attestations are removed but preserved
+The transaction re-derives the candidate cohort's evidence under the row locks,
+and checks readiness there too. Selected flags become NULL; legacy attestations are removed but preserved
 in the private backup and a durable `RecordRevision` repair ledger. Original
 timestamps retain microseconds. Backup creation is exclusive, mode 0600; both the
 file and its parent directory are fsynced before DB commit. Any failure aborts all DB changes. A file remaining

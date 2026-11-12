@@ -80,15 +80,17 @@ def _category_state(value):
     return 'nonempty' if condition_categories(value) else 'empty'
 
 
-def _flag_revisions():
+def _flag_revisions(ids=None):
     """The flag history for every record, grouped by record, oldest first.
 
-    Filtering by the cohort's ids would need a large ``IN`` clause and the whole
-    cohort in memory; the flag history is small (one row per authored change).
+    The audit reads the whole history; the repair narrows to its candidates to
+    re-derive their evidence under the row locks.
     """
     history = {}
-    rows = (RecordRevision.objects
-            .filter(field=FLAG_FIELD)
+    rows = RecordRevision.objects.filter(field=FLAG_FIELD)
+    if ids is not None:
+        rows = rows.filter(patient_record_id__in=list(ids))
+    rows = (rows
             .order_by('patient_record_id', 'changed_at', 'id')
             .values_list('patient_record_id', 'changed_at', 'old_value', 'new_value')
             .iterator(chunk_size=2000))

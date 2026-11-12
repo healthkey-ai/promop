@@ -41,7 +41,7 @@ from datetime import date, datetime, timezone as dt_timezone
 
 from django.core.management.base import BaseCommand, CommandError
 from django.db import connection, transaction
-from django.db.models import Min, Q
+from django.db.models import Count, Min, Q
 
 from omop_core.management.guarded_repair import (
     approval_digest, as_bool, make_transaction_read_only, refuse_existing_manifest,
@@ -77,15 +77,20 @@ ACTIONS = {
 _TOBACCO_CODES = ('72166-2', '266919005', '8517006', '77176002')
 _PREGNANCY_CODES = ('2106-3',)
 
-def _revisions(field_name):
+def _revisions(field_name, ids=None):
     """The field's authored history, grouped by record, oldest first.
 
     Repair/rollback revisions are operator actions, not authorship: a restored
     default must keep classifying as a default.
+
+    ``ids`` narrows the scan to a cohort the repair re-checks under its row
+    locks; the audit itself passes none and reads the whole history.
     """
     history = {}
-    rows = (RecordRevision.objects
-            .filter(field=field_name)
+    history_rows = RecordRevision.objects.filter(field=field_name)
+    if ids is not None:
+        history_rows = history_rows.filter(patient_record_id__in=list(ids))
+    rows = (history_rows
             .exclude(changed_by__startswith='repair:2432:')
             .exclude(changed_by__startswith='rollback:2432:')
             .order_by('patient_record_id', 'changed_at', 'id')
@@ -180,16 +185,24 @@ def _pregnancy_supports_true(row):
     return None
 
 
-def _source_state():
-    """Per person: whether the newest recorded tobacco/pregnancy fact supports True."""
-    tobacco_rows = list(
+def _source_state(ids=None):
+    """Per person: whether the newest recorded tobacco/pregnancy fact supports True.
+
+    ``ids`` narrows to a set of person ids, which the repair uses to re-derive
+    the evidence of its candidates under the row locks; the audit passes none.
+    """
+    tobacco_rows = (
         Observation.objects
         .filter(is_erroneous=False)
         .filter(
             Q(observation_concept__concept_code__in=_TOBACCO_CODES)
             | Q(observation_source_value__in=_TOBACCO_CODES)
         )
-        .values(
+    )
+    if ids is not None:
+        tobacco_rows = tobacco_rows.filter(person_id__in=list(ids))
+    tobacco_rows = list(
+        tobacco_rows.values(
             'person_id', 'observation_date', 'observation_id',
             'observation_concept__concept_code', 'observation_source_value',
             'value_as_concept__concept_code', 'value_as_concept__concept_name',
@@ -213,23 +226,28 @@ def _source_state():
                for person, state in tobacco.items()}
 
     pregnancy_rows = []
-    for row in Measurement.objects.filter(is_erroneous=False).filter(
-            Q(measurement_concept__concept_code__in=_PREGNANCY_CODES)
-            | Q(measurement_source_value__in=_PREGNANCY_CODES)).values(
-                'person_id', 'measurement_date', 'measurement_id',
-                'measurement_concept__concept_code', 'measurement_source_value',
-                'value_as_concept__concept_code', 'value_as_concept__concept_name',
-                'value_as_string', 'value_source_value'):
+    measurement_rows = Measurement.objects.filter(is_erroneous=False).filter(
+        Q(measurement_concept__concept_code__in=_PREGNANCY_CODES)
+        | Q(measurement_source_value__in=_PREGNANCY_CODES))
+    observation_rows = Observation.objects.filter(is_erroneous=False).filter(
+        Q(observation_concept__concept_code__in=_PREGNANCY_CODES)
+        | Q(observation_source_value__in=_PREGNANCY_CODES))
+    if ids is not None:
+        measurement_rows = measurement_rows.filter(person_id__in=list(ids))
+        observation_rows = observation_rows.filter(person_id__in=list(ids))
+    for row in measurement_rows.values(
+            'person_id', 'measurement_date', 'measurement_id',
+            'measurement_concept__concept_code', 'measurement_source_value',
+            'value_as_concept__concept_code', 'value_as_concept__concept_name',
+            'value_as_string', 'value_source_value'):
         pregnancy_rows.append({
             **row, 'date': row['measurement_date'], 'id': row['measurement_id'],
         })
-    for row in Observation.objects.filter(is_erroneous=False).filter(
-            Q(observation_concept__concept_code__in=_PREGNANCY_CODES)
-            | Q(observation_source_value__in=_PREGNANCY_CODES)).values(
-                'person_id', 'observation_date', 'observation_id',
-                'observation_concept__concept_code', 'observation_source_value',
-                'value_as_concept__concept_code', 'value_as_concept__concept_name',
-                'value_as_string', 'value_source_value'):
+    for row in observation_rows.values(
+            'person_id', 'observation_date', 'observation_id',
+            'observation_concept__concept_code', 'observation_source_value',
+            'value_as_concept__concept_code', 'value_as_concept__concept_name',
+            'value_as_string', 'value_source_value'):
         pregnancy_rows.append({
             **row, 'date': row['observation_date'], 'id': row['observation_id'],
         })
@@ -339,9 +357,16 @@ class Command(BaseCommand):
     def _collect(self, summary_only):
         histories = {field: _revisions(field) for field in FIELDS}
         source_states = _source_state()
-        revision_rows = RecordRevision.objects.all()
-        revision_total = revision_rows.count()
-        earliest_revision = revision_rows.aggregate(first=Min('changed_at'))['first']
+        revisions = RecordRevision.objects.aggregate(
+            total=Count('pk'), first=Min('changed_at'))
+        revision_total = revisions['total']
+        earliest_revision = revisions['first']
+        # Coverage is about the patient's history as a whole: a record edited
+        # before 0125 predates revisions entirely, which is the risk the clear
+        # review judges. The two audited fields' histories stay the evidence
+        # for the classification itself.
+        revised_records = set(
+            RecordRevision.objects.values_list('patient_record_id', flat=True).distinct())
         queryset = (
             PatientRecord.objects
             .order_by('pk')
@@ -353,7 +378,7 @@ class Command(BaseCommand):
         totals = 0
         records_with_any_revision = 0
         clear_candidates = 0
-        clear_candidates_with_revision_history = 0
+        clear_candidates_in_revised_records = 0
         by_field = {
             field: {
                 'by_classification': {name: 0 for name in CLASSIFICATIONS},
@@ -370,7 +395,7 @@ class Command(BaseCommand):
             values = dict(zip(FIELDS, row[3:5]))
             edited = row[5] if isinstance(row[5], list) else []
             derivation_version, derived_at = row[6], row[7]
-            has_any_revision = any(histories[field].get(pk) for field in FIELDS)
+            has_any_revision = pk in revised_records
             if has_any_revision:
                 records_with_any_revision += 1
             fields = {}
@@ -384,7 +409,7 @@ class Command(BaseCommand):
                 if action == 'clear':
                     clear_candidates += 1
                     if has_any_revision:
-                        clear_candidates_with_revision_history += 1
+                        clear_candidates_in_revised_records += 1
                 by_field[field]['by_classification'][classification] += 1
                 by_field[field]['by_action'][action] = (
                     by_field[field]['by_action'].get(action, 0) + 1)
@@ -433,14 +458,14 @@ class Command(BaseCommand):
                 # operator judges that from these counts and the manifest, so
                 # they are published with the audit rather than left to SQL.
                 'evidence': {
-                    'revisions_total': revision_total,
-                    'earliest_revision_at': (
+                    'revisions_total_all_fields': revision_total,
+                    'earliest_revision_at_all_fields': (
                         earliest_revision.isoformat() if earliest_revision else None),
                     'records_with_any_revision': records_with_any_revision,
                     'records_without_any_revision': totals - records_with_any_revision,
                     'clear_candidates': clear_candidates,
-                    'clear_candidates_with_revision_history': (
-                        clear_candidates_with_revision_history),
+                    'clear_candidates_in_revised_records': (
+                        clear_candidates_in_revised_records),
                 },
             },
             'records': records,
@@ -469,15 +494,18 @@ class Command(BaseCommand):
                     f'{name}={count}' for name, count in sorted(actions.items())))
         evidence = payload['totals']['evidence']
         self.stdout.write(
-            'revision history: '
-            f'{evidence["revisions_total"]} row(s), earliest '
-            f'{evidence["earliest_revision_at"] or "never"}, '
+            'revision history (all fields): '
+            f'{evidence["revisions_total_all_fields"]} row(s), earliest '
+            f'{evidence["earliest_revision_at_all_fields"] or "never"}; '
             f'{evidence["records_with_any_revision"]} of {payload["totals"]["records"]} '
             'record(s) carry any')
-        if evidence['clear_candidates']:
+        without_history = (evidence['clear_candidates']
+                           - evidence['clear_candidates_in_revised_records'])
+        if without_history:
             self.stdout.write(self.style.WARNING(
-                f'{evidence["clear_candidates"]} clear candidate(s) have no revision for the '
-                'field: an answer entered before RecordRevision existed (0125), or by a path '
-                'that recorded neither revision nor pending marker, is indistinguishable from '
-                'the legacy default. Review the manifest before --apply.'))
+                f'{without_history} of {evidence["clear_candidates"]} clear candidate(s) '
+                'belong to records with no revision history: an answer entered before '
+                'RecordRevision existed (0125), or by a path that recorded neither revision '
+                'nor pending marker, is indistinguishable from the legacy default. Review '
+                'the manifest before --apply.'))
         self.stdout.write(f'approval_sha256: {payload["approval_sha256"]}')

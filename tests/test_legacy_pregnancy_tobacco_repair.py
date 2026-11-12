@@ -127,15 +127,77 @@ def test_the_audit_publishes_the_revision_coverage_the_clear_review_needs(tmp_pa
 
     assert data['manifest_version'] == 2
     evidence = data['totals']['evidence']
-    assert evidence['revisions_total'] == 2              # authored + rewritten
-    assert evidence['earliest_revision_at']
+    assert evidence['revisions_total_all_fields'] == 2      # authored + rewritten
+    assert evidence['earliest_revision_at_all_fields']
     assert evidence['records_with_any_revision'] == 2
     assert evidence['records_without_any_revision'] == data['totals']['records'] - 2
     assert evidence['clear_candidates'] == 2             # the unattributed record, both fields
-    assert evidence['clear_candidates_with_revision_history'] == 0
+    assert evidence['clear_candidates_in_revised_records'] == 0
     rows = {row['id']: row for row in data['records']}
     assert rows[names['authored'].pk]['has_any_revision'] is True
     assert rows[names['unattributed'].pk]['has_any_revision'] is False
+
+
+def test_revision_coverage_counts_a_revision_on_any_field(tmp_path):
+    """A patient edited elsewhere before 0125 still has no revision history;
+    one edited after it does, even when the audited fields were never touched."""
+    record = PatientRecordFactory(**{PREGNANCY: True, TOBACCO: True})
+    RecordRevision.objects.create(
+        patient_record=record, field='email', old_value='old@example.test',
+        new_value='new@example.test')
+    manifest, _sha = audit(tmp_path)
+    data = json.loads(open(manifest).read())
+
+    evidence = data['totals']['evidence']
+    assert evidence['records_with_any_revision'] == 1
+    assert evidence['clear_candidates'] == 2
+    assert evidence['clear_candidates_in_revised_records'] == 2
+    assert (evidence['clear_candidates']
+            - evidence['clear_candidates_in_revised_records']) == 0
+
+
+
+def test_apply_aborts_when_authored_evidence_lands_between_audit_and_lock(
+        tmp_path, ready, monkeypatch):
+    """The audit runs before the lock, so the repair must re-derive the evidence
+    under the lock: a person answering True before the write is not a default."""
+    from omop_core.management.commands import repair_legacy_pregnancy_tobacco as module
+
+    names = cohort()
+    manifest, sha = audit(tmp_path)
+    original = module.Command._lock
+
+    def lock_after_a_person_answers(self, live, supplied, rolling_back):
+        RecordRevision.objects.create(
+            patient_record=names['unattributed'], field=PREGNANCY,
+            old_value='None', new_value='True')
+        original(self, live, supplied, rolling_back)
+
+    monkeypatch.setattr(module.Command, '_lock', lock_after_a_person_answers)
+    with pytest.raises(CommandError, match='changed after the audit'):
+        apply(tmp_path, manifest, sha)
+
+    names['unattributed'].refresh_from_db()
+    assert names['unattributed'].no_pregnancy_or_lactation_status is True
+    assert not RecordRevision.objects.filter(
+        changed_by__startswith='repair:2432:').exists()
+
+
+def test_apply_aborts_when_a_candidate_disappears_between_audit_and_lock(
+        tmp_path, ready, monkeypatch):
+    from omop_core.management.commands import repair_legacy_pregnancy_tobacco as module
+
+    names = cohort()
+    manifest, sha = audit(tmp_path)
+    original = module.Command._lock
+
+    def lock_after_the_row_is_gone(self, live, supplied, rolling_back):
+        PatientRecord.objects.filter(pk=names['unattributed'].pk).delete()
+        original(self, live, supplied, rolling_back)
+
+    monkeypatch.setattr(module.Command, '_lock', lock_after_the_row_is_gone)
+    with pytest.raises(CommandError, match='disappeared after the audit'):
+        apply(tmp_path, manifest, sha)
 
 
 def test_apply_locks_only_the_rows_it_clears(tmp_path, ready):

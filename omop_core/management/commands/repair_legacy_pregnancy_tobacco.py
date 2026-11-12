@@ -19,15 +19,16 @@ from django.db.migrations.recorder import MigrationRecorder
 from django.utils import timezone
 
 from omop_core.management.commands.audit_legacy_pregnancy_tobacco import (
-    Command as Audit, FIELDS, approval_digest,
+    Command as Audit, FIELDS, _revisions, _source_state, approval_digest, classify,
 )
 from omop_core.management.guarded_repair import (
     canonical, digest, lock_rows, make_transaction_read_only, read_json, receipt,
     target_guard, write_private,
 )
-from omop_core.models import FieldFormula, PatientRecord, RecordRevision
+from omop_core.models import FieldFormula, PatientRecord, Person, RecordRevision
 
 LEDGER = 'legacy_pregnancy_tobacco_repair'
+PREGNANCY = 'no_pregnancy_or_lactation_status'
 REQUIRED = {
     ('omop_core', '0323_alter_patientrecord_no_tobacco_use_status'),
     ('omop_core', '0329_explicit_pregnancy_answer'),
@@ -60,19 +61,34 @@ class Command(BaseCommand):
         parser.add_argument('--environment', choices=['local', 'staging'], default='local')
 
     def _lock(self, live, supplied, rolling_back):
-        """Lock only the rows this run can write, after the audit chose them.
+        """Lock what this run can write, after the audit chose the cohort.
 
-        The audit runs before the lock, so a value that changes in between is
-        caught by the per-record re-read in `_repair`/`_rollback`, which aborts
-        the transaction. A row that becomes a candidate after the audit is not
-        in the manifest and waits for the next run, never silently written.
+        The audit runs before the lock, so `_repair` re-derives each candidate's
+        evidence under the lock and aborts when it no longer classifies as a
+        pure default. The candidates' persons are locked too: recorded facts and
+        revisions take a key-share lock on the person row, so no evidence can
+        land between that check and the write. The formula row is locked so the
+        deactivation `_ready` verifies cannot be undone mid-run.
         """
-        lock_rows(PatientRecord, self._target_ids(live, supplied, rolling_back))
+        ids = self._target_ids(live, supplied, rolling_back)
+        lock_rows(PatientRecord, ids)
+        if not ids:
+            return
+        lock_rows(Person, PatientRecord.objects.filter(pk__in=ids)
+                  .values_list('person_id', flat=True))
+        lock_rows(FieldFormula, FieldFormula.objects.filter(field_name=PREGNANCY)
+                  .values_list('pk', flat=True))
 
     @staticmethod
     def _target_ids(live, supplied, rolling_back):
         if rolling_back:
-            return [entry['before']['id'] for entry in supplied.get('entries', [])]
+            ids = []
+            for entry in supplied.get('entries') or []:
+                before = entry.get('before') if isinstance(entry, dict) else None
+                if not isinstance(before, dict) or not isinstance(before.get('id'), int):
+                    raise CommandError('Backup/receipt entries are malformed.')
+                ids.append(before['id'])
+            return ids
         return [row['id'] for row in live['records']
                 if any(row['fields'][field]['recommended_action'] == 'clear'
                        for field in FIELDS)]
@@ -122,13 +138,36 @@ class Command(BaseCommand):
                 or len(supplied.get('records', [])) != live['totals']['records']):
             raise CommandError('Audit version, target, full cohort or digest mismatch; rerun audit.')
         run = f'repair:2432:{uuid.uuid4()}'
+        candidates = [
+            row for row in live['records']
+            if any(row['fields'][field]['recommended_action'] == 'clear'
+                   for field in FIELDS)
+        ]
+        ids = [row['id'] for row in candidates]
+        # Re-derive the evidence under the row locks: the audit ran before the
+        # lock, so a revision, pending marker or recorded fact may have landed
+        # in between. The value alone is not enough to call a row a default.
+        histories = {field: _revisions(field, ids=ids) for field in FIELDS}
+        person_ids = {row['person_id'] for row in candidates}
+        source_states = (_source_state(ids=person_ids) if person_ids
+                         else {field: {} for field in FIELDS})
         entries = []
-        for row in live['records']:
+        for row in candidates:
             fields = [field for field in FIELDS
                       if row['fields'][field]['recommended_action'] == 'clear']
-            if not fields:
-                continue
-            record = PatientRecord.objects.get(pk=row['id'])
+            record = PatientRecord.objects.filter(pk=row['id']).first()
+            if record is None:
+                raise CommandError(
+                    f'Record {row["id"]} disappeared after the audit; rerun it.')
+            edited = (record.user_edited_fields
+                      if isinstance(record.user_edited_fields, list) else [])
+            for field in fields:
+                current = classify(
+                    getattr(record, field), histories[field].get(record.pk, []),
+                    field in edited, source_states[field].get(record.person_id))
+                if current != 'unattributed_true':
+                    raise CommandError(
+                        f'Record {record.pk} changed after the audit ({current}); rerun it.')
             if any(getattr(record, field) is not True for field in fields):
                 raise CommandError(
                     f'Record {record.pk} changed after the audit; rerun it.')

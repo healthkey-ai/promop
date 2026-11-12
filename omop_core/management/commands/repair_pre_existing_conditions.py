@@ -13,14 +13,17 @@ from django.db import connection, transaction
 from django.db.migrations.recorder import MigrationRecorder
 from django.utils import timezone
 
-from omop_core.management.commands.audit_pre_existing_conditions import Command as Audit, approval_digest
+from omop_core.management.commands.audit_pre_existing_conditions import (
+    Command as Audit, _flag_revisions, approval_digest, classify,
+)
 from omop_core.management.guarded_repair import (
     canonical, digest, lock_rows, make_transaction_read_only, read_json, receipt,
     target_guard, write_private,
 )
 from omop_core.models import (
-    FieldFormula, PatientRecord, PreexistingConditionsAttestation, RecordRevision,
+    FieldFormula, PatientRecord, Person, PreexistingConditionsAttestation, RecordRevision,
 )
+from omop_core.services.pre_existing_conditions import EXPLICIT_ATTESTATION_SOURCES
 
 FLAG = 'no_pre_existing_conditions'
 LEDGER = 'preexisting_conditions_repair'
@@ -66,18 +69,34 @@ class Command(BaseCommand):
         parser.add_argument('--environment', choices=['local', 'staging'], default='local')
 
     def _lock(self, live, supplied, rolling_back):
-        """Lock only the rows this run can write (#2450 review).
+        """Lock what this run can write, after the audit chose the cohort.
 
-        The audit runs first, so a change between audit and lock is caught by
-        `_repair`/`_rollback` re-reading the row; a new candidate waits for the
-        next audit instead of being written without review.
+        The audit runs before the lock, so `_repair` re-derives each candidate's
+        evidence under it. Attestations and recorded revisions take a key-share
+        lock on their person row, so locking the candidates' persons keeps a
+        freshly recorded explicit answer from landing between that check and
+        the write. The formula row is locked so the deactivation `_ready`
+        verifies cannot be undone mid-run.
         """
-        lock_rows(PatientRecord, self._target_ids(live, supplied, rolling_back))
+        ids = self._target_ids(live, supplied, rolling_back)
+        lock_rows(PatientRecord, ids)
+        if not ids:
+            return
+        lock_rows(Person, PatientRecord.objects.filter(pk__in=ids)
+                  .values_list('person_id', flat=True))
+        lock_rows(FieldFormula, FieldFormula.objects.filter(field_name=FLAG)
+                  .values_list('pk', flat=True))
 
     @staticmethod
     def _target_ids(live, supplied, rolling_back):
         if rolling_back:
-            return [entry['before']['id'] for entry in supplied.get('entries', [])]
+            ids = []
+            for entry in supplied.get('entries') or []:
+                before = entry.get('before') if isinstance(entry, dict) else None
+                if not isinstance(before, dict) or not isinstance(before.get('id'), int):
+                    raise CommandError('Backup/receipt entries are malformed.')
+                ids.append(before['id'])
+            return ids
         return [row['id'] for row in live['records']
                 if row['classification'] in ('unattributed_true', 'rewritten_true')]
 
@@ -135,18 +154,58 @@ class Command(BaseCommand):
                 or len(supplied.get('records', [])) != live['totals']['records']):
             raise CommandError('Audit version, target, full cohort or digest mismatch; rerun audit.')
         run = f'repair:1988:{uuid.uuid4()}'
+        candidates = [
+            row for row in live['records']
+            if row['classification'] in ('unattributed_true', 'rewritten_true')
+        ]
+        ids = [row['id'] for row in candidates]
+        # Re-derive the evidence under the row locks: the audit ran before the
+        # lock, so an attestation, revision or saved flag may have landed in
+        # between. The flag alone is not enough to call a row unattributed.
+        history = _flag_revisions(ids=ids)
+        person_ids = set(
+            PatientRecord.objects.filter(pk__in=ids).values_list('person_id', flat=True))
+        attestations = {
+            person_id: {'source': source, 'confirmed_at': confirmed_at.isoformat()}
+            for person_id, source, confirmed_at in (
+                PreexistingConditionsAttestation.objects
+                .filter(person_id__in=person_ids)
+                .values_list('person_id', 'source', 'confirmed_at'))
+        }
         entries = []
-        for row in live['records']:
-            if row['classification'] not in ('unattributed_true', 'rewritten_true'):
-                continue
-            record = PatientRecord.objects.get(pk=row['id'])
-            # Malformed and nonempty lists require separate review, never inference.
+        for row in candidates:
+            record = PatientRecord.objects.filter(pk=row['id']).first()
+            if record is None:
+                raise CommandError(
+                    f'Record {row["id"]} disappeared after the audit; rerun it.')
+            # Malformed and nonempty lists are never inferred; a change into one
+            # after the audit makes the reviewed manifest stale.
             if record.preexisting_conditions not in (None, []):
-                continue
+                raise CommandError(
+                    f'Record {record.pk} changed after the audit; rerun it.')
+            attestation = attestations.get(record.person_id)
+            attested = bool(attestation
+                            and attestation['source'] in EXPLICIT_ATTESTATION_SOURCES)
+            edited = (record.user_edited_fields
+                      if isinstance(record.user_edited_fields, list) else [])
+            current = classify(
+                record.no_pre_existing_conditions, record.preexisting_conditions,
+                history.get(record.pk, []), FLAG in edited, attested)
+            if current != row['classification']:
+                raise CommandError(
+                    f'Record {record.pk} changed after the audit ({current}); rerun it.')
+            if attestation != row.get('attestation'):
+                raise CommandError(
+                    f'Record {record.pk} gained an attestation after the audit; rerun it.')
             before = snapshot(record)
             if applying:
-                PatientRecord.objects.filter(pk=record.pk).update(
-                    no_pre_existing_conditions=None, updated_at=timezone.now())
+                updated = (PatientRecord.objects
+                           .filter(pk=record.pk, no_pre_existing_conditions=True)
+                           .update(no_pre_existing_conditions=None,
+                                   updated_at=timezone.now()))
+                if not updated:
+                    raise CommandError(
+                        f'Record {record.pk} changed after the audit; rerun it.')
                 PreexistingConditionsAttestation.objects.filter(person_id=record.person_id).delete()
                 RecordRevision.objects.create(patient_record=record, field=FLAG,
                                               old_value='True', new_value='None', changed_by=run)
