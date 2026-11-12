@@ -16,6 +16,7 @@ import os
 import subprocess
 import sys
 import uuid
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -28,6 +29,18 @@ FIXTURE = REPO_ROOT / 'omop_core' / 'data' / 'field_curation_v1.json'
 # A full migrate, publisher catalogs included, takes about 90s locally. Well
 # under the CI job's limit, so a hang ends here with migrate's output.
 MIGRATE_TIMEOUT_S = 600
+
+# The columns the frozen writer in 0240 copies, plus the natural key.
+_MAPPING_COLUMNS = (
+    'field_name',
+    'provenance', 'vocabulary_id', 'concept_code', 'unit', 'omop_table',
+    'source_value', 'value_kind', 'type_concept_id', 'value_vocabulary',
+    'multiple', 'status', 'reviewed_at', 'notes',
+)
+# Fixture keys 0240 resolves or derives rather than copying verbatim.
+_RESOLVED_FIXTURE_KEYS = {
+    'concept_id', 'concept_vocabulary_id', 'concept_code_resolved',
+}
 
 
 def _server_url(database_url: str, name: str) -> str:
@@ -61,26 +74,97 @@ def empty_database():
             )
 
 
-def test_migrate_builds_an_empty_database(empty_database):
-    env = {**os.environ, 'DATABASE_URL': empty_database}
+def _run_migrate(database_url: str, *target) -> str:
+    """Run ``migrate`` (optionally to *target*) against *database_url*."""
+    env = {**os.environ, 'DATABASE_URL': database_url}
     # 0303 publishes to the broker on commit; a worker must not pick up a
     # request for a database that is about to be dropped. Blank rather than
     # unset, so load_dotenv() cannot bring a developer's .env value back.
     env['CELERY_BROKER_URL'] = ''
     env['CELERY_RESULT_BACKEND'] = ''
 
-    result = subprocess.run(
-        [sys.executable, 'manage.py', 'migrate', '--noinput'],
-        cwd=REPO_ROOT, env=env, capture_output=True, text=True,
-        timeout=MIGRATE_TIMEOUT_S,
-    )
+    try:
+        result = subprocess.run(
+            [sys.executable, 'manage.py', 'migrate', *target, '--noinput'],
+            cwd=REPO_ROOT, env=env, capture_output=True, text=True,
+            timeout=MIGRATE_TIMEOUT_S,
+        )
+    except subprocess.TimeoutExpired as exc:
+        # TimeoutExpired still carries what was captured before the kill; a
+        # report without it turns a diagnosable hang into "timed out".
+        captured = exc.stdout or ''
+        if isinstance(captured, bytes):
+            captured = captured.decode(errors='replace')
+        pytest.fail(
+            f'migrate did not finish within {MIGRATE_TIMEOUT_S}s:\n{captured[-4000:]}',
+        )
 
     output = (result.stdout + result.stderr)[-4000:]
     assert result.returncode == 0, f'migrate from empty failed:\n{output}'
+    return output
+
+
+def test_migrate_builds_an_empty_database(empty_database):
+    # Migrate to 0239 first, so rows earlier migrations already seeded can be
+    # told apart from the rows 0240 writes. Their values legitimately differ
+    # from the fixture (0239 stamps reviewed_at with now()), and 0240 leaves
+    # an existing natural key alone by design.
+    _run_migrate(empty_database, 'omop_core', '0239_backfill_field_mapping_provenance')
+    with psycopg.connect(empty_database) as conn:
+        preexisting = {
+            name for (name,) in conn.execute('SELECT field_name FROM field_concept_mapping')
+        }
+
+    _run_migrate(empty_database)
+
     # 0240 seeded rather than skipped: earlier migrations create only some of
     # the fixture's mappings. If a later migration removes a fixture field on
     # purpose, drop it from this check.
-    fixture_fields = {row['field_name'] for row in json.loads(FIXTURE.read_text())['mappings']}
+    fixture_rows = {
+        row['field_name']: row
+        for row in json.loads(FIXTURE.read_text())['mappings']
+    }
     with psycopg.connect(empty_database) as conn:
         present = {name for (name,) in conn.execute('SELECT field_name FROM field_concept_mapping')}
-    assert not fixture_fields - present, f'0240 did not seed: {sorted(fixture_fields - present)[:10]}'
+        seeded = conn.execute(
+            'SELECT ' + ', '.join(_MAPPING_COLUMNS)
+            + ' FROM field_concept_mapping WHERE field_name = ANY(%s)',
+            (list(fixture_rows),),
+        ).fetchall()
+    assert not set(fixture_rows) - present, (
+        f'0240 did not seed: {sorted(set(fixture_rows) - present)[:10]}'
+    )
+    # Presence alone would pass a writer that drops a column or copies the wrong
+    # source key, so compare the values 0240 writes for every row it created.
+    mismatches = []
+    for row in seeded:
+        got = dict(zip(_MAPPING_COLUMNS, row))
+        if got['field_name'] in preexisting:
+            continue
+        expected = fixture_rows[got['field_name']]
+        for name in _MAPPING_COLUMNS:
+            want = expected.get(name, '')
+            if name == 'reviewed_at' and want:
+                want = datetime.fromisoformat(want)
+            if got[name] != want:
+                mismatches.append((got['field_name'], name, got[name], want))
+    assert not mismatches, (
+        f'0240 seeded values that differ from the fixture: {mismatches[:5]}'
+    )
+    # Every fixture key is either copied by the frozen writer or deliberately
+    # resolved/derived. A new key fails here instead of being dropped silently.
+    fixture_keys = set().union(*(set(row) for row in fixture_rows.values()))
+    unhandled = fixture_keys - set(_MAPPING_COLUMNS) - _RESOLVED_FIXTURE_KEYS
+    assert not unhandled, f'unhandled fixture keys: {sorted(unhandled)}'
+
+
+def test_a_hung_migrate_keeps_its_output(monkeypatch):
+    """The timeout exists to report a *why*, so it must not discard stdout."""
+    def fake_run(*args, **kwargs):
+        raise subprocess.TimeoutExpired(
+            args[0], kwargs.get('timeout'), output='Applying omop_core.0312_stuck ...',
+        )
+
+    monkeypatch.setattr(subprocess, 'run', fake_run)
+    with pytest.raises(pytest.fail.Exception, match='0312_stuck'):
+        _run_migrate('postgresql:///unused')
