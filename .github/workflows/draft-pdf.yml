@@ -4,6 +4,11 @@ on:
       - main
       - dev
 
+# Checkout and artifact upload need no write scope (CodeQL
+# actions/missing-workflow-permissions, alert #86; #2488).
+permissions:
+  contents: read
+
 jobs:
   paper:
     runs-on: ubuntu-24.04
