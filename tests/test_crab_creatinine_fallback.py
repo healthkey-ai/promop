@@ -61,3 +61,30 @@ def test_a_newer_coded_ehr_result_is_seen():
     MeasurementFactory(person=person, measurement_concept=coded, measurement_source_value='Creatinine',
                        measurement_date=NEW, value_as_number=1.0, unit_source_value='mg/dL')
     assert _crab(person) is None
+
+
+def test_a_unitless_creatinine_with_unit_concept_zero_is_read_in_mg_dl():
+    """Concept 0 is no unit concept: the mg/dL default applies, as with no
+    concept at all, instead of an unreadable "No matching concept" unit."""
+    from omop_core.models import Concept
+    from tests.factories import ConceptFactory
+    zero = Concept.objects.filter(pk=0).first() or ConceptFactory(
+        concept_id=0, concept_code='No matching concept', concept_name='No matching concept')
+    person = PersonFactory()
+    MeasurementFactory(person=person, measurement_source_value='2160-0', measurement_date=NEW,
+                       value_as_number=2.5, unit_source_value='', unit_concept=zero)
+    assert _crab(person) is True
+
+
+def test_a_creatinine_beyond_its_column_is_not_renal_evidence():
+    person = PersonFactory()
+    _creatinine(person, 5000, 'mg/dL')
+    assert _crab(person) is None
+
+
+def test_the_approved_creatinine_alias_is_read():
+    """38483-4 is an approved serum creatinine alias, mass/volume like 2160-0."""
+    person = PersonFactory()
+    MeasurementFactory(person=person, measurement_source_value='38483-4', measurement_date=NEW,
+                       value_as_number=2.5, unit_source_value='mg/dL')
+    assert _crab(person) is True

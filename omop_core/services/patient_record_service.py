@@ -106,8 +106,13 @@ _UNIT_PAIR_SELECTED_FIELDS = _CHEMISTRY_SELECTED_FIELDS | {HEMOGLOBIN_CANONICAL}
 
 
 def _concept_unit_code(measurement):
-    """The unit concept's code, 'unknown' for a dangling one, None for none."""
-    if measurement.unit_concept_id is None:
+    """The unit concept's code, 'unknown' for a dangling one, None for none.
+
+    Concept 0 is OMOP's "No matching concept": the ETL's way of saying the row
+    has no unit concept, not a unit. Reading its code blocked hemoglobin and
+    the chemistry pairs on unitless rows that dev reads (#2418 review).
+    """
+    if not measurement.unit_concept_id:
         return None
     try:
         concept = measurement.unit_concept
@@ -195,7 +200,7 @@ def _usable_concept_name(concept) -> str | None:
 
 # Bump this whenever aggregation or computation logic changes in any section
 # extractor or in _compute_derived_fields.  See DERIVATION_CHANGELOG.md.
-DERIVATION_VERSION = 28
+DERIVATION_VERSION = 29
 
 # These PatientRecord columns are projections of PersonLanguageSkill, never
 # independent edits. Older PATCH requests could mark them as user-edited and
@@ -4554,7 +4559,7 @@ def derive_meets_crab(patient_info: PatientRecord):
     """Three-valued CRAB from the record's canonical inputs.
 
     Same thresholds as the OMOP fallback in :func:`_get_mm_specific_data`
-    (hemoglobin < 10 g/dL, calcium > 11 mg/dL, clearance < 40 mL/min) plus the
+    (0 < hemoglobin < 10 g/dL, calcium > 11 mg/dL, clearance < 40 mL/min) plus the
     standard serum-creatinine alternative (> 2 mg/dL) when no clearance is
     recorded. A positive component establishes CRAB; a negative answer requires
     every component to be evaluated, otherwise the result stays unknown rather
@@ -4571,7 +4576,9 @@ def derive_meets_crab(patient_info: PatientRecord):
     else:
         renal = None
     components = [
-        None if hgb is None else hgb < Decimal('10'),
+        # 0 g/dL fits the column but is an ETL placeholder, not a blood count:
+        # unknown, as in the OMOP fallback.
+        None if hgb is None or hgb <= 0 else hgb < Decimal('10'),
         None if calcium is None else calcium > Decimal('11'),
         renal,
         _bone_lesions_component(patient_info.bone_lesions),
@@ -4708,84 +4715,96 @@ def _get_mm_specific_data(person: Person, snapshot: OmopSnapshot = None) -> dict
 
     # ── meets_crab fallback: compute from OMOP Measurements when obs missing ─
     if 'meets_crab' not in data:
-        _CRAB_CODES = ('718-7', '59260-0', '17861-6', '2000-0',
-                       '2164-2', '33914-3', '2160-0')
+        # Creatinine clearance, the preferred renal fact. Hemoglobin, calcium
+        # and serum creatinine are read through newest_canonical below.
+        _CRCL_CODES = ('2164-2', '33914-3')
         crab_vals = {}
-        for code in _CRAB_CODES:
+        for code in _CRCL_CODES:
             for m in snapshot.meas_by_source.get(code, ()):
                 if m.value_as_number is not None:
                     crab_vals.setdefault(code, []).append(float(m.value_as_number))
 
         crcl_vals = crab_vals.get('2164-2', []) or crab_vals.get('33914-3', [])
-        # Coded EHR rows carry the LOINC on the concept and a display name as
-        # source value, and 38483-4 is an approved serum creatinine alias.
-        _creatinine_codes = ('2160-0', '38483-4')
-        creatinine_rows = list({
-            m.measurement_id: m
-            for m in (_rows_by_codes(snapshot, _creatinine_codes)
-                      + _rows_by_sources(snapshot, _creatinine_codes))
-            if m.value_as_number is not None
-        }.values())
 
-        def newest_canonical(codes, normalize, default_unit, from_pair):
+        def newest_canonical(defaults, normalize, from_pair, in_range):
             """The newest row's value in the canonical unit, or None.
 
             The snapshot holds each value in its reported unit (#2249), so a
             raw 8.1 mmol/L hemoglobin is 13 g/dL — not anemia. An unreadable
             newest unit is no evidence, not a reason to fall back to an older
             result with a different unit.
+
+            ``defaults`` maps each LOINC to the unit a unitless row is read in;
+            None means a row of that code needs a unit of its own. Molar
+            LOINCs get None: a unitless 59260-0 hemoglobin of 8 mmol/L read as
+            8 g/dL is a false anemia, and almost every normal molar value is
+            below 10.
+            A value outside the canonical column's range (a negative one would
+            meet every "< N" threshold) is no evidence either.
             """
-            rows = list({
-                m.measurement_id: m
-                for m in (_rows_by_codes(snapshot, codes)
-                          + _rows_by_sources(snapshot, codes))
-                if m.value_as_number is not None
-            }.values())
+            rows = {}
+            for code, default in defaults.items():
+                for m in (_rows_by_codes(snapshot, (code,))
+                          + _rows_by_sources(snapshot, (code,))):
+                    if m.value_as_number is None:
+                        continue
+                    # A row matching two codes takes the stricter default.
+                    known = rows.get(m.measurement_id)
+                    rows[m.measurement_id] = (
+                        m, None if known is not None and known[1] is None else default)
             if not rows:
                 return None
-            newest = sorted(rows, key=_fact_recency_key, reverse=True)[0]
+            newest, default_unit = sorted(
+                rows.values(), key=lambda pair: _fact_recency_key(pair[0]), reverse=True)[0]
             _reported_unit, unit_code = _resolve_reported_unit(
                 newest, normalize, default_unit)
             if unit_code is None:
                 return None
             recognised, canonical = from_pair(newest.value_as_number, unit_code)
-            return canonical if recognised else None
+            if not recognised or canonical is None or not in_range(canonical):
+                return None
+            return canonical
 
         hgb = newest_canonical(
-            ('718-7', '59260-0'), normalize_hemoglobin_unit,
-            HEMOGLOBIN_DEFAULT_UNIT,
+            # 718-7 is mass/volume; 59260-0 is moles/volume.
+            {'718-7': HEMOGLOBIN_DEFAULT_UNIT, '59260-0': None},
+            normalize_hemoglobin_unit,
             hemoglobin_canonical_from_pair,
+            hemoglobin_canonical_in_range,
         )
+        # 17861-6 is mass/volume. 2000-0 is kept from dev but is not a LOINC
+        # code (the moles/volume one is 2000-8, #2467); whatever an ETL files
+        # under it counts only with a unit of its own.
         calcium = newest_canonical(
-            ('17861-6', '2000-0'),
+            {'17861-6': _CHEMISTRY_PAIRS['serum_calcium_mg_dl']['default_unit'],
+             '2000-0': None},
             lambda unit: normalize_chemistry_unit('serum_calcium_mg_dl', unit),
-            _CHEMISTRY_PAIRS['serum_calcium_mg_dl']['default_unit'],
             lambda value, unit: chemistry_canonical_from_pair(
                 'serum_calcium_mg_dl', value, unit),
+            lambda value: chemistry_canonical_in_range('serum_calcium_mg_dl', value),
         )
 
-        crab_anemia = hgb is not None and hgb < 10.0
+        # 0 g/dL fits the column but is no blood count: an ETL placeholder.
+        crab_anemia = hgb is not None and 0 < hgb < 10.0
         crab_calcium = calcium is not None and calcium > 11.0
         # Clearance is the preferred renal fact; serum creatinine > 2 mg/dL is
         # the recorded alternative, matching derive_meets_crab().
         if crcl_vals:
             crab_renal = min(crcl_vals) < 40.0
-        elif creatinine_rows:
-            # The newest serum creatinine only, in mg/dL. The snapshot already
-            # holds each value in its unit_source_value's unit; the reported
-            # unit (text, else UCUM concept) converts it. Raw values have no
-            # unit (80 umol/L is normal) and span all history, so max() made
-            # one old or SI result CRAB for good (#2430). An unreadable newest
-            # unit is no renal evidence, not a reason to fall back to older.
-            newest = sorted(creatinine_rows, key=_fact_recency_key, reverse=True)[0]
-            reported_unit, unit_code = _resolve_reported_unit(
-                newest, creatinine_normalize_unit, 'MG/DL')
-            recognised, creatinine = (
-                creatinine_canonical_from_pair(newest.value_as_number, unit_code)
-                if unit_code is not None else (False, None))
-            crab_renal = bool(recognised and creatinine is not None and creatinine > 2)
         else:
-            crab_renal = False
+            # The newest serum creatinine only, in mg/dL, read like hemoglobin
+            # and calcium. Raw values have no unit (80 umol/L is normal) and
+            # span all history, so max() made one old or SI result CRAB for
+            # good (#2430). Coded EHR rows carry the LOINC on the concept and a
+            # display name as source value, and 38483-4 is an approved serum
+            # creatinine alias; both are mass/volume.
+            creatinine = newest_canonical(
+                {'2160-0': 'MG/DL', '38483-4': 'MG/DL'},
+                creatinine_normalize_unit,
+                creatinine_canonical_from_pair,
+                creatinine_canonical_in_range,
+            )
+            crab_renal = creatinine is not None and creatinine > 2
         crab_bone = data.get('bone_lesions') == 'Present'
 
         if any([crab_anemia, crab_calcium, crab_renal, crab_bone]):

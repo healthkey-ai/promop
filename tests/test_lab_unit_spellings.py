@@ -92,3 +92,19 @@ def test_a_known_text_unit_of_another_property_is_never_relabelled(ucum, source,
     MeasurementFactory(person=person, measurement_source_value=source, measurement_date=DAY,
                        value_as_number=value, unit_source_value=text, unit_concept=ucum(concept))
     assert _get_laboratory_data(person).get(field) is None
+
+
+@pytest.mark.parametrize('source, field, value, expected', [
+    ('718-7', 'hemoglobin_g_dl', Decimal('13.2'), Decimal('13.2')),
+    ('1751-7', 'albumin_g_dl', Decimal('3.4'), Decimal('3.4')),
+])
+def test_unit_concept_zero_is_no_unit_not_a_blocking_one(source, field, value, expected):
+    """OMOP concept 0 ("No matching concept") on a row with no unit text is the
+    ETL saying "no unit concept": the field's default unit applies, as in dev."""
+    from omop_core.models import Concept
+    zero = Concept.objects.filter(pk=0).first() or ConceptFactory(
+        concept_id=0, concept_code='No matching concept', concept_name='No matching concept')
+    person = PersonFactory()
+    MeasurementFactory(person=person, measurement_source_value=source, measurement_date=DAY,
+                       value_as_number=value, unit_source_value='', unit_concept=zero)
+    assert _get_laboratory_data(person).get(field) == expected
