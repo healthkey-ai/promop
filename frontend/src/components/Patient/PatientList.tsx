@@ -8,7 +8,7 @@ import type { ResolveRunStatus } from "@/types/sourceCodes";
 import { PaginationControls } from "@/components/labs/PaginationControls";
 import { useLocalPagination } from "@/lib/pagination";
 
-import { loadPreferences, REVIEW_FILTER_DEFAULTS, VIEW_COLUMNS, type PatientView, type ReviewFilters } from './patientListViews';
+import { columnsFor, DEFAULT_ORDERING, loadPreferences, REVIEW_FILTER_DEFAULTS, type ExtraColumn, type ReviewFilters } from './patientListViews';
 import { canOpenPatients, canViewMappings, isStaffOrOrgAdmin } from '@/utils/roles';
 
 interface Patient {
@@ -81,12 +81,18 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
   const navigate = useNavigate();
   const preferenceKey = `promop-patient-list:${currentUser?.id ?? 'session'}`;
   const [preferences, setPreferences] = useState(() => loadPreferences(preferenceKey));
-  const view = preferences.view;
-  const savedView = preferences.views[view];
-  const reviewFilters = savedView?.filters ?? REVIEW_FILTER_DEFAULTS;
-  const ordering = savedView?.ordering ?? '-updated';
-  const extraColumns: readonly string[] = VIEW_COLUMNS[view];
-  const show = (column: string) => extraColumns.includes(column);
+  const reviewFilters = preferences.filters;
+  // A reader who cannot open a patient -- an analyst browsing a public demo
+  // org's sample patients (#1392, #2416) -- gets the rows de-identified by
+  // the server and no way into the detail page, which would be 404 (#2460):
+  // no Name column, no row link, no name or age sort. Upload and the mapping
+  // hub are that same curator's; a demo-org analyst gets Code Mapping.
+  const canOpen = canOpenPatients(currentUser);
+  const canCurate = canOpen;
+  const canAdministerOrganizations = isStaffOrOrgAdmin(currentUser);
+  // A saved name or age sort means nothing to a reader whose names and ages
+  // the server withholds, and no heading would show it: back to the default.
+  const ordering = !canOpen && /^-?(name|age)$/.test(preferences.ordering) ? DEFAULT_ORDERING : preferences.ordering;
   useEffect(() => {
     try { localStorage.setItem(preferenceKey, JSON.stringify(preferences)); } catch { /* Storage may be disabled. */ }
   }, [preferenceKey, preferences]);
@@ -98,6 +104,22 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
     diseases: [],
     stages: ["I", "II", "III", "IV"],
   });
+  // Columns follow the roles (#2470): the outreach columns are an org
+  // admin's, and Organization appears once the list spans several real
+  // organizations (the Unassigned entry is not one).
+  const extraColumns = useMemo(() => columnsFor({
+    outreach: canAdministerOrganizations,
+    multiOrg: filterOptions.orgs.filter((org) => org.value !== '__unassigned__').length > 1,
+  }), [canAdministerOrganizations, filterOptions.orgs]);
+  const show = (column: ExtraColumn) => extraColumns.includes(column);
+  // A filter whose control the reader does not see is not applied: a record
+  // saved under the old Foundation preset could otherwise narrow a doctor's
+  // list by a contact or location filter nothing on screen shows.
+  const activeFilters: ReviewFilters = useMemo(() => ({
+    ...reviewFilters,
+    ...(extraColumns.includes('contact') ? {} : { contact: REVIEW_FILTER_DEFAULTS.contact }),
+    ...(extraColumns.includes('location') ? {} : { location: REVIEW_FILTER_DEFAULTS.location }),
+  }), [reviewFilters, extraColumns]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
@@ -130,7 +152,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
           disease: diseaseFilter,
           stage: stageFilter,
           date: dateFilter,
-          ...reviewFilters,
+          ...activeFilters,
           ordering,
         },
       });
@@ -149,7 +171,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
     } finally {
       setLoading(false);
     }
-  }, [page, pageSize, orgFilter, search, diseaseCategoryFilter, diseaseFilter, stageFilter, dateFilter, reviewFilters, ordering]);
+  }, [page, pageSize, orgFilter, search, diseaseCategoryFilter, diseaseFilter, stageFilter, dateFilter, activeFilters, ordering]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount
@@ -164,15 +186,11 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
 
   const changeReviewFilter = (name: keyof ReviewFilters, value: string) => {
     resetToFirstPage();
-    setPreferences((previous) => ({ ...previous, views: { ...previous.views,
-      [view]: { filters: { ...reviewFilters, [name]: value }, ordering },
-    } }));
+    setPreferences((previous) => ({ ...previous, filters: { ...previous.filters, [name]: value } }));
   };
   const changeOrdering = (value: string) => {
     resetToFirstPage();
-    setPreferences((previous) => ({ ...previous, views: { ...previous.views,
-      [view]: { filters: reviewFilters, ordering: value },
-    } }));
+    setPreferences((previous) => ({ ...previous, ordering: value }));
   };
 
   const stageOptions = useMemo(
@@ -206,7 +224,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
       setDeleting(true);
       if (selectAllMode) {
         await api.delete("/patient-info/bulk_delete_filtered/", {
-          params: { org: orgFilter, search, disease_category: diseaseCategoryFilter, disease: diseaseFilter, stage: stageFilter, date: dateFilter, ...reviewFilters },
+          params: { org: orgFilter, search, disease_category: diseaseCategoryFilter, disease: diseaseFilter, stage: stageFilter, date: dateFilter, ...activeFilters },
         });
       } else {
         await api.delete("/patient-info/bulk_delete/", {
@@ -233,7 +251,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
         ? { select_all: true }
         : { person_ids: Array.from(selectedIds) };
       const params = selectAllMode
-        ? { org: orgFilter, search, disease_category: diseaseCategoryFilter, disease: diseaseFilter, stage: stageFilter, date: dateFilter, ...reviewFilters }
+        ? { org: orgFilter, search, disease_category: diseaseCategoryFilter, disease: diseaseFilter, stage: stageFilter, date: dateFilter, ...activeFilters }
         : undefined;
       const res = await api.post<{ run_id: string; total: number }>(
         "/v1/patient-records/bulk-resolve-source-codes/",
@@ -266,7 +284,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
     try {
       setDownloading(true);
       const params = selectAllMode
-        ? { org: orgFilter, search, disease_category: diseaseCategoryFilter, disease: diseaseFilter, stage: stageFilter, date: dateFilter, ...reviewFilters, ordering }
+        ? { org: orgFilter, search, disease_category: diseaseCategoryFilter, disease: diseaseFilter, stage: stageFilter, date: dateFilter, ...activeFilters, ordering }
         : { person_ids: Array.from(selectedIds).join(",") };
       const response = await api.get<Blob>("/v1/patient-records/export-csv/", { params, responseType: "blob" });
       const disposition = String(response.headers?.["content-disposition"] ?? "");
@@ -321,14 +339,35 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
   const isAllSelected =
     patients.length > 0 &&
     (selectAllMode || visibleSelectedCount === patients.length);
-  // A reader who cannot open a patient -- an analyst browsing a public demo
-  // org's sample patients (#1392, #2416) -- gets the rows de-identified by
-  // the server and no way into the detail page, which would be 404 (#2460):
-  // no Name column, no row link, no name or age sort. Upload and the mapping
-  // hub are that same curator's; a demo-org analyst gets Code Mapping.
-  const canOpen = canOpenPatients(currentUser);
-  const canCurate = canOpen;
-  const canAdministerOrganizations = isStaffOrOrgAdmin(currentUser);
+  const plainHeader = (key: string, label: string) => (
+    <th key={key} className="whitespace-nowrap px-4 py-3 font-medium text-muted-foreground">{label}</th>
+  );
+  // The column headings are the sort: a first click takes the column's
+  // natural direction (newest, most, A to Z), a second reverses it.
+  const sortHeader = (key: string, label: string, descendingFirst: boolean, className = '') => {
+    const active = ordering.replace(/^-/, '') === key;
+    const descending = ordering.startsWith('-');
+    const next = active ? (descending ? key : `-${key}`) : (descendingFirst ? `-${key}` : key);
+    return (
+      <th key={key} aria-sort={active ? (descending ? 'descending' : 'ascending') : 'none'}
+          className={`whitespace-nowrap px-4 py-3 font-medium text-muted-foreground ${className}`}>
+        <button type="button" onClick={() => changeOrdering(next)} className="hover:text-foreground">
+          {label}{active ? (descending ? ' ↓' : ' ↑') : ''}
+        </button>
+      </th>
+    );
+  };
+  const extraHeader = (column: ExtraColumn) => {
+    switch (column) {
+      case 'treatment': return plainHeader('treatment', 'Latest Recorded Line');
+      case 'ecog': return sortHeader('ecog', 'ECOG', false);
+      case 'gaps': return sortHeader('gaps', 'Key Data Gaps', true);
+      case 'freshness': return sortHeader('freshness', 'Latest Clinical Result', true);
+      case 'location': return plainHeader('location', 'Location');
+      case 'contact': return plainHeader('contact', 'Contact Info');
+      case 'organization': return sortHeader('organization', 'Organization', false);
+    }
+  };
   const openPatient = (personId: number) =>
     canOpen ? () => navigate(`/patient/${personId}`) : undefined;
 
@@ -430,30 +469,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
         </div>
       )}
 
-      <div className="mb-4 flex flex-wrap items-end gap-4">
-        <label className="text-sm font-medium">Audience view
-          <select aria-label="Audience view" value={view} onChange={(event) => {
-            resetToFirstPage();
-            setPreferences((previous) => ({ ...previous, view: event.target.value as PatientView }));
-          }} className="ml-2 rounded-md border border-input bg-background p-2">
-            <option value="doctor">Doctor</option><option value="foundation">Foundation</option><option value="analyst">Analyst</option>
-          </select>
-        </label>
-        <label className="text-sm font-medium">Sort by
-          <select aria-label="Sort by" value={ordering} onChange={(event) => changeOrdering(event.target.value)} className="ml-2 rounded-md border border-input bg-background p-2">
-            <option value="-updated">Last updated</option><option value="-freshness">Newest clinical result</option>
-            <option value="freshness">Oldest clinical result</option><option value="-gaps">Most key data gaps</option>
-            <option value="gaps">Fewest key data gaps</option><option value="ecog">ECOG: low to high</option>
-            <option value="-ecog">ECOG: high to low</option><option value="-lines">Most therapy lines</option>
-            {canOpen && <><option value="name">Name</option><option value="age">Age: youngest first</option><option value="-age">Age: oldest first</option></>}
-            <option value="disease">Disease</option><option value="stage">Stage</option><option value="status">Disease status</option>
-            <option value="organization">Organization</option>
-            <option value="unmapped_source_codes">Unmapped Source Codes: low to high</option>
-            <option value="-unmapped_source_codes">Unmapped Source Codes: high to low</option>
-          </select>
-        </label>
-        <span className="text-xs text-muted-foreground">View and clinical filters are saved in this browser.</span>
-      </div>
+      <p className="mb-4 text-xs text-muted-foreground">Click a column heading to sort. Sort and clinical filters are saved in this browser.</p>
 
       <div className="mb-4 rounded-lg border border-border bg-background p-4 shadow-sm">
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
@@ -578,7 +594,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
             ['ecog', 'ECOG', [['all', 'All'], ...['0', '1', '2', '3', '4', '5'].map((value) => [value, value]), ['unknown', 'Not recorded']]],
             ['data_gap', 'Key data gaps', [['all', 'All'], ['any', 'Any key gap'], ['none', 'No key gaps'], ['stage', 'Missing stage'], ['ecog', 'Missing ECOG'], ['genomics', 'Missing genomics']]],
             ['freshness', 'Latest clinical result', [['all', 'All'], ['30d', 'Within 30 days'], ['90d', 'Within 90 days'], ['older', 'Older than 90 days'], ['unknown', 'Not recorded']]],
-            ['contact', 'Contact information', [['all', 'All'], ['available', 'Recorded'], ['missing', 'Not recorded']]],
+            ...(show('contact') ? [['contact', 'Contact information', [['all', 'All'], ['available', 'Recorded'], ['missing', 'Not recorded']]]] : []),
           ] as [keyof ReviewFilters, string, string[][]][]).map(([name, label, options]) => (
             <label key={name} className="flex flex-col gap-1 text-sm">{label}
               <select value={reviewFilters[name]} onChange={(event) => changeReviewFilter(name, event.target.value)} className="rounded-md border border-input bg-background p-2">
@@ -586,9 +602,10 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
               </select>
             </label>
           ))}
-          {([['treatment', 'Treatment history'], ['biomarker', 'Subtype / biomarker'], ['location', 'City / region / country']] as [keyof ReviewFilters, string][]).map(([name, label]) => (
+          {([['treatment', 'Treatment history'], ['biomarker', 'Subtype / biomarker'],
+             ...(show('location') ? [['location', 'City / region / country']] : [])] as [keyof ReviewFilters, string][]).map(([name, label]) => (
             <label key={name} className="flex flex-col gap-1 text-sm">{label}
-              <input type="search" defaultValue={reviewFilters[name]} key={`${view}-${name}-${reviewFilters[name]}`} placeholder="Search, then press Enter" onBlur={(event) => {
+              <input type="search" defaultValue={reviewFilters[name]} key={`${name}-${reviewFilters[name]}`} placeholder="Search, then press Enter" onBlur={(event) => {
                 if (event.target.value !== reviewFilters[name]) changeReviewFilter(name, event.target.value);
               }} onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur(); }} className="rounded-md border border-input bg-background p-2" />
             </label>
@@ -597,7 +614,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
         <p className="mt-3 text-xs text-muted-foreground">Key gaps track stage, ECOG, and genomic data. A recorded negative result counts as data. Clinical freshness uses result dates, not record update times.</p>
         <button type="button" className="mt-2 text-sm underline" onClick={() => {
           resetToFirstPage();
-          setPreferences((previous) => ({ ...previous, views: { ...previous.views, [view]: { filters: { ...REVIEW_FILTER_DEFAULTS }, ordering: '-updated' } } }));
+          setPreferences((previous) => ({ ...previous, filters: { ...REVIEW_FILTER_DEFAULTS } }));
         }}>Clear clinical filters</button>
       </details>
 
@@ -629,21 +646,14 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
                 />
               </th>
               <th className="px-4 py-3 font-medium text-muted-foreground">ID</th>
-              {canOpen && <th className="w-36 px-4 py-3 font-medium text-muted-foreground">Name</th>}
-              <th className="px-4 py-3 font-medium text-muted-foreground">Age</th>
-              <th className="px-4 py-3 font-medium text-muted-foreground">Disease</th>
-              <th className="px-4 py-3 font-medium text-muted-foreground">Stage</th>
-              <th className="whitespace-nowrap px-4 py-3 text-center font-medium text-muted-foreground">Num Lines</th>
-              {extraColumns.map((column) => <th key={column} className="whitespace-nowrap px-4 py-3 font-medium text-muted-foreground">{{
-                treatment: 'Latest Recorded Line', ecog: 'ECOG', gaps: 'Key Data Gaps',
-                freshness: 'Latest Clinical Result', location: 'Location', contact: 'Contact Info', organization: 'Organization',
-              }[column]}</th>)}
-              <th className="px-4 py-3 font-medium text-muted-foreground">Last Updated</th>
-              <th aria-sort={ordering === 'unmapped_source_codes' ? 'ascending' : ordering === '-unmapped_source_codes' ? 'descending' : 'none'} className="whitespace-nowrap px-4 py-3 text-right font-medium text-muted-foreground">
-                <button type="button" onClick={() => changeOrdering(ordering === 'unmapped_source_codes' ? '-unmapped_source_codes' : 'unmapped_source_codes')}>
-                  Unmapped Source Codes{ordering === 'unmapped_source_codes' ? ' ↑' : ordering === '-unmapped_source_codes' ? ' ↓' : ''}
-                </button>
-              </th>
+              {canOpen && sortHeader('name', 'Name', false, 'w-36')}
+              {canOpen ? sortHeader('age', 'Age', true) : plainHeader('age', 'Age')}
+              {sortHeader('disease', 'Disease', false)}
+              {sortHeader('stage', 'Stage', false)}
+              {sortHeader('lines', 'Num Lines', true, 'text-center')}
+              {extraColumns.map(extraHeader)}
+              {sortHeader('updated', 'Last Updated', true)}
+              {sortHeader('unmapped_source_codes', 'Unmapped Source Codes', false, 'text-right')}
             </tr>
           </thead>
           <tbody>
@@ -658,7 +668,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
                   diseaseFilter === ALL_FILTER_VALUE &&
                   stageFilter === ALL_FILTER_VALUE &&
                   dateFilter === ALL_FILTER_VALUE &&
-                  Object.entries(reviewFilters).every(([key, value]) => value === REVIEW_FILTER_DEFAULTS[key as keyof ReviewFilters])
+                  Object.entries(activeFilters).every(([key, value]) => value === REVIEW_FILTER_DEFAULTS[key as keyof ReviewFilters])
                     ? "No patients found. Upload a CSV or FHIR file to get started."
                     : "No patients match the selected filters."}
                 </td>

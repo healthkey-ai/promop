@@ -79,7 +79,8 @@ from omop_core.services.pk import next_pk, next_pk_batch
 from omop_core.mapping.table_relocation import relocatable, relocate_clinical_rows
 from omop_core.services.concept_lock import ConceptLocked, check_concept_lock, check_concept_locks
 from omop_core.services.provenance_attribution import (
-    ATTRIBUTION, OWN, UNATTRIBUTED, classify, same_attribution, with_attribution,
+    ATTRIBUTION, FOREIGN, OWN, UNATTRIBUTED, classify, same_attribution,
+    with_attribution,
 )
 from omop_core.signals import suppress_patient_record_refresh
 from omop_core.services.rxnav_service import resolve_drug as _rxnav_resolve_drug
@@ -7721,27 +7722,79 @@ def _upsert_key(instance, sv_field, date_field, extra_fields):
 class _UpsertPlan:
     """What one bulk batch resolves to once matched against the person's rows.
 
-    Built with a single SELECT and executed with a constant number of statements
-    regardless of batch size — the property ``BulkOmopUpsertTest`` pins with
-    ``CaptureQueriesContext``. Per-row ``.get()``/``.save()`` here is what the
-    endpoint exists to avoid; ``fhir/sync.py::_upsert_clinical`` can afford its
-    per-key query because a FHIR compartment is small, a 1,000-row ETL chunk is
-    not.
+    Built with a single SELECT (two when the batch carries source record keys)
+    and executed with a constant number of statements regardless of batch size
+    — the property ``BulkOmopUpsertTest`` pins with ``CaptureQueriesContext``.
+    Per-row ``.get()``/``.save()`` here is what the endpoint exists to avoid;
+    ``fhir/sync.py::_upsert_clinical`` can afford its per-key query because a
+    FHIR compartment is small, a 1,000-row ETL chunk is not.
     """
 
     def __init__(self, to_insert, row_slots, collapse_ids, to_update, touched_ids,
-                 unattributed_matches=0):
+                 unattributed_matches=0, keyed_updates=None, key_ambiguous=None,
+                 organization=None, writable=()):
         self.to_insert = to_insert        # unsaved rows needing a pk, in order
         self.row_slots = row_slots        # per input row: ('new', slot) | ('old', pk)
         self.collapse_ids = collapse_ids  # stacked duplicates to delete
         self.to_update = to_update        # [(pk, concept_id)] — concept changed
         self.touched_ids = touched_ids    # existing rows updated or de-stacked
         self.unattributed_matches = unattributed_matches
+        # pk -> (incoming row, attribution class): rows matched by their source
+        # record key, rewritten whole from the incoming row (#2453).
+        self.keyed_updates = keyed_updates or {}
+        self.key_ambiguous = key_ambiguous or []   # request indices, ascending
+        self.organization = organization
+        self.writable = frozenset(writable)  # columns a key match rewrites
+
+
+#: Models whose rows may carry the producer's ``source_record_key`` (#2453).
+_KEYED_MODELS = frozenset({'Measurement', 'Observation'})
+
+#: Columns a key match never rewrites, among those the request can carry: who
+#: the row belongs to, and a clinician's entered-in-error flag, which a replay
+#: must not revive. Columns the serializer does not accept are never rewritten
+#: either: the request cannot say what they hold.
+_KEYED_KEEP = frozenset({'person', 'is_erroneous', 'erroneous_reason'})
+
+
+class _SourceKeyConflict(Exception):
+    """A source record key is held by another hospital's row (409)."""
+
+
+def _keyed_update_fields(model_cls, pk_field, writable):
+    return [f for f in model_cls._meta.concrete_fields
+            if f.name in writable and f.name != pk_field and f.name not in _KEYED_KEEP]
+
+
+def _keyed_rows(model_cls, pk_field, person, keys):
+    """``{source_record_key: (pk, attribution)}`` for *person*, locked.
+
+    Entered-in-error rows are included, unlike the content match: the unique
+    index covers them, and the update keeps their flag.
+    """
+    rows = with_attribution(
+        model_cls.objects.select_for_update(of=('self',))
+        .filter(person=person, source_record_key__in=keys)
+    ).values_list(pk_field, 'source_record_key', ATTRIBUTION)
+    return {key: (pk, tuple(attribution)) for pk, key, attribution in rows}
+
+
+def _key_class(attribution, organization):
+    """Attribution class of a key-matched row, None without a named hospital.
+
+    A row's hospital is set once: a key held by another hospital's row is a 409.
+    """
+    if organization is None:
+        return None
+    cls = classify(attribution, organization.pk)
+    if cls == FOREIGN:
+        raise _SourceKeyConflict()
+    return cls
 
 
 
 def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances,
-                      organization=None):
+                      organization=None, content_match=True, writable=()):
     """Match a batch of unsaved rows against what `person` already has.
 
     Same three outcomes as ``_upsert_clinical``: an event already on file is left
@@ -7757,13 +7810,35 @@ def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances,
     rows are matched. An unattributed row could be any hospital's, so it is left
     as stored; another hospital's row is never touched. Stacked duplicates only
     collapse into a row with the same attribution.
+
+    A row carrying a ``source_record_key`` (#2453) is the producer's record and
+    matches by that key first, entered-in-error rows included; the stored row is
+    then rewritten from the incoming one: every *writable* column (the ones the
+    request can carry) but ``_KEYED_KEEP``. Without
+    a key match it falls back to the content match against *unkeyed* rows only,
+    and stamps its key on the one row that matches. When that is not one row
+    for one key (several unkeyed candidates of different attribution, or several
+    incoming keys on one row), nothing is stamped, one incoming row maps to the
+    stored row as an unkeyed row would, the others are inserted, and every such
+    request index is reported in ``key_ambiguous``. Keyed rows never merge with
+    each other by content, and a content collapse never deletes a keyed row.
+
+    ``content_match=False`` (``?upsert=false``) keeps only the key match.
     """
     sv_field, date_field, concept_field, extra_fields = _UPSERT_KEYS[model_name]
     cid_attr = f'{concept_field}_id'
+    supports_key = model_name in _KEYED_MODELS
 
-    keys = [_upsert_key(inst, sv_field, date_field, extra_fields)
+    source_keys = [getattr(inst, 'source_record_key', None) if supports_key else None
+                   for inst in instances]
+    keys = [_upsert_key(inst, sv_field, date_field, extra_fields) if content_match else None
             for inst in instances]
     keyed = [k for k in keys if k is not None]
+
+    by_source_key = {}
+    if any(source_keys):
+        by_source_key = _keyed_rows(model_cls, pk_field, person,
+                                    {k for k in source_keys if k})
 
     # One SELECT for every row of this person that could match the batch. The
     # (source_value IN …, date IN …) pair is a superset of the real key set —
@@ -7773,8 +7848,11 @@ def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances,
     existing = {}   # key -> [pk, …] ascending
     cid_by_pk = {}
     attribution_by_pk = {}
+    keyed_pks = set()   # stored rows that carry a source record key
     if keyed:
         columns = (pk_field, cid_attr, sv_field, date_field) + tuple(extra_fields)
+        if supports_key:
+            columns += ('source_record_key',)
         # Entered-in-error rows are excluded from the match on purpose.
         #
         # A row marked is_erroneous is not the current fact -- derivation already
@@ -7793,14 +7871,20 @@ def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances,
             f'{sv_field}__in': {k[0] for k in keyed},
             f'{date_field}__in': {k[1] for k in keyed},
         })
+        if any(source_keys):
+            # A keyed row may stamp its key on one of these. Lock them so a
+            # concurrent request with another key re-reads the row once the
+            # first commits, sees it keyed, and inserts instead of overwriting.
+            rows = rows.select_for_update(of=('self',))
         rows = with_attribution(rows).order_by(pk_field).values_list(*columns, ATTRIBUTION)
+        n_extra = len(extra_fields)
         for row in rows:
             # Normalise DB-side datetimes the same way _upsert_key does for
             # in-memory instances: naive → UTC-aware. In practice PostgreSQL
             # with USE_TZ=True already returns aware values, but the explicit
             # normalisation keeps the two sides provably symmetric.
             tail = []
-            for v in row[4:-1]:
+            for v in row[4:4 + n_extra]:
                 if isinstance(v, datetime) and is_naive(v):
                     v = make_aware(v, _dt.timezone.utc)
                 tail.append(v)
@@ -7808,6 +7892,16 @@ def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances,
             existing.setdefault(key, []).append(row[0])
             cid_by_pk[row[0]] = row[1]
             attribution_by_pk[row[0]] = tuple(row[-1])
+            if supports_key and row[-2]:
+                keyed_pks.add(row[0])
+
+    # Distinct attributions among the unkeyed rows of a key, before the
+    # filtering below narrows it to one: without a named hospital, more than
+    # one is an ambiguous match for a keyed row.
+    unkeyed_groups = {
+        key: {attribution_by_pk[pk] for pk in pks if pk not in keyed_pks}
+        for key, pks in existing.items()
+    }
 
     skipped = {}
     for key in list(existing):
@@ -7825,22 +7919,87 @@ def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances,
         if by_class[UNATTRIBUTED]:
             skipped[key] = by_class[UNATTRIBUTED][0]
 
+    to_insert, row_slots = [], [None] * len(instances)
+    insert_slot, collapse_ids, to_update, touched_ids = {}, [], [], []
+    keyed_updates, key_ambiguous = {}, []
+    unattributed_matches = 0
+
+    def match_content(i, key):
+        """Today's outcome for a row whose content key is on file."""
+        keep = existing[key][0]
+        row_slots[i] = ('old', keep)
+        extras = [pk for pk in existing[key][1:]
+                  if pk not in keyed_pks and pk not in collapse_ids]
+        collapse_ids.extend(extras)
+        new_cid = getattr(instances[i], cid_attr, None)
+        if cid_by_pk[keep] != new_cid:
+            to_update.append((keep, new_cid))
+            touched_ids.append(keep)
+        elif extras:
+            touched_ids.append(keep)
+
+    def insert(i):
+        row_slots[i] = ('new', len(to_insert))
+        to_insert.append(instances[i])
+
+    # --- rows with a source record key ----------------------------------------
+    last_by_source_key = {}
+    for i, source_key in enumerate(source_keys):
+        if source_key:
+            last_by_source_key[source_key] = i
+    fallback = defaultdict(list)   # content key -> request indices
+    for source_key, i in last_by_source_key.items():
+        if source_key in by_source_key:
+            pk, attribution = by_source_key[source_key]
+            keyed_updates[pk] = (instances[i], _key_class(attribution, organization))
+            touched_ids.append(pk)
+            row_slots[i] = ('old', pk)
+            continue
+        key = keys[i]
+        if key is not None and key in existing and any(
+                pk not in keyed_pks for pk in existing[key]):
+            fallback[key].append(i)
+        elif key is not None and key in skipped and skipped[key] not in keyed_pks:
+            row_slots[i] = ('old', skipped[key])
+            unattributed_matches += 1
+        else:
+            insert(i)
+    for key, idxs in fallback.items():
+        idxs.sort()
+        candidates = [pk for pk in existing[key] if pk not in keyed_pks]
+        # With a hospital named, only its own rows are candidates: one group.
+        groups = len(unkeyed_groups[key]) if organization is None else 1
+        if len(idxs) == 1 and groups == 1:
+            i, keep = idxs[0], candidates[0]
+            collapse_ids.extend(pk for pk in candidates[1:] if pk not in collapse_ids)
+            keyed_updates[keep] = (instances[i], _key_class(attribution_by_pk[keep], organization))
+            touched_ids.append(keep)
+            row_slots[i] = ('old', keep)
+            continue
+        key_ambiguous.extend(idxs)
+        existing[key] = candidates
+        match_content(idxs[-1], key)
+        for i in idxs[:-1]:
+            insert(i)
+    # Rows sharing a key with its last occurrence resolve to the same row.
+    for i, source_key in enumerate(source_keys):
+        if source_key and last_by_source_key[source_key] != i:
+            row_slots[i] = row_slots[last_by_source_key[source_key]]
+
+    # --- rows without one: matched by content -----------------------------------
     # Last occurrence of a repeated key wins, matching _upsert_clinical's
     # "desired" dict — so the batch converges on the row the producer emitted
     # most recently rather than the first one it happened to serialise.
     last_index = {}
     for i, key in enumerate(keys):
-        if key is not None:
+        if key is not None and not source_keys[i]:
             last_index[key] = i
 
-    to_insert, row_slots = [], [None] * len(instances)
-    insert_slot, collapse_ids, to_update, touched_ids = {}, [], [], []
-    unattributed_matches = 0
-
     for i, (inst, key) in enumerate(zip(instances, keys)):
+        if source_keys[i]:
+            continue
         if key is None:                       # no identity — always insert
-            row_slots[i] = ('new', len(to_insert))
-            to_insert.append(inst)
+            insert(i)
             continue
 
         if key in skipped:
@@ -7849,18 +8008,10 @@ def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances,
             continue
 
         if key in existing:
-            keep = existing[key][0]
-            row_slots[i] = ('old', keep)
             if last_index[key] != i:
+                row_slots[i] = ('old', existing[key][0])
                 continue                      # decide the key once, on its last row
-            extras = existing[key][1:]
-            collapse_ids.extend(extras)
-            new_cid = getattr(inst, cid_attr, None)
-            if cid_by_pk[keep] != new_cid:
-                to_update.append((keep, new_cid))
-                touched_ids.append(keep)
-            elif extras:
-                touched_ids.append(keep)
+            match_content(i, key)
             continue
 
         if key in insert_slot:                # repeated within this batch
@@ -7872,13 +8023,18 @@ def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances,
             to_insert.append(inst)
         row_slots[i] = ('new', slot)
 
-    return _UpsertPlan(to_insert, row_slots, collapse_ids, to_update, touched_ids,
-                       unattributed_matches)
+    # A row kept or rewritten by one match is never deleted as another's copy.
+    kept = {ref for kind, ref in row_slots if kind == 'old'} | set(keyed_updates)
+    collapse_ids = [pk for pk in collapse_ids if pk not in kept]
+    return _UpsertPlan(to_insert, row_slots, collapse_ids, to_update,
+                       list(dict.fromkeys(touched_ids)), unattributed_matches,
+                       keyed_updates, key_ambiguous, organization, writable)
 
 
 def _apply_upsert_plan(plan, model_cls, pk_field, model_name):
-    """Execute a plan: collapse duplicates, update changed concepts, insert the
-    rest. Returns (ids aligned with the input rows, newly inserted ids)."""
+    """Execute a plan: collapse duplicates, update changed concepts, rewrite
+    key-matched rows, insert the rest. Returns (ids aligned with the input rows,
+    newly inserted ids)."""
     concept_field = _UPSERT_KEYS[model_name][2]
     cid_attr = f'{concept_field}_id'
 
@@ -7898,14 +8054,47 @@ def _apply_upsert_plan(plan, model_cls, pk_field, model_name):
         )
 
     new_ids = []
+    keyed_slots = {}   # insert slot -> its source record key
     if plan.to_insert:
         new_ids = list(next_pk_batch(model_cls, pk_field, len(plan.to_insert)))
-        for row, pk in zip(plan.to_insert, new_ids):
+        for slot, (row, pk) in enumerate(zip(plan.to_insert, new_ids)):
             setattr(row, pk_field, pk)
-        model_cls.objects.bulk_create(plan.to_insert)
+            if getattr(row, 'source_record_key', None):
+                keyed_slots[slot] = row.source_record_key
+        # A concurrent request may insert one of these keys between the plan's
+        # SELECT and this INSERT. ON CONFLICT DO NOTHING lets the batch land,
+        # and the rows that did not are applied below as key matches.
+        model_cls.objects.bulk_create(plan.to_insert, ignore_conflicts=bool(keyed_slots))
+
+    if keyed_slots:
+        landed = set(model_cls.objects.filter(
+            **{f'{pk_field}__in': [new_ids[s] for s in keyed_slots]}
+        ).values_list(pk_field, flat=True))
+        lost = {s: k for s, k in keyed_slots.items() if new_ids[s] not in landed}
+        if lost:
+            person_id = plan.to_insert[next(iter(lost))].person_id
+            current = _keyed_rows(model_cls, pk_field, person_id, set(lost.values()))
+            remap = {}
+            for slot, source_key in lost.items():
+                pk, attribution = current[source_key]
+                plan.keyed_updates[pk] = (plan.to_insert[slot],
+                                          _key_class(attribution, plan.organization))
+                plan.touched_ids.append(pk)
+                remap[slot] = pk
+            plan.row_slots = [('old', remap[ref]) if kind == 'new' and ref in remap
+                              else (kind, ref) for kind, ref in plan.row_slots]
+            new_ids = [pk if s not in remap else None for s, pk in enumerate(new_ids)]
+
+    if plan.keyed_updates:
+        fields = _keyed_update_fields(model_cls, pk_field, plan.writable)
+        rows = []
+        for pk, (row, _cls) in plan.keyed_updates.items():
+            values = {f.attname: getattr(row, f.attname) for f in fields}
+            rows.append(model_cls(**{pk_field: pk}, **values))
+        model_cls.objects.bulk_update(rows, [f.name for f in fields])
 
     ids = [new_ids[ref] if kind == 'new' else ref for kind, ref in plan.row_slots]
-    return ids, new_ids
+    return ids, [pk for pk in new_ids if pk is not None]
 
 
 class _ConceptDuplicateConflict(Exception):
@@ -8445,6 +8634,37 @@ def _bulk_row_errors(errors, row_count):
     return errors
 
 
+def _source_key_conflict_response(what):
+    return Response(
+        {'detail': (
+            f'The {what} was rolled back: a source_record_key in it belongs to '
+            "another hospital's row, and a row's hospital is set once."
+        )},
+        status=status.HTTP_409_CONFLICT,
+    )
+
+
+def _record_keyed_provenance(model_cls, person, provenance, keyed_updates):
+    """Provenance for rows rewritten by a key match (#2453).
+
+    The hospital is recorded only on a row that is already that hospital's: a
+    replay never adds attribution to a row that had none.
+    """
+    ct = ContentType.objects.get_for_model(model_cls)
+    ProvenanceRecord.objects.bulk_create([
+        ProvenanceRecord(
+            source=provenance.source,
+            source_user_id=provenance.source_user_id,
+            target_patient_id=str(person.person_id),
+            modification_reason=provenance.reason,
+            organization=provenance.organization if cls == OWN else None,
+            content_type=ct,
+            object_id=pk,
+        )
+        for pk, (_row, cls) in keyed_updates.items()
+    ], ignore_conflicts=True)
+
+
 class _OmopBulkCreateMixin:
     """Accept a JSON *list* on POST and insert the rows in one batched transaction.
 
@@ -8493,6 +8713,12 @@ class _OmopBulkCreateMixin:
         pk_field, _model_cls = _MODEL_PK_MAP[model_name]
         if request.data.get(pk_field) is not None:
             return False
+        # A source record key matches even with ?upsert=false (#2453).
+        return self._content_upsert(request) or (
+            model_name in _KEYED_MODELS and bool(request.data.get('source_record_key')))
+
+    @staticmethod
+    def _content_upsert(request):
         return str(
             request.query_params.get('upsert', 'true')
         ).strip().lower() not in ('0', 'false', 'no')
@@ -8527,7 +8753,9 @@ class _OmopBulkCreateMixin:
                 with suppress_patient_record_refresh():
                     plan = _plan_bulk_upsert(
                         model_cls, pk_field, model_name, person, [instance],
-                        organization=provenance.match_organization)
+                        organization=provenance.match_organization,
+                        content_match=self._content_upsert(request),
+                        writable=self.serializer_class.Meta.fields)
                     ids, new_ids = _apply_upsert_plan(
                         plan, model_cls, pk_field, model_name)
 
@@ -8551,9 +8779,13 @@ class _OmopBulkCreateMixin:
                         modification_reason=provenance.reason,
                         organization=provenance.organization,
                     )
+                if source and plan.keyed_updates:
+                    _record_keyed_provenance(model_cls, person, provenance, plan.keyed_updates)
                 if not skip_refresh:
                     from omop_core.services.patient_record_service import refresh_patient_record
                     refresh_patient_record(person)
+        except _SourceKeyConflict:
+            return _source_key_conflict_response('row')
         except _ConceptDuplicateConflict as exc:
             return Response(
                 {'detail': (
@@ -8585,6 +8817,8 @@ class _OmopBulkCreateMixin:
         data = response_serializer.data
         if concept_duplicates:
             data['concept_duplicates'] = concept_duplicates
+        if plan.key_ambiguous:
+            data['key_ambiguous'] = True
         return Response(data, status=http_status)
 
     def _bulk_create(self, request):
@@ -8682,6 +8916,8 @@ class _OmopBulkCreateMixin:
                 ), 'concept_duplicates': exc.duplicates},
                 status=status.HTTP_409_CONFLICT,
             )
+        except _SourceKeyConflict:
+            return _source_key_conflict_response('batch')
         except IntegrityError as exc:
             # A conflict over data, not a server fault. The distinction decides
             # whether the caller retries, and a 500 reads as "service is down".
@@ -8725,14 +8961,22 @@ class _OmopBulkCreateMixin:
             with suppress_patient_record_refresh():
                 instances = [model_cls(**dict(attrs)) for attrs in validated]
                 unattributed_matches = 0
-                if upsert:
+                keyed_updates, key_ambiguous = {}, []
+                # ?upsert=false turns off the content match only: a second row
+                # with a source record key already on file cannot be inserted.
+                use_plan = upsert or any(
+                    getattr(inst, 'source_record_key', None) for inst in instances)
+                if use_plan:
                     plan = _plan_bulk_upsert(
                         model_cls, pk_field, model_name, person, instances,
-                        organization=provenance.match_organization)
+                        organization=provenance.match_organization,
+                        content_match=upsert,
+                        writable=self.serializer_class.Meta.fields)
                     ids, new_ids = _apply_upsert_plan(
                         plan, model_cls, pk_field, model_name)
                     updated = len(plan.touched_ids)
                     unattributed_matches = plan.unattributed_matches
+                    keyed_updates, key_ambiguous = plan.keyed_updates, plan.key_ambiguous
                 else:
                     new_ids = list(next_pk_batch(model_cls, pk_field, len(instances)))
                     for inst, pk in zip(instances, new_ids):
@@ -8745,7 +8989,7 @@ class _OmopBulkCreateMixin:
                     request, model_name)
                 concept_duplicates = []
                 if (concept_dup_warn or concept_dup_reject) and new_ids:
-                    inserted = plan.to_insert if upsert else instances
+                    inserted = plan.to_insert if use_plan else instances
                     concept_duplicates = _check_concept_date_duplicates(
                         model_cls, person, inserted,
                         exclude_ids=set(new_ids))
@@ -8770,6 +9014,8 @@ class _OmopBulkCreateMixin:
                     )
                     for pk in new_ids
                 ])
+            if provenance.source and keyed_updates:
+                _record_keyed_provenance(model_cls, person, provenance, keyed_updates)
 
             # Deliberately inside the transaction, and deliberately unguarded:
             # a failing derivation rolls the rows back and 500s rather than
@@ -8789,6 +9035,8 @@ class _OmopBulkCreateMixin:
 
         data = {'created': len(new_ids), 'updated': updated,
                 'unattributed_matches': unattributed_matches, 'ids': list(ids)}
+        if model_name in _KEYED_MODELS:
+            data['key_ambiguous'] = key_ambiguous
         if concept_duplicates:
             data['concept_duplicates'] = concept_duplicates
         return Response(data, status=status.HTTP_201_CREATED)

@@ -1314,6 +1314,21 @@ class DrugExposureSerializer(serializers.ModelSerializer):
         return None
 
 
+_SOURCE_RECORD_KEY = re.compile(r'[!-~]+')
+
+
+def _validate_source_record_key(value):
+    """The producer's stable id for a source record (#2453): printable ASCII,
+    no whitespace. Null means no key; an empty string is refused rather than
+    read as one."""
+    if value is None:
+        return value
+    if not _SOURCE_RECORD_KEY.fullmatch(value):
+        raise serializers.ValidationError(
+            'Must be non-empty printable ASCII with no whitespace.')
+    return value
+
+
 class MeasurementSerializer(serializers.ModelSerializer):
     concept_name = serializers.SerializerMethodField()
     normalized = serializers.SerializerMethodField()
@@ -1336,9 +1351,16 @@ class MeasurementSerializer(serializers.ModelSerializer):
             'unit_concept', 'range_low', 'range_high',
             'measurement_source_value', 'measurement_source_concept',
             'unit_source_value', 'value_source_value',
-            'is_erroneous', 'erroneous_reason',
+            'is_erroneous', 'erroneous_reason', 'source_record_key',
         ]
         extra_kwargs = {'measurement_id': {'required': False}}
+        # The (person, source_record_key) unique index is enforced by the
+        # keyed upsert, which turns a known key into an update (#2453); DRF's
+        # generated validator would refuse that replay first.
+        validators = []
+
+    def validate_source_record_key(self, value):
+        return _validate_source_record_key(value)
 
     def get_concept_name(self, obj):
         concept = getattr(obj, 'measurement_concept', None)
@@ -1393,9 +1415,16 @@ class ObservationSerializer(serializers.ModelSerializer):
             'qualifier_concept', 'unit_concept',
             'observation_source_value', 'observation_source_concept',
             'unit_source_value', 'qualifier_source_value', 'value_source_value',
-            'is_erroneous', 'erroneous_reason',
+            'is_erroneous', 'erroneous_reason', 'source_record_key',
         ]
         extra_kwargs = {'observation_id': {'required': False}}
+        # The (person, source_record_key) unique index is enforced by the
+        # keyed upsert, which turns a known key into an update (#2453); DRF's
+        # generated validator would refuse that replay first.
+        validators = []
+
+    def validate_source_record_key(self, value):
+        return _validate_source_record_key(value)
 
     def get_concept_name(self, obj):
         concept = getattr(obj, 'observation_concept', None)

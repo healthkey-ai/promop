@@ -36,6 +36,7 @@ import ForgotPassword from "@/components/Auth/ForgotPassword";
 import VerifyEmail from "@/components/Auth/VerifyEmail";
 import VerifyEmailBanner from "@/components/Auth/VerifyEmailBanner";
 import UserProfilePage from "@/components/User/UserProfilePage";
+import RolesPage from "@/components/Roles/RolesPage";
 import { useAuth } from "@/hooks/useAuth";
 
 function OrgHome({
@@ -175,6 +176,7 @@ function AppRoutes() {
       <Route path="/stats" element={<Navigate to="/org-admin" replace />} />
       <Route path="/service-applications" element={currentUser?.is_staff ? <ServiceApplicationsPage /> : <Navigate to={currentUser ? "/" : "/login"} replace />} />
       <Route path="/org-admin" element={orgAdminRoute(<OrgAdminPage />)} />
+      <Route path="/roles" element={currentUser ? <RolesPage /> : <Navigate to="/login" replace />} />
       <Route path="/mappings" element={mappingRoute(<MappingHubPage />)} />
       <Route path="/field-mappings" element={mappingRoute(<FieldMappingPage />)} />
       <Route path="/code-mappings" element={mappingRoute(<CodeMappingPage />)} />

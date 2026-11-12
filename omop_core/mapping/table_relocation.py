@@ -167,6 +167,7 @@ def relocate_clinical_rows(*, mapping, from_table, to_table, person_id=None, app
             if not batch:
                 break
             new_ids = next_pk_batch(to_model, to_core['pk'], len(batch))
+            taken = _taken_source_keys(to_model, batch)
             created = []
             for row, new_id in zip(batch, new_ids):
                 concepts_moved.add(getattr(row, from_concept_col))
@@ -180,6 +181,8 @@ def relocate_clinical_rows(*, mapping, from_table, to_table, person_id=None, app
                     to_core['source_value']: getattr(row, from_core['source_value']),
                     to_core['source_concept']: getattr(row, from_core['source_concept']),
                 })
+                if (row.person_id, values.get('source_record_key')) in taken:
+                    values['source_record_key'] = None
                 created.append(to_model(**values))
             to_model.objects.bulk_create(created)
             old_ids = [getattr(row, from_core['pk']) for row in batch]
@@ -207,6 +210,25 @@ def relocate_clinical_rows(*, mapping, from_table, to_table, person_id=None, app
             result['source_codes_refiled'],
         )
     return result
+
+
+def _taken_source_keys(to_model, batch):
+    """(person, source_record_key) pairs of *batch* the destination already holds.
+
+    The key travels with a moved row (#2453), but a producer that wrote the
+    same record to the destination table meanwhile owns it there; the copy
+    then goes without its key rather than failing the batch on the unique
+    index, which would stall the move on that row for good.
+    """
+    pairs = {(row.person_id, row.source_record_key) for row in batch
+             if getattr(row, 'source_record_key', None)}
+    if not pairs:
+        return set()
+    held = to_model.objects.filter(
+        person_id__in={p for p, _ in pairs},
+        source_record_key__in={k for _, k in pairs},
+    ).values_list('person_id', 'source_record_key')
+    return pairs & set(held)
 
 
 def _refile_source_codes(mapping, source, target, person_id):
