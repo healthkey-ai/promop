@@ -33,6 +33,14 @@ export interface MountOptions extends PatientFormConnection {
   readOnly?: boolean;
   infoHref?: string;
   onPatientUpdated?: (result?: PatientFormResult) => unknown;
+}
+
+/** `mountFields` only. Its slots are bare controls in the host's card, with no
+ *  room for the form's own "could not be saved" banner, so the host is told
+ *  instead. The full form shows that banner itself, and the therapy and
+ *  genomics editors write outside the save queue and show their errors inline;
+ *  neither calls this, so their options do not offer it. */
+export interface FieldsMountOptions extends MountOptions {
   onSaveError?: () => unknown;
 }
 
@@ -82,7 +90,7 @@ export function mount(el: HTMLElement, opts: MountOptions = {}): () => void {
 /** One remote React root/queue for all patient-value slots in a host card.
  * The host supplies only field identifiers and empty DOM targets, not controls
  * or clinical metadata. Portals retain the same recursive form context. */
-export function mountFields(el: HTMLElement, opts: MountOptions = {}): () => void {
+export function mountFields(el: HTMLElement, opts: FieldsMountOptions = {}): () => void {
   unmount(el);
   injectStyles();
   const runtime = patientFormRuntime(opts);
