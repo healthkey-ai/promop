@@ -147,3 +147,29 @@ def test_the_same_table_or_a_non_clinical_table_moves_nothing():
     assert relocate_clinical_rows(mapping=mapping, from_table='measurement', to_table='measurement')['rows_relocated'] == 0
     assert relocate_clinical_rows(mapping=mapping, from_table='measurement', to_table='')['rows_relocated'] == 0
     assert Measurement.objects.filter(measurement_source_value='GLU').count() == 1
+
+
+def test_a_moved_row_whose_key_the_destination_holds_goes_without_it():
+    """#2453: the key travels with the row, unless the producer already wrote
+    the same record to the destination; the move then cannot fail on the
+    unique index and stall on that row."""
+    from tests.factories import ObservationFactory
+
+    mapping = _mapping(domain_id='Observation', omop_table='observation')
+    person = PersonFactory()
+    PatientRecord.objects.create(person=person)
+    MeasurementFactory(person=person, measurement_source_value='GLU',
+                       source_record_key='fac/Observation/1')
+    MeasurementFactory(person=person, measurement_source_value='GLU',
+                       measurement_date='2024-02-01', source_record_key='fac/Observation/2')
+    held = ObservationFactory(person=person, observation_source_value='OTHER',
+                              source_record_key='fac/Observation/1')
+
+    outcome = relocate_clinical_rows(mapping=mapping, from_table='measurement', to_table='observation')
+
+    assert outcome['rows_relocated'] == 2
+    moved = dict(Observation.objects.filter(person=person, observation_source_value='GLU')
+                 .values_list('observation_date', 'source_record_key'))
+    assert moved == {date(2024, 1, 15): None, date(2024, 2, 1): 'fac/Observation/2'}
+    held.refresh_from_db()
+    assert held.source_record_key == 'fac/Observation/1'
