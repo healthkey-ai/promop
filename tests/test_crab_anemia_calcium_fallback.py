@@ -124,7 +124,11 @@ def test_an_out_of_range_value_is_not_evidence(code, value, unit):
 @pytest.mark.parametrize('concept_code, source', [('718-7', '59260-0'), ('59260-0', '718-7')])
 def test_a_row_under_both_hemoglobin_codes_takes_the_stricter_default(concept_code, source):
     """A unitless row matching the mass code one way and the molar code the
-    other is read as the molar one: no default, no evidence."""
+    other is read as the molar one: no default, no evidence.
+
+    Guards the outcome only: with the molar code listed last, the plain last
+    write already gives no default, so this passes without the stricter-
+    default merge in newest_canonical, which protects a reordering."""
     from tests.factories import ConceptFactory
     person = PersonFactory()
     MeasurementFactory(

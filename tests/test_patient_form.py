@@ -148,6 +148,16 @@ def test_crab_verdict_is_three_valued_from_the_same_inputs_the_form_edits():
     assert derive_meets_crab(record) is True
 
 
+def test_a_zero_hemoglobin_is_no_crab_evidence_on_the_edit_path():
+    """The OMOP fallback reads 0 g/dL as a placeholder; so must the verdict an
+    edit recomputes, or the same record flips to CRAB on an unrelated edit."""
+    from omop_core.models import PatientRecord
+    from omop_core.services.patient_record_service import derive_meets_crab
+
+    record = PatientRecord(hemoglobin_g_dl='0', bone_lesions='Absent')
+    assert derive_meets_crab(record) is None
+
+
 def test_slim_verdict_keeps_the_involved_chain_burden_guard():
     from omop_core.models import PatientRecord
     from omop_core.services.patient_record_service import derive_meets_slim

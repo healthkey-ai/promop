@@ -4559,7 +4559,7 @@ def derive_meets_crab(patient_info: PatientRecord):
     """Three-valued CRAB from the record's canonical inputs.
 
     Same thresholds as the OMOP fallback in :func:`_get_mm_specific_data`
-    (hemoglobin < 10 g/dL, calcium > 11 mg/dL, clearance < 40 mL/min) plus the
+    (0 < hemoglobin < 10 g/dL, calcium > 11 mg/dL, clearance < 40 mL/min) plus the
     standard serum-creatinine alternative (> 2 mg/dL) when no clearance is
     recorded. A positive component establishes CRAB; a negative answer requires
     every component to be evaluated, otherwise the result stays unknown rather
@@ -4576,7 +4576,9 @@ def derive_meets_crab(patient_info: PatientRecord):
     else:
         renal = None
     components = [
-        None if hgb is None else hgb < Decimal('10'),
+        # 0 g/dL fits the column but is an ETL placeholder, not a blood count:
+        # unknown, as in the OMOP fallback.
+        None if hgb is None or hgb <= 0 else hgb < Decimal('10'),
         None if calcium is None else calcium > Decimal('11'),
         renal,
         _bone_lesions_component(patient_info.bone_lesions),
