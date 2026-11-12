@@ -8,7 +8,7 @@ import type { ResolveRunStatus } from "@/types/sourceCodes";
 import { PaginationControls } from "@/components/labs/PaginationControls";
 import { useLocalPagination } from "@/lib/pagination";
 
-import { loadPreferences, REVIEW_FILTER_DEFAULTS, VIEW_COLUMNS, type PatientView, type ReviewFilters } from './patientListViews';
+import { columnsFor, DEFAULT_ORDERING, loadPreferences, REVIEW_FILTER_DEFAULTS, type ReviewFilters } from './patientListViews';
 import { canOpenPatients, canViewMappings, isStaffOrOrgAdmin } from '@/utils/roles';
 
 interface Patient {
@@ -81,12 +81,8 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
   const navigate = useNavigate();
   const preferenceKey = `promop-patient-list:${currentUser?.id ?? 'session'}`;
   const [preferences, setPreferences] = useState(() => loadPreferences(preferenceKey));
-  const view = preferences.view;
-  const savedView = preferences.views[view];
-  const reviewFilters = savedView?.filters ?? REVIEW_FILTER_DEFAULTS;
-  const ordering = savedView?.ordering ?? '-updated';
-  const extraColumns: readonly string[] = VIEW_COLUMNS[view];
-  const show = (column: string) => extraColumns.includes(column);
+  const reviewFilters = preferences.filters;
+  const ordering = preferences.ordering;
   useEffect(() => {
     try { localStorage.setItem(preferenceKey, JSON.stringify(preferences)); } catch { /* Storage may be disabled. */ }
   }, [preferenceKey, preferences]);
@@ -164,15 +160,11 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
 
   const changeReviewFilter = (name: keyof ReviewFilters, value: string) => {
     resetToFirstPage();
-    setPreferences((previous) => ({ ...previous, views: { ...previous.views,
-      [view]: { filters: { ...reviewFilters, [name]: value }, ordering },
-    } }));
+    setPreferences((previous) => ({ ...previous, filters: { ...previous.filters, [name]: value } }));
   };
   const changeOrdering = (value: string) => {
     resetToFirstPage();
-    setPreferences((previous) => ({ ...previous, views: { ...previous.views,
-      [view]: { filters: reviewFilters, ordering: value },
-    } }));
+    setPreferences((previous) => ({ ...previous, ordering: value }));
   };
 
   const stageOptions = useMemo(
@@ -329,6 +321,25 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
   const canOpen = canOpenPatients(currentUser);
   const canCurate = canOpen;
   const canAdministerOrganizations = isStaffOrOrgAdmin(currentUser);
+  // Columns follow the roles (#2463): the outreach columns are an org
+  // admin's, and Organization appears once the list spans several.
+  const extraColumns = columnsFor({ outreach: canAdministerOrganizations, multiOrg: filterOptions.orgs.length > 1 });
+  const show = (column: string) => extraColumns.includes(column);
+  // The column headings are the sort: a first click takes the column's
+  // natural direction (newest, most, A to Z), a second reverses it.
+  const sortHeader = (key: string, label: string, descendingFirst: boolean, className = '') => {
+    const active = ordering.replace(/^-/, '') === key;
+    const descending = ordering.startsWith('-');
+    const next = active ? (descending ? key : `-${key}`) : (descendingFirst ? `-${key}` : key);
+    return (
+      <th key={key} aria-sort={active ? (descending ? 'descending' : 'ascending') : 'none'}
+          className={`whitespace-nowrap px-4 py-3 font-medium text-muted-foreground ${className}`}>
+        <button type="button" onClick={() => changeOrdering(next)} className="hover:text-foreground">
+          {label}{active ? (descending ? ' ↓' : ' ↑') : ''}
+        </button>
+      </th>
+    );
+  };
   const openPatient = (personId: number) =>
     canOpen ? () => navigate(`/patient/${personId}`) : undefined;
 
@@ -430,30 +441,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
         </div>
       )}
 
-      <div className="mb-4 flex flex-wrap items-end gap-4">
-        <label className="text-sm font-medium">Audience view
-          <select aria-label="Audience view" value={view} onChange={(event) => {
-            resetToFirstPage();
-            setPreferences((previous) => ({ ...previous, view: event.target.value as PatientView }));
-          }} className="ml-2 rounded-md border border-input bg-background p-2">
-            <option value="doctor">Doctor</option><option value="foundation">Foundation</option><option value="analyst">Analyst</option>
-          </select>
-        </label>
-        <label className="text-sm font-medium">Sort by
-          <select aria-label="Sort by" value={ordering} onChange={(event) => changeOrdering(event.target.value)} className="ml-2 rounded-md border border-input bg-background p-2">
-            <option value="-updated">Last updated</option><option value="-freshness">Newest clinical result</option>
-            <option value="freshness">Oldest clinical result</option><option value="-gaps">Most key data gaps</option>
-            <option value="gaps">Fewest key data gaps</option><option value="ecog">ECOG: low to high</option>
-            <option value="-ecog">ECOG: high to low</option><option value="-lines">Most therapy lines</option>
-            {canOpen && <><option value="name">Name</option><option value="age">Age: youngest first</option><option value="-age">Age: oldest first</option></>}
-            <option value="disease">Disease</option><option value="stage">Stage</option><option value="status">Disease status</option>
-            <option value="organization">Organization</option>
-            <option value="unmapped_source_codes">Unmapped Source Codes: low to high</option>
-            <option value="-unmapped_source_codes">Unmapped Source Codes: high to low</option>
-          </select>
-        </label>
-        <span className="text-xs text-muted-foreground">View and clinical filters are saved in this browser.</span>
-      </div>
+      <p className="mb-4 text-xs text-muted-foreground">Click a column heading to sort. Sort and clinical filters are saved in this browser.</p>
 
       <div className="mb-4 rounded-lg border border-border bg-background p-4 shadow-sm">
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-5">
@@ -578,7 +566,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
             ['ecog', 'ECOG', [['all', 'All'], ...['0', '1', '2', '3', '4', '5'].map((value) => [value, value]), ['unknown', 'Not recorded']]],
             ['data_gap', 'Key data gaps', [['all', 'All'], ['any', 'Any key gap'], ['none', 'No key gaps'], ['stage', 'Missing stage'], ['ecog', 'Missing ECOG'], ['genomics', 'Missing genomics']]],
             ['freshness', 'Latest clinical result', [['all', 'All'], ['30d', 'Within 30 days'], ['90d', 'Within 90 days'], ['older', 'Older than 90 days'], ['unknown', 'Not recorded']]],
-            ['contact', 'Contact information', [['all', 'All'], ['available', 'Recorded'], ['missing', 'Not recorded']]],
+            ...(show('contact') ? [['contact', 'Contact information', [['all', 'All'], ['available', 'Recorded'], ['missing', 'Not recorded']]]] : []),
           ] as [keyof ReviewFilters, string, string[][]][]).map(([name, label, options]) => (
             <label key={name} className="flex flex-col gap-1 text-sm">{label}
               <select value={reviewFilters[name]} onChange={(event) => changeReviewFilter(name, event.target.value)} className="rounded-md border border-input bg-background p-2">
@@ -586,9 +574,10 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
               </select>
             </label>
           ))}
-          {([['treatment', 'Treatment history'], ['biomarker', 'Subtype / biomarker'], ['location', 'City / region / country']] as [keyof ReviewFilters, string][]).map(([name, label]) => (
+          {([['treatment', 'Treatment history'], ['biomarker', 'Subtype / biomarker'],
+             ...(show('location') ? [['location', 'City / region / country']] : [])] as [keyof ReviewFilters, string][]).map(([name, label]) => (
             <label key={name} className="flex flex-col gap-1 text-sm">{label}
-              <input type="search" defaultValue={reviewFilters[name]} key={`${view}-${name}-${reviewFilters[name]}`} placeholder="Search, then press Enter" onBlur={(event) => {
+              <input type="search" defaultValue={reviewFilters[name]} key={`${name}-${reviewFilters[name]}`} placeholder="Search, then press Enter" onBlur={(event) => {
                 if (event.target.value !== reviewFilters[name]) changeReviewFilter(name, event.target.value);
               }} onKeyDown={(event) => { if (event.key === 'Enter') event.currentTarget.blur(); }} className="rounded-md border border-input bg-background p-2" />
             </label>
@@ -597,7 +586,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
         <p className="mt-3 text-xs text-muted-foreground">Key gaps track stage, ECOG, and genomic data. A recorded negative result counts as data. Clinical freshness uses result dates, not record update times.</p>
         <button type="button" className="mt-2 text-sm underline" onClick={() => {
           resetToFirstPage();
-          setPreferences((previous) => ({ ...previous, views: { ...previous.views, [view]: { filters: { ...REVIEW_FILTER_DEFAULTS }, ordering: '-updated' } } }));
+          setPreferences({ filters: { ...REVIEW_FILTER_DEFAULTS }, ordering: DEFAULT_ORDERING });
         }}>Clear clinical filters</button>
       </details>
 
@@ -629,21 +618,22 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
                 />
               </th>
               <th className="px-4 py-3 font-medium text-muted-foreground">ID</th>
-              {canOpen && <th className="w-36 px-4 py-3 font-medium text-muted-foreground">Name</th>}
-              <th className="px-4 py-3 font-medium text-muted-foreground">Age</th>
-              <th className="px-4 py-3 font-medium text-muted-foreground">Disease</th>
-              <th className="px-4 py-3 font-medium text-muted-foreground">Stage</th>
-              <th className="whitespace-nowrap px-4 py-3 text-center font-medium text-muted-foreground">Num Lines</th>
-              {extraColumns.map((column) => <th key={column} className="whitespace-nowrap px-4 py-3 font-medium text-muted-foreground">{{
-                treatment: 'Latest Recorded Line', ecog: 'ECOG', gaps: 'Key Data Gaps',
-                freshness: 'Latest Clinical Result', location: 'Location', contact: 'Contact Info', organization: 'Organization',
-              }[column]}</th>)}
-              <th className="px-4 py-3 font-medium text-muted-foreground">Last Updated</th>
-              <th aria-sort={ordering === 'unmapped_source_codes' ? 'ascending' : ordering === '-unmapped_source_codes' ? 'descending' : 'none'} className="whitespace-nowrap px-4 py-3 text-right font-medium text-muted-foreground">
-                <button type="button" onClick={() => changeOrdering(ordering === 'unmapped_source_codes' ? '-unmapped_source_codes' : 'unmapped_source_codes')}>
-                  Unmapped Source Codes{ordering === 'unmapped_source_codes' ? ' ↑' : ordering === '-unmapped_source_codes' ? ' ↓' : ''}
-                </button>
-              </th>
+              {canOpen && sortHeader('name', 'Name', false, 'w-36')}
+              {sortHeader('age', 'Age', true)}
+              {sortHeader('disease', 'Disease', false)}
+              {sortHeader('stage', 'Stage', false)}
+              {sortHeader('lines', 'Num Lines', true, 'text-center')}
+              {extraColumns.map((column) => ({
+                treatment: <th key="treatment" className="whitespace-nowrap px-4 py-3 font-medium text-muted-foreground">Latest Recorded Line</th>,
+                ecog: sortHeader('ecog', 'ECOG', false),
+                gaps: sortHeader('gaps', 'Key Data Gaps', true),
+                freshness: sortHeader('freshness', 'Latest Clinical Result', true),
+                location: <th key="location" className="whitespace-nowrap px-4 py-3 font-medium text-muted-foreground">Location</th>,
+                contact: <th key="contact" className="whitespace-nowrap px-4 py-3 font-medium text-muted-foreground">Contact Info</th>,
+                organization: sortHeader('organization', 'Organization', false),
+              }[column]))}
+              {sortHeader('updated', 'Last Updated', true)}
+              {sortHeader('unmapped_source_codes', 'Unmapped Source Codes', false, 'text-right')}
             </tr>
           </thead>
           <tbody>

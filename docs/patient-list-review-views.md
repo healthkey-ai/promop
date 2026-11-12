@@ -1,20 +1,28 @@
-# Patient list review views
+# Patient list review columns
 
-The patient list provides Doctor, Foundation, and Analyst views. Each keeps its
-own clinical filters and sort choice in browser storage, scoped to the signed-in
-account. These are display preferences, not access roles. Existing organization
-and patient permissions still determine which records can be listed.
+The patient list shows the same base columns to everyone who reaches it, and
+decides the columns beside them from the reader's roles (#2463). There is no
+view to choose: the Doctor, Foundation and Analyst presets of #1254 are gone,
+and a saved preset's clinical filters and sort carry over as the reader's one
+saved set. The column headings sort the list: a first click takes the column's natural
+direction, a second reverses it. Clinical filters and the sort are kept in
+browser storage, scoped to the signed-in account. Existing organization and patient permissions
+still determine which records can be listed.
 
-All views retain disease, stage, genomics, therapy count, and record update time.
-Disease cells also show recorded histology/myeloma subtype and receptor results.
+All readers get disease, stage, genomics, therapy count, record update time,
+key data gaps and the latest clinical result date. Disease cells also show
+recorded histology/myeloma subtype and receptor results.
 
-- Doctor adds the latest recorded treatment line, disease status, ECOG, key data
-  gaps, and latest clinical result date.
-- Foundation adds disease status, location, contact-information availability,
-  key data gaps, and latest clinical result date. Contact information being
-  recorded does not assert permission to contact the patient.
-- Analyst adds disease status, ECOG, organization, location, key data gaps, and
-  latest clinical result date.
+- Everyone who reaches the list also gets the clinical context: the latest
+  recorded treatment line with its dates, and ECOG with its assessment date.
+- Staff and org admins, whose work spans an organization's patients, also get
+  the outreach columns: location and whether contact information is recorded.
+  Contact information being recorded does not assert permission to contact the
+  patient. The location and contact filters appear with these columns.
+- Organization is added once the list spans more than one organization.
+- A reader with no curation access (an analyst or a patient-role grant browsing
+  a public demo org, #2460) sees no Name column and no row link, and the
+  server withholds every demographic column.
 
 ## Meaning of the summaries
 
