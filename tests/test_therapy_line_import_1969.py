@@ -15,6 +15,7 @@ from omop_core.models import (
     ProvenanceRecord, RegimenMappingGap, TherapyRegimen,
 )
 from omop_core.services.episode_service import author_therapy_line
+from omop_core.services.therapy_errors import MESSAGES
 from omop_core.services.therapy_transactions import CONCURRENT_EDIT_MESSAGE, TherapyLineWriteConflict
 from omop_oncology.models import Episode, EpisodeEvent, TherapyLineAssertion
 from tests.factories import ConceptFactory, PatientRecordFactory, VocabularyFactory
@@ -309,7 +310,9 @@ def test_a_line_the_writer_refuses_rolls_back_the_whole_batch(etl, person):
     assert response.status_code == 400, response.data
     first, second = response.data['lines']
     assert not first
-    assert 'no diagnosis' in second['non_field_errors'][0]
+    # The catalog's sentence alone: the refusal's `[Melanoma]` detail is for
+    # logs, as on the native editor path (#2489).
+    assert second['non_field_errors'] == [MESSAGES['unknown_disease']]
     assert not Episode.objects.filter(person=person).exists()
     assert not RegimenMappingGap.objects.exists()
 
