@@ -12,7 +12,10 @@ import { PatientFormStore } from "./patientFormStore";
 const storeRef: { current?: PatientFormStore } = {};
 const disposers: Array<() => void> = [];
 
-vi.mock("./patientFormRuntime", () => ({
+vi.mock("./patientFormRuntime", async (importOriginal) => ({
+  // The renewal generation and the store cache stay real; only the runtime
+  // (its client and store) is replaced.
+  ...await importOriginal<typeof import("./patientFormRuntime")>(),
   patientFormRuntime: () => ({
     client: {},
     queryClient: new QueryClient(),

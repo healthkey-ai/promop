@@ -100,8 +100,10 @@ export interface GenomicsFindingsProps {
   /** Called when the reader dismisses the modal. Required for `variant="modal"`. */
   onClose?: () => void;
   /** Called after a finding is written, so the host can refresh its own rows.
-   *  The mutation bypasses the patient-form store, which never sees it. */
-  onChanged?: () => void;
+   *  The mutation bypasses the patient-form store, which never sees it. A
+   *  returned promise is awaited: its failure is shown here like the write's,
+   *  and the store's listeners stay held until it settles. */
+  onChanged?: () => void | Promise<void>;
   /** The transport these endpoints go through. Hosts that mount several widgets
    *  with different credentials pass their own client and URL builder, so a
    *  save can never pick up whichever mount registered last. Defaults to the
@@ -225,7 +227,7 @@ export default function GenomicsFindings({
         setVariants(old => draft.id ? old.map(v => v.id === data.id ? data : v) : [data, ...old]);
       }
       setDraft(null); setStatus('Genomic finding saved.');
-      onChanged?.();
+      await onChanged?.();
     } catch (err) { setError(errorMessage(err)); }
     finally { store?.endBypassWrite(); setBusy(false); }
   }
@@ -238,7 +240,7 @@ export default function GenomicsFindings({
       await client.delete(`${genomicsUrl}${deleting.id}/`);
       setVariants(old => old.filter(v => v.id !== deleting.id));
       setDeleting(null); setViewing(null); setStatus('Genomic finding deleted.');
-      onChanged?.();
+      await onChanged?.();
     } catch (err) { setError(errorMessage(err)); }
     finally { store?.endBypassWrite(); setBusy(false); }
   }

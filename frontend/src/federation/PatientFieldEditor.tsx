@@ -366,8 +366,11 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
             aria-label={`Edit ${label} inputs`} title={`Edit ${label} inputs`}>
             <Pencil className="h-4 w-4" strokeWidth={1.67} />
           </button></Dialog.Trigger>
+          {/* Centred by auto margins, not translate utilities: a Tailwind 3
+              host sets `transform` for those while ours sets `translate`, and
+              both moves apply (see ui-labs/dialog.tsx). */}
           <Dialog.Portal><Dialog.Overlay className="fixed inset-0 z-[60] bg-black/40" />
-            <Dialog.Content className="promop-root fixed left-1/2 top-1/2 z-[61] max-h-[85vh] w-[min(32rem,calc(100%-2rem))] -translate-x-1/2 -translate-y-1/2 space-y-4 overflow-y-auto rounded-xl bg-background p-6 shadow-xl">
+            <Dialog.Content className="promop-root fixed inset-0 z-[61] m-auto h-fit max-h-[85vh] w-[min(32rem,calc(100%-2rem))] space-y-4 overflow-y-auto rounded-xl bg-background p-6 shadow-xl">
               <Dialog.Title className="font-semibold">{label}</Dialog.Title>
               <Dialog.Description className="text-sm text-muted-foreground">{readOnly || !state.writable
                 ? 'These inputs are read-only in this view.'

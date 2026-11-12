@@ -316,7 +316,7 @@ describe('TreatmentTab — completeness confirmation', () => {
     );
     await waitFor(() => expect(mockGet).toHaveBeenCalled());
 
-    fireEvent.click(screen.getByLabelText(/treatment history is complete/i));
+    fireEvent.click(screen.getByLabelText(/complete treatment history/i));
     await waitFor(() => expect(mockPost).toHaveBeenCalledWith(
       '/v1/therapy-history/completeness/',
       { person: 262, complete: true },
@@ -327,8 +327,12 @@ describe('TreatmentTab — completeness confirmation', () => {
   it('shows an already-confirmed history and can withdraw it', async () => {
     renderTab({ ...THREE_LINES, person_id: 262, therapy_history_complete: true });
     await waitFor(() => expect(mockGet).toHaveBeenCalled());
-    const box = screen.getByLabelText(/treatment history is complete/i) as HTMLInputElement;
+    const box = screen.getByLabelText(/complete treatment history/i) as HTMLInputElement;
     expect(box.checked).toBe(true);
+    // The accessible name is the visible sentence (WCAG 2.5.3); the
+    // lower-bound note describes it.
+    expect(box).toHaveAccessibleName('This is my complete treatment history');
+    expect(box).toHaveAccessibleDescription(/treated as a minimum/i);
 
     fireEvent.click(box);
     await waitFor(() => expect(mockPost).toHaveBeenCalledWith(
@@ -340,7 +344,7 @@ describe('TreatmentTab — completeness confirmation', () => {
   it('does not offer the confirmation when the host is read-only', async () => {
     renderTab({ ...THREE_LINES, person_id: 262 }, true);
     await waitFor(() => expect(mockGet).toHaveBeenCalled());
-    expect(screen.getByLabelText(/treatment history is complete/i)).toBeDisabled();
+    expect(screen.getByLabelText(/complete treatment history/i)).toBeDisabled();
     expect(mockPost).not.toHaveBeenCalled();
   });
 });

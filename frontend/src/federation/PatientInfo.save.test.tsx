@@ -131,6 +131,26 @@ async function editAndSave(displayValue: string, next: string) {
 }
 
 describe('federated PatientInfo save', () => {
+  it('notifies the host once when it passes a new callback while a batch is pending', async () => {
+    const first = vi.fn();
+    const second = vi.fn();
+    const view = render(<PatientInfo apiClient={client} apiBasePath="/api" queryClient={qc}
+      onPatientUpdated={first} />);
+    await waitFor(() => expect(screen.getByText('Labs')).toBeInTheDocument());
+    const store = patientFormForClient(client, '/api');
+
+    // An inline host callback is a new function on every host render. The
+    // store keeps a removed listener until its queue drains, so a
+    // subscription keyed on the callback would deliver one batch twice.
+    await act(async () => { store.enqueue('email', 'next@example.org'); });
+    view.rerender(<PatientInfo apiClient={client} apiBasePath="/api" queryClient={qc}
+      onPatientUpdated={second} />);
+    await act(async () => { await store.flush(); });
+
+    expect(first).not.toHaveBeenCalled();
+    expect(second).toHaveBeenCalledTimes(1);
+  });
+
   it('does not resurrect none when an older in-flight PATCH finishes after withdrawal', async () => {
     let finishPatch!: (response: unknown) => void;
     (client.patch as ReturnType<typeof vi.fn>).mockImplementation((url: string, body: unknown) => {

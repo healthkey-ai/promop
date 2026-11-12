@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useContext, useId, useState } from 'react';
 import { Pencil, Plus, Trash2 } from 'lucide-react';
 
 import { diseaseToDiseaseCode } from '@/api/therapyContext';
@@ -9,7 +9,7 @@ import {
   type TherapyConnection,
 } from '@/api/therapyLines';
 import TherapyLineDialog from '@/components/PatientInfo/TherapyLineDialog';
-import { usePatientFormSnapshot } from './PatientFormContext';
+import { PatientFormRenewContext, usePatientFormSnapshot } from './PatientFormContext';
 import type { PatientFormStore } from './patientFormStore';
 
 interface Props {
@@ -34,8 +34,10 @@ interface Props {
  */
 export default function TherapyLinesPanel({ store, readOnly = false, onChanged, connection }: Props) {
   const state = usePatientFormSnapshot(store);
+  const renew = useContext(PatientFormRenewContext);
   const [dialog, setDialog] = useState<{ mode: 'add' } | { mode: 'edit'; line: EditableTherapyLine } | null>(null);
   const [busy, setBusy] = useState(false);
+  const completeId = useId();
   const [error, setError] = useState('');
 
   const personId = state.personId ?? null;
@@ -58,7 +60,11 @@ export default function TherapyLinesPanel({ store, readOnly = false, onChanged, 
   if (state.loading) return <p role="status" className="text-sm text-muted-foreground">Loading therapy lines…</p>;
   if (state.error) {
     return <div role="alert" className="text-sm text-red-600">
-      {state.error} <button type="button" className="underline" onClick={() => void store.load()}>Retry</button>
+      {state.error} <button type="button" className="underline" onClick={() => {
+        // The client now speaks for another patient: reloading this store
+        // only meets the identity guard again. Start a fresh one instead.
+        if (state.identityChanged && renew) renew(); else void store.load();
+      }}>Retry</button>
     </div>;
   }
 
@@ -151,12 +157,15 @@ export default function TherapyLinesPanel({ store, readOnly = false, onChanged, 
         checked={complete}
         disabled={!editable || busy}
         onChange={(event) => void setComplete(event.target.checked)}
-        aria-label="Treatment history is complete"
+        // Named by the visible sentence, not a differently worded aria-label
+        // (WCAG 2.5.3); the hint is a description, not part of the name.
+        aria-labelledby={`${completeId}-label`}
+        aria-describedby={complete ? undefined : `${completeId}-hint`}
         className="mt-0.5"
       />
       <span>
-        This is the complete treatment history.
-        {!complete && <span className="block text-xs text-muted-foreground">
+        <span id={`${completeId}-label`}>This is the complete treatment history.</span>
+        {!complete && <span id={`${completeId}-hint`} className="block text-xs text-muted-foreground">
           Until confirmed, the number of prior lines counts as a minimum.
         </span>}
       </span>

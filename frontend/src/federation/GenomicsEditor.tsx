@@ -1,10 +1,12 @@
 import { useMemo } from 'react';
 
 import GenomicsFindingsModal from './GenomicsFindingsModal';
+import { PatientFormRenewContext } from './PatientFormContext';
+import { patientFormStoreId } from './patientFormRuntime';
 import {
   editorBasePath,
   editorIdentity,
-  useEditorSession,
+  useRenewableEditorSession,
   type EditorConnection,
 } from './editorSession';
 
@@ -35,12 +37,15 @@ export default function GenomicsEditor({
   onClose,
   onChanged,
 }: GenomicsEditorProps) {
-  const store = useEditorSession({ apiClient, apiBasePath, connectionKey });
-  const identity = editorIdentity({ apiClient, apiBasePath, connectionKey });
+  // Renewable: the dialog's Retry starts a fresh store when the client now
+  // answers for another patient, and a renewed store remounts the dialog.
+  const { store, renew } = useRenewableEditorSession({ apiClient, apiBasePath, connectionKey });
+  const identity = `${editorIdentity({ apiClient, apiBasePath, connectionKey })}#${patientFormStoreId(store)}`;
   const base = editorBasePath({ apiClient, apiBasePath });
   // Stable identity: the editor stores this callback and compares it.
   const changed = useMemo(() => onChanged ?? (() => {}), [onChanged]);
   return (
+    <PatientFormRenewContext.Provider value={renew}>
     <GenomicsFindingsModal
       key={identity}
       store={store}
@@ -50,5 +55,6 @@ export default function GenomicsEditor({
       onClose={onClose}
       onChanged={changed}
     />
+    </PatientFormRenewContext.Provider>
   );
 }

@@ -13,7 +13,9 @@ const storeRef: { current?: PatientFormStore } = {};
 const clientRef: { current?: Record<string, unknown> } = {};
 const disposers: Array<() => void> = [];
 
-vi.mock("./patientFormRuntime", () => ({
+vi.mock("./patientFormRuntime", async (importOriginal) => ({
+  // Renewals and store ids stay real; only the runtime is replaced.
+  ...await importOriginal<typeof import("./patientFormRuntime")>(),
   patientFormRuntime: () => ({
     // The findings modal must talk through the widget's own client, not a
     // module-level transport that another mounted widget could have replaced.
@@ -127,6 +129,65 @@ describe("mountGenomics", () => {
       expect.objectContaining({ genomic_feature: "TP53" }),
     );
     expect(onPatientUpdated).toHaveBeenCalled();
+  });
+
+  it("reloads the shared store before it tells the host", async () => {
+    // The findings endpoints bypass the save queue. Other surfaces on this
+    // runtime read the record from the store, so it must be re-read before the
+    // host re-renders its row, like the therapy panel and the Genomics tab do.
+    let reads = 0;
+    const seen: unknown[] = [];
+    const onPatientUpdated = vi.fn(() => {
+      seen.push(storeRef.current!.getSnapshot().values.genetic_mutations);
+    });
+    const { client } = await mount({
+      onPatientUpdated,
+      patientRecord: async () => ({
+        patient_info: { person_id: 7, disease: "Breast Cancer",
+          genetic_mutations: ++reads === 1 ? [] : [{ genomic_feature: "TP53" }] },
+        write_enabled: true,
+      }),
+    });
+
+    await vi.waitFor(() => expect(button("Add genomic finding")).toBeTruthy());
+    await act(async () => { button("Add genomic finding")!.click(); });
+    const gene = [...document.querySelectorAll("label")]
+      .find((l) => l.textContent?.startsWith("Genomic feature"))?.querySelector("input");
+    const featureType = [...document.querySelectorAll("label")]
+      .find((l) => l.textContent?.startsWith("Feature type"))?.querySelector("select");
+    await act(async () => {
+      fireEvent.change(gene!, { target: { value: "TP53" } });
+      fireEvent.change(featureType!, { target: { value: "Gene" } });
+    });
+    await act(async () => { button("Save genomic finding")!.click(); });
+
+    await vi.waitFor(() => expect(onPatientUpdated).toHaveBeenCalledTimes(1));
+    expect(client.get.mock.calls.filter(([url]) => url.endsWith("/patient-info/me/"))).toHaveLength(2);
+    expect(seen).toEqual([[{ genomic_feature: "TP53" }]]);
+  });
+
+  it("shows a host callback failure instead of leaving it unhandled", async () => {
+    const onPatientUpdated = vi.fn(() => { throw new Error("host refresh broke"); });
+    const { client } = await mount({ onPatientUpdated });
+
+    await vi.waitFor(() => expect(button("Add genomic finding")).toBeTruthy());
+    await act(async () => { button("Add genomic finding")!.click(); });
+    const gene = [...document.querySelectorAll("label")]
+      .find((l) => l.textContent?.startsWith("Genomic feature"))?.querySelector("input");
+    const featureType = [...document.querySelectorAll("label")]
+      .find((l) => l.textContent?.startsWith("Feature type"))?.querySelector("select");
+    await act(async () => {
+      fireEvent.change(gene!, { target: { value: "TP53" } });
+      fireEvent.change(featureType!, { target: { value: "Gene" } });
+    });
+    await act(async () => { button("Save genomic finding")!.click(); });
+
+    await vi.waitFor(() => expect(onPatientUpdated).toHaveBeenCalled());
+    expect(client.post).toHaveBeenCalled();
+    // Reported in the dialog the way the write's own failure is, as it was
+    // before the store reload moved the callback behind a promise.
+    await vi.waitFor(() => expect(document.body.textContent)
+      .toContain("Could not save genomics changes. Please try again."));
   });
 
   it("passes the host's dismissal through so it can unmount", async () => {

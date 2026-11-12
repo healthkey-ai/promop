@@ -9,7 +9,8 @@ import { Input } from '@/components/shadcn/input';
 import { usePatientFormReadOnly } from '@/federation/PatientFormContext';
 import SelectControl from '../controls/SelectControl';
 import { today } from '@/api/clinicalFacts';
-import PreexistingConditionsAnswer, { type ConditionsAnswer } from '../PreexistingConditionsAnswer';import {
+import PreexistingConditionsAnswer, { type ConditionsAnswer } from '../PreexistingConditionsAnswer';
+import {
   COUNTRY_OPTIONS, US_STATES,
   ECOG_OPTIONS, KARNOFSKY_OPTIONS,
 } from '../patientConstants';

@@ -1,9 +1,12 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useSyncExternalStore } from 'react';
 import type { AxiosInstance } from 'axios';
 
 import { __resetWritableFieldsCache } from '@/hooks/useWritableFields';
 import { injectStyles } from './injectStyles';
-import { patientFormForClient, renewPatientFormForClient } from './patientFormRuntime';
+import {
+  patientFormForClient, patientFormRenewalGeneration, renewPatientFormForClient,
+  subscribePatientFormRenewals,
+} from './patientFormRuntime';
 import type { PatientFormStore } from './patientFormStore';
 
 // The React exports do not go through PatientInfoProvider, which is where the
@@ -77,6 +80,16 @@ export function editorIdentity(connection: EditorConnection): string {
 }
 
 /**
+ * The renewal generation of one connection, as React state. Any surface's
+ * renewal (a field slot's Retry, the full form's) changes it for every hook
+ * reading the same (client, base, key), so they all leave the retired store.
+ */
+export function usePatientFormRenewals(client: AxiosInstance, base: string, sessionKey: string): number {
+  const read = () => patientFormRenewalGeneration(client, base, sessionKey);
+  return useSyncExternalStore(subscribePatientFormRenewals, read, read);
+}
+
+/**
  * The patient-form store for one connection, loaded on mount.
  *
  * The store is shared per (client, base, connectionKey) by
@@ -104,7 +117,7 @@ export function useRenewableEditorSession(connection: EditorConnection): {
 } {
   const { apiClient, connectionKey } = connection;
   const base = editorBasePath(connection);
-  const [renewals, setRenewals] = useState(0);
+  const renewals = usePatientFormRenewals(apiClient, base, connectionKey ?? '');
   const store = useMemo(
     () => {
       void renewals; // a renewal replaced the cache entry; read it again
@@ -112,9 +125,10 @@ export function useRenewableEditorSession(connection: EditorConnection): {
     },
     [apiClient, base, connectionKey, renewals],
   );
+  // The bump inside renewPatientFormForClient re-renders every session on
+  // this connection, this one included.
   const renew = useCallback(() => {
     renewPatientFormForClient(apiClient, base, connectionKey ?? '', store);
-    setRenewals((count) => count + 1);
   }, [apiClient, base, connectionKey, store]);
   useEffect(() => {
     // The writability descriptor is cached per deployment, not per client. A

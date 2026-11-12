@@ -90,6 +90,9 @@ describe('computed patient field input dialogs', () => {
     render(<><PatientFieldEditor store={store} name="bmiMin" /><PatientFieldEditor store={store} name="bmi" /></>);
     fireEvent.click(screen.getAllByRole('button', { name: 'Edit BMI inputs' })[0]);
     const dialog = screen.getByRole('dialog');
+    // Centred without translate utilities, which a Tailwind 3 host doubles.
+    expect(dialog).toHaveClass('inset-0', 'm-auto', 'h-fit');
+    expect(dialog).not.toHaveClass('-translate-x-1/2', '-translate-y-1/2');
     expect(within(dialog).getByDisplayValue('170')).toBeEnabled();
     fireEvent.change(within(dialog).getByDisplayValue('60'), { target: { value: '80' } });
     await act(async () => { await store.flush(); });

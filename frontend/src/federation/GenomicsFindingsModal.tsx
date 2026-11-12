@@ -1,8 +1,8 @@
-import { useMemo } from 'react';
+import { useCallback, useContext, useMemo } from 'react';
 import type { AxiosInstance } from 'axios';
 
 import GenomicsFindings, { GenomicsDialogShell } from '@/components/PatientInfo/GenomicsFindings';
-import { PatientFormContext, usePatientFormSnapshot } from './PatientFormContext';
+import { PatientFormContext, PatientFormRenewContext, usePatientFormSnapshot } from './PatientFormContext';
 import type { PatientFormStore } from './patientFormStore';
 
 /**
@@ -27,10 +27,23 @@ export default function GenomicsFindingsModal({ store, client, apiBase, readOnly
   onChanged: () => void;
 }) {
   const state = usePatientFormSnapshot(store);
+  const renew = useContext(PatientFormRenewContext);
   const base = apiBase.replace(/\/+$/, '');
   // A fresh arrow every render would re-run the findings load on every state
   // change; the editor keys its effect on the resolved URL string instead.
   const url = useMemo(() => (path: string) => `${base}${path}`, [base]);
+  // The findings endpoints bypass the store's save queue, so the store still
+  // holds the pre-write record. Re-read it before telling the host, as the
+  // therapy panel and the Genomics tab do: other surfaces on this connection
+  // render from the store. The promise goes back to GenomicsFindings, which
+  // awaits it inside its write: the store's listeners stay held (its bypass
+  // spans the await) and a host callback that throws is shown as the write's
+  // error instead of escaping as an unhandled rejection.
+  const changed = useCallback(
+    // A read already in flight started before this write; start a new one.
+    () => store.load(true).then(() => onChanged()),
+    [store, onChanged],
+  );
 
   if (state.loading) {
     return <GenomicsDialogShell title="Genomic findings" onClose={onClose}>
@@ -40,8 +53,13 @@ export default function GenomicsFindingsModal({ store, client, apiBase, readOnly
   if (state.error || !state.personId) {
     return <GenomicsDialogShell title="Genomic findings" onClose={onClose}>
       <div role="alert">
-        Could not load the patient record, so genomic findings cannot be edited.
-        {' '}<button type="button" className="underline" onClick={() => void store.load()}>Retry</button>
+        {state.identityChanged && renew
+          ? 'The linked patient changed. Retry to load the current patient.'
+          : 'Could not load the patient record, so genomic findings cannot be edited.'}
+        {' '}<button type="button" className="underline" onClick={() => {
+          // Another patient answered: a fresh store, not a reload of this one.
+          if (state.identityChanged && renew) renew(); else void store.load();
+        }}>Retry</button>
       </div>
     </GenomicsDialogShell>;
   }
@@ -54,7 +72,7 @@ export default function GenomicsFindingsModal({ store, client, apiBase, readOnly
       client={client}
       url={url}
       onClose={onClose}
-      onChanged={onChanged}
+      onChanged={changed}
     />
   </PatientFormContext.Provider>;
 }

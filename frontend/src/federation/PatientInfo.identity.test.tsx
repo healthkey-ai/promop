@@ -3,7 +3,7 @@
  * change. The store for the old patient never adopts the new one (its queue
  * and values belong to the old patient); the form gets a fresh store instead.
  */
-import { act, fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import type { AxiosInstance } from 'axios';
 import { QueryClient } from '@tanstack/react-query';
@@ -270,5 +270,27 @@ describe('patient identity with a reused client', () => {
 
     expect(await screen.findByDisplayValue('second@example.org')).toBeInTheDocument();
     expect(original.getSnapshot().personId).toBe(261);
+  });
+
+  it('moves the full form too when a slot on the same connection renews', async () => {
+    render(<>
+      <div data-testid="form">{form()}</div>
+      <div data-testid="slot">
+        <PatientFieldEditorSlot apiClient={client} apiBasePath="/api" name="email" label="Email" />
+      </div>
+    </>);
+    expect(await screen.findAllByDisplayValue('first@example.org')).toHaveLength(2);
+    const original = patientFormForClient(client, '/api');
+
+    signedIn = 262;
+    await act(async () => { await original.load(); });
+    fireEvent.click(await within(screen.getByTestId('slot')).findByRole('button', { name: 'Retry' }));
+
+    // One renewal, every surface on the connection: the form must not stay on
+    // the retired store asking for a Retry of its own.
+    expect(await within(screen.getByTestId('form')).findByDisplayValue('second@example.org'))
+      .toBeInTheDocument();
+    expect(within(screen.getByTestId('slot')).getByDisplayValue('second@example.org'))
+      .toBeInTheDocument();
   });
 });

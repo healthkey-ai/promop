@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 
 import PatientFieldEditor from './PatientFieldEditor';
+import { usePatientFormRenewals } from './editorSession';
 import { PatientFormRenewContext } from './PatientFormContext';
 import { renewPatientFormForClient, type patientFormRuntime } from './patientFormRuntime';
 import type { PatientFormResult } from './patientFormStore';
@@ -24,14 +25,18 @@ export default function FieldSlots({ runtime, opts, slots }: {
 }) {
   const apiBase = (opts.apiBase ?? '').replace(/\/+$/, '');
   const { onPatientUpdated, onSaveError } = opts;
-  const [store, setStore] = useState(() => runtime.store);
-  const [generation, setGeneration] = useState(0);
+  // The connection's renewal generation, shared with every other surface on
+  // this client: a renewal from a co-mounted form moves these slots too.
+  const generation = usePatientFormRenewals(runtime.client, apiBase, '');
+  const store = useMemo(() => {
+    void generation; // a renewal replaced the cache entry; read it again
+    return runtime.store;
+  }, [runtime, generation]);
   const renew = useCallback(() => {
     // retire() publishes the "Not sent" errors before this render swaps the
     // store, so the subscription below tells the host once. Do not consume the
     // runtime count here: a later provider mount owns the visible notice.
-    setStore(renewPatientFormForClient(runtime.client, apiBase, '', store));
-    setGeneration((count) => count + 1);
+    renewPatientFormForClient(runtime.client, apiBase, '', store);
   }, [runtime, apiBase, store]);
   useEffect(() => { void store.load(); }, [store]);
   useEffect(() => onPatientUpdated ? store.onUpdated(onPatientUpdated) : undefined,
