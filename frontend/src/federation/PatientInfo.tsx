@@ -123,6 +123,7 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
             // would publish the pre-write record. Start a new one.
             void store.load(true)
               .then(() => store.announceUpdated())
+              .catch(() => store.failBypassWrite('Could not reload the patient record after that change.'))
               .finally(() => store.endBypassWrite());
           }} />}
         {tabKey === 'labs' && <LabsTab formData={editedInfo} onChange={handleFieldChange} />}
@@ -135,6 +136,7 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
             // would publish the pre-write record. Start a new one.
             void store.load(true)
               .then(() => store.announceUpdated())
+              .catch(() => store.failBypassWrite('Could not reload the patient record after that change.'))
               .finally(() => store.endBypassWrite());
           }} />}
         {tabKey === 'history' && <ClinicalSummaryTab formData={editedInfo} onNavigateToLabs={() => setActiveTab(tabKeys.indexOf('labs'))} />}

@@ -18,6 +18,8 @@ interface Runtime {
   /** Re-check the *current* store after a renewal swaps it under a retained
    *  runtime (the waiter's subscription belongs to the old store). */
   rearm?: () => void;
+  /** Mount-level save-state watchers; re-target when a renewal swaps the store. */
+  storeRenewals?: Set<() => void>;
 }
 const widgets = new Map<string, Runtime>();
 
@@ -110,7 +112,9 @@ export function renewPatientFormForClient(
   // fresh one; otherwise its 30 s clean-up never runs and the runtime (with
   // its credentials) is retained for the life of the page.
   for (const runtime of widgets.values()) {
-    if (runtime.client === client && runtime.references === 0) runtime.rearm?.();
+    if (runtime.client !== client) continue;
+    runtime.storeRenewals?.forEach((reattach) => reattach());
+    if (runtime.references === 0) runtime.rearm?.();
   }
   return fresh;
 }

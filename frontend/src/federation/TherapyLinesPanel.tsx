@@ -74,6 +74,7 @@ export default function TherapyLinesPanel({ store, readOnly = false, onChanged, 
       onChanged?.();
     } catch {
       setError('Could not remove that line. Try again.');
+      store.failBypassWrite('Could not remove that therapy line.');
     } finally {
       store.endBypassWrite();
       setBusy(false);
@@ -90,6 +91,7 @@ export default function TherapyLinesPanel({ store, readOnly = false, onChanged, 
       onChanged?.();
     } catch {
       setError('Could not update whether this history is complete.');
+      store.failBypassWrite('Could not update whether this treatment history is complete.');
     } finally {
       store.endBypassWrite();
       setBusy(false);

@@ -226,7 +226,7 @@ export default function GenomicsFindings({
       }
       setDraft(null); setStatus('Genomic finding saved.');
       onChanged?.();
-    } catch (err) { setError(errorMessage(err)); }
+    } catch (err) { const message = errorMessage(err); setError(message); store?.failBypassWrite(message); }
     finally { store?.endBypassWrite(); setBusy(false); }
   }
 
@@ -239,7 +239,7 @@ export default function GenomicsFindings({
       setVariants(old => old.filter(v => v.id !== deleting.id));
       setDeleting(null); setViewing(null); setStatus('Genomic finding deleted.');
       onChanged?.();
-    } catch (err) { setError(errorMessage(err)); }
+    } catch (err) { const message = errorMessage(err); setError(message); store?.failBypassWrite(message); }
     finally { store?.endBypassWrite(); setBusy(false); }
   }
 

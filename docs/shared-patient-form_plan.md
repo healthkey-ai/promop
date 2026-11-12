@@ -20,6 +20,20 @@ empty element, PROMOP owns the dialog, the fields and the write, and the host
 refreshes its own queries from `onPatientUpdated`.
 `omop_core/services/patient_form.py` is portable to an embedded Django host.
 
+### Host-visible save state
+
+Every mount accepts `onSaveStateChange(state)`, emitted on mount and on change.
+`pending` covers the initial record read, the scalar PATCH queue and every
+bypass write (therapy line, attestation, genomics); `failed` covers an unsent
+draft, a failed bypass write, a record-load failure, a contract refusal or an
+identity change. Per-field refusals stay in `errors` and are not `failed` on
+their own: the server restored the saved value. The subscription follows a
+store renewal, and a throwing host callback cannot break the store. A host may
+gate navigation on `pending || failed`, but `pending: false` alone is not an
+acknowledgement; read `errors` too. No settling event is guaranteed after
+unmount, so a host that navigates away must treat the write as abandoned rather
+than wait for `pending: false`.
+
 ### React-tree hosts
 
 A host that shares this React tree does not use the standalone widget. It mounts

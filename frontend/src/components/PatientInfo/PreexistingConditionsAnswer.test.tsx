@@ -114,6 +114,7 @@ describe('explicit pre-existing-conditions answers', () => {
     const store = {
       beginBypassWrite: vi.fn(() => { holds.count += 1; }),
       endBypassWrite: vi.fn(() => { holds.count -= 1; }),
+      failBypassWrite: vi.fn(),
     } as unknown as PatientFormStore;
     render(<PatientFormContext.Provider value={store}>
       <PreexistingConditionsAnswer personId={42} flag={true} categories={[]}

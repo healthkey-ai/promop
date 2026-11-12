@@ -84,6 +84,7 @@ export default function PreexistingConditionsAnswer({
       const status = (e as { response?: { status?: number } }).response?.status;
       setError(status === 409 ? 'This answer changed. Reload before confirming.'
         : 'Could not verify whether the answer was saved. Reload before retrying.');
+      store?.failBypassWrite('Could not save the pre-existing conditions answer.');
     } finally {
       store?.endBypassWrite();
       setBusy(false);

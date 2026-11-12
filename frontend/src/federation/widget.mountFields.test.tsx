@@ -3,7 +3,7 @@ import { act } from "@testing-library/react";
 import { QueryClient } from "@tanstack/react-query";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { PatientFormStore } from "./patientFormStore";
+import { PatientFormStore, type SaveState } from "./patientFormStore";
 
 // Imperative `createRoot` outside RTL's renderer: tell React that updates are
 // wrapped in act so the portal is flushed before the assertion.
@@ -25,7 +25,10 @@ vi.mock("./injectStyles", () => ({ injectStyles: () => {} }));
 
 import { mountFields } from "./widget.patient-info";
 
-async function mountWith(label: string | null) {
+async function mountWith(
+  label: string | null,
+  onSaveStateChange?: (state: SaveState) => void,
+) {
   const client = {
     get: vi.fn(async (url: string) => ({
       data: url.includes("writable-fields")
@@ -50,7 +53,7 @@ async function mountWith(label: string | null) {
   // The root and the slots are siblings: createRoot manages its own element and
   // would clear portalled slots if they were its children.
   await act(async () => {
-    disposers.push(mountFields(root, { apiBase: "/api", readOnly: false }));
+    disposers.push(mountFields(root, { apiBase: "/api", readOnly: false, onSaveStateChange }));
   });
   await act(async () => {});
   return { container, slot };
@@ -94,6 +97,41 @@ describe("mountFields labels", () => {
         '[data-promop-field="height"] input',
       );
       expect(input?.getAttribute("aria-label")).toBe("Height");
+    });
+  });
+});
+
+describe("mountFields save state", () => {
+  it("emits initial state and tracks a bypass write", async () => {
+    const states: SaveState[] = [];
+    await mountWith("Height", (state) => states.push(state));
+
+    await vi.waitFor(() => {
+      expect(states.at(-1)).toMatchObject({ pending: false, failed: false });
+    });
+
+    await act(async () => { storeRef.current!.beginBypassWrite(); });
+    await vi.waitFor(() => {
+      expect(states.at(-1)).toMatchObject({ pending: true });
+    });
+
+    await act(async () => { storeRef.current!.failBypassWrite('therapy failed'); });
+    await vi.waitFor(() => {
+      expect(states.at(-1)).toMatchObject({ pending: true, failed: true, bypassError: 'therapy failed' });
+    });
+
+    await act(async () => { storeRef.current!.endBypassWrite(); });
+    await vi.waitFor(() => {
+      expect(states.at(-1)).toMatchObject({ pending: false, failed: true });
+    });
+
+    await act(async () => { storeRef.current!.beginBypassWrite(); });
+    await vi.waitFor(() => {
+      expect(states.at(-1)).toMatchObject({ pending: true, failed: false });
+    });
+    await act(async () => { storeRef.current!.endBypassWrite(); });
+    await vi.waitFor(() => {
+      expect(states.at(-1)).toMatchObject({ pending: false, failed: false });
     });
   });
 });

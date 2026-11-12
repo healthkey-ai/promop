@@ -343,6 +343,7 @@ export default function TherapyLineDialog({
         }
       }
       setError(detail);
+      store?.failBypassWrite(detail);
     } finally {
       setSaving(false);
     }
