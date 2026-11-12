@@ -315,15 +315,11 @@ export default function TherapyLineDialog({
       // Keep the hold through `onAuthored`: the host reload and notification
       // start there, and the dialog may be unmounted by the time they land.
       store?.beginBypassWrite();
-      try {
-        const result = episodeId !== null
-          ? await updateTherapyLine(episodeId, payload, connection)
-          : await authorTherapyLine(payload, connection);
-        onAuthored(result.patient_info);
-        onClose();
-      } finally {
-        store?.endBypassWrite();
-      }
+      const result = episodeId !== null
+        ? await updateTherapyLine(episodeId, payload, connection)
+        : await authorTherapyLine(payload, connection);
+      onAuthored(result.patient_info);
+      onClose();
     } catch (err: unknown) {
       // The server's refusals are specific — an unknown drug concept, a line
       // with nothing in it, a missing Treatment Regimen concept — and each says
@@ -345,6 +341,7 @@ export default function TherapyLineDialog({
       setError(detail);
       store?.failBypassWrite(detail);
     } finally {
+      store?.endBypassWrite();
       setSaving(false);
     }
   };
