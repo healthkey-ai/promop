@@ -275,6 +275,33 @@ def test_a_stamp_candidate_is_locked(api):
                for q in ctx.captured_queries)
 
 
+def test_a_key_deleted_before_the_reread_is_409(api, monkeypatch):
+    api.post([api.row()])
+    # Both lookups miss: the plan's, and the re-read after the INSERT conflicted,
+    # as if the blocking row was deleted in between.
+    monkeypatch.setattr(views, '_keyed_rows', lambda *a, **k: {})
+
+    resp = api.post([api.row(value='37.8')], query='&upsert=false')
+
+    assert resp.status_code == 409, resp.content
+    assert _rows(api.person).get().value_as_number == Decimal('37.1')
+
+
+@pytest.mark.parametrize('key', ['k/new', None])
+def test_an_insert_whose_id_is_taken_is_409(api, monkeypatch, key):
+    # The id clashes with a row of the same person (keyed or not), as a writer
+    # allocating outside the sequence could cause. A keyed row elsewhere in the
+    # batch turns on ON CONFLICT DO NOTHING, which must not hide this conflict.
+    taken = api.post([api.row(key=None, value='36.0')]).json()['ids'][0]
+    monkeypatch.setattr(views, 'next_pk_batch', lambda *a, **k: iter([taken, taken + 10**9]))
+
+    resp = api.post([api.row(key=key, value='36.5'), api.row(key='k/other', value='36.9')],
+                    query='&upsert=false')
+
+    assert resp.status_code == 409, resp.content
+    assert list(_rows(api.person).values_list('measurement_id', flat=True)) == [taken]
+
+
 def test_bulk_update_may_set_a_key_and_a_collision_is_409(api, client):
     a, b = api.post([api.row(key=None, value='36.1'),
                      api.row(key=None, value='36.2')]).json()['ids']

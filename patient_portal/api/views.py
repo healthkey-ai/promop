@@ -7695,19 +7695,36 @@ def _apply_upsert_plan(plan, model_cls, pk_field, model_name):
                 keyed_slots[slot] = row.source_record_key
         # A concurrent request may insert one of these keys between the plan's
         # SELECT and this INSERT. ON CONFLICT DO NOTHING lets the batch land,
-        # and the rows that did not are applied below as key matches.
-        model_cls.objects.bulk_create(plan.to_insert, ignore_conflicts=bool(keyed_slots))
+        # and the rows that did not are applied below as key matches. It hides
+        # every conflict, so only keyed rows go through it: an unkeyed row's
+        # conflict still raises.
+        keyed_rows = [plan.to_insert[s] for s in keyed_slots]
+        model_cls.objects.bulk_create(
+            [row for s, row in enumerate(plan.to_insert) if s not in keyed_slots])
+        if keyed_rows:
+            model_cls.objects.bulk_create(keyed_rows, ignore_conflicts=True)
 
     if keyed_slots:
-        landed = set(model_cls.objects.filter(
+        # A keyed row landed only if its id now holds its own person and key.
+        landed = {pk: (person_id, key) for pk, person_id, key in model_cls.objects.filter(
             **{f'{pk_field}__in': [new_ids[s] for s in keyed_slots]}
-        ).values_list(pk_field, flat=True))
-        lost = {s: k for s, k in keyed_slots.items() if new_ids[s] not in landed}
+        ).values_list(pk_field, 'person_id', 'source_record_key')}
+        lost = {}
+        for slot, source_key in keyed_slots.items():
+            pk = new_ids[slot]
+            if landed.get(pk) == (plan.to_insert[slot].person_id, source_key):
+                continue
+            if pk in landed:
+                raise IntegrityError(f'{model_cls._meta.db_table}: row id {pk} was taken')
+            lost[slot] = source_key
         if lost:
             person_id = plan.to_insert[next(iter(lost))].person_id
             current = _keyed_rows(model_cls, pk_field, person_id, set(lost.values()))
             remap = {}
             for slot, source_key in lost.items():
+                if source_key not in current:   # deleted since it blocked the insert
+                    raise IntegrityError(
+                        f'{model_cls._meta.db_table}: a source record key changed concurrently')
                 pk, attribution = current[source_key]
                 plan.keyed_updates[pk] = (plan.to_insert[slot],
                                           _key_class(attribution, plan.organization))
