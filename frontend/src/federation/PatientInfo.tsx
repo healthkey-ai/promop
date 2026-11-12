@@ -1,8 +1,9 @@
-import { useState, useEffect, useRef, useCallback, useContext } from 'react';
+import { useState, useEffect, useRef, useCallback, useContext, useMemo } from 'react';
 import { AlertCircle } from 'lucide-react';
 import { PatientInfoProvider } from './PatientInfoProvider';
 import { PatientFormReadOnlyContext, PatientFormRenewContext, usePatientFormStore, usePatientFormSnapshot } from './PatientFormContext';
 import type { PatientInfoProps } from './patientInfoTypes';
+import type { PatientFormResult } from './patientFormStore';
 import GeneralTab from '@/components/PatientInfo/tabs/GeneralTab';
 import DiseaseTab from '@/components/PatientInfo/tabs/DiseaseTab';
 import GenomicsTab from '@/components/PatientInfo/tabs/GenomicsTab';
@@ -25,7 +26,14 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
   const editedName = String(editedInfo.patient_name ?? '');
   const [activeTab, setActiveTab] = useState(0);
   const deepLinkAppliedRef = useRef(false);
-  useEffect(() => onPatientUpdated ? store.onUpdated(onPatientUpdated) : undefined, [store, onPatientUpdated]);
+  // One stable listener per store; the latest callback is read through a ref.
+  // Keying the subscription on the callback would leave an inline host
+  // callback's old registration in place until the queue drains (the store
+  // only retires it then) and add a second one: one batch, two notifications.
+  const updated = useRef(onPatientUpdated);
+  useEffect(() => { updated.current = onPatientUpdated; }, [onPatientUpdated]);
+  const listener = useMemo(() => (result: PatientFormResult) => updated.current?.(result), []);
+  useEffect(() => store.onUpdated(listener), [store, listener]);
   const disease = String(editedInfo.disease ?? '').toLowerCase();
   const diseaseType = disease.includes('breast') ? 'breast' : disease.includes('mantle') ? 'mcl'
     : disease.includes('lymphoma') ? 'lymphoma' : disease.includes('myeloma') ? 'myeloma'
