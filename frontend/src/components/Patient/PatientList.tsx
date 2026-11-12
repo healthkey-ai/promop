@@ -321,7 +321,7 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
   const canOpen = canOpenPatients(currentUser);
   const canCurate = canOpen;
   const canAdministerOrganizations = isStaffOrOrgAdmin(currentUser);
-  // Columns follow the roles (#2463): the outreach columns are an org
+  // Columns follow the roles (#2470): the outreach columns are an org
   // admin's, and Organization appears once the list spans several.
   const extraColumns = columnsFor({ outreach: canAdministerOrganizations, multiOrg: filterOptions.orgs.length > 1 });
   const show = (column: string) => extraColumns.includes(column);
