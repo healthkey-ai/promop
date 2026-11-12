@@ -35,7 +35,6 @@ or left for policy review.
 
 import hashlib
 import json
-import os
 import re
 from datetime import date, datetime, timezone as dt_timezone
 
@@ -43,6 +42,10 @@ from django.core.management.base import BaseCommand, CommandError
 from django.db import connection, transaction
 from django.db.models import Q
 
+from omop_core.management.guarded_repair import (
+    approval_digest, as_bool, make_transaction_read_only, refuse_existing_manifest,
+    write_manifest,
+)
 from omop_core.models import Measurement, Observation, PatientRecord, RecordRevision
 
 FIELDS = (
@@ -72,22 +75,6 @@ ACTIONS = {
 
 _TOBACCO_CODES = ('72166-2', '266919005', '8517006', '77176002')
 _PREGNANCY_CODES = ('2106-3',)
-
-_TRUE_TEXT = {'true', 't', '1', 'yes', 'y', 'on'}
-_FALSE_TEXT = {'false', 'f', '0', 'no', 'n', 'off'}
-
-
-def _as_bool(text):
-    """Interpret a ``RecordRevision`` textual value, or None when it is blank."""
-    if text is None:
-        return None
-    normalized = str(text).strip().casefold()
-    if normalized in _TRUE_TEXT:
-        return True
-    if normalized in _FALSE_TEXT:
-        return False
-    return None
-
 
 def _revisions(field_name):
     """The field's authored history, grouped by record, oldest first.
@@ -266,7 +253,7 @@ def _revision_value(text):
     """A revision's new value: True/False, the 'clear' sentinel, or None."""
     if text is None or str(text).strip().casefold() in ('', 'none', 'null'):
         return 'clear'
-    return _as_bool(text)
+    return as_bool(text)
 
 
 def classify(value, revisions=(), pending_edit=False, source_state=None):
@@ -298,14 +285,6 @@ def classify(value, revisions=(), pending_edit=False, source_state=None):
     return 'unattributed_true'
 
 
-def approval_digest(payload):
-    """Authenticate the reviewable document, not just its underlying data state."""
-    stable = {key: value for key, value in payload.items()
-              if key not in ('generated_at', 'approval_sha256')}
-    return hashlib.sha256(json.dumps(
-        stable, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
-
-
 class Command(BaseCommand):
     help = ('Report legacy pregnancy/tobacco defaults with their provenance; '
             'read-only, writes an optional manifest for the repair command')
@@ -328,15 +307,12 @@ class Command(BaseCommand):
         )
 
     def handle(self, *args, **options):
-        if options['output'] and os.path.exists(options['output']):
-            raise CommandError(
-                f'{options["output"]} already exists; refusing to overwrite an audit '
-                'manifest (choose a new path)')
+        refuse_existing_manifest(options['output'])
 
         owns_transaction = not connection.in_atomic_block
         with transaction.atomic():
             if owns_transaction:
-                self._make_transaction_read_only()
+                make_transaction_read_only()
             payload = self._collect(summary_only=options['summary_only'])
 
         if options['quiet']:
@@ -345,17 +321,7 @@ class Command(BaseCommand):
             self._print_summary(payload)
 
         if options['output']:
-            directory = os.path.dirname(os.path.abspath(options['output']))
-            os.makedirs(directory, exist_ok=True)
-            try:
-                fd = os.open(options['output'], os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-            except FileExistsError as exc:
-                raise CommandError(
-                    f'{options["output"]} already exists; refusing to overwrite an audit '
-                    'manifest.') from exc
-            with os.fdopen(fd, 'w', encoding='utf-8') as handle:
-                json.dump(payload, handle, indent=2, sort_keys=True)
-                handle.write('\n')
+            write_manifest(options['output'], payload)
             self.stdout.write(self.style.SUCCESS(
                 f'manifest written to {options["output"]} ({payload["manifest_sha256"]})'))
 
@@ -368,13 +334,6 @@ class Command(BaseCommand):
             if found:
                 raise CommandError(
                     f'finding gate: records classified as {", ".join(found)}')
-
-    def _make_transaction_read_only(self):
-        """Ask Postgres to reject writes for this transaction, as a second guard."""
-        if connection.vendor != 'postgresql':
-            return
-        with connection.cursor() as cursor:
-            cursor.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY')
 
     def _collect(self, summary_only):
         histories = {field: _revisions(field) for field in FIELDS}
