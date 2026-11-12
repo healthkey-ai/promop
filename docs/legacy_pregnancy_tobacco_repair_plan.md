@@ -44,13 +44,15 @@ rewritten values; those stay for a person's answer or policy review.
 3. **Approve `approval_sha256` out of band** (the full-document hash, not the
    `manifest_sha256` data fingerprint). A summary-only manifest is not accepted
    for repair.
-4. **Pick a window.** Apply locks the candidate records, their person rows and the
-   pregnancy formula row. A writer for one of those patients waits until commit;
-   unrelated patients stay writable. In-place updates of an existing evidence row
-   (an observation or measurement patched without touching its person row) are not
-   blocked by a row lock, so a serializable transaction (when the command owns it)
-   turns such a race into an abort, and a final re-read verifies nothing landed.
-   `lock_timeout` for acquiring the locks is 5 s and is reset before the writes.
+4. **Stop writes for the cohort.** Pause ETL and UI writes for the audited
+   patients for the run. Apply locks the candidate records, their person rows and
+   the pregnancy formula row; inserted evidence waits, and a SERIALIZABLE
+   transaction aborts on a concurrent change to evidence the run has read. But
+   the repair cannot lock every evidence row or see a row the audit filtered out
+   (an erroneous fact flipped to active, an observation patched in place without
+   touching its person), so the write pause is a gate, not a nicety. Unrelated
+   patients stay writable. `lock_timeout` for acquiring the locks is 5 s and is
+   reset before the writes.
 
 ## Dry-run
 
@@ -85,9 +87,11 @@ Guards, unchanged by this run:
   blocked for the loop. Inserted evidence (a revision, attestation or recorded
   fact) takes a key-share lock on the parent and waits; an in-place update of an
   existing evidence row does not, so the transaction is SERIALIZABLE when the
-  command owns it, and the repair re-derives each candidate's classification
-  under the locks and re-reads the evidence after the loop, aborting the whole
-  run on any change or a disappeared record.
+  command owns it (a change to evidence the run read aborts it) and the repair
+  re-derives each candidate's classification under the locks, then re-reads the
+  evidence after the loop and rolls everything back on any change. A row the
+  audit filtered out can still change unseen, which is why the write pause above
+  is required.
 - `RecordRevision` per cleared field (`changed_by='repair:2432:<uuid>'`) plus one
   ledger revision with before/after hashes; `user_edited_fields` is untouched.
   The backup is exclusive, mode 0600, fsynced before commit.

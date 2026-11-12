@@ -237,16 +237,33 @@ class Command(BaseCommand):
             return
         person_ids = set(
             PatientRecord.objects.filter(pk__in=ids).values_list('person_id', flat=True))
-        if PreexistingConditionsAttestation.objects.filter(
-                person_id__in=person_ids,
-                source__in=EXPLICIT_ATTESTATION_SOURCES).exists():
-            raise CommandError(
-                'An explicit attestation was recorded during the run; nothing written.')
+        history = _flag_revisions(ids=ids)
+        attestations = {
+            person_id: {'source': source, 'confirmed_at': confirmed_at.isoformat()}
+            for person_id, source, confirmed_at in (
+                PreexistingConditionsAttestation.objects
+                .filter(person_id__in=person_ids)
+                .values_list('person_id', 'source', 'confirmed_at'))
+        }
         for row in candidates:
             record = PatientRecord.objects.filter(pk=row['id']).first()
             if record is None:
                 raise CommandError(
                     f'Record {row["id"]} disappeared during the run; nothing written.')
+            attestation = attestations.get(record.person_id)
+            attested = bool(attestation
+                            and attestation['source'] in EXPLICIT_ATTESTATION_SOURCES)
+            edited = (record.user_edited_fields
+                      if isinstance(record.user_edited_fields, list) else [])
+            # Classify as if the flag were still True; the repair revisions are
+            # excluded from the history, so only evidence that appeared during
+            # the run can change the answer.
+            current = classify(
+                True, record.preexisting_conditions, history.get(record.pk, []),
+                FLAG in edited, attested)
+            if current != row['classification']:
+                raise CommandError(
+                    f'Record {record.pk} gained evidence during the run; nothing written.')
             if (record.no_pre_existing_conditions is not None
                     or record.preexisting_conditions not in (None, [])):
                 raise CommandError(

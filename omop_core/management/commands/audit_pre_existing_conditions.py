@@ -93,6 +93,11 @@ def _flag_revisions(ids=None):
     if ids is not None:
         rows = rows.filter(patient_record_id__in=list(ids))
     rows = (rows
+            # Repair/rollback revisions are operator actions: the restored
+            # default must keep classifying as a default, and the repair's
+            # post-loop re-read must not count its own writes as new evidence.
+            .exclude(changed_by__startswith='repair:1988:')
+            .exclude(changed_by__startswith='rollback:1988:')
             .order_by('patient_record_id', 'changed_at', 'id')
             .values_list('patient_record_id', 'changed_at', 'old_value', 'new_value')
             .iterator(chunk_size=2000))

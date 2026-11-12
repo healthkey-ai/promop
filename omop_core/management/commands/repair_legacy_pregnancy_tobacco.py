@@ -223,8 +223,13 @@ class Command(BaseCommand):
             for field in FIELDS:
                 if row['fields'][field]['recommended_action'] != 'clear':
                     continue
-                if (histories[field].get(record.pk) or field in edited
-                        or source_states[field].get(record.person_id) is not None):
+                # Classify as if the stored value were still True: an unchanged
+                # revision with an unreadable value is not evidence, exactly as
+                # the audit and the pre-write check treat it.
+                current = classify(
+                    True, histories[field].get(record.pk, []),
+                    field in edited, source_states[field].get(record.person_id))
+                if current != row['fields'][field]['classification']:
                     raise CommandError(
                         f'Record {record.pk} gained evidence during the run; nothing written.')
                 if getattr(record, field) is not None:

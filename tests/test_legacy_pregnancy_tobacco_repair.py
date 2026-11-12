@@ -219,6 +219,24 @@ def test_apply_aborts_when_a_candidate_disappears_between_audit_and_lock(
         apply(tmp_path, manifest, sha)
 
 
+def test_an_unreadable_existing_revision_does_not_block_the_clear(tmp_path, ready):
+    """A revision whose value cannot be parsed is not evidence (classify ignores
+    it), so the post-loop re-read must not treat it as newly gained."""
+    names = cohort()
+    RecordRevision.objects.create(
+        patient_record=names['unattributed'], field=PREGNANCY,
+        old_value='True', new_value='unknown', changed_by='patient@example.test')
+    manifest, sha = audit(tmp_path)
+    data = json.loads(open(manifest).read())
+    row = next(item for item in data['records'] if item['id'] == names['unattributed'].pk)
+    assert row['fields'][PREGNANCY]['classification'] == 'unattributed_true'
+
+    apply(tmp_path, manifest, sha)
+
+    names['unattributed'].refresh_from_db()
+    assert names['unattributed'].no_pregnancy_or_lactation_status is None
+
+
 def test_apply_locks_only_the_rows_it_clears(tmp_path, ready):
     """The repair used to hold SHARE ROW EXCLUSIVE on the whole table and block
     every patient write for the loop (#2450 review)."""

@@ -37,12 +37,13 @@ review the manifest and receive explicit approval for that cohort.
    returns 503 for explicit writes. Verify the actual host transport, not a mock.
    The dedicated GET snapshot avoids widening the frozen general projection.
 7. Confirm backups, maintenance window, write pause, expected cohort size and
-   rollback ownership. Benchmark a representative local clone first: apply locks
-   the audited records and their person rows (`SELECT … FOR UPDATE`), so those
-   patients' writes wait until commit while unrelated patients continue; an
-   in-place update of an evidence row is caught by the serializable transaction
-   and the post-loop re-read. Acquisition has a five-second timeout; this is not
-   a zero-downtime bulk job.
+   rollback ownership. Pause ETL and UI writes for the audited patients for the
+   run: apply locks the audited records and their person rows (`SELECT … FOR
+   UPDATE`), so those patients' writes wait while unrelated patients continue,
+   but an evidence row the audit filtered out can change unseen. A serializable
+   transaction aborts on a concurrent change to evidence the run has read, and a
+   post-loop re-read rolls back anything that landed. Acquisition has a
+   five-second timeout; this is not a zero-downtime bulk job.
 
 ## Read-only sizing (deployment owner/operator)
 
