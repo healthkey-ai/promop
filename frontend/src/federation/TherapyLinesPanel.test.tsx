@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import type { AxiosInstance } from 'axios';
 
-import { PatientFormStore } from './patientFormStore';
+import { PatientFormStore, subscribeSaveState, type SaveState } from './patientFormStore';
 import TherapyLinesPanel from './TherapyLinesPanel';
 
 const completeTherapyHistory = vi.fn(async () => ({ therapy_history_complete: true, patient_info: {} }));
@@ -81,6 +81,24 @@ describe('therapy lines editor', () => {
     // The mutation bypassed the queue, so a read that started before it must
     // not be reused: the reload has to supersede it (#2433).
     expect(load).toHaveBeenCalledWith(true);
+  });
+
+  it('does not call a completed write failed when the host callback throws', async () => {
+    const { store } = await setup({ therapy_lines_count: '1', lines_of_therapy: [], therapy_history_complete: false });
+    const onChanged = vi.fn(() => { throw new Error('host refresh broke'); });
+    const states: SaveState[] = [];
+    const stop = subscribeSaveState(store, (state) => states.push(state));
+
+    render(<TherapyLinesPanel store={store} onChanged={onChanged} />);
+    fireEvent.click(screen.getByLabelText('This is the complete treatment history.'));
+
+    await waitFor(() => expect(onChanged).toHaveBeenCalled());
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'The completeness setting was saved, but this screen could not refresh the record.',
+    );
+    // The write landed, so the host must not be told it failed.
+    expect(states.some((state) => state.failed)).toBe(false);
+    stop();
   });
 
   it('shows the line count as a lower bound until the history is confirmed', async () => {

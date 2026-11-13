@@ -210,6 +210,7 @@ export default function GenomicsFindings({
     if (!draft || !editable) return;
     setBusy(true); setError(''); setStatus('');
     store?.beginBypassWrite();
+    let saved = false;
     try {
       const payload = { ...draft, allelic_frequency: draft.allelic_frequency === '' ? null : draft.allelic_frequency };
       const marker = markerFor(draft);
@@ -227,8 +228,21 @@ export default function GenomicsFindings({
         setVariants(old => draft.id ? old.map(v => v.id === data.id ? data : v) : [data, ...old]);
       }
       setDraft(null); setStatus('Genomic finding saved.');
+      saved = true;
       await onChanged?.();
-    } catch (err) { setError(errorMessage(err)); }
+    } catch (err) {
+      const message = errorMessage(err);
+      if (saved) {
+        // The write landed; only the host refresh failed. Do not report it as
+        // a failed save: that would invite a duplicate re-entry and would hold
+        // the host's save state as failed for a write the server accepted.
+        setStatus('');
+        setError('The finding was saved, but this screen could not refresh the record. Reload to see the current value.');
+      } else {
+        setError(message);
+        store?.failBypassWrite(message);
+      }
+    }
     finally { store?.endBypassWrite(); setBusy(false); }
   }
 
@@ -236,12 +250,23 @@ export default function GenomicsFindings({
     if (!deleting || !editable) return;
     setBusy(true); setError(''); setStatus('');
     store?.beginBypassWrite();
+    let saved = false;
     try {
       await client.delete(`${genomicsUrl}${deleting.id}/`);
       setVariants(old => old.filter(v => v.id !== deleting.id));
       setDeleting(null); setViewing(null); setStatus('Genomic finding deleted.');
+      saved = true;
       await onChanged?.();
-    } catch (err) { setError(errorMessage(err)); }
+    } catch (err) {
+      const message = errorMessage(err);
+      if (saved) {
+        setStatus('');
+        setError('The finding was deleted, but this screen could not refresh the record. Reload to see the current value.');
+      } else {
+        setError(message);
+        store?.failBypassWrite(message);
+      }
+    }
     finally { store?.endBypassWrite(); setBusy(false); }
   }
 

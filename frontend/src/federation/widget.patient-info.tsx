@@ -16,6 +16,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { PatientInfo } from "./PatientInfo";
 import { injectStyles } from "./injectStyles";
 import { patientFormRuntime, retainPatientFormRuntime, type PatientFormConnection } from './patientFormRuntime';
+import { subscribeSaveState, type SaveState } from './patientFormStore';
 import FieldSlots from './FieldSlots';
 import { __resetWritableFieldsCache } from '@/hooks/useWritableFields';
 import TherapyLinesPanel from './TherapyLinesPanel';
@@ -33,6 +34,10 @@ export interface MountOptions extends PatientFormConnection {
   readOnly?: boolean;
   infoHref?: string;
   onPatientUpdated?: (result?: PatientFormResult) => unknown;
+  /** Host-visible aggregate save state. `pending` covers the PATCH queue and
+   *  every bypass write; `failed` stays true until a later successful write.
+   *  Callers must not treat `pending: false` alone as acknowledgement. */
+  onSaveStateChange?: (state: SaveState) => void;
 }
 
 /** `mountFields` only. Its slots are bare controls in the host's card, with no
@@ -42,6 +47,28 @@ export interface MountOptions extends PatientFormConnection {
  *  neither calls this, so their options do not offer it. */
 export interface FieldsMountOptions extends MountOptions {
   onSaveError?: () => unknown;
+}
+
+/** Subscribe one mount to the store's save state; emits the initial state and
+ *  re-targets if a renewal replaces the store for this connection. */
+function watchSaveState(
+  runtime: ReturnType<typeof patientFormRuntime>,
+  opts: MountOptions,
+): () => void {
+  const onChange = opts.onSaveStateChange;
+  if (!onChange) return () => {};
+  let watched = runtime.store;
+  let stop = subscribeSaveState(watched, onChange);
+  const reattach = () => {
+    const current = runtime.store;
+    if (current === watched) return;
+    stop();
+    watched = current;
+    stop = subscribeSaveState(watched, onChange);
+  };
+  runtime.storeRenewals ??= new Set();
+  runtime.storeRenewals.add(reattach);
+  return () => { stop(); runtime.storeRenewals?.delete(reattach); };
 }
 
 export interface GenomicsMountOptions extends MountOptions {
@@ -61,7 +88,7 @@ export function mount(el: HTMLElement, opts: MountOptions = {}): () => void {
   // the clinical helpers append `/v1/…` to the same prefix. Passing the prefix as
   // `apiBasePath` (not as axios's baseURL) is what keeps both paths correct.
   const runtime = patientFormRuntime(opts);
-  subscriptions.set(el, retainPatientFormRuntime(opts));
+  const stopSaveState = watchSaveState(runtime, opts);
   const apiClient = runtime.client;
   const apiBasePath = (opts.apiBase ?? "").replace(/\/+$/, "");
   // CB mounts this against its in-process /federation surface, where the wearable
@@ -71,6 +98,8 @@ export function mount(el: HTMLElement, opts: MountOptions = {}): () => void {
 
   const root = createRoot(el);
   roots.set(el, root);
+  const release = retainPatientFormRuntime(opts);
+  subscriptions.set(el, () => { stopSaveState(); release(); });
   root.render(
     <StrictMode>
       <PatientInfo
@@ -98,7 +127,8 @@ export function mountFields(el: HTMLElement, opts: FieldsMountOptions = {}): () 
   if (!container) throw new Error('Patient field editor requires a data-promop-form container.');
   const slots = [...container.querySelectorAll<HTMLElement>('[data-promop-field]')];
   const release = retainPatientFormRuntime(opts);
-  subscriptions.set(el, release);
+  const stopSaveState = watchSaveState(runtime, opts);
+  subscriptions.set(el, () => { stopSaveState(); release(); });
   const root = createRoot(el);
   roots.set(el, root);
   root.render(<StrictMode><FieldSlots runtime={runtime} opts={opts} slots={slots} /></StrictMode>);
@@ -116,7 +146,9 @@ export function mountTherapyLines(el: HTMLElement, opts: MountOptions = {}): () 
   const apiBasePath = (opts.apiBase ?? "").replace(/\/+$/, "");
   __resetWritableFieldsCache();
   const releaseRuntime = retainPatientFormRuntime(opts);
+  const stopSaveState = watchSaveState(runtime, opts);
   subscriptions.set(el, () => {
+    stopSaveState();
     releaseRuntime();
     __resetWritableFieldsCache();
   });
@@ -157,7 +189,9 @@ export function mountGenomics(el: HTMLElement, opts: GenomicsMountOptions = {}):
   const runtime = patientFormRuntime(opts);
   const apiBasePath = (opts.apiBase ?? "").replace(/\/+$/, "");
   const releaseRuntime = retainPatientFormRuntime(opts);
+  const stopSaveState = watchSaveState(runtime, opts);
   subscriptions.set(el, () => {
+    stopSaveState();
     releaseRuntime();
     // Permission is per patient and can change with the session; the next host
     // mount must ask again.
@@ -176,8 +210,9 @@ export function mountGenomics(el: HTMLElement, opts: GenomicsMountOptions = {}):
         onClose={opts.onClose}
         // The findings endpoints bypass the store's save queue, so `store.load()`
         // never reaches the host's `onUpdated` listeners. The host still has to
-        // invalidate its own trial queries and re-render the row.
-        onChanged={() => { void opts.onPatientUpdated?.(); }}
+        // invalidate its own trial queries and re-render the row. Return the
+        // promise: the dialog awaits it and holds the bypass until it settles.
+        onChanged={() => opts.onPatientUpdated?.()}
       />}
       </RuntimeStoreScope>
     </StrictMode>,

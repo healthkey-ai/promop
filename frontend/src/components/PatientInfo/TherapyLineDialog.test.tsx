@@ -9,6 +9,8 @@
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import TherapyLineDialog from './TherapyLineDialog';
+import { PatientFormContext } from '@/federation/PatientFormContext';
+import type { PatientFormStore } from '@/federation/patientFormStore';
 
 const mockGet = vi.fn();
 const mockOutcomes = vi.fn();
@@ -229,6 +231,31 @@ describe('TherapyLineDialog', () => {
       expect(screen.getByRole('alert')).toHaveTextContent('Unknown drug concept_id 99999999'),
     );
     expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('records a failed write before releasing the host hold', async () => {
+    // A host gates navigation on the widget save state. Releasing the bypass
+    // hold before recording the failure would let it observe a clean
+    // {pending: false, failed: false} for a write that did not land.
+    const calls: string[] = [];
+    const store = {
+      beginBypassWrite: vi.fn(() => calls.push('begin')),
+      failBypassWrite: vi.fn(() => calls.push('fail')),
+      endBypassWrite: vi.fn(() => calls.push('end')),
+    } as unknown as PatientFormStore;
+    mockPost.mockRejectedValue({ response: { status: 500 } });
+    render(
+      <PatientFormContext.Provider value={store}>
+        <TherapyLineDialog personId={262} defaultLineNumber={1}
+          onClose={onClose} onAuthored={onAuthored} />
+      </PatientFormContext.Provider>,
+    );
+    await addDrug('lenalidomide');
+    fireEvent.click(screen.getByRole('button', { name: /record line/i }));
+
+    await waitFor(() => expect(store.endBypassWrite).toHaveBeenCalled());
+    expect(calls).toEqual(['begin', 'fail', 'end']);
+    expect(store.failBypassWrite).toHaveBeenCalledWith('Could not record the therapy line.');
   });
 
   it('does not list the same ingredient twice', async () => {

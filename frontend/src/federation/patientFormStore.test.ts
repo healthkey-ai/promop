@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AxiosInstance } from 'axios';
-import { PatientFormStore } from './patientFormStore';
+import { PatientFormStore, saveStateOf } from './patientFormStore';
 
 const fields = {
   height: { writable: true, target: 'patient_record' },
@@ -22,6 +22,23 @@ function setup() {
 }
 beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
+
+describe('host save state', () => {
+  it('reports pending for a queue or a bypass write, and failure separately', () => {
+    const snapshot = setup().store.getSnapshot();
+    expect(saveStateOf({ ...snapshot, loading: false })).toMatchObject({
+      pending: false, failed: false,
+    });
+    expect(saveStateOf({ ...snapshot, loading: false, pending: { height: 180 } }))
+      .toMatchObject({ pending: true, failed: false });
+    expect(saveStateOf({ ...snapshot, loading: false, errors: { height: 'no' } }))
+      .toMatchObject({ pending: false, failed: false, errors: { height: 'no' } });
+    expect(saveStateOf({ ...snapshot, loading: false, bypassError: 'therapy failed' }))
+      .toMatchObject({ pending: false, failed: true, bypassError: 'therapy failed' });
+    expect(saveStateOf({ ...snapshot, loading: false, contractError: 'bad build' }))
+      .toMatchObject({ pending: false, failed: true, contractError: 'bad build' });
+  });
+});
 
 describe('planned-therapy options from a host catalog', () => {
   function setupCatalog(regimens: unknown) {

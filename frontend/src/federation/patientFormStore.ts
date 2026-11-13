@@ -69,6 +69,13 @@ export interface PatientFormSnapshot {
   personId?: number;
   loading: boolean;
   saving: boolean;
+  /** A write outside the PATCH queue (therapy line, attestation, genomics) is
+   *  in flight. Snapshot consumers that gate navigation must treat this as
+   *  pending. */
+  bypassing: boolean;
+  /** The last bypass write (therapy/attestation/genomics) failed. Cleared when
+   *  the next bypass write starts. */
+  bypassError?: string;
   writable: boolean;
   error?: string;
   /** A post-save descriptor refresh failed, so `latest_date` may be stale. */
@@ -80,6 +87,70 @@ export interface PatientFormSnapshot {
    *  the caller starts a fresh store instead. */
   identityChanged?: boolean;
 }
+export interface SaveState {
+  /** Any started clinical write is still in flight: the PATCH queue, a bypass
+   *  write (therapy/attestation/genomics), or the initial record read. */
+  pending: boolean;
+  /** A draft is still unsent, a bypass write failed, or the record could not
+   *  be loaded/used. This is an attention signal, not "every field is saved";
+   *  a field rejection that restored the saved value is reported through
+   *  `errors` instead. `pending: false` alone is not acknowledgement. */
+  failed: boolean;
+  /** Per-field messages from the latest PATCH/refresh. */
+  errors: Record<string, string>;
+  /** The last bypass write failed; cleared when the next bypass write starts. */
+  bypassError?: string;
+  /** The record read failed. */
+  error?: string;
+  /** This build cannot honour the record contract; no write may be sent. */
+  contractError?: string;
+  /** The client now answers for another patient; this store is not usable. */
+  identityChanged?: boolean;
+}
+
+/** Derive the host-facing save state from one store snapshot. */
+export function saveStateOf(snapshot: PatientFormSnapshot): SaveState {
+  return {
+    pending: snapshot.loading || snapshot.saving || snapshot.bypassing
+      || Object.keys(snapshot.pending).length > 0,
+    failed: Object.keys(snapshot.failed).length > 0
+      || Boolean(snapshot.bypassError)
+      || Boolean(snapshot.error)
+      || Boolean(snapshot.contractError)
+      || Boolean(snapshot.identityChanged),
+    errors: { ...snapshot.errors },
+    ...(snapshot.bypassError ? { bypassError: snapshot.bypassError } : {}),
+    ...(snapshot.error ? { error: snapshot.error } : {}),
+    ...(snapshot.contractError ? { contractError: snapshot.contractError } : {}),
+    ...(snapshot.identityChanged ? { identityChanged: true } : {}),
+  };
+}
+
+/** Emit the derived state on change. Host callbacks are isolated: a throwing
+ *  federation callback must never break the store's publish loop. */
+export function subscribeSaveState(
+  store: PatientFormStore,
+  onChange: (state: SaveState) => void,
+): () => void {
+  let last: SaveState | null = null;
+  const emit = () => {
+    const next = saveStateOf(store.getSnapshot());
+    if (last
+      && last.pending === next.pending
+      && last.failed === next.failed
+      && JSON.stringify(last.errors) === JSON.stringify(next.errors)
+      && last.bypassError === next.bypassError
+      && last.error === next.error
+      && last.contractError === next.contractError
+      && last.identityChanged === next.identityChanged) return;
+    last = next;
+    try { onChange(next); } catch { /* host bug; keep the queue alive */ }
+  };
+  const stop = store.subscribe(emit);
+  emit();
+  return stop;
+}
+
 export interface PatientFormResult {
   patient_info: Record<string, unknown>;
   patient_name?: string;
@@ -90,7 +161,8 @@ export interface PatientFormResult {
  * This deliberately does not promise delivery after closing the browser tab. */
 export class PatientFormStore {
   private snapshot: PatientFormSnapshot = {
-    values: {}, fields: {}, pending: {}, failed: {}, errors: {}, loading: true, saving: false, writable: false,
+    values: {}, fields: {}, pending: {}, failed: {}, errors: {}, loading: true, saving: false,
+    bypassing: false, writable: false,
   };
   private listeners = new Set<() => void>();
   /** Listener -> the registration that owns it. A later registration with the
@@ -145,7 +217,8 @@ export class PatientFormStore {
     };
   }
   private publish(next: Partial<PatientFormSnapshot>) {
-    this.snapshot = { ...this.snapshot, ...next };
+    this.snapshot = { ...this.snapshot, ...next, bypassing: this.bypasses > 0,
+      bypassError: next.bypassError !== undefined ? next.bypassError : this.bypassError };
     this.listeners.forEach((listener) => listener());
   }
 
@@ -160,12 +233,20 @@ export class PatientFormStore {
     this.publish({ values: { ...this.snapshot.values, ...values } });
   }
   /** Hold the host's listeners while a write outside the PATCH queue runs. */
+  private bypassError?: string;
   beginBypassWrite() {
     this.bypasses += 1;
+    this.bypassError = undefined;
+    this.publish({});
+  }
+  /** Record a failed bypass write until the next bypass write starts. */
+  failBypassWrite(message = 'A treatment or genomic change was not saved.') {
+    this.bypassError = message;
+    this.publish({});
   }
   endBypassWrite() {
     this.bypasses = Math.max(0, this.bypasses - 1);
-    if (this.bypasses === 0) this.publish({});
+    if (this.bypasses === 0) this.publish({ bypassError: this.bypassError });
   }
   /** Tell the host's `onUpdated` listeners that a write bypassed the PATCH
    *  queue: an explicit attestation, a therapy line or a genomics finding.

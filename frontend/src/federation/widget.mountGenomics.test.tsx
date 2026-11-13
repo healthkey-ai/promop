@@ -3,7 +3,7 @@ import { act, fireEvent } from "@testing-library/react";
 import { QueryClient } from "@tanstack/react-query";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { PatientFormStore } from "./patientFormStore";
+import { PatientFormStore, type SaveState } from "./patientFormStore";
 
 // Imperative `createRoot` outside RTL's renderer: tell React that updates are
 // wrapped in act so the dialog is flushed before the assertion.
@@ -35,7 +35,8 @@ const saved = { id: 123, gene: "BRCA1", variant: "c.68_69delAG", interpretation:
 interface Options {
   readOnly?: boolean;
   onClose?: () => void;
-  onPatientUpdated?: () => void;
+  onPatientUpdated?: () => void | Promise<void>;
+  onSaveStateChange?: (state: SaveState) => void;
   apiBase?: string;
   variant?: string;
   /** What this widget's own descriptor says about genomic findings. */
@@ -166,9 +167,13 @@ describe("mountGenomics", () => {
     expect(seen).toEqual([[{ genomic_feature: "TP53" }]]);
   });
 
-  it("shows a host callback failure instead of leaving it unhandled", async () => {
+  it("reports a host callback failure without calling the write failed", async () => {
     const onPatientUpdated = vi.fn(() => { throw new Error("host refresh broke"); });
-    const { client } = await mount({ onPatientUpdated });
+    const states: SaveState[] = [];
+    const { client } = await mount({
+      onPatientUpdated,
+      onSaveStateChange: (state) => states.push(state),
+    });
 
     await vi.waitFor(() => expect(button("Add genomic finding")).toBeTruthy());
     await act(async () => { button("Add genomic finding")!.click(); });
@@ -184,10 +189,12 @@ describe("mountGenomics", () => {
 
     await vi.waitFor(() => expect(onPatientUpdated).toHaveBeenCalled());
     expect(client.post).toHaveBeenCalled();
-    // Reported in the dialog the way the write's own failure is, as it was
-    // before the store reload moved the callback behind a promise.
+    // The write landed; only the host refresh failed. The dialog says so
+    // instead of claiming the save failed, and the aggregate state must not
+    // stay failed for a write the server accepted.
     await vi.waitFor(() => expect(document.body.textContent)
-      .toContain("Could not save genomics changes. Please try again."));
+      .toContain("The finding was saved, but this screen could not refresh the record."));
+    expect(states.some((state) => state.failed)).toBe(false);
   });
 
   it("passes the host's dismissal through so it can unmount", async () => {

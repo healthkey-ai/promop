@@ -67,6 +67,7 @@ export default function TreatmentTab({ formData, onChange, diseaseType, onRecord
       onRecordRefreshed?.(result.patient_info);
     } catch {
       setHistoryError('Could not save the confirmation. Reopen this tab to retry.');
+      formStore?.failBypassWrite('Could not save the treatment-history confirmation.');
     } finally {
       formStore?.endBypassWrite();
       setConfirmingHistory(false);
@@ -88,6 +89,7 @@ export default function TreatmentTab({ formData, onChange, diseaseType, onRecord
       onRecordRefreshed?.(result.patient_info);
     } catch {
       setRetractError('Could not remove the line. Reopen this tab to retry.');
+      formStore?.failBypassWrite('Could not remove the therapy line.');
     } finally {
       formStore?.endBypassWrite();
       setRetracting(null);

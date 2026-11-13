@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { AxiosInstance } from 'axios';
 
 import { patientFormForClient } from './patientFormRuntime';
+import type { SaveState } from './patientFormStore';
 import TrialEditors from './TrialEditors';
 
 function hostClient() {
@@ -71,7 +72,10 @@ function hostClient() {
   return { get, patch, patient, client: { get, patch } as unknown as AxiosInstance };
 }
 
-function renderAdapter(onChanged?: () => void) {
+function renderAdapter(
+  onChanged?: () => void,
+  onSaveStateChange?: (state: SaveState) => void,
+) {
   const host = hostClient();
   render(
     <TrialEditors
@@ -79,6 +83,7 @@ function renderAdapter(onChanged?: () => void) {
       apiBasePath=""
       readOnly={false}
       onChanged={onChanged}
+      onSaveStateChange={onSaveStateChange}
     >
       {(slots) => (
         <div>
@@ -144,6 +149,12 @@ function renderGenomics(onChanged?: () => void) {
 }
 
 describe('the shared trial editor adapter', () => {
+  it('reports the load/save state to the host', async () => {
+    const states: SaveState[] = [];
+    renderAdapter(undefined, (state) => states.push(state));
+    await waitFor(() => expect(states.at(-1)).toMatchObject({ pending: false, failed: false }));
+  });
+
   it('routes each row kind to its editor and leaves unresolved rows to EXACT', async () => {
     renderAdapter();
 

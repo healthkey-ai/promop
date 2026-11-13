@@ -17,6 +17,7 @@ export { default as PatientFieldEditorSlot } from './PatientFieldEditorSlot';
 export { usePromopFieldBindings } from './usePromopFieldBindings';
 export { default as TrialEditors } from './TrialEditors';
 export { isGenomicsTrialRow, isTherapyTrialRow } from './trialRows';
+export type { SaveState } from './patientFormStore';
 
 /** Bumped only on a breaking change to this set's props or behavior. */
 export const PROMOP_EDITORS_API = 1;

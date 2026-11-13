@@ -4,6 +4,7 @@ import type { AxiosInstance } from 'axios';
 import { Pencil, X } from 'lucide-react';
 
 import { useEditorSession } from './editorSession';
+import { subscribeSaveState, type SaveState } from './patientFormStore';
 import GenomicsEditor from './GenomicsEditor';
 import PatientFieldEditorSlot from './PatientFieldEditorSlot';
 import TherapyLinesEditor from './TherapyLinesEditor';
@@ -44,6 +45,9 @@ export interface TrialEditorsProps extends TrialEditorsConnection {
   /** A record write landed (field, therapy line or genomics finding). The host
    *  re-reads its patient payload and invalidates the trial queries. */
   onChanged?: () => void;
+  /** Aggregate save state for navigation gates. `pending` covers the scalar
+   *  queue and bypass writes; `failed` stays true until a later success. */
+  onSaveStateChange?: (state: SaveState) => void;
   children: (slots: TrialEditorSlots) => ReactNode;
 }
 
@@ -154,6 +158,7 @@ export default function TrialEditors({
   enabled = true,
   readOnly = false,
   onChanged,
+  onSaveStateChange,
   children,
 }: TrialEditorsProps) {
   const bindings = usePromopFieldBindings(
@@ -175,6 +180,12 @@ export default function TrialEditors({
   useEffect(() => { changed.current = onChanged; }, [onChanged]);
   const listener = useMemo(() => () => { changed.current?.(); }, []);
   useEffect(() => store.onUpdated(listener), [store, listener]);
+  const saveState = useRef(onSaveStateChange);
+  useEffect(() => { saveState.current = onSaveStateChange; }, [onSaveStateChange]);
+  useEffect(
+    () => subscribeSaveState(store, (state) => saveState.current?.(state)),
+    [store],
+  );
 
   // Whether `renderFieldEditor` actually draws a scalar slot for this row.
   // `fieldEditorOwnsValue` must answer exactly this: claiming a row whose
