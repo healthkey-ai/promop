@@ -491,3 +491,51 @@ def test_receipt_records_the_approved_digest(tmp_path, ready):
     _path, receipt = apply(tmp_path, manifest, sha)
 
     assert receipt['input_sha256'] == sha
+
+
+
+
+@pytest.mark.parametrize('route,headers,pending', [
+    ('/api/v1/patient-records/{}/', {'HTTP_X_PATIENT_FORM': '1'}, True),
+    ('/api/patient-info/{}/', {}, False),
+])
+def test_an_echoed_true_on_the_native_route_leaves_no_trace(tmp_path, route, headers, pending):
+    """Keeping a stored True and saving: the shared form marks the field pending
+    (authored), the native patient-info route records nothing for it. The other
+    field in the same save gets a person-authored revision, so the record counts
+    as covered while its True is still unattributed; the summary must warn about
+    every clear candidate, not only those in records without history."""
+    from rest_framework.test import APIClient
+
+    from omop_core.models import Person
+    from patient_portal.models import Identity
+
+    person = Person.objects.create(person_id=99251)
+    record, _ = PatientRecord.objects.get_or_create(person=person)
+    PatientRecord.objects.filter(pk=record.pk).update(**{TOBACCO: True, PREGNANCY: None})
+    client = APIClient()
+    client.force_authenticate(Identity.objects.create_user(
+        email='echo-2506@example.test', is_staff=True))
+
+    response = client.patch(route.format(person.person_id),
+                            {TOBACCO: True, 'disease': 'CLL'}, format='json', **headers)
+    assert response.status_code == 200, response.data
+
+    record.refresh_from_db()
+    assert getattr(record, TOBACCO) is True
+    assert not RecordRevision.objects.filter(patient_record=record, field=TOBACCO).exists()
+    assert (TOBACCO in (record.user_edited_fields or [])) is pending
+
+    out = StringIO()
+    call_command('audit_legacy_pregnancy_tobacco', output=str(tmp_path / 'a.json'), stdout=out)
+    data = json.loads((tmp_path / 'a.json').read_text())
+    row = next(row for row in data['records'] if row['id'] == record.pk)
+    assert row['has_any_revision'] is True
+    if pending:
+        assert row['fields'][TOBACCO]['classification'] == 'authored_true'
+        assert 'cannot be told apart' not in out.getvalue()
+    else:
+        assert row['fields'][TOBACCO]['classification'] == 'unattributed_true'
+        assert data['totals']['evidence']['clear_candidates_in_authored_records'] == 1
+        assert ('1 clear candidate(s) cannot be told apart from a genuine True'
+                in out.getvalue())

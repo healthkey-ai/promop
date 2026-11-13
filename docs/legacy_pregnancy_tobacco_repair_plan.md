@@ -35,12 +35,17 @@ rewritten values; those stay for a person's answer or policy review.
    `clear_candidates_in_authored_records`). Only person-authored revisions count:
    migration `0321` and the service's `system` writes stamp a revision on nearly
    every legacy record, so including them would report full coverage and hide the
-   risk. A genuine `True` answered **before `RecordRevision` existed** (0125,
-   while the columns date from 0002), or entered by a path that wrote neither a
-   revision nor a pending marker, is indistinguishable from the default and would
-   be cleared. No code can tell them apart: the manifest review is the mitigation.
-   Spot-check the records and compare the counts with staging's history before
-   approving.
+   risk. **Every clear candidate may be a genuine `True`.** Resubmitting a
+   stored `True` unchanged through the native `PATCH /api/patient-info/<id>/`
+   writes neither a revision nor a pending marker, in any era (the shared form
+   route marks the field pending, so it classifies as authored). Such an answer is
+   indistinguishable from the default and would be cleared. A `True` answered **before
+   `RecordRevision` existed** (0125, while the columns date from 0002) is a second
+   such case. The coverage split bounds only that second case:
+   `clear_candidates_in_authored_records` means "this record has a person-authored
+   revision on *some* field", not "this answer was confirmed". No code can tell
+   them apart: the manifest review is the mitigation. Spot-check the records and
+   compare the counts with staging's history before approving.
 3. **Approve `approval_sha256` out of band** (the full-document hash, not the
    `manifest_sha256` data fingerprint). A summary-only manifest is not accepted
    for repair.

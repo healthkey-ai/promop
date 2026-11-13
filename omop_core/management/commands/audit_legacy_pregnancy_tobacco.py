@@ -467,11 +467,13 @@ class Command(BaseCommand):
             'totals': {
                 'records': totals,
                 'by_field': by_field,
-                # A genuine answer entered before RecordRevision existed (0125),
-                # or by a path that wrote neither a revision nor a pending
-                # marker, cannot be told apart from the legacy default. The
-                # operator judges that from these counts and the manifest, so
-                # they are published with the audit rather than left to SQL.
+                # A genuine True cannot be told apart from the legacy default
+                # when it was entered before RecordRevision existed (0125) or
+                # resubmitted unchanged through the native patient-info PATCH
+                # (no revision, no pending marker, in any era). The coverage
+                # split bounds only the first case: a revision on another field
+                # confirms nothing.
+                # The operator judges the rest from the manifest.
                 'evidence': {
                     'authored_revisions_total': revision_total,
                     'earliest_authored_revision_at': (
@@ -517,13 +519,19 @@ class Command(BaseCommand):
             f'{evidence["earliest_authored_revision_at"] or "never"}; '
             f'{evidence["records_with_any_authored_revision"]} of '
             f'{payload["totals"]["records"]} record(s) carry any')
-        without_history = (evidence['clear_candidates']
-                           - evidence['clear_candidates_in_authored_records'])
-        if without_history:
+        clear = evidence['clear_candidates']
+        if clear:
+            # Every candidate is at risk, not only those without history: the
+            # native patient-info PATCH saves an unchanged True with neither a
+            # revision nor a pending marker (the shared form marks it pending),
+            # so a revision on another field confirms nothing.
+            without_history = clear - evidence['clear_candidates_in_authored_records']
             self.stdout.write(self.style.WARNING(
-                f'{without_history} of {evidence["clear_candidates"]} clear candidate(s) '
-                'belong to records with no person-authored revision history: an answer entered '
-                'before RecordRevision existed (0125), or by a path that recorded neither revision '
-                'nor pending marker, is indistinguishable from the legacy default. Review '
-                'the manifest before --apply.'))
+                f'{clear} clear candidate(s) cannot be told apart from a genuine True: '
+                'resubmitting a stored True through the native patient-info API records '
+                'neither a revision nor a pending marker. '
+                f'{without_history} of them belong to records with no person-authored revision '
+                'history, where an answer entered before RecordRevision existed (0125) is also '
+                'possible; a revision on another field does not confirm the rest. Review the '
+                'manifest before --apply.'))
         self.stdout.write(f'approval_sha256: {payload["approval_sha256"]}')
