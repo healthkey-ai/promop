@@ -47,7 +47,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [django, pytest]
+        suite: [django, pytest, fresh_migrate]
 
     services:
       postgres:
@@ -130,6 +130,26 @@ jobs:
         # this database-heavy suite. Keep the faster scheduler and its timing
         # report so any future sharding decision remains evidence-led.
         run: pytest -n auto --dist loadfile -q --durations=20
+
+      # A fresh deploy runs every migration on an empty database, and nothing
+      # above does: the Django runner builds its schema on a `test_` database,
+      # where the fixture-seeding migration deliberately does nothing, and
+      # pytest uses --no-migrations. That is how 0333's `tab` column shipped
+      # while the 0240 seed still inserted it -- the graph was green, and a new
+      # instance stopped at 0240 (cancerbot-org/cancerbot#5847). This leg is the
+      # one that applies the real graph to a real empty database.
+      - name: Apply every migration to an empty database
+        if: matrix.suite == 'fresh_migrate'
+        env:
+          PGPASSWORD: postgres
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/promop_fresh
+        run: |
+          set -e
+          psql -h localhost -U postgres -d postgres -c 'CREATE DATABASE promop_fresh'
+          python manage.py migrate --noinput
+          # The seed is part of a usable install, and a migration that quietly
+          # skips it is not a pass.
+          python manage.py shell -c "from omop_core.models import FieldChoice, FieldConceptMapping, FieldFormula; assert FieldConceptMapping.objects.count() >= 317; assert FieldChoice.objects.count() >= 271; assert FieldFormula.objects.count() >= 9; print('seeded', FieldConceptMapping.objects.count(), 'mappings')"
 
   athena_browser:
     name: Athena browser runtime
