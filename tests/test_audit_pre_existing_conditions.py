@@ -14,7 +14,7 @@ import pytest
 from django.core.management import call_command
 from django.core.management.base import CommandError
 
-from omop_core.models import RecordRevision
+from omop_core.models import PatientRecord, RecordRevision
 from tests.factories import PatientRecordFactory
 
 pytestmark = pytest.mark.django_db
@@ -109,7 +109,7 @@ def test_the_summary_counts_every_record_once(tmp_path):
     assert totals['by_classification']['unattributed_true'] == 2
     assert totals['by_classification']['contradiction'] == 1
     assert totals['by_classification']['unanswered'] == 1
-    assert totals['by_recommended_action']['needs_policy'] == 2
+    assert totals['by_recommended_action']['clear'] == 2
 
 
 def test_the_manifest_pins_the_data_and_the_evidence(tmp_path):
@@ -136,12 +136,48 @@ def test_the_manifest_hash_is_recomputable_from_the_records(tmp_path):
     record = _record(True, [])
     payload = _audit(tmp_path)
 
-    line = json.dumps({
-        'id': record.id, 'flag': True, 'categories_raw': [],
-        'flag_history': [], 'pending_edit': False, 'attestation': None,
-    }, sort_keys=True, separators=(',', ':')) + '\n'
-    assert payload['manifest_version'] == 2
+    row = _by_id(payload)[record.id]
+    assert row['categories_raw'] == []
+    assert row['flag_history'] == []
+    line = json.dumps(row, sort_keys=True, separators=(',', ':')) + '\n'
+    assert payload['manifest_version'] == 3
     assert hashlib.sha256(line.encode()).hexdigest() == payload['manifest_sha256']
+
+
+def test_raw_categories_with_the_same_normalised_shape_change_the_digest(tmp_path):
+    """`{}` and `{"a": 1}` normalise to the same empty category list and the same
+    `malformed` state; only the raw payload can tell an approved manifest from a
+    different one."""
+    record = _record(True, {})
+    first = _audit(tmp_path / 'first.json')['manifest_sha256']
+
+    PatientRecord.objects.filter(pk=record.pk).update(preexisting_conditions={'a': 1})
+    second = _audit(tmp_path / 'second.json')['manifest_sha256']
+
+    assert first != second
+
+
+def test_revision_contents_with_the_same_count_change_the_digest(tmp_path):
+    record = _record(True, [])
+    revision = _revision(record, 'True', old_value='None')
+    first = _audit(tmp_path / 'first.json')['manifest_sha256']
+
+    RecordRevision.objects.filter(pk=revision.pk).update(old_value='False')
+    second = _audit(tmp_path / 'second.json')['manifest_sha256']
+
+    assert first != second
+
+
+@pytest.mark.parametrize('categories', [{}, [''], [None], 'infections'])
+def test_malformed_categories_are_contradictions_not_clearable(categories, tmp_path):
+    """The 0305 CHECK permits only NULL and [] beside True; `{}`, [""] and a bare
+    string must not be recommended for clearing as if they were defaults."""
+    record = _record(True, categories)
+    payload = _audit(tmp_path)
+
+    row = _by_id(payload)[record.id]
+    assert row['classification'] == 'contradiction'
+    assert row['recommended_action'] == 'clear_flag'
 
 
 def test_manifest_pins_raw_categories_and_attestation_metadata(tmp_path):

@@ -20,8 +20,10 @@ Classification, in priority order:
                      Legacy attestations, revisions and pending edits are not proof.
 ``rewritten_true``   A revision wrote False and the current value is True again.
                      The formula most likely rewrote it, but that is inference.
+                     Recommended action ``clear``.
 ``unattributed_true``True with no evidence who wrote it. Neither proven formula output
-                     nor proven authoring -- the policy decision, not a guess.
+                     nor proven authoring; recommended action ``clear``, which the
+                     repair applies only after the manifest is reviewed and approved.
 ``explicit_false``   False never came from this formula, so it is a real answer.
 ``unanswered``      NULL/None: nobody answered.
 
@@ -45,6 +47,7 @@ from omop_core.models import (
 )
 from omop_core.services.pre_existing_conditions import (
     EXPLICIT_ATTESTATION_SOURCES, condition_categories,
+    contradicts_no_pre_existing_conditions,
 )
 
 FLAG_FIELD = 'no_pre_existing_conditions'
@@ -62,15 +65,21 @@ CLASSIFICATIONS = (
     'unanswered',
 )
 
-#: Recommended next step per classification. Only the repair command acts on these.
+#: Recommended next step per classification. The repair command acts only on
+#: `clear`; `clear_flag` (a contradiction) is a human action.
 ACTIONS = {
     'contradiction': 'clear_flag',
     'authored_true': 'keep',
-    'rewritten_true': 'needs_policy',
-    'unattributed_true': 'needs_policy',
+    'rewritten_true': 'clear',
+    'unattributed_true': 'clear',
     'explicit_false': 'keep',
     'unanswered': 'none',
 }
+#: The classifications the repair may clear. Derived from `ACTIONS` so a new
+#: classification cannot be recommended for clearing without being reachable.
+REPAIRABLE_ACTIONS = ('clear',)
+REPAIRABLE_CLASSIFICATIONS = tuple(
+    name for name, action in ACTIONS.items() if action in REPAIRABLE_ACTIONS)
 
 def _category_state(value):
     if value is None:
@@ -80,15 +89,22 @@ def _category_state(value):
     return 'nonempty' if condition_categories(value) else 'empty'
 
 
-def _flag_revisions():
+def _flag_revisions(ids=None):
     """The flag history for every record, grouped by record, oldest first.
 
-    Filtering by the cohort's ids would need a large ``IN`` clause and the whole
-    cohort in memory; the flag history is small (one row per authored change).
+    The audit reads the whole history; the repair narrows to its candidates to
+    re-derive their evidence under the row locks.
     """
     history = {}
-    rows = (RecordRevision.objects
-            .filter(field=FLAG_FIELD)
+    rows = RecordRevision.objects.filter(field=FLAG_FIELD)
+    if ids is not None:
+        rows = rows.filter(patient_record_id__in=list(ids))
+    rows = (rows
+            # Repair/rollback revisions are operator actions: the restored
+            # default must keep classifying as a default, and the repair's
+            # post-loop re-read must not count its own writes as new evidence.
+            .exclude(changed_by__startswith='repair:1988:')
+            .exclude(changed_by__startswith='rollback:1988:')
             .order_by('patient_record_id', 'changed_at', 'id')
             .values_list('patient_record_id', 'changed_at', 'old_value', 'new_value')
             .iterator(chunk_size=2000))
@@ -103,7 +119,10 @@ def _flag_revisions():
 
 def classify(flag, categories, revisions=(), pending_edit=False, attested=False):
     """Classify one record from its stored answer, categories and evidence."""
-    if flag is True and condition_categories(categories):
+    # The same predicate as the 0305 CHECK: beside True only NULL and `[]` are
+    # allowed, so `{}`, `[""]` and a bare string are contradictions for manual
+    # review rather than defaults this repair may clear.
+    if contradicts_no_pre_existing_conditions(flag, categories):
         return 'contradiction'
     if flag is False:
         # The formula only ever produced True or None, so False is a real answer.
@@ -119,15 +138,6 @@ def classify(flag, categories, revisions=(), pending_edit=False, attested=False)
             # likely writer is the formula, but it is an inference, not a fact.
             return 'rewritten_true'
     return 'unattributed_true'
-
-
-def _record_line(pk, flag, categories, revisions, pending_edit, attestation):
-    """A canonical, hashable description of one record's data and evidence."""
-    return json.dumps({
-        'id': pk, 'flag': flag, 'categories_raw': categories,
-        'flag_history': revisions, 'pending_edit': pending_edit,
-        'attestation': attestation,
-    }, sort_keys=True, separators=(',', ':'))
 
 
 class Command(BaseCommand):
@@ -217,36 +227,41 @@ class Command(BaseCommand):
                 flag, categories_raw, revisions, pending_edit, attested)
             totals += 1
 
-            hashed.update(
-                (_record_line(pk, flag, categories_raw, revisions, pending_edit,
-                              attestation) + '\n').encode('utf-8'))
-
             state = _category_state(categories_raw)
+            action = ACTIONS[classification]
+            record = {
+                'id': pk,
+                'organization_id': organization_id,
+                'flag': flag,
+                'categories': categories,
+                'categories_raw': categories_raw,
+                'category_state': state,
+                'classification': classification,
+                'recommended_action': action,
+                'derivation_version': derivation_version,
+                'derived_at': derived_at.isoformat() if derived_at else None,
+                'flag_revisions': len(revisions),
+                'flag_history': revisions,
+                'pending_edit': pending_edit,
+                'attested': attested,
+                'attestation': attestation,
+            }
+            # Hash the whole published record: the decision inputs are the flag,
+            # raw categories, revision history, pending marker and attestation,
+            # but the coverage/provenance fields are part of what is approved.
+            hashed.update(
+                (json.dumps(record, sort_keys=True, separators=(',', ':')) + '\n').encode('utf-8'))
+
             by_classification[classification] += 1
             by_category_state[state] = by_category_state.get(state, 0) + 1
             by_organization[str(organization_id)] = \
                 by_organization.get(str(organization_id), 0) + 1
             by_derivation[str(derivation_version)] = \
                 by_derivation.get(str(derivation_version), 0) + 1
-            action = ACTIONS[classification]
             actions[action] = actions.get(action, 0) + 1
 
             if not summary_only:
-                records.append({
-                    'id': pk,
-                    'organization_id': organization_id,
-                    'flag': flag,
-                    'categories': categories,
-                    'category_state': state,
-                    'classification': classification,
-                    'recommended_action': action,
-                    'derivation_version': derivation_version,
-                    'derived_at': derived_at.isoformat() if derived_at else None,
-                    'flag_revisions': len(revisions),
-                    'pending_edit': pending_edit,
-                    'attested': attested,
-                    'attestation': attestation,
-                })
+                records.append(record)
 
         payload = {
             'generated_at': datetime.now(dt_timezone.utc).isoformat(),
@@ -266,8 +281,12 @@ class Command(BaseCommand):
             },
             'records': records,
             'manifest_sha256': hashed.hexdigest(),
-            'manifest_version': 2,
-            'manifest_scope': 'canonical JSON per record: id, flag, raw categories, flag history, pending edit, attestation',
+            # 3: the per-record hash covers the whole published record (#2506).
+            'manifest_version': 3,
+            'manifest_scope': 'canonical JSON per record: id, organization, flag, raw and '
+                              'normalised categories, category state, classification, '
+                              'recommended action, provenance, full flag history, pending '
+                              'edit and attestation',
         }
         payload['approval_sha256'] = approval_digest(payload)
         return payload

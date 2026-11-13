@@ -30,12 +30,14 @@ def cohort():
     unattributed = PatientRecordFactory(**{PREGNANCY: True, TOBACCO: True})
     authored = PatientRecordFactory(**{PREGNANCY: True, TOBACCO: False})
     RecordRevision.objects.create(
-        patient_record=authored, field=PREGNANCY, old_value='None', new_value='True')
+        patient_record=authored, field=PREGNANCY, old_value='None', new_value='True',
+        changed_by='patient@example.test')
     pending = PatientRecordFactory(
         **{PREGNANCY: False, TOBACCO: True}, user_edited_fields=[TOBACCO])
     rewritten = PatientRecordFactory(**{PREGNANCY: True, TOBACCO: False})
     RecordRevision.objects.create(
-        patient_record=rewritten, field=PREGNANCY, old_value='True', new_value='False')
+        patient_record=rewritten, field=PREGNANCY, old_value='True', new_value='False',
+        changed_by='patient@example.test')
     tobacco_source = PatientRecordFactory(**{PREGNANCY: False, TOBACCO: True})
     ObservationFactory(person=tobacco_source.person,
                        observation_source_value='266919005')
@@ -116,6 +118,139 @@ def test_audit_classifies_each_kind_of_evidence(tmp_path):
     assert field('rewritten')['recommended_action'] == 'needs_policy'
     assert field('negative')['classification'] == 'explicit_false'
     assert field('unknown')['classification'] == 'unanswered'
+
+
+def test_the_audit_publishes_the_revision_coverage_the_clear_review_needs(tmp_path):
+    """A True answered before RecordRevision existed cannot be told apart from
+    the default, so the audit has to publish what history it does have."""
+    names = cohort()
+    manifest, _sha = audit(tmp_path)
+    data = json.loads(open(manifest).read())
+
+    assert data['manifest_version'] == 2
+    evidence = data['totals']['evidence']
+    assert evidence['authored_revisions_total'] == 2      # authored + rewritten
+    assert evidence['earliest_authored_revision_at']
+    assert evidence['records_with_any_authored_revision'] == 2
+    assert evidence['records_without_any_authored_revision'] == data['totals']['records'] - 2
+    assert evidence['clear_candidates'] == 2             # the unattributed record, both fields
+    assert evidence['clear_candidates_in_authored_records'] == 0
+    rows = {row['id']: row for row in data['records']}
+    assert rows[names['authored'].pk]['has_any_revision'] is True
+    assert rows[names['unattributed'].pk]['has_any_revision'] is False
+
+
+def test_revision_coverage_counts_a_revision_on_any_field(tmp_path):
+    """A patient edited elsewhere before 0125 still has no revision history;
+    one edited after it does, even when the audited fields were never touched."""
+    record = PatientRecordFactory(**{PREGNANCY: True, TOBACCO: True})
+    RecordRevision.objects.create(
+        patient_record=record, field='email', old_value='old@example.test',
+        new_value='new@example.test', changed_by='patient@example.test')
+    manifest, _sha = audit(tmp_path)
+    data = json.loads(open(manifest).read())
+
+    evidence = data['totals']['evidence']
+    assert evidence['records_with_any_authored_revision'] == 1
+    assert evidence['clear_candidates'] == 2
+    assert evidence['clear_candidates_in_authored_records'] == 2
+
+
+def test_machine_written_revisions_do_not_count_as_authored_history(tmp_path):
+    """0321 and the default 'system' author write a revision for nearly every
+    legacy record; counting them would report full coverage and never warn."""
+    record = PatientRecordFactory(**{PREGNANCY: True, TOBACCO: True})
+    for author in ('system', 'migration:0321', None):
+        RecordRevision.objects.create(
+            patient_record=record, field='no_hiv_status',
+            old_value='None', new_value='True', changed_by=author)
+    manifest, _sha = audit(tmp_path)
+    data = json.loads(open(manifest).read())
+
+    evidence = data['totals']['evidence']
+    assert evidence['authored_revisions_total'] == 0
+    assert evidence['earliest_authored_revision_at'] is None
+    assert evidence['records_with_any_authored_revision'] == 0
+    assert evidence['clear_candidates'] == 2
+    assert evidence['clear_candidates_in_authored_records'] == 0
+
+
+
+def test_apply_aborts_when_authored_evidence_lands_between_audit_and_lock(
+        tmp_path, ready, monkeypatch):
+    """The audit runs before the lock, so the repair must re-derive the evidence
+    under the lock: a person answering True before the write is not a default."""
+    from omop_core.management.commands import repair_legacy_pregnancy_tobacco as module
+
+    names = cohort()
+    manifest, sha = audit(tmp_path)
+    original = module.Command._lock
+
+    def lock_after_a_person_answers(self, live, supplied, rolling_back):
+        RecordRevision.objects.create(
+            patient_record=names['unattributed'], field=PREGNANCY,
+            old_value='None', new_value='True')
+        original(self, live, supplied, rolling_back)
+
+    monkeypatch.setattr(module.Command, '_lock', lock_after_a_person_answers)
+    with pytest.raises(CommandError, match='changed after the audit'):
+        apply(tmp_path, manifest, sha)
+
+    names['unattributed'].refresh_from_db()
+    assert names['unattributed'].no_pregnancy_or_lactation_status is True
+    assert not RecordRevision.objects.filter(
+        changed_by__startswith='repair:2432:').exists()
+
+
+def test_apply_aborts_when_a_candidate_disappears_between_audit_and_lock(
+        tmp_path, ready, monkeypatch):
+    from omop_core.management.commands import repair_legacy_pregnancy_tobacco as module
+
+    names = cohort()
+    manifest, sha = audit(tmp_path)
+    original = module.Command._lock
+
+    def lock_after_the_row_is_gone(self, live, supplied, rolling_back):
+        PatientRecord.objects.filter(pk=names['unattributed'].pk).delete()
+        original(self, live, supplied, rolling_back)
+
+    monkeypatch.setattr(module.Command, '_lock', lock_after_the_row_is_gone)
+    with pytest.raises(CommandError, match='disappeared after the audit'):
+        apply(tmp_path, manifest, sha)
+
+
+def test_an_unreadable_existing_revision_does_not_block_the_clear(tmp_path, ready):
+    """A revision whose value cannot be parsed is not evidence (classify ignores
+    it), so the post-loop re-read must not treat it as newly gained."""
+    names = cohort()
+    RecordRevision.objects.create(
+        patient_record=names['unattributed'], field=PREGNANCY,
+        old_value='True', new_value='unknown', changed_by='patient@example.test')
+    manifest, sha = audit(tmp_path)
+    data = json.loads(open(manifest).read())
+    row = next(item for item in data['records'] if item['id'] == names['unattributed'].pk)
+    assert row['fields'][PREGNANCY]['classification'] == 'unattributed_true'
+
+    apply(tmp_path, manifest, sha)
+
+    names['unattributed'].refresh_from_db()
+    assert names['unattributed'].no_pregnancy_or_lactation_status is None
+
+
+def test_apply_locks_only_the_rows_it_clears(tmp_path, ready):
+    """The repair used to hold SHARE ROW EXCLUSIVE on the whole table and block
+    every patient write for the loop (#2450 review)."""
+    from django.test.utils import CaptureQueriesContext
+
+    names = cohort()
+    manifest, sha = audit(tmp_path)
+    with CaptureQueriesContext(connection) as captured:
+        apply(tmp_path, manifest, sha)
+
+    statements = [query['sql'] for query in captured.captured_queries]
+    assert not any('LOCK TABLE' in sql for sql in statements)
+    assert any('FOR UPDATE' in sql and str(names['unattributed'].pk) in sql
+               for sql in statements)
 
 
 def test_fail_on_makes_defaults_a_release_gate(tmp_path):
@@ -320,3 +455,158 @@ def test_backup_is_exclusive_and_apply_needs_one(tmp_path, ready):
     with pytest.raises(CommandError, match='exclusively create'):
         apply(tmp_path, manifest, sha)
     assert (tmp_path / 'backup.json').read_text() == 'do not overwrite'
+
+
+def test_apply_rolls_back_when_evidence_appears_during_the_loop(tmp_path, ready, monkeypatch):
+    from omop_core.management.commands import repair_legacy_pregnancy_tobacco as module
+
+    names = cohort()
+    manifest, sha = audit(tmp_path)
+    original = module._revisions
+    calls = {'n': 0}
+
+    def evidence_after_the_first_pass(field_name, ids=None):
+        calls['n'] += 1
+        if calls['n'] <= len(module.FIELDS):
+            return original(field_name, ids=ids)
+        if field_name == PREGNANCY:
+            return {names['unattributed'].pk: [
+                {'changed_at': None, 'old': 'True', 'new': 'False'}]}
+        return original(field_name, ids=ids)
+
+    monkeypatch.setattr(module, '_revisions', evidence_after_the_first_pass)
+    with pytest.raises(CommandError, match='gained evidence during the run'):
+        apply(tmp_path, manifest, sha)
+
+    names['unattributed'].refresh_from_db()
+    assert names['unattributed'].no_pregnancy_or_lactation_status is True
+
+
+def test_receipt_records_the_approved_digest(tmp_path, ready):
+    """The backup links to the manifest the operator approved; a classification
+    name must never replace the digest in the receipt."""
+    cohort()
+    manifest, sha = audit(tmp_path)
+
+    _path, receipt = apply(tmp_path, manifest, sha)
+
+    assert receipt['input_sha256'] == sha
+
+
+
+
+@pytest.mark.parametrize('route,headers,pending', [
+    ('/api/v1/patient-records/{}/', {'HTTP_X_PATIENT_FORM': '1'}, True),
+    ('/api/patient-info/{}/', {}, False),
+])
+def test_an_echoed_true_on_the_native_route_leaves_no_trace(tmp_path, route, headers, pending):
+    """Keeping a stored True and saving: the shared form marks the field pending
+    (authored), the native patient-info route records nothing for it. The other
+    field in the same save gets a person-authored revision, so the record counts
+    as covered while its True is still unattributed; the summary must warn about
+    every clear candidate, not only those in records without history."""
+    from rest_framework.test import APIClient
+
+    from omop_core.models import Person
+    from patient_portal.models import Identity
+
+    person = Person.objects.create(person_id=99251)
+    record, _ = PatientRecord.objects.get_or_create(person=person)
+    PatientRecord.objects.filter(pk=record.pk).update(**{TOBACCO: True, PREGNANCY: None})
+    client = APIClient()
+    client.force_authenticate(Identity.objects.create_user(
+        email='echo-2506@example.test', is_staff=True))
+
+    response = client.patch(route.format(person.person_id),
+                            {TOBACCO: True, 'disease': 'CLL'}, format='json', **headers)
+    assert response.status_code == 200, response.data
+
+    record.refresh_from_db()
+    assert getattr(record, TOBACCO) is True
+    assert not RecordRevision.objects.filter(patient_record=record, field=TOBACCO).exists()
+    assert (TOBACCO in (record.user_edited_fields or [])) is pending
+
+    out = StringIO()
+    call_command('audit_legacy_pregnancy_tobacco', output=str(tmp_path / 'a.json'), stdout=out)
+    data = json.loads((tmp_path / 'a.json').read_text())
+    row = next(row for row in data['records'] if row['id'] == record.pk)
+    assert row['has_any_revision'] is True
+    if pending:
+        assert row['fields'][TOBACCO]['classification'] == 'authored_true'
+        assert 'cannot be told apart' not in out.getvalue()
+    else:
+        assert row['fields'][TOBACCO]['classification'] == 'unattributed_true'
+        assert data['totals']['evidence']['clear_candidates_in_authored_records'] == 1
+        assert ('1 clear candidate(s) cannot be told apart from a genuine True'
+                in out.getvalue())
+
+
+def test_a_write_to_an_unrelated_patient_after_the_audit_stales_the_approval(tmp_path):
+    """The approval covers the whole table, not the cohort: the runbook's
+    global write quiet from audit to apply exists because of this."""
+    names = cohort()
+    manifest, sha = audit(tmp_path)
+    RecordRevision.objects.create(
+        patient_record=names['negative'], field='disease', old_value='None',
+        new_value='CLL', changed_by='patient@example.test')
+
+    with pytest.raises(CommandError, match='digest mismatch'):
+        repair(manifest, sha)
+
+
+@pytest.mark.django_db(transaction=True)
+def test_apply_outside_an_atomic_block_runs_the_production_path(tmp_path):
+    """Every other apply test runs inside pytest-django's atomic block, where
+    the command does not own its transaction and skips the isolation pin. Here
+    it owns it, as under manage.py: READ COMMITTED is set first, then the audit,
+    the row locks and the write, and the result commits."""
+    from django.test.utils import CaptureQueriesContext
+
+    recorder = MigrationRecorder(connection)
+    recorder.ensure_schema()
+    try:
+        # Inside the try: this test commits, so a failure halfway through must
+        # not leave migration rows in the shared test DB.
+        for app, name in REQUIRED:
+            recorder.record_applied(app, name)
+        record = PatientRecordFactory(**{PREGNANCY: True, TOBACCO: True})
+        manifest, sha = audit(tmp_path)
+        assert not connection.in_atomic_block
+        with CaptureQueriesContext(connection) as captured:
+            apply(tmp_path, manifest, sha)
+    finally:
+        for app, name in REQUIRED:
+            recorder.record_unapplied(app, name)
+
+    statements = [query['sql'].upper() for query in captured.captured_queries]
+    isolation = next(i for i, sql in enumerate(statements) if 'ISOLATION LEVEL' in sql)
+    assert 'READ COMMITTED' in statements[isolation]
+    # The pin must be the transaction's first statement, or Postgres rejects it.
+    assert all('SAVEPOINT' in sql or sql.startswith('BEGIN') for sql in statements[:isolation])
+    lock = next(i for i, sql in enumerate(statements) if 'FOR UPDATE' in sql)
+    write = next(i for i, sql in enumerate(statements)
+                 if sql.replace('"', '').startswith('UPDATE PATIENT_RECORD '))
+    assert isolation < lock < write
+    record.refresh_from_db()
+    assert getattr(record, PREGNANCY) is None and getattr(record, TOBACCO) is None
+
+
+def test_apply_has_no_per_candidate_record_lookup_before_classifying(tmp_path, ready):
+    """The repair and the post-write read load the cohort with in_bulk, not with
+    a single-row lookup per candidate. The only single-id read left is the
+    `refresh_from_db` after each write, so a regression to `.first()` or
+    `.get(pk=...)` in either pass (LIMIT 1 or LIMIT 21) exceeds one per
+    candidate."""
+    from django.test.utils import CaptureQueriesContext
+
+    candidates = 3
+    for _ in range(candidates):
+        PatientRecordFactory(**{PREGNANCY: True, TOBACCO: True})
+    manifest, sha = audit(tmp_path)
+    with CaptureQueriesContext(connection) as captured:
+        apply(tmp_path, manifest, sha)
+    single = [query['sql'] for query in captured.captured_queries
+              if query['sql'].startswith('SELECT')
+              and 'FROM "patient_record"' in query['sql']
+              and '"patient_record"."id" = ' in query['sql']]
+    assert len(single) <= candidates, single
