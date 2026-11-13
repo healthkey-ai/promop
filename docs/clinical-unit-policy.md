@@ -24,9 +24,12 @@ boundary for every measurement—not just white blood cell counts.
    recognized source-unit expressions. Missing or unrecognized units fail closed:
    the derived value is omitted and a warning is recorded. Source data remains
    available for repair. An exception has to be named in the projection's own
-   section: `serum_creatinine_mg_dl` reads an absent unit — including
-   `unit_concept_id = 0` — as mg/dL, the unit every canonical creatinine value
-   has been recorded in.
+   section. The chronological lab pass makes one: `hemoglobin_g_dl`, the
+   chemistry pairs (albumin, calcium, bilirubin) and `serum_creatinine_mg_dl`
+   read an absent unit — no text and no UCUM `unit_concept`, including
+   `unit_concept_id = 0` — as the lab's canonical unit, the unit every canonical
+   value of that lab has been recorded in. An unreadable unit that is present
+   still fails closed. The creatinine section below is the worked example.
 5. **Unit changes require a migration plan.** Adding a canonical unit or changing
    a conversion must include source-unit tests, boundary/range tests, documented
    backwards compatibility, and a repair/backfill plan for affected derived data.
