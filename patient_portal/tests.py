@@ -34022,3 +34022,344 @@ class AnalystRoleScopeTest(TestCase):
         domain_org = _make_org('Domain Org', 'domain-org')
         OrgTrust.objects.create(granting_org=domain_org, trusted_domain='test.com')
         self.assertEqual(set(get_admin_orgs(demo_doctor)), {domain_org})
+
+
+@override_settings(SERVICE_AUTH_SCOPES='patient/*.read patient/*.write')
+class ProvisionalConfidenceColumnTest(TestCase):
+    """Phase 0a of provisional data (#2434, #2527): the clinical ``confidence``.
+
+    Null is a real row; a number 0-100 is a provisional one. Only a machine
+    credential or staff may write a number, only with PROVISIONAL_DATA_ENABLED,
+    and never at concept 0. The column stays outside the upsert key, so a
+    re-send after approval converges on the row instead of stacking a second.
+    """
+
+    @classmethod
+    def setUpTestData(cls):
+        _make_vocab_fixtures()
+        cls.person = Person.objects.create(person_id=32101)
+        PatientRecord.objects.create(person=cls.person)
+        cls.proposed = Concept.objects.get(concept_id=3000963)
+        cls.approved = Concept.objects.get(concept_id=4112853)
+        cls.type_concept = Concept.objects.get(concept_id=32817)
+        cls.service_identity = Identity.objects.get_or_create(
+            issuer='urn:service', sub='provisional-confidence-test')[0]
+        cls.service_identity.set_unusable_password()
+        cls.service_identity.save()
+
+    def setUp(self):
+        from django.core.cache import cache
+        cache.clear()
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.service_identity, token='service-token')
+
+    def _row(self, concept=None, confidence=None, source_value='PROV-1', **extra):
+        row = {
+            'person': self.person.person_id,
+            'measurement_concept': (concept or self.proposed).concept_id,
+            'measurement_date': '2024-03-01',
+            'measurement_type_concept': self.type_concept.concept_id,
+            'value_as_number': 7.5,
+            'measurement_source_value': source_value,
+        }
+        if confidence is not None:
+            row['confidence'] = confidence
+        row.update(extra)
+        return row
+
+    def _post(self, rows, expect=status.HTTP_201_CREATED):
+        resp = self.client.post('/api/v1/measurements/?skip_refresh=true', rows, format='json')
+        self.assertEqual(resp.status_code, expect, getattr(resp, 'data', None))
+        return resp.data
+
+    def _only_row(self):
+        self.assertEqual(Measurement.objects.filter(person=self.person).count(), 1)
+        return Measurement.objects.get(person=self.person)
+
+    # --- the column ---------------------------------------------------------
+
+    def test_all_five_tables_carry_a_nullable_confidence_that_defaults_to_real(self):
+        from omop_core.models import (
+            ConditionOccurrence, DrugExposure, ProcedureOccurrence)
+        for model in (ConditionOccurrence, DrugExposure, ProcedureOccurrence,
+                      Measurement, Observation):
+            field = model._meta.get_field('confidence')
+            self.assertTrue(field.null, model.__name__)
+            self.assertFalse(field.has_default(), model.__name__)
+
+    def test_a_row_round_trips_its_confidence(self):
+        m = Measurement.objects.create(
+            measurement_id=9100001, person=self.person, measurement_concept=self.proposed,
+            measurement_date=date(2024, 3, 1), measurement_type_concept=self.type_concept,
+            confidence=85)
+        m.refresh_from_db()
+        self.assertEqual(m.confidence, 85)
+
+    def test_the_database_refuses_a_confidence_outside_0_to_100(self):
+        from django.db import IntegrityError, transaction
+        for bad in (101, -1):
+            with self.assertRaises(IntegrityError), transaction.atomic():
+                Measurement.objects.create(
+                    measurement_id=9100002, person=self.person,
+                    measurement_concept=self.proposed, measurement_date=date(2024, 3, 1),
+                    measurement_type_concept=self.type_concept, confidence=bad)
+
+    # --- who may write it ---------------------------------------------------
+
+    @override_settings(PROVISIONAL_DATA_ENABLED=True)
+    def test_a_machine_credential_writes_a_provisional_row(self):
+        data = self._post([self._row(confidence=85)])
+        self.assertEqual(data['created'], 1)
+        self.assertEqual(self._only_row().confidence, 85)
+
+    @override_settings(PROVISIONAL_DATA_ENABLED=True)
+    def test_the_single_row_write_accepts_it_too(self):
+        resp = self.client.post('/api/v1/measurements/?skip_refresh=true',
+                                self._row(confidence=72), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_201_CREATED, resp.data)
+        self.assertEqual(resp.data['confidence'], 72)
+
+    @override_settings(PROVISIONAL_DATA_ENABLED=False)
+    def test_a_number_is_refused_while_the_feature_is_off(self):
+        self._post([self._row(confidence=85)], expect=status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(Measurement.objects.filter(person=self.person).exists())
+
+    @override_settings(PROVISIONAL_DATA_ENABLED=False)
+    def test_null_is_always_accepted(self):
+        self._post([self._row(confidence=None)])
+        self.assertIsNone(self._only_row().confidence)
+
+    @override_settings(PROVISIONAL_DATA_ENABLED=True)
+    def test_a_number_is_refused_at_concept_zero(self):
+        zero = Concept.objects.get(concept_id=0)
+        resp = self.client.post('/api/v1/measurements/?skip_refresh=true',
+                                [self._row(concept=zero, confidence=85)], format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(Measurement.objects.filter(person=self.person).exists())
+
+    @override_settings(PROVISIONAL_DATA_ENABLED=True)
+    def test_a_number_outside_0_to_100_is_refused(self):
+        for bad in (101, -5):
+            self._post([self._row(confidence=bad)], expect=status.HTTP_400_BAD_REQUEST)
+
+    def _serializer(self, user, **row):
+        from rest_framework.request import Request
+        from patient_portal.api.serializers import MeasurementSerializer
+        request = Request(RequestFactory().post('/'))
+        request._user = user
+        request._auth = None
+        return MeasurementSerializer(data=row, context={'request': request})
+
+    def _payload(self, confidence):
+        return {
+            'person': self.person.person_id,
+            'measurement_concept': self.proposed.concept_id,
+            'measurement_date': '2024-03-01',
+            'measurement_type_concept': self.type_concept.concept_id,
+            'measurement_source_value': 'S',
+            'confidence': confidence,
+        }
+
+    @override_settings(PROVISIONAL_DATA_ENABLED=True)
+    def test_a_session_user_may_not_write_a_number(self):
+        user = Identity.objects.create_user(email='prov-session@test.com', password='x')
+        serializer = self._serializer(user, **self._payload(85))
+        self.assertFalse(serializer.is_valid())
+        self.assertIn('confidence', serializer.errors)
+
+    @override_settings(PROVISIONAL_DATA_ENABLED=True)
+    def test_a_session_user_may_still_write_null(self):
+        user = Identity.objects.create_user(email='prov-session-null@test.com', password='x')
+        serializer = self._serializer(user, **self._payload(None))
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+
+    @override_settings(PROVISIONAL_DATA_ENABLED=True)
+    def test_staff_may_write_a_number(self):
+        user = Identity.objects.create_user(email='prov-staff@test.com', password='x', is_staff=True)
+        serializer = self._serializer(user, **self._payload(85))
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+
+    # --- the upsert: confidence is outside the key --------------------------
+
+    @override_settings(PROVISIONAL_DATA_ENABLED=True)
+    def test_resending_a_provisional_row_converges(self):
+        first = self._post([self._row(confidence=85)])
+        second = self._post([self._row(confidence=85)])
+        self.assertEqual(second['created'], 0)
+        self.assertEqual(second['ids'], first['ids'])
+        self.assertEqual(self._only_row().confidence, 85)
+
+    @override_settings(PROVISIONAL_DATA_ENABLED=True)
+    def test_approval_promotes_the_row_in_place(self):
+        first = self._post([self._row(concept=self.proposed, confidence=85)])
+        second = self._post([self._row(concept=self.approved)])
+        self.assertEqual(second['ids'], first['ids'])
+        row = self._only_row()
+        self.assertEqual(row.measurement_concept_id, self.approved.concept_id)
+        self.assertIsNone(row.confidence)
+
+    @override_settings(PROVISIONAL_DATA_ENABLED=True)
+    def test_a_new_proposal_updates_a_provisional_row(self):
+        self._post([self._row(concept=self.proposed, confidence=72)])
+        self._post([self._row(concept=self.approved, confidence=91)])
+        row = self._only_row()
+        self.assertEqual(row.measurement_concept_id, self.approved.concept_id)
+        self.assertEqual(row.confidence, 91)
+
+    @override_settings(PROVISIONAL_DATA_ENABLED=True)
+    def test_a_proposal_never_touches_a_real_row(self):
+        self._post([self._row(concept=self.approved)])
+        self._post([self._row(concept=self.proposed, confidence=85)])
+        row = self._only_row()
+        self.assertEqual(row.measurement_concept_id, self.approved.concept_id)
+        self.assertIsNone(row.confidence)
+
+    @override_settings(PROVISIONAL_DATA_ENABLED=True)
+    def test_a_proposal_never_rewrites_a_real_keyed_row(self):
+        self._post([self._row(concept=self.approved, source_record_key='k-1', value_as_number=7.5)])
+        self._post([self._row(concept=self.proposed, confidence=85,
+                              source_record_key='k-1', value_as_number=9.9)])
+        row = self._only_row()
+        self.assertEqual(row.measurement_concept_id, self.approved.concept_id)
+        self.assertIsNone(row.confidence)
+        self.assertEqual(float(row.value_as_number), 7.5)
+
+    @override_settings(PROVISIONAL_DATA_ENABLED=True)
+    def test_a_keyed_provisional_row_is_promoted_by_its_producer(self):
+        self._post([self._row(concept=self.proposed, confidence=85, source_record_key='k-2')])
+        self._post([self._row(concept=self.approved, source_record_key='k-2')])
+        row = self._only_row()
+        self.assertEqual(row.measurement_concept_id, self.approved.concept_id)
+        self.assertIsNone(row.confidence)
+
+    # --- review follow-ups --------------------------------------------------
+
+    def _provisional_row(self, confidence=80):
+        return Measurement.objects.create(
+            measurement_id=9100101, person=self.person, measurement_concept=self.proposed,
+            measurement_date=date(2024, 3, 1), measurement_type_concept=self.type_concept,
+            measurement_source_value='PROV-1', value_as_number=7.5, confidence=confidence)
+
+    def _patch_serializer(self, user, instance, **data):
+        from rest_framework.request import Request
+        from patient_portal.api.serializers import MeasurementSerializer
+        request = Request(RequestFactory().patch('/'))
+        request._user = user
+        request._auth = None
+        return MeasurementSerializer(
+            instance, data=data, partial=True, context={'request': request})
+
+    @override_settings(PROVISIONAL_DATA_ENABLED=True)
+    def test_a_session_user_cannot_promote_a_provisional_row_with_null(self):
+        user = Identity.objects.create_user(email='prov-promote@test.com', password='x')
+        serializer = self._patch_serializer(user, self._provisional_row(), confidence=None)
+        self.assertFalse(serializer.is_valid())
+        self.assertIn('confidence', serializer.errors)
+
+    @override_settings(PROVISIONAL_DATA_ENABLED=True)
+    def test_staff_can_promote_a_provisional_row_with_null(self):
+        user = Identity.objects.create_user(
+            email='prov-promote-staff@test.com', password='x', is_staff=True)
+        serializer = self._patch_serializer(user, self._provisional_row(), confidence=None)
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+
+    @override_settings(PROVISIONAL_DATA_ENABLED=True)
+    def test_null_on_a_real_row_is_harmless_for_a_session_user(self):
+        user = Identity.objects.create_user(email='prov-real-null@test.com', password='x')
+        row = self._provisional_row(confidence=None)
+        serializer = self._patch_serializer(user, row, confidence=None)
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+
+    @override_settings(PROVISIONAL_DATA_ENABLED=True)
+    def test_moving_a_provisional_row_to_concept_zero_clears_its_confidence(self):
+        user = Identity.objects.create_user(email='prov-reject@test.com', password='x')
+        zero = Concept.objects.get(concept_id=0)
+        serializer = self._patch_serializer(
+            user, self._provisional_row(), measurement_concept=zero.concept_id)
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        self.assertIsNone(serializer.validated_data['confidence'])
+
+    @override_settings(PROVISIONAL_DATA_ENABLED=True)
+    def test_an_unrelated_edit_leaves_a_provisional_row_provisional(self):
+        user = Identity.objects.create_user(email='prov-edit@test.com', password='x')
+        serializer = self._patch_serializer(user, self._provisional_row(), value_as_number=3)
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+        self.assertNotIn('confidence', serializer.validated_data)
+
+    @override_settings(PROVISIONAL_DATA_ENABLED=True)
+    def test_a_proposal_lifts_an_unmapped_row_at_concept_zero(self):
+        zero = Concept.objects.get(concept_id=0)
+        first = self._post([self._row(concept=zero)])
+        second = self._post([self._row(concept=self.proposed, confidence=85)])
+        self.assertEqual(second['ids'], first['ids'])
+        row = self._only_row()
+        self.assertEqual(row.measurement_concept_id, self.proposed.concept_id)
+        self.assertEqual(row.confidence, 85)
+
+    @override_settings(PROVISIONAL_DATA_ENABLED=True)
+    def test_a_proposal_lifts_an_unmapped_keyed_row_at_concept_zero(self):
+        zero = Concept.objects.get(concept_id=0)
+        self._post([self._row(concept=zero, source_record_key='k-3')])
+        self._post([self._row(concept=self.proposed, confidence=85, source_record_key='k-3')])
+        row = self._only_row()
+        self.assertEqual(row.measurement_concept_id, self.proposed.concept_id)
+        self.assertEqual(row.confidence, 85)
+
+    @override_settings(PROVISIONAL_DATA_ENABLED=False)
+    def test_the_switch_off_still_lets_an_approval_promote_a_provisional_row(self):
+        self._provisional_row()
+        self._post([self._row(concept=self.approved)])
+        row = self._only_row()
+        self.assertEqual(row.measurement_concept_id, self.approved.concept_id)
+        self.assertIsNone(row.confidence)
+
+    def test_every_clinical_table_has_the_range_check(self):
+        from django.db import connection
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT conrelid::regclass::text FROM pg_constraint "
+                "WHERE conname LIKE 'ck\\_%\\_confidence\\_pct'")
+            tables = {row[0] for row in cursor.fetchall()}
+        self.assertEqual(tables, {
+            'measurement', 'observation', 'condition_occurrence',
+            'drug_exposure', 'procedure_occurrence'})
+
+    @override_settings(PROVISIONAL_DATA_ENABLED=True)
+    def test_a_session_users_resend_does_not_promote_a_provisional_row(self):
+        """Promotion is the approval path's, not any writer's: a session user
+        re-posting an identical event leaves the provisional row as it is."""
+        from omop_core.models import Measurement as M
+        self._provisional_row()
+        from patient_portal.api import views as api_views
+        from django.db import transaction
+        person = self.person
+        instance = M(
+            person=person, measurement_concept=self.approved, measurement_date=date(2024, 3, 1),
+            measurement_type_concept=self.type_concept, measurement_source_value='PROV-1',
+            value_as_number=7.5)
+        with transaction.atomic():
+            plan = api_views._plan_bulk_upsert(
+                M, 'measurement_id', 'Measurement', person, [instance],
+                may_write_confidence=False)
+        self.assertEqual(plan.to_update, [])
+        self.assertEqual(plan.to_insert, [])
+        self.assertEqual(M.objects.get(person=person).confidence, 80)
+
+    @override_settings(PROVISIONAL_DATA_ENABLED=True)
+    def test_a_machine_number_on_a_real_row_is_refused_by_patch(self):
+        row = self._provisional_row(confidence=None)
+        serializer = self._patch_serializer(
+            Identity.objects.create_user(
+                email='prov-demote@test.com', password='x', is_staff=True), row, confidence=60)
+        self.assertFalse(serializer.is_valid())
+        self.assertIn('confidence', serializer.errors)
+
+    @override_settings(PROVISIONAL_DATA_ENABLED=False)
+    def test_a_client_can_write_back_the_confidence_it_read(self):
+        user = Identity.objects.create_user(email='prov-roundtrip@test.com', password='x')
+        serializer = self._patch_serializer(user, self._provisional_row(80), confidence=80)
+        self.assertTrue(serializer.is_valid(), serializer.errors)
+
+    def test_a_malformed_floor_does_not_stop_settings_loading(self):
+        from django.conf import settings as s
+        self.assertTrue(0 <= s.PROVISIONAL_CONFIDENCE_FLOOR <= 100)

@@ -158,6 +158,7 @@ from .provenance_org import (
 )
 from .condition_serializers import V1MeasurementSerializer, V1ObservationSerializer
 from .serializers import (
+    may_write_confidence,
     PrologSurveySerializer, PrologSurveyResponseSerializer,
     UserSerializer, PatientRecordSerializer, PatientListSerializer, ProvenanceRecordSerializer,
     ConditionOccurrenceSerializer, ConditionContextSerializer, DrugExposureSerializer, MeasurementSerializer,
@@ -7302,7 +7303,7 @@ class _UpsertPlan:
         self.to_insert = to_insert        # unsaved rows needing a pk, in order
         self.row_slots = row_slots        # per input row: ('new', slot) | ('old', pk)
         self.collapse_ids = collapse_ids  # stacked duplicates to delete
-        self.to_update = to_update        # [(pk, concept_id)] — concept changed
+        self.to_update = to_update        # [(pk, concept_id, confidence)] — either changed
         self.touched_ids = touched_ids    # existing rows updated or de-stacked
         self.unattributed_matches = unattributed_matches
         # pk -> (incoming row, attribution class): rows matched by their source
@@ -7426,7 +7427,8 @@ def _normalize_bulk_measurement_rows(model_cls, new_ids):
 
 
 def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances,
-                      organization=None, content_match=True, writable=()):
+                      organization=None, content_match=True, writable=(),
+                      may_write_confidence=False):
     """Match a batch of unsaved rows against what `person` already has.
 
     Same three outcomes as ``_upsert_clinical``: an event already on file is left
@@ -7479,12 +7481,14 @@ def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances,
     # person's own rows for those source values.
     existing = {}   # key -> [pk, …] ascending
     cid_by_pk = {}
+    confidence_by_pk = {}   # pk -> stored confidence (null = a real row)
     attribution_by_pk = {}
     keyed_pks = set()   # stored rows that carry a source record key
     if keyed:
         columns = (pk_field, cid_attr, sv_field, date_field) + tuple(extra_fields)
         if supports_key:
             columns += ('source_record_key',)
+        columns += ('confidence',)
         # Entered-in-error rows are excluded from the match on purpose.
         #
         # A row marked is_erroneous is not the current fact -- derivation already
@@ -7503,7 +7507,11 @@ def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances,
             f'{sv_field}__in': {k[0] for k in keyed},
             f'{date_field}__in': {k[1] for k in keyed},
         })
-        if any(source_keys):
+        if any(source_keys) or any(
+                getattr(inst, 'confidence', None) is not None for inst in instances):
+            # A provisional write reads a row's confidence and rewrites it: lock
+            # the rows so an approval committing in between is not overwritten
+            # with a stale proposal (#2434).
             # A keyed row may stamp its key on one of these. Lock them so a
             # concurrent request with another key re-reads the row once the
             # first commits, sees it keyed, and inserts instead of overwriting.
@@ -7523,8 +7531,9 @@ def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances,
             key = (row[2], row[3]) + tuple(tail)
             existing.setdefault(key, []).append(row[0])
             cid_by_pk[row[0]] = row[1]
+            confidence_by_pk[row[0]] = row[-2]
             attribution_by_pk[row[0]] = tuple(row[-1])
-            if supports_key and row[-2]:
+            if supports_key and row[-3]:
                 keyed_pks.add(row[0])
 
     # Distinct attributions among the unkeyed rows of a key, before the
@@ -7564,8 +7573,20 @@ def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances,
                   if pk not in keyed_pks and pk not in collapse_ids]
         collapse_ids.extend(extras)
         new_cid = getattr(instances[i], cid_attr, None)
-        if cid_by_pk[keep] != new_cid:
-            to_update.append((keep, new_cid))
+        new_conf = getattr(instances[i], 'confidence', None)
+        old_conf = confidence_by_pk[keep]
+        if old_conf is not None and new_conf is None and not may_write_confidence:
+            # Only a machine credential or staff may promote a provisional row.
+            if extras:
+                touched_ids.append(keep)
+        elif old_conf is None and new_conf is not None and cid_by_pk[keep] != 0:
+            # Real beats provisional: a proposal never touches a row an approved
+            # mapping wrote (#2434). A row at concept 0 holds no mapping, so a
+            # proposal may lift it.
+            if extras:
+                touched_ids.append(keep)
+        elif cid_by_pk[keep] != new_cid or old_conf != new_conf:
+            to_update.append((keep, new_cid, new_conf))
             touched_ids.append(keep)
         elif extras:
             touched_ids.append(keep)
@@ -7658,9 +7679,11 @@ def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances,
     # A row kept or rewritten by one match is never deleted as another's copy.
     kept = {ref for kind, ref in row_slots if kind == 'old'} | set(keyed_updates)
     collapse_ids = [pk for pk in collapse_ids if pk not in kept]
-    return _UpsertPlan(to_insert, row_slots, collapse_ids, to_update,
+    plan = _UpsertPlan(to_insert, row_slots, collapse_ids, to_update,
                        list(dict.fromkeys(touched_ids)), unattributed_matches,
                        keyed_updates, key_ambiguous, organization, writable)
+    plan.may_write_confidence = may_write_confidence
+    return plan
 
 
 def _apply_upsert_plan(plan, model_cls, pk_field, model_name):
@@ -7681,8 +7704,9 @@ def _apply_upsert_plan(plan, model_cls, pk_field, model_name):
 
     if plan.to_update:
         model_cls.objects.bulk_update(
-            [model_cls(**{pk_field: pk, cid_attr: cid}) for pk, cid in plan.to_update],
-            [concept_field],
+            [model_cls(**{pk_field: pk, cid_attr: cid, 'confidence': conf})
+             for pk, cid, conf in plan.to_update],
+            [concept_field, 'confidence'],
         )
 
     new_ids = []
@@ -7733,6 +7757,27 @@ def _apply_upsert_plan(plan, model_cls, pk_field, model_name):
             plan.row_slots = [('old', remap[ref]) if kind == 'new' and ref in remap
                               else (kind, ref) for kind, ref in plan.row_slots]
             new_ids = [pk if s not in remap else None for s, pk in enumerate(new_ids)]
+
+    if plan.keyed_updates and (not plan.may_write_confidence or any(
+            getattr(row, 'confidence', None) is not None
+            for row, _cls in plan.keyed_updates.values())):
+        # Real beats provisional, and only a machine credential or staff may
+        # promote (#2434). Looked up only for a caller without that standing or
+        # a batch carrying a confidence, so the usual ETL write pays no query.
+        stored = {pk: (conf, cid) for pk, conf, cid in model_cls.objects.filter(
+            **{f'{pk_field}__in': list(plan.keyed_updates)}
+        ).values_list(pk_field, 'confidence', cid_attr)}
+        dropped = set()
+        for pk, (row, _cls) in plan.keyed_updates.items():
+            old_conf, old_cid = stored.get(pk, (None, None))
+            new_conf = getattr(row, 'confidence', None)
+            if new_conf is not None and old_conf is None and old_cid != 0:
+                dropped.add(pk)            # a proposal never touches a real row
+            elif new_conf is None and old_conf is not None and not plan.may_write_confidence:
+                dropped.add(pk)            # promotion is not a user's to make
+        plan.keyed_updates = {
+            pk: v for pk, v in plan.keyed_updates.items() if pk not in dropped}
+        plan.touched_ids = [pk for pk in plan.touched_ids if pk not in dropped]
 
     if plan.keyed_updates:
         fields = _keyed_update_fields(model_cls, pk_field, plan.writable)
@@ -8404,7 +8449,8 @@ class _OmopBulkCreateMixin:
                         model_cls, pk_field, model_name, person, [instance],
                         organization=provenance.match_organization,
                         content_match=self._content_upsert(request),
-                        writable=self.serializer_class.Meta.fields)
+                        writable=self.serializer_class.Meta.fields,
+                        may_write_confidence=may_write_confidence(request))
                     ids, new_ids = _apply_upsert_plan(
                         plan, model_cls, pk_field, model_name)
 
@@ -8618,7 +8664,8 @@ class _OmopBulkCreateMixin:
                         model_cls, pk_field, model_name, person, instances,
                         organization=provenance.match_organization,
                         content_match=upsert,
-                        writable=self.serializer_class.Meta.fields)
+                        writable=self.serializer_class.Meta.fields,
+                        may_write_confidence=may_write_confidence(request))
                     ids, new_ids = _apply_upsert_plan(
                         plan, model_cls, pk_field, model_name)
                     updated = len(plan.touched_ids)
