@@ -225,6 +225,8 @@ def lock_rows(model, pks):
     if not ids:
         return
     with connection.cursor() as cursor:
+        cursor.execute("SELECT current_setting('lock_timeout')")
+        previous = cursor.fetchone()[0]
         cursor.execute("SET LOCAL lock_timeout = '5s'")
     try:
         for start in range(0, len(ids), LOCK_BATCH):
@@ -241,10 +243,11 @@ def lock_rows(model, pks):
                 "Could not acquire the cohort's row locks within 5 s; "
                 'rerun inside the write pause.') from exc
         raise
-    # The timeout bounds acquisition only; the writes that follow wait normally.
-    # `SET LOCAL` is scoped to this transaction, so the session value is untouched.
+    # The timeout bounds acquisition only. Restore the value in force before it
+    # (role, database or session setting) rather than 0, which would mean "wait
+    # forever" for the writes that follow. Still transaction-local.
     with connection.cursor() as cursor:
-        cursor.execute('SET LOCAL lock_timeout = 0')
+        cursor.execute("SELECT set_config('lock_timeout', %s, true)", [previous])
 
 
 def receipt(operation, run, database, expected, entries):

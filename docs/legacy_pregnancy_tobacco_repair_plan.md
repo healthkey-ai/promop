@@ -59,7 +59,7 @@ rewritten values; those stay for a person's answer or policy review.
    active, an observation patched in place without touching its person) is
    invisible. The write pause is therefore a gate, not a nicety. During the run
    itself unrelated patients stay writable. `lock_timeout` for acquiring the
-   locks is 5 s and is reset before the writes.
+   locks is 5 s; the previous value is restored before the writes.
 5. **Keep the whole database quiet from the audit to `--apply`.** The approved
    digest covers every record and the global totals (each record's
    `derived_at`, its coverage flag, the person-authored revision count), not

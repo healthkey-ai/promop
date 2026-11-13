@@ -263,3 +263,21 @@ def test_lock_rows_with_no_candidates_does_not_lock_anything():
             guarded_repair.lock_rows(PatientRecord, [])
     assert not [query for query in captured.captured_queries
                 if 'FOR UPDATE' in query['sql']]
+
+
+def test_lock_rows_restores_the_previous_lock_timeout():
+    """`SET LOCAL lock_timeout = 0` after acquisition meant "no limit" for the
+    writes, dropping a role/database/session timeout instead of restoring it."""
+    from django.db import transaction
+
+    from omop_core.models import PatientRecord
+    from tests.factories import PatientRecordFactory
+
+    record = PatientRecordFactory()
+    with transaction.atomic():
+        with connection.cursor() as cursor:
+            cursor.execute("SET LOCAL lock_timeout = '7s'")
+        guarded_repair.lock_rows(PatientRecord, [record.pk])
+        with connection.cursor() as cursor:
+            cursor.execute('SHOW lock_timeout')
+            assert cursor.fetchone()[0] == '7s'
