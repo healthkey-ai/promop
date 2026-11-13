@@ -63,6 +63,7 @@ from omop_core.services.creatinine_units import (
     canonical_from_pair as creatinine_canonical_from_pair,
     canonical_in_range as creatinine_canonical_in_range,
     normalize_unit as creatinine_normalize_unit,
+    DEFAULT_UNIT as CREATININE_DEFAULT_UNIT,
 )
 from omop_core.services.blood_count_source_pairs import (
     PAIRS as _COUNT_SOURCE_PAIRS,
@@ -102,8 +103,12 @@ _DIRECT_UNIT_FIELD = direct_bilirubin_units.UNIT_FIELD
 _DIRECT_ALIAS_FIELD = direct_bilirubin_units.ALIAS_FIELD
 _CHEMISTRY_SELECTED_FIELDS = _CHEMISTRY_CANONICAL_FIELDS | {_DIRECT_PAIR_FIELD}
 #: The chronological import pass also owns hemoglobin's canonical/pair, because
-#: a LOINC 718-7 result can arrive in g/L and must not be stored as g/dL.
-_UNIT_PAIR_SELECTED_FIELDS = _CHEMISTRY_SELECTED_FIELDS | {HEMOGLOBIN_CANONICAL}
+#: a LOINC 718-7 result can arrive in g/L and must not be stored as g/dL, and
+#: serum creatinine's, because 2160-0 arrives in umol/L as often as in mg/dL:
+#: 80 umol/L (normal) was stored as 80 mg/dL (#2438).
+_UNIT_PAIR_SELECTED_FIELDS = _CHEMISTRY_SELECTED_FIELDS | {
+    HEMOGLOBIN_CANONICAL, CREATININE_CANONICAL,
+}
 
 
 def _concept_unit_code(measurement):
@@ -201,7 +206,7 @@ def _usable_concept_name(concept) -> str | None:
 
 # Bump this whenever aggregation or computation logic changes in any section
 # extractor or in _compute_derived_fields.  See DERIVATION_CHANGELOG.md.
-DERIVATION_VERSION = 29
+DERIVATION_VERSION = 30
 
 # These PatientRecord columns are projections of PersonLanguageSkill, never
 # independent edits. Older PATCH requests could mark them as user-edited and
@@ -5000,7 +5005,8 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None,
         field_name = _LEGACY_LAB_CONCEPT_FIELDS.get(concept_name)
         if not field_name or field_name in blood_count_fields:
             continue
-        if field_name in _CHEMISTRY_PAIR_CANONICAL or field_name == HEMOGLOBIN_CANONICAL:
+        if (field_name in _CHEMISTRY_PAIR_CANONICAL or field_name == HEMOGLOBIN_CANONICAL
+                or field_name == CREATININE_PAIR):
             # Selected with its canonical in one chronological pass below: a
             # pair and its read-model must come from the same newest fact.
             continue
@@ -5174,6 +5180,8 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None,
             candidate = _CHEMISTRY_PAIR_CANONICAL.get(legacy_field)
             if candidate is None and legacy_field == HEMOGLOBIN_CANONICAL:
                 candidate = HEMOGLOBIN_CANONICAL
+            if candidate is None and legacy_field == CREATININE_PAIR:
+                candidate = CREATININE_CANONICAL
             if candidate is not None:
                 field, representation = candidate, 'legacy'
         if field is not None and field not in chemistry_winners:
@@ -5220,6 +5228,47 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None,
             selected_dates[HEMOGLOBIN_PAIR] = measurement.measurement_date
             if dates_out is not None:
                 dates_out[HEMOGLOBIN_PAIR] = measurement.measurement_date
+            continue
+        if field == CREATININE_CANONICAL:
+            # mg/dL or umol/L (#2438); a unitless row is mg/dL, the unit every
+            # canonical value is recorded in. The pair keeps the number and
+            # unit the lab reported: eGFR reads the pair, because the
+            # canonical's two decimals can move a threshold (creatinine_units).
+            reported_unit, unit_code = _resolve_reported_unit(
+                measurement, creatinine_normalize_unit, CREATININE_DEFAULT_UNIT)
+            recognised, canonical_value = creatinine_canonical_from_pair(
+                measurement.value_as_number, unit_code)
+            if (unit_code is None or not recognised or canonical_value is None
+                    or not creatinine_canonical_in_range(canonical_value)):
+                if representation == 'legacy' and reported_unit is not None:
+                    # A historic concept-name fact keeps the number and unit the
+                    # lab reported, as it always has (#475); the canonical stays
+                    # unknown rather than reinterpreting an unsupported scale.
+                    data[CREATININE_CANONICAL] = None
+                    data[CREATININE_PAIR] = Decimal(str(measurement.value_as_number))
+                    data[CREATININE_UNIT] = reported_unit
+                    selected_dates[CREATININE_PAIR] = measurement.measurement_date
+                    if dates_out is not None:
+                        dates_out[CREATININE_PAIR] = measurement.measurement_date
+                    continue
+                # The newest result owns the field even when it is unusable: an
+                # older one must not stand in for it, and the explicit Nones
+                # stop the curated mapping from storing the raw number.
+                logger.warning(
+                    'Serum creatinine projection skipped for person_id=%s: '
+                    'unit=%r', person.person_id, reported_unit,
+                )
+                data[CREATININE_CANONICAL] = None
+                data[CREATININE_PAIR] = None
+                data[CREATININE_UNIT] = None
+                continue
+            data[CREATININE_CANONICAL] = canonical_value
+            data[CREATININE_PAIR] = Decimal(str(measurement.value_as_number))
+            data[CREATININE_UNIT] = unit_code
+            for dated in (CREATININE_CANONICAL, CREATININE_PAIR):
+                selected_dates[dated] = measurement.measurement_date
+                if dates_out is not None:
+                    dates_out[dated] = measurement.measurement_date
             continue
         if field == _DIRECT_PAIR_FIELD:
             reported_unit, unit_code = _resolve_reported_unit(
@@ -5298,6 +5347,10 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None,
             # copying the canonical back would replace a reported g/L pair
             # with the g/dL read-model.
             continue
+        if canonical == CREATININE_CANONICAL:
+            # Same for creatinine: the pair keeps the reported umol/L; only the
+            # ordinary alias follows the mg/dL value.
+            aliases = [alias for alias in aliases if alias != CREATININE_PAIR]
         chemistry = _CHEMISTRY_PAIRS.get(canonical)
         if chemistry is not None:
             # The pair and canonical were selected together above; copying the
@@ -5314,6 +5367,8 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None,
             unit_updates = _lab_alias_units(canonical, value)
             if chemistry is not None:
                 unit_updates.pop(chemistry['unit'], None)
+            if canonical == CREATININE_CANONICAL:
+                unit_updates.pop(CREATININE_UNIT, None)
             data.update(unit_updates)
 
     return data

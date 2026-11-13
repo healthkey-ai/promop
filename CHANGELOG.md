@@ -267,6 +267,12 @@ All notable changes to PRomop are documented here.
 
 ### Fixed
 
+- **SI serum creatinine is stored in mg/dL (#2438)** — a 2160-0 or 38483-4
+  result in umol/L was stored as that many mg/dL, so a normal 80 umol/L read as
+  renal failure in CRAB, renal adequacy and matching. Derivation now converts it
+  in the same newest-result pass as hemoglobin and calcium, keeps the reported
+  pair for eGFR, and leaves the field unknown when the newest unit cannot be
+  read. `DERIVATION_VERSION` 30.
 - **Computed rows offer the pencil only when a source is editable (#2244)** —
   a computed value whose dependency chain bottoms out in fields the record does
   not own (No Active Infection → `active_infection_status` → OMOP condition
