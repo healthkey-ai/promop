@@ -432,3 +432,44 @@ def test_apply_aborts_when_a_legacy_attestation_becomes_explicit_after_the_audit
     ambiguous.refresh_from_db()
     assert ambiguous.no_pre_existing_conditions is True
     assert PreexistingConditionsAttestation.objects.filter(pk=legacy.pk).exists()
+
+
+def test_apply_locks_the_candidates_attestations(tmp_path, ready):
+    """The delete is only safe because the row is locked; assert the statement."""
+    from django.test.utils import CaptureQueriesContext
+
+    ambiguous, *_ = cohort()
+    PreexistingConditionsAttestation.objects.create(
+        person=ambiguous.person, source='patient', confirmed_at=timezone.now())
+    manifest, sha = audit(tmp_path)
+
+    with CaptureQueriesContext(connection) as captured:
+        apply(tmp_path, manifest, sha)
+
+    assert any(
+        'FOR UPDATE' in query['sql']
+        and 'preexisting_conditions_attestation' in query['sql']
+        for query in captured.captured_queries)
+
+
+def test_apply_aborts_when_the_locked_attestation_disappears_before_delete(
+        tmp_path, ready, monkeypatch):
+    from django.db.models import QuerySet
+
+    ambiguous, *_ = cohort()
+    PreexistingConditionsAttestation.objects.create(
+        person=ambiguous.person, source='patient', confirmed_at=timezone.now())
+    manifest, sha = audit(tmp_path)
+    original = QuerySet.delete
+
+    def refuse_attestation_delete(self, *args, **kwargs):
+        if self.model is PreexistingConditionsAttestation:
+            return 0, {}
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(QuerySet, 'delete', refuse_attestation_delete)
+    with pytest.raises(CommandError, match='gained an attestation after the audit'):
+        apply(tmp_path, manifest, sha)
+
+    ambiguous.refresh_from_db()
+    assert ambiguous.no_pre_existing_conditions is True

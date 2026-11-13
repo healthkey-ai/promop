@@ -223,7 +223,7 @@ class Command(BaseCommand):
             edited = (record.user_edited_fields
                       if isinstance(record.user_edited_fields, list) else [])
             for field in FIELDS:
-                if row['fields'][field]['recommended_action'] != 'clear':
+                if row['fields'][field]['recommended_action'] not in REPAIRABLE_ACTIONS:
                     continue
                 # Classify as if the stored value were still True: an unchanged
                 # revision with an unreadable value is not evidence, exactly as

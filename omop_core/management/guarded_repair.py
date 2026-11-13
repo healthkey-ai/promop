@@ -235,7 +235,7 @@ def lock_rows(model, pks):
     except OperationalError as exc:
         cause = getattr(exc, '__cause__', None)
         sqlstate = (getattr(cause, 'sqlstate', None)
-                    or getattr(exc, 'pgcode', None))
+                    or getattr(cause, 'pgcode', None))
         if sqlstate == '55P03' or 'lock timeout' in str(exc).lower():
             raise CommandError(
                 "Could not acquire the cohort's row locks within 5 s; "

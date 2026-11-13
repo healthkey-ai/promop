@@ -182,6 +182,10 @@ def test_every_audit_repair_command_uses_the_shared_guards():
         for name in ('target_guard', 'write_private', 'read_json', 'canonical', 'digest',
                      'receipt', 'lock_rows', 'pin_transaction_isolation'):
             assert getattr(module, name) is getattr(guarded_repair, name), (module, name)
+    for module in (audit_legacy_pregnancy_tobacco, audit_pre_existing_conditions):
+        for name in ('approval_digest', 'as_bool', 'make_transaction_read_only',
+                     'refuse_existing_manifest', 'write_manifest'):
+            assert getattr(module, name) is getattr(guarded_repair, name), (module, name)
     # The apply path stays at READ COMMITTED: a serializable snapshot taken by
     # the audit read cannot see evidence committed before the locks, which is
     # the window the post-lock re-read exists to close.
@@ -215,10 +219,6 @@ def test_make_transaction_read_committed_issues_the_statement():
 
     assert any('READ COMMITTED' in query['sql'].upper()
                for query in captured.captured_queries)
-    for module in (audit_legacy_pregnancy_tobacco, audit_pre_existing_conditions):
-        for name in ('approval_digest', 'as_bool', 'make_transaction_read_only',
-                     'refuse_existing_manifest', 'write_manifest'):
-            assert getattr(module, name) is getattr(guarded_repair, name), (module, name)
 
 
 def test_lock_rows_locks_the_given_rows_instead_of_the_table():
