@@ -593,22 +593,27 @@ def test_medications_group_exposures_per_drug_current_first_with_dose_history():
     client = signed_in(record)
     meds = client.get('/api/v1/phr/medications/').data['medications']
 
+    # Lenalidomide's newest prescription runs to a date still to come, so it
+    # is current. Vitamin D3 was prescribed in 2020 and never ended: over a
+    # year old, it counts as taken and over (#123).
     assert [(m['name'], m['status']) for m in meds] == [
         ('lenalidomide 10 MG Oral Capsule', 'current'),
-        ('Vitamin D3 / 2000 IU', 'current'),
         ('dexamethasone 4 MG Oral Tablet', 'past'),
+        ('Vitamin D3 / 2000 IU', 'past'),
     ]
     assert meds[0]['dose'] == '10 mg daily, days 1–21'
     assert meds[0]['started'] == '2023-01-01' and 'ended' not in meds[0]
-    assert meds[2]['dose'] == '40 mg' and meds[2]['ended'] == '2022-12-31'
-    assert meds[1]['id'] == 'src-vitamin-d3-2000-iu'
+    assert meds[0]['confirmation'] == {'status': 'taking', 'assumed': True}
+    assert 'may_still_take' not in meds[0]
+    assert meds[1]['dose'] == '40 mg' and meds[1]['ended'] == '2022-12-31'
+    assert meds[2]['id'] == 'src-vitamin-d3-2000-iu' and meds[2]['may_still_take'] is True
 
     detail = client.get(f"/api/v1/phr/medications/{meds[0]['id']}/").data
     assert [(h['date'], h['dose'], h['source']['facility']) for h in detail['history']] == [
         ('2024-01-01', '10 mg daily, days 1–21', 'MD Anderson pharmacy'),
         ('2023-01-01', '15 mg daily, days 1–21', None),
     ]
-    assert client.get(f"/api/v1/phr/medications/{meds[1]['id']}/").status_code == 200
+    assert client.get(f"/api/v1/phr/medications/{meds[2]['id']}/").status_code == 200
     assert client.get('/api/v1/phr/medications/424242/').status_code == 404
 
 
@@ -925,25 +930,43 @@ def test_record_prescriptions_wait_for_confirmation_and_answers_can_be_undone(me
 
 
 def test_prescriptions_older_than_a_year_count_as_taken_and_can_be_changed(meds_patient):
-    """#123: only the last year's prescriptions are asked about."""
+    """#123: only the last year's prescriptions are asked about. Older ones are
+    reported as taken and over, even when the record never ended them: the
+    patient switches the few they still take instead of stopping the many."""
     record, client, ids = meds_patient
     today = timezone.localdate()
     old_past = drug(record, ConceptFactory(concept_name='Cephalexin', concept_code='RX-CEP'),
                     (today - timedelta(days=500)).isoformat(), (today - timedelta(days=490)).isoformat())
     old_open = drug(record, ConceptFactory(concept_name='Levothyroxine', concept_code='RX-LEV'),
                     (today - timedelta(days=800)).isoformat(), None)
-    past, current = str(old_past.drug_concept_id), str(old_open.drug_concept_id)
+    past, open_ended = str(old_past.drug_concept_id), str(old_open.drug_concept_id)
 
-    assert 'pending' not in med(client, past)
-    assert med(client, past)['confirmation'] == {'status': 'took', 'assumed': True}
-    assert med(client, current)['confirmation'] == {'status': 'taking', 'assumed': True}
+    for key in (past, open_ended):
+        assert 'pending' not in med(client, key)
+        assert med(client, key)['confirmation'] == {'status': 'took', 'assumed': True}
+        assert med(client, key)['status'] == 'past'  # "Reported as taken", not "Currently taking"
+    # Only the one the record never ended may still be taken.
+    assert 'may_still_take' not in med(client, past)
+    assert med(client, open_ended)['may_still_take'] is True
     assert not PatientStatement.objects.filter(person=record.person).exists()  # nothing is written
 
+    # A prescription that really ended stays past.
+    assert say(client, past, status='taking').status_code == 400
     assert say(client, past, status='not_taken').status_code == 200
     assert med(client, past)['confirmation'] == {'status': 'not_taken'}
+
+    # One the record never ended takes either answer.
+    assert say(client, open_ended, status='not_taken').status_code == 200
+    assert med(client, open_ended)['status'] == 'past'
+    assert say(client, open_ended, status='took').status_code == 200
+    assert med(client, open_ended)['status'] == 'past'
+    assert say(client, open_ended, status='taking').status_code == 200
+    assert med(client, open_ended)['status'] == 'current'
+    assert med(client, open_ended)['confirmation'] == {'status': 'taking'}
     stopped_on = (today - timedelta(days=10)).isoformat()
-    assert say(client, current, status='stopped', stopped_on=stopped_on).status_code == 200
-    assert med(client, current)['confirmation'] == {'status': 'stopped', 'stopped_on': stopped_on}
+    assert say(client, open_ended, status='stopped', stopped_on=stopped_on).status_code == 200
+    assert med(client, open_ended)['confirmation'] == {'status': 'stopped', 'stopped_on': stopped_on}
+    assert med(client, open_ended)['status'] == 'past'
 
     # Prescribed again this year: asked about again.
     assert client.delete(f'/api/v1/phr/medications/{past}/statement/').status_code == 204
