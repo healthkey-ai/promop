@@ -95,7 +95,9 @@ class MedicationStatementView(_StatementView):
         current = med['status'] == 'current'
         if status in (S.TAKING, S.NOT_TAKING) and not current:
             return Response({'status': ['This prescription has ended: answer "took" or "not taken".']}, status=400)
-        if status in (S.TOOK, S.NOT_TAKEN) and current:
+        # An old prescription the record never ended is shown as taken and
+        # over, so it takes the past answers too (#123).
+        if status in (S.TOOK, S.NOT_TAKEN) and current and not med.get('may_still_take'):
             return Response({'status': ['This prescription is current: answer "taking" or "not taking".']}, status=400)
         if status == S.STOPPED:
             # What the patient said, or took as said for an older prescription (#123).

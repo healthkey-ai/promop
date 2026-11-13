@@ -1185,13 +1185,30 @@ class ConditionOccurrence(models.Model):
     # normal reads by default; never deleted.
     is_erroneous = models.BooleanField(default=False, help_text="Marked entered-in-error; retained but excluded from normal reads")
     erroneous_reason = models.TextField(null=True, blank=True, help_text="Why this record was marked erroneous")
+    # Provisional data (#2434): null is a real row, written from an approved
+    # mapping. A number (0-100) is a provisional row, written from a proposal at
+    # that confidence. docs/provisional_data_plan.md
+    confidence = models.SmallIntegerField(
+        null=True, blank=True, validators=[MinValueValidator(0), MaxValueValidator(100)],
+        help_text="Null for a real row; the confidence percent of the proposed mapping for a provisional one")
 
     class Meta:
         db_table = 'condition_occurrence'
         indexes = [
             models.Index(
+                fields=['person'],
+                condition=models.Q(confidence__isnull=False),
+                name='ix_cond_provisional',
+            ),
+            models.Index(
                 fields=['person', 'condition_start_date'],
                 name='ix_cond_person_start_date',
+            ),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(confidence__gte=0, confidence__lte=100),
+                name='ck_cond_confidence_pct',
             ),
         ]
 
@@ -1227,14 +1244,31 @@ class DrugExposure(models.Model):
     # PHR-S FM PH.1.1#06 — entered-in-error (retain, exclude from normal reads).
     is_erroneous = models.BooleanField(default=False, help_text="Marked entered-in-error; retained but excluded from normal reads")
     erroneous_reason = models.TextField(null=True, blank=True, help_text="Why this record was marked erroneous")
+    # Provisional data (#2434): null is a real row, written from an approved
+    # mapping. A number (0-100) is a provisional row, written from a proposal at
+    # that confidence. docs/provisional_data_plan.md
+    confidence = models.SmallIntegerField(
+        null=True, blank=True, validators=[MinValueValidator(0), MaxValueValidator(100)],
+        help_text="Null for a real row; the confidence percent of the proposed mapping for a provisional one")
 
     class Meta:
         db_table = 'drug_exposure'
         indexes = [
+            models.Index(
+                fields=['person'],
+                condition=models.Q(confidence__isnull=False),
+                name='ix_de_provisional',
+            ),
             models.Index(fields=['route_source_value'], name='ix_de_route_src'),
             models.Index(
                 fields=['person', 'drug_exposure_start_date'],
                 name='ix_de_person_start_date',
+            ),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(confidence__gte=0, confidence__lte=100),
+                name='ck_de_confidence_pct',
             ),
         ]
 
@@ -1263,13 +1297,30 @@ class ProcedureOccurrence(models.Model):
     # PHR-S FM PH.1.1#06 — entered-in-error (retain, exclude from normal reads).
     is_erroneous = models.BooleanField(default=False, help_text="Marked entered-in-error; retained but excluded from normal reads")
     erroneous_reason = models.TextField(null=True, blank=True, help_text="Why this record was marked erroneous")
+    # Provisional data (#2434): null is a real row, written from an approved
+    # mapping. A number (0-100) is a provisional row, written from a proposal at
+    # that confidence. docs/provisional_data_plan.md
+    confidence = models.SmallIntegerField(
+        null=True, blank=True, validators=[MinValueValidator(0), MaxValueValidator(100)],
+        help_text="Null for a real row; the confidence percent of the proposed mapping for a provisional one")
 
     class Meta:
         db_table = 'procedure_occurrence'
         indexes = [
             models.Index(
+                fields=['person'],
+                condition=models.Q(confidence__isnull=False),
+                name='ix_proc_provisional',
+            ),
+            models.Index(
                 fields=['person', 'procedure_date'],
                 name='ix_proc_person_date',
+            ),
+        ]
+        constraints = [
+            models.CheckConstraint(
+                condition=models.Q(confidence__gte=0, confidence__lte=100),
+                name='ck_proc_confidence_pct',
             ),
         ]
 
@@ -1311,10 +1362,21 @@ class Measurement(models.Model):
     # PHR-S FM PH.1.1#06 — entered-in-error (retain, exclude from normal reads).
     is_erroneous = models.BooleanField(default=False, help_text="Marked entered-in-error; retained but excluded from normal reads")
     erroneous_reason = models.TextField(null=True, blank=True, help_text="Why this record was marked erroneous")
+    # Provisional data (#2434): null is a real row, written from an approved
+    # mapping. A number (0-100) is a provisional row, written from a proposal at
+    # that confidence. docs/provisional_data_plan.md
+    confidence = models.SmallIntegerField(
+        null=True, blank=True, validators=[MinValueValidator(0), MaxValueValidator(100)],
+        help_text="Null for a real row; the confidence percent of the proposed mapping for a provisional one")
 
     class Meta:
         db_table = 'measurement'
         indexes = [
+            models.Index(
+                fields=['person'],
+                condition=models.Q(confidence__isnull=False),
+                name='ix_meas_provisional',
+            ),
             models.Index(
                 fields=['person', 'measurement_concept', 'measurement_date'],
                 name='ix_meas_person_concept_date',
@@ -1329,6 +1391,10 @@ class Measurement(models.Model):
             ),
         ]
         constraints = [
+            models.CheckConstraint(
+                condition=models.Q(confidence__gte=0, confidence__lte=100),
+                name='ck_meas_confidence_pct',
+            ),
             models.UniqueConstraint(
                 fields=['person', 'source_record_key'],
                 condition=models.Q(source_record_key__isnull=False),
@@ -1387,10 +1453,21 @@ class Observation(models.Model):
     # PHR-S FM PH.1.1#06 — entered-in-error (retain, exclude from normal reads).
     is_erroneous = models.BooleanField(default=False, help_text="Marked entered-in-error; retained but excluded from normal reads")
     erroneous_reason = models.TextField(null=True, blank=True, help_text="Why this record was marked erroneous")
+    # Provisional data (#2434): null is a real row, written from an approved
+    # mapping. A number (0-100) is a provisional row, written from a proposal at
+    # that confidence. docs/provisional_data_plan.md
+    confidence = models.SmallIntegerField(
+        null=True, blank=True, validators=[MinValueValidator(0), MaxValueValidator(100)],
+        help_text="Null for a real row; the confidence percent of the proposed mapping for a provisional one")
 
     class Meta:
         db_table = 'observation'
         indexes = [
+            models.Index(
+                fields=['person'],
+                condition=models.Q(confidence__isnull=False),
+                name='ix_obs_provisional',
+            ),
             models.Index(fields=['qualifier_source_value'], name='ix_obs_qual_src'),
             models.Index(
                 fields=['person', 'is_erroneous', 'observation_date'],
@@ -1398,6 +1475,10 @@ class Observation(models.Model):
             ),
         ]
         constraints = [
+            models.CheckConstraint(
+                condition=models.Q(confidence__gte=0, confidence__lte=100),
+                name='ck_obs_confidence_pct',
+            ),
             models.UniqueConstraint(
                 fields=['person', 'source_record_key'],
                 condition=models.Q(source_record_key__isnull=False),

@@ -7,6 +7,75 @@ whenever aggregation or computation logic changes, then add a row here.
 After bumping, review the entry's rollout constraints before any authorized
 `python manage.py backfill_patient_records` run to re-derive stale records.
 
+## Before a backfill: preview the value changes
+
+`backfill_patient_records --dry-run` only counts the stale records. To see what
+the re-derivation would actually change, run the preview with the same cohort
+options first and check the result against the version's row below:
+
+```bash
+python manage.py preview_rederivation [--organization <slug>] [--target-version N | --all]
+python manage.py preview_rederivation --person-id 101 --field disease --field stage
+python manage.py preview_rederivation --format json > preview.json   # or --format csv
+```
+
+It prints a summary (records scanned, records that would change, records
+changed per field, changes per kind) and one line per change: `person_id`,
+field, and how it changes -- `set` (empty -> value), `cleared` (value -> empty;
+empty is null, `""`, `[]` or `{}`, as for the derivation) or `changed`, with
+`up`/`down` for a number (not for a flag: its direction would be its value). `--limit` caps the records
+scanned, `--max-rows` the lines printed (the counts still cover everything). A
+field that held a pending user edit is marked `[user-edited]`; the refresh
+keeps such an edit until OMOP backs it, so most pending edits show no change,
+and the preview reports exactly what the refresh does to the rest. `--field`
+accepts a `PatientRecord` field name, `custom_fields.<key>` of a defined custom
+field or `custom_fields.<undefined>`, and refuses anything else. A change
+between two empty values (`""` -> null) is not reported: the derivation treats
+them as equal too.
+
+It prints no values, neither stored nor re-derived, and no names; rows carry
+`person_id` only. A `custom_fields` key with no `CustomPatientField`
+definition prints as `custom_fields.<undefined>`, since such a key is whatever
+was written into the JSON. To look at a value, read that record in the admin,
+under its access controls. A record that cannot be previewed is reported, and
+logged, by error type, plus SQLSTATE and constraint name for a database error
+-- never the error message, which for a constraint violation quotes the whole
+row. The refresh's own log lines are dropped while it runs: they quote what
+they diagnose (a unit's source text, an overflowing value). The backfill, which
+runs the same refresh for real, still logs them.
+
+It keeps nothing, but it is not read-only: each record runs the real
+`refresh_patient_record`, including its `UPDATE` of `patient_record`, inside a
+transaction that is always rolled back, while a guard refuses any SQL other
+than reads and the `patient_record` update (and, within reads, sequence,
+advisory-lock, setting and `SELECT ... INTO` calls), and any Celery publish.
+The guard catches accidental writes by the refresh code; it is not a sandbox,
+so run it as a role with SELECT plus UPDATE on `patient_record` only. A
+refused write is reported, by statement verb and table, as an error for that
+person and the command exits non-zero.
+
+On `cb-v2` the refresh makes two more writes than dev's: it supersedes a
+"no pre-existing conditions" attestation (a `DELETE` on
+`preexisting_conditions_attestation` whenever `preexisting_conditions` is set)
+and writes `record_revision` rows when a newer OMOP fact retires a pending
+source pair. The guard refuses both, so those records are reported as errors
+rather than previewed (#2542).
+
+**Run it on staging, or on a restored copy of production -- never against
+`PROD_DATABASE_URL`.** Production is for read-only checks (see AGENTS.md), and
+this takes row locks and executes updates there before rolling them back.
+Operational costs:
+
+- It must run against the writable primary, as a role that may `UPDATE
+  patient_record`: the refresh really executes its update before the rollback,
+  so it fails on a read replica or under `default_transaction_read_only`.
+- Each record's row lock is held for the length of its refresh, as the backfill
+  holds it; concurrent edits to that patient wait.
+- Each record previewed leaves one or two dead row versions in `patient_record`
+  (two when active formulas run their own update) and
+  writes WAL, as an update that rolled back does. Vacuum reclaims them; a
+  preview of the whole table costs about what an update of it would.
+
 | Version | Date       | Description                                      |
 |---------|------------|--------------------------------------------------|
 | 1       | 2026-07-31 | Baseline — all existing derivation logic          |

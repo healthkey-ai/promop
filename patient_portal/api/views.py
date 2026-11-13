@@ -161,6 +161,7 @@ from .provenance_org import (
 )
 from .condition_serializers import V1MeasurementSerializer, V1ObservationSerializer
 from .serializers import (
+    may_write_confidence,
     PrologSurveySerializer, PrologSurveyResponseSerializer,
     UserSerializer, PatientRecordSerializer, PatientListSerializer, ProvenanceRecordSerializer,
     ConditionOccurrenceSerializer, ConditionContextSerializer, DrugExposureSerializer, MeasurementSerializer,
@@ -7755,7 +7756,7 @@ class _UpsertPlan:
         self.to_insert = to_insert        # unsaved rows needing a pk, in order
         self.row_slots = row_slots        # per input row: ('new', slot) | ('old', pk)
         self.collapse_ids = collapse_ids  # stacked duplicates to delete
-        self.to_update = to_update        # [(pk, concept_id)] — concept changed
+        self.to_update = to_update        # [(pk, concept_id, confidence)] — either changed
         self.touched_ids = touched_ids    # existing rows updated or de-stacked
         self.unattributed_matches = unattributed_matches
         # pk -> (incoming row, attribution class): rows matched by their source
@@ -7813,7 +7814,8 @@ def _key_class(attribution, organization):
 
 
 def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances,
-                      organization=None, content_match=True, writable=()):
+                      organization=None, content_match=True, writable=(),
+                      may_write_confidence=False):
     """Match a batch of unsaved rows against what `person` already has.
 
     Same three outcomes as ``_upsert_clinical``: an event already on file is left
@@ -7866,12 +7868,14 @@ def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances,
     # person's own rows for those source values.
     existing = {}   # key -> [pk, …] ascending
     cid_by_pk = {}
+    confidence_by_pk = {}   # pk -> stored confidence (null = a real row)
     attribution_by_pk = {}
     keyed_pks = set()   # stored rows that carry a source record key
     if keyed:
         columns = (pk_field, cid_attr, sv_field, date_field) + tuple(extra_fields)
         if supports_key:
             columns += ('source_record_key',)
+        columns += ('confidence',)
         # Entered-in-error rows are excluded from the match on purpose.
         #
         # A row marked is_erroneous is not the current fact -- derivation already
@@ -7890,7 +7894,11 @@ def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances,
             f'{sv_field}__in': {k[0] for k in keyed},
             f'{date_field}__in': {k[1] for k in keyed},
         })
-        if any(source_keys):
+        if any(source_keys) or any(
+                getattr(inst, 'confidence', None) is not None for inst in instances):
+            # A provisional write reads a row's confidence and rewrites it: lock
+            # the rows so an approval committing in between is not overwritten
+            # with a stale proposal (#2434).
             # A keyed row may stamp its key on one of these. Lock them so a
             # concurrent request with another key re-reads the row once the
             # first commits, sees it keyed, and inserts instead of overwriting.
@@ -7910,8 +7918,9 @@ def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances,
             key = (row[2], row[3]) + tuple(tail)
             existing.setdefault(key, []).append(row[0])
             cid_by_pk[row[0]] = row[1]
+            confidence_by_pk[row[0]] = row[-2]
             attribution_by_pk[row[0]] = tuple(row[-1])
-            if supports_key and row[-2]:
+            if supports_key and row[-3]:
                 keyed_pks.add(row[0])
 
     # Distinct attributions among the unkeyed rows of a key, before the
@@ -7951,8 +7960,20 @@ def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances,
                   if pk not in keyed_pks and pk not in collapse_ids]
         collapse_ids.extend(extras)
         new_cid = getattr(instances[i], cid_attr, None)
-        if cid_by_pk[keep] != new_cid:
-            to_update.append((keep, new_cid))
+        new_conf = getattr(instances[i], 'confidence', None)
+        old_conf = confidence_by_pk[keep]
+        if old_conf is not None and new_conf is None and not may_write_confidence:
+            # Only a machine credential or staff may promote a provisional row.
+            if extras:
+                touched_ids.append(keep)
+        elif old_conf is None and new_conf is not None and cid_by_pk[keep] != 0:
+            # Real beats provisional: a proposal never touches a row an approved
+            # mapping wrote (#2434). A row at concept 0 holds no mapping, so a
+            # proposal may lift it.
+            if extras:
+                touched_ids.append(keep)
+        elif cid_by_pk[keep] != new_cid or old_conf != new_conf:
+            to_update.append((keep, new_cid, new_conf))
             touched_ids.append(keep)
         elif extras:
             touched_ids.append(keep)
@@ -8045,9 +8066,11 @@ def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances,
     # A row kept or rewritten by one match is never deleted as another's copy.
     kept = {ref for kind, ref in row_slots if kind == 'old'} | set(keyed_updates)
     collapse_ids = [pk for pk in collapse_ids if pk not in kept]
-    return _UpsertPlan(to_insert, row_slots, collapse_ids, to_update,
+    plan = _UpsertPlan(to_insert, row_slots, collapse_ids, to_update,
                        list(dict.fromkeys(touched_ids)), unattributed_matches,
                        keyed_updates, key_ambiguous, organization, writable)
+    plan.may_write_confidence = may_write_confidence
+    return plan
 
 
 def _apply_upsert_plan(plan, model_cls, pk_field, model_name):
@@ -8068,8 +8091,9 @@ def _apply_upsert_plan(plan, model_cls, pk_field, model_name):
 
     if plan.to_update:
         model_cls.objects.bulk_update(
-            [model_cls(**{pk_field: pk, cid_attr: cid}) for pk, cid in plan.to_update],
-            [concept_field],
+            [model_cls(**{pk_field: pk, cid_attr: cid, 'confidence': conf})
+             for pk, cid, conf in plan.to_update],
+            [concept_field, 'confidence'],
         )
 
     new_ids = []
@@ -8082,19 +8106,36 @@ def _apply_upsert_plan(plan, model_cls, pk_field, model_name):
                 keyed_slots[slot] = row.source_record_key
         # A concurrent request may insert one of these keys between the plan's
         # SELECT and this INSERT. ON CONFLICT DO NOTHING lets the batch land,
-        # and the rows that did not are applied below as key matches.
-        model_cls.objects.bulk_create(plan.to_insert, ignore_conflicts=bool(keyed_slots))
+        # and the rows that did not are applied below as key matches. It hides
+        # every conflict, so only keyed rows go through it: an unkeyed row's
+        # conflict still raises.
+        keyed_rows = [plan.to_insert[s] for s in keyed_slots]
+        model_cls.objects.bulk_create(
+            [row for s, row in enumerate(plan.to_insert) if s not in keyed_slots])
+        if keyed_rows:
+            model_cls.objects.bulk_create(keyed_rows, ignore_conflicts=True)
 
     if keyed_slots:
-        landed = set(model_cls.objects.filter(
+        # A keyed row landed only if its id now holds its own person and key.
+        landed = {pk: (person_id, key) for pk, person_id, key in model_cls.objects.filter(
             **{f'{pk_field}__in': [new_ids[s] for s in keyed_slots]}
-        ).values_list(pk_field, flat=True))
-        lost = {s: k for s, k in keyed_slots.items() if new_ids[s] not in landed}
+        ).values_list(pk_field, 'person_id', 'source_record_key')}
+        lost = {}
+        for slot, source_key in keyed_slots.items():
+            pk = new_ids[slot]
+            if landed.get(pk) == (plan.to_insert[slot].person_id, source_key):
+                continue
+            if pk in landed:
+                raise IntegrityError(f'{model_cls._meta.db_table}: row id {pk} was taken')
+            lost[slot] = source_key
         if lost:
             person_id = plan.to_insert[next(iter(lost))].person_id
             current = _keyed_rows(model_cls, pk_field, person_id, set(lost.values()))
             remap = {}
             for slot, source_key in lost.items():
+                if source_key not in current:   # deleted since it blocked the insert
+                    raise IntegrityError(
+                        f'{model_cls._meta.db_table}: a source record key changed concurrently')
                 pk, attribution = current[source_key]
                 plan.keyed_updates[pk] = (plan.to_insert[slot],
                                           _key_class(attribution, plan.organization))
@@ -8103,6 +8144,27 @@ def _apply_upsert_plan(plan, model_cls, pk_field, model_name):
             plan.row_slots = [('old', remap[ref]) if kind == 'new' and ref in remap
                               else (kind, ref) for kind, ref in plan.row_slots]
             new_ids = [pk if s not in remap else None for s, pk in enumerate(new_ids)]
+
+    if plan.keyed_updates and (not plan.may_write_confidence or any(
+            getattr(row, 'confidence', None) is not None
+            for row, _cls in plan.keyed_updates.values())):
+        # Real beats provisional, and only a machine credential or staff may
+        # promote (#2434). Looked up only for a caller without that standing or
+        # a batch carrying a confidence, so the usual ETL write pays no query.
+        stored = {pk: (conf, cid) for pk, conf, cid in model_cls.objects.filter(
+            **{f'{pk_field}__in': list(plan.keyed_updates)}
+        ).values_list(pk_field, 'confidence', cid_attr)}
+        dropped = set()
+        for pk, (row, _cls) in plan.keyed_updates.items():
+            old_conf, old_cid = stored.get(pk, (None, None))
+            new_conf = getattr(row, 'confidence', None)
+            if new_conf is not None and old_conf is None and old_cid != 0:
+                dropped.add(pk)            # a proposal never touches a real row
+            elif new_conf is None and old_conf is not None and not plan.may_write_confidence:
+                dropped.add(pk)            # promotion is not a user's to make
+        plan.keyed_updates = {
+            pk: v for pk, v in plan.keyed_updates.items() if pk not in dropped}
+        plan.touched_ids = [pk for pk in plan.touched_ids if pk not in dropped]
 
     if plan.keyed_updates:
         fields = _keyed_update_fields(model_cls, pk_field, plan.writable)
@@ -8774,7 +8836,8 @@ class _OmopBulkCreateMixin:
                         model_cls, pk_field, model_name, person, [instance],
                         organization=provenance.match_organization,
                         content_match=self._content_upsert(request),
-                        writable=self.serializer_class.Meta.fields)
+                        writable=self.serializer_class.Meta.fields,
+                        may_write_confidence=may_write_confidence(request))
                     ids, new_ids = _apply_upsert_plan(
                         plan, model_cls, pk_field, model_name)
 
@@ -8990,7 +9053,8 @@ class _OmopBulkCreateMixin:
                         model_cls, pk_field, model_name, person, instances,
                         organization=provenance.match_organization,
                         content_match=upsert,
-                        writable=self.serializer_class.Meta.fields)
+                        writable=self.serializer_class.Meta.fields,
+                        may_write_confidence=may_write_confidence(request))
                     ids, new_ids = _apply_upsert_plan(
                         plan, model_cls, pk_field, model_name)
                     updated = len(plan.touched_ids)
@@ -14274,44 +14338,77 @@ def code_mapping_unit_search(request):
 
 
 CODE_MAPPING_MAX_PAGE_SIZE = 1000
+_CODE_MAPPING_CURSOR_SALT = 'code-mapping-cursor'
+# A cursor is bound to the query it was issued for, except the parts a client
+# may change between pages without changing which rows the read consists of.
+_CODE_MAPPING_CURSOR_FREE_PARAMS = frozenset({'cursor', 'limit', 'include_total'})
+
+
+def _parse_rfc3339_instant(raw):
+    """An RFC 3339 instant with its offset, or None.
+
+    A bare date or a datetime without an offset is refused rather than read
+    as UTC (#2513): the boundary of a warehouse's nightly delta must not
+    depend on which side assumed the zone. A ``+hh:mm`` offset sent
+    unencoded arrives as a space, and is tolerated.
+    """
+    from django.utils import timezone
+    from django.utils.dateparse import parse_datetime
+    text = raw.strip().upper()
+    try:
+        # parse_datetime returns None for text that is not a datetime at all,
+        # but raises ValueError for one that is shaped like it and is not a
+        # real instant (a 30th of February, an hour 24).
+        parsed = parse_datetime(text) or parse_datetime(text.replace(' ', '+'))
+    except ValueError:
+        return None
+    if parsed is None or timezone.is_naive(parsed):
+        return None
+    return parsed
 
 
 class _CodeMappingPage:
-    """One page of the plain code-mapping list (#2451).
+    """One page of the plain code-mapping list (#2451, #2513).
 
     Two ways through the table. ``page=N`` is the offset paging the curation
-    UI uses, in (vocabulary, code, id) order. ``ordering=id`` with
-    ``after=<mapping_id>`` is a keyset cursor for a client reading the whole
-    table: a row written while it pages gets a higher id than any it has
-    read, and a deleted one leaves no gap to skip over, so a full read neither
-    repeats nor misses a row that existed throughout. The next link carries
-    ``after=`` and there is no prev link; ``X-Total-Count`` is sent on the
-    first page only, since it is a count of the whole table. ``page_size`` is honoured on both,
-    up to ``CODE_MAPPING_MAX_PAGE_SIZE``; HealthTree's table is 863k rows, and
-    at 100 a page that is 8,600 requests.
+    UI uses, in (vocabulary, code, id) order. ``sort=updated_at``, or a
+    ``cursor``, is the read a warehouse makes: rows in ``(updated_at, id)``
+    order, the ``Link`` next URL carrying an opaque cursor that names the last
+    row and the query it was issued for. A row written or re-saved while a
+    client pages gets a later ``updated_at`` than any it has read, so it is
+    delivered later in the same run, and a deleted one leaves no gap to skip
+    over: a full read misses no row that existed throughout. A row stamped
+    inside a long writer transaction can commit after the cursor has passed
+    its ``updated_at``; the next delta delivers it, provided its
+    ``updated_since`` margin covers the longest such transaction. The cursor is signed
+    with ``SECRET_KEY`` and bound to the filters, so a token replayed against
+    another ``updated_since`` or ``status`` is a 400, not a silently wrong
+    page. ``X-Total-Count`` is one count of the filtered table, so a cursor
+    read gets it only with ``include_total=true``. ``limit`` is honoured on
+    both, up to ``CODE_MAPPING_MAX_PAGE_SIZE``; HealthTree's table is 863k
+    rows, and at 100 a page that is 8,600 requests.
     """
 
     SOURCE_ORDER = ('source_vocabulary_id', 'source_code', 'id')
 
     def __init__(self, request, mappings):
         from rest_framework.pagination import PageNumberPagination
-        from rest_framework.utils.urls import remove_query_param, replace_query_param
+        from rest_framework.utils.urls import replace_query_param
         from omop_core.services.mapping_browse import PAGE_SIZE
         from omop_core.services.mapping_destinations import with_destination_counts
         params = request.query_params
-        page_size = self._int(params, 'page_size', PAGE_SIZE, 1, CODE_MAPPING_MAX_PAGE_SIZE)
-        ordering = params.get('ordering', 'source')
-        if ordering not in ('source', 'id'):
-            raise ValidationError({'ordering': 'Choose one of source, id.'})
-        after = self._int(params, 'after', None, 0, None)
-        if after is not None and params.get('ordering') == 'source':
-            raise ValidationError({'after': 'after=<mapping_id> pages in id order; use ordering=id or omit it.'})
+        limit = self._int(params, 'limit', PAGE_SIZE, 1, CODE_MAPPING_MAX_PAGE_SIZE)
+        sort = params.get('sort') or None
+        if sort not in (None, 'updated_at'):
+            raise ValidationError({'sort': 'Only updated_at is accepted.'})
+        cursor = params.get('cursor') or None
+        include_total = self._flag(params, 'include_total')
         mappings = with_destination_counts(mappings)
-        self.headers = {'X-Page-Size': str(page_size)}
+        self.headers = {'X-Page-Size': str(limit)}
         self.links = []
-        if after is None and ordering == 'source':
+        if cursor is None and sort is None:
             paginator = PageNumberPagination()
-            paginator.page_size = page_size
+            paginator.page_size = limit
             self.rows = list(paginator.paginate_queryset(mappings.order_by(*self.SOURCE_ORDER), request))
             self.headers['X-Total-Count'] = str(paginator.page.paginator.count)
             self.headers['X-Page'] = str(paginator.page.number)
@@ -14320,19 +14417,63 @@ class _CodeMappingPage:
                     self.links.append((relation, url))
             return
         if 'page' in params:
-            raise ValidationError({'page': 'Use after=<mapping_id> with ordering=id, not page.'})
-        # The total is one full count of the table; a cursor needs it once.
-        if after is None:
+            raise ValidationError({'page': 'A cursor read has no pages; follow the Link header.'})
+        binding = self._binding(params)
+        window = mappings.order_by('updated_at', 'id')
+        if cursor is not None:
+            updated_at, last_id = self._unsign(cursor, binding)
+            # The >= is redundant to the OR, and is what lets the planner start
+            # inside ix_sccm_updated_at: an OR alone is only a Filter, which
+            # walks the index from its first entry on every page.
+            window = window.filter(updated_at__gte=updated_at).filter(
+                Q(updated_at__gt=updated_at) | Q(updated_at=updated_at, id__gt=last_id))
+        if include_total:
+            # One full count of the filtered table, on request only.
             self.headers['X-Total-Count'] = str(mappings.order_by().count())
-        window = mappings.order_by('id')
-        if after is not None:
-            window = window.filter(id__gt=after)
-        rows = list(window[:page_size + 1])
-        self.rows = rows[:page_size]
-        if len(rows) > page_size:
-            url = replace_query_param(request.build_absolute_uri(), 'after', self.rows[-1].pk)
-            url = replace_query_param(url, 'ordering', 'id')
-            self.links.append(('next', remove_query_param(url, 'page')))
+        rows = list(window[:limit + 1])
+        self.rows = rows[:limit]
+        if len(rows) > limit:
+            last = self.rows[-1]
+            url = replace_query_param(request.build_absolute_uri(), 'cursor', self._sign(last, binding))
+            self.links.append(('next', url))
+
+    @staticmethod
+    def _binding(params):
+        from urllib.parse import urlencode
+        items = sorted(
+            (key, value)
+            for key in params if key not in _CODE_MAPPING_CURSOR_FREE_PARAMS
+            for value in params.getlist(key)
+        )
+        return hashlib.sha256(urlencode(items).encode()).hexdigest()[:16]
+
+    @staticmethod
+    def _sign(row, binding):
+        from django.core import signing
+        return signing.dumps([row.updated_at.isoformat(), row.pk, binding], salt=_CODE_MAPPING_CURSOR_SALT)
+
+    @staticmethod
+    def _unsign(cursor, binding):
+        from django.core import signing
+        try:
+            updated_at, last_id, issued_for = signing.loads(cursor, salt=_CODE_MAPPING_CURSOR_SALT)
+            updated_at = _dt.datetime.fromisoformat(updated_at)
+        except (signing.BadSignature, ValueError, TypeError):
+            raise ValidationError({'cursor': 'Not a cursor this list issued.'})
+        if issued_for != binding:
+            raise ValidationError({'cursor': 'This cursor was issued for a different query; start again without it.'})
+        return updated_at, last_id
+
+    @staticmethod
+    def _flag(params, name):
+        # Stricter than _truthy_param on purpose: a machine caller's typo
+        # ("include_total=yes") must be refused, not silently drop the count.
+        raw = (params.get(name) or '').strip().lower()
+        if raw in ('', 'false', '0'):
+            return False
+        if raw in ('true', '1'):
+            return True
+        raise ValidationError({name: 'true or false.'})
 
     @staticmethod
     def _int(params, name, default, low, high):
@@ -14398,15 +14539,12 @@ def code_mapping_list(request):
             mappings = mappings.filter(organization__slug=organization_filter)
         updated_since = request.query_params.get('updated_since')
         if updated_since:
-            from django.utils import timezone
-            from django.utils.dateparse import parse_datetime
-            # A '+hh:mm' offset sent unencoded arrives as a space.
-            since = parse_datetime(updated_since.strip()) or parse_datetime(updated_since.strip().replace(' ', '+'))
+            since = _parse_rfc3339_instant(updated_since)
             if since is None:
-                return Response({'updated_since': 'An ISO 8601 datetime is required.'},
-                                status=status.HTTP_400_BAD_REQUEST)
-            if timezone.is_naive(since):
-                since = timezone.make_aware(since, _dt.timezone.utc)
+                return Response(
+                    {'updated_since': ['An RFC 3339 instant with its offset is required, '
+                                       'such as 2026-11-13T00:00:00Z; a bare date is not.']},
+                    status=status.HTTP_400_BAD_REQUEST)
             mappings = mappings.filter(updated_at__gte=since)
         try:
             page = _CodeMappingPage(request, mappings)
