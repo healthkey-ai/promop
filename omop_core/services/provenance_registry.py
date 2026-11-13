@@ -554,8 +554,9 @@ _MANUAL_ENTRIES: dict[str, FieldProvenance] = {
         selection_rule="composite",
         description=(
             "Composite CRAB criteria from the record's canonical inputs: "
-            "calcium > 11 mg/dL, clearance < 40 mL/min (else creatinine > 2 mg/dL), "
-            "0 < hemoglobin < 10 g/dL, bone lesions; an explicit 89599-5 fact wins"
+            "calcium > 11 mg/dL, 0 < clearance < 40 mL/min (else creatinine > 2 mg/dL), "
+            "0 < hemoglobin < 10 g/dL, bone lesions; an explicit 89599-5 fact wins "
+            "on refresh (#2520)"
         ),
         constituent_fields=[
             "serum_calcium_mg_dl", "creatinine_clearance_ml_min",

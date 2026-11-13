@@ -60,9 +60,12 @@ SCENARIOS = {
         lambda p: _measure(p, '2164-2', -5, 'mL/min'), None),
     'zero clearance is a placeholder': (
         lambda p: _measure(p, '2164-2', 0, 'mL/min'), None),
-    'zero clearance defers to a high creatinine': (
-        lambda p: (_measure(p, '2164-2', 0, 'mL/min'),
-                   _measure(p, '2160-0', 3.0, 'mg/dL')), True),
+    'zero clearance defers to a normal creatinine': (
+        lambda p: (_measure(p, '718-7', 13.0, 'g/dL'),
+                   _measure(p, '17861-6', 9.5, 'mg/dL'),
+                   _measure(p, '2164-2', 0, 'mL/min'),
+                   _measure(p, '2160-0', 1.0, 'mg/dL'),
+                   _measure(p, '24646-7', 0)), False),
     'all four assessed and negative': (
         lambda p: (_measure(p, '718-7', 13.0, 'g/dL'),
                    _measure(p, '17861-6', 9.5, 'mg/dL'),
@@ -119,10 +122,12 @@ def test_a_stated_crab_fact_wins_over_the_inputs():
     assert refresh_patient_record(person).meets_crab is False
 
 
-@pytest.mark.parametrize('answer', ['Unknown', 'unknown', 'Not assessed'])
-def test_an_unknown_bone_lesion_answer_is_not_a_lesion(answer):
-    """'Unknown' is a curated bone_lesions choice. Read as a lesion it set CRAB
-    with no evidence; it is unknown, so the verdict stays unknown."""
+@pytest.mark.parametrize('answer', [
+    'Unknown', 'unknown', 'Not assessed', 'Indeterminate', 'Not detected', 'No lesions',
+])
+def test_an_unrecognised_bone_lesion_answer_is_not_a_lesion(answer):
+    """'Unknown' is a curated bone_lesions choice. Read as a lesion, it and any
+    other unrecognised text set CRAB with no evidence; they are unknown."""
     from omop_core.models import PatientRecord
     person = PersonFactory()
     PatientRecord.objects.update_or_create(
@@ -144,3 +149,18 @@ def test_an_unknown_bone_lesion_answer_leaves_a_negative_work_up_unknown():
         person=person, defaults={'bone_lesions': 'Unknown', 'user_edited_fields': ['bone_lesions']})
 
     assert refresh_patient_record(person).meets_crab is None
+
+
+@pytest.mark.parametrize('answer, expected', [
+    ('Yes', True), ('Present', True), ('2', True), ('>2', True),
+    ('No', None), ('Absent', None),
+])
+def test_recognised_bone_lesion_answers(answer, expected):
+    """A positive answer alone meets CRAB; a negative alone leaves it unknown
+    until the other three components are assessed."""
+    from omop_core.models import PatientRecord
+    person = PersonFactory()
+    PatientRecord.objects.update_or_create(
+        person=person, defaults={'bone_lesions': answer, 'user_edited_fields': ['bone_lesions']})
+
+    assert refresh_patient_record(person).meets_crab is expected

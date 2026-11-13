@@ -275,7 +275,8 @@ All notable changes to PRomop are documented here.
   clearance sets CRAB on refresh; an old clearance no longer counts forever,
   and a 0 mL/min clearance is a placeholder, not renal failure; eGFR no longer
   stands in for clearance (the SME rule, CancerBot #3593, names only CrCl and
-  creatinine); a `bone_lesions` answer of "Unknown" is unknown, not a lesion;
+  creatinine); only a recognised `bone_lesions` answer (Yes, Present, a count)
+  is a lesion, so "Unknown" or other text is unknown;
   a fully negative work-up stores `False`. Creatinine is still read only when
   no clearance is recorded (#2521), and an edit still overwrites a stated
   89599-5 verdict (#2520). `DERIVATION_VERSION` 31.

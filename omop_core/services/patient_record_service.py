@@ -4581,30 +4581,30 @@ def _decimal_or_none(value):
     return number
 
 
-#: Answers that say nobody knows. ``Unknown`` is one of the curated
-#: ``bone_lesions`` choices (Yes / No / Unknown); read as a lesion it made
-#: CRAB "met" with no evidence at all.
-_BONE_LESIONS_UNKNOWN = frozenset({
-    'unknown', 'unk', 'not known', 'not assessed', 'not evaluated', 'n/a', 'na',
-})
+#: ``bone_lesions`` answers that are a lesion and that are none. The writers
+#: emit Yes / No / Unknown (the curated choices) and Present / Absent (the OMOP
+#: extractor); CancerBot's source answers are counts (1, 2, >2).
+_BONE_LESIONS_POSITIVE = frozenset({'present', 'yes', 'true', '1', '2', '>2'})
+_BONE_LESIONS_NEGATIVE = frozenset({'absent', 'no', 'false', '0', 'none', 'negative'})
 
 
 def _bone_lesions_component(value):
-    """True for a recorded lesion, False for an explicit negative, None if blank
-    or answered unknown.
+    """True for a recognised lesion, False for a recognised negative, else None.
 
-    ``bone_lesions`` is stored as free text and the extractor writes
-    ``Present``/``Absent``. Treating an explicit negative as evidence is what
-    lets a fully negative CRAB work-up answer "not met" instead of "unknown".
+    ``bone_lesions`` is stored as free text. Only an answer known to mean a
+    lesion counts: "Unknown", "Indeterminate" or "Not detected" read as a
+    lesion set CRAB with no evidence. Treating an explicit negative as
+    evidence is what lets a fully negative CRAB work-up answer "not met"
+    instead of "unknown".
     """
-    if value is None or str(value).strip() == '':
+    if value is None:
         return None
     text = str(value).strip().casefold()
-    if text in _BONE_LESIONS_UNKNOWN:
-        return None
-    return text not in {
-        'absent', 'no', 'false', '0', 'none', 'negative',
-    }
+    if text in _BONE_LESIONS_POSITIVE:
+        return True
+    if text in _BONE_LESIONS_NEGATIVE:
+        return False
+    return None
 
 
 def derive_meets_crab(patient_info: PatientRecord):
@@ -4614,7 +4614,7 @@ def derive_meets_crab(patient_info: PatientRecord):
     fact both call it (#2480). A stated 89599-5 fact is kept by the refresh
     but not yet by an edit (#2520). The thresholds are the SME's (CancerBot
     #3593, MM_Disease_Activity slides 5 and 12): 0 < hemoglobin < 10 g/dL,
-    calcium > 11 mg/dL, clearance < 40 mL/min, serum creatinine > 2 mg/dL.
+    calcium > 11 mg/dL, 0 < clearance < 40 mL/min, serum creatinine > 2 mg/dL.
     The renal arm reads creatinine only when no usable clearance is recorded,
     as it did before; the SME slides state "creatinine > 2 or CrCl < 40",
     and whether to apply it as an OR is open (#2521). eGFR is not a
