@@ -405,3 +405,30 @@ def test_apply_rolls_back_when_evidence_appears_during_the_loop(tmp_path, ready,
 
     ambiguous.refresh_from_db()
     assert ambiguous.no_pre_existing_conditions is True
+
+
+def test_apply_aborts_when_a_legacy_attestation_becomes_explicit_after_the_audit(
+        tmp_path, ready, monkeypatch):
+    """At READ COMMITTED an in-place update of a legacy attestation takes no
+    key-share lock on the person, so the repair must lock the attestation row and
+    re-derive from it before deciding to delete it."""
+    from omop_core.management.commands import repair_pre_existing_conditions as module
+
+    ambiguous, *_ = cohort()
+    legacy = PreexistingConditionsAttestation.objects.create(
+        person=ambiguous.person, source='patient', confirmed_at=timezone.now())
+    manifest, sha = audit(tmp_path)
+    original = module.Command._lock
+
+    def lock_after_the_confirmation(self, live, supplied, rolling_back):
+        PreexistingConditionsAttestation.objects.filter(pk=legacy.pk).update(
+            source='patient-explicit', confirmed_at=timezone.now())
+        original(self, live, supplied, rolling_back)
+
+    monkeypatch.setattr(module.Command, '_lock', lock_after_the_confirmation)
+    with pytest.raises(CommandError, match='changed after the audit'):
+        apply(tmp_path, manifest, sha)
+
+    ambiguous.refresh_from_db()
+    assert ambiguous.no_pre_existing_conditions is True
+    assert PreexistingConditionsAttestation.objects.filter(pk=legacy.pk).exists()

@@ -73,18 +73,26 @@ class Command(BaseCommand):
         """Lock what this run can write, after the audit chose the cohort.
 
         The audit runs before the lock, so `_repair` re-derives each candidate's
-        evidence under it. Attestations and recorded revisions take a key-share
+        evidence under it. New attestations and recorded facts take a key-share
         lock on their person row, so locking the candidates' persons keeps a
-        freshly recorded explicit answer from landing between that check and
-        the write. The formula row is locked so the deactivation `_ready`
+        freshly recorded answer from landing between that check and the write.
+        Existing attestation rows are locked explicitly: at READ COMMITTED an
+        update of a legacy attestation takes no key-share lock on the person,
+        and deleting the row after such an update would remove a just-confirmed
+        explicit answer. The formula row is locked so the deactivation `_ready`
         verifies cannot be undone mid-run.
         """
         ids = self._target_ids(live, supplied, rolling_back)
         lock_rows(PatientRecord, ids)
         if not ids:
             return
-        lock_rows(Person, PatientRecord.objects.filter(pk__in=ids)
-                  .values_list('person_id', flat=True))
+        person_ids = PatientRecord.objects.filter(pk__in=ids).values_list(
+            'person_id', flat=True)
+        lock_rows(Person, person_ids)
+        lock_rows(PreexistingConditionsAttestation,
+                  PreexistingConditionsAttestation.objects
+                  .filter(person_id__in=person_ids)
+                  .values_list('pk', flat=True))
         lock_rows(FieldFormula, FieldFormula.objects.filter(field_name=FLAG)
                   .values_list('pk', flat=True))
 
@@ -169,12 +177,17 @@ class Command(BaseCommand):
         history = _flag_revisions(ids=ids)
         person_ids = set(
             PatientRecord.objects.filter(pk__in=ids).values_list('person_id', flat=True))
-        attestations = {
-            person_id: {'source': source, 'confirmed_at': confirmed_at.isoformat()}
-            for person_id, source, confirmed_at in (
+        attestation_rows = {
+            person_id: {'pk': pk, 'source': source,
+                        'confirmed_at': confirmed_at.isoformat()}
+            for person_id, pk, source, confirmed_at in (
                 PreexistingConditionsAttestation.objects
                 .filter(person_id__in=person_ids)
-                .values_list('person_id', 'source', 'confirmed_at'))
+                .values_list('person_id', 'pk', 'source', 'confirmed_at'))
+        }
+        attestations = {
+            person_id: {'source': row['source'], 'confirmed_at': row['confirmed_at']}
+            for person_id, row in attestation_rows.items()
         }
         entries = []
         for row in candidates:
@@ -210,7 +223,19 @@ class Command(BaseCommand):
                 if not updated:
                     raise CommandError(
                         f'Record {record.pk} changed after the audit; rerun it.')
-                PreexistingConditionsAttestation.objects.filter(person_id=record.person_id).delete()
+                # Delete only the row whose state was classified. A concurrent
+                # answer cannot land while the person and attestation rows are
+                # locked; if the row changed before the lock, the re-check above
+                # already aborted.
+                if attestation:
+                    deleted, _ = (PreexistingConditionsAttestation.objects
+                                  .filter(pk=attestation_rows[record.person_id]['pk'],
+                                          source=attestation['source'])
+                                  .delete())
+                    if not deleted:
+                        raise CommandError(
+                            f'Record {record.pk} gained an attestation after the audit; '
+                            'rerun it.')
                 RecordRevision.objects.create(patient_record=record, field=FLAG,
                                               old_value='True', new_value='None', changed_by=run)
                 record.refresh_from_db()

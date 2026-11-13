@@ -232,12 +232,14 @@ class Command(BaseCommand):
                 'organization_id': organization_id,
                 'flag': flag,
                 'categories': categories,
+                'categories_raw': categories_raw,
                 'category_state': state,
                 'classification': classification,
                 'recommended_action': action,
                 'derivation_version': derivation_version,
                 'derived_at': derived_at.isoformat() if derived_at else None,
                 'flag_revisions': len(revisions),
+                'flag_history': revisions,
                 'pending_edit': pending_edit,
                 'attested': attested,
                 'attestation': attestation,
@@ -278,9 +280,10 @@ class Command(BaseCommand):
             'records': records,
             'manifest_sha256': hashed.hexdigest(),
             'manifest_version': 2,
-            'manifest_scope': 'canonical JSON per record: id, organization, flag, raw '
-                              'categories, category state, classification, recommended action, '
-                              'provenance, revision count, pending edit and attestation',
+            'manifest_scope': 'canonical JSON per record: id, organization, flag, raw and '
+                              'normalised categories, category state, classification, '
+                              'recommended action, provenance, full flag history, pending '
+                              'edit and attestation',
         }
         payload['approval_sha256'] = approval_digest(payload)
         return payload

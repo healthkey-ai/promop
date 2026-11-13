@@ -480,3 +480,14 @@ def test_apply_rolls_back_when_evidence_appears_during_the_loop(tmp_path, ready,
 
     names['unattributed'].refresh_from_db()
     assert names['unattributed'].no_pregnancy_or_lactation_status is True
+
+
+def test_receipt_records_the_approved_digest(tmp_path, ready):
+    """The backup links to the manifest the operator approved; a classification
+    name must never replace the digest in the receipt."""
+    cohort()
+    manifest, sha = audit(tmp_path)
+
+    _path, receipt = apply(tmp_path, manifest, sha)
+
+    assert receipt['input_sha256'] == sha

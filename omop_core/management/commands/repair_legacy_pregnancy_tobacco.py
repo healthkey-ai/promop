@@ -168,11 +168,12 @@ class Command(BaseCommand):
             edited = (record.user_edited_fields
                       if isinstance(record.user_edited_fields, list) else [])
             for field in fields:
-                expected = row['fields'][field]['classification']
+                expected_classification = row['fields'][field]['classification']
                 current = classify(
                     getattr(record, field), histories[field].get(record.pk, []),
                     field in edited, source_states[field].get(record.person_id))
-                if expected not in REPAIRABLE_CLASSIFICATIONS or current != expected:
+                if (expected_classification not in REPAIRABLE_CLASSIFICATIONS
+                        or current != expected_classification):
                     raise CommandError(
                         f'Record {record.pk} changed after the audit ({current}); rerun it.')
             if any(getattr(record, field) is not True for field in fields):
