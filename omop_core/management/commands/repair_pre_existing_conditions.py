@@ -60,7 +60,7 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         mode = parser.add_mutually_exclusive_group(required=True)
-        mode.add_argument('--manifest', help='Full audit manifest v2')
+        mode.add_argument('--manifest', help='Full audit manifest v3')
         mode.add_argument('--rollback', help='Repair backup/receipt to roll back')
         parser.add_argument('--expect-sha', required=True, help='Independently approved audit/backup digest')
         parser.add_argument('--apply', action='store_true')
@@ -156,7 +156,7 @@ class Command(BaseCommand):
         }))
 
     def _repair(self, supplied, live, expected, applying):
-        if (supplied.get('manifest_version') != 2
+        if (supplied.get('manifest_version') != 3
                 or supplied.get('approval_sha256') != expected
                 or approval_digest(supplied) != expected
                 or expected != live['approval_sha256']

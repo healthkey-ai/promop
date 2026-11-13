@@ -61,8 +61,9 @@ DATABASE_URL="${STAGING_DATABASE_URL:?}" python manage.py audit_pre_existing_con
   --output "$PRIVATE_DIR/conditions-audit.json"
 ```
 
-Read the full manifest v2. The repair also checks database host, port and name;
-regenerate old v2 manifests that predate port identification. Approve its
+Read the full manifest v3. The repair also checks database host, port and name,
+and refuses older manifests: v2 hashed fewer per-record fields, so regenerate any
+v2 audit rather than approving it. Approve its
 `approval_sha256` out of band (the full-document hash, not the underlying
 `manifest_sha256` data fingerprint). Do not simply compute a new approved hash after a
 conflict. A summary-only file is not accepted for repair.

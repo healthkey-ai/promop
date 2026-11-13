@@ -484,3 +484,20 @@ def test_a_write_to_an_unrelated_patient_after_the_audit_stales_the_approval(tmp
 
     with pytest.raises(CommandError, match='digest mismatch'):
         repair(manifest, sha)
+
+
+def test_a_v2_manifest_is_refused_as_a_version_mismatch(tmp_path):
+    """v2 hashed fewer per-record fields; an approved v2 audit must be
+    regenerated, not matched against a v3 digest."""
+    from omop_core.management.guarded_repair import approval_digest
+
+    cohort()
+    manifest, _sha = audit(tmp_path)
+    payload = json.loads(open(manifest).read())
+    payload['manifest_version'] = 2
+    payload['approval_sha256'] = approval_digest(payload)
+    old = tmp_path / 'v2.json'
+    old.write_text(json.dumps(payload))
+
+    with pytest.raises(CommandError, match='Audit version'):
+        repair(str(old), payload['approval_sha256'])

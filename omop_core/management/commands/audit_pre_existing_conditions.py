@@ -279,7 +279,8 @@ class Command(BaseCommand):
             },
             'records': records,
             'manifest_sha256': hashed.hexdigest(),
-            'manifest_version': 2,
+            # 3: the per-record hash covers the whole published record (#2506).
+            'manifest_version': 3,
             'manifest_scope': 'canonical JSON per record: id, organization, flag, raw and '
                               'normalised categories, category state, classification, '
                               'recommended action, provenance, full flag history, pending '

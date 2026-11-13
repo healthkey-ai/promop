@@ -140,7 +140,7 @@ def test_the_manifest_hash_is_recomputable_from_the_records(tmp_path):
     assert row['categories_raw'] == []
     assert row['flag_history'] == []
     line = json.dumps(row, sort_keys=True, separators=(',', ':')) + '\n'
-    assert payload['manifest_version'] == 2
+    assert payload['manifest_version'] == 3
     assert hashlib.sha256(line.encode()).hexdigest() == payload['manifest_sha256']
 
 
