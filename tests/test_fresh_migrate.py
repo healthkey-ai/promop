@@ -46,9 +46,10 @@ _RESOLVED_FIXTURE_KEYS = {
     'concept_id', 'concept_vocabulary_id', 'concept_code_resolved',
 }
 
-seed = importlib.import_module(
+# cb-v2's 0240 seeds per table; the custom-field seeder is the branch under test.
+seed_custom_fields = importlib.import_module(
     'omop_core.migrations.0240_seed_field_curation_fixture',
-).seed
+)._seed_custom_fields
 
 
 def _server_url(database_url: str, name: str) -> str:
@@ -206,7 +207,7 @@ def test_an_existing_custom_field_is_left_alone_and_an_orphan_is_skipped():
         ],
     }
 
-    created = seed(apps, 'default', data)
+    created = seed_custom_fields(apps, data['custom_fields'])
 
     assert created == 0
     field = CustomPatientField.objects.get(field_name='existing_field')
