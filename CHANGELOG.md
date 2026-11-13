@@ -147,13 +147,14 @@ All notable changes to PRomop are documented here.
 - **The code-mapping full read takes HealthTree's export shape** —
   `GET /api/v1/code-mappings/?sort=updated_at` pages in `(updated_at, id)`
   order behind an opaque `cursor` that is signed and bound to its query, so
-  a row re-saved mid-read comes round again in the same run and a token
+  a row re-saved and committed mid-read comes round again in the same run and a token
   replayed against another `updated_since` or filter is a 400. `limit`
   (1 to 1000) replaces `page_size`, `include_total=true` asks for
   `X-Total-Count` on a cursor read, and `updated_since` is an RFC 3339
   instant whose offset is required: a bare date or a naive datetime is a
   400, not a guess at UTC. The two-day-old `ordering=id&after=` cursor is
-  gone. See [Code Mapping API](docs/code-mapping-api.md). (#2513)
+  gone, and a client still sending `ordering`, `after` or `page_size` gets
+  a 400 naming the replacement rather than an offset page 1. See [Code Mapping API](docs/code-mapping-api.md). (#2513)
 - **One instruction file for every coding agent** — `AGENTS.md` now holds the
   whole rulebook (the former `CLAUDE.md` content and the former `AGENTS.md`
   conventions), and `CLAUDE.md` is `@AGENTS.md` plus a short Claude Code

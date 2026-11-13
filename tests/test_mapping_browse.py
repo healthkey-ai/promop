@@ -824,8 +824,11 @@ def test_plain_list_honours_limit_up_to_the_ceiling():
         response = client.get('/api/v1/code-mappings/', {'limit': bad}, secure=True)
         assert response.status_code == 400, bad
         assert 'limit' in response.data
-    # The old name is not a silent alias.
-    assert len(client.get('/api/v1/code-mappings/', {'page_size': 2}, secure=True).data) == 100
+    # The #2451 names are refused, not read as offset page 1 of a table that looks complete.
+    for retired in ({'page_size': 2}, {'ordering': 'id'}, {'after': 5}, {'ordering': 'id', 'after': 5, 'page_size': 1000}):
+        response = client.get('/api/v1/code-mappings/', retired, secure=True)
+        assert response.status_code == 400, retired
+        assert set(response.data) <= {'page_size', 'ordering', 'after'}
 
 
 def test_plain_list_pages_by_cursor_without_skipping_or_repeating():
@@ -846,7 +849,9 @@ def test_plain_list_pages_by_cursor_without_skipping_or_repeating():
     query = _next_query(first)
     assert query['sort'] == ['updated_at'] and query['limit'] == ['3'] and 'page' not in query
     cursor = query['cursor'][0]
-    assert cursor and str(ids[-1]) not in cursor.split(':')[0:1]  # opaque, not the bare id
+    from django.core import signing
+    from patient_portal.api import views
+    assert signing.loads(cursor, salt=views._CODE_MAPPING_CURSOR_SALT)[1] == ids[-1]
 
     # A row written and one deleted mid-read neither repeat nor skip anything.
     SourceCodeConceptMapping.objects.filter(pk=ids[0]).delete()
@@ -919,7 +924,8 @@ def test_plain_list_cursor_is_bound_to_its_query():
         response = get(**overrides)
         assert response.status_code == 400 and 'cursor' in response.data, overrides
     # A forged or damaged token is refused, not read.
-    for forged in (cursor[:-2] + 'xx', cursor.replace(':', '-', 1), str(rows[1].pk), ''):
+    flipped = cursor[:-1] + ('A' if cursor[-1] != 'A' else 'B')  # always differs from the real signature
+    for forged in (flipped, cursor.replace(':', '-', 1), str(rows[1].pk), ''):
         response = get(cursor=forged)
         assert response.status_code == (200 if forged == '' else 400), forged
     assert get(page=2).status_code == 400
@@ -968,9 +974,15 @@ def test_plain_list_filters_by_updated_since_rfc3339_instant():
     response = client.get('/api/v1/code-mappings/?updated_since=2024-01-01T02:00:00 02:00', secure=True)
     assert {r['mapping_id'] for r in response.data} == {older.pk, newer.pk}
     # A bare date, a naive datetime or prose is a 400, never read as UTC.
-    for bad in ('2023-12-31', '2023-12-31T00:00:00', 'yesterday'):
+    # Nor is an instant that is shaped right and is not real: that was a 500.
+    for bad in ('2023-12-31', '2023-12-31T00:00:00', 'yesterday', '2026-02-30T00:00:00Z', '2026-11-13T24:00:00Z',
+                '2026-13-01T00:00:00Z', '2026-11-13T00:00:00+99:00'):
         response = client.get('/api/v1/code-mappings/', {'updated_since': bad}, secure=True)
         assert response.status_code == 400 and 'updated_since' in response.data, bad
+        assert isinstance(response.data['updated_since'], list)
+    # RFC 3339 allows a lowercase t and z.
+    response = client.get('/api/v1/code-mappings/', {'updated_since': '2024-01-01t00:00:00z'}, secure=True)
+    assert response.status_code == 200 and len(response.data) == 2
 
 
 @pytest.mark.parametrize('k_service, expected', [('ctomop-staging', 'trusted'), ('', 'None')])

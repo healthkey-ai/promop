@@ -13928,8 +13928,14 @@ def _parse_rfc3339_instant(raw):
     """
     from django.utils import timezone
     from django.utils.dateparse import parse_datetime
-    text = raw.strip()
-    parsed = parse_datetime(text) or parse_datetime(text.replace(' ', '+'))
+    text = raw.strip().upper()
+    try:
+        # parse_datetime returns None for text that is not a datetime at all,
+        # but raises ValueError for one that is shaped like it and is not a
+        # real instant (a 30th of February, an hour 24).
+        parsed = parse_datetime(text) or parse_datetime(text.replace(' ', '+'))
+    except ValueError:
+        return None
     if parsed is None or timezone.is_naive(parsed):
         return None
     return parsed
@@ -13945,8 +13951,10 @@ class _CodeMappingPage:
     row and the query it was issued for. A row written or re-saved while a
     client pages gets a later ``updated_at`` than any it has read, so it is
     delivered later in the same run, and a deleted one leaves no gap to skip
-    over: a full read misses no row that existed throughout, and a delta
-    needs no margin for rows updated below the cursor. The cursor is signed
+    over: a full read misses no row that existed throughout. A row stamped
+    inside a long writer transaction can commit after the cursor has passed
+    its ``updated_at``; the next delta delivers it, provided its
+    ``updated_since`` margin covers the longest such transaction. The cursor is signed
     with ``SECRET_KEY`` and bound to the filters, so a token replayed against
     another ``updated_since`` or ``status`` is a 400, not a silently wrong
     page. ``X-Total-Count`` is one count of the filtered table, so a cursor
@@ -13958,12 +13966,17 @@ class _CodeMappingPage:
     SOURCE_ORDER = ('source_vocabulary_id', 'source_code', 'id')
 
     def __init__(self, request, mappings):
-        from django.db.models import Q
         from rest_framework.pagination import PageNumberPagination
-        from rest_framework.utils.urls import remove_query_param, replace_query_param
+        from rest_framework.utils.urls import replace_query_param
         from omop_core.services.mapping_browse import PAGE_SIZE
         from omop_core.services.mapping_destinations import with_destination_counts
         params = request.query_params
+        # The #2451 contract lasted two days. A client still sending it would
+        # get offset page 1 and, seeing no cursor to follow, take it for the
+        # whole table, so refuse it and name what replaced it.
+        for retired, replacement in (('page_size', 'limit'), ('ordering', 'sort=updated_at'), ('after', 'cursor')):
+            if retired in params:
+                raise ValidationError({retired: f'Retired in #2513; use {replacement} and the Link header.'})
         limit = self._int(params, 'limit', PAGE_SIZE, 1, CODE_MAPPING_MAX_PAGE_SIZE)
         sort = params.get('sort') or None
         if sort not in (None, 'updated_at'):
@@ -13989,7 +14002,11 @@ class _CodeMappingPage:
         window = mappings.order_by('updated_at', 'id')
         if cursor is not None:
             updated_at, last_id = self._unsign(cursor, binding)
-            window = window.filter(Q(updated_at__gt=updated_at) | Q(updated_at=updated_at, id__gt=last_id))
+            # The >= is redundant to the OR, and is what lets the planner start
+            # inside ix_sccm_updated_at: an OR alone is only a Filter, which
+            # walks the index from its first entry on every page.
+            window = window.filter(updated_at__gte=updated_at).filter(
+                Q(updated_at__gt=updated_at) | Q(updated_at=updated_at, id__gt=last_id))
         if include_total:
             # One full count of the filtered table, on request only.
             self.headers['X-Total-Count'] = str(mappings.order_by().count())
@@ -13998,7 +14015,7 @@ class _CodeMappingPage:
         if len(rows) > limit:
             last = self.rows[-1]
             url = replace_query_param(request.build_absolute_uri(), 'cursor', self._sign(last, binding))
-            self.links.append(('next', remove_query_param(url, 'page')))
+            self.links.append(('next', url))
 
     @staticmethod
     def _binding(params):
@@ -14029,6 +14046,8 @@ class _CodeMappingPage:
 
     @staticmethod
     def _flag(params, name):
+        # Stricter than _truthy_param on purpose: a machine caller's typo
+        # ("include_total=yes") must be refused, not silently drop the count.
         raw = (params.get(name) or '').strip().lower()
         if raw in ('', 'false', '0'):
             return False
@@ -14103,8 +14122,8 @@ def code_mapping_list(request):
             since = _parse_rfc3339_instant(updated_since)
             if since is None:
                 return Response(
-                    {'updated_since': 'An RFC 3339 instant with its offset is required, '
-                                      'such as 2026-11-13T00:00:00Z; a bare date is not.'},
+                    {'updated_since': ['An RFC 3339 instant with its offset is required, '
+                                       'such as 2026-11-13T00:00:00Z; a bare date is not.']},
                     status=status.HTTP_400_BAD_REQUEST)
             mappings = mappings.filter(updated_at__gte=since)
         try:

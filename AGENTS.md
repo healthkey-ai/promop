@@ -1595,15 +1595,24 @@ retrieval needs all standard concepts embedded, not just the queue's candidates.
 | Params | Order | Use |
 |---|---|---|
 | `page=N` (default) | vocabulary, code, id | the curation UI; offset paging, so a row inserted or deleted mid-read shifts later pages |
-| `sort=updated_at` + `cursor=<token>` | updated_at, id | a warehouse reading the whole table or a delta, in the shape HealthTree's own export endpoints take: a row written or re-saved mid-read gets a later `updated_at` than any read, so it comes round later in the same run, and a deleted one leaves no gap. The `Link` next URL carries `cursor=`; there is no prev. `page` with either is a 400, and `sort` takes nothing else |
+| `sort=updated_at` + `cursor=<token>` | updated_at, id | a warehouse reading the whole table or a delta, in the shape HealthTree's own export endpoints take: a row written or re-saved mid-read gets a later `updated_at` than any read, so it comes round later in the same run once committed, and a deleted one leaves no gap. The `Link` next URL carries `cursor=`; there is no prev. `page` with either is a 400, and `sort` takes nothing else |
 
 The cursor is `signing.dumps([updated_at, id, digest])` under its own salt:
 opaque, and bound to the query by a digest of every parameter but `cursor`,
 `limit` and `include_total`, so a token replayed against another
 `updated_since` or filter is a 400 rather than a wrong page. Ties on
 `updated_at` are real (a bulk writer stamps one clock value on a batch), so
-the window is `updated_at > u OR (updated_at = u AND id > i)`, which
-`ix_sccm_updated_at` serves. `limit` is honoured on both, 1 to
+the window is `updated_at >= u AND (updated_at > u OR (updated_at = u AND
+id > i))`: the OR alone is a Filter that walks `ix_sccm_updated_at` from its
+first entry on every page, and the redundant `>=` is what gives the planner
+an index condition to start from. A tie of many rows (a bulk writer stamps
+one value) is still walked on each page that falls inside it. A row stamped
+inside a long writer transaction can commit after a reader's cursor has
+passed its stamp, so the delta's `updated_since` margin must cover the
+longest such transaction (`copy_reference_data`, the bulk commands), not
+clock skew alone. The cursor survives a `SECRET_KEY` rotation only while the
+old key is in `SECRET_KEY_FALLBACKS`. `ordering`, `after` and `page_size`
+are retired (#2513) and answered with a 400, not ignored. `limit` is honoured on both, 1 to
 `CODE_MAPPING_MAX_PAGE_SIZE` (1000; out of range is a 400, not a silent
 cap). The ceiling is the request budget: at ~1s per 100 rows on HealthTree,
 5,000 would outrun gunicorn's 30s. `updated_since=<RFC 3339 instant>` (offset
