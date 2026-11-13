@@ -518,3 +518,49 @@ def test_apply_has_no_per_candidate_record_lookup_before_classifying(tmp_path, r
               if 'FROM "patient_record"' in query['sql'] and 'LIMIT 1' in query['sql']]
     assert single == []
 
+
+@pytest.mark.django_db(transaction=True)
+def test_apply_outside_an_atomic_block_runs_the_production_path(tmp_path):
+    """As for the pregnancy repair: outside pytest-django's atomic block the
+    command owns its transaction, as under manage.py. READ COMMITTED is set
+    first; the constraint check, the record/person/attestation locks, the write
+    and the legacy attestation's delete follow, and the result commits."""
+    from django.test.utils import CaptureQueriesContext
+
+    recorder = MigrationRecorder(connection)
+    recorder.ensure_schema()
+    for app, name in REQUIRED:
+        recorder.record_applied(app, name)
+    with connection.cursor() as cursor:
+        cursor.execute(f'ALTER TABLE patient_record ADD CONSTRAINT {CONSTRAINT} '
+                       "CHECK (no_pre_existing_conditions IS NOT TRUE OR "
+                       "preexisting_conditions IS NULL OR "
+                       "preexisting_conditions IN ('[]'::jsonb, 'null'::jsonb))")
+    try:
+        record = PatientRecordFactory(
+            no_pre_existing_conditions=True, preexisting_conditions=[])
+        PreexistingConditionsAttestation.objects.create(
+            person=record.person, source='patient', confirmed_at=timezone.now())
+        manifest, sha = audit(tmp_path)
+        assert not connection.in_atomic_block
+        with CaptureQueriesContext(connection) as captured:
+            apply(tmp_path, manifest, sha)
+    finally:
+        with connection.cursor() as cursor:
+            cursor.execute(f'ALTER TABLE patient_record DROP CONSTRAINT IF EXISTS {CONSTRAINT}')
+        for app, name in REQUIRED:
+            recorder.record_unapplied(app, name)
+
+    statements = [query['sql'].upper() for query in captured.captured_queries]
+    isolation = next(i for i, sql in enumerate(statements) if 'ISOLATION LEVEL' in sql)
+    assert 'READ COMMITTED' in statements[isolation]
+    assert all('SAVEPOINT' in sql or sql.startswith('BEGIN') for sql in statements[:isolation])
+    locks = [i for i, sql in enumerate(statements) if 'FOR UPDATE' in sql]
+    write = next(i for i, sql in enumerate(statements)
+                 if sql.replace('"', '').startswith('UPDATE PATIENT_RECORD '))
+    assert isolation < min(locks) and max(locks) < write
+    assert any('PREEXISTINGCONDITIONSATTESTATION' in sql.replace('_', '')
+               for i in locks for sql in [statements[i]])
+    record.refresh_from_db()
+    assert record.no_pre_existing_conditions is None
+    assert not PreexistingConditionsAttestation.objects.filter(person=record.person).exists()
