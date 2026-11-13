@@ -24,11 +24,26 @@ emitted ``INSERT ... tab`` against a table without the column and stopped at
 schema history, so it writes that point's state — the fixture predates ``tab``
 and never carries one, and rows are created here rather than updated, which is
 all this migration ever needs (it filters out the natural keys that exist).
+Custom fields are the one exception to "created here": the writer's path could
+update an existing one's label, tab, type and mode from the fixture, while this
+one leaves an existing row alone, the same rule the four keyed tables follow.
+The fixture ships none today, so the difference is a shape, not data.
 """
 import json
 import os
 
 from django.db import migrations
+
+#: Fields whose answer is authored, not derived, frozen here rather than imported:
+#: a data migration must not depend on the services of a later point in history.
+#: `authored_answers.AUTHORED_ANSWER_FORMULA_FIELDS` says the same thing today;
+#: this copy is what keeps the invariant true if a release moves it.
+_AUTHORED_ANSWER_FORMULA_FIELDS = frozenset({
+    'no_pre_existing_conditions',
+    'no_active_infection_status',
+    'no_other_active_malignancies',
+    'no_pregnancy_or_lactation_status',
+})
 
 #: Columns the fixture supplies for a mapping, mapped to the model field that
 #: receives them. Everything else (id, concept, reviewer, timestamps) is set
@@ -140,10 +155,12 @@ def _seed_formulas(apps, rows):
         FieldFormula.objects.create(
             field_name=row['field_name'],
             formula=row['formula'],
-            # The fixture's active state is what the reviewed formulas shipped
-            # with. A later migration deactivates an authored-answer formula,
-            # which is where that rule belongs: it did not exist at this point.
-            is_active=row['is_active'],
+            # An authored answer can never be seeded as an active formula: the
+            # value would replace what the patient actually said. The fixture
+            # ships all four inactive, so this is the invariant, not a change.
+            is_active=bool(row['is_active']) and (
+                row['field_name'] not in _AUTHORED_ANSWER_FORMULA_FIELDS
+            ),
             created_by=None,
         )
         created += 1

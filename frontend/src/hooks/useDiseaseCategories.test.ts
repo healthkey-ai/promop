@@ -50,13 +50,15 @@ describe('disease category hooks use the clinical transport', () => {
       { disease_name: 'Multiple Myeloma', category: 'MM' },
     ] });
     const { result } = renderHook(() => useDiseasesByCategory('MM'));
-    await waitFor(() => expect(result.current.loading).toBe(false));
+    // `loading` starts false here, so waiting on it would resolve before the
+    // mocked response lands; wait on the value the hook exists to produce.
+    await waitFor(() =>
+      expect(result.current.diseases).toEqual(['Multiple Myeloma']));
 
     expect(get).toHaveBeenCalledWith(
       '/api/v1/federation/v1/disease-category-mappings/',
       { params: { category: 'MM' } },
     );
-    expect(result.current.diseases).toEqual(['Multiple Myeloma']);
   });
 
   it('maps disease names to categories through the host prefix', async () => {
@@ -85,6 +87,23 @@ describe('disease category hooks use the clinical transport', () => {
 
     expect(result.current.categoryForDisease('Multiple Myeloma')).toBeNull();
     expect(result.current.diseasesByCategory).toEqual({});
+  });
+
+  it('does not cache an unroutable body on the label path either', async () => {
+    get.mockResolvedValueOnce({ data: '<!doctype html><html></html>' });
+    const first = renderHook(() => useCategoryObjects());
+    await waitFor(() => expect(first.result.current.loading).toBe(false));
+    expect(first.result.current.categories).toEqual([]);
+    first.unmount();
+
+    get.mockResolvedValueOnce({ data: [{ value: 'MM', label: 'Multiple Myeloma' }] });
+    const second = renderHook(() => useCategoryObjects());
+    await waitFor(() =>
+      expect(second.result.current.categories).toEqual([
+        { value: 'MM', label: 'Multiple Myeloma' },
+      ]));
+
+    expect(get).toHaveBeenCalledTimes(2);
   });
 
   it('does not cache an unroutable body, so a later mount fetches again', async () => {
