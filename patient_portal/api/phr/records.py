@@ -93,7 +93,9 @@ def _statements(person, subject: str) -> dict[str, PatientStatement]:
 
 
 # Prescriptions from the record wait for the patient to say whether they took
-# them only when given in the last year; older ones count as taken (#123).
+# them only when given in the last year. Older ones count as taken and over,
+# even when the record never ended them: a patient switches the few they still
+# take rather than stopping the many they don't (#123).
 ASK_WITHIN = timedelta(days=365)
 
 
@@ -106,6 +108,12 @@ def _summary(key: str, rows: list[DrugExposure], sources: dict, today: date,
     ended = None if current or not ends else max(ends)
     in_line = all(getattr(r, 'in_line_of_therapy', False) for r in rows)
     source = sources[latest.pk]
+    old = source['kind'] == 'record' and not in_line and latest.drug_exposure_start_date < today - ASK_WITHIN
+    # An old prescription the record never ended may be one the patient still
+    # takes: it shows as taken and over, and takes "taking" as well as the
+    # past answers. One with an end date still to come is current as before.
+    # Judged on the record alone, as answers are validated.
+    may_still_take = old and current and latest.drug_exposure_end_date is None
     confirmation = None
     if with_statements and statement is not None:
         confirmation = {k: v for k, v in {
@@ -116,9 +124,15 @@ def _summary(key: str, rows: list[DrugExposure], sources: dict, today: date,
         if statement.status == PatientStatement.STOPPED and current:
             # Stopped by the patient: no longer current, history intact.
             current, ended = False, statement.stopped_on
+        elif statement.status in (PatientStatement.TOOK, PatientStatement.NOT_TAKEN) and current:
+            # A past answer, which only an old open-ended prescription takes.
+            current = False
     unanswered = with_statements and source['kind'] == 'record' and statement is None and not in_line
-    if unanswered and latest.drug_exposure_start_date < today - ASK_WITHIN:
-        # Taken unless the patient says otherwise, which they can as usual.
+    if unanswered and old:
+        # Taken unless the patient says otherwise, which they can as usual; and
+        # over, unless the record says it runs on.
+        if may_still_take:
+            current = False
         confirmation = {'status': PatientStatement.TAKING if current else PatientStatement.TOOK, 'assumed': True}
         unanswered = False
     item = {
@@ -134,6 +148,7 @@ def _summary(key: str, rows: list[DrugExposure], sources: dict, today: date,
         'confirmation': confirmation,
         'my_note': (note.note or None) if with_statements and note is not None else None,
         'pending': True if unanswered else None,
+        'may_still_take': True if may_still_take else None,
     }
     return {k: v for k, v in item.items() if v is not None}
 

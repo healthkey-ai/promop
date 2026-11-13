@@ -299,6 +299,9 @@ def test_shared_medication_selection_limits_attributes(setup, settings):
     from patient_portal.api.phr.sharing import medication_group
     settings.PHR_SHARE_URL = 'https://one.example/r'
     record, exposure, client, *_ = setup
+    # Started this year, so it stays current: a prescription over a year old
+    # without an end date reads as taken (#123), the Vitamin D's group.
+    DrugExposure.objects.filter(pk=exposure.pk).update(drug_exposure_start_date=date.today())
     patch(client, exposure, {'category': 'Myeloma treatment'})
     other = drug(record, ConceptFactory(concept_name='Vitamin D'), '2024-01-01', '2024-12-31')
     patch(client, other, {'category': 'Supplement'})

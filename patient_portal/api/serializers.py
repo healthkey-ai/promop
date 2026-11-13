@@ -1265,7 +1265,78 @@ class PatientRecordSerializer(serializers.ModelSerializer):
 # OMOP clinical event serializers
 # ---------------------------------------------------------------------------
 
-class ConditionOccurrenceSerializer(serializers.ModelSerializer):
+def may_write_confidence(request):
+    """True for a machine credential or staff: the only callers that may put a
+    row's confidence in or take it out (#2434)."""
+    from patient_portal.api.permissions import is_machine_request
+    return request is not None and (
+        is_machine_request(request) or bool(getattr(request.user, 'is_staff', False)))
+
+
+class ConfidenceWriteMixin:
+    """Who may write `confidence` on a clinical row, and on which rows (#2434).
+
+    A number marks the row provisional. Only a machine credential or staff may
+    write one, only while ``PROVISIONAL_DATA_ENABLED`` is on, never at concept 0
+    (an unmapped row has no proposal to be confident about), and never onto a
+    real row that already holds a mapping: real beats provisional.
+
+    Null on a new row is always accepted. Null on an *update* of a provisional
+    row would promote it without an approval, so it needs the same standing as
+    writing a number. Sending back the value a row already has changes nothing
+    and is accepted from anyone, so a client that reads a row and writes it
+    back still works. A write that moves a provisional row to concept 0 clears
+    its confidence: that is a rejection, and a rejected row is unmapped.
+    """
+    concept_field = None   # set by each serializer
+
+    def _stored_confidence(self):
+        return getattr(self.instance, 'confidence', None) if self.instance is not None else None
+
+    def validate_confidence(self, value):
+        from django.conf import settings
+        stored = self._stored_confidence()
+        if value == stored:
+            return value
+        if value is not None and not settings.PROVISIONAL_DATA_ENABLED:
+            raise serializers.ValidationError('Provisional data is not enabled.')
+        if not may_write_confidence(self.context.get('request')):
+            raise serializers.ValidationError(
+                'Only a service credential or staff may write or clear a confidence.')
+        return value
+
+    def _concept_id(self, attrs):
+        """The row's concept id after this write, without loading the concept:
+        a bulk update validates one bound instance per row, and a related-object
+        fetch each would make the query count grow with the batch."""
+        if self.concept_field in attrs:
+            concept = attrs[self.concept_field]
+            return None if concept is None else concept.pk
+        if self.instance is None:
+            return None
+        return getattr(self.instance, f'{self.concept_field}_id', None)
+
+    def validate(self, attrs):
+        attrs = super().validate(attrs)
+        concept_id = self._concept_id(attrs)
+        at_zero = concept_id is None or concept_id == 0
+        confidence = attrs.get('confidence')
+        if confidence is not None and at_zero:
+            raise serializers.ValidationError(
+                {'confidence': 'A row at concept 0 has no proposed mapping to be confident about.'})
+        if self.instance is not None:
+            stored_id = getattr(self.instance, f'{self.concept_field}_id', None)
+            if (confidence is not None and self._stored_confidence() is None
+                    and stored_id not in (None, 0)):
+                raise serializers.ValidationError(
+                    {'confidence': 'A real row is never made provisional.'})
+            if at_zero and 'confidence' not in attrs and self._stored_confidence() is not None:
+                attrs['confidence'] = None
+        return attrs
+
+
+class ConditionOccurrenceSerializer(ConfidenceWriteMixin, serializers.ModelSerializer):
+    concept_field = 'condition_concept'
     concept_name = serializers.SerializerMethodField()
 
     class Meta:
@@ -1278,7 +1349,7 @@ class ConditionOccurrenceSerializer(serializers.ModelSerializer):
             'condition_type_concept', 'condition_status_concept',
             'stop_reason', 'condition_source_value', 'condition_source_concept',
             'condition_status_source_value',
-            'is_erroneous', 'erroneous_reason',
+            'is_erroneous', 'erroneous_reason', 'confidence',
         ]
         extra_kwargs = {'condition_occurrence_id': {'required': False}}
 
@@ -1289,7 +1360,8 @@ class ConditionOccurrenceSerializer(serializers.ModelSerializer):
         return None
 
 
-class DrugExposureSerializer(serializers.ModelSerializer):
+class DrugExposureSerializer(ConfidenceWriteMixin, serializers.ModelSerializer):
+    concept_field = 'drug_concept'
     concept_name = serializers.SerializerMethodField()
 
     class Meta:
@@ -1303,7 +1375,7 @@ class DrugExposureSerializer(serializers.ModelSerializer):
             'route_concept', 'lot_number',
             'drug_source_value', 'drug_source_concept',
             'route_source_value', 'dose_unit_source_value',
-            'is_erroneous', 'erroneous_reason',
+            'is_erroneous', 'erroneous_reason', 'confidence',
         ]
         extra_kwargs = {'drug_exposure_id': {'required': False}}
 
@@ -1329,7 +1401,8 @@ def _validate_source_record_key(value):
     return value
 
 
-class MeasurementSerializer(serializers.ModelSerializer):
+class MeasurementSerializer(ConfidenceWriteMixin, serializers.ModelSerializer):
+    concept_field = 'measurement_concept'
     concept_name = serializers.SerializerMethodField()
     normalized = serializers.SerializerMethodField()
 
@@ -1351,7 +1424,7 @@ class MeasurementSerializer(serializers.ModelSerializer):
             'unit_concept', 'range_low', 'range_high',
             'measurement_source_value', 'measurement_source_concept',
             'unit_source_value', 'value_source_value',
-            'is_erroneous', 'erroneous_reason', 'source_record_key',
+            'is_erroneous', 'erroneous_reason', 'confidence', 'source_record_key',
         ]
         extra_kwargs = {'measurement_id': {'required': False}}
         # The (person, source_record_key) unique index is enforced by the
@@ -1401,7 +1474,8 @@ class MeasurementSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class ObservationSerializer(serializers.ModelSerializer):
+class ObservationSerializer(ConfidenceWriteMixin, serializers.ModelSerializer):
+    concept_field = 'observation_concept'
     concept_name = serializers.SerializerMethodField()
 
     class Meta:
@@ -1415,7 +1489,7 @@ class ObservationSerializer(serializers.ModelSerializer):
             'qualifier_concept', 'unit_concept',
             'observation_source_value', 'observation_source_concept',
             'unit_source_value', 'qualifier_source_value', 'value_source_value',
-            'is_erroneous', 'erroneous_reason', 'source_record_key',
+            'is_erroneous', 'erroneous_reason', 'confidence', 'source_record_key',
         ]
         extra_kwargs = {'observation_id': {'required': False}}
         # The (person, source_record_key) unique index is enforced by the
@@ -1465,7 +1539,8 @@ class ObservationSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class ProcedureOccurrenceSerializer(serializers.ModelSerializer):
+class ProcedureOccurrenceSerializer(ConfidenceWriteMixin, serializers.ModelSerializer):
+    concept_field = 'procedure_concept'
     concept_name = serializers.SerializerMethodField()
 
     class Meta:
@@ -1478,7 +1553,7 @@ class ProcedureOccurrenceSerializer(serializers.ModelSerializer):
             'procedure_type_concept', 'modifier_concept', 'quantity',
             'procedure_source_value', 'procedure_source_concept',
             'modifier_source_value',
-            'is_erroneous', 'erroneous_reason',
+            'is_erroneous', 'erroneous_reason', 'confidence',
         ]
         extra_kwargs = {'procedure_occurrence_id': {'required': False}}
 

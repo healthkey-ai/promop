@@ -122,11 +122,16 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
   // A filter whose control the reader does not see is not applied: a record
   // saved under the old Foundation preset could otherwise narrow a doctor's
   // list by a contact or location filter nothing on screen shows.
+  //
+  // Depend on the two booleans, not on extraColumns: a new column set that
+  // leaves these unchanged must not rebuild fetchPatients and refetch the list.
+  const showContact = extraColumns.includes('contact');
+  const showLocation = extraColumns.includes('location');
   const activeFilters: ReviewFilters = useMemo(() => ({
     ...reviewFilters,
-    ...(extraColumns.includes('contact') ? {} : { contact: REVIEW_FILTER_DEFAULTS.contact }),
-    ...(extraColumns.includes('location') ? {} : { location: REVIEW_FILTER_DEFAULTS.location }),
-  }), [reviewFilters, extraColumns]);
+    ...(showContact ? {} : { contact: REVIEW_FILTER_DEFAULTS.contact }),
+    ...(showLocation ? {} : { location: REVIEW_FILTER_DEFAULTS.location }),
+  }), [reviewFilters, showContact, showLocation]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());

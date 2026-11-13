@@ -33,6 +33,7 @@ from datetime import date
 from django.contrib.contenttypes.models import ContentType
 from django.db import IntegrityError, transaction
 from django.db.models import Case, F, IntegerField, Q, When
+from django.db.models.functions import Substr, Upper
 from django.utils import timezone
 
 from omop_core.models import (
@@ -800,6 +801,49 @@ def _source_value_match(model, source_col, mapping, include_description=True):
     return match
 
 
+def _persons_coded_elsewhere(mapping, table, new_concept_id, model, source_col):
+    """Persons whose rows for this code may come from another code system.
+
+    A clinical row keeps the code but not its code system, so the concept-0
+    sweep matches every unresolved row with that code. A bare local code such
+    as Epic flowsheet "6" is body temperature at one hospital and FVC at
+    another. The per-patient source codes say which systems a person's code
+    arrived in: a person who also has it under a system without a global
+    approval to this same destination is left unresolved rather than guessed.
+
+    Codes match as the sweep matches rows (case-insensitive, at the clinical
+    column's width); an inventory code that only shares that prefix blocks.
+    A hospital-scoped approval never agrees: the inventory cannot say which
+    hospital a person's code came from.
+    """
+    width = model._meta.get_field(source_col).max_length or 50
+    code = mapping.source_code
+    rows = PatientSourceCode.objects.filter(omop_table=table).annotate(
+        stored_code=Upper(Substr('source_value', 1, width)),
+    ).filter(stored_code=code[:width].upper())
+    vocabularies = set(rows.values_list('source_vocabulary_id', flat=True).distinct())
+    if not vocabularies:
+        return rows.none().values('person_id')
+    # The resolver keeps an OID apart from its canonical name when the OID
+    # holds a mapping of its own (_resolution_vocabulary).
+    retained = set(SourceCodeConceptMapping.objects.filter(
+        source_vocabulary_id__in=vocabularies & set(VOCABULARY_OID_ALIASES),
+        source_code__iexact=code[:SOURCE_CODE_MAX],
+    ).values_list('source_vocabulary_id', flat=True))
+    agreeing = set(SourceCodeConceptMapping.objects.filter(
+        source_code__iexact=code, omop_table=table, status='approved',
+        organization__isnull=True, target_concept_id=new_concept_id,
+    ).values_list('source_vocabulary_id', flat=True))
+    agreeing.add(mapping.source_vocabulary_id)
+    blocking = {
+        vocabulary for vocabulary in vocabularies
+        if (vocabulary if vocabulary in retained else canonical_source_vocabulary(vocabulary)) not in agreeing
+    }
+    return rows.filter(
+        Q(source_vocabulary_id__in=blocking) | ~Q(source_value__iexact=code),
+    ).values('person_id')
+
+
 def repoint_clinical_rows(*, mapping, old_concept_id, new_concept_id,
                           apply_changes=True, match_description=True,
                           person_id=None, units=None):
@@ -861,6 +905,9 @@ def repoint_clinical_rows(*, mapping, old_concept_id, new_concept_id,
             if raw and unit_code(raw) in wanted
         ]
         qs = qs.filter(unit_source_value__in=spellings)
+    if old_concept_id == NO_MATCHING_CONCEPT_ID:
+        qs = qs.exclude(person_id__in=_persons_coded_elsewhere(
+            mapping, table, new_concept_id, model, source_col))
     if mapping.organization_id:
         # A shared Epic flowsheet code can mean different things at two
         # hospitals.  Only rows whose write provenance names this mapping's

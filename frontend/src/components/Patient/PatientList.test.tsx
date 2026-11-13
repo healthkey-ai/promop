@@ -356,3 +356,17 @@ it('does not count unassigned patients as a second organization', async () => {
   await screen.findByText('Recorded regimen');
   expect(screen.queryByRole('columnheader', { name: 'Organization' })).not.toBeInTheDocument();
 });
+
+it('fetches the list once even when every response carries a new filter_options object', async () => {
+  // A fresh object and array per call, as the network gives. The columns once
+  // depended on that array, so each response rebuilt the fetch and fetched again.
+  vi.mocked(api.get).mockImplementation(async () => ({ data: {
+    count: 1,
+    results: [{ person_id: 1, patient_name: 'Sam Example', disease: 'Breast Cancer', therapy_lines_count: 0, unmapped_source_code_count: 0 }],
+    filter_options: { orgs: [{ value: 'a', label: 'A' }, { value: 'b', label: 'B' }], diseases: [], stages: ['I'] },
+  } }));
+  render(<MemoryRouter><PatientList /></MemoryRouter>);
+  await screen.findByTitle('Sam Example');
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  expect(api.get).toHaveBeenCalledTimes(1);
+});
