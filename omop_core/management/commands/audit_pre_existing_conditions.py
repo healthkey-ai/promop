@@ -20,8 +20,10 @@ Classification, in priority order:
                      Legacy attestations, revisions and pending edits are not proof.
 ``rewritten_true``   A revision wrote False and the current value is True again.
                      The formula most likely rewrote it, but that is inference.
+                     Recommended action ``clear``.
 ``unattributed_true``True with no evidence who wrote it. Neither proven formula output
-                     nor proven authoring -- the policy decision, not a guess.
+                     nor proven authoring; recommended action ``clear``, which the
+                     repair applies only after the manifest is reviewed and approved.
 ``explicit_false``   False never came from this formula, so it is a real answer.
 ``unanswered``      NULL/None: nobody answered.
 
@@ -64,7 +66,7 @@ CLASSIFICATIONS = (
 )
 
 #: Recommended next step per classification. The repair command acts only on
-#: `clear`; `clear_flag` (a contradiction) and `needs_policy` are human actions.
+#: `clear`; `clear_flag` (a contradiction) is a human action.
 ACTIONS = {
     'contradiction': 'clear_flag',
     'authored_true': 'keep',
