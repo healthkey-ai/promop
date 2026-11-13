@@ -10,6 +10,14 @@ date of ``pregnancy_test_result_value``; ``substance_use_details`` and
 ``geographic_exposure_risk_details`` qualify their boolean assertion row. Making
 those independent writable fields would create a second same-day row under the
 same source value and break the one-field/one-fact contract.
+
+The #0329 audit found six of the original codes in no LOINC release (11286-7,
+77243-3, 8659-8, 75985-6, 75618-3, 74204-0). A fresh install never seeded them
+(``Concept`` lookup fails), and an instance that did has had the rows moved by
+migration 0329. The table below carries the real codes for the four that have
+one; ``contraceptive_use`` (SNOMED 13197004) and ``consent_capability``
+(HealthKey ``hko:consent-capability``) are not LOINC and come from the
+``field_curation_v1`` fixture (0240) instead.
 """
 from django.db import migrations
 
@@ -22,7 +30,7 @@ _BEHAVIOR_MAPPINGS = [
     ('smoking_status', '72166-2', 'measurement', 'string', _LAB_TYPE_CONCEPT_ID),
     ('pack_years', '63640-7', 'measurement', 'number', _LAB_TYPE_CONCEPT_ID),
     ('alcohol_use', '74013-4', 'measurement', 'string', _LAB_TYPE_CONCEPT_ID),
-    ('drinks_per_week', '11286-7', 'measurement', 'number', _LAB_TYPE_CONCEPT_ID),
+    ('drinks_per_week', '44940-5', 'measurement', 'number', _LAB_TYPE_CONCEPT_ID),
     ('exercise_frequency', '68516-4', 'measurement', 'string', _LAB_TYPE_CONCEPT_ID),
     ('exercise_minutes_per_week', '89555-7', 'measurement', 'number', _LAB_TYPE_CONCEPT_ID),
     ('diet_type', '88365-2', 'measurement', 'string', _LAB_TYPE_CONCEPT_ID),
@@ -33,13 +41,11 @@ _BEHAVIOR_MAPPINGS = [
     ('education_level', '82589-3', 'measurement', 'string', _LAB_TYPE_CONCEPT_ID),
     ('marital_status', '45404-1', 'measurement', 'string', _LAB_TYPE_CONCEPT_ID),
     ('number_of_dependents', '63512-8', 'measurement', 'number', _LAB_TYPE_CONCEPT_ID),
-    ('annual_household_income', '77243-3', 'measurement', 'number', _LAB_TYPE_CONCEPT_ID),
+    ('annual_household_income', '63586-2', 'measurement', 'number', _LAB_TYPE_CONCEPT_ID),
     ('pregnancy_test_result_value', '2106-3', 'observation', 'string', _EHR_TYPE_CONCEPT_ID),
-    ('contraceptive_use', '8659-8', 'observation', 'boolean', _EHR_TYPE_CONCEPT_ID),
-    ('consent_capability', '75985-6', 'observation', 'boolean', _EHR_TYPE_CONCEPT_ID),
     ('caregiver_availability_status', '74014-2', 'observation', 'boolean', _EHR_TYPE_CONCEPT_ID),
-    ('no_mental_health_disorder_status', '75618-3', 'observation', 'boolean', _EHR_TYPE_CONCEPT_ID),
-    ('no_substance_use_status', '74204-0', 'observation', 'boolean', _EHR_TYPE_CONCEPT_ID),
+    ('no_mental_health_disorder_status', '45420-7', 'observation', 'boolean', _EHR_TYPE_CONCEPT_ID),
+    ('no_substance_use_status', '74204-9', 'observation', 'boolean', _EHR_TYPE_CONCEPT_ID),
     ('no_geographic_exposure_risk', '82593-5', 'observation', 'boolean', _EHR_TYPE_CONCEPT_ID),
 ]
 

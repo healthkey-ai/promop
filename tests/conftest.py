@@ -38,4 +38,11 @@ def lab_field_mappings(db):
         )
     apply_payload({'mappings': rows}, tables=('mappings',))
     run_data_migration('0285_approve_lab_extractor_aliases', 'approve_aliases')
+    # 0285 also approved an alias for 32730-5, a code no LOINC release has;
+    # 0329 deletes it, as it does on a deployed instance.
+    from importlib import import_module
+    from django.apps import apps as global_apps
+    from django.db import connection
+    retire = import_module('omop_core.migrations.0329_retire_invented_generator_codes')
+    retire._delete_retired_source_mappings(global_apps, connection.alias)
     return resolve_lab_code_fields()

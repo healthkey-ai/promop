@@ -153,17 +153,18 @@ _BC_HISTOLOGY_TYPES = [
     'Invasive lobular carcinoma of breast',
     'Breast carcinoma, NOS',
 ]
+# Gene-specific LOINC tests (see generate_synthea_bc; migration 0329).
 _BC_MUTATION_LOINCS = [
     ('21636-6', 'BRCA1'),
-    ('21637-4', 'BRCA2'),
-    ('21667-1', 'TP53'),
-    ('62318-1', 'PIK3CA'),
+    ('79208-5', 'BRCA2'),
+    ('103680-5', 'TP53'),
+    ('60034-6', 'PIK3CA'),
 ]
 _BC_BEHAVIOR_MEASUREMENTS = {
     '72166-2': ['Never smoked tobacco', 'Ex-smoker', 'Current smoker'],
     '63640-7': (0, 40),
     '74013-4': ['No alcohol use', 'Occasional alcohol use', 'Heavy alcohol use'],
-    '11286-7': (0, 21),
+    '44940-5': (0, 21),
     '68516-4': ['Never', 'Sometimes', 'Weekly', 'Daily'],
     '89555-7': (0, 300),
     '88365-2': ['Balanced diet', 'Low carb', 'Mediterranean', 'Standard'],
@@ -175,7 +176,7 @@ _BC_BEHAVIOR_MEASUREMENTS = {
     '45404-1': ['Single', 'Married', 'Divorced', 'Widowed'],
     '76513-1': ['Commercial', 'Medicaid', 'Medicare', 'Self-pay'],
     '63512-8': (0, 6),
-    '77243-3': (25000, 220000),
+    '63586-2': (25000, 220000),
 }
 _BC_THERAPY_PLANS = {
     'early': [

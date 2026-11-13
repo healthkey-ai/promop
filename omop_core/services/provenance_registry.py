@@ -226,7 +226,7 @@ _MANUAL_ENTRIES: dict[str, FieldProvenance] = {
         omop_table="Measurement,Observation",
         lookup_strategy="loinc",
         concept_codes=["21908-9"],
-        source_values=["21908-9", "21908-9-riss"],
+        source_values=["21908-9", "hko:r-iss-stage"],
         extractor="_get_staging_data",
         selection_rule="latest",
         description="Overall cancer stage by LOINC 21908-9",
@@ -352,21 +352,21 @@ _MANUAL_ENTRIES: dict[str, FieldProvenance] = {
     # --- MM-specific fields ---
     "plasma_cell_leukemia": FieldProvenance(
         omop_table="Measurement,Observation",
-        lookup_strategy="loinc",
-        concept_codes=["47082-2"],
-        source_values=["47082-2"],
+        lookup_strategy="snomed",
+        concept_codes=["95210003"],
+        source_values=["95210003"],
         extractor="_get_mm_specific_data",
         selection_rule="latest",
-        description="Plasma cell leukemia by LOINC 47082-2",
+        description="Plasma cell leukemia by SNOMED 95210003",
     ),
     "bone_lesions": FieldProvenance(
         omop_table="Measurement,Observation",
-        lookup_strategy="loinc",
-        concept_codes=["24646-7"],
-        source_values=["24646-7"],
+        lookup_strategy="source_value",
+        concept_codes=["hko:bone-lesions"],
+        source_values=["hko:bone-lesions"],
         extractor="_get_mm_specific_data",
         selection_rule="latest",
-        description="Bone lesions by LOINC 24646-7",
+        description="Bone lesions by HealthKey hko:bone-lesions",
     ),
 
     # --- Lymphoma-specific fields ---

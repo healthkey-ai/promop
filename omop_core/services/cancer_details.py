@@ -26,7 +26,7 @@ SLUG_FAMILY = {'multiple-myeloma': 'myeloma'}
 # Existing field mappings remain authoritative. These are existing extractor
 # identities, not newly invented concepts or diagnoses inferred from a date.
 CODES = {
-    'stage': [('LOINC', '21908-9'), ('LOINC', '21908-9-riss')],
+    'stage': [('LOINC', '21908-9'), ('HK-Observation', 'hko:r-iss-stage')],
     'histologic_type': [('LOINC', '59847-4')],
     'binet_stage': [('SNOMED', '1149099005')],
     'flipi_risk_category': [],

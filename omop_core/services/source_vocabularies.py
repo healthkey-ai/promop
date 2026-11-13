@@ -224,6 +224,9 @@ FHIR_SYSTEM_VOCABULARIES = {
     'http://hl7.org/fhir/sid/icd-10-cm': 'ICD10CM',
     'http://hl7.org/fhir/sid/icd-10': 'ICD10CM',
     'http://hl7.org/fhir/sid/cvx': 'CVX',
+    # HealthKey-minted observation concepts (hko:), the system the demo
+    # generators, the bulk importer and the legacy uploader share.
+    'https://healthkey.ai/fhir/codesystem/hk-observation': 'HK-Observation',
 }
 
 

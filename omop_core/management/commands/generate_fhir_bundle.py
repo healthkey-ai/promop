@@ -229,7 +229,7 @@ class Command(BaseCommand):
                 "status": "final",
                 "category": [{"coding": [{"system": "http://terminology.hl7.org/CodeSystem/observation-category", "code": "laboratory"}]}],
                 "code": {
-                    "coding": [{"system": "http://loinc.org", "code": "85319-5", "display": "Clonal bone marrow B lymphocytes"}],
+                    "coding": [{"system": "http://loinc.org", "code": "32525-8", "display": "CD19 cells/cells in Bone marrow"}],
                     "text": "Clonal bone marrow B lymphocytes"
                 },
                 "subject": {"reference": f"Patient/{patient_id}"},
@@ -1045,17 +1045,22 @@ class Command(BaseCommand):
             else:
                 interpretation = random.choices(interpretations, weights=interpretation_weights)[0]
             
+            # The gene-specific LOINC test, checked against the LOINC release.
+            # Before the #0329 audit this table coded PTEN and ERBB2 as the HER2
+            # IHC interpretation, ATM as a deprecated HER2 FISH, CHEK2 as the
+            # c.HGVS component, CDH1 as a reference-sequence OID, BRCA2 as the
+            # BRCA1 c.185delAG test, and TP53 / PALB2 as numbers no release has.
             gene_loinc_codes = {
-                "BRCA1": "21636-6",
-                "BRCA2": "21637-4",
-                "TP53": "47423-8",
-                "PIK3CA": "55233-1",
-                "PTEN": "48676-1",
-                "ATM": "48675-3",
-                "CHEK2": "48004-6",
-                "PALB2": "88039-1",
-                "CDH1": "81295-8",
-                "ERBB2": "48676-1"
+                "BRCA1": "21636-6",   # BRCA1 gene mutations found
+                "BRCA2": "79208-5",   # BRCA2 gene mutation analysis limited to known familial mutations
+                "TP53": "103680-5",   # TP53 gene full mutation analysis
+                "PIK3CA": "60034-6",  # PIK3CA gene targeted mutation analysis
+                "PTEN": "47969-1",    # PTEN gene targeted mutation analysis
+                "ATM": "21624-2",     # ATM gene mutations found
+                "CHEK2": "89038-4",   # CHEK2 gene deletion+duplication and full mutation analysis
+                "PALB2": "81845-0",   # PALB2 gene full mutation analysis
+                "CDH1": "21652-3",    # CDH1 gene mutations found
+                "ERBB2": "42783-1"    # ERBB2 gene mutations found
             }
             
             loinc_code = gene_loinc_codes.get(gene, "81247-9")
@@ -1156,18 +1161,24 @@ class Command(BaseCommand):
             num_lines = random.choices([0, 1, 2, 3], weights=[0.4, 0.3, 0.2, 0.1])[0]
         
         # Breast cancer treatment regimens
+        # RxNorm ingredient RXCUIs, checked against the loaded RxNorm
+        # vocabulary. Before the #0329 audit doxorubicin was coded as
+        # cyclophosphamide, cyclophosphamide as cycloserine, paclitaxel as a
+        # vitamin injection, gemcitabine as a cisplatin injection, T-DM1 as a
+        # veterinary antibiotic, palbociclib as a ribociclib brand, and five
+        # more as numbers no RxNorm release has.
         first_line_regimens = {
             'AC-T': [
-                ('Doxorubicin', '3002'),
-                ('Cyclophosphamide', '3007'),
-                ('Paclitaxel', '1716024')
+                ('Doxorubicin', '3639'),
+                ('Cyclophosphamide', '3002'),
+                ('Paclitaxel', '56946')
             ],
             'TC': [
                 ('Docetaxel', '72962'),
-                ('Cyclophosphamide', '3007')
+                ('Cyclophosphamide', '3002')
             ],
             'Paclitaxel/Trastuzumab/Pertuzumab': [
-                ('Paclitaxel', '1716024'),
+                ('Paclitaxel', '56946'),
                 ('Trastuzumab', '224905'),
                 ('Pertuzumab', '1298944')
             ],
@@ -1175,8 +1186,8 @@ class Command(BaseCommand):
                 ('Tamoxifen', '10324')
             ],
             'CDK4/6 Inhibitor + Letrozole': [
-                ('Palbociclib', '1873985'),
-                ('Letrozole', '73274')
+                ('Palbociclib', '1601374'),
+                ('Letrozole', '72965')
             ]
         }
         
@@ -1185,14 +1196,14 @@ class Command(BaseCommand):
                 ('Capecitabine', '194000')
             ],
             'T-DM1': [
-                ('Ado-trastuzumab emtansine', '1371352')
+                ('Ado-trastuzumab emtansine', '1371041')
             ],
             'Eribulin': [
                 ('Eribulin', '1045453')
             ],
             'Gemcitabine/Carboplatin': [
-                ('Gemcitabine', '1736854'),
-                ('Carboplatin', '40223')
+                ('Gemcitabine', '12574'),
+                ('Carboplatin', '40048')
             ],
             'Olaparib': [
                 ('Olaparib', '1597582')
@@ -1201,13 +1212,13 @@ class Command(BaseCommand):
         
         later_line_regimens = {
             'T-DXd': [
-                ('Trastuzumab deruxtecan', '2360840')
+                ('Trastuzumab deruxtecan', '2267582')
             ],
             'Sacituzumab govitecan': [
-                ('Sacituzumab govitecan', '2359306')
+                ('Sacituzumab govitecan', '2360232')
             ],
             'Vinorelbine': [
-                ('Vinorelbine', '72956')
+                ('Vinorelbine', '39541')
             ],
             'Pembrolizumab': [
                 ('Pembrolizumab', '1547545')
@@ -1317,7 +1328,8 @@ class Command(BaseCommand):
                 }
                 medications.append(drug_resource)
             
-            # Create Therapy Intent observation (LOINC 42804-5)
+            # Create Therapy Intent observation (LOINC 104803-2 "Therapeutic
+            # intent"; 42804-5, used before, is a fungus culture)
             # Most lines should be DEFINITIVE_LOCAL (primary curative treatment)
             if line_num == 1:
                 therapy_intent = random.choices(
@@ -1344,8 +1356,8 @@ class Command(BaseCommand):
                     "code": {
                         "coding": [{
                             "system": "http://loinc.org",
-                            "code": "42804-5",
-                            "display": "Therapy Intent"
+                            "code": "104803-2",
+                            "display": "Therapeutic intent"
                         }],
                         "text": "Therapy Intent"
                     },
@@ -1360,7 +1372,8 @@ class Command(BaseCommand):
             }
             observations.append(intent_obs)
             
-            # Create Discontinuation Reason observation (LOINC 91379-3) for completed lines
+            # Create Discontinuation Reason observation (LOINC 64882-4 "Reason
+            # stopped"; 91379-3, used before, is in no LOINC release)
             if line_num < num_lines:  # Only for completed therapy lines
                 # Determine discontinuation reason based on outcome
                 if outcome == 'Progressive Disease':
@@ -1379,8 +1392,8 @@ class Command(BaseCommand):
                         "code": {
                             "coding": [{
                                 "system": "http://loinc.org",
-                                "code": "91379-3",
-                                "display": "Reason for Discontinuation"
+                                "code": "64882-4",
+                                "display": "Reason stopped"
                             }],
                             "text": "Reason for Discontinuation"
                         },
@@ -1512,19 +1525,23 @@ class Command(BaseCommand):
         """Generate breast cancer procedures useful for OMOP ProcedureOccurrence testing."""
         procedures = []
 
+        # SNOMED procedures, checked against the loaded vocabulary: 387713003
+        # (used before for the biopsy) is the generic "Surgical procedure",
+        # 23426006 is "Measurement of respiratory function" and 108290001 is
+        # a retired radiotherapy concept.
         procedure_defs = [
-            ('biopsy', '387713003', 'Surgical biopsy of breast', -14, 0),
-            ('sentinel-node-biopsy', '23426006', 'Sentinel lymph node biopsy', 7, 35),
+            ('biopsy', '122548005', 'Biopsy of breast', -14, 0),
+            ('sentinel-node-biopsy', '396487001', 'Sentinel lymph node biopsy', 7, 35),
         ]
         if stage == '0':
             procedure_defs.append(('lumpectomy', '392021009', 'Lumpectomy of breast', 14, 45))
         elif stage == 'IV':
-            procedure_defs.append(('radiation-therapy', '108290001', 'Radiation oncology procedure', 45, 120))
+            procedure_defs.append(('radiation-therapy', '1287742003', 'Radiotherapy', 45, 120))
         else:
             procedure_defs.append(random.choice([
                 ('lumpectomy', '392021009', 'Lumpectomy of breast', 14, 45),
-                ('mastectomy', '172043006', 'Mastectomy', 14, 45),
-                ('radiation-therapy', '108290001', 'Radiation oncology procedure', 45, 120),
+                ('mastectomy', '172043006', 'Simple mastectomy', 14, 45),
+                ('radiation-therapy', '1287742003', 'Radiotherapy', 45, 120),
             ]))
 
         for key, code, display, min_days, max_days in procedure_defs:

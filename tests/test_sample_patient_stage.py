@@ -66,7 +66,7 @@ def test_backfill_preserves_projection_and_real_source_wins_later():
 
 def test_existing_omop_stage_does_not_create_synthetic_fact():
     record = PatientRecordFactory(organization=OrganizationFactory(slug='synthea-mm'))
-    ObservationFactory(person=record.person, observation_source_value='21908-9-riss', value_as_string='R-ISS III')
+    ObservationFactory(person=record.person, observation_source_value='hko:r-iss-stage', value_as_string='R-ISS III')
     PatientRecord.objects.filter(pk=record.pk).update(stage=None)
     call_command('backfill_sample_patient_stage', confirm=True)
     record.refresh_from_db()
@@ -87,7 +87,7 @@ def test_coded_stage_value_and_riss_preference():
     record = PatientRecordFactory()
     with suppress_patient_record_refresh():
         ObservationFactory(person=record.person, observation_source_value='21908-9', value_as_string='ISS II')
-        ObservationFactory(person=record.person, observation_source_value='21908-9-riss',
+        ObservationFactory(person=record.person, observation_source_value='hko:r-iss-stage',
                            value_as_concept=ConceptFactory(concept_name='R-ISS III'))
     assert _get_staging_data(record.person)['stage'] == 'R-ISS III'
 

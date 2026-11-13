@@ -32,6 +32,7 @@ from pathlib import Path
 from django.core.management.base import BaseCommand
 
 from omop_core.services.lot_regimens import MYELOMA_REGIMEN_CONCEPT_IDS
+from omop_core.services.mappings import HK_OBSERVATION_SYSTEM, LOINC_SYSTEM, SNOMED_SYSTEM
 
 # ---------------------------------------------------------------------------
 # LOINC codes used for lab observations
@@ -58,7 +59,7 @@ _L = {
     'ldh':        '2532-0',   # LDH [Enzymatic activity/vol] in Serum
     'b2m':        '1952-1',   # Beta-2 microglobulin [Mass/vol] in Serum
     'serum_m':    '51435-6',  # Protein M-spike [Mass/vol] in Serum
-    'urine_m':    '32730-5',  # Protein M-spike [Mass/time] in 24h Urine
+    'urine_m':    '42482-0',  # Protein.monoclonal [Mass/time] in 24 hour Urine by Electrophoresis (3034655)
     'kflc':       '36916-5',  # Kappa light chains.free [Mass/volume] in Serum (3034860)
     'lflc':       '33944-0',  # Lambda light chains.free [Mass/volume] in Serum or Plasma (3047169)
     'bmpc':       '11118-7',  # Plasma cells/100 cells in Bone marrow
@@ -100,26 +101,31 @@ _LATER_REGIMENS = [
     ('IxaRd',      ['ixazomib', 'lenalidomide', 'dexamethasone'],               6),
 ]
 
+# RxNorm ingredient RXCUIs, checked against the loaded RxNorm vocabulary
+# (vocabulary_id='RxNorm', concept_class_id='Ingredient'). The previous
+# values were not RXCUIs for these drugs: 1295214 is a clonidine dose group,
+# 10237 is sulindac, 1860484 a docetaxel injection, 8638 prednisolone, and
+# eleven were in no RxNorm release at all (#0329 audit).
 _DRUG_INFO = {
-    'bortezomib':    ('387544',   'Bortezomib (Velcade)'),
-    'carfilzomib':   ('1279374',  'Carfilzomib (Kyprolis)'),
-    'ixazomib':      ('1855505',  'Ixazomib (Ninlaro)'),
-    'lenalidomide':  ('337535',   'Lenalidomide (Revlimid)'),
-    'pomalidomide':  ('1295214',  'Pomalidomide (Pomalyst)'),
-    'thalidomide':   ('10237',    'Thalidomide (Thalomid)'),
-    'daratumumab':   ('1811191',  'Daratumumab (Darzalex)'),
-    'isatuximab':    ('2180126',  'Isatuximab (Sarclisa)'),
-    'elotuzumab':    ('1855498',  'Elotuzumab (Empliciti)'),
+    'bortezomib':    ('358258',   'Bortezomib (Velcade)'),
+    'carfilzomib':   ('1302966',  'Carfilzomib (Kyprolis)'),
+    'ixazomib':      ('1723735',  'Ixazomib (Ninlaro)'),
+    'lenalidomide':  ('342369',   'Lenalidomide (Revlimid)'),
+    'pomalidomide':  ('1369713',  'Pomalidomide (Pomalyst)'),
+    'thalidomide':   ('10432',    'Thalidomide (Thalomid)'),
+    'daratumumab':   ('1721947',  'Daratumumab (Darzalex)'),
+    'isatuximab':    ('2282018',  'Isatuximab (Sarclisa)'),
+    'elotuzumab':    ('1726104',  'Elotuzumab (Empliciti)'),
     'dexamethasone': ('3264',     'Dexamethasone'),
-    'prednisone':    ('8638',     'Prednisone'),
+    'prednisone':    ('8640',     'Prednisone'),
     'cyclophosphamide': ('3002',  'Cyclophosphamide'),
-    'melphalan':     ('6862',     'Melphalan (Alkeran)'),
-    'venetoclax':    ('1860484',  'Venetoclax (Venclexta)'),
-    'selinexor':     ('2177028',  'Selinexor (Xpovio)'),
-    'ciltacabtagene':('2445279',  'Ciltacabtagene autoleucel (Carvykti)'),
-    'idecabtagene':  ('2370313',  'Idecabtagene vicleucel (Abecma)'),
-    'teclistamab':   ('2574521',  'Teclistamab (Tecvayli)'),
-    'belantamab':    ('2372498',  'Belantamab mafodotin (Blenrep)'),
+    'melphalan':     ('6718',     'Melphalan (Alkeran)'),
+    'venetoclax':    ('1747556',  'Venetoclax (Venclexta)'),
+    'selinexor':     ('2178390',  'Selinexor (Xpovio)'),
+    'ciltacabtagene':('2594775',  'Ciltacabtagene autoleucel (Carvykti)'),
+    'idecabtagene':  ('2536430',  'Idecabtagene vicleucel (Abecma)'),
+    'teclistamab':   ('2619426',  'Teclistamab (Tecvayli)'),
+    'belantamab':    ('2387834',  'Belantamab mafodotin (Blenrep)'),
 }
 
 _HIGH_RISK_CYTO = {'del17p', 't(4;14)', 't(14;16)', 't(14;20)', '1q_amp'}
@@ -650,7 +656,8 @@ class Command(BaseCommand):
                                       'code': 'encounter-diagnosis'}]}],
             'code': {
                 'coding': [
-                    {'system': 'http://snomed.info/sct', 'code': '55921005', 'display': 'Multiple myeloma'},
+                    # 109989006 is the disorder; 55921005 is the morphologic abnormality.
+                    {'system': 'http://snomed.info/sct', 'code': '109989006', 'display': 'Multiple myeloma'},
                     {'system': 'http://hl7.org/fhir/sid/icd-10-cm', 'code': 'C90.00',
                      'display': 'Multiple myeloma, not having achieved remission'},
                 ],
@@ -686,15 +693,21 @@ class Command(BaseCommand):
             )}],
         }
 
-    def _obs(self, pid, obs_id, loinc, display, category, date_str, value_type, value, unit=None, unit_system=None):
-        """Build a minimal FHIR Observation entry (not wrapped in fullUrl yet)."""
+    def _obs(self, pid, obs_id, loinc, display, category, date_str, value_type, value, unit=None, unit_system=None,
+             system=LOINC_SYSTEM):
+        """Build a minimal FHIR Observation entry (not wrapped in fullUrl yet).
+
+        ``loinc`` is the code under ``system``: LOINC by default, SNOMED where
+        the field's approved mapping is a SNOMED concept, HK-Observation for a
+        HealthKey-minted concept. Never a made-up code under a standard system.
+        """
         resource = {
             'resourceType': 'Observation',
             'id': obs_id,
             'status': 'final',
             'category': [{'coding': [{'system': 'http://terminology.hl7.org/CodeSystem/observation-category',
                                        'code': category}]}],
-            'code': {'coding': [{'system': 'http://loinc.org', 'code': loinc, 'display': display}],
+            'code': {'coding': [{'system': system, 'code': loinc, 'display': display}],
                      'text': display},
             'subject': {'reference': f'Patient/{pid}'},
             'effectiveDateTime': date_str,
@@ -749,7 +762,7 @@ class Command(BaseCommand):
         return [
             self._obs(pid, f"obs-{pid}-ecog", _L['ecog'], 'ECOG Performance Status', 'survey', dt, 'integer', p['ecog']),
             self._obs(pid, f"obs-{pid}-kps", _L['kps'], 'Karnofsky Performance Status', 'survey', dt, 'integer', p['kps']),
-            self._obs(pid, f"obs-{pid}-pn-grade", '73643-8', 'Peripheral neuropathy grade',
+            self._obs(pid, f"obs-{pid}-pn-grade", '75691-6', 'Peripheral sensory neuropathy grade NCICTC',
                       'survey', dt, 'integer', p['peripheral_neuropathy_grade']),
             self._obs(pid, f"obs-{pid}-bp-sys", '8480-6', 'Systolic blood pressure',
                       'vital-signs', dt, 'quantity', p['systolic_bp'], 'mmHg'),
@@ -771,15 +784,18 @@ class Command(BaseCommand):
             'laboratory', dt, 'string', summary_val,
         ))
 
-        # Individual boolean observations for EXACT-relevant markers
+        # Individual boolean observations for EXACT-relevant markers, each
+        # under the LOINC FISH test for that abnormality. The codes used before
+        # were either not LOINC codes (72838-3, 72842-5, 72840-9) or HL7
+        # genomics reference-sequence metadata (81248-7, 81249-5, 81250-3).
         for marker, loinc, display in [
-            ('del17p',      '72838-3', 'TP53/17p deletion'),
-            ('t(4;14)',     '72842-5', 'FGFR3/IGH translocation t(4;14)'),
-            ('t(14;16)',    '81250-3', 'MAF/IGH translocation t(14;16)'),
-            ('1q_gain',     '81249-5', '1q21 gain/amplification'),
-            ('1q_amp',      '81249-5', '1q21 amplification (≥4 copies)'),
-            ('hyperdiploidy','81248-7','Hyperdiploidy'),
-            ('del13q',      '72840-9', '13q deletion'),
+            ('del17p',      '81746-0', 'Chromosome region 17p13.1 deletion [TP53] by FISH'),
+            ('t(4;14)',     '72726-3', 't(4;14)(p16;q32)(FGFR3,IGH) fusion transcript by FISH'),
+            ('t(14;16)',    '77033-9', 't(14;16)(q32;q23)(IGH,MAF) fusion transcript by FISH'),
+            ('1q_gain',     '81752-8', 'Chromosome region 1q21 duplication in Bone marrow by FISH'),
+            ('1q_amp',      '81752-8', 'Chromosome region 1q21 duplication in Bone marrow by FISH (≥4 copies)'),
+            ('hyperdiploidy','30914-6','Hyperdiploid cells/cells by Flow cytometry'),
+            ('del13q',      '81749-4', 'Chromosome region 13q14 deletion in Bone marrow by FISH'),
         ]:
             # Avoid duplicate 1q obs id
             mk_id = marker.replace('(', '').replace(')', '').replace(',', '').replace('/', '-')
@@ -798,17 +814,22 @@ class Command(BaseCommand):
             self._q_obs(pid, 'kflc',     _L['kflc'],   'Kappa free light chains', p['kappa_flc'], 'mg/L', dt),
             self._q_obs(pid, 'lflc',     _L['lflc'],   'Lambda free light chains', p['lambda_flc'], 'mg/L', dt),
         ]
+        # myeloma_type's approved mapping is SNOMED 415109007 (57905-2, used
+        # before, is a stool haemoglobin test).
         obs_list.append(self._obs(
-            pid, f"obs-{pid}-disease-type", '57905-2', 'Myeloma immunoglobulin type',
-            'laboratory', dt, 'string', p['disease_type'],
+            pid, f"obs-{pid}-disease-type", '415109007', 'Plasma cell myeloma - category',
+            'laboratory', dt, 'string', p['disease_type'], system=SNOMED_SYSTEM,
+        ))
+        # No vocabulary has a lytic-bone-lesion or a CRAB observable: both are
+        # HealthKey concepts (migration 0329). 24646-7 was not a LOINC code
+        # and 89599-5 is a Toxoplasma culture.
+        obs_list.append(self._obs(
+            pid, f"obs-{pid}-bone-lesions", 'hko:bone-lesions', 'Lytic bone lesions present',
+            'imaging', dt, 'boolean', p['bone_lesions'], system=HK_OBSERVATION_SYSTEM,
         ))
         obs_list.append(self._obs(
-            pid, f"obs-{pid}-bone-lesions", '24646-7', 'Bone lesions',
-            'imaging', dt, 'boolean', p['bone_lesions'],
-        ))
-        obs_list.append(self._obs(
-            pid, f"obs-{pid}-meets-crab", '89599-5', 'Meets CRAB criteria',
-            'laboratory', dt, 'boolean', p['meets_crab'],
+            pid, f"obs-{pid}-meets-crab", 'hko:meets-crab-criteria', 'Meets CRAB criteria',
+            'laboratory', dt, 'boolean', p['meets_crab'], system=HK_OBSERVATION_SYSTEM,
         ))
         return obs_list
 
@@ -850,7 +871,7 @@ class Command(BaseCommand):
             'social-history', dt, 'string', p['alcohol_use'],
         ))
         obs.append(self._q_obs(
-            pid, 'drinks-wk', '11286-7', 'Alcoholic drinks per week',
+            pid, 'drinks-wk', '44940-5', 'Alcoholic drinks per week - Reported',
             p['drinks_per_week'], '{drinks}/wk', dt, 'social-history',
         ))
 
@@ -900,7 +921,7 @@ class Command(BaseCommand):
             p['dependents'], '{count}', dt, 'social-history',
         ))
         obs.append(self._obs(
-            pid, f'obs-{pid}-income', '77243-3', 'Annual household income',
+            pid, f'obs-{pid}-income', '63586-2', 'Total family income in last year',
             'social-history', dt, 'string', p['annual_income'],
         ))
 
@@ -1068,8 +1089,8 @@ class Command(BaseCommand):
                 'coding': [
                     {'system': 'http://snomed.info/sct', 'code': '58336002',
                      'display': 'Autologous bone marrow transplantation'},
-                    {'system': 'http://snomed.info/sct', 'code': '404798000',
-                     'display': 'Autologous peripheral blood stem cell transplantation'},
+                    {'system': 'http://snomed.info/sct', 'code': '425983008',
+                     'display': 'Autologous peripheral blood stem cell transplant'},
                 ],
                 'text': 'Autologous Stem Cell Transplantation (ASCT)',
             },
@@ -1210,35 +1231,38 @@ class Command(BaseCommand):
         pid = p['id']
         dt = diag_date.strftime('%Y-%m-%d')
         obs_list = []
+        # Each code below is the field's approved FieldConceptMapping concept
+        # or a HealthKey mint; the codes used before (47082-2, 85598-2,
+        # 33728-8, 21908-9-riss, 21861-0, 85330-2) were not LOINC codes.
         obs_list.append(self._obs(
-            pid, f"obs-{pid}-pcl", '47082-2', 'Plasma cell leukemia',
-            'laboratory', dt, 'boolean', p['plasma_cell_leukemia'],
+            pid, f"obs-{pid}-pcl", '95210003', 'Plasma cell leukemia',
+            'laboratory', dt, 'boolean', p['plasma_cell_leukemia'], system=SNOMED_SYSTEM,
         ))
         obs_list.append(self._obs(
-            pid, f"obs-{pid}-measurable-imwg", '85598-2',
+            pid, f"obs-{pid}-measurable-imwg", 'hko:measurable-disease-imwg',
             'Measurable disease per IMWG criteria',
-            'laboratory', dt, 'boolean', p['measurable_disease_imwg'],
+            'laboratory', dt, 'boolean', p['measurable_disease_imwg'], system=HK_OBSERVATION_SYSTEM,
         ))
         obs_list.append(self._obs(
-            pid, f"obs-{pid}-progression", '33728-8', 'Disease progression status',
-            'laboratory', dt, 'string', p['progression'],
+            pid, f"obs-{pid}-progression", '246450006', 'Progression',
+            'laboratory', dt, 'string', p['progression'], system=SNOMED_SYSTEM,
         ))
         obs_list.append(self._obs(
             pid, f"obs-{pid}-iss-stage", '21908-9', 'ISS stage',
             'laboratory', dt, 'string', f"ISS {p['iss_stage']}",
         ))
         obs_list.append(self._obs(
-            pid, f"obs-{pid}-riss-stage", '21908-9-riss', 'R-ISS stage',
-            'laboratory', dt, 'string', f"R-ISS {p['riss_stage']}",
+            pid, f"obs-{pid}-riss-stage", 'hko:r-iss-stage', 'R-ISS stage',
+            'laboratory', dt, 'string', f"R-ISS {p['riss_stage']}", system=HK_OBSERVATION_SYSTEM,
         ))
         obs_list.append(self._obs(
-            pid, f"obs-{pid}-prior-lines", '21861-0', 'Prior lines of therapy',
-            'laboratory', dt, 'integer', p['prior_lines'],
+            pid, f"obs-{pid}-prior-lines", 'hko:prior-lines-of-therapy', 'Number of prior lines of therapy',
+            'laboratory', dt, 'integer', p['prior_lines'], system=HK_OBSERVATION_SYSTEM,
         ))
         obs_list.append(self._obs(
-            pid, f"obs-{pid}-refractory", '85330-2', 'Treatment refractory status',
+            pid, f"obs-{pid}-refractory", 'hko:refractory-drug-classes', 'Drug classes refractory to',
             'laboratory', dt, 'string',
-            ','.join(p['refractory']) if p['refractory'] else 'none',
+            ','.join(p['refractory']) if p['refractory'] else 'none', system=HK_OBSERVATION_SYSTEM,
         ))
         from omop_core.services.sample_disease_profiles import profile_fhir_observation
         assessments = {'myeloma_type': p['disease_type'], 'sct_eligibility': p['sct_eligibility'],

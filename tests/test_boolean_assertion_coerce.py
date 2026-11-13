@@ -20,8 +20,8 @@ from omop_core.services.field_write_service import (
 class TestCoerceAssertionValue:
     """Pure-function tests — no database required."""
 
-    # A known boolean assertion code (contraceptive_use).
-    CODE = '8659-8'
+    # A known boolean assertion code (contraceptive_use, SNOMED 13197004).
+    CODE = '13197004'
 
     # ------------------------------------------------------------------
     # Valid truthy values
@@ -147,8 +147,8 @@ class TestCoerceAssertionValue:
     # ------------------------------------------------------------------
 
     def test_inverse_boolean_code_coerces_same_as_boolean(self):
-        # 75618-3 is inverse_boolean (no_mental_health_disorder_status)
-        num, string, error = coerce_assertion_value('75618-3', None, 'yes')
+        # 45420-7 is inverse_boolean (no_mental_health_disorder_status)
+        num, string, error = coerce_assertion_value('45420-7', None, 'yes')
         assert error is None
         assert string == 'True'
         assert num == 1.0
@@ -165,10 +165,10 @@ class TestSerializerBooleanCoercion:
 
     def test_measurement_serializer_rejects_invalid_boolean(self):
         from patient_portal.api.serializers import MeasurementSerializer
-        from tests.factories import ConceptFactory, PersonFactory
+        from tests.factories import ConceptFactory, PersonFactory, VocabularyFactory
 
         person = PersonFactory()
-        concept = ConceptFactory(concept_code='8659-8', concept_name='Contraceptive use')
+        concept = ConceptFactory(concept_code='13197004', vocabulary=VocabularyFactory(vocabulary_id='SNOMED'), concept_name='Uses contraception')
         type_concept = ConceptFactory(concept_code='32856', concept_name='Lab')
 
         data = {
@@ -177,7 +177,7 @@ class TestSerializerBooleanCoercion:
             'measurement_date': '2026-01-15',
             'measurement_datetime': '2026-01-15T10:00:00Z',
             'measurement_type_concept': type_concept.concept_id,
-            'measurement_source_value': '8659-8',
+            'measurement_source_value': '13197004',
             'value_as_string': 'maybe',
         }
         serializer = MeasurementSerializer(data=data)
@@ -186,10 +186,10 @@ class TestSerializerBooleanCoercion:
 
     def test_measurement_serializer_coerces_valid_boolean(self):
         from patient_portal.api.serializers import MeasurementSerializer
-        from tests.factories import ConceptFactory, PersonFactory
+        from tests.factories import ConceptFactory, PersonFactory, VocabularyFactory
 
         person = PersonFactory()
-        concept = ConceptFactory(concept_code='8659-8', concept_name='Contraceptive use')
+        concept = ConceptFactory(concept_code='13197004', vocabulary=VocabularyFactory(vocabulary_id='SNOMED'), concept_name='Uses contraception')
         type_concept = ConceptFactory(concept_code='32856', concept_name='Lab')
 
         data = {
@@ -198,7 +198,7 @@ class TestSerializerBooleanCoercion:
             'measurement_date': '2026-01-15',
             'measurement_datetime': '2026-01-15T10:00:00Z',
             'measurement_type_concept': type_concept.concept_id,
-            'measurement_source_value': '8659-8',
+            'measurement_source_value': '13197004',
             'value_as_string': 'yes',
         }
         serializer = MeasurementSerializer(data=data)
@@ -208,10 +208,10 @@ class TestSerializerBooleanCoercion:
 
     def test_observation_serializer_rejects_invalid_boolean(self):
         from patient_portal.api.serializers import ObservationSerializer
-        from tests.factories import ConceptFactory, PersonFactory
+        from tests.factories import ConceptFactory, PersonFactory, VocabularyFactory
 
         person = PersonFactory()
-        concept = ConceptFactory(concept_code='75985-6', concept_name='Ability to consent')
+        concept = ConceptFactory(concept_code='hko:consent-capability', vocabulary=VocabularyFactory(vocabulary_id='HK-Observation'), concept_name='Capacity to consent to treatment')
         type_concept = ConceptFactory(concept_code='32817', concept_name='EHR')
 
         data = {
@@ -220,7 +220,7 @@ class TestSerializerBooleanCoercion:
             'observation_date': '2026-01-15',
             'observation_datetime': '2026-01-15T10:00:00Z',
             'observation_type_concept': type_concept.concept_id,
-            'observation_source_value': '75985-6',
+            'observation_source_value': 'hko:consent-capability',
             'value_as_string': 'banana',
         }
         serializer = ObservationSerializer(data=data)
@@ -229,10 +229,10 @@ class TestSerializerBooleanCoercion:
 
     def test_observation_serializer_coerces_valid_boolean(self):
         from patient_portal.api.serializers import ObservationSerializer
-        from tests.factories import ConceptFactory, PersonFactory
+        from tests.factories import ConceptFactory, PersonFactory, VocabularyFactory
 
         person = PersonFactory()
-        concept = ConceptFactory(concept_code='75985-6', concept_name='Ability to consent')
+        concept = ConceptFactory(concept_code='hko:consent-capability', vocabulary=VocabularyFactory(vocabulary_id='HK-Observation'), concept_name='Capacity to consent to treatment')
         type_concept = ConceptFactory(concept_code='32817', concept_name='EHR')
 
         data = {
@@ -241,7 +241,7 @@ class TestSerializerBooleanCoercion:
             'observation_date': '2026-01-15',
             'observation_datetime': '2026-01-15T10:00:00Z',
             'observation_type_concept': type_concept.concept_id,
-            'observation_source_value': '75985-6',
+            'observation_source_value': 'hko:consent-capability',
             'value_as_string': 'no',
         }
         serializer = ObservationSerializer(data=data)
@@ -252,7 +252,7 @@ class TestSerializerBooleanCoercion:
     def test_non_assertion_measurement_passes_through(self):
         """A normal lab measurement should not be affected by the coercion."""
         from patient_portal.api.serializers import MeasurementSerializer
-        from tests.factories import ConceptFactory, PersonFactory
+        from tests.factories import ConceptFactory, PersonFactory, VocabularyFactory
 
         person = PersonFactory()
         concept = ConceptFactory(concept_code='718-7', concept_name='Hemoglobin')
