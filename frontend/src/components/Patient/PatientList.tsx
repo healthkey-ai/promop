@@ -107,19 +107,30 @@ function PatientListContent({ currentUser, logout }: { currentUser: User | null;
   // Columns follow the roles (#2470): the outreach columns are an org
   // admin's, and Organization appears once the list spans several real
   // organizations (the Unassigned entry is not one).
-  const extraColumns = useMemo(() => columnsFor({
-    outreach: canAdministerOrganizations,
-    multiOrg: filterOptions.orgs.filter((org) => org.value !== '__unassigned__').length > 1,
-  }), [canAdministerOrganizations, filterOptions.orgs]);
+  //
+  // Depend on the boolean, not on filterOptions.orgs: every response stores a
+  // new filter_options object, so the array is a new reference each time, and a
+  // dependency on it rebuilt the columns, the active filters and fetchPatients
+  // on every response -- an endless refetch that kept the spinner on.
+  const multiOrg = filterOptions.orgs.filter((org) => org.value !== '__unassigned__').length > 1;
+  const extraColumns = useMemo(
+    () => columnsFor({ outreach: canAdministerOrganizations, multiOrg }),
+    [canAdministerOrganizations, multiOrg],
+  );
   const show = (column: ExtraColumn) => extraColumns.includes(column);
   // A filter whose control the reader does not see is not applied: a record
   // saved under the old Foundation preset could otherwise narrow a doctor's
   // list by a contact or location filter nothing on screen shows.
+  //
+  // Depend on the two booleans, not on extraColumns: a new column set that
+  // leaves these unchanged must not rebuild fetchPatients and refetch the list.
+  const showContact = extraColumns.includes('contact');
+  const showLocation = extraColumns.includes('location');
   const activeFilters: ReviewFilters = useMemo(() => ({
     ...reviewFilters,
-    ...(extraColumns.includes('contact') ? {} : { contact: REVIEW_FILTER_DEFAULTS.contact }),
-    ...(extraColumns.includes('location') ? {} : { location: REVIEW_FILTER_DEFAULTS.location }),
-  }), [reviewFilters, extraColumns]);
+    ...(showContact ? {} : { contact: REVIEW_FILTER_DEFAULTS.contact }),
+    ...(showLocation ? {} : { location: REVIEW_FILTER_DEFAULTS.location }),
+  }), [reviewFilters, showContact, showLocation]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
