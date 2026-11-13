@@ -167,8 +167,10 @@ class Command(BaseCommand):
         # lock, so an attestation, revision or saved flag may have landed in
         # between. The flag alone is not enough to call a row unattributed.
         history = _flag_revisions(ids=ids)
-        person_ids = set(
-            PatientRecord.objects.filter(pk__in=ids).values_list('person_id', flat=True))
+        # One read for the cohort rather than one per candidate: the loop runs
+        # under the row locks, so its length is how long other writers wait.
+        records = PatientRecord.objects.in_bulk(ids)
+        person_ids = {record.person_id for record in records.values()}
         attestation_rows = {
             person_id: {'pk': pk, 'source': source,
                         'confirmed_at': confirmed_at.isoformat()}
@@ -181,9 +183,6 @@ class Command(BaseCommand):
             person_id: {'source': row['source'], 'confirmed_at': row['confirmed_at']}
             for person_id, row in attestation_rows.items()
         }
-        # One read for the cohort rather than one per candidate: the loop runs
-        # under the row locks, so its length is how long other writers wait.
-        records = PatientRecord.objects.in_bulk(ids)
         entries = []
         for row in candidates:
             record = records.get(row['id'])

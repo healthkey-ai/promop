@@ -503,9 +503,10 @@ def test_a_v2_manifest_is_refused_as_a_version_mismatch(tmp_path):
         repair(str(old), payload['approval_sha256'])
 
 
-def test_apply_reads_the_cohort_once_instead_of_per_candidate(tmp_path, ready):
-    """The loop runs under the row locks; a per-candidate lookup in the repair
-    and again in the post-write read lengthened how long other writers wait."""
+def test_apply_has_no_per_candidate_record_lookup_before_classifying(tmp_path, ready):
+    """The repair and the post-write read load the cohort with one query each
+    instead of a single-row lookup per candidate. The write itself still does
+    per-record work (refresh, snapshot, revisions); this pins only the lookups."""
     from django.test.utils import CaptureQueriesContext
 
     for _ in range(3):
@@ -516,3 +517,4 @@ def test_apply_reads_the_cohort_once_instead_of_per_candidate(tmp_path, ready):
     single = [query['sql'] for query in captured.captured_queries
               if 'FROM "patient_record"' in query['sql'] and 'LIMIT 1' in query['sql']]
     assert single == []
+
