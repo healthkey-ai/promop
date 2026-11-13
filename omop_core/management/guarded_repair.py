@@ -250,6 +250,21 @@ def lock_rows(model, pks):
         cursor.execute("SELECT set_config('lock_timeout', %s, true)", [previous])
 
 
+def rollback_target_ids(supplied):
+    """The record ids a rollback will write, from its repair receipt.
+
+    It runs before the receipt's digest is checked (the locks come first), so
+    it validates the shape of each entry itself.
+    """
+    ids = []
+    for entry in supplied.get('entries') or []:
+        before = entry.get('before') if isinstance(entry, dict) else None
+        if not isinstance(before, dict) or not isinstance(before.get('id'), int):
+            raise CommandError('Backup/receipt entries are malformed.')
+        ids.append(before['id'])
+    return ids
+
+
 def receipt(operation, run, database, expected, entries):
     payload = {'receipt_version': 1, 'operation': operation, 'run_id': run,
                'database': database, 'input_sha256': expected, 'entries': entries}

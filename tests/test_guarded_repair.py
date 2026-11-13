@@ -281,3 +281,18 @@ def test_lock_rows_restores_the_previous_lock_timeout():
         with connection.cursor() as cursor:
             cursor.execute('SHOW lock_timeout')
             assert cursor.fetchone()[0] == '7s'
+
+
+def test_rollback_target_ids_is_shared_and_refuses_malformed_entries():
+    from omop_core.management.commands import (
+        repair_legacy_pregnancy_tobacco, repair_pre_existing_conditions,
+    )
+
+    for module in (repair_legacy_pregnancy_tobacco, repair_pre_existing_conditions):
+        assert module.rollback_target_ids is guarded_repair.rollback_target_ids
+    assert guarded_repair.rollback_target_ids(
+        {'entries': [{'before': {'id': 3}}, {'before': {'id': 1}}]}) == [3, 1]
+    assert guarded_repair.rollback_target_ids({}) == []
+    for entries in ([{'before': {'id': '3'}}], [{'before': None}], ['x']):
+        with pytest.raises(CommandError, match='malformed'):
+            guarded_repair.rollback_target_ids({'entries': entries})

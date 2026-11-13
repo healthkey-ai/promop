@@ -24,7 +24,7 @@ from omop_core.management.commands.audit_legacy_pregnancy_tobacco import (
 )
 from omop_core.management.guarded_repair import (
     canonical, digest, lock_rows, pin_transaction_isolation, read_json, receipt,
-    target_guard, write_private,
+    rollback_target_ids, target_guard, write_private,
 )
 from omop_core.models import FieldFormula, PatientRecord, Person, RecordRevision
 
@@ -85,13 +85,7 @@ class Command(BaseCommand):
     @staticmethod
     def _target_ids(live, supplied, rolling_back):
         if rolling_back:
-            ids = []
-            for entry in supplied.get('entries') or []:
-                before = entry.get('before') if isinstance(entry, dict) else None
-                if not isinstance(before, dict) or not isinstance(before.get('id'), int):
-                    raise CommandError('Backup/receipt entries are malformed.')
-                ids.append(before['id'])
-            return ids
+            return rollback_target_ids(supplied)
         return [row['id'] for row in live['records']
                 if any(row['fields'][field]['recommended_action'] in REPAIRABLE_ACTIONS
                        for field in FIELDS)]
