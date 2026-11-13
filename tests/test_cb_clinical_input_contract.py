@@ -657,7 +657,7 @@ def test_normal_backfill_selects_older_records_for_source_reader_update(patient,
     PatientRecord.objects.filter(person=patient).update(derivation_version=old_version, prothrombin_time_uln=None)
     call_command('backfill_patient_records', organization=patient.patient_record.organization.slug)
     record = PatientRecord.objects.get(person=patient)
-    assert record.derivation_version == DERIVATION_VERSION == 30
+    assert record.derivation_version == DERIVATION_VERSION == 31
     assert getattr(record, RATIO) == Decimal('1.2')
     assert list(Observation.objects.filter(person=patient).values()) == original
 
