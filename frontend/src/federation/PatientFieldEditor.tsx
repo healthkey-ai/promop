@@ -21,11 +21,12 @@ interface Props {
    * a date or boolean is never turned into a list of strings. */
   options?: string[];
   /** The control the caller's tab declared for this field (ClinicalField's
-   * `type`). A tab that names `select` alongside its own choices is describing
-   * a closed answer set — ECOG 0-5, Karnofsky 0-100 — and the stored value
-   * kind alone would otherwise fall back to a free number box that accepts
-   * values the scale does not have. An `email` declaration keeps the input's
-   * type; the descriptor's own `control` still wins for everything else. */
+   * `type`). A tab that names `select`/`multiselect` alongside its own choices
+   * is describing a closed answer set — ECOG 0-5, Karnofsky 0-100, protein
+   * expressions — and the model-derived control (`IntegerField` → number)
+   * would otherwise win and accept values the scale does not have. An `email`
+   * declaration likewise keeps the input's type. Booleans, dates and curated
+   * options keep the descriptor's control. */
   controlType?: 'text' | 'number' | 'select' | 'multiselect' | 'boolean' | 'date' | 'email';
 }
 
@@ -311,17 +312,26 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
   };
   const valueControl = field.value_kind === 'number' ? 'number'
     : field.value_kind === 'boolean' ? 'boolean' : field.value_kind === 'date' ? 'date' : 'text';
-  // A tab's declared select with its own answers is a closed scale. Booleans
-  // keep their yes/no control because their stored value is a boolean, not
-  // the tab's answer string; a plain number stays a number box.
+  // A tab's declared select with its own answers is a closed scale. It beats
+  // the descriptor's model-derived control (`IntegerField` → number); booleans
+  // keep their yes/no control because their stored value is a boolean, not the
+  // tab's answer string, dates keep the date input, and a plain number stays a
+  // number box.
   const tabSelect = (controlType === 'select' || controlType === 'multiselect')
-    && Boolean(tabOptions?.length) && field.value_kind !== 'boolean';
-  const ownControl = field.control ?? (tabSelect ? controlType
-    : (controlType === 'email' && valueControl === 'text') ? 'email' : valueControl);
+    && Boolean(tabOptions?.length)
+    && field.value_kind !== 'boolean' && field.value_kind !== 'date'
+    && field.control !== 'boolean' && field.control !== 'date';
+  const ownControl = tabSelect ? controlType
+    : (controlType === 'email' && valueControl === 'text') ? 'email'
+    : field.control ?? valueControl;
   const choices = field.options?.length ? field.options
-    : tabOptions?.length && (field.multiple || ownControl === 'text' || ownControl === 'select')
+    : tabOptions?.length && (field.multiple || ownControl === 'text'
+        || ownControl === 'select' || ownControl === 'multiselect')
       ? tabOptions : [];
-  const control = field.multiple ? 'multiselect' : choices.length ? 'select' : ownControl;
+  // A declared multiselect stays a list even when the descriptor does not mark
+  // the column `multiple` (protein expressions are comma-joined strings).
+  const control = (field.multiple || ownControl === 'multiselect') ? 'multiselect'
+    : choices.length ? 'select' : ownControl;
   // A numeric scale answered from a picker still writes a number: the column is
   // numeric and the editor's contract is type-preserving.
   const numericAnswers = control === 'select' && field.value_kind === 'number';
@@ -353,9 +363,16 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
       ? (value ? field.answer_labels?.true ?? 'Yes' : field.answer_labels?.false ?? 'No')
     : typeof value === 'object' ? JSON.stringify(value) : String(value);
   const onChangeValue = (name: string, next: unknown) => {
-    if (numericAnswers && next != null && next !== '') {
-      const parsed = Number(next);
-      if (!Number.isNaN(parsed)) next = parsed;
+    if (numericAnswers) {
+      // Clearing a numeric picker writes the same null the number box writes;
+      // an empty string would reach an integer column. An answer that is not a
+      // number is passed through unchanged: the server refuses it visibly, and
+      // turning it into null would erase the stored value instead.
+      if (next == null || next === '') next = null;
+      else {
+        const parsed = Number(next);
+        if (Number.isFinite(parsed)) next = parsed;
+      }
     }
     if (dated) { setValueDraft({ set: true, value: next }); return; }
     if (showUnitPicker && unitFieldName) {

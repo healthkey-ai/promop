@@ -413,7 +413,7 @@ describe('a tab that declares its own closed answer set', () => {
     const user = userEvent.setup();
     const { store, patch } = await setup({
       ecog_performance_status: { writable: true, target: 'patient_record',
-        value_kind: 'number', label: 'ECOG Performance Status' },
+        control: 'number', value_kind: 'number', label: 'ECOG Performance Status' },
     }, { ecog_performance_status: 2 });
     render(<PatientFieldEditor store={store} name="ecog_performance_status"
       label="ECOG Performance Status" controlType="select"
@@ -428,14 +428,73 @@ describe('a tab that declares its own closed answer set', () => {
     expect(patch.mock.calls.at(-1)?.[1]).toEqual({ ecog_performance_status: 4 });
   });
 
+  it('clears a numeric picker to null, not an empty string', async () => {
+    const user = userEvent.setup();
+    const { store, patch } = await setup({
+      ecog_performance_status: { writable: true, target: 'patient_record',
+        control: 'number', value_kind: 'number', label: 'ECOG Performance Status' },
+    }, { ecog_performance_status: 2 });
+    render(<PatientFieldEditor store={store} name="ecog_performance_status"
+      label="ECOG Performance Status" controlType="select"
+      options={['0', '1', '2']} />);
+
+    await user.click(screen.getByRole('combobox'));
+    await user.click(screen.getByRole('option', { name: '— None —' }));
+    await act(async () => { await store.flush(); });
+    expect(patch.mock.calls.at(-1)?.[1]).toEqual({ ecog_performance_status: null });
+  });
+
+  it('does not erase a numeric answer when the choice is not a number', async () => {
+    const user = userEvent.setup();
+    const { store, patch } = await setup({
+      ecog_performance_status: { writable: true, target: 'patient_record',
+        control: 'number', value_kind: 'number', label: 'ECOG Performance Status' },
+    }, { ecog_performance_status: 2 });
+    render(<PatientFieldEditor store={store} name="ecog_performance_status"
+      label="ECOG Performance Status" controlType="select"
+      options={['0', '1', 'Unknown']} />);
+
+    await user.click(screen.getByRole('combobox'));
+    await user.click(screen.getByRole('option', { name: 'Unknown' }));
+    await act(async () => { await store.flush(); });
+    // Sent as-is so the server refuses it visibly; null would silently clear.
+    expect(patch.mock.calls.at(-1)?.[1]).toEqual({ ecog_performance_status: 'Unknown' });
+  });
+
   it('keeps the declared email input type', async () => {
     const { store } = await setup({
-      email: { writable: true, target: 'patient_record', value_kind: 'string', label: 'Email' },
+      email: { writable: true, target: 'patient_record',
+        control: 'text', value_kind: 'string', label: 'Email' },
     }, { email: 'patient@example.com' });
     const { container } = render(<PatientFieldEditor store={store} name="email"
       label="Email" controlType="email" />);
 
     expect(container.querySelector('input')?.getAttribute('type')).toBe('email');
+  });
+
+  it('renders a declared multiselect from the tab answers', async () => {
+    const { store } = await setup({
+      protein_expressions: { writable: true, target: 'patient_record',
+        control: 'text', value_kind: 'string', label: 'Protein Expressions' },
+    }, { protein_expressions: 'CD5,CD23' });
+    render(<PatientFieldEditor store={store} name="protein_expressions"
+      label="Protein Expressions" controlType="multiselect"
+      options={['CD5', 'CD10', 'CD23']} />);
+
+    // A single select would show one answer and write over the rest.
+    expect(screen.getByRole('button', { name: /CD5, CD23/ })).toBeInTheDocument();
+    expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
+  });
+
+  it('never turns a date into a list of strings', async () => {
+    const { store } = await setup({
+      diagnosis_date: { writable: true, target: 'patient_record',
+        control: 'date', value_kind: 'date', label: 'Diagnosis Date' },
+    }, { diagnosis_date: '2025-01-02' });
+    const { container } = render(<PatientFieldEditor store={store} name="diagnosis_date"
+      label="Diagnosis Date" controlType="select" options={['2025-01-02']} />);
+
+    expect(container.querySelector('input')?.getAttribute('type')).toBe('date');
   });
 });
 
