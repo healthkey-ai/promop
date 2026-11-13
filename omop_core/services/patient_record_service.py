@@ -63,6 +63,7 @@ from omop_core.services.creatinine_units import (
     canonical_from_pair as creatinine_canonical_from_pair,
     canonical_in_range as creatinine_canonical_in_range,
     normalize_unit as creatinine_normalize_unit,
+    DEFAULT_UNIT as CREATININE_DEFAULT_UNIT,
 )
 from omop_core.services.blood_count_source_pairs import (
     PAIRS as _COUNT_SOURCE_PAIRS,
@@ -102,8 +103,12 @@ _DIRECT_UNIT_FIELD = direct_bilirubin_units.UNIT_FIELD
 _DIRECT_ALIAS_FIELD = direct_bilirubin_units.ALIAS_FIELD
 _CHEMISTRY_SELECTED_FIELDS = _CHEMISTRY_CANONICAL_FIELDS | {_DIRECT_PAIR_FIELD}
 #: The chronological import pass also owns hemoglobin's canonical/pair, because
-#: a LOINC 718-7 result can arrive in g/L and must not be stored as g/dL.
-_UNIT_PAIR_SELECTED_FIELDS = _CHEMISTRY_SELECTED_FIELDS | {HEMOGLOBIN_CANONICAL}
+#: a LOINC 718-7 result can arrive in g/L and must not be stored as g/dL, and
+#: serum creatinine's, because 2160-0 arrives in umol/L as often as in mg/dL:
+#: 80 umol/L (normal) was stored as 80 mg/dL (#2438).
+_UNIT_PAIR_SELECTED_FIELDS = _CHEMISTRY_SELECTED_FIELDS | {
+    HEMOGLOBIN_CANONICAL, CREATININE_CANONICAL,
+}
 
 
 def _concept_unit_code(measurement):
@@ -201,7 +206,7 @@ def _usable_concept_name(concept) -> str | None:
 
 # Bump this whenever aggregation or computation logic changes in any section
 # extractor or in _compute_derived_fields.  See DERIVATION_CHANGELOG.md.
-DERIVATION_VERSION = 29
+DERIVATION_VERSION = 31
 
 # These PatientRecord columns are projections of PersonLanguageSkill, never
 # independent edits. Older PATCH requests could mark them as user-edited and
@@ -1526,6 +1531,11 @@ def refresh_patient_record(person: Person) -> PatientRecord:
             changed_fields=(
                 user_edited & {'flipi_score_options', 'gelf_criteria_options'}
             ) | ({'disease'} if 'disease' in user_edited else set()),
+            # A stated CRAB result (an 89599-5 fact or an approved mapping)
+            # stands. Otherwise the verdict comes from the record's final
+            # inputs, after pending edits and source pairs are settled, with
+            # the rule an edit uses (#2480).
+            derive_crab=patient_info.meets_crab is None,
         )
         if retired_values:
             write_record_revisions(record, retired_values, changed_by='system')
@@ -1533,11 +1543,13 @@ def refresh_patient_record(person: Person) -> PatientRecord:
 
 
 def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fields=(),
-                                    pair_derived=()) -> PatientRecord:
+                                    pair_derived=(), derive_crab=False) -> PatientRecord:
     """Save aliases and calculations from the current record without reading OMOP facts.
 
     This does not advance derived_at/version: those describe the last full
     OMOP refresh, not the last edit of PatientRecord's own values.
+    ``derive_crab`` re-derives ``meets_crab`` from the record's inputs even
+    when none of them changed; a full refresh with no stated CRAB fact sets it.
     """
     from omop_core.services.pre_existing_conditions import (
         contradicts_no_pre_existing_conditions,
@@ -1812,7 +1824,7 @@ def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fiel
     # MM defining events are computed, but their source facts are ordinary
     # editable inputs. A direct edit to one of those inputs must move the verdict
     # now rather than leaving a stale result from the last OMOP refresh.
-    if MEETS_CRAB_INPUT_FIELDS.intersection(dependency_changed):
+    if derive_crab or MEETS_CRAB_INPUT_FIELDS.intersection(dependency_changed):
         # A source-pair edit changes the canonical g/dL read-model without
         # being an explicit canonical write, so the verdict must follow it too.
         patient_info.meets_crab = derive_meets_crab(patient_info)
@@ -4569,33 +4581,56 @@ def _decimal_or_none(value):
     return number
 
 
-def _bone_lesions_component(value):
-    """True for a recorded lesion, False for an explicit negative, None if blank.
+#: ``bone_lesions`` answers that are a lesion and that are none. The writers
+#: emit Yes / No / Unknown (the curated choices) and Present / Absent (the OMOP
+#: extractor); CancerBot's source answers are counts (1, 2, >2).
+_BONE_LESIONS_POSITIVE = frozenset({'present', 'yes', 'true', '1', '2', '>2'})
+_BONE_LESIONS_NEGATIVE = frozenset({'absent', 'no', 'false', '0', 'none', 'negative'})
 
-    ``bone_lesions`` is stored as free text and the extractor writes
-    ``Present``/``Absent``. Treating an explicit negative as evidence is what
-    lets a fully negative CRAB work-up answer "not met" instead of "unknown".
+
+def _bone_lesions_component(value):
+    """True for a recognised lesion, False for a recognised negative, else None.
+
+    ``bone_lesions`` is stored as free text. Only an answer known to mean a
+    lesion counts: "Unknown", "Indeterminate" or "Not detected" read as a
+    lesion set CRAB with no evidence. Treating an explicit negative as
+    evidence is what lets a fully negative CRAB work-up answer "not met"
+    instead of "unknown".
     """
-    if value is None or str(value).strip() == '':
+    if value is None:
         return None
-    return str(value).strip().casefold() not in {
-        'absent', 'no', 'false', '0', 'none', 'negative',
-    }
+    text = str(value).strip().casefold()
+    if text in _BONE_LESIONS_POSITIVE:
+        return True
+    if text in _BONE_LESIONS_NEGATIVE:
+        return False
+    return None
 
 
 def derive_meets_crab(patient_info: PatientRecord):
     """Three-valued CRAB from the record's canonical inputs.
 
-    Same thresholds as the OMOP fallback in :func:`_get_mm_specific_data`
-    (0 < hemoglobin < 10 g/dL, calcium > 11 mg/dL, clearance < 40 mL/min) plus the
-    standard serum-creatinine alternative (> 2 mg/dL) when no clearance is
-    recorded. A positive component establishes CRAB; a negative answer requires
-    every component to be evaluated, otherwise the result stays unknown rather
-    than asserting a defining event that was never assessed.
+    The one CRAB rule: a direct edit and a full refresh without a stated CRAB
+    fact both call it (#2480). A stated 89599-5 fact is kept by the refresh
+    but not yet by an edit (#2520). The thresholds are the SME's (CancerBot
+    #3593, MM_Disease_Activity slides 5 and 12): 0 < hemoglobin < 10 g/dL,
+    calcium > 11 mg/dL, 0 < clearance < 40 mL/min, serum creatinine > 2 mg/dL.
+    The renal arm reads creatinine only when no usable clearance is recorded,
+    as it did before; the SME slides state "creatinine > 2 or CrCl < 40",
+    and whether to apply it as an OR is open (#2521). eGFR is not a
+    clearance there and is not read. A positive component
+    establishes CRAB; a negative answer requires every component to be
+    evaluated, otherwise the result stays unknown rather than asserting a
+    defining event that was never assessed ("not enough data" is Unknown,
+    slide 15).
     """
     hgb = _decimal_or_none(patient_info.hemoglobin_g_dl)
     calcium = _decimal_or_none(patient_info.serum_calcium_mg_dl)
     clearance = _decimal_or_none(patient_info.creatinine_clearance_ml_min)
+    if clearance is not None and clearance <= 0:
+        # 0 mL/min fits the column but is an ETL placeholder, as a 0 g/dL
+        # hemoglobin is; an anuric patient's creatinine still decides (#2485).
+        clearance = None
     creatinine = _decimal_or_none(patient_info.serum_creatinine_mg_dl)
     if clearance is not None:
         renal = clearance < Decimal('40')
@@ -4648,7 +4683,9 @@ def _get_mm_specific_data(person: Person, snapshot: OmopSnapshot = None) -> dict
     """Derive MM-specific boolean and coded fields from OMOP Observation table.
 
     Covers fields the lab routing cannot derive (boolean / string-valued
-    observations): plasma_cell_leukemia, bone_lesions, meets_crab.
+    observations): plasma_cell_leukemia, bone_lesions, an explicit meets_crab
+    fact, and meets_slim. Without an explicit fact, meets_crab comes from
+    :func:`derive_meets_crab` at the end of :func:`refresh_patient_record`.
     Uses measurement_source_value as the LOINC lookup since Concept rows may not
     be loaded in all environments.
     """
@@ -4741,102 +4778,11 @@ def _get_mm_specific_data(person: Person, snapshot: OmopSnapshot = None) -> dict
 
     data['meets_slim'] = meets_slim
 
-    # ── meets_crab fallback: compute from OMOP Measurements when obs missing ─
-    if 'meets_crab' not in data:
-        # Creatinine clearance, the preferred renal fact. Hemoglobin, calcium
-        # and serum creatinine are read through newest_canonical below.
-        _CRCL_CODES = ('2164-2', '33914-3')
-        crab_vals = {}
-        for code in _CRCL_CODES:
-            for m in snapshot.meas_by_source.get(code, ()):
-                if m.value_as_number is not None:
-                    crab_vals.setdefault(code, []).append(float(m.value_as_number))
-
-        crcl_vals = crab_vals.get('2164-2', []) or crab_vals.get('33914-3', [])
-
-        def newest_canonical(defaults, normalize, from_pair, in_range):
-            """The newest row's value in the canonical unit, or None.
-
-            The snapshot holds each value in its reported unit (#2249), so a
-            raw 8.1 mmol/L hemoglobin is 13 g/dL — not anemia. An unreadable
-            newest unit is no evidence, not a reason to fall back to an older
-            result with a different unit.
-
-            ``defaults`` maps each LOINC to the unit a unitless row is read in;
-            None means a row of that code needs a unit of its own. Molar
-            LOINCs get None: a unitless 59260-0 hemoglobin of 8 mmol/L read as
-            8 g/dL is a false anemia, and almost every normal molar value is
-            below 10.
-            A value outside the canonical column's range (a negative one would
-            meet every "< N" threshold) is no evidence either.
-            """
-            rows = {}
-            for code, default in defaults.items():
-                for m in (_rows_by_codes(snapshot, (code,))
-                          + _rows_by_sources(snapshot, (code,))):
-                    if m.value_as_number is None:
-                        continue
-                    # A row matching two codes takes the stricter default.
-                    known = rows.get(m.measurement_id)
-                    rows[m.measurement_id] = (
-                        m, None if known is not None and known[1] is None else default)
-            if not rows:
-                return None
-            newest, default_unit = sorted(
-                rows.values(), key=lambda pair: _fact_recency_key(pair[0]), reverse=True)[0]
-            _reported_unit, unit_code = _resolve_reported_unit(
-                newest, normalize, default_unit)
-            if unit_code is None:
-                return None
-            recognised, canonical = from_pair(newest.value_as_number, unit_code)
-            if not recognised or canonical is None or not in_range(canonical):
-                return None
-            return canonical
-
-        hgb = newest_canonical(
-            # 718-7 is mass/volume; 59260-0 is moles/volume.
-            {'718-7': HEMOGLOBIN_DEFAULT_UNIT, '59260-0': None},
-            normalize_hemoglobin_unit,
-            hemoglobin_canonical_from_pair,
-            hemoglobin_canonical_in_range,
-        )
-        # 17861-6 is mass/volume. 2000-0 is kept from dev but is not a LOINC
-        # code (the moles/volume one is 2000-8, #2467); whatever an ETL files
-        # under it counts only with a unit of its own.
-        calcium = newest_canonical(
-            {'17861-6': _CHEMISTRY_PAIRS['serum_calcium_mg_dl']['default_unit'],
-             '2000-0': None},
-            lambda unit: normalize_chemistry_unit('serum_calcium_mg_dl', unit),
-            lambda value, unit: chemistry_canonical_from_pair(
-                'serum_calcium_mg_dl', value, unit),
-            lambda value: chemistry_canonical_in_range('serum_calcium_mg_dl', value),
-        )
-
-        # 0 g/dL fits the column but is no blood count: an ETL placeholder.
-        crab_anemia = hgb is not None and 0 < hgb < 10.0
-        crab_calcium = calcium is not None and calcium > 11.0
-        # Clearance is the preferred renal fact; serum creatinine > 2 mg/dL is
-        # the recorded alternative, matching derive_meets_crab().
-        if crcl_vals:
-            crab_renal = min(crcl_vals) < 40.0
-        else:
-            # The newest serum creatinine only, in mg/dL, read like hemoglobin
-            # and calcium. Raw values have no unit (80 umol/L is normal) and
-            # span all history, so max() made one old or SI result CRAB for
-            # good (#2430). Coded EHR rows carry the LOINC on the concept and a
-            # display name as source value, and 38483-4 is an approved serum
-            # creatinine alias; both are mass/volume.
-            creatinine = newest_canonical(
-                {'2160-0': 'MG/DL', '38483-4': 'MG/DL'},
-                creatinine_normalize_unit,
-                creatinine_canonical_from_pair,
-                creatinine_canonical_in_range,
-            )
-            crab_renal = creatinine is not None and creatinine > 2
-        crab_bone = data.get('bone_lesions') == 'Present'
-
-        if any([crab_anemia, crab_calcium, crab_renal, crab_bone]):
-            data['meets_crab'] = True
+    # meets_crab is not computed here unless an explicit 89599-5 fact states
+    # it: without one, refresh_patient_record derives it from the record's
+    # canonical inputs with derive_meets_crab(), the same rule an edit uses
+    # (#2480). Reading fixed LOINCs here bypassed the lab routing, so an
+    # approved alias or a coded EHR row set the input but not the verdict.
 
     return data
 
@@ -5000,7 +4946,8 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None,
         field_name = _LEGACY_LAB_CONCEPT_FIELDS.get(concept_name)
         if not field_name or field_name in blood_count_fields:
             continue
-        if field_name in _CHEMISTRY_PAIR_CANONICAL or field_name == HEMOGLOBIN_CANONICAL:
+        if (field_name in _CHEMISTRY_PAIR_CANONICAL or field_name == HEMOGLOBIN_CANONICAL
+                or field_name == CREATININE_PAIR):
             # Selected with its canonical in one chronological pass below: a
             # pair and its read-model must come from the same newest fact.
             continue
@@ -5174,6 +5121,8 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None,
             candidate = _CHEMISTRY_PAIR_CANONICAL.get(legacy_field)
             if candidate is None and legacy_field == HEMOGLOBIN_CANONICAL:
                 candidate = HEMOGLOBIN_CANONICAL
+            if candidate is None and legacy_field == CREATININE_PAIR:
+                candidate = CREATININE_CANONICAL
             if candidate is not None:
                 field, representation = candidate, 'legacy'
         if field is not None and field not in chemistry_winners:
@@ -5220,6 +5169,48 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None,
             selected_dates[HEMOGLOBIN_PAIR] = measurement.measurement_date
             if dates_out is not None:
                 dates_out[HEMOGLOBIN_PAIR] = measurement.measurement_date
+            continue
+        if field == CREATININE_CANONICAL:
+            # mg/dL or umol/L (#2438); a unitless row is mg/dL, the unit every
+            # canonical value is recorded in. The pair keeps the number and
+            # unit the lab reported: eGFR reads the pair, because the
+            # canonical's two decimals can move a threshold (creatinine_units).
+            reported_unit, unit_code = _resolve_reported_unit(
+                measurement, creatinine_normalize_unit, CREATININE_DEFAULT_UNIT)
+            recognised, canonical_value = creatinine_canonical_from_pair(
+                measurement.value_as_number, unit_code)
+            if (unit_code is None or not recognised or canonical_value is None
+                    or not creatinine_canonical_in_range(canonical_value)):
+                if representation == 'legacy' and reported_unit is not None:
+                    # A historic concept-name fact reports the number and unit
+                    # the lab sent (#475); the canonical stays unknown rather
+                    # than reinterpreting an unsupported scale. The refresh
+                    # does not keep this pair on the record yet (#2519).
+                    data[CREATININE_CANONICAL] = None
+                    data[CREATININE_PAIR] = Decimal(str(measurement.value_as_number))
+                    data[CREATININE_UNIT] = reported_unit
+                    selected_dates[CREATININE_PAIR] = measurement.measurement_date
+                    if dates_out is not None:
+                        dates_out[CREATININE_PAIR] = measurement.measurement_date
+                    continue
+                # The newest result owns the field even when it is unusable: an
+                # older one must not stand in for it, and the explicit Nones
+                # stop the curated mapping from storing the raw number.
+                logger.warning(
+                    'Serum creatinine projection skipped for person_id=%s: '
+                    'unit=%r', person.person_id, reported_unit,
+                )
+                data[CREATININE_CANONICAL] = None
+                data[CREATININE_PAIR] = None
+                data[CREATININE_UNIT] = None
+                continue
+            data[CREATININE_CANONICAL] = canonical_value
+            data[CREATININE_PAIR] = Decimal(str(measurement.value_as_number))
+            data[CREATININE_UNIT] = unit_code
+            for dated in (CREATININE_CANONICAL, CREATININE_PAIR):
+                selected_dates[dated] = measurement.measurement_date
+                if dates_out is not None:
+                    dates_out[dated] = measurement.measurement_date
             continue
         if field == _DIRECT_PAIR_FIELD:
             reported_unit, unit_code = _resolve_reported_unit(
@@ -5298,6 +5289,10 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None,
             # copying the canonical back would replace a reported g/L pair
             # with the g/dL read-model.
             continue
+        if canonical == CREATININE_CANONICAL:
+            # Same for creatinine: the pair keeps the reported umol/L; only the
+            # ordinary alias follows the mg/dL value.
+            aliases = [alias for alias in aliases if alias != CREATININE_PAIR]
         chemistry = _CHEMISTRY_PAIRS.get(canonical)
         if chemistry is not None:
             # The pair and canonical were selected together above; copying the
@@ -5314,6 +5309,8 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None,
             unit_updates = _lab_alias_units(canonical, value)
             if chemistry is not None:
                 unit_updates.pop(chemistry['unit'], None)
+            if canonical == CREATININE_CANONICAL:
+                unit_updates.pop(CREATININE_UNIT, None)
             data.update(unit_updates)
 
     return data
