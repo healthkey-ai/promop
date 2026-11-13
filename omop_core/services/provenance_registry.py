@@ -550,12 +550,16 @@ _MANUAL_ENTRIES: dict[str, FieldProvenance] = {
     "meets_crab": FieldProvenance(
         omop_table="Measurement,Observation,ConditionOccurrence",
         lookup_strategy="composite",
-        extractor="_get_mm_specific_data",
+        extractor="derive_meets_crab",
         selection_rule="composite",
-        description="Composite CRAB criteria: calcium > 11, creatinine > 2, hemoglobin < 10, bone lesions",
+        description=(
+            "Composite CRAB criteria from the record's canonical inputs: "
+            "calcium > 11 mg/dL, clearance < 40 mL/min (else creatinine > 2 mg/dL), "
+            "0 < hemoglobin < 10 g/dL, bone lesions; an explicit 89599-5 fact wins"
+        ),
         constituent_fields=[
-            "serum_calcium_mg_dl", "serum_creatinine_mg_dl",
-            "hemoglobin_g_dl", "bone_lesions",
+            "serum_calcium_mg_dl", "creatinine_clearance_ml_min",
+            "serum_creatinine_mg_dl", "hemoglobin_g_dl", "bone_lesions",
         ],
     ),
     "meets_slim": FieldProvenance(

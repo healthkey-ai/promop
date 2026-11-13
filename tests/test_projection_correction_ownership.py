@@ -113,11 +113,11 @@ def test_a_patient_self_provenanced_import_is_not_ours_to_rewrite(setup):
 def test_a_corrected_low_hemoglobin_no_longer_meets_crab(setup):
     """The all-history CRAB fallback took min(hemoglobin); an appended correction
     beside a live import kept the import's 8 g/dL counting."""
-    from omop_core.services.patient_record_service import _get_mm_specific_data
+    from omop_core.services.patient_record_service import refresh_patient_record
     person, concept, projection = setup
     _import(person, concept)
-    assert _get_mm_specific_data(person).get('meets_crab') is True
+    assert refresh_patient_record(person).meets_crab is True
 
     project_single_value(person, 'hemoglobin_g_dl', 12.0, projection, fact_date=DAY)
 
-    assert _get_mm_specific_data(person).get('meets_crab') is None
+    assert refresh_patient_record(person).meets_crab is None

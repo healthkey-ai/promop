@@ -71,12 +71,12 @@ def test_a_related_but_unreadable_text_unit_never_borrows_the_concept(ucum, sour
 
 
 def test_an_mg_per_litre_creatinine_is_not_read_as_mg_per_dl(ucum):
-    from omop_core.services.patient_record_service import _get_mm_specific_data
+    from omop_core.services.patient_record_service import refresh_patient_record
     person = PersonFactory()
     MeasurementFactory(person=person, measurement_source_value='2160-0', measurement_date=DAY,
                        value_as_number=Decimal('1.2'), unit_source_value='mg/L',
                        unit_concept=ucum('mg/dL'), value_source_value='12')
-    assert _get_mm_specific_data(person).get('meets_crab') is None
+    assert refresh_patient_record(person).meets_crab is None
 
 
 @pytest.mark.parametrize('source, field, value, text, concept', [
