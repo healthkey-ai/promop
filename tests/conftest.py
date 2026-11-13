@@ -16,7 +16,7 @@ def lab_field_mappings(db):
     pytest runs ``--no-migrations``, so 0240, 0285 and 0327 never fire here and
     the lab routing falls back to ``_LOINC_LAB_FIELDS``. This loads the
     fixture's lab rows through ``apply_payload``, which writes the rows 0240
-    seeds (0240 carries its own copy since #2440), with a LOINC Concept
+    seeds (0240 seeds them through its own historical-model copy), with a LOINC Concept
     for each so the rows resolve, then runs 0285's alias approval, so a test
     derives through the mapping tables as a deployed instance does.
 

@@ -181,7 +181,7 @@ def test_a_hung_migrate_keeps_its_output(monkeypatch):
 
 @pytest.mark.django_db
 def test_an_existing_custom_field_is_left_alone_and_an_orphan_is_skipped():
-    """The only new branch in 0240: existing custom fields are not overwritten."""
+    """0240's custom-field seeder leaves an existing field alone and skips an orphan."""
     mapping = FieldConceptMapping.objects.create(field_name='existing_mapping')
     created_field = CustomPatientField.objects.create(
         field_name='existing_field', display_name='Original',
@@ -189,25 +189,22 @@ def test_an_existing_custom_field_is_left_alone_and_an_orphan_is_skipped():
     )
     before = (created_field.display_name, created_field.tab,
               created_field.field_type, created_field.mode)
-    data = {
-        'tables': ['custom_fields'],
-        'custom_fields': [
-            {   # already exists: must keep its values
-                'field_name': 'existing_field',
-                'mapping_field_name': 'existing_mapping',
-                'display_name': 'Replaced', 'tab': 'labs',
-                'field_type': 'number', 'mode': 'computed',
-            },
-            {   # no mapping in this database: skipped, not created
-                'field_name': 'orphan_field',
-                'mapping_field_name': 'missing_mapping',
-                'display_name': 'Orphan', 'tab': 'labs',
-                'field_type': 'text', 'mode': 'editable',
-            },
-        ],
-    }
+    rows = [
+        {   # already exists: must keep its values
+            'field_name': 'existing_field',
+            'mapping_field_name': 'existing_mapping',
+            'display_name': 'Replaced', 'tab': 'labs',
+            'field_type': 'number', 'mode': 'computed',
+        },
+        {   # no mapping in this database: skipped, not created
+            'field_name': 'orphan_field',
+            'mapping_field_name': 'missing_mapping',
+            'display_name': 'Orphan', 'tab': 'labs',
+            'field_type': 'text', 'mode': 'editable',
+        },
+    ]
 
-    created = seed_custom_fields(apps, data['custom_fields'])
+    created = seed_custom_fields(apps, rows)
 
     assert created == 0
     field = CustomPatientField.objects.get(field_name='existing_field')
