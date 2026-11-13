@@ -153,11 +153,14 @@ class Command(BaseCommand):
         person_ids = {row['person_id'] for row in candidates}
         source_states = (_source_state(ids=person_ids) if person_ids
                          else {field: {} for field in FIELDS})
+        # One read for the cohort rather than one per candidate: the loop runs
+        # under the row locks, so its length is how long other writers wait.
+        records = PatientRecord.objects.in_bulk(ids)
         entries = []
         for row in candidates:
             fields = [field for field in FIELDS
                       if row['fields'][field]['recommended_action'] in REPAIRABLE_ACTIONS]
-            record = PatientRecord.objects.filter(pk=row['id']).first()
+            record = records.get(row['id'])
             if record is None:
                 raise CommandError(
                     f'Record {row["id"]} disappeared after the audit; rerun it.')
@@ -215,8 +218,9 @@ class Command(BaseCommand):
             return
         histories = {field: _revisions(field, ids=ids) for field in FIELDS}
         source_states = _source_state(ids={row['person_id'] for row in candidates})
+        records = PatientRecord.objects.in_bulk(ids)
         for row in candidates:
-            record = PatientRecord.objects.filter(pk=row['id']).first()
+            record = records.get(row['id'])
             if record is None:
                 raise CommandError(
                     f'Record {row["id"]} disappeared during the run; nothing written.')

@@ -587,3 +587,18 @@ def test_apply_outside_an_atomic_block_runs_the_production_path(tmp_path):
     assert isolation < lock < write
     record.refresh_from_db()
     assert getattr(record, PREGNANCY) is None and getattr(record, TOBACCO) is None
+
+
+def test_apply_reads_the_cohort_once_instead_of_per_candidate(tmp_path, ready):
+    """The loop runs under the row locks; a per-candidate lookup in the repair
+    and again in the post-write read lengthened how long other writers wait."""
+    from django.test.utils import CaptureQueriesContext
+
+    for _ in range(3):
+        PatientRecordFactory(**{PREGNANCY: True, TOBACCO: True})
+    manifest, sha = audit(tmp_path)
+    with CaptureQueriesContext(connection) as captured:
+        apply(tmp_path, manifest, sha)
+    single = [query['sql'] for query in captured.captured_queries
+              if 'FROM "patient_record"' in query['sql'] and 'LIMIT 1' in query['sql']]
+    assert single == []

@@ -187,9 +187,12 @@ class Command(BaseCommand):
             person_id: {'source': row['source'], 'confirmed_at': row['confirmed_at']}
             for person_id, row in attestation_rows.items()
         }
+        # One read for the cohort rather than one per candidate: the loop runs
+        # under the row locks, so its length is how long other writers wait.
+        records = PatientRecord.objects.in_bulk(ids)
         entries = []
         for row in candidates:
-            record = PatientRecord.objects.filter(pk=row['id']).first()
+            record = records.get(row['id'])
             if record is None:
                 raise CommandError(
                     f'Record {row["id"]} disappeared after the audit; rerun it.')
@@ -260,8 +263,8 @@ class Command(BaseCommand):
         ids = [row['id'] for row in candidates]
         if not ids:
             return
-        person_ids = set(
-            PatientRecord.objects.filter(pk__in=ids).values_list('person_id', flat=True))
+        records = PatientRecord.objects.in_bulk(ids)
+        person_ids = {record.person_id for record in records.values()}
         history = _flag_revisions(ids=ids)
         attestations = {
             person_id: {'source': source, 'confirmed_at': confirmed_at.isoformat()}
@@ -271,7 +274,7 @@ class Command(BaseCommand):
                 .values_list('person_id', 'source', 'confirmed_at'))
         }
         for row in candidates:
-            record = PatientRecord.objects.filter(pk=row['id']).first()
+            record = records.get(row['id'])
             if record is None:
                 raise CommandError(
                     f'Record {row["id"]} disappeared during the run; nothing written.')

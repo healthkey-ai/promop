@@ -501,3 +501,18 @@ def test_a_v2_manifest_is_refused_as_a_version_mismatch(tmp_path):
 
     with pytest.raises(CommandError, match='Audit version'):
         repair(str(old), payload['approval_sha256'])
+
+
+def test_apply_reads_the_cohort_once_instead_of_per_candidate(tmp_path, ready):
+    """The loop runs under the row locks; a per-candidate lookup in the repair
+    and again in the post-write read lengthened how long other writers wait."""
+    from django.test.utils import CaptureQueriesContext
+
+    for _ in range(3):
+        PatientRecordFactory(no_pre_existing_conditions=True, preexisting_conditions=[])
+    manifest, sha = audit(tmp_path)
+    with CaptureQueriesContext(connection) as captured:
+        apply(tmp_path, manifest, sha)
+    single = [query['sql'] for query in captured.captured_queries
+              if 'FROM "patient_record"' in query['sql'] and 'LIMIT 1' in query['sql']]
+    assert single == []
