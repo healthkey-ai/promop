@@ -805,6 +805,30 @@ def _source_value_match(model, source_col, mapping, include_description=True):
     return match
 
 
+def _persons_coded_elsewhere(mapping, table, new_concept_id):
+    """Persons whose rows for this code may come from another code system.
+
+    A clinical row keeps the code but not its code system, so the concept-0
+    sweep matches every unresolved row with that code. A bare local code such
+    as Epic flowsheet "6" is body temperature at one hospital and FVC at
+    another. The per-patient source codes say which systems a person's code
+    arrived in: a person who also has it under a system not approved to this
+    same destination is left unresolved rather than guessed.
+    """
+    agreeing = {canonical_source_vocabulary(v) for v in SourceCodeConceptMapping.objects.filter(
+        source_code=mapping.source_code, omop_table=table, status='approved',
+        target_concept_id=new_concept_id,
+    ).values_list('source_vocabulary_id', flat=True)}
+    agreeing.add(canonical_source_vocabulary(mapping.source_vocabulary_id))
+    agreeing |= {oid for oid, canonical in VOCABULARY_OID_ALIASES.items() if canonical in agreeing}
+    rows = PatientSourceCode.objects.filter(omop_table=table)
+    if len(mapping.source_code) >= SOURCE_CODE_MAX:
+        rows = rows.filter(source_value__startswith=mapping.source_code)
+    else:
+        rows = rows.filter(source_value=mapping.source_code)
+    return rows.exclude(source_vocabulary_id__in=agreeing).values('person_id')
+
+
 def repoint_clinical_rows(*, mapping, old_concept_id, new_concept_id,
                           apply_changes=True, match_description=True,
                           person_id=None, units=None):
@@ -866,6 +890,8 @@ def repoint_clinical_rows(*, mapping, old_concept_id, new_concept_id,
             if raw and unit_code(raw) in wanted
         ]
         qs = qs.filter(unit_source_value__in=spellings)
+    if old_concept_id == NO_MATCHING_CONCEPT_ID:
+        qs = qs.exclude(person_id__in=_persons_coded_elsewhere(mapping, table, new_concept_id))
     if mapping.organization_id:
         # A shared Epic flowsheet code can mean different things at two
         # hospitals.  Only rows whose write provenance names this mapping's

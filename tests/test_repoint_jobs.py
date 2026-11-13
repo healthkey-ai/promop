@@ -146,3 +146,57 @@ def test_the_command_runs_named_or_all_queued_mappings():
     call_command('run_queued_repoints', str(row.pk))
     stored.refresh_from_db(); row.refresh_from_db()
     assert stored.measurement_concept_id == new.pk and row.deferred_repoint_concept_ids == []
+
+
+def _code_seen(row, vocabulary):
+    from omop_core.models import PatientSourceCode
+    PatientSourceCode.objects.create(person=row.person, source_value='6',
+                                     source_vocabulary_id=vocabulary, omop_table='measurement')
+
+
+def test_the_concept_0_sweep_leaves_rows_another_code_system_sent():
+    temperature = ConceptFactory()
+    row = mapping(temperature, source_code='6', source_vocabulary_id='urn:oid:hospital-a',
+                  source_code_description='', deferred_repoint_concept_ids=[0])
+    ours = MeasurementFactory(measurement_concept_id=0, measurement_source_value='6')
+    theirs = MeasurementFactory(measurement_concept_id=0, measurement_source_value='6')
+    both = MeasurementFactory(measurement_concept_id=0, measurement_source_value='6')
+    unknown = MeasurementFactory(measurement_concept_id=0, measurement_source_value='6')
+    _code_seen(ours, 'urn:oid:hospital-a')
+    _code_seen(theirs, 'urn:oid:hospital-b')
+    _code_seen(both, 'urn:oid:hospital-a')
+    _code_seen(both, 'urn:oid:hospital-b')
+
+    assert repoint_jobs.run_repoint(row.pk)['rows_updated'] == 2
+
+    for stored in (ours, theirs, both, unknown):
+        stored.refresh_from_db()
+    assert ours.measurement_concept_id == temperature.pk
+    assert unknown.measurement_concept_id == temperature.pk
+    assert theirs.measurement_concept_id == 0
+    assert both.measurement_concept_id == 0
+
+
+def test_a_code_system_approved_to_the_same_destination_does_not_hold_rows_back():
+    temperature = ConceptFactory()
+    mapping(temperature, source_code='6', source_vocabulary_id='urn:oid:hospital-b', source_code_description='')
+    row = mapping(temperature, source_code='6', source_vocabulary_id='urn:oid:hospital-a',
+                  source_code_description='', deferred_repoint_concept_ids=[0])
+    both = MeasurementFactory(measurement_concept_id=0, measurement_source_value='6')
+    _code_seen(both, 'urn:oid:hospital-a')
+    _code_seen(both, 'urn:oid:hospital-b')
+
+    assert repoint_jobs.run_repoint(row.pk)['rows_updated'] == 1
+    both.refresh_from_db()
+    assert both.measurement_concept_id == temperature.pk
+
+
+def test_another_code_system_does_not_hold_back_a_minted_concept_sweep():
+    minted, new = ConceptFactory(), ConceptFactory()
+    row = mapping(new, deferred_repoint_concept_ids=[minted.pk])
+    stored = MeasurementFactory(measurement_concept=minted, measurement_source_value='GLU')
+    from omop_core.models import PatientSourceCode
+    PatientSourceCode.objects.create(person=stored.person, source_value='GLU',
+                                     source_vocabulary_id='Other', omop_table='measurement')
+
+    assert repoint_jobs.run_repoint(row.pk)['rows_updated'] == 1
