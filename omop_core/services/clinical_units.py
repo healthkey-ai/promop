@@ -1,7 +1,7 @@
 """Organization-selectable clinical unit policy for derived compatibility fields."""
 
 import logging
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
 logger = logging.getLogger(__name__)
 
@@ -174,3 +174,56 @@ def flc_to_canonical(
     if factor is None:
         return None
     return Decimal(str(value)) * factor
+
+
+# Serum creatinine (#2438). The divisor is 88.42, the factor the installed
+# exact_matching CKD-EPI calculator uses; the result is quantised half-up to
+# the two decimals of PatientRecord.serum_creatinine_mg_dl, so the value the
+# derivation reads is the value stored.
+CREATININE_UMOL_L_PER_MG_DL = Decimal('88.42')
+_CREATININE_DIVISORS = {'mg/dL': Decimal('1'), 'umol/L': CREATININE_UMOL_L_PER_MG_DL}
+_CREATININE_QUANTUM = Decimal('0.01')
+
+
+def creatinine_unit(text, concept_code):
+    """The unit a creatinine result is in, 'mg/dL' or 'umol/L', or None.
+
+    The snapshot holds the value in the unit of its text (#2249), so a text
+    promop knows is the unit, and one it knows but cannot convert (mg/L,
+    mmol/L) leaves the result unknown rather than deferring to the concept.
+    Only text promop cannot read at all defers to the unit concept, where the
+    ETL puts the UCUM unit it meant (#2248). With no unit at all the result is
+    mg/dL, the unit every canonical value has been recorded in.
+    """
+    from omop_core.services.canonical_units import is_known_unit, unit_code
+    text = (text or '').strip()
+    if text and (is_known_unit(text) or not concept_code):
+        unit = unit_code(text)
+    elif concept_code:
+        unit = unit_code(concept_code)
+    else:
+        unit = 'mg/dL'
+    return unit if unit in _CREATININE_DIVISORS else None
+
+
+def creatinine_to_mg_dl(value, text, concept_code):
+    """A creatinine result in mg/dL, or None when its unit cannot be read."""
+    unit = creatinine_unit(text, concept_code)
+    if value is None or unit is None or isinstance(value, bool):
+        return None
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, ValueError):
+        return None
+    if not number.is_finite():
+        return None
+    return (number / _CREATININE_DIVISORS[unit]).quantize(_CREATININE_QUANTUM, rounding=ROUND_HALF_UP)
+
+
+def measurement_creatinine_mg_dl(row):
+    """``creatinine_to_mg_dl`` for a measurement row."""
+    # Only a UCUM concept names a unit (as measurement_count_unit and #2249's
+    # reading); concept 0 "No matching concept" and other vocabularies do not.
+    concept = row.unit_concept if row.unit_concept_id else None
+    return creatinine_to_mg_dl(row.value_as_number, row.unit_source_value,
+                               concept.concept_code if concept and concept.vocabulary_id == 'UCUM' else None)

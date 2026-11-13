@@ -23,7 +23,10 @@ boundary for every measurement—not just white blood cell counts.
 4. **Conversions are explicit and allowlisted.** A projection may convert only
    recognized source-unit expressions. Missing or unrecognized units fail closed:
    the derived value is omitted and a warning is recorded. Source data remains
-   available for repair.
+   available for repair. An exception has to be named in the projection's own
+   section: `serum_creatinine_mg_dl` reads an absent unit — including
+   `unit_concept_id = 0` — as mg/dL, the unit every canonical creatinine value
+   has been recorded in.
 5. **Unit changes require a migration plan.** Adding a canonical unit or changing
    a conversion must include source-unit tests, boundary/range tests, documented
    backwards compatibility, and a repair/backfill plan for affected derived data.
@@ -174,6 +177,27 @@ not a count of distinct affected people across both markers. Custom approved
 question overrides were excluded. Recheck source evidence and affected cohorts
 before applying a staging backfill; the numbers alone cannot establish a missing
 unit or authorize a source-data repair.
+
+## Serum creatinine (#2438)
+
+`serum_creatinine_mg_dl` and its `creatinine_mg_dl` alias are always mg/dL; the
+organization setting does not change them. Source LOINCs are [2160-0](https://loinc.org/2160-0)
+and [38483-4](https://loinc.org/38483-4), plus the display names
+`Creatinine [Mass/volume] in Serum or Plasma`, `Serum Creatinine` and `Creatinine`.
+
+| Source unit | Read as |
+| --- | --- |
+| `mg/dL` (any known spelling) | the number |
+| `umol/L` and its spellings (`µmol/L`, `micromoles/liter`, `micromol/L`) | number ÷ 88.42, half-up to 0.01 |
+| `mg/L`, `mmol/L`, bare `mg` — known but not convertible | unknown |
+| unreadable text, with a UCUM `unit_concept` | the concept's unit |
+| no unit at all, including `unit_concept_id = 0` | mg/dL |
+
+Conversion is `mg/dL = µmol/L / 88.42`, quantised half-up to the two decimals of
+the canonical column. The newest result owns the field across every source
+spelling: an unreadable newest unit makes the field an explicit unknown, and an
+older result is not resurrected. The unknown is explicit rather than omitted so
+an approved `FieldConceptMapping` cannot refill the field with the raw number.
 
 ## Instance-selected LOINC units
 
