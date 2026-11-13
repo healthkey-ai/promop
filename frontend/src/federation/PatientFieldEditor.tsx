@@ -17,10 +17,16 @@ interface Props {
    * Do not append the descriptor unit beside it: one unit, one source (#5704). */
   labelIncludesUnit?: boolean;
   /** The tab's own choices for a select. They apply only when the descriptor
-   * carries no options of its own and would otherwise render a free-text box;
-   * curated descriptor options always win, and a typed number, date or
-   * boolean is never turned into a list of strings. */
+   * carries no options of its own; curated descriptor options always win, and
+   * a date or boolean is never turned into a list of strings. */
   options?: string[];
+  /** The control the caller's tab declared for this field (ClinicalField's
+   * `type`). A tab that names `select` alongside its own choices is describing
+   * a closed answer set — ECOG 0-5, Karnofsky 0-100 — and the stored value
+   * kind alone would otherwise fall back to a free number box that accepts
+   * values the scale does not have. An `email` declaration keeps the input's
+   * type; the descriptor's own `control` still wins for everything else. */
+  controlType?: 'text' | 'number' | 'select' | 'multiselect' | 'boolean' | 'date' | 'email';
 }
 
 /** Today in the browser's zone, not UTC: a result date is a local calendar day. */
@@ -96,7 +102,7 @@ function inspectInputs(
 
 /** CB's computed → source-input dialog, with recursive drill-in. Medical
  * metadata and values come only from PROMOP, never the host's trial uoptions. */
-export default function PatientFieldEditor({ store, name, readOnly, infoHref, ancestors = [], compact, label: callerLabel, labelIncludesUnit = false, options: tabOptions }: Props) {
+export default function PatientFieldEditor({ store, name, readOnly, infoHref, ancestors = [], compact, label: callerLabel, labelIncludesUnit = false, options: tabOptions, controlType }: Props) {
   const state = usePatientFormSnapshot(store);
   const renew = useContext(PatientFormRenewContext);
   const [open, setOpen] = useState(false);
@@ -303,12 +309,22 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
     setValueDraft({ set: false, value: undefined });
     setResultDateOverride(null);
   };
-  const ownControl = field.control ?? (field.value_kind === 'number' ? 'number'
-    : field.value_kind === 'boolean' ? 'boolean' : field.value_kind === 'date' ? 'date' : 'text');
+  const valueControl = field.value_kind === 'number' ? 'number'
+    : field.value_kind === 'boolean' ? 'boolean' : field.value_kind === 'date' ? 'date' : 'text';
+  // A tab's declared select with its own answers is a closed scale. Booleans
+  // keep their yes/no control because their stored value is a boolean, not
+  // the tab's answer string; a plain number stays a number box.
+  const tabSelect = (controlType === 'select' || controlType === 'multiselect')
+    && Boolean(tabOptions?.length) && field.value_kind !== 'boolean';
+  const ownControl = field.control ?? (tabSelect ? controlType
+    : (controlType === 'email' && valueControl === 'text') ? 'email' : valueControl);
   const choices = field.options?.length ? field.options
     : tabOptions?.length && (field.multiple || ownControl === 'text' || ownControl === 'select')
       ? tabOptions : [];
   const control = field.multiple ? 'multiselect' : choices.length ? 'select' : ownControl;
+  // A numeric scale answered from a picker still writes a number: the column is
+  // numeric and the editor's contract is type-preserving.
+  const numericAnswers = control === 'select' && field.value_kind === 'number';
   // A read-only list reads as its answers, by label, not as serialised JSON:
   // ["autologous SCT", "tandem SCT"] and "autologous SCT,tandem SCT" both
   // show "autologous SCT, tandem SCT".
@@ -337,6 +353,10 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
       ? (value ? field.answer_labels?.true ?? 'Yes' : field.answer_labels?.false ?? 'No')
     : typeof value === 'object' ? JSON.stringify(value) : String(value);
   const onChangeValue = (name: string, next: unknown) => {
+    if (numericAnswers && next != null && next !== '') {
+      const parsed = Number(next);
+      if (!Number.isNaN(parsed)) next = parsed;
+    }
     if (dated) { setValueDraft({ set: true, value: next }); return; }
     if (showUnitPicker && unitFieldName) {
       // Once queued, the pending pair (then the server value) owns the choice.

@@ -1417,7 +1417,15 @@ def build_writable_field_descriptor():
     # shared editor that renders from the descriptor (and ignores a tab's local
     # options) otherwise shows an empty picker (#5603). An existing entry's
     # options win, so curated concept-valued sets are never replaced here.
+    #
+    # `stage` is the exception: the column is disease-specific and the tab owns
+    # the list — Ann Arbor for follicular lymphoma, ISS/R-ISS for myeloma, Rai
+    # for CLL all write it. The one FieldChoice set is the lymphoma list, so
+    # attaching it here offered Ann Arbor stages on a myeloma record and
+    # overrode the tab's ISS/R-ISS picker.
     for field, options in choice_options.items():
+        if field == 'stage':
+            continue
         entry = descriptor.get(field)
         if entry is not None and options and 'options' not in entry:
             entry['options'] = options

@@ -408,6 +408,37 @@ describe('tab choices for a descriptor without options', () => {
   });
 });
 
+describe('a tab that declares its own closed answer set', () => {
+  it('renders a numeric scale as the tab picker and still writes a number', async () => {
+    const user = userEvent.setup();
+    const { store, patch } = await setup({
+      ecog_performance_status: { writable: true, target: 'patient_record',
+        value_kind: 'number', label: 'ECOG Performance Status' },
+    }, { ecog_performance_status: 2 });
+    render(<PatientFieldEditor store={store} name="ecog_performance_status"
+      label="ECOG Performance Status" controlType="select"
+      options={['0', '1', '2', '3', '4', '5']} />);
+
+    // A number box would accept values the scale does not have.
+    expect(screen.queryByRole('spinbutton')).not.toBeInTheDocument();
+    await user.click(screen.getByRole('combobox'));
+    await user.click(screen.getByRole('option', { name: '4' }));
+    await act(async () => { await store.flush(); });
+    // The numeric column receives a number, not the option's "4" string.
+    expect(patch.mock.calls.at(-1)?.[1]).toEqual({ ecog_performance_status: 4 });
+  });
+
+  it('keeps the declared email input type', async () => {
+    const { store } = await setup({
+      email: { writable: true, target: 'patient_record', value_kind: 'string', label: 'Email' },
+    }, { email: 'patient@example.com' });
+    const { container } = render(<PatientFieldEditor store={store} name="email"
+      label="Email" controlType="email" />);
+
+    expect(container.querySelector('input')?.getAttribute('type')).toBe('email');
+  });
+});
+
 describe('read-only multiple answers', () => {
   it('lists an array value by its labels instead of JSON', async () => {
     const { store } = await setup({
