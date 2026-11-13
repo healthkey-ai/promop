@@ -552,3 +552,38 @@ def test_a_write_to_an_unrelated_patient_after_the_audit_stales_the_approval(tmp
 
     with pytest.raises(CommandError, match='digest mismatch'):
         repair(manifest, sha)
+
+
+@pytest.mark.django_db(transaction=True)
+def test_apply_outside_an_atomic_block_runs_the_production_path(tmp_path):
+    """Every other apply test runs inside pytest-django's atomic block, where
+    the command does not own its transaction and skips the isolation pin. Here
+    it owns it, as under manage.py: READ COMMITTED is set first, then the audit,
+    the row locks and the write, and the result commits."""
+    from django.test.utils import CaptureQueriesContext
+
+    recorder = MigrationRecorder(connection)
+    recorder.ensure_schema()
+    for app, name in REQUIRED:
+        recorder.record_applied(app, name)
+    try:
+        record = PatientRecordFactory(**{PREGNANCY: True, TOBACCO: True})
+        manifest, sha = audit(tmp_path)
+        assert not connection.in_atomic_block
+        with CaptureQueriesContext(connection) as captured:
+            apply(tmp_path, manifest, sha)
+    finally:
+        for app, name in REQUIRED:
+            recorder.record_unapplied(app, name)
+
+    statements = [query['sql'].upper() for query in captured.captured_queries]
+    isolation = next(i for i, sql in enumerate(statements) if 'ISOLATION LEVEL' in sql)
+    assert 'READ COMMITTED' in statements[isolation]
+    # The pin must be the transaction's first statement, or Postgres rejects it.
+    assert all('SAVEPOINT' in sql or sql.startswith('BEGIN') for sql in statements[:isolation])
+    lock = next(i for i, sql in enumerate(statements) if 'FOR UPDATE' in sql)
+    write = next(i for i, sql in enumerate(statements)
+                 if sql.replace('"', '').startswith('UPDATE PATIENT_RECORD '))
+    assert isolation < lock < write
+    record.refresh_from_db()
+    assert getattr(record, PREGNANCY) is None and getattr(record, TOBACCO) is None
