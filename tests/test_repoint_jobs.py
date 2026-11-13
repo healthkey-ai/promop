@@ -4,9 +4,9 @@ from unittest.mock import patch
 import pytest
 from rest_framework.test import APIClient
 
-from omop_core.models import SourceCodeConceptMapping
+from omop_core.models import PatientSourceCode, SourceCodeConceptMapping
 from omop_core.services import repoint_jobs
-from tests.factories import ConceptFactory, MeasurementFactory
+from tests.factories import ConceptFactory, MeasurementFactory, OrganizationFactory
 
 pytestmark = pytest.mark.django_db
 
@@ -148,10 +148,17 @@ def test_the_command_runs_named_or_all_queued_mappings():
     assert stored.measurement_concept_id == new.pk and row.deferred_repoint_concept_ids == []
 
 
-def _code_seen(row, vocabulary):
-    from omop_core.models import PatientSourceCode
-    PatientSourceCode.objects.create(person=row.person, source_value='6',
+SNOMED_OID = 'urn:oid:2.16.840.1.113883.6.96'
+
+
+def _code_seen(row, vocabulary, code='6'):
+    PatientSourceCode.objects.create(person=row.person, source_value=code,
                                      source_vocabulary_id=vocabulary, omop_table='measurement')
+
+
+def _temperature_sweep(temperature, vocabulary='urn:oid:hospital-a', code='6'):
+    return mapping(temperature, source_code=code, source_vocabulary_id=vocabulary,
+                   source_code_description='', deferred_repoint_concept_ids=[0])
 
 
 def test_the_concept_0_sweep_leaves_rows_another_code_system_sent():
@@ -195,8 +202,48 @@ def test_another_code_system_does_not_hold_back_a_minted_concept_sweep():
     minted, new = ConceptFactory(), ConceptFactory()
     row = mapping(new, deferred_repoint_concept_ids=[minted.pk])
     stored = MeasurementFactory(measurement_concept=minted, measurement_source_value='GLU')
-    from omop_core.models import PatientSourceCode
-    PatientSourceCode.objects.create(person=stored.person, source_value='GLU',
-                                     source_vocabulary_id='Other', omop_table='measurement')
+    _code_seen(stored, 'Other', code='GLU')
 
     assert repoint_jobs.run_repoint(row.pk)['rows_updated'] == 1
+
+
+def test_a_hospital_scoped_approval_does_not_agree():
+    temperature = ConceptFactory()
+    mapping(temperature, source_code='6', source_vocabulary_id='urn:oid:hospital-b',
+            source_code_description='', organization=OrganizationFactory())
+    row = _temperature_sweep(temperature)
+    both = MeasurementFactory(measurement_concept_id=0, measurement_source_value='6')
+    _code_seen(both, 'urn:oid:hospital-a')
+    _code_seen(both, 'urn:oid:hospital-b')
+
+    assert repoint_jobs.run_repoint(row.pk)['rows_updated'] == 0
+
+
+def test_inventory_codes_match_as_rows_do():
+    """Case-insensitive, and a longer code sharing the stored prefix blocks."""
+    target = ConceptFactory()
+    long_code = 'X' * 60
+    row = _temperature_sweep(target, vocabulary='Local', code=long_code)
+    cased = MeasurementFactory(measurement_concept_id=0, measurement_source_value=long_code[:50].lower())
+    prefixed = MeasurementFactory(measurement_concept_id=0, measurement_source_value=long_code[:50])
+    _code_seen(cased, 'Other', code=long_code.lower())
+    _code_seen(prefixed, 'Local', code=long_code[:55])
+
+    assert repoint_jobs.run_repoint(row.pk)['rows_updated'] == 0
+
+
+def test_an_oid_alias_agrees_unless_it_holds_a_mapping_of_its_own():
+    target = ConceptFactory()
+    row = _temperature_sweep(target, vocabulary='SNOMED', code='123')
+    aliased = MeasurementFactory(measurement_concept_id=0, measurement_source_value='123')
+    _code_seen(aliased, SNOMED_OID, code='123')
+
+    assert repoint_jobs.run_repoint(row.pk)['rows_updated'] == 1
+
+    retained = MeasurementFactory(measurement_concept_id=0, measurement_source_value='123')
+    _code_seen(retained, SNOMED_OID, code='123')
+    mapping(ConceptFactory(), source_code='123', source_vocabulary_id=SNOMED_OID,
+            source_code_description='', status='proposed')
+    SourceCodeConceptMapping.objects.filter(pk=row.pk).update(deferred_repoint_concept_ids=[0])
+
+    assert repoint_jobs.run_repoint(row.pk)['rows_updated'] == 0
