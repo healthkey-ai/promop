@@ -974,18 +974,29 @@ class ConfidenceWriteMixin:
                 'Only a service credential or staff may write or clear a confidence.')
         return value
 
+    def _concept_id(self, attrs):
+        """The row's concept id after this write, without loading the concept:
+        a bulk update validates one bound instance per row, and a related-object
+        fetch each would make the query count grow with the batch."""
+        if self.concept_field in attrs:
+            concept = attrs[self.concept_field]
+            return None if concept is None else concept.pk
+        if self.instance is None:
+            return None
+        return getattr(self.instance, f'{self.concept_field}_id', None)
+
     def validate(self, attrs):
         attrs = super().validate(attrs)
-        concept = attrs.get(self.concept_field, getattr(self.instance, self.concept_field, None))
-        at_zero = concept is None or concept.pk == 0
+        concept_id = self._concept_id(attrs)
+        at_zero = concept_id is None or concept_id == 0
         confidence = attrs.get('confidence')
         if confidence is not None and at_zero:
             raise serializers.ValidationError(
                 {'confidence': 'A row at concept 0 has no proposed mapping to be confident about.'})
         if self.instance is not None:
-            stored_concept = getattr(self.instance, self.concept_field, None)
+            stored_id = getattr(self.instance, f'{self.concept_field}_id', None)
             if (confidence is not None and self._stored_confidence() is None
-                    and stored_concept is not None and stored_concept.pk != 0):
+                    and stored_id not in (None, 0)):
                 raise serializers.ValidationError(
                     {'confidence': 'A real row is never made provisional.'})
             if at_zero and 'confidence' not in attrs and self._stored_confidence() is not None:
