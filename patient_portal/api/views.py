@@ -13971,12 +13971,6 @@ class _CodeMappingPage:
         from omop_core.services.mapping_browse import PAGE_SIZE
         from omop_core.services.mapping_destinations import with_destination_counts
         params = request.query_params
-        # The #2451 contract lasted two days. A client still sending it would
-        # get offset page 1 and, seeing no cursor to follow, take it for the
-        # whole table, so refuse it and name what replaced it.
-        for retired, replacement in (('page_size', 'limit'), ('ordering', 'sort=updated_at'), ('after', 'cursor')):
-            if retired in params:
-                raise ValidationError({retired: f'Retired in #2513; use {replacement} and the Link header.'})
         limit = self._int(params, 'limit', PAGE_SIZE, 1, CODE_MAPPING_MAX_PAGE_SIZE)
         sort = params.get('sort') or None
         if sort not in (None, 'updated_at'):

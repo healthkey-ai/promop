@@ -237,10 +237,6 @@ so a cursor survives a key rotation only while the old key is in
 `SECRET_KEY_FALLBACKS`; a 400 on a `Link` URL you did not alter means start
 the run again without a cursor.
 
-The parameters of the earlier cursor read (`ordering`, `after`, `page_size`)
-are retired and answered with a 400 that names their replacement, not
-ignored.
-
 `include_total=true` adds `X-Total-Count`, the count of rows matching the
 filters (not the rows remaining), to each page of a cursor read. It is one
 full count of the table, so it is not computed unless asked for.

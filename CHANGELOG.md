@@ -153,8 +153,7 @@ All notable changes to PRomop are documented here.
   `X-Total-Count` on a cursor read, and `updated_since` is an RFC 3339
   instant whose offset is required: a bare date or a naive datetime is a
   400, not a guess at UTC. The two-day-old `ordering=id&after=` cursor is
-  gone, and a client still sending `ordering`, `after` or `page_size` gets
-  a 400 naming the replacement rather than an offset page 1. See [Code Mapping API](docs/code-mapping-api.md). (#2513)
+  gone; nothing used it. See [Code Mapping API](docs/code-mapping-api.md). (#2513)
 - **One instruction file for every coding agent** — `AGENTS.md` now holds the
   whole rulebook (the former `CLAUDE.md` content and the former `AGENTS.md`
   conventions), and `CLAUDE.md` is `@AGENTS.md` plus a short Claude Code

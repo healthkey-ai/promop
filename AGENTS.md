@@ -1611,8 +1611,7 @@ inside a long writer transaction can commit after a reader's cursor has
 passed its stamp, so the delta's `updated_since` margin must cover the
 longest such transaction (`copy_reference_data`, the bulk commands), not
 clock skew alone. The cursor survives a `SECRET_KEY` rotation only while the
-old key is in `SECRET_KEY_FALLBACKS`. `ordering`, `after` and `page_size`
-are retired (#2513) and answered with a 400, not ignored. `limit` is honoured on both, 1 to
+old key is in `SECRET_KEY_FALLBACKS`. `limit` is honoured on both, 1 to
 `CODE_MAPPING_MAX_PAGE_SIZE` (1000; out of range is a 400, not a silent
 cap). The ceiling is the request budget: at ~1s per 100 rows on HealthTree,
 5,000 would outrun gunicorn's 30s. `updated_since=<RFC 3339 instant>` (offset

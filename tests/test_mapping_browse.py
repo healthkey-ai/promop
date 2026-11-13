@@ -824,11 +824,6 @@ def test_plain_list_honours_limit_up_to_the_ceiling():
         response = client.get('/api/v1/code-mappings/', {'limit': bad}, secure=True)
         assert response.status_code == 400, bad
         assert 'limit' in response.data
-    # The #2451 names are refused, not read as offset page 1 of a table that looks complete.
-    for retired in ({'page_size': 2}, {'ordering': 'id'}, {'after': 5}, {'ordering': 'id', 'after': 5, 'page_size': 1000}):
-        response = client.get('/api/v1/code-mappings/', retired, secure=True)
-        assert response.status_code == 400, retired
-        assert set(response.data) <= {'page_size', 'ordering', 'after'}
 
 
 def test_plain_list_pages_by_cursor_without_skipping_or_repeating():
