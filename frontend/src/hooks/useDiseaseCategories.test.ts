@@ -86,4 +86,24 @@ describe('disease category hooks use the clinical transport', () => {
     expect(result.current.categoryForDisease('Multiple Myeloma')).toBeNull();
     expect(result.current.diseasesByCategory).toEqual({});
   });
+
+  it('does not cache an unroutable body, so a later mount fetches again', async () => {
+    // The 200 HTML shell is a host that does not route the path, not an empty
+    // catalog. Caching it as the answer would leave every later mount empty
+    // after the host is fixed, until a full page reload.
+    get.mockResolvedValueOnce({ data: '<!doctype html><html></html>' });
+    const first = renderHook(() => useAllDiseaseMappings());
+    await waitFor(() => expect(first.result.current.loading).toBe(false));
+    expect(first.result.current.diseasesByCategory).toEqual({});
+    first.unmount();
+
+    get.mockResolvedValueOnce({
+      data: [{ disease_name: 'Breast Cancer', category: 'BC' }],
+    });
+    const second = renderHook(() => useAllDiseaseMappings());
+    await waitFor(() => expect(second.result.current.loading).toBe(false));
+
+    expect(get).toHaveBeenCalledTimes(2);
+    expect(second.result.current.diseasesByCategory).toEqual({ BC: ['Breast Cancer'] });
+  });
 });

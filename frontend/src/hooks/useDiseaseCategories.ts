@@ -12,16 +12,21 @@ interface MappingEntry {
 }
 
 /**
- * The response has to be an array of rows before any hook iterates it.
+ * The response as rows, or `null` when it is not the shape this endpoint
+ * promises.
  *
  * A host that does not route the path answers its own SPA shell with a 200, and
  * axios hands that back as a string: `items.map` then throws inside
  * `useDiseaseCategories`'s `.then` (caught), but `useAllDiseaseMappings` stored
  * it and the render threw on `m.disease_name.toLowerCase()` -- which unmounts
  * the whole widget instead of showing an empty category picker.
+ *
+ * `null` is deliberately distinct from `[]`: an empty list is a real answer and
+ * is cached, while an unroutable one must not poison the module cache, or every
+ * later mount keeps rendering empty after the host has been fixed.
  */
-function rowsFrom<T>(data: unknown): T[] {
-  return Array.isArray(data) ? (data as T[]) : [];
+function rowsFrom<T>(data: unknown): T[] | null {
+  return Array.isArray(data) ? (data as T[]) : null;
 }
 
 let labelCache: string[] | null = null;
@@ -53,6 +58,7 @@ export const useDiseaseCategories = (): { options: string[]; loading: boolean } 
       .then((res) => {
         if (cancelled) return;
         const items = rowsFrom<CategoryObject>(res.data);
+        if (items === null) return; // don't cache a body that is not the contract
         const labels = items.map((item) => item.label);
         labelCache = labels;
         objectCache = items;
@@ -96,6 +102,7 @@ export const useCategoryObjects = (): {
       .then((res) => {
         if (cancelled) return;
         const items = rowsFrom<CategoryObject>(res.data);
+        if (items === null) return; // don't cache a body that is not the contract
         objectCache = items;
         labelCache = items.map((i) => i.label);
         setCategories(items);
@@ -136,7 +143,9 @@ export const useDiseasesByCategory = (
       .get(clinicalUrl("/v1/disease-category-mappings/"), { params: { category } })
       .then((res) => {
         if (cancelled) return;
-        const names = rowsFrom<MappingEntry>(res.data)
+        const rows = rowsFrom<MappingEntry>(res.data);
+        if (rows === null) return; // don't cache a body that is not the contract
+        const names = rows
           .map((m) => m.disease_name)
           .filter((name): name is string => typeof name === "string");
         names.sort();
@@ -187,7 +196,9 @@ export const useAllDiseaseMappings = (): {
       .get(clinicalUrl("/v1/disease-category-mappings/"))
       .then((res) => {
         if (cancelled) return;
-        const items = rowsFrom<MappingEntry>(res.data).filter(
+        const rows = rowsFrom<MappingEntry>(res.data);
+        if (rows === null) return; // don't cache a body that is not the contract
+        const items = rows.filter(
           (m) => typeof m?.disease_name === "string" && typeof m?.category === "string",
         );
         allMappingsCache = items;

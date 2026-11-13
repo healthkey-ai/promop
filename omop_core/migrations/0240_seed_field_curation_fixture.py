@@ -45,18 +45,19 @@ def _concept_for(apps, row):
 
     Same resolution order the writer uses: the resolved code first (curators
     re-point a mapping without rewriting its source code), then the denormalized
-    pair, then the numeric id. None is the expected answer on a fresh install,
-    where Athena has not been loaded yet.
+    pair, and the numeric id only when no pair was supplied at all. A pair that
+    names nothing must not silently attach whatever concept happens to hold that
+    id on this instance -- the same rule as `_resolve_concept_ref`, where a stale
+    id would name a different concept and ingest would then act on it. None is
+    the expected answer on a fresh install, where Athena has not been loaded yet.
     """
     Concept = apps.get_model('omop_core', 'Concept')
     vocabulary_id = row.get('concept_vocabulary_id') or row.get('vocabulary_id') or ''
     concept_code = row.get('concept_code_resolved') or row.get('concept_code') or ''
     if vocabulary_id and concept_code:
-        found = Concept.objects.filter(
+        return Concept.objects.filter(
             vocabulary_id=vocabulary_id, concept_code=concept_code,
         ).first()
-        if found is not None:
-            return found
     concept_id = row.get('concept_id')
     if concept_id is not None:
         return Concept.objects.filter(concept_id=concept_id).first()
