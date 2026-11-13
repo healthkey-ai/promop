@@ -37,19 +37,19 @@ review the manifest and receive explicit approval for that cohort.
    returns 503 for explicit writes. Verify the actual host transport, not a mock.
    The dedicated GET snapshot avoids widening the frozen general projection.
 7. Confirm backups, maintenance window, write pause, expected cohort size and
-   rollback ownership. Pause ETL and UI writes for the audited patients for the
-   run: apply locks the audited records and their person rows (`SELECT … FOR
-   UPDATE`), so those patients' writes wait while unrelated patients continue,
-   but an evidence row the audit filtered out can change unseen. A READ COMMITTED
-   transaction makes the post-lock re-read see changes committed since the audit,
-   but it does not guarantee that every concurrent change is caught, so the write
-   pause is the gate. Acquisition has a five-second timeout; this is not a
-   zero-downtime bulk job. "Unrelated patients continue" holds for the run only:
-   the approved digest covers every record and the global totals, so any patient
-   write between the audit and `--apply` makes the repair refuse with "digest
-   mismatch; rerun audit". `--apply` re-runs that whole-table audit inside its
-   transaction before taking the locks, so keep ETL, re-derivation and UI writes
-   paused for the whole database from the audit until `--apply` has finished.
+   rollback ownership. **Pause ETL, re-derivation and UI writes for the whole
+   database from the audit until `--apply` has finished.** The approved digest
+   covers every record and the global totals, and `--apply` re-runs that
+   whole-table audit inside its transaction before taking the locks, so any
+   patient write in that span makes the repair refuse with "digest mismatch;
+   rerun audit". During the run the row locks (`SELECT … FOR UPDATE` on the
+   audited records, their person rows and attestations) make the cohort's writes
+   wait without blocking other patients' rows, but an evidence row the audit
+   filtered out can change unseen. A READ COMMITTED transaction makes the
+   post-lock re-read see changes committed since the audit, but it does not
+   guarantee that every concurrent change is caught, so the write pause is the
+   gate. Acquisition has a five-second timeout; this is not a zero-downtime bulk
+   job.
 
 ## Read-only sizing (deployment owner/operator)
 

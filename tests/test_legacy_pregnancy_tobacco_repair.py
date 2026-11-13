@@ -590,9 +590,9 @@ def test_apply_outside_an_atomic_block_runs_the_production_path(tmp_path):
 
 
 def test_apply_has_no_per_candidate_record_lookup_before_classifying(tmp_path, ready):
-    """The repair and the post-write read load the cohort with one query each
-    instead of a single-row lookup per candidate. The write itself still does
-    per-record work (refresh, snapshot, revisions); this pins only the lookups."""
+    """The repair and the post-write read do no single-row record lookup per
+    candidate (they use in_bulk). The write itself still does per-record work
+    (refresh, snapshot, revisions); this pins only those lookups."""
     from django.test.utils import CaptureQueriesContext
 
     for _ in range(3):

@@ -17,17 +17,22 @@ from tests.factories import PatientRecordFactory
 pytestmark = pytest.mark.django_db
 
 
+def add_check_constraint():
+    with connection.cursor() as cursor:
+        cursor.execute(f'ALTER TABLE patient_record DROP CONSTRAINT IF EXISTS {CONSTRAINT}')
+        cursor.execute(f'ALTER TABLE patient_record ADD CONSTRAINT {CONSTRAINT} '
+                       "CHECK (no_pre_existing_conditions IS NOT TRUE OR "
+                       "preexisting_conditions IS NULL OR "
+                       "preexisting_conditions IN ('[]'::jsonb, 'null'::jsonb))")
+
+
 @pytest.fixture
 def ready():
     recorder = MigrationRecorder(connection)
     recorder.ensure_schema()
     for app, name in REQUIRED:
         recorder.record_applied(app, name)
-    with connection.cursor() as cursor:
-        cursor.execute(f'ALTER TABLE patient_record ADD CONSTRAINT {CONSTRAINT} '
-                       "CHECK (no_pre_existing_conditions IS NOT TRUE OR "
-                       "preexisting_conditions IS NULL OR "
-                       "preexisting_conditions IN ('[]'::jsonb, 'null'::jsonb))")
+    add_check_constraint()
 
 
 def cohort():
@@ -504,9 +509,9 @@ def test_a_v2_manifest_is_refused_as_a_version_mismatch(tmp_path):
 
 
 def test_apply_has_no_per_candidate_record_lookup_before_classifying(tmp_path, ready):
-    """The repair and the post-write read load the cohort with one query each
-    instead of a single-row lookup per candidate. The write itself still does
-    per-record work (refresh, snapshot, revisions); this pins only the lookups."""
+    """The repair and the post-write read do no single-row record lookup per
+    candidate (they use in_bulk). The write itself still does per-record work
+    (refresh, snapshot, revisions); this pins only those lookups."""
     from django.test.utils import CaptureQueriesContext
 
     for _ in range(3):
@@ -529,14 +534,12 @@ def test_apply_outside_an_atomic_block_runs_the_production_path(tmp_path):
 
     recorder = MigrationRecorder(connection)
     recorder.ensure_schema()
-    for app, name in REQUIRED:
-        recorder.record_applied(app, name)
-    with connection.cursor() as cursor:
-        cursor.execute(f'ALTER TABLE patient_record ADD CONSTRAINT {CONSTRAINT} '
-                       "CHECK (no_pre_existing_conditions IS NOT TRUE OR "
-                       "preexisting_conditions IS NULL OR "
-                       "preexisting_conditions IN ('[]'::jsonb, 'null'::jsonb))")
     try:
+        # Inside the try: this test commits, so a failure halfway through must
+        # not leave the constraint or migration rows in the shared test DB.
+        for app, name in REQUIRED:
+            recorder.record_applied(app, name)
+        add_check_constraint()
         record = PatientRecordFactory(
             no_pre_existing_conditions=True, preexisting_conditions=[])
         PreexistingConditionsAttestation.objects.create(
