@@ -509,19 +509,24 @@ def test_a_v2_manifest_is_refused_as_a_version_mismatch(tmp_path):
 
 
 def test_apply_has_no_per_candidate_record_lookup_before_classifying(tmp_path, ready):
-    """The repair and the post-write read do no single-row record lookup per
-    candidate (they use in_bulk). The write itself still does per-record work
-    (refresh, snapshot, revisions); this pins only those lookups."""
+    """The repair and the post-write read load the cohort with in_bulk, not with
+    a single-row lookup per candidate. The only single-id read left is the
+    `refresh_from_db` after each write, so a regression to `.first()` or
+    `.get(pk=...)` in either pass (LIMIT 1 or LIMIT 21) exceeds one per
+    candidate."""
     from django.test.utils import CaptureQueriesContext
 
-    for _ in range(3):
+    candidates = 3
+    for _ in range(candidates):
         PatientRecordFactory(no_pre_existing_conditions=True, preexisting_conditions=[])
     manifest, sha = audit(tmp_path)
     with CaptureQueriesContext(connection) as captured:
         apply(tmp_path, manifest, sha)
     single = [query['sql'] for query in captured.captured_queries
-              if 'FROM "patient_record"' in query['sql'] and 'LIMIT 1' in query['sql']]
-    assert single == []
+              if query['sql'].startswith('SELECT')
+              and 'FROM "patient_record"' in query['sql']
+              and '"patient_record"."id" = ' in query['sql']]
+    assert len(single) <= candidates, single
 
 
 @pytest.mark.django_db(transaction=True)
