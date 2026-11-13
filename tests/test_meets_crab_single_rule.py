@@ -7,8 +7,8 @@ record's canonical fields. The two disagreed: an approved calcium alias set
 clearance counted forever; eGFR stood in for clearance on one path only.
 
 The thresholds are the SME's (CancerBot #3593, MM_Disease_Activity slides 5,
-12 and 15): CrCl < 40 mL/min or creatinine > 2 mg/dL, no eGFR, and "not
-enough data" is Unknown.
+12 and 15): CrCl < 40 mL/min, creatinine > 2 mg/dL (read when no clearance is
+recorded, #2521), no eGFR, and "not enough data" is Unknown.
 """
 from datetime import date
 
@@ -58,6 +58,11 @@ SCENARIOS = {
         lambda p: _measure(p, '33914-3', 30, 'mL/min/1.73m2'), None),
     'negative clearance is not evidence': (
         lambda p: _measure(p, '2164-2', -5, 'mL/min'), None),
+    'zero clearance is a placeholder': (
+        lambda p: _measure(p, '2164-2', 0, 'mL/min'), None),
+    'zero clearance defers to a high creatinine': (
+        lambda p: (_measure(p, '2164-2', 0, 'mL/min'),
+                   _measure(p, '2160-0', 3.0, 'mg/dL')), True),
     'all four assessed and negative': (
         lambda p: (_measure(p, '718-7', 13.0, 'g/dL'),
                    _measure(p, '17861-6', 9.5, 'mg/dL'),
@@ -112,3 +117,30 @@ def test_a_stated_crab_fact_wins_over_the_inputs():
     _measure(person, '718-7', 8.0, 'g/dL')
     _measure(person, '89599-5', 0)
     assert refresh_patient_record(person).meets_crab is False
+
+
+@pytest.mark.parametrize('answer', ['Unknown', 'unknown', 'Not assessed'])
+def test_an_unknown_bone_lesion_answer_is_not_a_lesion(answer):
+    """'Unknown' is a curated bone_lesions choice. Read as a lesion it set CRAB
+    with no evidence; it is unknown, so the verdict stays unknown."""
+    from omop_core.models import PatientRecord
+    person = PersonFactory()
+    PatientRecord.objects.update_or_create(
+        person=person, defaults={'bone_lesions': answer, 'user_edited_fields': ['bone_lesions']})
+
+    record = refresh_patient_record(person)
+
+    assert record.bone_lesions == answer
+    assert record.meets_crab is None
+
+
+def test_an_unknown_bone_lesion_answer_leaves_a_negative_work_up_unknown():
+    from omop_core.models import PatientRecord
+    person = PersonFactory()
+    _measure(person, '718-7', 13.0, 'g/dL')
+    _measure(person, '17861-6', 9.5, 'mg/dL')
+    _measure(person, '2164-2', 80, 'mL/min')
+    PatientRecord.objects.update_or_create(
+        person=person, defaults={'bone_lesions': 'Unknown', 'user_edited_fields': ['bone_lesions']})
+
+    assert refresh_patient_record(person).meets_crab is None

@@ -4581,8 +4581,17 @@ def _decimal_or_none(value):
     return number
 
 
+#: Answers that say nobody knows. ``Unknown`` is one of the curated
+#: ``bone_lesions`` choices (Yes / No / Unknown); read as a lesion it made
+#: CRAB "met" with no evidence at all.
+_BONE_LESIONS_UNKNOWN = frozenset({
+    'unknown', 'unk', 'not known', 'not assessed', 'not evaluated', 'n/a', 'na',
+})
+
+
 def _bone_lesions_component(value):
-    """True for a recorded lesion, False for an explicit negative, None if blank.
+    """True for a recorded lesion, False for an explicit negative, None if blank
+    or answered unknown.
 
     ``bone_lesions`` is stored as free text and the extractor writes
     ``Present``/``Absent``. Treating an explicit negative as evidence is what
@@ -4590,7 +4599,10 @@ def _bone_lesions_component(value):
     """
     if value is None or str(value).strip() == '':
         return None
-    return str(value).strip().casefold() not in {
+    text = str(value).strip().casefold()
+    if text in _BONE_LESIONS_UNKNOWN:
+        return None
+    return text not in {
         'absent', 'no', 'false', '0', 'none', 'negative',
     }
 
@@ -4598,12 +4610,15 @@ def _bone_lesions_component(value):
 def derive_meets_crab(patient_info: PatientRecord):
     """Three-valued CRAB from the record's canonical inputs.
 
-    The one CRAB rule: a direct edit and a full refresh both call it, so the
-    verdict cannot depend on which path last wrote the record (#2480). The
-    thresholds are the SME's (CancerBot #3593, MM_Disease_Activity slides 5
-    and 12): 0 < hemoglobin < 10 g/dL, calcium > 11 mg/dL, clearance
-    < 40 mL/min, and serum creatinine > 2 mg/dL when no clearance is recorded.
-    eGFR is not a clearance there and is not read. A positive component
+    The one CRAB rule: a direct edit and a full refresh without a stated CRAB
+    fact both call it (#2480). A stated 89599-5 fact is kept by the refresh
+    but not yet by an edit (#2520). The thresholds are the SME's (CancerBot
+    #3593, MM_Disease_Activity slides 5 and 12): 0 < hemoglobin < 10 g/dL,
+    calcium > 11 mg/dL, clearance < 40 mL/min, serum creatinine > 2 mg/dL.
+    The renal arm reads creatinine only when no usable clearance is recorded,
+    as it did before; the SME slides state "creatinine > 2 or CrCl < 40",
+    and whether to apply it as an OR is open (#2521). eGFR is not a
+    clearance there and is not read. A positive component
     establishes CRAB; a negative answer requires every component to be
     evaluated, otherwise the result stays unknown rather than asserting a
     defining event that was never assessed ("not enough data" is Unknown,
@@ -4612,6 +4627,10 @@ def derive_meets_crab(patient_info: PatientRecord):
     hgb = _decimal_or_none(patient_info.hemoglobin_g_dl)
     calcium = _decimal_or_none(patient_info.serum_calcium_mg_dl)
     clearance = _decimal_or_none(patient_info.creatinine_clearance_ml_min)
+    if clearance is not None and clearance <= 0:
+        # 0 mL/min fits the column but is an ETL placeholder, as a 0 g/dL
+        # hemoglobin is; an anuric patient's creatinine still decides (#2485).
+        clearance = None
     creatinine = _decimal_or_none(patient_info.serum_creatinine_mg_dl)
     if clearance is not None:
         renal = clearance < Decimal('40')
