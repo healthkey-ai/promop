@@ -37,7 +37,7 @@ rewritten values; those stay for a person's answer or policy review.
    every legacy record, so including them would report full coverage and hide the
    risk. **Every clear candidate may be a genuine `True`.** Resubmitting a
    stored `True` unchanged through the native `PATCH /api/patient-info/<id>/`
-   writes neither a revision nor a pending marker, in any era (the shared form
+   writes neither a revision nor a pending marker in the current code (the shared form
    route marks the field pending, so it classifies as authored). Such an answer is
    indistinguishable from the default and would be cleared. A `True` answered **before
    `RecordRevision` existed** (0125, while the columns date from 0002) is a second
@@ -58,16 +58,18 @@ rewritten values; those stay for a person's answer or policy review.
    re-read or in a row the audit filtered out (an erroneous fact flipped to
    active, an observation patched in place without touching its person) is
    invisible. The write pause is therefore a gate, not a nicety. During the run
-   itself unrelated patients stay writable. `lock_timeout` for acquiring the
+   itself unrelated patients are not blocked by the locks, but see step 5. `lock_timeout` for acquiring the
    locks is 5 s; the previous value is restored before the writes.
-5. **Keep the whole database quiet from the audit to `--apply`.** The approved
+5. **Keep the whole database quiet from the audit until `--apply` finishes.** The approved
    digest covers every record and the global totals (each record's
    `derived_at`, its coverage flag, the person-authored revision count), not
-   only the cohort. Any write to any patient between the audit and the apply,
-   including a re-derivation, makes the repair refuse with "digest mismatch;
-   rerun audit". That is fail-closed, but it costs the approval cycle: pause ETL,
-   re-derivation and UI writes globally until the apply starts, and narrow the
-   pause to the cohort only for the run.
+   only the cohort, and `--apply` re-runs the whole-table audit inside its own
+   transaction before it takes the locks. Any write to any patient between the
+   audit and that re-read, including a re-derivation, makes the repair refuse
+   with "digest mismatch; rerun audit". That is fail-closed, but it costs the
+   approval cycle: keep ETL, re-derivation and UI writes paused globally until
+   `--apply` has finished. The command does not report when its locks are held,
+   so there is no safe moment to narrow the pause to the cohort mid-run.
 
 ## Dry-run
 
@@ -99,8 +101,8 @@ Guards, unchanged by this run:
 - The whole run is one transaction. It locks the **candidate rows**, their
   person rows and the pregnancy formula row with `SELECT … FOR UPDATE` rather
   than `LOCK TABLE patient_record`; unrelated patient writes are no longer
-  blocked for the loop (they still stale the approval if they land between the
-  audit and the apply, see step 5 above). Inserted evidence (a revision, attestation or recorded
+  blocked for the loop (they still stale the approval if they land before the
+  apply's own audit read, see step 5 above). Inserted evidence (a revision, attestation or recorded
   fact) takes a key-share lock on the parent and waits; an in-place update of an
   existing evidence row does not. The transaction runs at READ COMMITTED when the
   command owns it, so the re-derivation under the locks and the post-loop re-read

@@ -470,10 +470,10 @@ class Command(BaseCommand):
                 # A genuine True cannot be told apart from the legacy default
                 # when it was entered before RecordRevision existed (0125) or
                 # resubmitted unchanged through the native patient-info PATCH
-                # (no revision, no pending marker, in any era). The coverage
-                # split bounds only the first case: a revision on another field
-                # confirms nothing.
-                # The operator judges the rest from the manifest.
+                # (no revision, no pending marker, in the current code). The
+                # coverage split bounds only the first case: a revision on
+                # another field confirms nothing. The operator judges the rest
+                # from the manifest.
                 'evidence': {
                     'authored_revisions_total': revision_total,
                     'earliest_authored_revision_at': (

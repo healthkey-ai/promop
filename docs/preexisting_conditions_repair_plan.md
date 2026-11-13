@@ -47,8 +47,9 @@ review the manifest and receive explicit approval for that cohort.
    zero-downtime bulk job. "Unrelated patients continue" holds for the run only:
    the approved digest covers every record and the global totals, so any patient
    write between the audit and `--apply` makes the repair refuse with "digest
-   mismatch; rerun audit". Keep ETL, re-derivation and UI writes paused for the
-   whole database from the audit until the apply starts.
+   mismatch; rerun audit". `--apply` re-runs that whole-table audit inside its
+   transaction before taking the locks, so keep ETL, re-derivation and UI writes
+   paused for the whole database from the audit until `--apply` has finished.
 
 ## Read-only sizing (deployment owner/operator)
 
