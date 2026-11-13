@@ -54,6 +54,13 @@ so run it as a role with SELECT plus UPDATE on `patient_record` only. A
 refused write is reported, by statement verb and table, as an error for that
 person and the command exits non-zero.
 
+On `cb-v2` the refresh makes two more writes than dev's: it supersedes a
+"no pre-existing conditions" attestation (a `DELETE` on
+`preexisting_conditions_attestation` whenever `preexisting_conditions` is set)
+and writes `record_revision` rows when a newer OMOP fact retires a pending
+source pair. The guard refuses both, so those records are reported as errors
+rather than previewed (#2542).
+
 **Run it on staging, or on a restored copy of production -- never against
 `PROD_DATABASE_URL`.** Production is for read-only checks (see AGENTS.md), and
 this takes row locks and executes updates there before rolling them back.
