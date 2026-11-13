@@ -18,8 +18,8 @@ from omop_core.management.commands.audit_pre_existing_conditions import (
     classify,
 )
 from omop_core.management.guarded_repair import (
-    canonical, digest, lock_rows, make_transaction_read_only,
-    make_transaction_serializable, read_json, receipt, target_guard, write_private,
+    canonical, digest, lock_rows, make_transaction_read_committed,
+    make_transaction_read_only, read_json, receipt, target_guard, write_private,
 )
 from omop_core.models import (
     FieldFormula, PatientRecord, Person, PreexistingConditionsAttestation, RecordRevision,
@@ -128,11 +128,11 @@ class Command(BaseCommand):
             target_guard(options['environment'])
         owns = not connection.in_atomic_block
         with transaction.atomic():
-            if applying:
-                if owns:
-                    make_transaction_serializable()
-            elif owns:
-                make_transaction_read_only()
+            if owns:
+                if applying:
+                    make_transaction_read_committed()
+                else:
+                    make_transaction_read_only()
             live = Audit()._collect(summary_only=False)
             if applying:
                 self._lock(live, supplied, rolling_back=bool(options['rollback']))
@@ -228,9 +228,11 @@ class Command(BaseCommand):
     def _verify_post_write(self, candidates):
         """The loop ran under the locks; prove no answer appeared while it did.
 
-        Row locks block inserts and a serializable transaction blocks an
-        in-place update of the flag or attestation; this last read catches an
-        update committed inside the loop's window and rolls everything back.
+        Row locks block inserts; an in-place update of an evidence row is not
+        covered by them. The post-lock reads run at READ COMMITTED, so this last
+        read sees an update committed inside the loop's window and rolls
+        everything back. A commit after this read is covered only by the write
+        pause the runbook requires, not by the transaction.
         """
         ids = [row['id'] for row in candidates]
         if not ids:

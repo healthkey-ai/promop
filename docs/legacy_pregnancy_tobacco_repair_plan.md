@@ -46,14 +46,15 @@ rewritten values; those stay for a person's answer or policy review.
    for repair.
 4. **Stop writes for the cohort.** Pause ETL and UI writes for the audited
    patients for the run. Apply locks the candidate records, their person rows and
-   the pregnancy formula row; inserted evidence waits. A SERIALIZABLE transaction
-   detects serialization anomalies, and the post-loop re-read sees classification
-   changes visible to this transaction — neither is a guarantee that every
-   concurrent change aborts, and a row the audit filtered out (an erroneous fact
-   flipped to active, an observation patched in place without touching its
-   person) is invisible to both. The write pause is therefore a gate, not a
-   nicety. Unrelated patients stay writable. `lock_timeout` for acquiring the
-   locks is 5 s and is reset before the writes.
+   the pregnancy formula row; inserted evidence waits. The apply transaction runs
+   at READ COMMITTED, so the post-lock re-derivation and the post-loop re-read
+   see anything committed since the audit; an in-place update of an existing
+   evidence row is not blocked by the row locks, and a change committed after the
+   re-read or in a row the audit filtered out (an erroneous fact flipped to
+   active, an observation patched in place without touching its person) is
+   invisible. The write pause is therefore a gate, not a nicety. Unrelated
+   patients stay writable. `lock_timeout` for acquiring the locks is 5 s and is
+   reset before the writes.
 
 ## Dry-run
 
@@ -87,12 +88,12 @@ Guards, unchanged by this run:
   than `LOCK TABLE patient_record`; unrelated patient writes are no longer
   blocked for the loop. Inserted evidence (a revision, attestation or recorded
   fact) takes a key-share lock on the parent and waits; an in-place update of an
-  existing evidence row does not. The transaction is SERIALIZABLE when the
-  command owns it, which detects serialization anomalies, and the repair
-  re-derives each candidate's classification under the locks, then re-reads the
-  evidence after the loop; that read sees changes visible to this transaction,
-  not every concurrent commit. A row the audit filtered out can still change
-  unseen, which is why the write pause above is required.
+  existing evidence row does not. The transaction runs at READ COMMITTED when the
+  command owns it, so the re-derivation under the locks and the post-loop re-read
+  see anything committed since the audit — a serializable snapshot would be
+  fixed by the audit read and miss exactly that window. A commit after the
+  re-read, or a row the audit filtered out, can still change unseen, which is why
+  the write pause above is required.
 - `RecordRevision` per cleared field (`changed_by='repair:2432:<uuid>'`) plus one
   ledger revision with before/after hashes; `user_edited_fields` is untouched.
   The backup is exclusive, mode 0600, fsynced before commit.

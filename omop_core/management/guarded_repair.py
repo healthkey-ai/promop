@@ -16,7 +16,7 @@ from urllib.parse import unquote, urlsplit
 
 from django.core.management.base import CommandError
 from django.core.serializers.json import DjangoJSONEncoder
-from django.db import connection
+from django.db import OperationalError, connection
 
 _TRUE_TEXT = {'true', 't', '1', 'yes', 'y', 'on'}
 _FALSE_TEXT = {'false', 'f', '0', 'no', 'n', 'off'}
@@ -59,21 +59,19 @@ def make_transaction_read_only():
         cursor.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY')
 
 
-def make_transaction_serializable():
-    """Make the applying transaction serializable, when the command owns it.
+def make_transaction_read_committed():
+    """Pin the applying transaction to READ COMMITTED, when the command owns it.
 
-    Row locks cover inserts (their FK takes a key-share lock on the parent) but
-    not an in-place update of an evidence row: updating an existing observation
-    keeps its person FK and never touches the locked rows. SERIALIZABLE makes
-    PostgreSQL abort one of the two transactions when such an update races the
-    read this repair relies on, which is the safe outcome for an all-or-nothing
-    run. Inside a caller's transaction (tests) the isolation level is already
-    fixed, so this is skipped there, like the read-only guard.
+    The audit runs before the locks, so the re-derivation and the post-write
+    read must see evidence committed since the audit. READ COMMITTED takes a
+    fresh snapshot per statement; a serializable/repeatable-read snapshot would
+    be fixed by the audit read and make both re-checks blind to that window.
+    The row locks still block inserts from acquisition onwards.
     """
     if connection.vendor != 'postgresql':
         return
     with connection.cursor() as cursor:
-        cursor.execute('SET TRANSACTION ISOLATION LEVEL SERIALIZABLE')
+        cursor.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
 
 
 def refuse_existing_manifest(path):
@@ -214,12 +212,20 @@ def lock_rows(model, pks):
         return
     with connection.cursor() as cursor:
         cursor.execute("SET LOCAL lock_timeout = '5s'")
-    for start in range(0, len(ids), LOCK_BATCH):
-        batch = ids[start:start + LOCK_BATCH]
-        # select_for_update locks on read; the values are not needed.
-        list(model.objects.select_for_update().filter(pk__in=batch)
-             .order_by('pk').values_list('pk', flat=True))
+    try:
+        for start in range(0, len(ids), LOCK_BATCH):
+            batch = ids[start:start + LOCK_BATCH]
+            # select_for_update locks on read; the values are not needed.
+            list(model.objects.select_for_update().filter(pk__in=batch)
+                 .order_by('pk').values_list('pk', flat=True))
+    except OperationalError as exc:
+        if 'lock timeout' in str(exc).lower():
+            raise CommandError(
+                "Could not acquire the cohort's row locks within 5 s; "
+                'rerun inside the write pause.') from exc
+        raise
     # The timeout bounds acquisition only; the writes that follow wait normally.
+    # `SET LOCAL` is scoped to this transaction, so the session value is untouched.
     with connection.cursor() as cursor:
         cursor.execute('SET LOCAL lock_timeout = 0')
 

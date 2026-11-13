@@ -181,8 +181,12 @@ def test_every_audit_repair_command_uses_the_shared_guards():
     for module in (repair_legacy_pregnancy_tobacco, repair_pre_existing_conditions):
         for name in ('target_guard', 'write_private', 'read_json', 'canonical', 'digest',
                      'receipt', 'lock_rows', 'make_transaction_read_only',
-                     'make_transaction_serializable'):
+                     'make_transaction_read_committed'):
             assert getattr(module, name) is getattr(guarded_repair, name), (module, name)
+    # The apply path stays at READ COMMITTED: a serializable snapshot taken by
+    # the audit read cannot see evidence committed before the locks, which is
+    # the window the post-lock re-read exists to close.
+    assert not hasattr(guarded_repair, 'make_transaction_serializable')
     for module in (audit_legacy_pregnancy_tobacco, audit_pre_existing_conditions):
         for name in ('approval_digest', 'as_bool', 'make_transaction_read_only',
                      'refuse_existing_manifest', 'write_manifest'):
@@ -205,6 +209,19 @@ def test_lock_rows_locks_the_given_rows_instead_of_the_table():
     assert any('FOR UPDATE' in sql for sql in statements)
     assert not any('LOCK TABLE' in sql for sql in statements)
     assert any('FOR UPDATE' in sql and str(record.pk) in sql for sql in statements)
+
+
+def test_lock_rows_translates_a_lock_timeout(monkeypatch):
+    from unittest import mock
+
+    from django.db import OperationalError
+
+    from omop_core.models import PatientRecord
+
+    timeout = OperationalError('canceling statement due to lock timeout')
+    with mock.patch.object(PatientRecord.objects, 'select_for_update', side_effect=timeout):
+        with pytest.raises(CommandError, match="Could not acquire the cohort's row locks"):
+            guarded_repair.lock_rows(PatientRecord, [1, 2])
 
 
 def test_lock_rows_with_no_candidates_does_not_lock_anything():

@@ -40,11 +40,11 @@ review the manifest and receive explicit approval for that cohort.
    rollback ownership. Pause ETL and UI writes for the audited patients for the
    run: apply locks the audited records and their person rows (`SELECT … FOR
    UPDATE`), so those patients' writes wait while unrelated patients continue,
-   but an evidence row the audit filtered out can change unseen. A serializable
-   transaction detects serialization anomalies and a post-loop re-read sees the
-   classification changes visible to it, but neither guarantees that every
-   concurrent change aborts, so the write pause is the gate. Acquisition has a
-   five-second timeout; this is not a zero-downtime bulk job.
+   but an evidence row the audit filtered out can change unseen. A READ COMMITTED
+   transaction makes the post-lock re-read see changes committed since the audit,
+   but it does not guarantee that every concurrent change is caught, so the write
+   pause is the gate. Acquisition has a five-second timeout; this is not a
+   zero-downtime bulk job.
 
 ## Read-only sizing (deployment owner/operator)
 

@@ -63,6 +63,8 @@ CLASSIFICATIONS = (
     'source_unknown',
     'unattributed_true',
 )
+#: Recommended next step per classification. The repair command acts only on
+#: `clear`; `needs_policy` is a human action.
 ACTIONS = {
     'unanswered': 'none',
     'explicit_false': 'keep',
@@ -73,6 +75,11 @@ ACTIONS = {
     'source_unknown': 'needs_policy',
     'unattributed_true': 'clear',
 }
+#: The classifications the repair may clear. Derived from `ACTIONS` so a new
+#: classification cannot be recommended for clearing without being reachable.
+REPAIRABLE_ACTIONS = ('clear',)
+REPAIRABLE_CLASSIFICATIONS = tuple(
+    name for name, action in ACTIONS.items() if action in REPAIRABLE_ACTIONS)
 
 _TOBACCO_CODES = ('72166-2', '266919005', '8517006', '77176002')
 _PREGNANCY_CODES = ('2106-3',)
@@ -432,20 +439,22 @@ class Command(BaseCommand):
                          if parsed is not None), None),
                 }
             totals += 1
-            line = json.dumps({
-                'id': pk, 'fields': fields,
-            }, sort_keys=True, separators=(',', ':'))
+            record = {
+                'id': pk,
+                'person_id': person_id,
+                'organization_id': organization_id,
+                'has_any_revision': has_any_revision,
+                'fields': fields,
+                'derivation_version': derivation_version,
+                'derived_at': derived_at.isoformat() if derived_at else None,
+            }
+            # Hash the whole published record, not only id+fields: the coverage
+            # flag and provenance are part of what the operator approves, and a
+            # manifest whose hash ignored them could change under the same digest.
+            line = json.dumps(record, sort_keys=True, separators=(',', ':'))
             hashed.update((line + '\n').encode('utf-8'))
             if not summary_only:
-                records.append({
-                    'id': pk,
-                    'person_id': person_id,
-                    'organization_id': organization_id,
-                    'has_any_revision': has_any_revision,
-                    'fields': fields,
-                    'derivation_version': derivation_version,
-                    'derived_at': derived_at.isoformat() if derived_at else None,
-                })
+                records.append(record)
 
         payload = {
             'generated_at': datetime.now(dt_timezone.utc).isoformat(),
@@ -478,9 +487,11 @@ class Command(BaseCommand):
             'records': records,
             'manifest_sha256': hashed.hexdigest(),
             'manifest_version': 2,
-            'manifest_scope': 'canonical JSON per record: id, per-field value, classification, '
-                              'revision count, pending edit, source-backed evidence; totals '
-                              'carry the revision-history coverage the clear review relies on',
+            'manifest_scope': 'canonical JSON per record: id, person, organization, '
+                              'revision coverage, derivation version, derived-at, per-field '
+                              'value, classification, revision count, pending edit and '
+                              'source-backed evidence; totals carry the revision-history '
+                              'coverage the clear review relies on',
         }
         payload['approval_sha256'] = approval_digest(payload)
         return payload

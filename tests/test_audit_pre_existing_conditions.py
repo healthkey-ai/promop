@@ -136,12 +136,22 @@ def test_the_manifest_hash_is_recomputable_from_the_records(tmp_path):
     record = _record(True, [])
     payload = _audit(tmp_path)
 
-    line = json.dumps({
-        'id': record.id, 'flag': True, 'categories_raw': [],
-        'flag_history': [], 'pending_edit': False, 'attestation': None,
-    }, sort_keys=True, separators=(',', ':')) + '\n'
+    row = _by_id(payload)[record.id]
+    line = json.dumps(row, sort_keys=True, separators=(',', ':')) + '\n'
     assert payload['manifest_version'] == 2
     assert hashlib.sha256(line.encode()).hexdigest() == payload['manifest_sha256']
+
+
+@pytest.mark.parametrize('categories', [{}, [''], [None], 'infections'])
+def test_malformed_categories_are_contradictions_not_clearable(categories, tmp_path):
+    """The 0305 CHECK permits only NULL and [] beside True; `{}`, [""] and a bare
+    string must not be recommended for clearing as if they were defaults."""
+    record = _record(True, categories)
+    payload = _audit(tmp_path)
+
+    row = _by_id(payload)[record.id]
+    assert row['classification'] == 'contradiction'
+    assert row['recommended_action'] == 'clear_flag'
 
 
 def test_manifest_pins_raw_categories_and_attestation_metadata(tmp_path):

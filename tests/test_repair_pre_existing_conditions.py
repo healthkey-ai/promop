@@ -372,3 +372,36 @@ def test_hostaddr_cannot_disguise_remote_connection_as_local(tmp_path, ready, mo
             host=cfg['HOST'], port=int(cfg['PORT']), dbname=cfg['NAME'], hostaddr='192.0.2.1')))
     with pytest.raises(CommandError, match='Host-address overrides|loopback peer'):
         apply(tmp_path, manifest, sha)
+
+
+def test_dry_run_does_not_abort_on_already_malformed_categories(tmp_path):
+    """A `True` row with `{}` was malformed at audit time; the audit classifies it
+    as a contradiction, so it is not a candidate and the dry-run reports cleanly."""
+    PatientRecordFactory(no_pre_existing_conditions=True, preexisting_conditions={})
+    manifest, sha = audit(tmp_path)
+
+    repair(manifest, sha)  # must not raise "changed after the audit"
+
+
+def test_apply_rolls_back_when_evidence_appears_during_the_loop(tmp_path, ready, monkeypatch):
+    from omop_core.management.commands import repair_pre_existing_conditions as module
+
+    ambiguous, *_ = cohort()
+    manifest, sha = audit(tmp_path)
+    original = module._flag_revisions
+    calls = {'n': 0}
+
+    def evidence_after_the_first_read(ids=None):
+        calls['n'] += 1
+        if calls['n'] == 1:
+            return original(ids=ids)
+        # A person answered "not none" after the audit: the post-write read must
+        # see it and roll the whole apply back.
+        return {ambiguous.pk: [{'changed_at': None, 'old': 'True', 'new': 'False'}]}
+
+    monkeypatch.setattr(module, '_flag_revisions', evidence_after_the_first_read)
+    with pytest.raises(CommandError, match='gained evidence during the run'):
+        apply(tmp_path, manifest, sha)
+
+    ambiguous.refresh_from_db()
+    assert ambiguous.no_pre_existing_conditions is True

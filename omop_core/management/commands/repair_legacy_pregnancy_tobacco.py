@@ -19,11 +19,12 @@ from django.db.migrations.recorder import MigrationRecorder
 from django.utils import timezone
 
 from omop_core.management.commands.audit_legacy_pregnancy_tobacco import (
-    Command as Audit, FIELDS, _revisions, _source_state, approval_digest, classify,
+    Command as Audit, FIELDS, REPAIRABLE_CLASSIFICATIONS, _revisions, _source_state,
+    approval_digest, classify,
 )
 from omop_core.management.guarded_repair import (
-    canonical, digest, lock_rows, make_transaction_read_only,
-    make_transaction_serializable, read_json, receipt, target_guard, write_private,
+    canonical, digest, lock_rows, make_transaction_read_committed,
+    make_transaction_read_only, read_json, receipt, target_guard, write_private,
 )
 from omop_core.models import FieldFormula, PatientRecord, Person, RecordRevision
 
@@ -65,10 +66,12 @@ class Command(BaseCommand):
 
         The audit runs before the lock, so `_repair` re-derives each candidate's
         evidence under the lock and aborts when it no longer classifies as a
-        pure default. The candidates' persons are locked too: recorded facts and
-        revisions take a key-share lock on the person row, so no evidence can
-        land between that check and the write. The formula row is locked so the
-        deactivation `_ready` verifies cannot be undone mid-run.
+        pure default. The candidates' persons are locked too: attestations and
+        new clinical facts take a key-share lock on the person row, while
+        revisions take one on their `patient_record` row. The unlocked reads
+        before this point are the reason the re-check exists; at READ COMMITTED
+        it sees anything committed since the audit. The formula row is locked so
+        the deactivation `_ready` verifies cannot be undone mid-run.
         """
         ids = self._target_ids(live, supplied, rolling_back)
         lock_rows(PatientRecord, ids)
@@ -111,11 +114,11 @@ class Command(BaseCommand):
             target_guard(options['environment'])
         owns = not connection.in_atomic_block
         with transaction.atomic():
-            if applying:
-                if owns:
-                    make_transaction_serializable()
-            elif owns:
-                make_transaction_read_only()
+            if owns:
+                if applying:
+                    make_transaction_read_committed()
+                else:
+                    make_transaction_read_only()
             live = Audit()._collect(summary_only=False)
             if applying:
                 self._lock(live, supplied, rolling_back=bool(options['rollback']))
@@ -165,10 +168,11 @@ class Command(BaseCommand):
             edited = (record.user_edited_fields
                       if isinstance(record.user_edited_fields, list) else [])
             for field in fields:
+                expected = row['fields'][field]['classification']
                 current = classify(
                     getattr(record, field), histories[field].get(record.pk, []),
                     field in edited, source_states[field].get(record.person_id))
-                if current != 'unattributed_true':
+                if expected not in REPAIRABLE_CLASSIFICATIONS or current != expected:
                     raise CommandError(
                         f'Record {record.pk} changed after the audit ({current}); rerun it.')
             if any(getattr(record, field) is not True for field in fields):
@@ -203,10 +207,11 @@ class Command(BaseCommand):
     def _verify_post_write(self, candidates):
         """The loop ran under the locks; prove no evidence appeared while it did.
 
-        Row locks block inserts, and a serializable transaction blocks an
-        in-place update of an evidence row. This last read catches an update
-        that committed inside the loop's window; any finding rolls the whole
-        transaction back, which is the guarantee the command is built on.
+        Row locks block inserts, but not an in-place update of an evidence row.
+        The post-lock reads run at READ COMMITTED, so this last read sees an
+        update committed inside the loop's window; any finding rolls the whole
+        transaction back. A commit after this read is covered only by the write
+        pause the runbook requires, not by the transaction.
         """
         ids = [row['id'] for row in candidates]
         if not ids:

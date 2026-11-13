@@ -455,3 +455,28 @@ def test_backup_is_exclusive_and_apply_needs_one(tmp_path, ready):
     with pytest.raises(CommandError, match='exclusively create'):
         apply(tmp_path, manifest, sha)
     assert (tmp_path / 'backup.json').read_text() == 'do not overwrite'
+
+
+def test_apply_rolls_back_when_evidence_appears_during_the_loop(tmp_path, ready, monkeypatch):
+    from omop_core.management.commands import repair_legacy_pregnancy_tobacco as module
+
+    names = cohort()
+    manifest, sha = audit(tmp_path)
+    original = module._revisions
+    calls = {'n': 0}
+
+    def evidence_after_the_first_pass(field_name, ids=None):
+        calls['n'] += 1
+        if calls['n'] <= len(module.FIELDS):
+            return original(field_name, ids=ids)
+        if field_name == PREGNANCY:
+            return {names['unattributed'].pk: [
+                {'changed_at': None, 'old': 'True', 'new': 'False'}]}
+        return original(field_name, ids=ids)
+
+    monkeypatch.setattr(module, '_revisions', evidence_after_the_first_pass)
+    with pytest.raises(CommandError, match='gained evidence during the run'):
+        apply(tmp_path, manifest, sha)
+
+    names['unattributed'].refresh_from_db()
+    assert names['unattributed'].no_pregnancy_or_lactation_status is True
