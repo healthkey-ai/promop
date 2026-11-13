@@ -267,6 +267,19 @@ All notable changes to PRomop are documented here.
 
 ### Fixed
 
+- **`meets_crab` has one rule on refresh and on edit (#2480, #2482, #2485)** —
+  without an explicit 89599-5 result, a full refresh now derives CRAB with
+  `derive_meets_crab` from the record's canonical hemoglobin, calcium,
+  clearance, creatinine and bone-lesion fields, as an edit already did, instead
+  of reading its own fixed LOINCs. An approved calcium alias or a coded EHR
+  clearance sets CRAB on refresh; an old clearance no longer counts forever,
+  and a 0 mL/min clearance is a placeholder, not renal failure; eGFR no longer
+  stands in for clearance (the SME rule, CancerBot #3593, names only CrCl and
+  creatinine); only a recognised `bone_lesions` answer (Yes, Present, a count)
+  is a lesion, so "Unknown" or other text is unknown;
+  a fully negative work-up stores `False`. Creatinine is still read only when
+  no clearance is recorded (#2521), and an edit still overwrites a stated
+  89599-5 verdict (#2520). `DERIVATION_VERSION` 31.
 - **SI serum creatinine is stored in mg/dL (#2438)** — a 2160-0 or 38483-4
   result in umol/L was stored as that many mg/dL, so a normal 80 umol/L read as
   renal failure in CRAB, renal adequacy and matching. Derivation now converts it

@@ -1,16 +1,17 @@
-"""The meets_crab fallback reads hemoglobin and calcium in their canonical units (#2441).
+"""meets_crab reads hemoglobin and calcium in their canonical units (#2441).
 
 It compared the raw ``value_as_number``: 8.1 mmol/L hemoglobin (about 13 g/dL)
 looked like anemia, and 2.9 mmol/L calcium (about 11.6 mg/dL) looked normal.
 Both had to be read across the whole history, so one old result set CRAB for
-good. Creatinine gained the unit/recency handling in #2430; these are the other
-two arms.
+good. Since #2480 the refresh takes the verdict from the record's canonical
+``hemoglobin_g_dl`` / ``serum_calcium_mg_dl`` (see
+test_meets_crab_single_rule.py), so these cases run through the refresh.
 """
 from datetime import date
 
 import pytest
 
-from omop_core.services.patient_record_service import _get_mm_specific_data
+from omop_core.services.patient_record_service import refresh_patient_record
 from tests.factories import MeasurementFactory, PersonFactory
 
 pytestmark = pytest.mark.django_db
@@ -29,7 +30,7 @@ def _measure(person, code, value, unit, day=NEW):
 
 
 def _crab(person):
-    return _get_mm_specific_data(person).get('meets_crab')
+    return refresh_patient_record(person).meets_crab
 
 
 def test_a_normal_si_hemoglobin_is_not_anemia():
@@ -84,10 +85,13 @@ def test_a_unitless_molar_hemoglobin_is_not_anemia():
     assert _crab(person) is None
 
 
-def test_a_row_under_the_molar_hemoglobin_code_counts_with_a_readable_unit():
+def test_the_molar_hemoglobin_code_is_not_read_until_it_is_routed():
+    """59260-0 is not routed to ``hemoglobin_g_dl``, so CRAB no longer reads
+    it either, even with a g/dL unit: the verdict follows the canonical field
+    (#2480). Routing the molar codes is a separate change (#2467)."""
     person = PersonFactory()
     _measure(person, '59260-0', 8.5, 'g/dL')
-    assert _crab(person) is True
+    assert _crab(person) is None
 
 
 def test_a_molar_hemoglobin_in_mmol_per_litre_is_no_evidence_yet():
@@ -118,21 +122,4 @@ def test_a_conventional_calcium_without_a_unit_takes_mg_dl():
 def test_an_out_of_range_value_is_not_evidence(code, value, unit):
     person = PersonFactory()
     _measure(person, code, value, unit)
-    assert _crab(person) is None
-
-
-@pytest.mark.parametrize('concept_code, source', [('718-7', '59260-0'), ('59260-0', '718-7')])
-def test_a_row_under_both_hemoglobin_codes_takes_the_stricter_default(concept_code, source):
-    """A unitless row matching the mass code one way and the molar code the
-    other is read as the molar one: no default, no evidence.
-
-    Guards the outcome only: with the molar code listed last, the plain last
-    write already gives no default, so this passes without the stricter-
-    default merge in newest_canonical, which protects a reordering."""
-    from tests.factories import ConceptFactory
-    person = PersonFactory()
-    MeasurementFactory(
-        person=person, measurement_concept=ConceptFactory(concept_code=concept_code),
-        measurement_source_value=source, measurement_date=NEW,
-        value_as_number=8.0, unit_source_value='')
     assert _crab(person) is None

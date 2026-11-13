@@ -1,13 +1,15 @@
-"""The meets_crab fallback's creatinine branch reads the canonical creatinine (#2430).
+"""meets_crab's creatinine branch reads the canonical creatinine (#2430).
 
 It used max() over every raw 2160-0 value: no unit (80 umol/L is normal, not
-"> 2") and no recency (one abnormal value years ago set CRAB for good).
+"> 2") and no recency (one abnormal value years ago set CRAB for good). Since
+#2480 the refresh takes the verdict from the record's canonical
+``serum_creatinine_mg_dl``, so these cases run through the refresh.
 """
 from datetime import date
 
 import pytest
 
-from omop_core.services.patient_record_service import _get_mm_specific_data
+from omop_core.services.patient_record_service import refresh_patient_record
 from tests.factories import MeasurementFactory, PersonFactory
 
 pytestmark = pytest.mark.django_db
@@ -21,7 +23,7 @@ def _creatinine(person, value, unit, day=NEW):
 
 
 def _crab(person):
-    return _get_mm_specific_data(person).get('meets_crab')
+    return refresh_patient_record(person).meets_crab
 
 
 def test_a_normal_si_creatinine_is_not_renal_evidence():
