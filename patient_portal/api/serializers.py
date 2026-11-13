@@ -934,38 +934,62 @@ class PatientRecordSerializer(serializers.ModelSerializer):
 # OMOP clinical event serializers
 # ---------------------------------------------------------------------------
 
+def may_write_confidence(request):
+    """True for a machine credential or staff: the only callers that may put a
+    row's confidence in or take it out (#2434)."""
+    from patient_portal.api.permissions import is_machine_request
+    return request is not None and (
+        is_machine_request(request) or bool(getattr(request.user, 'is_staff', False)))
+
+
 class ConfidenceWriteMixin:
     """Who may write `confidence` on a clinical row, and on which rows (#2434).
 
-    Null is a real row and is always accepted: it is how a caller promotes a
-    provisional row once its mapping is approved. A number marks the row
-    provisional, which only a machine credential or staff may do, only while
-    ``PROVISIONAL_DATA_ENABLED`` is on, and never at concept 0 -- an unmapped
-    row has no proposal to be confident about.
+    A number marks the row provisional. Only a machine credential or staff may
+    write one, only while ``PROVISIONAL_DATA_ENABLED`` is on, never at concept 0
+    (an unmapped row has no proposal to be confident about), and never onto a
+    real row that already holds a mapping: real beats provisional.
+
+    Null on a new row is always accepted. Null on an *update* of a provisional
+    row would promote it without an approval, so it needs the same standing as
+    writing a number. Sending back the value a row already has changes nothing
+    and is accepted from anyone, so a client that reads a row and writes it
+    back still works. A write that moves a provisional row to concept 0 clears
+    its confidence: that is a rejection, and a rejected row is unmapped.
     """
     concept_field = None   # set by each serializer
 
+    def _stored_confidence(self):
+        return getattr(self.instance, 'confidence', None) if self.instance is not None else None
+
     def validate_confidence(self, value):
-        if value is None:
-            return value
         from django.conf import settings
-        from patient_portal.api.permissions import is_machine_request
-        if not settings.PROVISIONAL_DATA_ENABLED:
+        stored = self._stored_confidence()
+        if value == stored:
+            return value
+        if value is not None and not settings.PROVISIONAL_DATA_ENABLED:
             raise serializers.ValidationError('Provisional data is not enabled.')
-        request = self.context.get('request')
-        if request is None or not (
-                is_machine_request(request) or getattr(request.user, 'is_staff', False)):
+        if not may_write_confidence(self.context.get('request')):
             raise serializers.ValidationError(
-                'Only a service credential or staff may write a confidence.')
+                'Only a service credential or staff may write or clear a confidence.')
         return value
 
     def validate(self, attrs):
         attrs = super().validate(attrs)
-        if attrs.get('confidence') is not None:
-            concept = attrs.get(self.concept_field, getattr(self.instance, self.concept_field, None))
-            if concept is None or concept.pk == 0:
+        concept = attrs.get(self.concept_field, getattr(self.instance, self.concept_field, None))
+        at_zero = concept is None or concept.pk == 0
+        confidence = attrs.get('confidence')
+        if confidence is not None and at_zero:
+            raise serializers.ValidationError(
+                {'confidence': 'A row at concept 0 has no proposed mapping to be confident about.'})
+        if self.instance is not None:
+            stored_concept = getattr(self.instance, self.concept_field, None)
+            if (confidence is not None and self._stored_confidence() is None
+                    and stored_concept is not None and stored_concept.pk != 0):
                 raise serializers.ValidationError(
-                    {'confidence': 'A row at concept 0 has no proposed mapping to be confident about.'})
+                    {'confidence': 'A real row is never made provisional.'})
+            if at_zero and 'confidence' not in attrs and self._stored_confidence() is not None:
+                attrs['confidence'] = None
         return attrs
 
 

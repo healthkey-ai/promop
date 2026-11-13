@@ -921,4 +921,8 @@ PROLOG_EMAIL_FROM = os.environ.get('PROLOG_EMAIL_FROM', DEFAULT_FROM_EMAIL)
 PROVISIONAL_DATA_ENABLED = os.environ.get(
     'PROVISIONAL_DATA_ENABLED', 'false').strip().lower() in ('1', 'true', 'yes')
 # Least confidence (percent) a provisional row is written at.
-PROVISIONAL_CONFIDENCE_FLOOR = int(os.environ.get('PROVISIONAL_CONFIDENCE_FLOOR', '70'))
+try:
+    PROVISIONAL_CONFIDENCE_FLOOR = max(0, min(100, int(
+        os.environ.get('PROVISIONAL_CONFIDENCE_FLOOR', '70'))))
+except ValueError:
+    PROVISIONAL_CONFIDENCE_FLOOR = 70   # a typo must not stop the app from loading
