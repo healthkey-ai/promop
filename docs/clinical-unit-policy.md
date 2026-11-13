@@ -206,8 +206,8 @@ an unreadable newest unit, or a value beyond the column (999.99 mg/dL), makes
 the field an explicit unknown, and an older result is not resurrected. The
 unknown is explicit rather than omitted so an approved `FieldConceptMapping`
 cannot refill the field with the raw number. A historic concept-name row in an
-unsupported unit keeps its number and unit in the pair, with the canonical
-unknown, as hemoglobin's does (#475).
+unsupported unit is reported by the extractor as its pair with the canonical
+unknown (#475), but a refresh does not yet keep that pair on the record (#2519).
 
 ## Instance-selected LOINC units
 

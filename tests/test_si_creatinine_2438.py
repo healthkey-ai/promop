@@ -209,9 +209,10 @@ def test_a_newer_coded_result_beats_an_older_legacy_concept_name_row():
     assert data['serum_creatinine_level_units'] == 'UMOL/L'
 
 
-def test_a_legacy_row_in_an_unsupported_unit_keeps_what_the_lab_reported():
+def test_the_extractor_reports_a_legacy_row_in_an_unsupported_unit_as_sent():
     """#475's rule for historic concept-name facts, as hemoglobin has it: the
-    number and unit stay as reported, the canonical stays unknown."""
+    extractor reports the number and unit as sent, the canonical unknown. The
+    refresh does not keep that pair yet (#2519), so this is extractor-only."""
     person = PersonFactory()
     legacy = ConceptFactory(concept_code='LEGACY-CREAT2', concept_name='Creatinine')
     MeasurementFactory(

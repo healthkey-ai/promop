@@ -5241,9 +5241,10 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None,
             if (unit_code is None or not recognised or canonical_value is None
                     or not creatinine_canonical_in_range(canonical_value)):
                 if representation == 'legacy' and reported_unit is not None:
-                    # A historic concept-name fact keeps the number and unit the
-                    # lab reported, as it always has (#475); the canonical stays
-                    # unknown rather than reinterpreting an unsupported scale.
+                    # A historic concept-name fact reports the number and unit
+                    # the lab sent (#475); the canonical stays unknown rather
+                    # than reinterpreting an unsupported scale. The refresh
+                    # does not keep this pair on the record yet (#2519).
                     data[CREATININE_CANONICAL] = None
                     data[CREATININE_PAIR] = Decimal(str(measurement.value_as_number))
                     data[CREATININE_UNIT] = reported_unit
