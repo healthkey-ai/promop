@@ -23554,7 +23554,7 @@ class CodeMappingServiceTokenReadTest(TestCase):
 
         # ... a machine reads the table alone, on every list shape.
         client = self._bearer('dbt-read-secret-0000000000000000000000000')
-        for params in (source, {**source, 'browse': '1'}, {**source, 'ordering': 'id', 'page_size': 1}):
+        for params in (source, {**source, 'browse': '1'}, {**source, 'sort': 'updated_at'}):
             with self.subTest(params=params):
                 response = client.get('/api/v1/code-mappings/', params)
                 self.assertEqual(response.status_code, 200, response.content)
