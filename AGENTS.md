@@ -1590,32 +1590,41 @@ retrieval needs all standard concepts embedded, not just the queue's candidates.
 ## Code Mapping List — paging for a full read
 
 `GET /api/v1/code-mappings/` (a `system/*.read` service token may read it,
-#2340) pages two ways (#2451, `_CodeMappingPage` in `views.py`):
+#2340) pages two ways (#2451, #2513, `_CodeMappingPage` in `views.py`):
 
 | Params | Order | Use |
 |---|---|---|
 | `page=N` (default) | vocabulary, code, id | the curation UI; offset paging, so a row inserted or deleted mid-read shifts later pages |
-| `ordering=id` + `after=<mapping_id>` | id | a client reading the whole table: a row written mid-read has a higher id than any read, a deleted one leaves no gap, so nothing repeats or is skipped. The `Link` next URL carries `after=`; there is no prev. `page` with `after` is a 400 |
+| `sort=updated_at` + `cursor=<token>` | updated_at, id | a warehouse reading the whole table or a delta, in the shape HealthTree's own export endpoints take: a row written or re-saved mid-read gets a later `updated_at` than any read, so it comes round later in the same run, and a deleted one leaves no gap. The `Link` next URL carries `cursor=`; there is no prev. `page` with either is a 400, and `sort` takes nothing else |
 
-`page_size` is honoured on both, 1 to `CODE_MAPPING_MAX_PAGE_SIZE` (1000;
-out of range is a 400, not a silent cap). The ceiling is the request budget:
-at ~1s per 100 rows on HealthTree, 5,000 would outrun gunicorn's 30s.
-`updated_since=<ISO 8601>` (naive means UTC; a decoded `+` offset is
+The cursor is `signing.dumps([updated_at, id, digest])` under its own salt:
+opaque, and bound to the query by a digest of every parameter but `cursor`,
+`limit` and `include_total`, so a token replayed against another
+`updated_since` or filter is a 400 rather than a wrong page. Ties on
+`updated_at` are real (a bulk writer stamps one clock value on a batch), so
+the window is `updated_at > u OR (updated_at = u AND id > i)`, which
+`ix_sccm_updated_at` serves. `limit` is honoured on both, 1 to
+`CODE_MAPPING_MAX_PAGE_SIZE` (1000; out of range is a 400, not a silent
+cap). The ceiling is the request budget: at ~1s per 100 rows on HealthTree,
+5,000 would outrun gunicorn's 30s. `updated_since=<RFC 3339 instant>` (offset
+required: a bare date or a naive datetime is a 400; a decoded `+` offset is
 tolerated) narrows to rows whose `updated_at` is at or after it, for a
-nightly delta. The delta is additive and tracks curation: a hard-deleted row is never
-seen, so a client reconciles with a periodic full read and uses the previous
-run's start time as the next `updated_since` (`docs/code-mapping-api.md`).
-`auto_now` is skipped by `bulk_update`/`.update()`, so every writer that
-changes a destination, status, description or source concept sets
-`updated_at` itself (`apply_icd10cm_mappings`, `enrich_source_mappings`,
+nightly delta. The delta is additive and tracks curation: a hard-deleted row
+is never seen, so a client reconciles with a periodic full read and uses the
+previous run's start time as the next `updated_since`
+(`docs/code-mapping-api.md`). `auto_now` is skipped by
+`bulk_update`/`.update()`, so every writer that changes a destination,
+status, description or source concept sets `updated_at` itself
+(`apply_icd10cm_mappings`, `enrich_source_mappings`,
 `backfill_icd10_source_info`, `reference_transfer._apply_table`, which
 stamps every `auto_now` column with this instance's clock, and the naming
 branch of `resolve_source_code`); the Seen counters and unit evidence are
-sightings and deliberately do not. `ix_sccm_updated_at` serves the filter. `X-Total-Count`
-counts the filtered set; on the keyset path it is sent on the first page
-only. `Link` URLs are absolute, so behind a proxy they are
-`https://` only when `SECURE_PROXY_SSL_HEADER` is trusted: automatic on
-Render and Cloud Run (`K_SERVICE`), `TRUST_PROXY_SSL_HEADER=true` elsewhere.
+sightings and deliberately do not. `X-Total-Count` counts the filtered set:
+on every offset page, and on a cursor read only with `include_total=true`,
+since it is one full count of the table. `Link` URLs are absolute, so
+behind a proxy they are `https://` only when `SECURE_PROXY_SSL_HEADER` is
+trusted: automatic on Render and Cloud Run (`K_SERVICE`),
+`TRUST_PROXY_SSL_HEADER=true` elsewhere.
 
 ## Code Mapping Lookup — Unit Conversion
 

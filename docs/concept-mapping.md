@@ -429,7 +429,8 @@ The plain-list endpoint without `browse=1` preserves its JSON array response,
 but returns at most 100 codes. Use `?page=2` or follow the response's `Link`
 header (`rel="next"` / `rel="prev"`) to traverse results. `X-Total-Count`,
 `X-Page`, and `X-Page-Size` report the filtered count and page metadata.
-Source, search, and status filters apply before pagination. The page size is
-fixed; `page_size` cannot request an unbounded response.
+Source, search, and status filters apply before pagination. `limit` sets the
+page size, 1 to 1000; a warehouse reading the whole table uses the cursor read
+described in `code-mapping-api.md` instead of pages.
 The four pagination headers are exposed to configured CORS origins so browser
 clients can read navigation and totals across origins.

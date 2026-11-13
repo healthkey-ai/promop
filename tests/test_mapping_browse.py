@@ -582,7 +582,7 @@ def test_plain_list_pages_before_serialization_and_filters_in_database(status_fi
         force_authenticate(request, user=user)
         return code_mapping_list(request)
 
-    assert get(page_size=100000).status_code == 400
+    assert get(limit=100000).status_code == 400
     with patch.object(views, '_serialize_code_mapping_row', wraps=views._serialize_code_mapping_row) as serialize:
         first = get()
         assert first.status_code == 200
@@ -775,99 +775,202 @@ def test_delete_rejected_mapping_with_destination_truly_deletes(staff_user):
     assert not SourceCodeConceptMapping.objects.filter(id=mapping.id).exists()
 
 
-def test_plain_list_honours_page_size_up_to_the_ceiling():
-    SourceCodeConceptMapping.objects.bulk_create([
-        SourceCodeConceptMapping(source_vocabulary_id='ICD10CM', source_code=f'S{i:03}')
-        for i in range(250)
-    ])
+def _reader(email):
     client = APIClient()
-    client.force_authenticate(user=Identity.objects.create_user(email='page-size@example.test', is_staff=True))
-
-    response = client.get('/api/v1/code-mappings/', {'page_size': 200}, secure=True)
-    assert response.status_code == 200
-    assert len(response.data) == 200
-    assert response['X-Page-Size'] == '200'
-    assert response['X-Total-Count'] == '250'
-    assert 'page=2' in response['Link'] and 'page_size=200' in response['Link']
-    assert len(client.get('/api/v1/code-mappings/', {'page_size': 200, 'page': 2}, secure=True).data) == 50
-
-    for bad in ('0', '1001', 'ten'):
-        response = client.get('/api/v1/code-mappings/', {'page_size': bad}, secure=True)
-        assert response.status_code == 400, bad
-        assert 'page_size' in response.data
+    client.force_authenticate(user=Identity.objects.create_user(email=email, is_staff=True))
+    return client
 
 
-def test_plain_list_pages_by_keyset_cursor_without_skipping_or_repeating():
+def _next_url(response):
+    if 'Link' not in response:
+        return None
+    links = dict((part.split('; rel=')[1].strip('"'), part.split('>')[0].strip('<'))
+                 for part in response['Link'].split(', '))
+    return links.get('next')
+
+
+def _next_query(response):
     from urllib.parse import parse_qs, urlparse
+    return parse_qs(urlparse(_next_url(response)).query)
 
-    SourceCodeConceptMapping.objects.bulk_create([
-        SourceCodeConceptMapping(source_vocabulary_id='ICD10CM', source_code=f'K{i:03}')
-        for i in range(7)
-    ])
-    client = APIClient()
-    client.force_authenticate(user=Identity.objects.create_user(email='keyset@example.test', is_staff=True))
 
-    first = client.get('/api/v1/code-mappings/', {'ordering': 'id', 'page_size': 3}, secure=True)
-    assert first.status_code == 200
-    ids = [r['mapping_id'] for r in first.data]
-    assert ids == sorted(ids) and len(ids) == 3
-    assert first['X-Total-Count'] == '7'
-    assert 'X-Page' not in first
-    assert 'rel="prev"' not in first['Link']
-    next_url = first['Link'].split('>')[0][1:]
-    assert next_url.startswith('https://')
-    query = parse_qs(urlparse(next_url).query)
-    assert query['after'] == [str(ids[-1])] and query['ordering'] == ['id'] and 'page' not in query
-
-    # A row written and one deleted mid-read neither repeat nor skip anything.
-    SourceCodeConceptMapping.objects.filter(pk=ids[0]).delete()
-    SourceCodeConceptMapping.objects.create(source_vocabulary_id='ICD10CM', source_code='A-new')
-    seen = list(ids)
-    url = next_url
+def _follow(client, response, seen):
+    """Follow next links to the end, appending every mapping_id to ``seen``."""
+    url = _next_url(response)
     while url:
         response = client.get(url, secure=True)
         assert response.status_code == 200
         seen.extend(r['mapping_id'] for r in response.data)
-        url = response['Link'].split('>')[0][1:] if 'Link' in response else None
-    assert seen == sorted(seen) and len(seen) == len(set(seen)) == 8
+        url = _next_url(response)
+    return response
+
+
+def test_plain_list_honours_limit_up_to_the_ceiling():
+    SourceCodeConceptMapping.objects.bulk_create([
+        SourceCodeConceptMapping(source_vocabulary_id='ICD10CM', source_code=f'S{i:03}')
+        for i in range(250)
+    ])
+    client = _reader('limit@example.test')
+
+    response = client.get('/api/v1/code-mappings/', {'limit': 200}, secure=True)
+    assert response.status_code == 200
+    assert len(response.data) == 200
+    assert response['X-Page-Size'] == '200'
+    assert response['X-Total-Count'] == '250'
+    assert 'page=2' in response['Link'] and 'limit=200' in response['Link']
+    assert len(client.get('/api/v1/code-mappings/', {'limit': 200, 'page': 2}, secure=True).data) == 50
+
+    for bad in ('0', '1001', 'ten'):
+        response = client.get('/api/v1/code-mappings/', {'limit': bad}, secure=True)
+        assert response.status_code == 400, bad
+        assert 'limit' in response.data
+    # The old name is not a silent alias.
+    assert len(client.get('/api/v1/code-mappings/', {'page_size': 2}, secure=True).data) == 100
+
+
+def test_plain_list_pages_by_cursor_without_skipping_or_repeating():
+    SourceCodeConceptMapping.objects.bulk_create([
+        SourceCodeConceptMapping(source_vocabulary_id='ICD10CM', source_code=f'K{i:03}')
+        for i in range(7)
+    ])
+    client = _reader('cursor@example.test')
+
+    first = client.get('/api/v1/code-mappings/', {'sort': 'updated_at', 'limit': 3}, secure=True)
+    assert first.status_code == 200
+    ids = [r['mapping_id'] for r in first.data]
+    assert len(ids) == 3
+    assert 'X-Total-Count' not in first and 'X-Page' not in first
+    assert 'rel="prev"' not in first['Link']
+    next_url = _next_url(first)
+    assert next_url.startswith('https://')
+    query = _next_query(first)
+    assert query['sort'] == ['updated_at'] and query['limit'] == ['3'] and 'page' not in query
+    cursor = query['cursor'][0]
+    assert cursor and str(ids[-1]) not in cursor.split(':')[0:1]  # opaque, not the bare id
+
+    # A row written and one deleted mid-read neither repeat nor skip anything.
+    SourceCodeConceptMapping.objects.filter(pk=ids[0]).delete()
+    new = SourceCodeConceptMapping.objects.create(source_vocabulary_id='ICD10CM', source_code='A-new')
+    seen = list(ids)
+    response = _follow(client, first, seen)
+    assert len(seen) == len(set(seen)) == 8 and seen[-1] == new.pk
     assert len(response.data) == 2  # 8 rows at 3 a page: no trailing empty page
-    assert 'X-Total-Count' not in response
+    assert 'Link' not in response
 
-    # A later page repeats neither the count nor loses the filters it was asked with.
-    SourceCodeConceptMapping.objects.filter(pk__in=seen[1:3]).update(status='approved')  # seen[0] was deleted
-    response = client.get('/api/v1/code-mappings/', {
-        'ordering': 'id', 'page_size': 1, 'status': 'approved', 'updated_since': '2020-01-01T00:00:00+00:00',
+    # A row re-saved after it was read comes round again in the same run, so a
+    # delta reader needs no margin for rows updated below its cursor.
+    first = client.get('/api/v1/code-mappings/', {'sort': 'updated_at', 'limit': 3}, secure=True)
+    page_one = [r['mapping_id'] for r in first.data]
+    resaved = SourceCodeConceptMapping.objects.get(pk=page_one[1])
+    resaved.status = 'approved'
+    resaved.save()
+    seen = list(page_one)
+    _follow(client, first, seen)
+    assert seen.count(resaved.pk) == 2 and seen[-1] == resaved.pk
+    assert len(seen) == 8 and len(set(seen)) == 7  # seven rows, one of them twice
+
+
+def test_plain_list_cursor_pages_through_updated_at_ties():
+    """A bulk writer stamps one clock value on a whole batch, so the id is
+    the tie-breaker inside one updated_at and a page boundary that falls
+    inside a tie must not skip or repeat the rest of it."""
+    SourceCodeConceptMapping.objects.bulk_create([
+        SourceCodeConceptMapping(source_vocabulary_id='ICD10CM', source_code=f'T{i:03}')
+        for i in range(7)
+    ])
+    SourceCodeConceptMapping.objects.update(updated_at='2026-01-01T00:00:00.123456Z')
+    client = _reader('ties@example.test')
+
+    first = client.get('/api/v1/code-mappings/', {'sort': 'updated_at', 'limit': 3}, secure=True)
+    seen = [r['mapping_id'] for r in first.data]
+    _follow(client, first, seen)
+    assert seen == sorted(seen) and len(seen) == len(set(seen)) == 7
+
+
+def test_plain_list_cursor_is_bound_to_its_query():
+    rows = SourceCodeConceptMapping.objects.bulk_create([
+        SourceCodeConceptMapping(source_vocabulary_id='ICD10CM', source_code=f'B{i:03}',
+                                 status='approved' if i % 2 else 'proposed')
+        for i in range(6)
+    ])
+    client = _reader('bound@example.test')
+    since = '2020-01-01T00:00:00Z'
+    first = client.get('/api/v1/code-mappings/', {
+        'sort': 'updated_at', 'limit': 1, 'status': 'approved', 'updated_since': since,
     }, secure=True)
-    assert response['X-Total-Count'] == '2' and [r['mapping_id'] for r in response.data] == [seen[1]]
-    query = parse_qs(urlparse(response['Link'].split('>')[0][1:]).query)
-    assert query['status'] == ['approved'] and query['updated_since'] == ['2020-01-01T00:00:00+00:00']
-    response = client.get(response['Link'].split('>')[0][1:], secure=True)
-    assert [r['mapping_id'] for r in response.data] == [seen[2]] and 'X-Total-Count' not in response
+    assert [r['mapping_id'] for r in first.data] == [rows[1].pk]
+    query = _next_query(first)
+    assert query['status'] == ['approved'] and query['updated_since'] == [since]
+    cursor = query['cursor'][0]
 
-    assert client.get('/api/v1/code-mappings/', {'after': ids[0], 'page': 2}, secure=True).status_code == 400
-    assert client.get('/api/v1/code-mappings/', {'after': ids[0], 'ordering': 'source'}, secure=True).status_code == 400
-    assert client.get('/api/v1/code-mappings/', {'ordering': 'name'}, secure=True).status_code == 400
-    assert client.get('/api/v1/code-mappings/', {'after': '-1'}, secure=True).status_code == 400
-    # after= alone implies ordering=id and starts past the id given.
-    response = client.get('/api/v1/code-mappings/', {'after': ids[-1]}, secure=True)
-    assert [r['mapping_id'] for r in response.data] == sorted(seen)[3:]
+    def get(**overrides):
+        params = {'sort': 'updated_at', 'limit': 1, 'status': 'approved', 'updated_since': since, 'cursor': cursor}
+        params.update(overrides)
+        return client.get('/api/v1/code-mappings/', {k: v for k, v in params.items() if v is not None}, secure=True)
+
+    # The same query continues; the page size and the total request may change.
+    assert [r['mapping_id'] for r in get().data] == [rows[3].pk]
+    response = get(limit=5, include_total='true')
+    assert [r['mapping_id'] for r in response.data] == [rows[3].pk, rows[5].pk]
+    assert response['X-Total-Count'] == '3'
+    # Another filter, another delta boundary, or no sort: a different query.
+    for overrides in ({'status': 'proposed'}, {'updated_since': '2021-01-01T00:00:00Z'},
+                      {'updated_since': None}, {'source': 'ICD10CM'}, {'sort': None}):
+        response = get(**overrides)
+        assert response.status_code == 400 and 'cursor' in response.data, overrides
+    # A forged or damaged token is refused, not read.
+    for forged in (cursor[:-2] + 'xx', cursor.replace(':', '-', 1), str(rows[1].pk), ''):
+        response = get(cursor=forged)
+        assert response.status_code == (200 if forged == '' else 400), forged
+    assert get(page=2).status_code == 400
+    assert client.get('/api/v1/code-mappings/', {'sort': 'id'}, secure=True).status_code == 400
+    assert client.get('/api/v1/code-mappings/', {'sort': 'updated_at', 'page': 2}, secure=True).status_code == 400
 
 
-def test_plain_list_filters_by_updated_since():
+def test_plain_list_include_total_is_opt_in_on_a_cursor_read():
+    SourceCodeConceptMapping.objects.bulk_create([
+        SourceCodeConceptMapping(source_vocabulary_id='ICD10CM', source_code=f'C{i:03}',
+                                 status='approved' if i < 4 else 'proposed')
+        for i in range(6)
+    ])
+    client = _reader('total@example.test')
+    response = client.get('/api/v1/code-mappings/', {'sort': 'updated_at', 'limit': 3, 'status': 'approved'}, secure=True)
+    assert 'X-Total-Count' not in response
+    response = client.get('/api/v1/code-mappings/', {
+        'sort': 'updated_at', 'limit': 3, 'status': 'approved', 'include_total': 'true',
+    }, secure=True)
+    assert response['X-Total-Count'] == '4'  # the matching rows, not the remaining ones
+    assert _next_query(response)['include_total'] == ['true']
+    response = client.get(_next_url(response), secure=True)
+    assert response['X-Total-Count'] == '4' and len(response.data) == 1
+    for raw, expected in (('1', '4'), ('false', None), ('0', None)):
+        response = client.get('/api/v1/code-mappings/', {
+            'sort': 'updated_at', 'status': 'approved', 'include_total': raw,
+        }, secure=True)
+        assert response.get('X-Total-Count') == expected, raw
+    response = client.get('/api/v1/code-mappings/', {'sort': 'updated_at', 'include_total': 'maybe'}, secure=True)
+    assert response.status_code == 400 and 'include_total' in response.data
+
+
+def test_plain_list_filters_by_updated_since_rfc3339_instant():
     older = SourceCodeConceptMapping.objects.create(source_vocabulary_id='ICD10CM', source_code='OLD')
     SourceCodeConceptMapping.objects.filter(pk=older.pk).update(updated_at='2024-01-01T00:00:00Z')
     newer = SourceCodeConceptMapping.objects.create(source_vocabulary_id='ICD10CM', source_code='NEW')
-    client = APIClient()
-    client.force_authenticate(user=Identity.objects.create_user(email='since@example.test', is_staff=True))
+    client = _reader('since@example.test')
 
     response = client.get('/api/v1/code-mappings/', {'updated_since': '2025-01-01T00:00:00Z'}, secure=True)
     assert [r['mapping_id'] for r in response.data] == [newer.pk]
     assert response['X-Total-Count'] == '1'
-    # A naive datetime is read as UTC.
-    response = client.get('/api/v1/code-mappings/', {'updated_since': '2023-12-31T00:00:00'}, secure=True)
+    # Inclusive, and any offset will do.
+    response = client.get('/api/v1/code-mappings/', {'updated_since': '2024-01-01T02:00:00+02:00'}, secure=True)
     assert {r['mapping_id'] for r in response.data} == {older.pk, newer.pk}
-    response = client.get('/api/v1/code-mappings/', {'updated_since': 'yesterday'}, secure=True)
-    assert response.status_code == 400 and 'updated_since' in response.data
+    # An unencoded '+' arrives as a space and is read as the offset it was.
+    response = client.get('/api/v1/code-mappings/?updated_since=2024-01-01T02:00:00 02:00', secure=True)
+    assert {r['mapping_id'] for r in response.data} == {older.pk, newer.pk}
+    # A bare date, a naive datetime or prose is a 400, never read as UTC.
+    for bad in ('2023-12-31', '2023-12-31T00:00:00', 'yesterday'):
+        response = client.get('/api/v1/code-mappings/', {'updated_since': bad}, secure=True)
+        assert response.status_code == 400 and 'updated_since' in response.data, bad
 
 
 @pytest.mark.parametrize('k_service, expected', [('ctomop-staging', 'trusted'), ('', 'None')])

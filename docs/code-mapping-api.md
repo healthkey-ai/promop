@@ -205,36 +205,51 @@ GET /api/v1/code-mappings/?status=approved
 Authorization: Bearer <service credential>
 ```
 
-The response is a bare JSON array of mapping rows, `page_size` to a page
+The response is a bare JSON array of mapping rows, `limit` to a page
 (default 100, at most 1000; outside that range is a 400). Pagination is in
-the headers: `X-Total-Count`, `X-Page-Size`, and a `Link` header whose
-`rel="next"` URL is absolute (`https://` behind a proxy that passes
-`X-Forwarded-Proto`, as Render and Cloud Run do). Follow it until the `Link`
-header carries none.
+the headers: `X-Page-Size`, a `Link` header whose `rel="next"` URL is
+absolute (`https://` behind a proxy that passes `X-Forwarded-Proto`, as
+Render and Cloud Run do), and `X-Total-Count` where noted below. Follow the
+`Link` header until it carries no `rel="next"`.
 
-Two ways to page (#2451):
+Two ways to page (#2451, #2513):
 
 - `page=N`, the default: offset pages in (vocabulary, code, id) order, with
-  `X-Page` and a `rel="prev"` link. A row written or deleted while you page
-  shifts every later page, so rows can be skipped or repeated. Fine for a
-  look, not for a full read.
-- `ordering=id&after=<mapping_id>`: a keyset cursor in id order. Start with
-  `ordering=id` alone; each `rel="next"` URL carries `after=` the last id on
-  the page, there is no `rel="prev"`, and `X-Total-Count` comes on the first
-  page only. A row written mid-read has a higher id than any already read and
-  a deleted one leaves no gap, so a full read sees every row that existed
-  throughout exactly once. `page` with `after` is a 400.
+  `X-Page`, `X-Total-Count` on every page and a `rel="prev"` link. A row
+  written or deleted while you page shifts every later page, so rows can be
+  skipped or repeated. Fine for a look, not for a full read.
+- `sort=updated_at`: a cursor read in `(updated_at, id)` order, the shape a
+  warehouse export takes. Start with `sort=updated_at` and your filters; each
+  `rel="next"` URL carries `cursor=<token>`, and there is no `rel="prev"`.
+  A row written or re-saved mid-read gets a later `updated_at` than any you
+  have read, so it is delivered later in the same run (a re-saved row twice:
+  once as it was, once as it is), and a deleted one leaves no gap. A full
+  read therefore sees every row that existed throughout. `page` with a
+  cursor or `sort` is a 400, and `sort` accepts nothing but `updated_at`.
 
-`updated_since=<ISO 8601 datetime>` (naive means UTC; percent-encode a `+`
-offset, or use `Z`) narrows to rows whose `updated_at` is at or after it.
-Three limits of that delta:
+The cursor is opaque: a token signed by the server that names the last row
+delivered and the query it was issued for. Reusing it with a different
+`updated_since`, `sort` or filter is a 400 ("issued for a different query"),
+as is a token the server did not issue. `limit` and `include_total` may
+change between pages.
+
+`include_total=true` adds `X-Total-Count`, the count of rows matching the
+filters (not the rows remaining), to each page of a cursor read. It is one
+full count of the table, so it is not computed unless asked for.
+
+`updated_since=<RFC 3339 instant>` narrows to rows whose `updated_at` is at
+or after it, inclusive: `2026-11-13T00:00:00Z`, or with an offset such as
+`+02:00`. The offset is required; a bare date or a naive datetime is a 400
+rather than a guess at the zone. Percent-encode a `+` offset, or use `Z`.
+Three things to know about the delta:
 
 - It is additive. A deleted mapping is gone, not marked, so a nightly delta
   never sees it. Reconcile deletions with a periodic full read
-  (`ordering=id`) and a set difference on `mapping_id`.
-- Use the previous run's *start* time (less a margin for clock skew) as the
-  next `updated_since`, not its end: a row updated during a run, below its
-  cursor, is not delivered by that run.
+  (`sort=updated_at` with no `updated_since`) and a set difference on
+  `mapping_id`.
+- Use the previous run's start time, less a margin for clock skew, as the
+  next `updated_since`. Within a run nothing is missed: a row updated after
+  you read it comes round again before the run ends.
 - It tracks curation, not sightings. Every writer that changes a row's
   destination, status, description or source concept stamps `updated_at`,
   including the bulk maintenance commands and `copy_reference_data` (a
