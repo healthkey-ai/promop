@@ -232,6 +232,16 @@ def _field_choice_options() -> dict[str, list[tuple[str, str | None]]]:
         result.setdefault(choice.field_name, []).append((choice.display, primary))
     return result
 
+
+# Columns whose vocabulary is a property of the disease, not of the field, so a
+# single FieldChoice set cannot serve them: `stage` is Ann Arbor for follicular
+# lymphoma and ISS/R-ISS for myeloma, `tumor_grade` is 1-3 for breast cancer and
+# the centroblast grades for FL. The tab names the system and supplies its list;
+# the seeds happen to be the follicular ones, so the descriptor must not attach
+# them. Host and trial editors without a tab render these as text — no list is
+# better than the wrong list.
+_TAB_OWNED_ANSWER_SETS = frozenset({'stage', 'tumor_grade'})
+
 # PatientRecord field → the Person field the persons endpoint accepts.
 #
 # These are not clinical facts and never were: they describe the person, not an
@@ -982,12 +992,17 @@ def build_writable_field_descriptor():
         if spec.get('concept_id')
     }
 
+    # One FieldChoice set is one meaning, but these columns carry a different
+    # vocabulary per disease and the tab names it (`_TAB_OWNED_ANSWER_SETS`).
+    # Dropping them before both the curated-mapping path and the fallback
+    # attachment below means an approved mapping cannot reintroduce them either.
     choice_options = {
         field_name: [
             {'value': display, 'code': primary_code}
             for display, primary_code in choices
         ]
         for field_name, choices in _field_choice_options().items()
+        if field_name not in _TAB_OWNED_ANSWER_SETS
     }
     from omop_core.services.genomics import mapping_is_usable
     genomics_recipes = {}
@@ -1417,6 +1432,11 @@ def build_writable_field_descriptor():
     # shared editor that renders from the descriptor (and ignores a tab's local
     # options) otherwise shows an empty picker (#5603). An existing entry's
     # options win, so curated concept-valued sets are never replaced here.
+    #
+    # `stage` and `tumor_grade` are excluded where the set is built, because
+    # their vocabulary is a property of the disease and the tab names it. Host
+    # and trial editors without a tab render them as text: no list is better
+    # than the wrong list.
     for field, options in choice_options.items():
         entry = descriptor.get(field)
         if entry is not None and options and 'options' not in entry:

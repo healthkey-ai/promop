@@ -93,7 +93,8 @@ export default function ClinicalField({
   // Both the tabbed profile and embedded Trial Details use the same control,
   // dependency dialogs and save queue. Dedicated authoring views remain separate.
   if (store) return <PatientFieldEditor store={store} name={name} label={label}
-    labelIncludesUnit={labelIncludesUnit} readOnly={formReadOnly} options={options} />;
+    labelIncludesUnit={labelIncludesUnit} readOnly={formReadOnly} options={options}
+    controlType={type} />;
   // `absent` is stronger than "not writable": the server has no such field.
   const absent = !!unknownField;
   const curated = descriptor?.options?.map((o) => o.value);
