@@ -913,3 +913,12 @@ PHR_SHARE_GEO_HEADERS = {
     if os.environ.get(f'PHR_SHARE_GEO_{key.upper()}_HEADER')
 }
 PROLOG_EMAIL_FROM = os.environ.get('PROLOG_EMAIL_FROM', DEFAULT_FROM_EMAIL)
+
+# Provisional data (#2434): OMOP rows written from proposed, not yet approved,
+# mappings carry a `confidence` percentage. Off, every writer behaves as it did
+# before the feature and a clinical write that carries a confidence is refused.
+# docs/provisional_data_plan.md#settings
+PROVISIONAL_DATA_ENABLED = os.environ.get(
+    'PROVISIONAL_DATA_ENABLED', 'false').strip().lower() in ('1', 'true', 'yes')
+# Least confidence (percent) a provisional row is written at.
+PROVISIONAL_CONFIDENCE_FLOOR = int(os.environ.get('PROVISIONAL_CONFIDENCE_FLOOR', '70'))

@@ -7302,7 +7302,7 @@ class _UpsertPlan:
         self.to_insert = to_insert        # unsaved rows needing a pk, in order
         self.row_slots = row_slots        # per input row: ('new', slot) | ('old', pk)
         self.collapse_ids = collapse_ids  # stacked duplicates to delete
-        self.to_update = to_update        # [(pk, concept_id)] — concept changed
+        self.to_update = to_update        # [(pk, concept_id, confidence)] — either changed
         self.touched_ids = touched_ids    # existing rows updated or de-stacked
         self.unattributed_matches = unattributed_matches
         # pk -> (incoming row, attribution class): rows matched by their source
@@ -7479,12 +7479,14 @@ def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances,
     # person's own rows for those source values.
     existing = {}   # key -> [pk, …] ascending
     cid_by_pk = {}
+    confidence_by_pk = {}   # pk -> stored confidence (null = a real row)
     attribution_by_pk = {}
     keyed_pks = set()   # stored rows that carry a source record key
     if keyed:
         columns = (pk_field, cid_attr, sv_field, date_field) + tuple(extra_fields)
         if supports_key:
             columns += ('source_record_key',)
+        columns += ('confidence',)
         # Entered-in-error rows are excluded from the match on purpose.
         #
         # A row marked is_erroneous is not the current fact -- derivation already
@@ -7523,8 +7525,9 @@ def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances,
             key = (row[2], row[3]) + tuple(tail)
             existing.setdefault(key, []).append(row[0])
             cid_by_pk[row[0]] = row[1]
+            confidence_by_pk[row[0]] = row[-2]
             attribution_by_pk[row[0]] = tuple(row[-1])
-            if supports_key and row[-2]:
+            if supports_key and row[-3]:
                 keyed_pks.add(row[0])
 
     # Distinct attributions among the unkeyed rows of a key, before the
@@ -7564,8 +7567,15 @@ def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances,
                   if pk not in keyed_pks and pk not in collapse_ids]
         collapse_ids.extend(extras)
         new_cid = getattr(instances[i], cid_attr, None)
-        if cid_by_pk[keep] != new_cid:
-            to_update.append((keep, new_cid))
+        new_conf = getattr(instances[i], 'confidence', None)
+        old_conf = confidence_by_pk[keep]
+        if old_conf is None and new_conf is not None:
+            # Real beats provisional: a proposal never touches a row an approved
+            # mapping wrote (#2434).
+            if extras:
+                touched_ids.append(keep)
+        elif cid_by_pk[keep] != new_cid or old_conf != new_conf:
+            to_update.append((keep, new_cid, new_conf))
             touched_ids.append(keep)
         elif extras:
             touched_ids.append(keep)
@@ -7681,8 +7691,9 @@ def _apply_upsert_plan(plan, model_cls, pk_field, model_name):
 
     if plan.to_update:
         model_cls.objects.bulk_update(
-            [model_cls(**{pk_field: pk, cid_attr: cid}) for pk, cid in plan.to_update],
-            [concept_field],
+            [model_cls(**{pk_field: pk, cid_attr: cid, 'confidence': conf})
+             for pk, cid, conf in plan.to_update],
+            [concept_field, 'confidence'],
         )
 
     new_ids = []
@@ -7733,6 +7744,18 @@ def _apply_upsert_plan(plan, model_cls, pk_field, model_name):
             plan.row_slots = [('old', remap[ref]) if kind == 'new' and ref in remap
                               else (kind, ref) for kind, ref in plan.row_slots]
             new_ids = [pk if s not in remap else None for s, pk in enumerate(new_ids)]
+
+    if any(getattr(row, 'confidence', None) is not None
+           for row, _cls in plan.keyed_updates.values()):
+        # Real beats provisional here too: a provisional row never rewrites a
+        # keyed row an approved mapping wrote (#2434). Looked up only when a
+        # batch carries a confidence, so the usual write pays no query for it.
+        real = set(model_cls.objects.filter(
+            **{f'{pk_field}__in': list(plan.keyed_updates), 'confidence__isnull': True}
+        ).values_list(pk_field, flat=True))
+        plan.keyed_updates = {
+            pk: (row, cls) for pk, (row, cls) in plan.keyed_updates.items()
+            if not (pk in real and getattr(row, 'confidence', None) is not None)}
 
     if plan.keyed_updates:
         fields = _keyed_update_fields(model_cls, pk_field, plan.writable)

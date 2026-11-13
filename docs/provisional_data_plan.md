@@ -237,11 +237,15 @@ record) at the cost of a coalesce for anyone reading it in SQL.
 
 ## Schema
 
-**Clinical tables.** `confidence = PositiveSmallIntegerField(null=True)` on
-the five models, with a check constraint `confidence <= 100`, and a partial
-index per table on `(person_id) WHERE confidence IS NOT NULL`. The column is
-nullable with no default, so the `ADD COLUMN` is a catalogue change on every
-table including `measurement`. The partial indexes are built with
+**Clinical tables.** `confidence = SmallIntegerField(null=True)` on the five
+models (migration `0339`), with a check constraint `0 <= confidence <= 100`, and
+a partial index per table on `(person_id) WHERE confidence IS NOT NULL`. The
+column is nullable with no default, so the `ADD COLUMN` is a catalogue change on
+every table including `measurement`. It is a signed `smallint` on purpose:
+`PositiveSmallIntegerField` adds a `>= 0` check to the `ADD COLUMN` statement,
+and a check on an added column scans the table under an exclusive lock. The
+range check is added `NOT VALID` and validated in a second statement, which
+blocks no writes. The partial indexes are built with
 `AddIndexConcurrently` in a non-atomic migration: a plain build scans the
 whole table under a lock, and the Cloud Run migrate job has an hour (#2021).
 
@@ -303,7 +307,7 @@ name through the same endpoint's list form, or directly, joined on `person`.
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `PROVISIONAL_DATA_ENABLED` | `False` | master switch; off, every writer behaves as today and the provisional pair is neither written nor served |
+| `PROVISIONAL_DATA_ENABLED` | `False` | master switch; off, every writer behaves as today (a clinical write carrying a confidence number is refused with 400; null is always accepted) and the provisional pair is neither written nor served |
 | `PROVISIONAL_CONFIDENCE_FLOOR` | `70` | least confidence a provisional row is written at |
 | `Organization.accepts_provisional_data` | `False` | FHIR sync for this organization passes `accept_proposed` |
 
