@@ -43,13 +43,14 @@ review the manifest and receive explicit approval for that cohort.
    whole-table audit inside its transaction before taking the locks, so any
    patient write in that span makes the repair refuse with "digest mismatch;
    rerun audit". During the run the row locks (`SELECT … FOR UPDATE` on the
-   audited records, their person rows and attestations) make the cohort's writes
-   wait without blocking other patients' rows, but an evidence row the audit
-   filtered out can change unseen. A READ COMMITTED transaction makes the
-   post-lock re-read see changes committed since the audit, but it does not
-   guarantee that every concurrent change is caught, so the write pause is the
-   gate. Acquisition has a five-second timeout; this is not a zero-downtime bulk
-   job.
+   cohort's records — the candidates the repair may clear, not every audited
+   record — their person rows and attestations, and the formula row) make the
+   cohort's writes wait without blocking other patients' rows, but an evidence
+   row the audit filtered out can change unseen. A READ COMMITTED transaction
+   makes the post-lock re-read see changes committed since the audit, but it
+   does not guarantee that every concurrent change is caught, so the write pause
+   is the gate. Acquisition has a five-second timeout; this is not a
+   zero-downtime bulk job.
 
 ## Read-only sizing (deployment owner/operator)
 
