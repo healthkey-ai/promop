@@ -302,6 +302,35 @@ def test_cancer_conditions_become_dated_transitions_and_other_conditions_are_lis
     ]
 
 
+def test_a_condition_coded_only_by_its_source_is_named_from_terminology_or_left_out():
+    """#131: with no standard concept, the card fell back to the source text,
+    which can be a bare code ("Z94.81") or junk ("0"). The code is named from
+    the terminology; one that names nothing is left out and logged."""
+    from unittest import mock
+
+    from patient_portal.api.phr import views
+
+    record = PatientRecordFactory(disease='')
+    unmatched = ConceptFactory(concept_id=0, concept_code='No matching concept', concept_name='No matching concept')
+    icd10('Z94.81', 'Bone marrow transplant status')
+    condition(record, unmatched, '2016-09-26', condition_source_value='Z94.81')
+    condition(record, unmatched, '2016-04-01', condition_source_value='0')
+    condition(record, unmatched, '2017-01-01', condition_source_value='Seasonal allergies')
+
+    # patient_portal's loggers don't propagate (settings.LOGGING), so caplog
+    # can't see them: watch the module's logger itself.
+    with mock.patch.object(views.logger, 'warning') as warning:
+        data = signed_in(record).get('/api/v1/phr/diagnoses/').data
+
+    assert [(c['name'], c['date']) for c in data['other']] == [
+        ('Seasonal allergies', '2017-01-01'),
+        ('Bone marrow transplant status', '2016-09-26'),
+    ]
+    # The left-out code is logged once, with its source.
+    unresolved = [c for c in warning.call_args_list if 'unresolved condition code' in c.args[0]]
+    assert len(unresolved) == 1 and unresolved[0].args[1] == '0'
+
+
 def test_a_second_cancer_gets_its_own_entry_after_the_primary():
     record = PatientRecordFactory(disease='Multiple myeloma', disease_slug='myeloma', diagnosis_date='2024-03-12')
     condition(record, icd10('D47.2', 'Monoclonal gammopathy'), '2019-06-04')

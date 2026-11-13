@@ -6,6 +6,7 @@ effect, so a clinician or service identity gets 404 rather than an empty record.
 """
 from __future__ import annotations
 
+import logging
 import re
 from typing import Any
 
@@ -14,6 +15,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from omop_core.models import (
+    Concept,
     ConceptAncestor,
     ConditionOccurrence,
     DrugExposure,
@@ -247,10 +249,53 @@ def _condition_rows(person):
     )
 
 
+logger = logging.getLogger(__name__)
+
+# A source value that is a code rather than a name: ICD-10 (Z94.81, or E039
+# without its decimal), a SNOMED or other numeric id, or junk like "0" (#131).
+_BARE_CODE = re.compile(r'[A-Z]\d{2}(?:\.?[0-9A-Z]{1,4})?|\d+', re.IGNORECASE)
+# Where a bare code is looked up, most specific first.
+_NAMING_VOCABULARIES = ('ICD10CM', 'ICD10', 'SNOMED')
+
+
+def _code_name(code: str) -> str | None:
+    """The terminology's name for a bare condition code, if it has one."""
+    code = code.strip().upper()
+    candidates = {code}
+    if '.' not in code and len(code) > 3 and code[0].isalpha():
+        candidates.add(f'{code[:3]}.{code[3:]}')  # E039 -> E03.9
+    names = dict(
+        Concept.objects.filter(vocabulary_id__in=_NAMING_VOCABULARIES, concept_code__in=candidates)
+        .values_list('vocabulary_id', 'concept_name')
+    )
+    return next((_text(names[v]) for v in _NAMING_VOCABULARIES if _text(names.get(v))), None)
+
+
 def _condition_name(row) -> str | None:
-    # Concept 0 is "No matching concept": the source text is the name then.
+    """A condition's name. Concept 0 is "No matching concept": then it is the
+    record's own coding, named from the terminology when it is a bare code,
+    and None when nothing names it (the card is left out, #131)."""
     concept = row.condition_concept if row.condition_concept_id else None
-    return _text(concept.concept_name if concept else None) or _text(row.condition_source_value)
+    if name := _text(concept.concept_name if concept else None):
+        return name
+    source = row.condition_source_concept if row.condition_source_concept_id else None
+    if name := _text(source.concept_name if source else None):
+        return name
+    text = _text(row.condition_source_value)
+    if not text or not _BARE_CODE.fullmatch(text):
+        return text
+    return _code_name(text)
+
+
+def _unnamed(row, sources) -> None:
+    """Log a condition left out for having no name, with where it came from,
+    to see how often codes fail to resolve and whether a source clusters (#131)."""
+    if row.condition_source_value:
+        origin = sources.get(row.pk) or {}
+        logger.warning(
+            'phr: unresolved condition code %r (condition %s, facility %r)',
+            row.condition_source_value, row.pk, origin.get('facility'),
+        )
 
 
 # Cancer families by ICD-10 prefix: conditions in one family are one disease
@@ -400,6 +445,7 @@ def diagnoses(person, record: PatientRecord | None) -> dict[str, Any]:
         latest = family_rows[-1]
         name = name_of(latest)
         if not name:
+            _unnamed(latest, sources)
             continue
         resolved = all(r.condition_end_date for r in family_rows)
         # Diagnosed when the current diagnosis began (myeloma, not the MGUS
@@ -431,7 +477,10 @@ def diagnoses(person, record: PatientRecord | None) -> dict[str, Any]:
     other, seen = [], set()
     for row in other_rows:
         name = _condition_name(row)
-        if not name or name.lower() in seen:
+        if not name:
+            _unnamed(row, sources)
+            continue
+        if name.lower() in seen:
             continue
         seen.add(name.lower())
         dated = str(row.pk) not in undated
