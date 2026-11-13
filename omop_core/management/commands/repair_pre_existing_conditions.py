@@ -18,8 +18,8 @@ from omop_core.management.commands.audit_pre_existing_conditions import (
     classify,
 )
 from omop_core.management.guarded_repair import (
-    canonical, digest, lock_rows, make_transaction_read_committed,
-    make_transaction_read_only, read_json, receipt, target_guard, write_private,
+    canonical, digest, lock_rows, pin_transaction_isolation, read_json, receipt,
+    target_guard, write_private,
 )
 from omop_core.models import (
     FieldFormula, PatientRecord, Person, PreexistingConditionsAttestation, RecordRevision,
@@ -74,8 +74,10 @@ class Command(BaseCommand):
 
         The audit runs before the lock, so `_repair` re-derives each candidate's
         evidence under it. New attestations and recorded facts take a key-share
-        lock on their person row, so locking the candidates' persons keeps a
-        freshly recorded answer from landing between that check and the write.
+        lock on their person row, and revisions take theirs on the
+        `patient_record` row, so locking the candidates' persons and records
+        keeps a freshly recorded answer from landing between that check and the
+        write.
         Existing attestation rows are locked explicitly: at READ COMMITTED an
         update of a legacy attestation takes no key-share lock on the person,
         and deleting the row after such an update would remove a just-confirmed
@@ -136,11 +138,7 @@ class Command(BaseCommand):
             target_guard(options['environment'])
         owns = not connection.in_atomic_block
         with transaction.atomic():
-            if owns:
-                if applying:
-                    make_transaction_read_committed()
-                else:
-                    make_transaction_read_only()
+            pin_transaction_isolation(applying, owns)
             live = Audit()._collect(summary_only=False)
             if applying:
                 self._lock(live, supplied, rolling_back=bool(options['rollback']))

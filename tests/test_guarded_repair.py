@@ -180,13 +180,41 @@ def test_as_bool(text, expected):
 def test_every_audit_repair_command_uses_the_shared_guards():
     for module in (repair_legacy_pregnancy_tobacco, repair_pre_existing_conditions):
         for name in ('target_guard', 'write_private', 'read_json', 'canonical', 'digest',
-                     'receipt', 'lock_rows', 'make_transaction_read_only',
-                     'make_transaction_read_committed'):
+                     'receipt', 'lock_rows', 'pin_transaction_isolation'):
             assert getattr(module, name) is getattr(guarded_repair, name), (module, name)
     # The apply path stays at READ COMMITTED: a serializable snapshot taken by
     # the audit read cannot see evidence committed before the locks, which is
     # the window the post-lock re-read exists to close.
     assert not hasattr(guarded_repair, 'make_transaction_serializable')
+
+
+def test_pin_transaction_isolation_chooses_by_apply_and_ownership(monkeypatch):
+    calls = []
+    monkeypatch.setattr(guarded_repair, 'make_transaction_read_committed',
+                        lambda: calls.append('read-committed'))
+    monkeypatch.setattr(guarded_repair, 'make_transaction_read_only',
+                        lambda: calls.append('read-only'))
+
+    guarded_repair.pin_transaction_isolation(applying=True, owns=False)
+    guarded_repair.pin_transaction_isolation(applying=False, owns=False)
+    assert calls == []
+
+    guarded_repair.pin_transaction_isolation(applying=True, owns=True)
+    guarded_repair.pin_transaction_isolation(applying=False, owns=True)
+    assert calls == ['read-committed', 'read-only']
+
+
+@pytest.mark.django_db(transaction=True)
+def test_make_transaction_read_committed_issues_the_statement():
+    from django.db import transaction
+    from django.test.utils import CaptureQueriesContext
+
+    with transaction.atomic():
+        with CaptureQueriesContext(connection) as captured:
+            guarded_repair.make_transaction_read_committed()
+
+    assert any('READ COMMITTED' in query['sql'].upper()
+               for query in captured.captured_queries)
     for module in (audit_legacy_pregnancy_tobacco, audit_pre_existing_conditions):
         for name in ('approval_digest', 'as_bool', 'make_transaction_read_only',
                      'refuse_existing_manifest', 'write_manifest'):

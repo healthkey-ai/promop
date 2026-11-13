@@ -74,6 +74,20 @@ def make_transaction_read_committed():
         cursor.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
 
 
+def pin_transaction_isolation(applying, owns):
+    """Choose the isolation level for the command's own transaction.
+
+    Tests run inside pytest-django's atomic block, where the level is already
+    fixed, so `owns` is False and the guards stay out of the caller's way.
+    """
+    if not owns:
+        return
+    if applying:
+        make_transaction_read_committed()
+    else:
+        make_transaction_read_only()
+
+
 def refuse_existing_manifest(path):
     """Fail early, before the audit reads anything, when ``path`` already exists."""
     if path and os.path.exists(path):
@@ -219,7 +233,10 @@ def lock_rows(model, pks):
             list(model.objects.select_for_update().filter(pk__in=batch)
                  .order_by('pk').values_list('pk', flat=True))
     except OperationalError as exc:
-        if 'lock timeout' in str(exc).lower():
+        cause = getattr(exc, '__cause__', None)
+        sqlstate = (getattr(cause, 'sqlstate', None)
+                    or getattr(exc, 'pgcode', None))
+        if sqlstate == '55P03' or 'lock timeout' in str(exc).lower():
             raise CommandError(
                 "Could not acquire the cohort's row locks within 5 s; "
                 'rerun inside the write pause.') from exc

@@ -19,12 +19,12 @@ from django.db.migrations.recorder import MigrationRecorder
 from django.utils import timezone
 
 from omop_core.management.commands.audit_legacy_pregnancy_tobacco import (
-    Command as Audit, FIELDS, REPAIRABLE_CLASSIFICATIONS, _revisions, _source_state,
-    approval_digest, classify,
+    Command as Audit, FIELDS, REPAIRABLE_ACTIONS, REPAIRABLE_CLASSIFICATIONS,
+    _revisions, _source_state, approval_digest, classify,
 )
 from omop_core.management.guarded_repair import (
-    canonical, digest, lock_rows, make_transaction_read_committed,
-    make_transaction_read_only, read_json, receipt, target_guard, write_private,
+    canonical, digest, lock_rows, pin_transaction_isolation, read_json, receipt,
+    target_guard, write_private,
 )
 from omop_core.models import FieldFormula, PatientRecord, Person, RecordRevision
 
@@ -93,7 +93,7 @@ class Command(BaseCommand):
                 ids.append(before['id'])
             return ids
         return [row['id'] for row in live['records']
-                if any(row['fields'][field]['recommended_action'] == 'clear'
+                if any(row['fields'][field]['recommended_action'] in REPAIRABLE_ACTIONS
                        for field in FIELDS)]
 
     def _ready(self):
@@ -114,11 +114,7 @@ class Command(BaseCommand):
             target_guard(options['environment'])
         owns = not connection.in_atomic_block
         with transaction.atomic():
-            if owns:
-                if applying:
-                    make_transaction_read_committed()
-                else:
-                    make_transaction_read_only()
+            pin_transaction_isolation(applying, owns)
             live = Audit()._collect(summary_only=False)
             if applying:
                 self._lock(live, supplied, rolling_back=bool(options['rollback']))
@@ -146,7 +142,7 @@ class Command(BaseCommand):
         run = f'repair:2432:{uuid.uuid4()}'
         candidates = [
             row for row in live['records']
-            if any(row['fields'][field]['recommended_action'] == 'clear'
+            if any(row['fields'][field]['recommended_action'] in REPAIRABLE_ACTIONS
                    for field in FIELDS)
         ]
         ids = [row['id'] for row in candidates]
@@ -160,7 +156,7 @@ class Command(BaseCommand):
         entries = []
         for row in candidates:
             fields = [field for field in FIELDS
-                      if row['fields'][field]['recommended_action'] == 'clear']
+                      if row['fields'][field]['recommended_action'] in REPAIRABLE_ACTIONS]
             record = PatientRecord.objects.filter(pk=row['id']).first()
             if record is None:
                 raise CommandError(
