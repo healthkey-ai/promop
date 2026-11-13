@@ -44,7 +44,11 @@ review the manifest and receive explicit approval for that cohort.
    transaction makes the post-lock re-read see changes committed since the audit,
    but it does not guarantee that every concurrent change is caught, so the write
    pause is the gate. Acquisition has a five-second timeout; this is not a
-   zero-downtime bulk job.
+   zero-downtime bulk job. "Unrelated patients continue" holds for the run only:
+   the approved digest covers every record and the global totals, so any patient
+   write between the audit and `--apply` makes the repair refuse with "digest
+   mismatch; rerun audit". Keep ETL, re-derivation and UI writes paused for the
+   whole database from the audit until the apply starts.
 
 ## Read-only sizing (deployment owner/operator)
 

@@ -539,3 +539,16 @@ def test_an_echoed_true_on_the_native_route_leaves_no_trace(tmp_path, route, hea
         assert data['totals']['evidence']['clear_candidates_in_authored_records'] == 1
         assert ('1 clear candidate(s) cannot be told apart from a genuine True'
                 in out.getvalue())
+
+
+def test_a_write_to_an_unrelated_patient_after_the_audit_stales_the_approval(tmp_path):
+    """The approval covers the whole table, not the cohort: the runbook's
+    global write quiet from audit to apply exists because of this."""
+    names = cohort()
+    manifest, sha = audit(tmp_path)
+    RecordRevision.objects.create(
+        patient_record=names['negative'], field='disease', old_value='None',
+        new_value='CLL', changed_by='patient@example.test')
+
+    with pytest.raises(CommandError, match='digest mismatch'):
+        repair(manifest, sha)

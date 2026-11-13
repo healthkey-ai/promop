@@ -57,9 +57,17 @@ rewritten values; those stay for a person's answer or policy review.
    evidence row is not blocked by the row locks, and a change committed after the
    re-read or in a row the audit filtered out (an erroneous fact flipped to
    active, an observation patched in place without touching its person) is
-   invisible. The write pause is therefore a gate, not a nicety. Unrelated
-   patients stay writable. `lock_timeout` for acquiring the locks is 5 s and is
-   reset before the writes.
+   invisible. The write pause is therefore a gate, not a nicety. During the run
+   itself unrelated patients stay writable. `lock_timeout` for acquiring the
+   locks is 5 s and is reset before the writes.
+5. **Keep the whole database quiet from the audit to `--apply`.** The approved
+   digest covers every record and the global totals (each record's
+   `derived_at`, its coverage flag, the person-authored revision count), not
+   only the cohort. Any write to any patient between the audit and the apply,
+   including a re-derivation, makes the repair refuse with "digest mismatch;
+   rerun audit". That is fail-closed, but it costs the approval cycle: pause ETL,
+   re-derivation and UI writes globally until the apply starts, and narrow the
+   pause to the cohort only for the run.
 
 ## Dry-run
 
@@ -91,7 +99,8 @@ Guards, unchanged by this run:
 - The whole run is one transaction. It locks the **candidate rows**, their
   person rows and the pregnancy formula row with `SELECT … FOR UPDATE` rather
   than `LOCK TABLE patient_record`; unrelated patient writes are no longer
-  blocked for the loop. Inserted evidence (a revision, attestation or recorded
+  blocked for the loop (they still stale the approval if they land between the
+  audit and the apply, see step 5 above). Inserted evidence (a revision, attestation or recorded
   fact) takes a key-share lock on the parent and waits; an in-place update of an
   existing evidence row does not. The transaction runs at READ COMMITTED when the
   command owns it, so the re-derivation under the locks and the post-loop re-read
