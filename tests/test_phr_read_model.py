@@ -330,7 +330,7 @@ def test_a_condition_coded_only_by_its_source_is_named_from_terminology_or_left_
     # diagnosis code itself (#2545).
     unresolved = [c for c in warning.call_args_list if 'unresolved condition code' in c.args[0]]
     assert len(unresolved) == 1 and unresolved[0].args[1] == junk.pk
-    assert "'0'" not in unresolved[0].args[0] % unresolved[0].args[1:]
+    assert '0' not in unresolved[0].args[1:] and 'Z94.81' not in unresolved[0].args[1:]  # no code is logged
 
     # The exports and shares that build the section again do not log it again.
     with mock.patch.object(views.logger, 'warning') as again:
@@ -362,12 +362,15 @@ def test_bare_condition_codes_are_named_by_the_terminology_in_a_fixed_number_of_
         client = signed_in(record)
         with CaptureQueriesContext(connection) as queries:
             data = client.get('/api/v1/phr/diagnoses/').data
-        return sorted(c['name'] for c in data['other']), len(queries)
+        lookups = [q for q in queries.captured_queries if 'concept_code" IN' in q['sql']]
+        return sorted(c['name'] for c in data['other']), len(queries), len(lookups)
 
-    few, few_queries = names(1)
-    many, many_queries = names(5)
+    names(0)  # warms the process-wide caches, so the runs below start level wherever the test is run
+    few, few_queries, few_lookups = names(1)
+    many, many_queries, many_lookups = names(5)
     assert few == many == ['Hypertensive disorder', 'Hypothyroidism', 'Named by its source concept']
-    assert few_queries == many_queries  # not one lookup per unmapped condition
+    assert few_lookups == many_lookups == 1  # one terminology query for all the codes
+    assert few_queries == many_queries  # and nothing else grows with them
 
 
 def test_a_patient_adds_a_condition_named_like_a_code(adder):

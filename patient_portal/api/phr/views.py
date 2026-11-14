@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Iterable
 from typing import Any
 
 from rest_framework.permissions import IsAuthenticated
@@ -268,7 +269,7 @@ def _code_candidates(code: str) -> set[str]:
     return candidates
 
 
-def _code_names(codes) -> dict[str, str | None]:
+def _code_names(codes: Iterable[str]) -> dict[str, str | None]:
     """The terminology's name for each bare condition code, in one query."""
     wanted = {code: _code_candidates(code) for code in codes}
     candidates = set().union(*wanted.values()) if wanted else set()
@@ -291,7 +292,7 @@ def _code_names(codes) -> dict[str, str | None]:
     return result
 
 
-def _own_name(row) -> str | None:
+def _own_name(row: ConditionOccurrence) -> str | None:
     """The name the row carries itself: its concept's, then its source concept's."""
     concept = row.condition_concept if row.condition_concept_id else None
     if name := _text(concept.concept_name if concept else None):
@@ -300,16 +301,19 @@ def _own_name(row) -> str | None:
     return _text(source.concept_name if source else None)
 
 
-def _is_bare_code(row) -> bool:
+def _is_bare_code(row: ConditionOccurrence) -> bool:
     """A row the terminology has to name: nothing of its own, and a source text that is a code.
-    A patient's own entry is their words, whatever they look like (#2553)."""
+    A patient's own entry is their words, whatever they look like (#2553): the
+    app writes it with the self-report type concept, which is what is checked
+    here. A row another writer marks patient-authored by provenance alone
+    keeps being named from the terminology."""
     if row.condition_type_concept_id == PATIENT_SELF_REPORT_TYPE_CONCEPT_ID or _own_name(row):
         return False
     text = _text(row.condition_source_value)
     return bool(text and _BARE_CODE.fullmatch(text))
 
 
-def _attach_code_names(rows) -> None:
+def _attach_code_names(rows: Iterable[ConditionOccurrence]) -> None:
     """Name every bare-code row from the terminology with one query, so a section
     costs the same however many unmapped codes the patient has."""
     bare = [row for row in rows if _is_bare_code(row)]
@@ -318,7 +322,7 @@ def _attach_code_names(rows) -> None:
         row._phr_code_name = names.get(_text(row.condition_source_value))
 
 
-def _condition_name(row) -> str | None:
+def _condition_name(row: ConditionOccurrence) -> str | None:
     """A condition's name. Concept 0 is "No matching concept": then it is the
     record's own coding, named from the terminology when it is a bare code,
     and None when nothing names it (the card is left out, #131)."""
