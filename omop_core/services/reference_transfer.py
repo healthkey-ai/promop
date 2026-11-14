@@ -23,6 +23,7 @@ from django.utils import timezone
 from omop_core.models import (
     Concept,
     ConceptClass,
+    ChronicConditionOverride,
     ConceptMappingDone,
     ConceptMappingNote,
     ConceptMappingPriority,
@@ -122,6 +123,7 @@ def copied_tables() -> list[ReferenceTable]:
         ReferenceTable(ConceptMappingNote, ('concept',)),
         ReferenceTable(DiseaseCategoryChoice, ('code',)),
         ReferenceTable(DiseaseCategoryMapping, ('disease_name',)),
+        ReferenceTable(ChronicConditionOverride, ('code',)),
     ]
 
 

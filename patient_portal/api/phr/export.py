@@ -180,6 +180,7 @@ LABELS: dict[str, dict[str, str]] = {
         'blood_type': 'Blood type',
         'cancer': 'Cancer diagnoses',
         'other_conditions': 'Other conditions',
+        'historical_procedures': 'Historical procedures',
         'condition': 'Condition',
         'diagnosed': 'Diagnosed',
         'status': 'Status',
@@ -351,13 +352,14 @@ def _diagnoses(person, record, labels, styles, diagnosed) -> list:
         out.append(Paragraph(labels['cancer'], styles['h2']))
         for entry in data['cancer']:
             out.extend(_cancer_entry(entry, labels, styles))
-    if data['other']:
-        out.append(Paragraph(labels['other_conditions'], styles['h2']))
-        rows = [[labels['diagnosed'], labels['condition'], labels['status'], labels['source']]]
-        for entry in data['other']:
-            rows.append([entry.get('date') or '', entry.get('name') or '', entry.get('status') or '',
-                         _source_text(entry.get('source'), labels) or ''])
-        out.append(_table(rows, [70, 220, 90, 150], styles))
+    for key, heading in (('other', 'other_conditions'), ('historical_procedures', 'historical_procedures')):
+        if data[key]:
+            out.append(Paragraph(labels[heading], styles['h2']))
+            rows = [[labels['diagnosed'], labels['condition'], labels['status'], labels['source']]]
+            for entry in data[key]:
+                rows.append([entry.get('date') or '', entry.get('name') or '', entry.get('status') or '',
+                             _source_text(entry.get('source'), labels) or ''])
+            out.append(_table(rows, [70, 220, 90, 150], styles))
     return out
 
 

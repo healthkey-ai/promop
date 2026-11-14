@@ -72,7 +72,7 @@ def _cancer_condition(person, slug: str):
     from omop_core.services.patient_record_service import _usable_concept_name
 
     rows = (
-        ConditionOccurrence.objects.filter(person=person, is_erroneous=False)
+        ConditionOccurrence.objects.filter(person=person, is_erroneous=False, confidence__isnull=True)
         .select_related('condition_concept')
         .order_by('-condition_start_date', '-condition_occurrence_id')
     )
@@ -99,7 +99,9 @@ def disease_keys_on_record(person) -> set[str]:
     from omop_core.services.patient_record_service import _usable_concept_name
 
     keys = set()
-    rows = ConditionOccurrence.objects.filter(person=person, is_erroneous=False).select_related('condition_concept')
+    rows = ConditionOccurrence.objects.filter(
+        person=person, is_erroneous=False, confidence__isnull=True,
+    ).select_related('condition_concept')
     for row in rows:
         name = (_usable_concept_name(row.condition_concept) if row.condition_concept_id else None) \
             or row.condition_source_value
@@ -232,7 +234,8 @@ def lines_by_disease(person) -> list[dict]:
     observations = {
         (o.observation_event_id, o.observation_source_value): o.value_as_string
         for o in Observation.objects.filter(
-            person=person, is_erroneous=False, observation_source_value__startswith='LOT-',
+            person=person, is_erroneous=False, confidence__isnull=True,
+            observation_source_value__startswith='LOT-',
         ).order_by('observation_date', 'observation_id')
     }
 
@@ -242,7 +245,8 @@ def lines_by_disease(person) -> list[dict]:
     events = EpisodeEvent.objects.filter(episode_id__in=[line.episode_id for line in lines])
     exposures = {
         d.drug_exposure_id: d for d in DrugExposure.objects.filter(
-            person=person, is_erroneous=False, drug_exposure_id__in=[e.event_id for e in events],
+            person=person, is_erroneous=False, confidence__isnull=True,
+            drug_exposure_id__in=[e.event_id for e in events],
         ).select_related('drug_concept')
     }
     drug_names: dict = {}
