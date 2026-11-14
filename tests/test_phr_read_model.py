@@ -84,7 +84,7 @@ def test_a_patient_sees_only_their_own_conditions():
     response = signed_in(mine).get('/api/v1/phr/diagnoses/')
 
     assert response.status_code == 200
-    assert response.data == {'cancer': [], 'other': []}
+    assert response.data == {'cancer': [], 'other': [], 'historical_procedures': []}
 
 
 # ---------------------------------------------------------------- about
@@ -304,7 +304,7 @@ def test_cancer_conditions_become_dated_transitions_and_other_conditions_are_lis
 
 def test_a_condition_coded_only_by_its_source_is_named_from_terminology_or_left_out():
     """#131: with no standard concept, the card fell back to the source text,
-    which can be a bare code ("Z94.81") or junk ("0"). The code is named from
+    which can be a bare code ("I10") or junk ("0"). The code is named from
     the terminology; one that names nothing is left out and logged."""
     from unittest import mock
 
@@ -312,8 +312,8 @@ def test_a_condition_coded_only_by_its_source_is_named_from_terminology_or_left_
 
     record = PatientRecordFactory(disease='')
     unmatched = ConceptFactory(concept_id=0, concept_code='No matching concept', concept_name='No matching concept')
-    icd10('Z94.81', 'Bone marrow transplant status')
-    condition(record, unmatched, '2016-09-26', condition_source_value='Z94.81')
+    icd10('I10', 'Essential hypertension')
+    condition(record, unmatched, '2016-09-26', condition_source_value='I10')
     junk = condition(record, unmatched, '2016-04-01', condition_source_value='0')
     condition(record, unmatched, '2017-01-01', condition_source_value='Seasonal allergies')
 
@@ -324,13 +324,13 @@ def test_a_condition_coded_only_by_its_source_is_named_from_terminology_or_left_
 
     assert [(c['name'], c['date']) for c in data['other']] == [
         ('Seasonal allergies', '2017-01-01'),
-        ('Bone marrow transplant status', '2016-09-26'),
+        ('Essential hypertension', '2016-09-26'),
     ]
     # The left-out code is logged once, by its row and source and not by the
     # diagnosis code itself (#2545).
     unresolved = [c for c in warning.call_args_list if 'unresolved condition code' in c.args[0]]
     assert len(unresolved) == 1 and unresolved[0].args[1] == junk.pk
-    assert '0' not in unresolved[0].args[1:] and 'Z94.81' not in unresolved[0].args[1:]  # no code is logged
+    assert '0' not in unresolved[0].args[1:] and 'I10' not in unresolved[0].args[1:]  # no code is logged
 
     # The exports and shares that build the section again do not log it again.
     with mock.patch.object(views.logger, 'warning') as again:

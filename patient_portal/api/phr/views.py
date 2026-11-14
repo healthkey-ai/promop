@@ -151,6 +151,22 @@ _CANCER_WORDS = re.compile(
 )
 
 
+# ICD-10-CM Z94: transplanted organ and tissue status (Z94.81 bone marrow
+# transplant status). It records a procedure that was done, not a condition to
+# manage, so the PHR lists it apart from the diagnoses (#2567).
+_ICD10_HISTORICAL_PROCEDURE = re.compile(r'^Z94(\.|$|[0-9A-Z])', re.IGNORECASE)
+
+
+def is_historical_procedure(row: ConditionOccurrence) -> bool:
+    """A condition coded as the status left by a past procedure."""
+    codes = [row.condition_source_value or '']
+    for concept in (row.condition_concept if row.condition_concept_id else None,
+                    row.condition_source_concept if row.condition_source_concept_id else None):
+        if concept is not None and (concept.vocabulary_id or '').upper().startswith('ICD10'):
+            codes.append(concept.concept_code or '')
+    return any(_ICD10_HISTORICAL_PROCEDURE.match(code.strip()) for code in codes if code)
+
+
 def is_cancer_condition(row: ConditionOccurrence) -> bool:
     if row.condition_type_concept_id == PATIENT_SELF_REPORT_TYPE_CONCEPT_ID and not row.condition_concept_id:
         # Words the patient typed ("C3-C4 stenosis", "D45") are not a coded
@@ -466,10 +482,12 @@ def diagnoses(person, record: PatientRecord | None, *, log_unresolved: bool = Fa
         ConditionOccurrence, rows, type_attr='condition_type_concept', date_attr='condition_start_date'
     )
     families: dict[str, list] = {}
-    other_rows = []
+    other_rows, historical_rows = [], []
     for row in rows:
         if is_cancer_condition(row):
             families.setdefault(cancer_family(row), []).append(row)
+        elif is_historical_procedure(row):
+            historical_rows.append(row)
         else:
             other_rows.append(row)
     families, general_names = _same_disease(families)
@@ -531,30 +549,32 @@ def diagnoses(person, record: PatientRecord | None, *, log_unresolved: bool = Fa
         ).values_list('subject_key', flat=True)
     )
 
-    # Other conditions: one entry per condition, dated from its first record.
-    other, seen = [], set()
-    for row in other_rows:
-        name = _condition_name(row)
-        if not name:
-            if log_unresolved:
-                _unnamed(row, sources)
-            continue
-        if name.lower() in seen:
-            continue
-        seen.add(name.lower())
-        dated = str(row.pk) not in undated
-        entry = {
-            'id': f'condition-{row.pk}',
-            **contexts.get(row.pk, {}),
-            'name': name,
-            'date': row.condition_start_date.isoformat() if dated else None,
-            'status': 'Resolved' if row.condition_end_date else _text(row.condition_status_source_value),
-            'source': sources[row.pk] if dated else {**sources[row.pk], 'date': None},
-        }
-        other.append({k: v for k, v in entry.items() if v is not None})
-    other.sort(key=lambda e: e.get('date') or '9999', reverse=True)
+    def cards(card_rows):
+        """One entry per condition, dated from its first record, newest first."""
+        cards, seen = [], set()
+        for row in card_rows:
+            name = _condition_name(row)
+            if not name:
+                if log_unresolved:
+                    _unnamed(row, sources)
+                continue
+            if name.lower() in seen:
+                continue
+            seen.add(name.lower())
+            dated = str(row.pk) not in undated
+            entry = {
+                'id': f'condition-{row.pk}',
+                **contexts.get(row.pk, {}),
+                'name': name,
+                'date': row.condition_start_date.isoformat() if dated else None,
+                'status': 'Resolved' if row.condition_end_date else _text(row.condition_status_source_value),
+                'source': sources[row.pk] if dated else {**sources[row.pk], 'date': None},
+            }
+            cards.append({k: v for k, v in entry.items() if v is not None})
+        cards.sort(key=lambda e: e.get('date') or '9999', reverse=True)
+        return cards
 
-    return {'cancer': cancer, 'other': other}
+    return {'cancer': cancer, 'other': cards(other_rows), 'historical_procedures': cards(historical_rows)}
 
 
 class DiagnosesView(PhrView):

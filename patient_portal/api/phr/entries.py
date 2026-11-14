@@ -324,7 +324,9 @@ class ConditionEntryView(_EntryView):
         return '', {'date_unknown': not data.get('diagnosed')}
 
     def respond(self, person, record, pk):
-        entry = next((c for c in diagnoses(person, record)['other'] if c['id'] == f'condition-{pk}'), None)
+        listed = diagnoses(person, record)
+        entry = next((c for c in listed['other'] + listed['historical_procedures']
+                      if c['id'] == f'condition-{pk}'), None)
         if entry is not None:
             return entry
         # The list folds a condition into an earlier one of the same name. The
