@@ -177,7 +177,7 @@ def catalog(person, record) -> list[dict[str, Any]]:
         'about': _groups(about_fields(record, person), lambda f: about_group(f['key']), lambda f: f['key'], ABOUT_LABELS),
         'diagnoses': [
             _item(d['id'], d['name'], d.get('date'), detail='cancer') for d in dx['cancer']
-        ] + [_item(d['id'], d['name'], d.get('date')) for d in dx['other']],
+        ] + [_item(d['id'], d['name'], d.get('date')) for d in dx['other'] + dx['historical_procedures']],
         'therapy': [
             _item(line['id'], line.get('regimen') or f"Line {line['number']}", line.get('start'),
                   detail=track['diagnosis']['name'])
@@ -569,7 +569,8 @@ class SharedDiagnosesView(SharedRecordMixin, DiagnosesView):
 
     def share_filter(self, data):
         ok = allowed(self.share.selection, 'diagnoses')
-        return {'cancer': [d for d in data['cancer'] if ok(d['id'])], 'other': [d for d in data['other'] if ok(d['id'])]}
+        return {key: [d for d in data[key] if ok(d['id'])]
+                for key in ('cancer', 'other', 'historical_procedures')}
 
 
 class SharedTherapyView(SharedRecordMixin, TherapyView):
