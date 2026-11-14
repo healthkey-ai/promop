@@ -1179,6 +1179,14 @@ class ConditionOccurrence(models.Model):
     condition_source_value = models.CharField(max_length=50, null=True, blank=True)
     condition_source_concept = models.ForeignKey(Concept, on_delete=models.PROTECT, related_name='condition_source_occurrences', db_column='condition_source_concept_id', null=True, blank=True)
     condition_status_source_value = models.CharField(max_length=50, null=True, blank=True)
+    # What the source FHIR Condition said about itself (#2512), kept as its codes:
+    # category (problem-list-item, encounter-diagnosis, ... comma-joined),
+    # verificationStatus (confirmed, provisional, entered-in-error, ...) and
+    # clinicalStatus (active, resolved, inactive, ...). abatement[x] lands in
+    # condition_end_date. Null when the source did not say.
+    condition_category = models.CharField(max_length=100, null=True, blank=True)
+    condition_verification_status = models.CharField(max_length=40, null=True, blank=True)
+    condition_clinical_status = models.CharField(max_length=40, null=True, blank=True)
     # PHR-S FM PH.1.1#06 — entered-in-error. Flag a row as erroneous while
     # RETAINING it (FHIR status=entered-in-error semantics). Excluded from
     # normal reads by default; never deleted.
