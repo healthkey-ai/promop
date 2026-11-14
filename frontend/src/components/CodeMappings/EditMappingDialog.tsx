@@ -116,7 +116,10 @@ export interface SourceExample {
 type SourceExamplesState =
   | { status: "loading" }
   | { status: "error"; message: string }
-  | { status: "ready"; examples: SourceExample[] };
+  | { status: "ready"; examples: SourceExample[]; hasMore: boolean; loadingMore?: boolean; moreError?: boolean };
+
+/** Patients per page from source-examples/ (SOURCE_EXAMPLE_LIMIT on the server). */
+const EXAMPLE_PAGE_SIZE = 3;
 
 /** The `existing_mapping` block of a 400 from POST /v1/code-mappings/ (#2347). */
 interface ExistingMappingConflict {
@@ -357,7 +360,7 @@ export default function EditMappingDialog({
         });
         if (!active) return;
         const found = data?.examples ?? [];
-        setExamples({ status: "ready", examples: found });
+        setExamples({ status: "ready", examples: found, hasMore: found.length >= EXAMPLE_PAGE_SIZE });
         setExamplePersonId(found[0]?.person_id ?? null);
       } catch (err) {
         if (!active) return;
@@ -369,6 +372,29 @@ export default function EditMappingDialog({
     })();
     return () => { active = false; };
   }, [open, sourceExamples, exampleVocabulary, exampleCode, exampleTable]);
+
+  // Up to three more patients, skipping those already listed.
+  const loadMoreExamples = useCallback(async () => {
+    if (examples?.status !== "ready" || examples.loadingMore) return;
+    const shown = examples.examples;
+    setExamples({ ...examples, loadingMore: true, moreError: false });
+    try {
+      const { data } = await api.get<{ examples: SourceExample[] }>("/v1/concept-to-code/source-examples/", {
+        params: {
+          source_vocabulary_id: exampleVocabulary, source_code: exampleCode, omop_table: exampleTable,
+          exclude_person_ids: shown.map((item) => item.person_id).join(","),
+        },
+      });
+      const found = (data?.examples ?? []).filter((item) => !shown.some((old) => old.person_id === item.person_id));
+      setExamples((current) => current?.status === "ready" ? {
+        status: "ready", examples: [...current.examples, ...found],
+        hasMore: found.length >= EXAMPLE_PAGE_SIZE,
+      } : current);
+      if (found.length) setExamplePersonId(found[0].person_id);
+    } catch {
+      setExamples((current) => current?.status === "ready" ? { ...current, loadingMore: false, moreError: true } : current);
+    }
+  }, [examples, exampleVocabulary, exampleCode, exampleTable]);
 
   // ── Acquire edit lock on open ───────────────────────────────────
   useEffect(() => {
@@ -1094,6 +1120,7 @@ export default function EditMappingDialog({
                 ? selectedRow.source_metadata : sourceEvidence?.metadata as Record<string, unknown> | undefined} />
               {sourceExamples && (
                 <SourceExamplesBlock state={examples} selected={examplePersonId} onSelect={setExamplePersonId}
+                  onMore={loadMoreExamples}
                   inventoryPatients={sourceEvidence?.metadata?.patients} />
               )}
             </fieldset>
@@ -1597,10 +1624,11 @@ export default function EditMappingDialog({
 
 // ── Source Examples Block ──────────────────────────────────────────
 
-function SourceExamplesBlock({ state, selected, onSelect, inventoryPatients }: {
+function SourceExamplesBlock({ state, selected, onSelect, onMore, inventoryPatients }: {
   state: SourceExamplesState | null;
   selected: number | null;
   onSelect: (personId: number) => void;
+  onMore: () => void;
   inventoryPatients?: number | null;
 }) {
   if (!state) return null;
@@ -1630,6 +1658,13 @@ function SourceExamplesBlock({ state, selected, onSelect, inventoryPatients }: {
             </option>
           ))}
         </select>
+        {state.hasMore && (
+          <button type="button" onClick={onMore} disabled={state.loadingMore}
+            className="rounded border border-slate-300 bg-white px-2 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-60">
+            {state.loadingMore ? "Loading…" : "More patients"}
+          </button>
+        )}
+        {state.moreError && <span role="alert" className="text-xs font-normal text-rose-700">Could not load more patients.</span>}
       </label>
       {(example.source_unit || example.example_quantity) && (
         <p className="text-xs text-slate-600">

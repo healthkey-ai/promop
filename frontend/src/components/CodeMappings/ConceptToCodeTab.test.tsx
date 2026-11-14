@@ -759,6 +759,28 @@ describe('editing a source code from a concept (#1915)', () => {
     expect(await screen.findByRole('dialog', { name: 'Edit Mapping' })).toBeInTheDocument();
   });
 
+  it('loads up to three more example patients with the More patients button', async () => {
+    const mk = (id: number) => ({ person_id: id, omop_table: 'measurement', occurrence_count: 1, source_unit: '',
+      example_quantity: '', source_metadata: { specimen: `s${id}` }, last_seen: null });
+    get.mockImplementation(routes({ '/v1/concept-to-code/source-examples/': () => Promise.resolve({ data: { examples: [mk(11), mk(12), mk(13)] } }) }));
+    await selectConcept();
+    fireEvent.click(screen.getByRole('button', { name: 'SNOMED:S1' }));
+    const editor = await screen.findByRole('dialog', { name: 'Edit Mapping' });
+    const picker = await within(editor).findByRole('combobox', { name: 'Example patient' });
+    expect(within(picker).getAllByRole('option')).toHaveLength(3);
+
+    get.mockImplementation(routes({ '/v1/concept-to-code/source-examples/': () => Promise.resolve({ data: { examples: [mk(14)] } }) }));
+    fireEvent.click(within(editor).getByRole('button', { name: 'More patients' }));
+
+    await waitFor(() => expect(within(picker).getAllByRole('option')).toHaveLength(4));
+    expect(get).toHaveBeenCalledWith('/v1/concept-to-code/source-examples/', {
+      params: { source_vocabulary_id: 'SNOMED', source_code: 'S1', omop_table: 'measurement', exclude_person_ids: '11,12,13' },
+    });
+    expect(await within(editor).findByText(/"specimen": "s14"/)).toBeInTheDocument();
+    // A short page means nothing is left.
+    expect(within(editor).queryByRole('button', { name: 'More patients' })).not.toBeInTheDocument();
+  });
+
   it('shows the selected example patient\'s Source Metadata and switches patients without writing', async () => {
     await selectConcept();
     fireEvent.click(screen.getByRole('button', { name: 'SNOMED:S1' }));
