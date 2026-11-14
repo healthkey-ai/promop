@@ -16,7 +16,7 @@ from urllib.parse import unquote, urlsplit
 
 from django.core.management.base import CommandError
 from django.core.serializers.json import DjangoJSONEncoder
-from django.db import connection
+from django.db import OperationalError, connection
 
 _TRUE_TEXT = {'true', 't', '1', 'yes', 'y', 'on'}
 _FALSE_TEXT = {'false', 'f', '0', 'no', 'n', 'off'}
@@ -57,6 +57,35 @@ def make_transaction_read_only():
         return
     with connection.cursor() as cursor:
         cursor.execute('SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY')
+
+
+def make_transaction_read_committed():
+    """Pin the applying transaction to READ COMMITTED, when the command owns it.
+
+    The audit runs before the locks, so the re-derivation and the post-write
+    read must see evidence committed since the audit. READ COMMITTED takes a
+    fresh snapshot per statement; a serializable/repeatable-read snapshot would
+    be fixed by the audit read and make both re-checks blind to that window.
+    The row locks still block inserts from acquisition onwards.
+    """
+    if connection.vendor != 'postgresql':
+        return
+    with connection.cursor() as cursor:
+        cursor.execute('SET TRANSACTION ISOLATION LEVEL READ COMMITTED')
+
+
+def pin_transaction_isolation(applying, owns):
+    """Choose the isolation level for the command's own transaction.
+
+    Tests run inside pytest-django's atomic block, where the level is already
+    fixed, so `owns` is False and the guards stay out of the caller's way.
+    """
+    if not owns:
+        return
+    if applying:
+        make_transaction_read_committed()
+    else:
+        make_transaction_read_only()
 
 
 def refuse_existing_manifest(path):
@@ -178,14 +207,62 @@ def target_guard(environment):
             raise CommandError('Staging target must exactly match STAGING_DATABASE_URL.')
 
 
-def lock_tables(models):
-    """Lock ``models``' tables, in the given order, for the rest of the transaction."""
+LOCK_BATCH = 500
+
+
+def lock_rows(model, pks):
+    """Lock exactly the rows a repair may write, for the rest of the transaction.
+
+    The repairs used to take ``SHARE ROW EXCLUSIVE`` on the whole
+    ``patient_record`` table, which blocked every patient write for the entire
+    per-row loop (#2450 review). Locking only the rows the audit selected keeps
+    the all-or-nothing guarantee for them and leaves the rest of the table
+    writable. Ids are sorted and batched so two overlapping runs cannot deadlock.
+    """
     if connection.vendor != 'postgresql':
         raise CommandError('Apply requires PostgreSQL.')
+    ids = sorted({int(pk) for pk in pks})
+    if not ids:
+        return
     with connection.cursor() as cursor:
+        cursor.execute("SELECT current_setting('lock_timeout')")
+        previous = cursor.fetchone()[0]
         cursor.execute("SET LOCAL lock_timeout = '5s'")
-        names = ', '.join(connection.ops.quote_name(model._meta.db_table) for model in models)
-        cursor.execute(f'LOCK TABLE {names} IN SHARE ROW EXCLUSIVE MODE')
+    try:
+        for start in range(0, len(ids), LOCK_BATCH):
+            batch = ids[start:start + LOCK_BATCH]
+            # select_for_update locks on read; the values are not needed.
+            list(model.objects.select_for_update().filter(pk__in=batch)
+                 .order_by('pk').values_list('pk', flat=True))
+    except OperationalError as exc:
+        cause = getattr(exc, '__cause__', None)
+        sqlstate = (getattr(cause, 'sqlstate', None)
+                    or getattr(cause, 'pgcode', None))
+        if sqlstate == '55P03' or 'lock timeout' in str(exc).lower():
+            raise CommandError(
+                "Could not acquire the cohort's row locks within 5 s; "
+                'rerun inside the write pause.') from exc
+        raise
+    # The timeout bounds acquisition only. Restore the value in force before it
+    # (role, database or session setting) rather than 0, which would mean "wait
+    # forever" for the writes that follow. Still transaction-local.
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT set_config('lock_timeout', %s, true)", [previous])
+
+
+def rollback_target_ids(supplied):
+    """The record ids a rollback will write, from its repair receipt.
+
+    It runs before the receipt's digest is checked (the locks come first), so
+    it validates the shape of each entry itself.
+    """
+    ids = []
+    for entry in supplied.get('entries') or []:
+        before = entry.get('before') if isinstance(entry, dict) else None
+        if not isinstance(before, dict) or not isinstance(before.get('id'), int):
+            raise CommandError('Backup/receipt entries are malformed.')
+        ids.append(before['id'])
+    return ids
 
 
 def receipt(operation, run, database, expected, entries):

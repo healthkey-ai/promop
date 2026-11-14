@@ -180,9 +180,119 @@ def test_as_bool(text, expected):
 def test_every_audit_repair_command_uses_the_shared_guards():
     for module in (repair_legacy_pregnancy_tobacco, repair_pre_existing_conditions):
         for name in ('target_guard', 'write_private', 'read_json', 'canonical', 'digest',
-                     'receipt', 'lock_tables', 'make_transaction_read_only'):
+                     'receipt', 'lock_rows', 'pin_transaction_isolation'):
             assert getattr(module, name) is getattr(guarded_repair, name), (module, name)
     for module in (audit_legacy_pregnancy_tobacco, audit_pre_existing_conditions):
         for name in ('approval_digest', 'as_bool', 'make_transaction_read_only',
                      'refuse_existing_manifest', 'write_manifest'):
             assert getattr(module, name) is getattr(guarded_repair, name), (module, name)
+    # The apply path stays at READ COMMITTED: a serializable snapshot taken by
+    # the audit read cannot see evidence committed before the locks, which is
+    # the window the post-lock re-read exists to close.
+    assert not hasattr(guarded_repair, 'make_transaction_serializable')
+
+
+def test_pin_transaction_isolation_chooses_by_apply_and_ownership(monkeypatch):
+    calls = []
+    monkeypatch.setattr(guarded_repair, 'make_transaction_read_committed',
+                        lambda: calls.append('read-committed'))
+    monkeypatch.setattr(guarded_repair, 'make_transaction_read_only',
+                        lambda: calls.append('read-only'))
+
+    guarded_repair.pin_transaction_isolation(applying=True, owns=False)
+    guarded_repair.pin_transaction_isolation(applying=False, owns=False)
+    assert calls == []
+
+    guarded_repair.pin_transaction_isolation(applying=True, owns=True)
+    guarded_repair.pin_transaction_isolation(applying=False, owns=True)
+    assert calls == ['read-committed', 'read-only']
+
+
+@pytest.mark.django_db(transaction=True)
+def test_make_transaction_read_committed_issues_the_statement():
+    from django.db import transaction
+    from django.test.utils import CaptureQueriesContext
+
+    with transaction.atomic():
+        with CaptureQueriesContext(connection) as captured:
+            guarded_repair.make_transaction_read_committed()
+
+    assert any('READ COMMITTED' in query['sql'].upper()
+               for query in captured.captured_queries)
+
+
+def test_lock_rows_locks_the_given_rows_instead_of_the_table():
+    """A table lock blocked every patient write for the repair's whole loop."""
+    from django.db import transaction
+    from django.test.utils import CaptureQueriesContext
+
+    from omop_core.models import PatientRecord
+    from tests.factories import PatientRecordFactory
+
+    record = PatientRecordFactory()
+    with transaction.atomic():
+        with CaptureQueriesContext(connection) as captured:
+            guarded_repair.lock_rows(PatientRecord, [record.pk])
+    statements = [query['sql'] for query in captured.captured_queries]
+    assert any('FOR UPDATE' in sql for sql in statements)
+    assert not any('LOCK TABLE' in sql for sql in statements)
+    assert any('FOR UPDATE' in sql and str(record.pk) in sql for sql in statements)
+
+
+def test_lock_rows_translates_a_lock_timeout(monkeypatch):
+    from unittest import mock
+
+    from django.db import OperationalError
+
+    from omop_core.models import PatientRecord
+
+    timeout = OperationalError('canceling statement due to lock timeout')
+    with mock.patch.object(PatientRecord.objects, 'select_for_update', side_effect=timeout):
+        with pytest.raises(CommandError, match="Could not acquire the cohort's row locks"):
+            guarded_repair.lock_rows(PatientRecord, [1, 2])
+
+
+def test_lock_rows_with_no_candidates_does_not_lock_anything():
+    from django.db import transaction
+    from django.test.utils import CaptureQueriesContext
+
+    from omop_core.models import PatientRecord
+
+    with transaction.atomic():
+        with CaptureQueriesContext(connection) as captured:
+            guarded_repair.lock_rows(PatientRecord, [])
+    assert not [query for query in captured.captured_queries
+                if 'FOR UPDATE' in query['sql']]
+
+
+def test_lock_rows_restores_the_previous_lock_timeout():
+    """`SET LOCAL lock_timeout = 0` after acquisition meant "no limit" for the
+    writes, dropping a role/database/session timeout instead of restoring it."""
+    from django.db import transaction
+
+    from omop_core.models import PatientRecord
+    from tests.factories import PatientRecordFactory
+
+    record = PatientRecordFactory()
+    with transaction.atomic():
+        with connection.cursor() as cursor:
+            cursor.execute("SET LOCAL lock_timeout = '7s'")
+        guarded_repair.lock_rows(PatientRecord, [record.pk])
+        with connection.cursor() as cursor:
+            cursor.execute('SHOW lock_timeout')
+            assert cursor.fetchone()[0] == '7s'
+
+
+def test_rollback_target_ids_is_shared_and_refuses_malformed_entries():
+    from omop_core.management.commands import (
+        repair_legacy_pregnancy_tobacco, repair_pre_existing_conditions,
+    )
+
+    for module in (repair_legacy_pregnancy_tobacco, repair_pre_existing_conditions):
+        assert module.rollback_target_ids is guarded_repair.rollback_target_ids
+    assert guarded_repair.rollback_target_ids(
+        {'entries': [{'before': {'id': 3}}, {'before': {'id': 1}}]}) == [3, 1]
+    assert guarded_repair.rollback_target_ids({}) == []
+    for entries in ([{'before': {'id': '3'}}], [{'before': None}], ['x']):
+        with pytest.raises(CommandError, match='malformed'):
+            guarded_repair.rollback_target_ids({'entries': entries})

@@ -7,7 +7,8 @@ nullable and deactivated the pregnancy formula.
 
 It clears only ``unattributed_true`` (a pure legacy default). Authored,
 source-backed, source-conflict and rewritten True values are never touched;
-those need a person's answer or a policy review.
+those need a person's answer or a policy review. The pre-apply review and the
+rollback procedure are in ``docs/legacy_pregnancy_tobacco_repair_plan.md``.
 """
 import json
 import uuid
@@ -18,15 +19,17 @@ from django.db.migrations.recorder import MigrationRecorder
 from django.utils import timezone
 
 from omop_core.management.commands.audit_legacy_pregnancy_tobacco import (
-    Command as Audit, FIELDS, approval_digest,
+    Command as Audit, FIELDS, REPAIRABLE_ACTIONS, REPAIRABLE_CLASSIFICATIONS,
+    _revisions, _source_state, approval_digest, classify,
 )
 from omop_core.management.guarded_repair import (
-    canonical, digest, lock_tables, make_transaction_read_only, read_json, receipt,
-    target_guard, write_private,
+    canonical, digest, lock_rows, pin_transaction_isolation, read_json, receipt,
+    rollback_target_ids, target_guard, write_private,
 )
-from omop_core.models import FieldFormula, PatientRecord, RecordRevision
+from omop_core.models import FieldFormula, PatientRecord, Person, RecordRevision
 
 LEDGER = 'legacy_pregnancy_tobacco_repair'
+PREGNANCY = 'no_pregnancy_or_lactation_status'
 REQUIRED = {
     ('omop_core', '0323_alter_patientrecord_no_tobacco_use_status'),
     ('omop_core', '0329_explicit_pregnancy_answer'),
@@ -58,8 +61,34 @@ class Command(BaseCommand):
         parser.add_argument('--backup', help='New private backup file (required on apply)')
         parser.add_argument('--environment', choices=['local', 'staging'], default='local')
 
-    def _lock(self):
-        lock_tables((PatientRecord, RecordRevision))
+    def _lock(self, live, supplied, rolling_back):
+        """Lock what this run can write, after the audit chose the cohort.
+
+        The audit runs before the lock, so `_repair` re-derives each candidate's
+        evidence under the lock and aborts when it no longer classifies as a
+        pure default. The candidates' persons are locked too: attestations and
+        new clinical facts take a key-share lock on the person row, while
+        revisions take one on their `patient_record` row. The unlocked reads
+        before this point are the reason the re-check exists; at READ COMMITTED
+        it sees anything committed since the audit. The formula row is locked so
+        the deactivation `_ready` verifies cannot be undone mid-run.
+        """
+        ids = self._target_ids(live, supplied, rolling_back)
+        lock_rows(PatientRecord, ids)
+        if not ids:
+            return
+        lock_rows(Person, PatientRecord.objects.filter(pk__in=ids)
+                  .values_list('person_id', flat=True))
+        lock_rows(FieldFormula, FieldFormula.objects.filter(field_name=PREGNANCY)
+                  .values_list('pk', flat=True))
+
+    @staticmethod
+    def _target_ids(live, supplied, rolling_back):
+        if rolling_back:
+            return rollback_target_ids(supplied)
+        return [row['id'] for row in live['records']
+                if any(row['fields'][field]['recommended_action'] in REPAIRABLE_ACTIONS
+                       for field in FIELDS)]
 
     def _ready(self):
         if FieldFormula.objects.filter(
@@ -79,12 +108,11 @@ class Command(BaseCommand):
             target_guard(options['environment'])
         owns = not connection.in_atomic_block
         with transaction.atomic():
-            if applying:
-                self._lock()
-                self._ready()
-            elif owns:
-                make_transaction_read_only()
+            pin_transaction_isolation(applying, owns)
             live = Audit()._collect(summary_only=False)
+            if applying:
+                self._lock(live, supplied, rolling_back=bool(options['rollback']))
+                self._ready()
             if options['rollback']:
                 output = self._rollback(supplied, live, options['expect_sha'], applying)
             else:
@@ -98,7 +126,7 @@ class Command(BaseCommand):
         }))
 
     def _repair(self, supplied, live, expected, applying):
-        if (supplied.get('manifest_version') != 1
+        if (supplied.get('manifest_version') != 2
                 or supplied.get('approval_sha256') != expected
                 or approval_digest(supplied) != expected
                 or expected != live['approval_sha256']
@@ -106,13 +134,41 @@ class Command(BaseCommand):
                 or len(supplied.get('records', [])) != live['totals']['records']):
             raise CommandError('Audit version, target, full cohort or digest mismatch; rerun audit.')
         run = f'repair:2432:{uuid.uuid4()}'
+        candidates = [
+            row for row in live['records']
+            if any(row['fields'][field]['recommended_action'] in REPAIRABLE_ACTIONS
+                   for field in FIELDS)
+        ]
+        ids = [row['id'] for row in candidates]
+        # Re-derive the evidence under the row locks: the audit ran before the
+        # lock, so a revision, pending marker or recorded fact may have landed
+        # in between. The value alone is not enough to call a row a default.
+        histories = {field: _revisions(field, ids=ids) for field in FIELDS}
+        person_ids = {row['person_id'] for row in candidates}
+        source_states = (_source_state(ids=person_ids) if person_ids
+                         else {field: {} for field in FIELDS})
+        # One read for the cohort rather than one per candidate: the loop runs
+        # under the row locks, so its length is how long other writers wait.
+        records = PatientRecord.objects.in_bulk(ids)
         entries = []
-        for row in live['records']:
+        for row in candidates:
             fields = [field for field in FIELDS
-                      if row['fields'][field]['recommended_action'] == 'clear']
-            if not fields:
-                continue
-            record = PatientRecord.objects.get(pk=row['id'])
+                      if row['fields'][field]['recommended_action'] in REPAIRABLE_ACTIONS]
+            record = records.get(row['id'])
+            if record is None:
+                raise CommandError(
+                    f'Record {row["id"]} disappeared after the audit; rerun it.')
+            edited = (record.user_edited_fields
+                      if isinstance(record.user_edited_fields, list) else [])
+            for field in fields:
+                expected_classification = row['fields'][field]['classification']
+                current = classify(
+                    getattr(record, field), histories[field].get(record.pk, []),
+                    field in edited, source_states[field].get(record.person_id))
+                if (expected_classification not in REPAIRABLE_CLASSIFICATIONS
+                        or current != expected_classification):
+                    raise CommandError(
+                        f'Record {record.pk} changed after the audit ({current}); rerun it.')
             if any(getattr(record, field) is not True for field in fields):
                 raise CommandError(
                     f'Record {record.pk} changed after the audit; rerun it.')
@@ -138,7 +194,47 @@ class Command(BaseCommand):
                                 'fields': fields, 'ledger_id': ledger.pk})
             else:
                 entries.append({'before': before, 'fields': fields})
+        if applying:
+            self._verify_post_write(candidates)
         return receipt('repair', run, live['database'], expected, entries)
+
+    def _verify_post_write(self, candidates):
+        """The loop ran under the locks; prove no evidence appeared while it did.
+
+        Row locks block inserts, but not an in-place update of an evidence row.
+        The post-lock reads run at READ COMMITTED, so this last read sees an
+        update committed inside the loop's window; any finding rolls the whole
+        transaction back. A commit after this read is covered only by the write
+        pause the runbook requires, not by the transaction.
+        """
+        ids = [row['id'] for row in candidates]
+        if not ids:
+            return
+        histories = {field: _revisions(field, ids=ids) for field in FIELDS}
+        source_states = _source_state(ids={row['person_id'] for row in candidates})
+        records = PatientRecord.objects.in_bulk(ids)
+        for row in candidates:
+            record = records.get(row['id'])
+            if record is None:
+                raise CommandError(
+                    f'Record {row["id"]} disappeared during the run; nothing written.')
+            edited = (record.user_edited_fields
+                      if isinstance(record.user_edited_fields, list) else [])
+            for field in FIELDS:
+                if row['fields'][field]['recommended_action'] not in REPAIRABLE_ACTIONS:
+                    continue
+                # Classify as if the stored value were still True: an unchanged
+                # revision with an unreadable value is not evidence, exactly as
+                # the audit and the pre-write check treat it.
+                current = classify(
+                    True, histories[field].get(record.pk, []),
+                    field in edited, source_states[field].get(record.person_id))
+                if current != row['fields'][field]['classification']:
+                    raise CommandError(
+                        f'Record {record.pk} gained evidence during the run; nothing written.')
+                if getattr(record, field) is not None:
+                    raise CommandError(
+                        f'Record {record.pk} was changed during the run; nothing written.')
 
     def _rollback(self, supplied, live, expected, applying):
         unsigned = {key: value for key, value in supplied.items() if key != 'backup_sha256'}
