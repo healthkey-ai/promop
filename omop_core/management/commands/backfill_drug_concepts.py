@@ -31,16 +31,24 @@ logger = logging.getLogger(__name__)
 def _without_trailing_parenthetical(source_value):
     """``'Lenalidomide (Revlimid)'`` -> ``'Lenalidomide'``, in one pass.
 
-    Only a parenthetical that closes the value is removed, and only when it
-    holds no other ``)``: ``'a ((b))'`` keeps its text, as the pattern did.
+    Only a parenthetical that closes the value is removed, and its contents
+    may not hold a ``)``. The opener is the *earliest* ``(`` in the run of
+    text before that final ``)``, because the pattern's ``[^)]+`` is greedy:
+    ``'a (b (c)'`` became ``'a'``, not ``'a (b'``. A value the pattern did
+    not match is returned as it came in, spaces and all.
     """
     text = source_value.rstrip()
     if not text.endswith(')'):
-        return text
+        return source_value
     close = len(text) - 1
-    opened = text.rfind('(', 0, close)
-    if opened == -1 or opened == close - 1 or ')' in text[opened + 1:close]:
-        return text
+    # Walk back over the characters the final ')' could close: the first ')'
+    # to the left ends the run, since [^)]+ cannot cross one.
+    start = close
+    while start > 0 and text[start - 1] != ')':
+        start -= 1
+    opened = text.find('(', start, close)
+    if opened == -1 or opened == close - 1:
+        return source_value
     return text[:opened].rstrip()
 
 
