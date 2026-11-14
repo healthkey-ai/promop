@@ -1,6 +1,7 @@
 import functools
 from collections import defaultdict
 from typing import Any, Callable, ContextManager
+from urllib.parse import urlsplit
 
 from drf_spectacular.utils import (
     OpenApiParameter, OpenApiResponse, extend_schema, extend_schema_view, inline_serializer,
@@ -901,6 +902,24 @@ def _delete_omop_clinical_rows(person):
     handle those after this returns.
     """
     delete_omop_clinical_rows(person)
+
+
+def _is_loinc_system(system):
+    """Whether a FHIR ``Coding.system`` addresses LOINC.
+
+    Compared on the parsed host, not by substring: ``'loinc.org'`` may appear
+    anywhere in a URL (CodeQL ``py/incomplete-url-substring-sanitization``),
+    and ``https://example.test/loinc.org`` is not LOINC. A value with no
+    scheme and no path ("loinc.org") is read as a host, which is what the
+    substring test accepted before.
+    """
+    value = (system or '').strip()
+    if not value:
+        return False
+    host = (urlsplit(value).hostname or '').lower()
+    if not host and '://' not in value and '/' not in value:
+        host = value.lower()
+    return host == 'loinc.org' or host.endswith('.loinc.org')
 
 
 @method_decorator(csrf_exempt, name='dispatch')
@@ -4003,7 +4022,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         for _coding in _obs_fhir_code.get('coding', []):
                             _sys = _coding.get('system', '')
                             _code = _coding.get('code', '')
-                            if 'loinc.org' in _sys and _code in _ASSESSMENT_LOINC:
+                            if _is_loinc_system(_sys) and _code in _ASSESSMENT_LOINC:
                                 _obs_concept = _cc_by_loinc(_code)
                                 _obs_src = _code
                                 break
@@ -5916,18 +5935,21 @@ def auth_test(request):
     """Test auth endpoint — DEBUG only."""
     if not settings.DEBUG:
         return Response({'detail': 'Not available'}, status=status.HTTP_404_NOT_FOUND)
-    import traceback as tb
+    step = 'start'
     try:
-        step = 'start'
-        username = request.data.get('username', 'test')
         step = 'got username'
+        username = request.data.get('username', 'test')
         from django.contrib.auth import authenticate as do_auth
         step = 'imported authenticate'
         user = do_auth(request, username=username, password='badpassword_test_only')
         step = 'authenticate done'
         return Response({'status': 'ok', 'step': step, 'user': str(user)})
-    except Exception as e:
-        return Response({'status': 'error', 'step': step, 'error': str(e), 'traceback': tb.format_exc()}, status=500)
+    except Exception:
+        # The traceback stays in the log: this endpoint is reachable without
+        # authentication, and a response body is the one place it must not go
+        # (CodeQL py/stack-trace-exposure).
+        logger.exception('auth_test failed at step %s', step)
+        return Response({'status': 'error', 'step': step}, status=500)
 
 # =============================================================================
 # Person ViewSet — identity resolution and demographic patch
