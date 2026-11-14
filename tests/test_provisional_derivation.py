@@ -217,3 +217,41 @@ def test_a_provisional_clear_marker_does_not_hide_a_real_value(snomed, record):
     from omop_core.models import Measurement
     Measurement.objects.filter(confidence=60).update(confidence=None)
     assert refresh_patient_record(record.person).hemoglobin_g_dl is None
+
+
+# The reads the derivation makes outside the snapshot filter on their own, so
+# each is exercised directly: a build through _build_snapshot never reaches them.
+
+def test_disease_keys_on_record_ignore_a_provisional_cancer(snomed, record):
+    from omop_core.services.disease_episodes import disease_keys_on_record
+    concept = _concept('Condition', 4003, '109989006', 'Multiple myeloma')
+    with suppress_patient_record_refresh():
+        ConditionOccurrenceFactory(
+            person=record.person, condition_concept=concept,
+            condition_source_value='109989006', condition_start_date=date(2024, 6, 1),
+            confidence=60)
+    assert disease_keys_on_record(record.person) == set()
+
+    with suppress_patient_record_refresh():
+        ConditionOccurrenceFactory(
+            person=record.person, condition_concept=concept,
+            condition_source_value='109989006', condition_start_date=date(2024, 7, 1))
+    assert len(disease_keys_on_record(record.person)) == 1
+
+
+@pytest.mark.parametrize('confidence, expected', [(60, 0), (None, 1)])
+def test_procedure_events_without_a_snapshot_skip_provisional_rows(
+        snomed, record, confidence, expected):
+    from omop_core.models import ProcedureOccurrence
+    from omop_core.services.lot_inference_service import _build_procedure_events
+    from omop_core.services.pk import next_pk
+    concept = _concept('Procedure', 4004, '425983008', 'Peripheral blood stem cell transplant')
+    type_concept = _concept('Type Concept', 44818, '44818', 'EHR', 'Type Concept')
+    with suppress_patient_record_refresh():
+        ProcedureOccurrence.objects.create(
+            procedure_occurrence_id=next_pk(ProcedureOccurrence, 'procedure_occurrence_id'),
+            person=record.person, procedure_concept=concept, procedure_date=date(2024, 6, 1),
+            procedure_type_concept=type_concept, procedure_source_value='425983008',
+            confidence=confidence)
+
+    assert len(_build_procedure_events(record.person)) == expected

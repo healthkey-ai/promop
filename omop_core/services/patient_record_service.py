@@ -812,6 +812,8 @@ class OmopSnapshot:
     # Rows whose concept is a proposed mapping's (confidence is not null). The
     # lists above hold real rows only, so a provisional value never reaches
     # patient_record (docs/provisional_data_plan.md, invariant 3).
+    # Raw: not read through _read_values_in_source_units (#2249), so a consumer of
+    # these lists must prove the unit itself before trusting a value.
     provisional_measurements: list = dataclasses.field(default_factory=list)
     provisional_observations: list = dataclasses.field(default_factory=list)
     provisional_conditions: list = dataclasses.field(default_factory=list)
