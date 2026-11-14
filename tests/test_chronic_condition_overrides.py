@@ -91,6 +91,10 @@ def test_invalid_input_is_a_400(admin, body):
     assert not ChronicConditionOverride.objects.exists()
 
 
+def test_a_body_that_is_not_an_object_is_a_400(admin):
+    assert admin.post(URL, [{'code': 'E03.9', 'is_chronic': True}], format='json').status_code == 400
+
+
 def test_a_patch_checks_only_what_it_sends(admin):
     pk = admin.post(URL, {'code': 'E03.9', 'is_chronic': True}, format='json').data['id']
     assert admin.patch(f'{URL}{pk}/', {'is_chronic': 'no'}, format='json').status_code == 400

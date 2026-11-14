@@ -11063,6 +11063,8 @@ def _override_fields(data, obj=None):
     """Validated column values from a request body, or (None, error Response).
     Only the keys sent are returned, so a PATCH leaves the rest alone."""
     from omop_core.services.chronic_conditions import normalize_icd10cm
+    if not hasattr(data, 'get'):
+        return None, Response({'detail': 'Expected a JSON object'}, status=status.HTTP_400_BAD_REQUEST)
     out = {}
     if obj is None or 'code' in data:
         code = normalize_icd10cm(data.get('code') if isinstance(data.get('code'), str) else None)
