@@ -1305,4 +1305,54 @@ describe('dated source pairs', () => {
       serum_bilirubin_level_direct_units: 'UMOL/L',
     });
   });
+
+  it('still lets a reader withdraw a dated result without changing its unit', async () => {
+    const { store, patch } = await setup(pairFields, pairValues);
+    render(<PatientFieldEditor store={store} name="serum_bilirubin_level_direct" />);
+
+    fireEvent.change(screen.getByRole('spinbutton'), { target: { value: '' } });
+    expect(screen.getByRole('button', { name: 'Save result' })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Save result' }));
+    await act(async () => { await store.flush(); });
+
+    expect(patch.mock.calls[0][1]).toEqual({
+      serum_bilirubin_level_direct: { value: null, date: '2026-08-01' },
+      serum_bilirubin_level_direct_units: 'MG/DL',
+    });
+  });
+
+  it('keeps Save result off when only the date moves after a unit change', async () => {
+    const { store, patch } = await setup(pairFields, pairValues);
+    render(<PatientFieldEditor store={store} name="serum_bilirubin_level_direct" />);
+
+    fireEvent.change(screen.getByLabelText('Unit for Direct bilirubin'),
+      { target: { value: 'UMOL/L' } });
+    fireEvent.change(screen.getByLabelText('Result date'),
+      { target: { value: '2026-07-01' } });
+    expect(screen.getByRole('button', { name: 'Save result' })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Save result' }));
+    await act(async () => { await store.flush(); });
+    expect(patch).not.toHaveBeenCalled();
+  });
+});
+
+describe('a dated scalar clear', () => {
+  it('withdraws the result with its date', async () => {
+    const { store, patch } = await setup({
+      hemoglobin_level: { label: 'Hemoglobin', writable: true,
+        target: 'patient_record', control: 'number', dated: true,
+        latest_date: '2026-08-01' },
+    }, { hemoglobin_level: 12.5 });
+    render(<PatientFieldEditor store={store} name="hemoglobin_level" />);
+
+    fireEvent.change(screen.getByRole('spinbutton'), { target: { value: '' } });
+    expect(screen.getByRole('button', { name: 'Save result' })).toBeEnabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Save result' }));
+    await act(async () => { await store.flush(); });
+
+    expect(patch.mock.calls[0][1]).toEqual({
+      hemoglobin_level: { value: null, date: '2026-08-01' },
+    });
+  });
 });

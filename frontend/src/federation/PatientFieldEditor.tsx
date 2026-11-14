@@ -125,6 +125,10 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
   // A source pair's unit is chosen beside the value (#5700). `null` follows the
   // stored/pending unit until the reader picks one.
   const [unitDraft, setUnitDraft] = useState<string | null>(null);
+  // A unit change on a dated pair clears the number; until the reader types a
+  // new one, Save result must stay off. An ordinary explicit clear does not set
+  // this flag, so a result can still be withdrawn.
+  const [unitRequiresValue, setUnitRequiresValue] = useState(false);
   // A draft chosen while the value was empty must not survive a pair that
   // arrives from elsewhere (another mounted editor, a refresh, or a rollback
   // after a rejected clear). If the pair later clears again, a surviving draft
@@ -327,25 +331,31 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
   // attach it to the previous result's date before the user has chosen one, so
   // the pair waits for an explicit commit.
   const datedValue = dated && valueDraft.set ? valueDraft.value : value;
+  const hasNewValue = valueDraft.set
+    && valueDraft.value !== '' && valueDraft.value != null;
   // A unit choice alone does not make a dated result: keeping the stored
   // number and changing only its unit would reinterpret the scale (17.1
   // µmol/L becoming 17.1 mg/dL). The reader must type the value in the chosen
-  // unit; a date-only correction keeps the stored value.
+  // unit. An explicit clear without a unit change is still a real answer.
   const datedDirty = dated && (
-    (valueDraft.set && valueDraft.value !== '' && valueDraft.value != null)
-    || resultDateOverride !== null
+    unitRequiresValue
+      ? hasNewValue
+      : (valueDraft.set || resultDateOverride !== null)
   );
   const commitDated = () => {
-    if (datesStale || !resultDate || datedValue == null || datedValue === '') return;
-    const datedEdit = { value: datedValue, date: resultDate };
+    if (datesStale || !resultDate) return;
+    if (unitRequiresValue && !hasNewValue) return;
+    const datedEdit = { value: datedValue === '' ? null : datedValue, date: resultDate };
     if (showUnitPicker && unitFieldName) {
       // The number, its date and the unit are one result. Saving the value
       // alone would keep the stored unit and silently change the scale.
       if (store.enqueuePair(canonical, datedEdit, unitFieldName, chosenUnit)) {
         setUnitDraft(null);
+        setUnitRequiresValue(false);
       }
     } else {
       store.enqueue(canonical, datedEdit);
+      setUnitRequiresValue(false);
     }
     setValueDraft({ set: false, value: undefined });
     setResultDateOverride(null);
@@ -410,7 +420,11 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
         if (Number.isFinite(parsed)) next = parsed;
       }
     }
-    if (dated) { setValueDraft({ set: true, value: next }); return; }
+    if (dated) {
+      setUnitRequiresValue(false);
+      setValueDraft({ set: true, value: next });
+      return;
+    }
     if (showUnitPicker && unitFieldName) {
       // Once queued, the pending pair (then the server value) owns the choice.
       // Keeping a local draft would let a rejected unit survive its rollback and
@@ -475,6 +489,7 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
               // the stored number too, so the reader types it in the chosen
               // unit instead of keeping it under the new scale.
               if (dated) {
+                setUnitRequiresValue(true);
                 setValueDraft({ set: true, value: '' });
                 return;
               }
