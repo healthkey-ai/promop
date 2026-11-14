@@ -53,4 +53,7 @@ def test_the_set_does_not_come_back_through_an_approved_mapping():
 
     entry = build_writable_field_descriptor()['stage']
 
+    # The entry must come from the curated path, otherwise this test could pass
+    # through the unmapped fallback and stop proving the exclusion.
+    assert entry.get('curated') is True
     assert entry.get('options') is None

@@ -800,7 +800,7 @@ def _curated_writes(choice_options=None, genomics_recipes=None, clinical_mapping
             entry['unit'] = row.unit
             entry['projection']['unit'] = row.unit
             entry['projection']['unit_concept_id'] = unit_ids.get(row.unit)
-        if row.value_vocabulary:
+        if row.value_vocabulary and row.field_name not in _TAB_OWNED_ANSWER_SETS:
             options = titles.get(row.value_vocabulary) or ()
             if options:
                 entry['options'] = [{'value': t} for t in options]

@@ -21,12 +21,14 @@ interface Props {
    * a date or boolean is never turned into a list of strings. */
   options?: string[];
   /** The control the caller's tab declared for this field (ClinicalField's
-   * `type`). A tab that names `select`/`multiselect` alongside its own choices
-   * is describing a closed answer set — ECOG 0-5, Karnofsky 0-100, protein
-   * expressions — and the model-derived control (`IntegerField` → number)
-   * would otherwise win and accept values the scale does not have. An `email`
-   * declaration likewise keeps the input's type. Booleans, dates and curated
-   * options keep the descriptor's control. */
+   * `type`). A tab that names `select` alongside its own choices is describing
+   * a closed answer set — ECOG 0-5, Karnofsky 0-100 — and the model-derived
+   * control (`IntegerField` → number) would otherwise win and accept values
+   * the scale does not have. An `email` declaration keeps the input's type;
+   * note that a profile `email` is read-only in this editor today (it is a
+   * `person` write, and this branch only writes `patient_record`), so that
+   * case is prospective. Booleans, dates and curated options keep the
+   * descriptor's control. */
   controlType?: 'text' | 'number' | 'select' | 'multiselect' | 'boolean' | 'date' | 'email';
 }
 
@@ -317,7 +319,7 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
   // keep their yes/no control because their stored value is a boolean, not the
   // tab's answer string, dates keep the date input, and a plain number stays a
   // number box.
-  const tabSelect = (controlType === 'select' || controlType === 'multiselect')
+  const tabSelect = controlType === 'select'
     && Boolean(tabOptions?.length)
     && field.value_kind !== 'boolean' && field.value_kind !== 'date'
     && field.control !== 'boolean' && field.control !== 'date';
@@ -325,13 +327,9 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
     : (controlType === 'email' && valueControl === 'text') ? 'email'
     : field.control ?? valueControl;
   const choices = field.options?.length ? field.options
-    : tabOptions?.length && (field.multiple || ownControl === 'text'
-        || ownControl === 'select' || ownControl === 'multiselect')
+    : tabOptions?.length && (field.multiple || ownControl === 'text' || ownControl === 'select')
       ? tabOptions : [];
-  // A declared multiselect stays a list even when the descriptor does not mark
-  // the column `multiple` (protein expressions are comma-joined strings).
-  const control = (field.multiple || ownControl === 'multiselect') ? 'multiselect'
-    : choices.length ? 'select' : ownControl;
+  const control = field.multiple ? 'multiselect' : choices.length ? 'select' : ownControl;
   // A numeric scale answered from a picker still writes a number: the column is
   // numeric and the editor's contract is type-preserving.
   const numericAnswers = control === 'select' && field.value_kind === 'number';

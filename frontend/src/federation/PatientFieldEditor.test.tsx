@@ -462,6 +462,9 @@ describe('a tab that declares its own closed answer set', () => {
   });
 
   it('keeps the declared email input type', async () => {
+    // Prospective branch: a profile email stays read-only in this editor today,
+    // so the descriptor here describes the shape a writable email field would
+    // have once the profile write path lands.
     const { store } = await setup({
       email: { writable: true, target: 'patient_record',
         control: 'text', value_kind: 'string', label: 'Email' },
@@ -470,20 +473,6 @@ describe('a tab that declares its own closed answer set', () => {
       label="Email" controlType="email" />);
 
     expect(container.querySelector('input')?.getAttribute('type')).toBe('email');
-  });
-
-  it('renders a declared multiselect from the tab answers', async () => {
-    const { store } = await setup({
-      protein_expressions: { writable: true, target: 'patient_record',
-        control: 'text', value_kind: 'string', label: 'Protein Expressions' },
-    }, { protein_expressions: 'CD5,CD23' });
-    render(<PatientFieldEditor store={store} name="protein_expressions"
-      label="Protein Expressions" controlType="multiselect"
-      options={['CD5', 'CD10', 'CD23']} />);
-
-    // A single select would show one answer and write over the rest.
-    expect(screen.getByRole('button', { name: /CD5, CD23/ })).toBeInTheDocument();
-    expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
   });
 
   it('never turns a date into a list of strings', async () => {
