@@ -6,6 +6,7 @@ export interface MappingStats {
   therapy: { regimens: number; components: number; classes: number; disease_links: number };
   relevance_signals?: { proposed: number; accepted: number; rejected: number };
   disease_category?: { total: number };
+  chronic_overrides?: { total: number };
 }
 
 export interface TherapyRegimenItem {
@@ -189,4 +190,39 @@ export async function updateDiseaseCategoryMapping(id: number, data: { category?
 
 export async function deleteDiseaseCategoryMapping(id: number): Promise<void> {
   await api.delete(`/v1/disease-category-mappings/${id}/`);
+}
+
+// --- Chronic Condition Overrides ---
+
+export interface ChronicConditionOverrideItem {
+  id: number;
+  code: string;
+  is_chronic: boolean;
+  label: string;
+  notes: string;
+}
+
+export async function fetchChronicConditionOverrides(search?: string): Promise<ChronicConditionOverrideItem[]> {
+  const params: Record<string, string> = {};
+  if (search) params.search = search;
+  const resp = await api.get('/v1/chronic-condition-overrides/', { params });
+  return resp.data as ChronicConditionOverrideItem[];
+}
+
+export async function createChronicConditionOverride(
+  data: { code: string; is_chronic: boolean; label?: string; notes?: string },
+): Promise<ChronicConditionOverrideItem> {
+  const resp = await api.post('/v1/chronic-condition-overrides/', data);
+  return resp.data as ChronicConditionOverrideItem;
+}
+
+export async function updateChronicConditionOverride(
+  id: number, data: Partial<Omit<ChronicConditionOverrideItem, 'id'>>,
+): Promise<ChronicConditionOverrideItem> {
+  const resp = await api.patch(`/v1/chronic-condition-overrides/${id}/`, data);
+  return resp.data as ChronicConditionOverrideItem;
+}
+
+export async function deleteChronicConditionOverride(id: number): Promise<void> {
+  await api.delete(`/v1/chronic-condition-overrides/${id}/`);
 }

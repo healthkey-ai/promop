@@ -29,6 +29,7 @@ import MappingAccuracyAnalyticsPage from "@/components/CodeMappings/MappingAccur
 import MappingHubPage from "@/components/MappingHub/MappingHubPage";
 import { canViewMappings, isAnalystOnly, isStaffOrOrgAdmin } from "@/utils/roles";
 import DiseaseCategoryPage from "@/components/MappingHub/DiseaseCategoryPage";
+import ChronicConditionOverridesPage from "@/components/MappingHub/ChronicConditionOverridesPage";
 import TherapyMappingPage from "@/components/TherapyMappings/TherapyMappingPage";
 import OrgLogin from "@/components/Auth/OrgLogin";
 import OrgSignup from "@/components/Auth/OrgSignup";
@@ -187,6 +188,7 @@ function AppRoutes() {
       <Route path="/therapy-mappings" element={mappingRoute(<TherapyMappingPage />)} />
       <Route path="/relevance-signals" element={mappingRoute(<RelevanceSignalsPage />)} />
       <Route path="/disease-category-mappings" element={mappingRoute(<DiseaseCategoryPage />)} />
+      <Route path="/chronic-condition-overrides" element={mappingRoute(<ChronicConditionOverridesPage />)} />
       <Route
         path="/profile"
         element={

@@ -47,7 +47,7 @@ from omop_core.models import (
     ToxicityGrade, Language, LanguageSkillLevel, BinetStage, ProteinExpression,
     RichterTransformation, TumorBurden, MorphologicVariant, DiseaseActivity,
     PreExistingConditionCategory,
-    Disease, DiseaseCategory, DiseaseCategoryChoice, DiseaseCategoryMapping,
+    ChronicConditionOverride, Disease, DiseaseCategory, DiseaseCategoryChoice, DiseaseCategoryMapping,
     CancerStage, KarnofskyScore, EcogStatus, PeripheralNeuropathyGrade,
     InfectionStatus, DiseaseProgression, MeasurableDisease, GelfCriteria,
     FlipIScore, FollicularLymphomaGrade, PostTransformationOutcome,
@@ -10685,6 +10685,7 @@ def mapping_stats(request):
         .values_list('status', 'n'))
 
     disease_category_total = DiseaseCategoryMapping.objects.count()
+    chronic_overrides_total = ChronicConditionOverride.objects.count()
 
     return Response({
         'relevance_signals': {s: signal_pairs.get(s, 0) for s in ('proposed', 'accepted', 'rejected')},
@@ -10698,6 +10699,9 @@ def mapping_stats(request):
         },
         'disease_category': {
             'total': disease_category_total,
+        },
+        'chronic_overrides': {
+            'total': chronic_overrides_total,
         },
     })
 
@@ -11049,6 +11053,104 @@ def disease_category_mapping_detail(request, pk):
             status=status.HTTP_409_CONFLICT,
         )
     return Response({'id': obj.id, 'disease_name': obj.disease_name, 'category': obj.category})
+
+
+def _override_json(o):
+    return {'id': o.id, 'code': o.code, 'is_chronic': o.is_chronic, 'label': o.label, 'notes': o.notes}
+
+
+def _override_fields(data, obj=None):
+    """Validated column values from a request body, or (None, error Response).
+    Only the keys sent are returned, so a PATCH leaves the rest alone."""
+    from omop_core.services.chronic_conditions import normalize_icd10cm
+    out = {}
+    if obj is None or 'code' in data:
+        code = normalize_icd10cm(data.get('code') if isinstance(data.get('code'), str) else None)
+        if not code:
+            return None, Response({'detail': 'code must be an ICD-10-CM code such as E03.9'},
+                                  status=status.HTTP_400_BAD_REQUEST)
+        out['code'] = code
+    if obj is None or 'is_chronic' in data:
+        if not isinstance(data.get('is_chronic'), bool):
+            return None, Response({'detail': 'is_chronic must be true or false'},
+                                  status=status.HTTP_400_BAD_REQUEST)
+        out['is_chronic'] = data['is_chronic']
+    for key, limit in (('label', 200), ('notes', 5000)):
+        if key in data:
+            value = data[key]
+            if value is None:
+                value = ''
+            if not isinstance(value, str) or len(value) > limit:
+                return None, Response({'detail': f'{key} must be text of at most {limit} characters'},
+                                      status=status.HTTP_400_BAD_REQUEST)
+            out[key] = value.strip()
+    return out, None
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def chronic_condition_override_list(request):
+    """List or create chronic-condition overrides (#2566).
+
+    GET  /api/v1/chronic-condition-overrides/?search=M85
+    POST /api/v1/chronic-condition-overrides/  {"code": "M85.8", "is_chronic": true, "label": "Osteopenia"}
+    """
+    if request.method == 'GET':
+        qs = ChronicConditionOverride.objects.all()
+        search = request.query_params.get('search', '').strip()
+        if search:
+            qs = qs.filter(Q(code__icontains=search) | Q(label__icontains=search))
+        return Response([_override_json(o) for o in qs])
+    denied = _require_mapping_admin(request)
+    if denied:
+        return denied
+    fields, error = _override_fields(request.data)
+    if error:
+        return error
+    if ChronicConditionOverride.objects.filter(code=fields['code']).exists():
+        return Response({'detail': f'An override for {fields["code"]} already exists'},
+                        status=status.HTTP_409_CONFLICT)
+    try:
+        obj = ChronicConditionOverride.objects.create(**fields)
+    except IntegrityError:
+        return Response({'detail': f'An override for {fields["code"]} already exists'},
+                        status=status.HTTP_409_CONFLICT)
+    return Response(_override_json(obj), status=status.HTTP_201_CREATED)
+
+
+@api_view(['PATCH', 'DELETE'])
+@permission_classes([IsAuthenticated])
+def chronic_condition_override_detail(request, pk):
+    """Change or delete a chronic-condition override.
+
+    PATCH  /api/v1/chronic-condition-overrides/<pk>/  {"is_chronic": false}
+    DELETE /api/v1/chronic-condition-overrides/<pk>/
+    """
+    denied = _require_mapping_admin(request)
+    if denied:
+        return denied
+    try:
+        obj = ChronicConditionOverride.objects.get(pk=pk)
+    except ChronicConditionOverride.DoesNotExist:
+        return Response({'detail': 'Not found'}, status=status.HTTP_404_NOT_FOUND)
+    if request.method == 'DELETE':
+        obj.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+    fields, error = _override_fields(request.data, obj)
+    if error:
+        return error
+    code = fields.get('code')
+    if code and ChronicConditionOverride.objects.filter(code=code).exclude(pk=pk).exists():
+        return Response({'detail': f'An override for {code} already exists'},
+                        status=status.HTTP_409_CONFLICT)
+    for key, value in fields.items():
+        setattr(obj, key, value)
+    try:
+        obj.save()
+    except IntegrityError:
+        return Response({'detail': f'An override for {obj.code} already exists'},
+                        status=status.HTTP_409_CONFLICT)
+    return Response(_override_json(obj))
 
 
 # =============================================================================

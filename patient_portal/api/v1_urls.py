@@ -45,6 +45,7 @@ from .views import (
     disease_therapy_regimen_list, disease_therapy_regimen_detail,
     disease_category_list, disease_category_detail,
     disease_category_mapping_list, disease_category_mapping_detail,
+    chronic_condition_override_list, chronic_condition_override_detail,
     concept_ancestors, concept_descendants, concept_detail, concept_graph_batch,
     concept_synonyms, concept_synonym_search, concept_replacement,
     vocab_release_list, vocab_release_detail, vocab_release_latest,
@@ -259,4 +260,6 @@ urlpatterns = [
     path('disease-categories/<str:code>/', disease_category_detail, name='v1-disease-category-detail'),
     path('disease-category-mappings/', disease_category_mapping_list, name='v1-disease-category-mapping-list'),
     path('disease-category-mappings/<int:pk>/', disease_category_mapping_detail, name='v1-disease-category-mapping-detail'),
+    path('chronic-condition-overrides/', chronic_condition_override_list, name='v1-chronic-condition-override-list'),
+    path('chronic-condition-overrides/<int:pk>/', chronic_condition_override_detail, name='v1-chronic-condition-override-detail'),
 ]
