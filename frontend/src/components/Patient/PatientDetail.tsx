@@ -1,5 +1,5 @@
 import BrandLogo from '@/components/Branding/BrandLogo';
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { ArrowLeft, Check, AlertCircle, ChevronDown, ShieldCheck } from "lucide-react";
 import api from "@/api/axios";
@@ -27,6 +27,8 @@ import PatientSourceCodesTab from "./PatientSourceCodesTab";
 import { confirmRecord } from "@/api/clinicalFacts";
 import { mayBeUnitedStates } from "@/lib/usZip";
 import { FieldMappingLinksProvider } from "@/components/PatientInfo/fieldMappingLinks";
+import { PatientFormStore } from "@/federation/patientFormStore";
+import StandaloneLabsProvider from "@/federation/StandaloneLabsProvider";
 
 type SaveStatus = "idle" | "pending" | "saving" | "saved" | "error";
 
@@ -329,6 +331,17 @@ export default function PatientDetail({
   const [saveErrorMsg, setSaveErrorMsg] = useState<string | null>(null);
 
   const [patientInfo, setPatientInfo] = useState<Record<string, unknown> | null>(null);
+  // The record read's write gate for this caller. The standalone Labs tab
+  // publishes it to the shared source-pair editor; a caller without write
+  // access still opens the page read-only (#2577).
+  const [writeEnabled, setWriteEnabled] = useState(true);
+  // The standalone Labs tab edits through the same source-pair store as the
+  // federated surfaces. One store per patient; a plain unmount lets its queue
+  // drain, as the federation store does, and a different person gets a new one.
+  const labsStore = useMemo(
+    () => (personId ? new PatientFormStore(api, '', { patientId: personId }) : null),
+    [personId],
+  );
   // Server-side baseline for change detection. A clinical edit is only written
   // when its value actually moved: the editor holds the whole record, so without
   // this every autosave would rewrite every lab as a fresh dated result.
@@ -418,6 +431,22 @@ export default function PatientDetail({
     setEditedInfo(edited);
   }, []);
 
+  // Load the Labs source-pair store once per patient, and fold every confirmed
+  // save back into the page baseline. Without this the page would keep the
+  // pre-save lab values and a later non-lab autosave could rebuild them.
+  useEffect(() => {
+    if (!labsStore) return undefined;
+    void labsStore.load();
+    return labsStore.onUpdated((result) => {
+      // The lab response may have been built before the page's last PATCH.
+      // Adopting it without a request marker keeps the page's confirmed
+      // non-lab writes over the older record instead of clearing them; the
+      // store's lab fields are not in that confirmed set, so they still move
+      // (#2578 review).
+      adoptServerRecord(result.patient_info as Record<string, unknown>);
+    });
+  }, [labsStore, adoptServerRecord]);
+
   useEffect(() => {
     if (!personId) return;
     const readRevision = saveRevisionRef.current;
@@ -427,6 +456,7 @@ export default function PatientDetail({
         const res = await api.get(`/patient-info/${personId}/`);
         const d = res.data.patient_info;
         adoptServerRecord(d, readRevision);
+        setWriteEnabled(res.data.write_enabled !== false);
 
         const user = res.data.user;
         const name = d.patient_name
@@ -632,9 +662,14 @@ export default function PatientDetail({
     if (!personId) return;
     const readRevision = saveRevisionRef.current;
     api.get(`/patient-info/${personId}/`)
-      .then((res) => adoptServerRecord(res.data.patient_info, readRevision))
+      .then((res) => {
+        adoptServerRecord(res.data.patient_info, readRevision);
+        // The Labs tab renders the store's values, not editedInfo; a refresh
+        // triggered by another tab must reach it too (#2578 review).
+        void labsStore?.load(true);
+      })
       .catch(() => {});
-  }, [personId, adoptServerRecord]);
+  }, [personId, adoptServerRecord, labsStore]);
 
   const handleFieldChange = useCallback((field: string, value: unknown, date?: string) => {
     const base = pendingDataRef.current?.info ?? editedInfoRef.current;
@@ -1010,7 +1045,15 @@ export default function PatientDetail({
                     )}
                   </>
                 )}
-                {activeTab === labsIdx && <LabsTab formData={editedInfo} onChange={handleFieldChange} />}
+                {activeTab === labsIdx && (
+                  labsStore ? (
+                    <StandaloneLabsProvider store={labsStore} writeEnabled={writeEnabled}>
+                      <LabsTab formData={editedInfo} onChange={handleFieldChange} />
+                    </StandaloneLabsProvider>
+                  ) : (
+                    <LabsTab formData={editedInfo} onChange={handleFieldChange} />
+                  )
+                )}
                 {activeTab === genomicsIdx && <GenomicsTab formData={editedInfo} />}
                 {allergiesIdx >= 0 && activeTab === allergiesIdx && <AllergyList user={user ?? null} />}
                 {activeTab === behaviorIdx && <BehaviorTab formData={editedInfo} onChange={handleFieldChange} onRefresh={reloadPatientInfo} />}

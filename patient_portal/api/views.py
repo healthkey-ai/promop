@@ -1310,7 +1310,15 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
         return Response({
             'patient_info': patient_serializer.data,  # legacy wire format — preserved for frontend/federation host compatibility
-            'user': user_data
+            'user': user_data,
+            # The standalone provider form mounts the shared source-pair editor
+            # for labs. It needs the same write gate the /me/ read publishes, or
+            # a caller with no write access sees controls whose PATCH is refused
+            # (#2577).
+            'write_enabled': (
+                credential_allows_write(request)
+                and _caller_may_write_patient(request, person.person_id)
+            ),
         })
 
     def partial_update(self, request, pk=None):

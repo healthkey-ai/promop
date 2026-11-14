@@ -67,7 +67,7 @@ const LIVER: Array<[string, string]> = [
   ['ALT (U/L)', 'alt_u_l'],
   ['Alkaline Phosphatase (U/L)', 'alkaline_phosphatase_u_l'],
   ['Total Bilirubin (mg/dL)', 'bilirubin_total_mg_dl'],
-  ['Direct Bilirubin (mg/dL)', 'serum_bilirubin_level_direct'],
+  ['Direct Bilirubin', 'serum_bilirubin_level_direct'],
 ];
 
 // Prognostic and inflammatory. LDH is a tumour-burden marker here — it sits in
@@ -152,6 +152,8 @@ export default function LabsTab({ formData, onChange }: Props) {
   // today's date is not a correction the client named, so the backend records
   // it as a new result; either way it asks for a fact nobody asserted, so a
   // value reverted before autosave sends nothing (#2454).
+  // A store-backed mount renders PatientFieldEditor, which owns its value,
+  // unit and date; these props remain for a store-less host.
   const changeValue = (name: string, value: unknown) => (
     dates[name] ? onChange(name, value, dates[name]) : onChange(name, value)
   );
@@ -194,7 +196,11 @@ export default function LabsTab({ formData, onChange }: Props) {
                 <div className="flex-1 min-w-0">
                   <ClinicalField
                     label={label}
-                    labelIncludesUnit
+                    // The direct bilirubin pair can be stored in mg/dL or
+                    // µmol/L; its row must not assert mg/dL. The source-pair
+                    // editor shows the actual unit, so leave the unit off that
+                    // label. The other review labels already carry their unit.
+                    labelIncludesUnit={name !== 'serum_bilirubin_level_direct'}
                     name={name}
                     type={type}
                     value={formData?.[name]}

@@ -190,7 +190,21 @@ export class PatientFormStore {
    *  counted here. */
   private retiredDrafts = 0;
 
-  constructor(private client: AxiosInstance, private base: string) {}
+  constructor(
+    private client: AxiosInstance,
+    private base: string,
+    /** A provider viewing `/patient/:personId`; omit for the signed-in patient. */
+    private options: { patientId?: number | string } = {},
+  ) {}
+
+  /** The record read is `/me/` for the signed-in patient and the provider's
+   *  explicit person for a standalone provider page. The write target below
+   *  already uses the person id the response carries. */
+  private recordPath(): string {
+    return this.options.patientId != null
+      ? `${this.base}/patient-info/${this.options.patientId}/`
+      : `${this.base}/patient-info/me/`;
+  }
 
   getSnapshot = () => this.snapshot;
   subscribe = (listener: () => void) => {
@@ -298,9 +312,13 @@ export class PatientFormStore {
       // descriptor request is a different failure.
       let readingRecord = true;
       try {
-        const { data } = await this.client.get(`${this.base}/patient-info/me/`);
+        const { data } = await this.client.get(this.recordPath());
         readingRecord = false;
-        const values = { ...data.patient_info, patient_name: data.patient_name };
+        const info = data.patient_info as Record<string, unknown>;
+        const values: Record<string, unknown> = {
+          ...info,
+          patient_name: data.patient_name ?? info.patient_name,
+        };
         const personId = Number(values.person_id ?? values.person);
         if (!personId) throw new Error('No linked patient record.');
         if (this.snapshot.personId && this.snapshot.personId !== personId) {

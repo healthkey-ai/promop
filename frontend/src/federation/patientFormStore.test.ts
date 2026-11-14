@@ -23,6 +23,27 @@ function setup() {
 beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
 
+describe('provider record path', () => {
+  it('loads the explicit patient instead of /me/ (#2577)', async () => {
+    const get = vi.fn(async (url: string) => ({
+      data: url.includes('writable-fields') ? fields : {
+        patient_info: { person_id: 42, height: 170 }, write_enabled: true,
+      },
+    }));
+    const store = new PatientFormStore(
+      { get, patch: vi.fn() } as unknown as AxiosInstance,
+      '/api',
+      { patientId: 42 },
+    );
+
+    await store.load();
+
+    expect(get.mock.calls[0][0]).toBe('/api/patient-info/42/');
+    expect(store.getSnapshot().personId).toBe(42);
+    expect(store.getSnapshot().writable).toBe(true);
+  });
+});
+
 describe('host save state', () => {
   it('reports pending for a queue or a bypass write, and failure separately', () => {
     const snapshot = setup().store.getSnapshot();

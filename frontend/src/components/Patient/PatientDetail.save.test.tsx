@@ -13,7 +13,7 @@ import { MemoryRouter } from 'react-router-dom';
  * columns are never sent, aliases are never sent, and unchanged values are never
  * sent.
  */
-import { render as baseRender, screen, fireEvent, waitFor, act } from '@testing-library/react';
+import { render as baseRender, screen, fireEvent, waitFor, act, within } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import PatientDetail from './PatientDetail';
 import { __resetWritableFieldsCache } from '@/hooks/useWritableFields';
@@ -69,6 +69,22 @@ const DESCRIPTORS = {
       type_concept_id: 32856, source_value: '718-7',
     },
   },
+  serum_bilirubin_level_direct: {
+    kind: 'direct', writable: true, target: 'patient_record',
+    value_kind: 'number', dated: true,
+    unit_options: [
+      { value: 'MG/DL', label: 'mg/dL' },
+      { value: 'UMOL/L', label: 'umol/L' },
+    ],
+  },
+  serum_bilirubin_level_direct_units: {
+    kind: 'selectable', writable: false,
+    qualifies: 'serum_bilirubin_level_direct',
+    unit_options: [
+      { value: 'MG/DL', label: 'mg/dL' },
+      { value: 'UMOL/L', label: 'umol/L' },
+    ],
+  },
 };
 
 const PATIENT = {
@@ -80,6 +96,9 @@ const PATIENT = {
   anc_thousand_per_ul: 3.1,
   absolute_neutrophile_count: '3.10',
   hemoglobin_g_dl: 12.5,
+  serum_bilirubin_level_direct: 17.1,
+  serum_bilirubin_level_direct_units: 'UMOL/L',
+  serum_bilirubin_level: 1.0,
   // lifecycle — read-only, and updated_at moves on any write
   id: 7, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
   derivation_version: 1, user_edited_fields: [],
@@ -167,128 +186,69 @@ describe('PatientDetail save — the edit, not the record', () => {
     expect(body).toMatchObject({ anc_thousand_per_ul: 5.5 });
   });
 
-  it('saves a normalised canonical lab through the PatientRecord PATCH (#2425)', async () => {
-    const normalised = {
-      ...DESCRIPTORS,
-      hemoglobin_g_dl: {
-        kind: 'computed', writable: false, target: 'patient_record', value_kind: 'number',
-        inputs: ['hemoglobin_level'], normalised_read_model: true,
-      },
-    };
-    (api.get as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
-      if (url.includes('writable-fields')) return Promise.resolve({ data: normalised });
-      if (url.includes('/patient-info/')) {
-        return Promise.resolve({
-          data: { patient_info: { ...PATIENT }, user: null, patient_name: PATIENT.patient_name },
-        });
-      }
-      return Promise.resolve({ data: [] });
-    });
-    await renderAndLoad();
-    await openLabsTab();
-    await editAndSave('12.5', '9.5');
-
-    await waitFor(() => expect(api.patch).toHaveBeenCalled());
-    expect(patchBody()).toMatchObject({ hemoglobin_g_dl: 9.5 });
-  });
-
-  it('sends a lab result date with its value (#2439)', async () => {
+  it('saves a direct bilirubin pair with its chosen unit through the standalone editor (#2577)', async () => {
     await renderAndLoad();
     await openLabsTab();
     vi.useFakeTimers({ shouldAdvanceTime: true });
-    fireEvent.change(screen.getByDisplayValue('12.5'), { target: { value: '9.5' } });
-    fireEvent.change(document.getElementById('hemoglobin_g_dl-date')!,
+
+    // Choosing the unit first clears the stored number; the reader then types
+    // the value in that unit (the pair is not silently rescaled).
+    fireEvent.change(screen.getByLabelText('Unit for Direct Bilirubin'), {
+      target: { value: 'MG/DL' },
+    });
+    fireEvent.change(screen.getByLabelText('Direct Bilirubin'), {
+      target: { value: '2' },
+    });
+    fireEvent.change(document.getElementById('serum_bilirubin_level_direct-result-date')!,
       { target: { value: '2026-10-01' } });
+    const biliRow = document.querySelector('[data-field="serum_bilirubin_level_direct"]') as HTMLElement;
+    fireEvent.click(within(biliRow).getByRole('button', { name: 'Save result' }));
     await act(async () => { vi.advanceTimersByTime(2100); });
 
     await waitFor(() => expect(api.patch).toHaveBeenCalled());
-    expect(patchBody()).toMatchObject({
+    const call = (api.patch as ReturnType<typeof vi.fn>).mock.calls.at(-1)!;
+    expect(call[0]).toBe('/v1/patient-records/261/');
+    expect(call[2]).toMatchObject({ headers: { 'X-Patient-Form': '1' } });
+    const body = call[1] as Record<string, unknown>;
+    expect(body.serum_bilirubin_level_direct_units).toBe('MG/DL');
+    expect(String((body.serum_bilirubin_level_direct as { value: unknown }).value)).toBe('2');
+    expect((body.serum_bilirubin_level_direct as { date: string }).date).toBe('2026-10-01');
+  });
+
+  it('does not autosave a dated lab value before Save result (#2454)', async () => {
+    await renderAndLoad();
+    await openLabsTab();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+
+    fireEvent.change(screen.getByDisplayValue('12.5'), { target: { value: '9.5' } });
+    await act(async () => { vi.advanceTimersByTime(2100); });
+
+    // The source-pair editor commits the value, its date and its unit as one
+    // edit; typing alone must not attach it to today.
+    expect(api.patch).not.toHaveBeenCalled();
+  });
+
+  it('saves a lab result date with its value through the source-pair editor (#2439)', async () => {
+    await renderAndLoad();
+    await openLabsTab();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+
+    fireEvent.change(screen.getByDisplayValue('12.5'), { target: { value: '9.5' } });
+    fireEvent.change(document.getElementById('hemoglobin_g_dl-result-date')!,
+      { target: { value: '2026-10-01' } });
+    const hbRow = document.querySelector('[data-field="hemoglobin_g_dl"]') as HTMLElement;
+    fireEvent.click(within(hbRow).getByRole('button', { name: 'Save result' }));
+    await act(async () => { vi.advanceTimersByTime(2100); });
+
+    await waitFor(() => expect(api.patch).toHaveBeenCalled());
+    const call = (api.patch as ReturnType<typeof vi.fn>).mock.calls.at(-1)!;
+    expect(call[0]).toBe('/v1/patient-records/261/');
+    expect(call[1]).toMatchObject({
       hemoglobin_g_dl: { value: 9.5, date: '2026-10-01' },
     });
   });
 
-  it('saves a date picked after the value was already autosaved (#2439)', async () => {
-    await renderAndLoad();
-    await openLabsTab();
-    vi.useFakeTimers({ shouldAdvanceTime: true });
-    (api.patch as ReturnType<typeof vi.fn>).mockResolvedValue({
-      data: { fact_ids: { hemoglobin_g_dl: 55 } },
-    });
-    fireEvent.change(screen.getByDisplayValue('12.5'), { target: { value: '9.5' } });
-    await act(async () => { vi.advanceTimersByTime(2100); });
-    await waitFor(() => expect(api.patch).toHaveBeenCalledTimes(1));
-
-    fireEvent.change(document.getElementById('hemoglobin_g_dl-date')!,
-      { target: { value: '2026-10-01' } });
-    await act(async () => { vi.advanceTimersByTime(2100); });
-
-    await waitFor(() => expect(api.patch).toHaveBeenCalledTimes(2));
-    expect(patchBody()).toMatchObject({
-      hemoglobin_g_dl: { value: 9.5, date: '2026-10-01', fact_id: 55 },
-    });
-  });
-
-  it('keeps a date changed while the previous PATCH is in flight (#2439)', async () => {
-    await renderAndLoad();
-    await openLabsTab();
-    vi.useFakeTimers({ shouldAdvanceTime: true });
-    let finishFirst!: (value: unknown) => void;
-    (api.patch as ReturnType<typeof vi.fn>).mockImplementationOnce(
-      () => new Promise((resolve) => { finishFirst = resolve; }),
-    );
-    fireEvent.change(screen.getByDisplayValue('12.5'), { target: { value: '9.5' } });
-    fireEvent.change(document.getElementById('hemoglobin_g_dl-date')!,
-      { target: { value: '2026-10-01' } });
-    await act(async () => { vi.advanceTimersByTime(2100); });
-    expect(api.patch).toHaveBeenCalledTimes(1);
-
-    fireEvent.change(document.getElementById('hemoglobin_g_dl-date')!,
-      { target: { value: '2026-10-02' } });
-    await act(async () => { finishFirst({ data: {} }); await Promise.resolve(); });
-    await act(async () => { vi.advanceTimersByTime(2100); });
-
-    await waitFor(() => expect(api.patch).toHaveBeenCalledTimes(2));
-    expect(patchBody()).toMatchObject({
-      hemoglobin_g_dl: { value: 9.5, date: '2026-10-02' },
-    });
-  });
-
-  it('keeps the date when the value changes during the previous PATCH (#2439)', async () => {
-    await renderAndLoad();
-    await openLabsTab();
-    vi.useFakeTimers({ shouldAdvanceTime: true });
-    let finishFirst!: (value: unknown) => void;
-    (api.patch as ReturnType<typeof vi.fn>).mockImplementationOnce(
-      () => new Promise((resolve) => { finishFirst = resolve; }),
-    );
-    fireEvent.change(screen.getByDisplayValue('12.5'), { target: { value: '9.5' } });
-    fireEvent.change(document.getElementById('hemoglobin_g_dl-date')!,
-      { target: { value: '2026-10-01' } });
-    await act(async () => { vi.advanceTimersByTime(2100); });
-    expect(api.patch).toHaveBeenCalledTimes(1);
-
-    fireEvent.change(screen.getByDisplayValue('9.5'), { target: { value: '10' } });
-    await act(async () => { finishFirst({ data: {} }); await Promise.resolve(); });
-    await act(async () => { vi.advanceTimersByTime(2100); });
-
-    await waitFor(() => expect(api.patch).toHaveBeenCalledTimes(2));
-    expect(patchBody()).toMatchObject({
-      hemoglobin_g_dl: { value: 10, date: '2026-10-01' },
-    });
-  });
-
-  it('sends a changed lab value without an implicit date (#2454)', async () => {
-    await renderAndLoad();
-    await openLabsTab();
-    await editAndSave('12.5', '9.5');
-
-    await waitFor(() => expect(api.patch).toHaveBeenCalled());
-    // Only a date the user chose is an instruction; changing a value alone
-    // records it on today by backend default.
-    expect(patchBody().hemoglobin_g_dl).toBe(9.5);
-  });
-
-  it('sends nothing when a lab value is reverted before autosave (#2454)', async () => {
+  it('sends nothing when a lab value is reverted before Save result (#2454)', async () => {
     await renderAndLoad();
     await openLabsTab();
     vi.useFakeTimers({ shouldAdvanceTime: true });
@@ -297,9 +257,60 @@ describe('PatientDetail save — the edit, not the record', () => {
     fireEvent.change(screen.getByDisplayValue('9.5'), { target: { value: '12.5' } });
     await act(async () => { vi.advanceTimersByTime(2100); });
 
-    // The value is back to the committed one and no date was chosen: nothing
-    // is an instruction, so nothing is sent (and nothing can be refused).
     expect(api.patch).not.toHaveBeenCalled();
+  });
+
+  it('shows the standalone Labs rows read-only when the record read says so (#2577)', async () => {
+    (api.get as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
+      if (url.includes('writable-fields')) return Promise.resolve({ data: DESCRIPTORS });
+      if (url.includes('/patient-info/')) {
+        return Promise.resolve({
+          data: {
+            patient_info: { ...PATIENT }, user: null,
+            patient_name: PATIENT.patient_name, write_enabled: false,
+          },
+        });
+      }
+      return Promise.resolve({ data: [] });
+    });
+    await renderAndLoad();
+    fireEvent.click(screen.getByRole('button', { name: 'Labs' }));
+
+    await waitFor(() => expect(screen.getByText('3.1')).toBeInTheDocument());
+    expect(screen.queryByRole('spinbutton', { name: /ANC/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Save result' })).not.toBeInTheDocument();
+  });
+
+  it('keeps a confirmed page edit when a late lab response arrives (#2578 review)', async () => {
+    await renderAndLoad();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let resolveLab!: (value: unknown) => void;
+    const labResponse = new Promise((resolve) => { resolveLab = resolve; });
+    (api.patch as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
+      if (url.includes('/v1/patient-records/')) return labResponse;
+      return Promise.resolve({ data: {} });
+    });
+
+    // A non-lab edit is queued, then a lab edit starts its own PATCH.
+    fireEvent.change(screen.getByDisplayValue('howell@example.org'),
+      { target: { value: 'new@example.org' } });
+    await openLabsTab();
+    fireEvent.change(screen.getByDisplayValue('3.1'), { target: { value: '5.5' } });
+    await act(async () => { vi.advanceTimersByTime(600); });
+    // The page's 2s autosave lands while the lab request is still open.
+    await act(async () => { vi.advanceTimersByTime(2100); });
+
+    // The lab response predates that page edit: it carries the old email.
+    await act(async () => {
+      resolveLab({ data: {
+        patient_info: { ...PATIENT, email: 'howell@example.org', anc_thousand_per_ul: 5.5 },
+        write: { applied: ['anc_thousand_per_ul'] },
+      } });
+      await Promise.resolve();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'General' }));
+    expect(screen.getByDisplayValue('new@example.org')).toBeInTheDocument();
   });
 
   it('never sends an alias in the PATCH', async () => {
