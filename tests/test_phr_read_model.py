@@ -23,10 +23,13 @@ def _inline_derivation(settings):
 
 
 def signed_in(record):
+    """A member's client with a real session login. Not ``force_authenticate``:
+    the PHR writes accept only a session or partner login, and forcing
+    bypasses every authenticator."""
     identity = Identity.objects.create_user(email=f'p{record.person_id}@example.test')
     PatientUser.objects.create(identity=identity, person=record.person)
     client = APIClient()
-    client.force_authenticate(identity)
+    client.force_login(identity)
     return client
 
 

@@ -105,9 +105,11 @@ Every request to these paths is classified `consent` in the audit trail by
 
 ## Not here
 
-Account deletion and its deletion log, retention and purge of the ledger (six
-years after the account closes), and the access audit log's database role are
-separate work. A migration from an earlier consent record calls
+Account deletion and its deletion log are in [account deletion](account-deletion.md):
+closing the account, or withdrawing the record permission
+(`CONSENT_RECORD_PURPOSE_KEY`), deletes the account and its data and leaves
+the ledger. Retention and purge of the ledger (six years after the account
+closes) and the access audit log's database role are separate work. A migration from an earlier consent record calls
 `record_consent(..., source='migration', version=..., recorded_at=...)`, which
 accepts a non-current version.
 

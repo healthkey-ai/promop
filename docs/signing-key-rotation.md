@@ -15,6 +15,7 @@ Audit finding PROMOP F20, SOC2 CC7.2.
 |---|---|---|
 | `AUDIT_HMAC_KEY` | The hash chain over `AuditEvent` rows | Events written under the old key no longer verify against the new one |
 | `EXPORT_SIGNING_KEY` | FHIR export bundle signatures | Previously issued bundles no longer verify |
+| `AUDIT_HMAC_KEY` (again) | The hash chain over `DeletionLogEntry` rows ([account deletion](account-deletion.md)) | None, when the old key is added to `AUDIT_HMAC_PREVIOUS_KEYS`: each entry names the key that signed it. Without that, `replay_deletion_log` reports the old entries unverifiable and refuses to replay |
 
 **Read that table before rotating.** Neither key is a session secret you can cycle freely:
 rotation invalidates the verifiability of everything already signed. That is the point of
@@ -63,6 +64,12 @@ Once per key. Never reuse a value across the two, across environments, or from
 5. **Re-run `verify_audit_integrity` after the deploy.** Events written under the previous
    key will not verify against the new one. That is expected, and the retained
    pre-rotation output is what demonstrates the chain was intact up to the cutover.
+
+6. **Keep the old `AUDIT_HMAC_KEY` in `AUDIT_HMAC_PREVIOUS_KEYS`** (comma-separated, newest
+   first) for as long as the deletion log may need replaying after a restore, which is
+   the life of the backups. `python manage.py replay_deletion_log --verify-only` must
+   report the chain verified after the deploy; an `UNVERIFIABLE` line means a signing key
+   is missing from that list, not that the log was tampered with.
 
 ## Cadence
 
