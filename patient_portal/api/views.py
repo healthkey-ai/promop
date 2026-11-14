@@ -910,15 +910,24 @@ def _is_loinc_system(system):
     Compared on the parsed host, not by substring: ``'loinc.org'`` may appear
     anywhere in a URL (CodeQL ``py/incomplete-url-substring-sanitization``),
     and ``https://example.test/loinc.org`` is not LOINC. A value with no
-    scheme and no path ("loinc.org") is read as a host, which is what the
-    substring test accepted before.
+    scheme ("loinc.org", "loinc.org/x") is read as a host plus path, which is
+    what the substring test accepted before.
+
+    Never raises: a bundle's ``system`` is upload input, and one malformed
+    value must not fail the patient the way an unparsable URL would.
     """
-    value = (system or '').strip()
+    if not isinstance(system, str):
+        return False
+    value = system.strip()
     if not value:
         return False
-    host = (urlsplit(value).hostname or '').lower()
-    if not host and '://' not in value and '/' not in value:
-        host = value.lower()
+    try:
+        host = (urlsplit(value).hostname or '').lower()
+    except ValueError:
+        # e.g. 'http://[x': an authority urlsplit refuses to read.
+        return False
+    if not host and '://' not in value:
+        host = value.split('/', 1)[0].lower()
     return host == 'loinc.org' or host.endswith('.loinc.org')
 
 
@@ -5937,8 +5946,8 @@ def auth_test(request):
         return Response({'detail': 'Not available'}, status=status.HTTP_404_NOT_FOUND)
     step = 'start'
     try:
-        step = 'got username'
         username = request.data.get('username', 'test')
+        step = 'got username'
         from django.contrib.auth import authenticate as do_auth
         step = 'imported authenticate'
         user = do_auth(request, username=username, password='badpassword_test_only')

@@ -13,6 +13,9 @@ from rest_framework.test import APIClient
 
 from patient_portal.api.views import _is_loinc_system
 
+# The probe request traverses AuditLogMiddleware, which writes an AuditEvent.
+pytestmark = pytest.mark.django_db
+
 
 @pytest.mark.parametrize('system', [
     'http://loinc.org',
@@ -20,6 +23,7 @@ from patient_portal.api.views import _is_loinc_system
     'HTTPS://LOINC.ORG',
     'http://loinc.org/',
     'loinc.org',
+    'loinc.org/x',
 ])
 def test_a_loinc_system_is_recognised(system):
     assert _is_loinc_system(system) is True
@@ -28,12 +32,15 @@ def test_a_loinc_system_is_recognised(system):
 @pytest.mark.parametrize('system', [
     '',
     None,
+    42,
     'http://snomed.info/sct',
     # The value the substring test accepted and this one must not.
     'https://example.test/loinc.org',
     'https://example.test/?next=http://loinc.org',
     'http://loinc.org.example.test',
     'https://notloinc.org',
+    # Upload input: an authority urlsplit refuses must decline, not raise.
+    'http://[x',
 ])
 def test_a_system_that_merely_names_loinc_is_not_loinc(system):
     assert _is_loinc_system(system) is False
