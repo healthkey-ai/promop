@@ -85,8 +85,17 @@ def test_the_descriptor_exposes_the_pair_and_a_read_only_alias():
     assert pair['projection']['unit_from'] == units.UNIT_FIELD
     assert pair['projection']['unit_by_code']['UMOL/L']['label'] == 'umol/L'
 
+    # The shared source-pair editor needs the stored codes, not the display
+    # labels the generic list uses: a label is not one of the column's choices,
+    # so the final stored-code filter would drop the picker entirely (#2577).
+    expected_units = [
+        {'value': 'MG/DL', 'label': 'mg/dL'},
+        {'value': 'UMOL/L', 'label': 'umol/L'},
+    ]
+    assert pair['unit_options'] == expected_units
     unit = descriptor[units.UNIT_FIELD]
     assert unit['qualifies'] == units.PAIR_FIELD
+    assert unit['unit_options'] == expected_units
 
     alias = descriptor[units.ALIAS_FIELD]
     assert alias['writable'] is False
@@ -325,6 +334,29 @@ def test_the_shared_form_writes_the_pair_and_normalises_the_alias():
     assert {units.PAIR_FIELD, units.UNIT_FIELD} <= set(result.applied)
     assert saved.serum_bilirubin_level_direct == Decimal('34.20')
     assert saved.serum_bilirubin_level_direct_units == 'UMOL/L'
+    assert saved.serum_bilirubin_level == Decimal('2.00')
+
+
+def test_the_shared_form_switches_a_stored_umol_pair_to_mg_dl():
+    from omop_core.services.patient_form import apply_patient_form_patch
+
+    ConceptFactory(
+        concept_id=1968007, concept_code=LOINC_DIRECT,
+        vocabulary=VocabularyFactory(vocabulary_id='LOINC'))
+    person = PersonFactory()
+    PatientRecordFactory(
+        person=person,
+        serum_bilirubin_level_direct=Decimal('17.10'),
+        serum_bilirubin_level_direct_units='UMOL/L',
+        serum_bilirubin_level=Decimal('1.00'),
+    )
+
+    saved, result = apply_patient_form_patch(
+        person, {units.PAIR_FIELD: '2', units.UNIT_FIELD: 'mg/dL'})
+
+    assert {units.PAIR_FIELD, units.UNIT_FIELD} <= set(result.applied)
+    assert saved.serum_bilirubin_level_direct == Decimal('2.00')
+    assert saved.serum_bilirubin_level_direct_units == 'MG/DL'
     assert saved.serum_bilirubin_level == Decimal('2.00')
 
 

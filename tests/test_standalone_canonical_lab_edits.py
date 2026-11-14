@@ -82,6 +82,15 @@ def test_a_native_canonical_write_retires_a_pending_hemoglobin_pair(staff):
     ]
 
 
+def test_the_provider_record_read_reports_write_access(staff):
+    record = PatientRecordFactory()
+
+    response = staff.get(f'/api/patient-info/{record.person_id}/')
+
+    assert response.status_code == 200, response.data
+    assert response.data['write_enabled'] is True
+
+
 def test_a_caller_without_write_access_sees_them_read_only():
     record = PatientRecordFactory()
     client = APIClient()
