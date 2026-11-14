@@ -4029,7 +4029,11 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
                         # Check for LOINC-coded assessment observations
                         for _coding in _obs_fhir_code.get('coding', []):
+                            # Upload input: a coding's fields need not be strings,
+                            # and a raise here loses the whole patient (the call
+                            # sits inside the per-patient try).
                             _sys = _coding.get('system', '')
+                            _sys = _sys if isinstance(_sys, str) else ''
                             _code = _coding.get('code', '')
                             if _is_loinc_system(_sys) and _code in _ASSESSMENT_LOINC:
                                 _obs_concept = _cc_by_loinc(_code)

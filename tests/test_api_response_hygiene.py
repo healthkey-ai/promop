@@ -58,3 +58,21 @@ def test_auth_test_returns_no_traceback(settings, monkeypatch):
     assert response.status_code == 500
     assert response.data == {'status': 'error', 'step': 'imported authenticate'}
     assert 'hunter2' not in str(response.data)
+
+
+def test_auth_test_reports_the_step_it_reached(settings, monkeypatch):
+    """The label is the only diagnostic left, so it must follow the work it names."""
+    from rest_framework.request import Request
+
+    settings.DEBUG = True
+
+    def unreadable(self):
+        raise RuntimeError('unreadable body')
+
+    # Reading the body is the first thing the probe does; the answer must not
+    # claim it got past that step.
+    monkeypatch.setattr(Request, 'data', property(unreadable))
+    response = APIClient().post('/api/v1/auth/test/', {'username': 'nobody'}, format='json')
+
+    assert response.status_code == 500
+    assert response.data['step'] == 'start'
