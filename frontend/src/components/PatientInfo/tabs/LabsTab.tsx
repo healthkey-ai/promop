@@ -152,6 +152,8 @@ export default function LabsTab({ formData, onChange }: Props) {
   // today's date is not a correction the client named, so the backend records
   // it as a new result; either way it asks for a fact nobody asserted, so a
   // value reverted before autosave sends nothing (#2454).
+  // A store-backed mount renders PatientFieldEditor, which owns its value,
+  // unit and date; these props remain for a store-less host.
   const changeValue = (name: string, value: unknown) => (
     dates[name] ? onChange(name, value, dates[name]) : onChange(name, value)
   );

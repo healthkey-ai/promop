@@ -257,14 +257,12 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
   // arrived from elsewhere (another mounted editor, or a rollback after a
   // rejected clear). Once the shared value is non-empty, the saved/pending pair
   // is the authority; the draft is ignored and cleared by the next queued edit.
-  const authoritativeUnit = storedUnit || unitOptions[0]?.value || '';
   // A source pair's unit lives beside the value, not in the descriptor's
-  // static recipe. Read-only rows have no picker, so the suffix must still
-  // name the unit the pair is actually stored in (#2577): a direct bilirubin
-  // 17.1 UMOL/L is not 17.1 mg/dL. Match the stored spelling against both the
-  // option code and its display label (legacy rows carry `umol/L`/`µmol/L`).
-  // An explicitly set unit we cannot recognise is said to be unknown; it is
-  // never relabelled with the descriptor's unit.
+  // static recipe. Match the stored spelling against both the option code and
+  // its display label (legacy rows carry `umol/L`/`µmol/L`), so a writable
+  // picker selects the stored unit and a read-only row names it. An explicitly
+  // set unit we cannot recognise is said to be unknown; it is never relabelled
+  // with the descriptor's unit.
   const matchedUnit = storedUnit
     ? unitOptions.find((option) => {
         const stored = normaliseUnitLabel(storedUnit);
@@ -275,6 +273,8 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
   const storedUnitLabel = matchedUnit
     ? (matchedUnit.label ?? matchedUnit.value)
     : undefined;
+  const authoritativeUnit = matchedUnit?.value
+    ?? (storedUnit || unitOptions[0]?.value || '');
   const displayUnit = storedUnit
     ? (storedUnitLabel ?? 'unit unknown')
     : (unitOptions.length
@@ -327,10 +327,16 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
   // attach it to the previous result's date before the user has chosen one, so
   // the pair waits for an explicit commit.
   const datedValue = dated && valueDraft.set ? valueDraft.value : value;
-  const datedDirty = dated && (valueDraft.set || resultDateOverride !== null
-    || unitDraft !== null);
+  // A unit choice alone does not make a dated result: keeping the stored
+  // number and changing only its unit would reinterpret the scale (17.1
+  // µmol/L becoming 17.1 mg/dL). The reader must type the value in the chosen
+  // unit; a date-only correction keeps the stored value.
+  const datedDirty = dated && (
+    (valueDraft.set && valueDraft.value !== '' && valueDraft.value != null)
+    || resultDateOverride !== null
+  );
   const commitDated = () => {
-    if (datesStale || !resultDate) return;
+    if (datesStale || !resultDate || datedValue == null || datedValue === '') return;
     const datedEdit = { value: datedValue, date: resultDate };
     if (showUnitPicker && unitFieldName) {
       // The number, its date and the unit are one result. Saving the value
@@ -465,8 +471,13 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
               const nextUnit = event.target.value;
               setUnitDraft(nextUnit);
               // A dated row commits only through "Save result": queueing the
-              // pair here would attach the current value to today's date.
-              if (dated) return;
+              // pair here would attach the current value to today's date. Clear
+              // the stored number too, so the reader types it in the chosen
+              // unit instead of keeping it under the new scale.
+              if (dated) {
+                setValueDraft({ set: true, value: '' });
+                return;
+              }
               // A unit change with a value is a real edit of the same pair, not
               // a formatting change; a unit alone cannot be written.
               if (value != null && value !== '' && unitFieldName

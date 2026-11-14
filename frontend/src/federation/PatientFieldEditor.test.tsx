@@ -1271,9 +1271,9 @@ describe('dated source pairs', () => {
     const { store, patch } = await setup(pairFields, pairValues);
     render(<PatientFieldEditor store={store} name="serum_bilirubin_level_direct" />);
 
-    fireEvent.change(screen.getByRole('spinbutton'), { target: { value: '10' } });
     fireEvent.change(screen.getByLabelText('Unit for Direct bilirubin'),
       { target: { value: 'UMOL/L' } });
+    fireEvent.change(screen.getByRole('spinbutton'), { target: { value: '10' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save result' }));
     await act(async () => { await store.flush(); });
 
@@ -1283,7 +1283,7 @@ describe('dated source pairs', () => {
     });
   });
 
-  it('does not save a dated unit change before Save result', async () => {
+  it('does not reinterpret a dated value when only its unit changes', async () => {
     const { store, patch } = await setup(pairFields, pairValues);
     render(<PatientFieldEditor store={store} name="serum_bilirubin_level_direct" />);
 
@@ -1291,12 +1291,17 @@ describe('dated source pairs', () => {
       { target: { value: 'UMOL/L' } });
     await act(async () => { await store.flush(); });
     expect(patch).not.toHaveBeenCalled();
+    // The stored number is not kept under the new scale: the reader must type
+    // the value in the unit they chose, and the Save result button stays off.
+    expect(screen.getByRole('spinbutton')).toHaveValue(null);
+    expect(screen.getByRole('button', { name: 'Save result' })).toBeDisabled();
 
+    fireEvent.change(screen.getByRole('spinbutton'), { target: { value: '2' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save result' }));
     await act(async () => { await store.flush(); });
 
     expect(patch.mock.calls[0][1]).toEqual({
-      serum_bilirubin_level_direct: { value: 1.2, date: '2026-08-01' },
+      serum_bilirubin_level_direct: { value: 2, date: '2026-08-01' },
       serum_bilirubin_level_direct_units: 'UMOL/L',
     });
   });

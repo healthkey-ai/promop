@@ -191,11 +191,13 @@ describe('PatientDetail save — the edit, not the record', () => {
     await openLabsTab();
     vi.useFakeTimers({ shouldAdvanceTime: true });
 
-    fireEvent.change(screen.getByLabelText('Direct Bilirubin'), {
-      target: { value: '2' },
-    });
+    // Choosing the unit first clears the stored number; the reader then types
+    // the value in that unit (the pair is not silently rescaled).
     fireEvent.change(screen.getByLabelText('Unit for Direct Bilirubin'), {
       target: { value: 'MG/DL' },
+    });
+    fireEvent.change(screen.getByLabelText('Direct Bilirubin'), {
+      target: { value: '2' },
     });
     fireEvent.change(document.getElementById('serum_bilirubin_level_direct-result-date')!,
       { target: { value: '2026-10-01' } });

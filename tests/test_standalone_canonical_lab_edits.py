@@ -10,6 +10,7 @@ write access is told so.
 from decimal import Decimal
 
 import pytest
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from omop_core.models import PatientRecord, RecordRevision
@@ -102,6 +103,33 @@ def test_the_provider_record_read_reports_read_only(staff, monkeypatch):
 
     assert response.status_code == 200, response.data
     assert response.data['write_enabled'] is False
+
+
+def test_a_read_only_oauth_token_cannot_edit_the_provider_record():
+    from datetime import timedelta
+    from oauth2_provider.models import AccessToken, Application
+
+    identity = Identity.objects.create_user(
+        email='read-only-provider@example.test', is_staff=True)
+    application = Application.objects.create(
+        name='Read-only provider client', client_id='test-read-only-provider-client',
+        client_type=Application.CLIENT_CONFIDENTIAL,
+        authorization_grant_type=Application.GRANT_PASSWORD, user=identity)
+    token = AccessToken.objects.create(
+        application=application, user=identity, token='test-read-only-provider-token',
+        scope='patient/*.read', expires=timezone.now() + timedelta(hours=1))
+    client = APIClient()
+    client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.token}')
+    record = PatientRecordFactory()
+
+    response = client.get(f'/api/patient-info/{record.person_id}/')
+
+    assert response.status_code == 200, response.data
+    assert response.data['write_enabled'] is False
+    patch = client.patch(
+        f'/api/patient-info/{record.person_id}/',
+        {'hemoglobin_g_dl': 12}, format='json')
+    assert patch.status_code in (401, 403), patch.data
 
 
 def test_a_caller_without_write_access_sees_them_read_only():

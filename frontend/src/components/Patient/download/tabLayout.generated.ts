@@ -830,7 +830,7 @@ export const TAB_LAYOUT: TabLayout = {
           "bilirubin_total_mg_dl"
         ],
         [
-          "Direct Bilirubin (mg/dL)",
+          "Direct Bilirubin",
           "serum_bilirubin_level_direct"
         ]
       ]

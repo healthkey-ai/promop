@@ -342,6 +342,14 @@ def test_the_shared_form_switches_a_stored_umol_pair_to_mg_dl():
     ConceptFactory(
         concept_id=1968007, concept_code=LOINC_DIRECT,
         vocabulary=VocabularyFactory(vocabulary_id='LOINC'))
+    type_vocab = VocabularyFactory(
+        vocabulary_id='Type Concept', vocabulary_name='Type Concept')
+    ConceptFactory(
+        concept_id=32865, concept_code='PT-SELF-REPORT',
+        concept_name='Patient self-report', vocabulary=type_vocab)
+    mg_dl = ConceptFactory(
+        concept_code='mg/dL',
+        vocabulary=VocabularyFactory(vocabulary_id='UCUM'))
     person = PersonFactory()
     PatientRecordFactory(
         person=person,
@@ -357,6 +365,11 @@ def test_the_shared_form_switches_a_stored_umol_pair_to_mg_dl():
     assert saved.serum_bilirubin_level_direct == Decimal('2.00')
     assert saved.serum_bilirubin_level_direct_units == 'MG/DL'
     assert saved.serum_bilirubin_level == Decimal('2.00')
+    row = Measurement.objects.get(
+        person=person, measurement_source_value=LOINC_DIRECT)
+    assert row.value_as_number == Decimal('2.00000')
+    assert row.unit_source_value == 'mg/dL'
+    assert row.unit_concept_id == mg_dl.pk
 
 
 def test_the_shared_form_refuses_a_unit_on_its_own():

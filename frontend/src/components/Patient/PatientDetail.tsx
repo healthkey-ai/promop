@@ -336,8 +336,8 @@ export default function PatientDetail({
   // access still opens the page read-only (#2577).
   const [writeEnabled, setWriteEnabled] = useState(true);
   // The standalone Labs tab edits through the same source-pair store as the
-  // federated surfaces. One store per patient: its queue must not outlive the
-  // record it belongs to.
+  // federated surfaces. One store per patient; a plain unmount lets its queue
+  // drain, as the federation store does, and a different person gets a new one.
   const labsStore = useMemo(
     () => (personId ? new PatientFormStore(api, '', { patientId: personId }) : null),
     [personId],
@@ -662,9 +662,14 @@ export default function PatientDetail({
     if (!personId) return;
     const readRevision = saveRevisionRef.current;
     api.get(`/patient-info/${personId}/`)
-      .then((res) => adoptServerRecord(res.data.patient_info, readRevision))
+      .then((res) => {
+        adoptServerRecord(res.data.patient_info, readRevision);
+        // The Labs tab renders the store's values, not editedInfo; a refresh
+        // triggered by another tab must reach it too (#2578 review).
+        void labsStore?.load(true);
+      })
       .catch(() => {});
-  }, [personId, adoptServerRecord]);
+  }, [personId, adoptServerRecord, labsStore]);
 
   const handleFieldChange = useCallback((field: string, value: unknown, date?: string) => {
     const base = pendingDataRef.current?.info ?? editedInfoRef.current;
