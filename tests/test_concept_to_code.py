@@ -873,6 +873,20 @@ def test_source_examples_return_up_to_three_patients_matching_system_and_code(cl
     assert examples[0]['source_metadata'] == {'category': 'laboratory', 'person': records[-1].person.person_id}
 
 
+def test_source_examples_exclude_patients_already_shown(client):
+    from tests.factories import PatientRecordFactory
+    records = [PatientRecordFactory() for _ in range(5)]
+    for index, record in enumerate(records):
+        inventory('ALB', record, occurrence_count=index + 1)
+    ids = [r.person.person_id for r in records[::-1]]
+    query = {'source_vocabulary_id': 'SNOMED', 'source_code': 'ALB'}
+
+    more = client.get(EXAMPLES, {**query, 'exclude_person_ids': ','.join(map(str, ids[:3]))}).data['examples']
+
+    assert [example['person_id'] for example in more] == ids[3:]
+    assert client.get(EXAMPLES, {**query, 'exclude_person_ids': 'abc'}).status_code == 400
+
+
 def test_source_examples_apply_curator_corrections_and_match_vocabulary_aliases(client):
     from omop_core.services.source_vocabularies import VOCABULARY_OID_ALIASES
     from tests.factories import PatientRecordFactory
