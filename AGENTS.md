@@ -540,22 +540,25 @@ rule below for when that is called for.
 2. `git checkout -b <descriptive-branch-name>` before writing any code
 3. Commit the work on the feature branch
 4. Run the targeted tests for the change (see below)
-5. Open a PR targeting `dev`
+5. Open a PR targeting the branch the work belongs to: `cb-v2` while the CB
+   integration lane is the target (as in
+   [`docs/shared-patient-form_plan.md`](docs/shared-patient-form_plan.md)), `dev`
+   otherwise. Never target `main`.
 6. Perform a code review on the PR. **Stop and present the review to the user before merging** — the user must read the review and approve the merge.
-   - **Exception — small, local, low-risk fixes** (typos, docstring updates, single-line bug fixes, config tweaks): these may proceed all the way through to a merge into `dev` without waiting for user review, provided the code review found no unfixable issues.
-7. **After the PR merges into `dev` successfully, delete the feature branch.** Prefer `gh pr merge --delete-branch`, which removes the remote branch as part of the merge. Then delete the local copy (`git branch -d <branch>`) and remove any worktree created for it (`git worktree remove <path>`). Do not leave merged feature branches lingering locally or on the remote.
+   - **Exception — small, local, low-risk fixes** (typos, docstring updates, single-line bug fixes, config tweaks): these may proceed all the way through to a merge without waiting for user review, provided the code review found no unfixable issues.
+7. **After the PR merges successfully, delete the feature branch.** Prefer `gh pr merge --delete-branch`, which removes the remote branch as part of the merge. Then delete the local copy (`git branch -d <branch>`) and remove any worktree created for it (`git worktree remove <path>`). Do not leave merged feature branches lingering locally or on the remote.
 
-### Rule: A `cb-v2` Merge Closes No Issue by Itself
+### Rule: Work Landing on `cb-v2` Closes No Issue by Itself
 
 GitHub closes an issue named by `Fixes #N` / `Closes #N` when the commit reaches the
-repository's **default branch**, which is `dev`. A PR merged into `cb-v2` (our
-integration lane, never the default branch) leaves the linked issue open however
-plainly the keyword is written — #2577 and #2425 both did, and nothing in the merge
-says so.
+repository's **default branch**, which is `dev`. Work that lands on `cb-v2` — our
+integration lane, never the default branch — leaves its issue open however plainly
+the keyword is written: #2577 said `Fixes #2577` in #2578 and stayed open, and #2425
+stayed open for a fix committed straight onto `cb-v2`.
 
-So a `cb-v2` PR that fixes something is not finished until its issues are closed by
-hand. After the user merges it, check which issues it **fully** resolves — the ones
-it only mentions, or fixes in part, stay open — and close those, naming the merge
+So a change merged or pushed to `cb-v2` is not finished until its issues are closed
+by hand. After the user merges it, check which issues it **fully** resolves — the
+ones it only mentions, or fixes in part, stay open — and close those, naming the
 commit and what the change makes true:
 
 ```bash
@@ -563,12 +566,21 @@ gh issue close <n> --repo healthkey-ai/promop --comment \
   "Fixed by #<pr>, merged into cb-v2 as <merge-sha>. <what is true now>."
 ```
 
+A fix that went straight onto `cb-v2` with no PR of its own names the commit
+instead, as #2425 does.
+
 Keep `Fixes #N` in the PR body as the reference a reader follows from the issue.
 Automatic closure on a later promotion needs a closing keyword in a commit message
 that reaches `dev`, or in the promotion PR's description; the body of the `cb-v2`
 PR itself counts for nothing there, and a squash promotion does not preserve the
-original commits. So do not rely on it. An issue left open beside a merged `cb-v2`
-PR is not evidence of unfinished work; check for the merge before picking it up.
+original commits. So do not rely on it.
+
+The converse trap matters too: a hand-closed issue here is **not** evidence that
+the fix is on `dev` or deployed, since a release checklist built on closed issues
+would count it as shipped. It arrives on the default branch with the promotion.
+
+An issue left open beside a merged `cb-v2` PR is not evidence of unfinished work
+either; check for the merge before picking it up.
 
 ### Rule: Unfinished Means Draft, Not a Title Prefix
 
