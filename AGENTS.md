@@ -554,18 +554,21 @@ plainly the keyword is written — #2577 and #2425 both did, and nothing in the 
 says so.
 
 So a `cb-v2` PR that fixes something is not finished until its issues are closed by
-hand, naming the merge commit and what the change makes true:
+hand. After the user merges it, check which issues it **fully** resolves — the ones
+it only mentions, or fixes in part, stay open — and close those, naming the merge
+commit and what the change makes true:
 
 ```bash
 gh issue close <n> --repo healthkey-ai/promop --comment \
   "Fixed by #<pr>, merged into cb-v2 as <merge-sha>. <what is true now>."
 ```
 
-Keep `Fixes #N` in the PR body anyway: it is the link a reader follows from the
-issue, and it is what closes the issue if the promotion into `dev` carries the
-commit that names it — a squash promotion carries only the squash message, so do
-not rely on it. An issue left open beside a merged `cb-v2` PR is not evidence of
-unfinished work; check for the merge before picking it up.
+Keep `Fixes #N` in the PR body as the reference a reader follows from the issue.
+Automatic closure on a later promotion needs a closing keyword in a commit message
+that reaches `dev`, or in the promotion PR's description; the PR body of the
+`cb-v2` PR itself does it nothing, and a squash promotion does not preserve the
+original commits. So do not rely on it. An issue left open beside a merged `cb-v2`
+PR is not evidence of unfinished work; check for the merge before picking it up.
 
 ### Rule: Unfinished Means Draft, Not a Title Prefix
 
