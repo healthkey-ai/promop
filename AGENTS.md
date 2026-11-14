@@ -544,17 +544,17 @@ rule below for when that is called for.
    integration lane is the target (as in
    [`docs/shared-patient-form_plan.md`](docs/shared-patient-form_plan.md)), `dev`
    otherwise. Never target `main`.
-6. Perform a code review on the PR. **Stop and present the review to the user before merging** — the user must read the review and approve the merge.
-   - **Exception — small, local, low-risk fixes** (typos, docstring updates, single-line bug fixes, config tweaks): these may proceed all the way through to a merge without waiting for user review, provided the code review found no unfixable issues.
-7. **After the PR merges successfully, delete the feature branch.** Prefer `gh pr merge --delete-branch`, which removes the remote branch as part of the merge. Then delete the local copy (`git branch -d <branch>`) and remove any worktree created for it (`git worktree remove <path>`). Do not leave merged feature branches lingering locally or on the remote.
+6. Perform a code review on the PR and present it to the user. **The user merges; an agent never does**, in this repository or any other, and never by admin merge, auto-merge or a ruleset bypass.
+   - **Exception — small, local, low-risk fixes** (typos, docstring updates, single-line bug fixes, config tweaks): these may skip the separate review round and go straight to the user as merge-ready, provided the review found no unfixable issues. They still wait for the user's merge.
+7. **After the user merges the PR, delete the feature branch.** A merge done with `gh pr merge --delete-branch` has already removed the remote branch. Delete the local copy (`git branch -d <branch>`) and remove any worktree created for it (`git worktree remove <path>`). Do not leave merged feature branches lingering locally or on the remote.
 
 ### Rule: Work Landing on `cb-v2` Closes No Issue by Itself
 
 GitHub closes an issue named by `Fixes #N` / `Closes #N` when the commit reaches the
 repository's **default branch**, which is `dev`. Work that lands on `cb-v2` — our
 integration lane, never the default branch — leaves its issue open however plainly
-the keyword is written: #2577 said `Fixes #2577` in #2578 and stayed open, and #2425
-stayed open for a fix committed straight onto `cb-v2`.
+the keyword is written: PR #2578 said `Fixes #2577`, but #2577 stayed open, and
+#2425 stayed open after its fix landed on `cb-v2`.
 
 So a change merged or pushed to `cb-v2` is not finished until its issues are closed
 by hand. After the user merges it, check which issues it **fully** resolves — the
@@ -566,8 +566,8 @@ gh issue close <n> --repo healthkey-ai/promop --comment \
   "Fixed by #<pr>, merged into cb-v2 as <merge-sha>. <what is true now>."
 ```
 
-A fix that went straight onto `cb-v2` with no PR of its own names the commit
-instead, as #2425 does.
+A fix that reached `cb-v2` without a PR of its own names the commit instead of a
+merge.
 
 Keep `Fixes #N` in the PR body as the reference a reader follows from the issue.
 Automatic closure on a later promotion needs a closing keyword in a commit message
