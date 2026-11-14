@@ -36,7 +36,7 @@ from .records import genetics, medication_detail, medications, procedures
 from .feed import imaging, whats_new
 from .outcomes import has_outcomes, outcomes
 from .therapy import therapy
-from .sources import PATIENT, RECORD, row_sources, source
+from .sources import PATIENT, PATIENT_SELF_REPORT_TYPE_CONCEPT_ID, RECORD, row_sources, source
 
 GENETIC_DOC_TYPES = ('FISH', 'GEP', 'NGS', 'CYTOMETRY', 'CYTOGENETICS', 'MRD', 'BONE_MARROW')
 
@@ -242,11 +242,13 @@ def primary_cancer(record: PatientRecord, transitions: list[dict]) -> dict[str, 
 
 
 def _condition_rows(person):
-    return list(
+    rows = list(
         ConditionOccurrence.objects.filter(person=person, is_erroneous=False)
-        .select_related('condition_concept', 'visit_occurrence')
+        .select_related('condition_concept', 'condition_source_concept', 'visit_occurrence')
         .order_by('condition_start_date', 'condition_occurrence_id')
     )
+    _attach_code_names(rows)
+    return rows
 
 
 logger = logging.getLogger(__name__)
@@ -258,43 +260,87 @@ _BARE_CODE = re.compile(r'[A-Z]\d{2}(?:\.?[0-9A-Z]{1,4})?|\d+', re.IGNORECASE)
 _NAMING_VOCABULARIES = ('ICD10CM', 'ICD10', 'SNOMED')
 
 
-def _code_name(code: str) -> str | None:
-    """The terminology's name for a bare condition code, if it has one."""
+def _code_candidates(code: str) -> set[str]:
     code = code.strip().upper()
     candidates = {code}
     if '.' not in code and len(code) > 3 and code[0].isalpha():
         candidates.add(f'{code[:3]}.{code[3:]}')  # E039 -> E03.9
-    names = dict(
-        Concept.objects.filter(vocabulary_id__in=_NAMING_VOCABULARIES, concept_code__in=candidates)
-        .values_list('vocabulary_id', 'concept_name')
-    )
-    return next((_text(names[v]) for v in _NAMING_VOCABULARIES if _text(names.get(v))), None)
+    return candidates
+
+
+def _code_names(codes) -> dict[str, str | None]:
+    """The terminology's name for each bare condition code, in one query."""
+    wanted = {code: _code_candidates(code) for code in codes}
+    candidates = set().union(*wanted.values()) if wanted else set()
+    if not candidates:
+        return {}
+    found: dict[str, dict[str, str]] = {}
+    for vocabulary, code, name in Concept.objects.filter(
+        vocabulary_id__in=_NAMING_VOCABULARIES, concept_code__in=candidates,
+    ).values_list('vocabulary_id', 'concept_code', 'concept_name'):
+        found.setdefault(code, {})[vocabulary] = name
+    result = {}
+    for code, options in wanted.items():
+        # Most specific vocabulary first; within one, the code as sent before the dotted form.
+        ordered = sorted(options, key=lambda c: c != code.strip().upper())
+        result[code] = next(
+            (_text(found[c][v]) for v in _NAMING_VOCABULARIES for c in ordered
+             if c in found and _text(found[c].get(v))),
+            None,
+        )
+    return result
+
+
+def _own_name(row) -> str | None:
+    """The name the row carries itself: its concept's, then its source concept's."""
+    concept = row.condition_concept if row.condition_concept_id else None
+    if name := _text(concept.concept_name if concept else None):
+        return name
+    source = row.condition_source_concept if row.condition_source_concept_id else None
+    return _text(source.concept_name if source else None)
+
+
+def _is_bare_code(row) -> bool:
+    """A row the terminology has to name: nothing of its own, and a source text that is a code.
+    A patient's own entry is their words, whatever they look like (#2553)."""
+    if row.condition_type_concept_id == PATIENT_SELF_REPORT_TYPE_CONCEPT_ID or _own_name(row):
+        return False
+    text = _text(row.condition_source_value)
+    return bool(text and _BARE_CODE.fullmatch(text))
+
+
+def _attach_code_names(rows) -> None:
+    """Name every bare-code row from the terminology with one query, so a section
+    costs the same however many unmapped codes the patient has."""
+    bare = [row for row in rows if _is_bare_code(row)]
+    names = _code_names({_text(row.condition_source_value) for row in bare})
+    for row in bare:
+        row._phr_code_name = names.get(_text(row.condition_source_value))
 
 
 def _condition_name(row) -> str | None:
     """A condition's name. Concept 0 is "No matching concept": then it is the
     record's own coding, named from the terminology when it is a bare code,
     and None when nothing names it (the card is left out, #131)."""
-    concept = row.condition_concept if row.condition_concept_id else None
-    if name := _text(concept.concept_name if concept else None):
-        return name
-    source = row.condition_source_concept if row.condition_source_concept_id else None
-    if name := _text(source.concept_name if source else None):
+    if name := _own_name(row):
         return name
     text = _text(row.condition_source_value)
-    if not text or not _BARE_CODE.fullmatch(text):
+    if not _is_bare_code(row):
         return text
-    return _code_name(text)
+    if not hasattr(row, '_phr_code_name'):  # a row not loaded by _condition_rows
+        _attach_code_names([row])
+    return row._phr_code_name
 
 
 def _unnamed(row, sources) -> None:
-    """Log a condition left out for having no name, with where it came from,
-    to see how often codes fail to resolve and whether a source clusters (#131)."""
+    """Log a condition left out for having no name, with where it came from, to
+    see how often codes fail to resolve and whether a source clusters (#131).
+    The row id and facility only: the code itself is a diagnosis, and the row
+    id leads to it (#2545)."""
     if row.condition_source_value:
         origin = sources.get(row.pk) or {}
         logger.warning(
-            'phr: unresolved condition code %r (condition %s, facility %r)',
-            row.condition_source_value, row.pk, origin.get('facility'),
+            'phr: unresolved condition code (condition %s, facility %r)', row.pk, origin.get('facility'),
         )
 
 
@@ -402,7 +448,10 @@ def _apply_cancer_details(entry, details, sources, family):
     return entry
 
 
-def diagnoses(person, record: PatientRecord | None) -> dict[str, Any]:
+def diagnoses(person, record: PatientRecord | None, *, log_unresolved: bool = False) -> dict[str, Any]:
+    """The Diagnoses section. Only the page itself logs the codes it left out
+    (``log_unresolved``); the exports and shares that build it again do not, so
+    the log counts codes and not page loads (#2545)."""
     rows = _condition_rows(person)
     contexts = condition_contexts(person.pk, [row.pk for row in rows])
     sources = row_sources(
@@ -445,7 +494,8 @@ def diagnoses(person, record: PatientRecord | None) -> dict[str, Any]:
         latest = family_rows[-1]
         name = name_of(latest)
         if not name:
-            _unnamed(latest, sources)
+            if log_unresolved:
+                _unnamed(latest, sources)
             continue
         resolved = all(r.condition_end_date for r in family_rows)
         # Diagnosed when the current diagnosis began (myeloma, not the MGUS
@@ -478,7 +528,8 @@ def diagnoses(person, record: PatientRecord | None) -> dict[str, Any]:
     for row in other_rows:
         name = _condition_name(row)
         if not name:
-            _unnamed(row, sources)
+            if log_unresolved:
+                _unnamed(row, sources)
             continue
         if name.lower() in seen:
             continue
@@ -500,7 +551,7 @@ def diagnoses(person, record: PatientRecord | None) -> dict[str, Any]:
 
 class DiagnosesView(PhrView):
     def build(self, person, record):
-        return diagnoses(person, record)
+        return diagnoses(person, record, log_unresolved=True)
 
 
 # ---------------------------------------------------------------- Status

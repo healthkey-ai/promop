@@ -111,9 +111,17 @@ def _summary(key: str, rows: list[DrugExposure], sources: dict, today: date,
     old = source['kind'] == 'record' and not in_line and latest.drug_exposure_start_date < today - ASK_WITHIN
     # An old prescription the record never ended may be one the patient still
     # takes: it shows as taken and over, and takes "taking" as well as the
-    # past answers. One with an end date still to come is current as before.
+    # past answers. It is current only through open-ended rows: one with an end
+    # date still to come says it runs on, whichever row is newest (#2554).
     # Judged on the record alone, as answers are validated.
-    may_still_take = old and current and latest.drug_exposure_end_date is None
+    runs_on = any(r.drug_exposure_end_date and r.drug_exposure_end_date >= today for r in rows)
+    may_still_take = old and current and not runs_on
+    # A past answer describes the prescription it was given for. Once the drug
+    # is current again for another reason, a renewal, the answer is stale and
+    # the patient is asked again (#2544).
+    if (statement is not None and statement.status in (PatientStatement.TOOK, PatientStatement.NOT_TAKEN)
+            and current and not may_still_take):
+        statement = None
     confirmation = None
     if with_statements and statement is not None:
         confirmation = {k: v for k, v in {
@@ -125,7 +133,7 @@ def _summary(key: str, rows: list[DrugExposure], sources: dict, today: date,
             # Stopped by the patient: no longer current, history intact.
             current, ended = False, statement.stopped_on
         elif statement.status in (PatientStatement.TOOK, PatientStatement.NOT_TAKEN) and current:
-            # A past answer, which only an old open-ended prescription takes.
+            # A past answer, which only an old open-ended prescription still takes.
             current = False
     unanswered = with_statements and source['kind'] == 'record' and statement is None and not in_line
     if unanswered and old:
