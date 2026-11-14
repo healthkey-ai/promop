@@ -84,7 +84,7 @@ def test_a_patient_sees_only_their_own_conditions():
     response = signed_in(mine).get('/api/v1/phr/diagnoses/')
 
     assert response.status_code == 200
-    assert response.data == {'cancer': [], 'other': [], 'historical_procedures': []}
+    assert response.data == {'cancer': [], 'other': [], 'other_hidden': [], 'historical_procedures': []}
 
 
 # ---------------------------------------------------------------- about
@@ -297,8 +297,11 @@ def test_cancer_conditions_become_dated_transitions_and_other_conditions_are_lis
         {'name': 'Multiple myeloma', 'date': '2021-02-01'},
     ]
     assert [(c['name'], c['date'], c.get('status')) for c in data['other']] == [
-        ('Hypertension', '2020-01-01', 'Resolved'),
         ('Type 2 diabetes', '2015-01-01', None),
+    ]
+    # Hypertension ended in 2021: listed apart, not dropped (#2568).
+    assert [(c['name'], c['date'], c['reason']) for c in data['other_hidden']] == [
+        ('Hypertension', '2020-01-01', 'resolved'),
     ]
 
 
