@@ -15,7 +15,7 @@ from rest_framework.response import Response
 
 from patient_portal.models import PatientStatement
 
-from .records import medication_summary_by_key
+from .records import THROUGH_ROW, medication_summary_by_key, newest_row_id
 from .therapy import all_lines
 from .views import PhrView
 
@@ -111,7 +111,8 @@ class MedicationStatementView(_StatementView):
                 return Response({'stopped_on': ['The date must be between the start date and today.']}, status=400)
         else:
             stopped_on = None
-        self.save(request, person, item_id, status=status, note=note.strip(), stopped_on=stopped_on, reason='')
+        self.save(request, person, item_id, status=status, note=note.strip(), stopped_on=stopped_on, reason='',
+                  details={THROUGH_ROW: newest_row_id(person, item_id)})
         return Response(medication_summary_by_key(person, item_id))
 
 
