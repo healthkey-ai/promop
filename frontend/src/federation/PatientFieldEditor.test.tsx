@@ -462,9 +462,8 @@ describe('a tab that declares its own closed answer set', () => {
   });
 
   it('keeps the declared email input type', async () => {
-    // Prospective branch: a profile email stays read-only in this editor today,
-    // so the descriptor here describes the shape a writable email field would
-    // have once the profile write path lands.
+    // Production shape: the profile email is a patient_record write with
+    // projection_target person (write_descriptor), so the branch is live.
     const { store } = await setup({
       email: { writable: true, target: 'patient_record',
         control: 'text', value_kind: 'string', label: 'Email' },
@@ -473,6 +472,21 @@ describe('a tab that declares its own closed answer set', () => {
       label="Email" controlType="email" />);
 
     expect(container.querySelector('input')?.getAttribute('type')).toBe('email');
+  });
+
+  it('keeps a declared multiselect a single select until #2574 lands', async () => {
+    // Deliberate: multi-answer writes are not supported yet, so a tab that
+    // declares multiselect over a non-multiple descriptor gets one select.
+    const { store } = await setup({
+      protein_expressions: { writable: true, target: 'patient_record',
+        control: 'text', value_kind: 'string', label: 'Protein Expressions' },
+    }, { protein_expressions: 'CD5 +ve' });
+    render(<PatientFieldEditor store={store} name="protein_expressions"
+      label="Protein Expressions" controlType="multiselect"
+      options={['CD5 +ve', 'CD5 -ve']} />);
+
+    expect(screen.getByRole('combobox')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /CD5/ })).not.toBeInTheDocument();
   });
 
   it('never turns a date into a list of strings', async () => {

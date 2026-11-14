@@ -24,10 +24,11 @@ interface Props {
    * `type`). A tab that names `select` alongside its own choices is describing
    * a closed answer set — ECOG 0-5, Karnofsky 0-100 — and the model-derived
    * control (`IntegerField` → number) would otherwise win and accept values
-   * the scale does not have. An `email` declaration keeps the input's type;
-   * note that a profile `email` is read-only in this editor today (it is a
-   * `person` write, and this branch only writes `patient_record`), so that
-   * case is prospective. Booleans, dates and curated options keep the
+   * the scale does not have. An `email` declaration is live: the profile email
+   * is a `patient_record` write with `projection_target: 'person'`, so the
+   * input keeps `type="email"`. A declared `multiselect` is deliberately
+   * ignored here (the field stays a single select) until multi-answer writes
+   * are supported — see #2574. Booleans, dates and curated options keep the
    * descriptor's control. */
   controlType?: 'text' | 'number' | 'select' | 'multiselect' | 'boolean' | 'date' | 'email';
 }
