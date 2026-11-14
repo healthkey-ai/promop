@@ -152,6 +152,10 @@ _CANCER_WORDS = re.compile(
 
 
 def is_cancer_condition(row: ConditionOccurrence) -> bool:
+    if row.condition_type_concept_id == PATIENT_SELF_REPORT_TYPE_CONCEPT_ID and not row.condition_concept_id:
+        # Words the patient typed ("C3-C4 stenosis", "D45") are not a coded
+        # diagnosis, and cancers are refused on entry (#2553).
+        return False
     concept = row.condition_concept
     if any(NOT_CANCER_NAME.search(text or '') for text in (_condition_name(row), row.condition_source_value)):
         return False

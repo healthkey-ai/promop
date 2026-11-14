@@ -384,6 +384,17 @@ def test_a_patient_adds_a_condition_named_like_a_code(adder):
     assert renamed.status_code == 200 and renamed.data['name'] == '42'
     assert sorted(c['name'] for c in client.get('/api/v1/phr/diagnoses/').data['other']) == ['123', '42', 'B12']
 
+    # Words that begin like a cancer code are still the patient's, not a cancer.
+    for name in ('C2 disc herniation', 'D45'):
+        added = client.post('/api/v1/phr/conditions/', {'name': name}, format='json')
+        assert added.status_code == 201 and added.data['name'] == name and added.data['source']['kind'] == 'patient'
+    assert not [c for c in client.get('/api/v1/phr/diagnoses/').data['cancer'] if c['name'] in ('C2 disc herniation', 'D45')]
+
+    # The list folds a repeat of an earlier condition into it; the entry is still answered.
+    condition(record, ConceptFactory(concept_code='G-1', concept_name='Gout'), '2019-01-01')
+    again = client.post('/api/v1/phr/conditions/', {'name': 'Gout'}, format='json')
+    assert again.status_code == 201 and again.data['name'] == 'Gout'
+
 
 def test_a_second_cancer_gets_its_own_entry_after_the_primary():
     record = PatientRecordFactory(disease='Multiple myeloma', disease_slug='myeloma', diagnosis_date='2024-03-12')
