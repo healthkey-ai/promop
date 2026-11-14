@@ -10,7 +10,7 @@ fallback loop.
 """
 import pytest
 
-from omop_core.models import FieldChoice, FieldConceptMapping
+from omop_core.models import FieldChoice, FieldConceptMapping, ProteinExpression
 from omop_core.services.write_descriptor import build_writable_field_descriptor
 from tests.factories import ConceptFactory
 
@@ -55,5 +55,29 @@ def test_the_set_does_not_come_back_through_an_approved_mapping():
 
     # The entry must come from the curated path, otherwise this test could pass
     # through the unmapped fallback and stop proving the exclusion.
+    assert entry.get('curated') is True
+    assert entry.get('options') is None
+
+
+def test_a_curator_vocabulary_on_the_mapping_is_guarded_too():
+    # The curated path also attaches `value_vocabulary` titles; the guard has to
+    # cover that branch, or a curator-set vocabulary reintroduces the set.
+    _seed_choices('stage', ('I', 'II', 'III'))
+    ProteinExpression.objects.create(code='CD5', title='CD5 +ve')
+    FieldConceptMapping.objects.create(
+        field_name='stage',
+        concept=ConceptFactory(),
+        vocabulary_id='SNOMED',
+        concept_code='399390009',
+        omop_table='observation',
+        source_value='stage',
+        value_kind='string',
+        value_vocabulary='ProteinExpression',
+        type_concept_id=EHR_TYPE,
+        status='approved',
+    )
+
+    entry = build_writable_field_descriptor()['stage']
+
     assert entry.get('curated') is True
     assert entry.get('options') is None
