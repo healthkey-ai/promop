@@ -314,7 +314,7 @@ def test_a_condition_coded_only_by_its_source_is_named_from_terminology_or_left_
     unmatched = ConceptFactory(concept_id=0, concept_code='No matching concept', concept_name='No matching concept')
     icd10('Z94.81', 'Bone marrow transplant status')
     condition(record, unmatched, '2016-09-26', condition_source_value='Z94.81')
-    condition(record, unmatched, '2016-04-01', condition_source_value='0')
+    junk = condition(record, unmatched, '2016-04-01', condition_source_value='0')
     condition(record, unmatched, '2017-01-01', condition_source_value='Seasonal allergies')
 
     # patient_portal's loggers don't propagate (settings.LOGGING), so caplog
@@ -326,9 +326,74 @@ def test_a_condition_coded_only_by_its_source_is_named_from_terminology_or_left_
         ('Seasonal allergies', '2017-01-01'),
         ('Bone marrow transplant status', '2016-09-26'),
     ]
-    # The left-out code is logged once, with its source.
+    # The left-out code is logged once, by its row and source and not by the
+    # diagnosis code itself (#2545).
     unresolved = [c for c in warning.call_args_list if 'unresolved condition code' in c.args[0]]
-    assert len(unresolved) == 1 and unresolved[0].args[1] == '0'
+    assert len(unresolved) == 1 and unresolved[0].args[1] == junk.pk
+    assert '0' not in unresolved[0].args[1:] and 'Z94.81' not in unresolved[0].args[1:]  # no code is logged
+
+    # The exports and shares that build the section again do not log it again.
+    with mock.patch.object(views.logger, 'warning') as again:
+        views.diagnoses(record.person, record)
+    assert not again.called
+
+
+def test_bare_condition_codes_are_named_by_the_terminology_in_a_fixed_number_of_queries():
+    """#2545: a decimal-less code, the source concept and the vocabulary order
+    are all handled, and the section does not query per unmapped condition."""
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+
+    unmatched = ConceptFactory(concept_id=0, concept_code='No matching concept', concept_name='No matching concept')
+    icd10('E03.9', 'Hypothyroidism')
+    snomed = VocabularyFactory(vocabulary_id='SNOMED', vocabulary_name='SNOMED')
+    ConceptFactory(concept_code='E03.9', concept_name='A SNOMED namesake', vocabulary=snomed)
+    ConceptFactory(concept_code='38341003', concept_name='Hypertensive disorder', vocabulary=snomed)
+    own = ConceptFactory(concept_code='SRC-1', concept_name='Named by its source concept')
+
+    def names(count):
+        record = PatientRecordFactory(disease='')
+        condition(record, unmatched, '2016-01-01', condition_source_value='E039')           # no decimal
+        condition(record, unmatched, '2016-02-01', condition_source_value='38341003')       # SNOMED id
+        condition(record, unmatched, '2016-03-01', condition_source_value='99999',
+                  condition_source_concept=own)                                              # its own name wins
+        for i in range(count):
+            condition(record, unmatched, f'2017-0{i + 1}-01', condition_source_value=f'{i}0{i}')
+        client = signed_in(record)
+        with CaptureQueriesContext(connection) as queries:
+            data = client.get('/api/v1/phr/diagnoses/').data
+        lookups = [q for q in queries.captured_queries if 'concept_code" IN' in q['sql']]
+        return sorted(c['name'] for c in data['other']), len(queries), len(lookups)
+
+    names(0)  # warms the process-wide caches, so the runs below start level wherever the test is run
+    few, few_queries, few_lookups = names(1)
+    many, many_queries, many_lookups = names(5)
+    assert few == many == ['Hypertensive disorder', 'Hypothyroidism', 'Named by its source concept']
+    assert few_lookups == many_lookups == 1  # one terminology query for all the codes
+    assert few_queries == many_queries  # and nothing else grows with them
+
+
+def test_a_patient_adds_a_condition_named_like_a_code(adder):
+    """#2553: the patient's own words are their name, even when they read as a code."""
+    record, client = adder
+    for name in ('123', 'B12', 'Z99'):
+        added = client.post('/api/v1/phr/conditions/', {'name': name}, format='json')
+        assert added.status_code == 201 and added.data['name'] == name
+    row_id = added.data['id'].removeprefix('condition-')
+    renamed = client.patch(f'/api/v1/phr/conditions/{row_id}/', {'name': '42'}, format='json')
+    assert renamed.status_code == 200 and renamed.data['name'] == '42'
+    assert sorted(c['name'] for c in client.get('/api/v1/phr/diagnoses/').data['other']) == ['123', '42', 'B12']
+
+    # Words that begin like a cancer code are still the patient's, not a cancer.
+    for name in ('C2 disc herniation', 'D45'):
+        added = client.post('/api/v1/phr/conditions/', {'name': name}, format='json')
+        assert added.status_code == 201 and added.data['name'] == name and added.data['source']['kind'] == 'patient'
+    assert not [c for c in client.get('/api/v1/phr/diagnoses/').data['cancer'] if c['name'] in ('C2 disc herniation', 'D45')]
+
+    # The list folds a repeat of an earlier condition into it; the entry is still answered.
+    condition(record, ConceptFactory(concept_code='G-1', concept_name='Gout'), '2019-01-01')
+    again = client.post('/api/v1/phr/conditions/', {'name': 'Gout'}, format='json')
+    assert again.status_code == 201 and again.data['name'] == 'Gout'
 
 
 def test_a_second_cancer_gets_its_own_entry_after_the_primary():
@@ -1001,6 +1066,65 @@ def test_prescriptions_older_than_a_year_count_as_taken_and_can_be_changed(meds_
     assert client.delete(f'/api/v1/phr/medications/{past}/statement/').status_code == 204
     drug(record, old_past.drug_concept, (today - timedelta(days=5)).isoformat(), (today - timedelta(days=1)).isoformat())
     assert med(client, past)['pending'] is True and 'confirmation' not in med(client, past)
+
+
+def test_a_drug_with_several_prescriptions_is_judged_on_all_of_them():
+    """#2554: current comes from any row, so "may still be taken" does too."""
+    record = PatientRecordFactory(disease='')
+    client = signed_in(record)
+    today = timezone.localdate()
+
+    def days(n):
+        return (today + timedelta(days=n)).isoformat()
+
+    # The newest prescription ended long ago; an older one was never ended.
+    ended_over_open = ConceptFactory(concept_name='Vitamin B12', concept_code='RX-B12')
+    drug(record, ended_over_open, days(-800), days(-700))
+    drug(record, ended_over_open, days(-1500), None)
+    # The newest is open-ended; an older long order still has an end date to come.
+    open_over_running = ConceptFactory(concept_name='Metformin', concept_code='RX-MET')
+    drug(record, open_over_running, days(-800), None)
+    drug(record, open_over_running, days(-1000), days(30))
+
+    first = med(client, str(ended_over_open.concept_id))
+    assert first['status'] == 'past' and first['may_still_take'] is True
+    assert first['confirmation'] == {'status': 'took', 'assumed': True}
+
+    second = med(client, str(open_over_running.concept_id))
+    assert second['status'] == 'current' and 'may_still_take' not in second
+    assert second['confirmation'] == {'status': 'taking', 'assumed': True}
+    # The record says it runs on: a past answer is refused, as for any current prescription.
+    assert say(client, str(open_over_running.concept_id), status='took').status_code == 400
+
+
+def test_a_past_answer_does_not_outlive_the_prescription_it_was_given_for():
+    """#2544: a "took" on an old open-ended prescription, or a "not taken" on one
+    that ended, is stale once the drug is prescribed again, and is asked again."""
+    record = PatientRecordFactory(disease='')
+    client = signed_in(record)
+    today = timezone.localdate()
+
+    def days(n):
+        return (today + timedelta(days=n)).isoformat()
+
+    open_ended = ConceptFactory(concept_name='Levothyroxine', concept_code='RX-LEVO')
+    ended = ConceptFactory(concept_name='Cephalexin', concept_code='RX-CEPH')
+    drug(record, open_ended, days(-800), None)
+    drug(record, ended, days(-500), days(-490))
+    keys = str(open_ended.concept_id), str(ended.concept_id)
+    assert say(client, keys[0], status='took').status_code == 200
+    assert say(client, keys[1], status='not_taken').status_code == 200
+    assert med(client, keys[0])['status'] == 'past'  # still true while it describes the latest prescription
+
+    drug(record, open_ended, days(-5), None)
+    drug(record, ended, days(-5), days(7))
+    for key in keys:
+        renewed = med(client, key)
+        assert renewed['status'] == 'current' and renewed['pending'] is True
+        assert 'confirmation' not in renewed and 'may_still_take' not in renewed
+    # The patient answers the renewal as usual.
+    assert say(client, keys[0], status='taking').status_code == 200
+    assert med(client, keys[0])['confirmation'] == {'status': 'taking'}
 
 
 def test_answers_must_fit_whether_the_prescription_is_current(meds_patient):

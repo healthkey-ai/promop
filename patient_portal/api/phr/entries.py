@@ -22,7 +22,7 @@ from omop_core.services.pk import next_pk
 from patient_portal.models import PatientStatement
 
 from .records import _group_key, medication_summary_by_key, procedures
-from .sources import PATIENT_SELF_REPORT_TYPE_CONCEPT_ID as SELF_REPORT, row_sources
+from .sources import PATIENT, PATIENT_SELF_REPORT_TYPE_CONCEPT_ID as SELF_REPORT, row_sources, source
 from .views import _CANCER_WORDS, PhrView, diagnoses
 
 S = PatientStatement
@@ -324,7 +324,21 @@ class ConditionEntryView(_EntryView):
         return '', {'date_unknown': not data.get('diagnosed')}
 
     def respond(self, person, record, pk):
-        return next(c for c in diagnoses(person, record)['other'] if c['id'] == f'condition-{pk}')
+        entry = next((c for c in diagnoses(person, record)['other'] if c['id'] == f'condition-{pk}'), None)
+        if entry is not None:
+            return entry
+        # The list folds a condition into an earlier one of the same name. The
+        # row is saved either way, so answer with what the patient entered
+        # rather than failing after the commit (#2553).
+        row = ConditionOccurrence.objects.get(pk=pk)
+        dated = not S.objects.filter(person=person, subject=self.subject, subject_key=str(pk),
+                                     details__date_unknown=True).exists()
+        day = row.condition_start_date
+        return {k: v for k, v in {
+            'id': f'condition-{pk}', 'name': row.condition_source_value,
+            'date': day.isoformat() if dated else None,
+            'source': source(PATIENT, None, day if dated else None),
+        }.items() if v is not None}
 
 
 class ProcedureEntryView(_EntryView):
