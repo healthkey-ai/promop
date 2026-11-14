@@ -192,3 +192,28 @@ def test_a_provisional_row_does_not_override_a_real_one(snomed, record):
 
     assert provisional_only is None
     assert float(refreshed.hemoglobin_g_dl) == 9.0
+
+
+def test_a_provisional_clear_marker_does_not_hide_a_real_value(snomed, record):
+    """The split happens before cleared history is applied, so a clear that is itself
+    provisional cannot suppress the approved result it would otherwise erase."""
+    from omop_core.services.omop_projection import CLEAR_VALUE
+    concept = _concept('Measurement', 3000963, '718-7', 'Hemoglobin [Mass/volume] in Blood', 'LOINC')
+    with suppress_patient_record_refresh():
+        MeasurementFactory(
+            person=record.person, measurement_concept=concept,
+            measurement_date=date(2024, 5, 1), value_as_number=9.0,
+            measurement_source_value='718-7', unit_source_value='g/dL',
+            value_source_value='9.0')
+        MeasurementFactory(
+            person=record.person, measurement_concept=concept,
+            measurement_date=date(2024, 6, 1), value_as_number=None,
+            measurement_source_value='718-7', unit_source_value='g/dL',
+            value_source_value=CLEAR_VALUE, confidence=60)
+
+    assert float(refresh_patient_record(record.person).hemoglobin_g_dl) == 9.0
+
+    # Control: the same clear marker, real, does erase it.
+    from omop_core.models import Measurement
+    Measurement.objects.filter(confidence=60).update(confidence=None)
+    assert refresh_patient_record(record.person).hemoglobin_g_dl is None
