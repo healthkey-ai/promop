@@ -621,7 +621,8 @@ data, run only:
   and `npm run build` (see "Frontend Lint" below — neither `tsc` nor the tests
   catch what lint does).
 
-Do not push if any of those fail. Then **wait for CI to pass before merging**;
+Do not push if any of those fail. Then **wait for CI to pass before presenting
+the PR for merge**;
 a red required check blocks the merge, and a failure there is fixed on the
 branch and re-pushed, not reproduced first with a local full run.
 
@@ -2315,8 +2316,9 @@ Run generator:
 - CI is the gate for the full suites. Before a push, run only the tests the
   change touches (plus `npm run lint` and `npm run build` for frontend work);
   do not run the full Django or pytest suite locally. Wait for the required
-  checks before merging. See [Targeted Tests Before a Push, CI for the Full
-  Suites](#rule-targeted-tests-before-a-push-ci-for-the-full-suites) above.
+  checks before presenting it for merge. See [Targeted Tests Before a Push, CI
+  for the Full Suites](#rule-targeted-tests-before-a-push-ci-for-the-full-suites)
+  above.
 
 #### Migration conflicts
 
@@ -2331,10 +2333,10 @@ so a stale green check does not catch it.
 - **Rebase before creating a migration.** `git fetch origin dev && git rebase
   origin/dev`, then run `makemigrations`, so the migration gets the next number
   and depends on the current leaf.
-- **Rebase again immediately before merging a PR that adds a migration.** If
+- **Rebase again immediately before a migration PR goes to the user.** If
   `omop_core/migrations/` on `dev` changed since the branch's last CI run,
-  rebase, check the graph, push, and wait for CI to pass on the new head. Do
-  not merge on the older green result.
+  rebase, check the graph, push, and wait for CI to pass on the new head. An
+  older green result does not describe the branch that would merge.
 - **Check the graph locally after every rebase.** With `DATABASE_URL` pointed at
   local PostgreSQL and `DEBUG=True`, run
   `.venv/bin/python manage.py makemigrations --check --dry-run`. It fails with
