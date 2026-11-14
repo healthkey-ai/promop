@@ -1,3 +1,5 @@
+import re
+import time
 from datetime import date
 from decimal import Decimal
 from types import SimpleNamespace
@@ -11,7 +13,7 @@ from omop_core.models import (
     SourceCodeAxisVariant, SourceCodeConceptMapping,
 )
 from omop_core.services.canonical_units import (
-    LoincAxes, convert, loinc_axes_for_concepts, normalize, property_for,
+    LoincAxes, PROPERTY_NAMES, convert, loinc_axes_for_concepts, normalize, property_for,
     normalize_measurement_units,
 )
 from patient_portal.models import Identity
@@ -92,6 +94,35 @@ def test_imported_property_wins_over_name():
     assert property_for(concept) == 'MCnc'
     assert property_for(concept, SimpleNamespace(property='SCnc', scale_type='Qn')) == 'SCnc'
     assert property_for(concept, SimpleNamespace(property='MCnc', scale_type='Ord')) == ''
+
+
+def test_property_scans_the_name_brackets_and_cannot_backtrack():
+    def from_name(name):
+        return property_for(SimpleNamespace(
+            vocabulary_id='LOINC', domain_id='Measurement', concept_name=name))
+
+    # The first non-empty [...] group, which is what re.search returned.
+    for name in ('Test [Mass/volume]', 'Test []x] [Mass/volume]', 'Test [[[Mass/volume]'):
+        match = re.search(r'\[([^]]+)\]', name)
+        expected = PROPERTY_NAMES.get(match.group(1).lower(), '') if match else ''
+        assert from_name(name) == expected
+
+    # A value the pattern gave up on: opening brackets and no closing one.
+    assert from_name('Test ' + '[' * 20000) == ''
+
+
+def test_a_bracket_run_the_pattern_retried_at_every_bracket_is_one_scan():
+    """Same answer, different cost: the pattern is 1.4 s here, the scan is µs.
+
+    The bound is orders of magnitude above the scan's real cost, so it cannot
+    flake, and a restored `re.search` fails it instead of hanging the job.
+    """
+    name = '[' * 20000
+    concept = SimpleNamespace(
+        vocabulary_id='LOINC', domain_id='Measurement', concept_name=name)
+    started = time.monotonic()
+    assert property_for(concept) == ''
+    assert time.monotonic() - started < 0.25
 
 
 def _link_axis(source, relationship_id, target_name, target_code, invalid_reason=None):

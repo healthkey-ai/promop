@@ -289,6 +289,12 @@ def concept_to_code_source_examples(request):
     omop_table = str(params.get('omop_table') or '').strip()
     if omop_table and omop_table not in DOMAIN_TO_TABLE.values():
         raise ValidationError({'omop_table': 'Unknown clinical table.'})
+    # "More patients": ids the dialog already shows are skipped, so each call
+    # returns the next up-to-three.
+    try:
+        excluded = {int(part) for part in str(params.get('exclude_person_ids') or '').split(',') if part.strip()}
+    except ValueError:
+        raise ValidationError({'exclude_person_ids': 'Supply comma-separated patient ids.'})
 
     # The ETL posts the system URI it received; mappings store the canonical id.
     aliases = [vocabulary, *[alias for alias, canonical in VOCABULARY_OID_ALIASES.items()
@@ -299,6 +305,8 @@ def concept_to_code_source_examples(request):
     )
     if omop_table:
         rows = rows.filter(Q(omop_table=omop_table) | Q(omop_table=''))
+    if excluded:
+        rows = rows.exclude(person_id__in=excluded)
     rows = rows.order_by('-occurrence_count', '-last_seen', 'pk').values(
         'person_id', 'person__patient_record__organization_id', 'omop_table', 'occurrence_count',
         'source_unit', 'source_unit_override', 'example_quantity', 'example_quantity_override',

@@ -115,6 +115,7 @@ REFERENCE_FROM_RELEASE: dict[str, str] = {
 _REFERENCE_COPIED_EXPLICIT: frozenset[str] = frozenset({
     'omop_core.ConceptMappingDone', 'omop_core.ConceptMappingNote',
     'omop_core.ConceptMappingPriority',
+    'omop_core.ChronicConditionOverride',
     'omop_core.CustomPatientField', 'omop_core.DiseaseCategoryChoice',
     'omop_core.DiseaseCategoryMapping',
     'omop_core.FieldChoice', 'omop_core.FieldChoiceCode',

@@ -200,6 +200,28 @@ def is_known_unit(unit):
     return unit_code(unit) in _KNOWN_UNITS
 
 
+def _bracketed(name):
+    """The first non-empty ``[...]`` group in a concept name, by scanning.
+
+    ``re.search(r'\\[([^]]+)\\]', name)`` backtracks over every opening
+    bracket when a name has many of them and no closing one, which is what
+    CodeQL ``py/polynomial-redos`` reports at this call. Concept names come
+    from the loaded vocabulary, so treat them as arbitrary text. Indices
+    cannot backtrack, and this returns the same group for every name.
+    """
+    start = name.find('[')
+    while start != -1:
+        end = name.find(']', start + 1)
+        if end == -1:
+            # No closing bracket after this one, so a later opening bracket
+            # cannot have one either.
+            return ''
+        if end > start + 1:
+            return name[start + 1:end]
+        start = name.find('[', start + 1)
+    return ''
+
+
 def property_for(concept, metadata=None, axes=None):
     if concept.vocabulary_id != 'LOINC' or concept.domain_id != 'Measurement':
         return ''
@@ -212,8 +234,8 @@ def property_for(concept, metadata=None, axes=None):
         return axes.property_code
     if metadata and metadata.property:
         return metadata.property
-    match = re.search(r'\[([^]]+)\]', concept.concept_name or '')
-    return PROPERTY_NAMES.get(match.group(1).lower(), '') if match else ''
+    bracketed = _bracketed(concept.concept_name or '')
+    return PROPERTY_NAMES.get(bracketed.lower(), '') if bracketed else ''
 
 
 def convert(value, source, target, property_code):

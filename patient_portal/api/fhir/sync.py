@@ -118,6 +118,24 @@ def _codings(codeable):
     return (codeable or {}).get('coding', []) or []
 
 
+def _coding_codes(codeable_or_list, limit=100):
+    """The codes of a CodeableConcept (or a list of them), comma-joined, or None."""
+    items = codeable_or_list if isinstance(codeable_or_list, list) else [codeable_or_list]
+    codes = []
+    for item in items:
+        for coding in _codings(item):
+            code = coding.get('code')
+            if isinstance(code, str) and code and code not in codes:
+                codes.append(code)
+    return ','.join(codes)[:limit] or None
+
+
+def _abatement_date(cond):
+    """A Condition's end: abatementDateTime, abatementPeriod.end or abatementDate."""
+    return (_parse_date(cond.get('abatementDateTime')) or _parse_date(cond.get('abatementDate'))
+            or _parse_date((cond.get('abatementPeriod') or {}).get('end')))
+
+
 def _source_text(codeable):
     """Human-readable text for a CodeableConcept: its text, else any coding's
     display, else the first code.
@@ -875,12 +893,18 @@ class FhirSyncView(APIView):
                 person=person,
                 condition_concept=concept or no_match,
                 condition_start_date=start,
+                condition_end_date=_abatement_date(cond),
                 condition_type_concept=ehr_type,
                 condition_source_value=_source_text(cond.get('code'))[:50],
+                condition_category=_coding_codes(cond.get('category'), 100),
+                condition_verification_status=_coding_codes(cond.get('verificationStatus'), 40),
+                condition_clinical_status=_coding_codes(cond.get('clinicalStatus'), 40),
             ), cond.get('code')))
         return self._upsert_clinical(
             ConditionOccurrence, 'condition_occurrence_id', 'condition_concept_id',
-            'condition_start_date', 'condition_source_value', person, rows, source_user_id, org)
+            'condition_start_date', 'condition_source_value', person, rows, source_user_id, org,
+            refresh_fields=('condition_end_date', 'condition_category',
+                            'condition_verification_status', 'condition_clinical_status'))
 
     def _ingest_medications(self, person, medications, ehr_type, no_match, cache, source_user_id, org, skipped):
         rows = []
@@ -1111,7 +1135,7 @@ class FhirSyncView(APIView):
         return ids
 
     def _upsert_clinical(self, model, pk_field, cid_field, date_field, sv_field,
-                         person, rows, source_user_id, org):
+                         person, rows, source_user_id, org, refresh_fields=()):
         """Idempotent upsert for clinical rows, keyed by (source_value, date) —
         the stable identity of a clinical event, independent of how its code
         resolves. If a row already exists for that key, its concept is updated in
@@ -1119,7 +1143,9 @@ class FhirSyncView(APIView):
         concept' to a real concept doesn't strand a duplicate) and any stacked
         duplicates are collapsed onto the earliest row; otherwise the row is
         inserted. `rows` is a list of unsaved model instances (person already
-        set). Returns touched + inserted pk ids."""
+        set). `refresh_fields` are further columns a re-sync fills on a matched
+        row, but only with a value the source gave (never blanking a stored one).
+        Returns touched + inserted pk ids."""
         if not rows:
             return []
         from omop_core.services.cancer_details import EVENT_FIELDS
@@ -1157,6 +1183,11 @@ class FhirSyncView(APIView):
                 if getattr(keep, cid_field) != getattr(inst, cid_field):
                     setattr(keep, cid_field, getattr(inst, cid_field))
                     changed.append(cid_field)
+                for field in refresh_fields:
+                    value = getattr(inst, field)
+                    if value is not None and getattr(keep, field) != value:
+                        setattr(keep, field, value)
+                        changed.append(field)
                 if changed:
                     keep._skip_patient_record_refresh = True
                     keep.save(update_fields=changed)

@@ -248,7 +248,7 @@ def _build_procedure_events(person=None, procedures=None) -> list[_ProcedureEven
     events = []
     if procedures is None:
         procs = ProcedureOccurrence.objects.filter(
-            person=person,
+            person=person, confidence__isnull=True,
             procedure_concept__concept_code__in=list(PROCEDURE_SNOMED_MAP.keys()),
         ).select_related('procedure_concept')
     else:
@@ -519,7 +519,7 @@ def infer_lot_for_person(
 
         if exposures is None:
             exposures = list(
-                DrugExposure.objects.filter(person=person)
+                DrugExposure.objects.filter(person=person, confidence__isnull=True)
                 .select_related('drug_concept')
                 .order_by('drug_exposure_start_date')
             )

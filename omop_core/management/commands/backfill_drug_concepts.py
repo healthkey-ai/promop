@@ -16,7 +16,6 @@ Note: .update() is used for the writes, which does not fire post_save signals.
 PatientRecord does not derive any fields from drug_concept_id (only from
 drug_source_value), so no refresh_patient_record call is needed here.
 """
-import re
 import logging
 from django.core.management.base import BaseCommand
 from django.db.models import Count
@@ -27,7 +26,31 @@ logger = logging.getLogger(__name__)
 
 # Strips any trailing parenthetical — intentionally broad so it catches
 # brand names like "(Revlimid)" as well as qualifiers like "(oral)".
-_BRAND_RE = re.compile(r'\s*\([^)]+\)\s*$')
+# Scanned, not matched: `\s*\([^)]+\)\s*$` backtracks over a long run of
+# spaces, and source values come from uploads (CodeQL py/polynomial-redos).
+def _without_trailing_parenthetical(source_value):
+    """``'Lenalidomide (Revlimid)'`` -> ``'Lenalidomide'``, in one pass.
+
+    Only a parenthetical that closes the value is removed, and its contents
+    may not hold a ``)``. The opener is the *earliest* ``(`` in the run of
+    text before that final ``)``, because the pattern's ``[^)]+`` is greedy:
+    ``'a (b (c)'`` became ``'a'``, not ``'a (b'``. A value the pattern did
+    not match is returned as it came in, spaces and all.
+    """
+    text = source_value.rstrip()
+    if not text.endswith(')'):
+        return source_value
+    close = len(text) - 1
+    # Walk back over the characters the final ')' could close: the first ')'
+    # to the left ends the run, since [^)]+ cannot cross one.
+    start = close
+    while start > 0 and text[start - 1] != ')':
+        start -= 1
+    opened = text.find('(', start, close)
+    if opened == -1 or opened == close - 1:
+        return source_value
+    return text[:opened].rstrip()
+
 
 # Explicit CVX mapping for the HealthTree vaccine source values.
 _CVX_MAP = {
@@ -133,7 +156,7 @@ class Command(BaseCommand):
             return None
 
         # 1. Strip trailing parenthetical: "Lenalidomide (Revlimid)" → "Lenalidomide"
-        generic = _BRAND_RE.sub('', source_value).strip()
+        generic = _without_trailing_parenthetical(source_value).strip()
 
         # 2. RxNorm Ingredient — try generic name first, then raw source value
         for name in (generic, source_value):

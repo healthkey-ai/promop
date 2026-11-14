@@ -180,7 +180,7 @@ def write_clinical_inputs(person, changes, *, today=None):
         appended = _append_inputs(person, values, today or date.today())
         latest = {}
         for row in Observation.objects.filter(
-            person=person, is_erroneous=False,
+            person=person, is_erroneous=False, confidence__isnull=True,
             observation_source_value__in=[RECIPES[field][0] for field in values],
         ).order_by('-observation_date', '-observation_id'):
             latest.setdefault(row.observation_source_value, row.pk)

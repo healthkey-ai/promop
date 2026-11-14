@@ -370,3 +370,25 @@ def test_pending_context_for_an_ineligible_exposure_is_acknowledged(setup):
 
     assert str(exposure.pk) not in (refreshed.medication_contexts or {})
     assert 'medication_contexts' not in (refreshed.user_edited_fields or [])
+
+
+def test_a_provisional_context_neither_sets_nor_clears_a_value(setup):
+    """A context row with a confidence is a proposal; only real rows are read (#2529)."""
+    record, exposure, _, _, _, event = setup
+
+    def context(pk, day, value, confidence):
+        with suppress_patient_record_refresh():
+            Observation.objects.create(
+                observation_id=pk, person=record.person, observation_concept_id=0,
+                observation_type_concept_id=32817, observation_date=day,
+                observation_event_id=exposure.pk, obs_event_field_concept=event,
+                observation_source_value='phr:drug-exposure-role',
+                value_as_string=value, confidence=confidence)
+
+    context(81001, '2024-02-01', 'Provisional only', 60)
+    assert medication_contexts(record.person_id, [exposure.pk]) == {}
+
+    context(81002, '2024-03-01', 'Induction', None)
+    context(81003, '2024-04-01', '', 60)  # a newer provisional blank must not clear it
+    assert medication_contexts(record.person_id, [exposure.pk]) == {
+        exposure.pk: {'role': 'Induction'}}

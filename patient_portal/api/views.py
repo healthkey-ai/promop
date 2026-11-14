@@ -1,6 +1,7 @@
 import functools
 from collections import defaultdict
 from typing import Any, Callable, ContextManager
+from urllib.parse import urlsplit
 
 from drf_spectacular.utils import (
     OpenApiParameter, OpenApiResponse, extend_schema, extend_schema_view, inline_serializer,
@@ -47,7 +48,7 @@ from omop_core.models import (
     ToxicityGrade, Language, LanguageSkillLevel, BinetStage, ProteinExpression,
     RichterTransformation, TumorBurden, MorphologicVariant, DiseaseActivity,
     PreExistingConditionCategory,
-    Disease, DiseaseCategory, DiseaseCategoryChoice, DiseaseCategoryMapping,
+    ChronicConditionOverride, Disease, DiseaseCategory, DiseaseCategoryChoice, DiseaseCategoryMapping,
     CancerStage, KarnofskyScore, EcogStatus, PeripheralNeuropathyGrade,
     InfectionStatus, DiseaseProgression, MeasurableDisease, GelfCriteria,
     FlipIScore, FollicularLymphomaGrade, PostTransformationOutcome,
@@ -901,6 +902,60 @@ def _delete_omop_clinical_rows(person):
     handle those after this returns.
     """
     delete_omop_clinical_rows(person)
+
+
+def _is_loinc_system(system):
+    """Whether a FHIR ``Coding.system`` addresses LOINC.
+
+    Compared on the parsed host, not by substring: ``'loinc.org'`` may appear
+    anywhere in a URL (CodeQL ``py/incomplete-url-substring-sanitization``),
+    and neither ``https://example.test/loinc.org`` nor
+    ``example.test?next=www.loinc.org`` is LOINC. A value with no ``://``
+    ("loinc.org", "loinc.org/x") is parsed as a host plus path, so a query, a
+    fragment or an opaque URI cannot stand in for one.
+
+    Never raises: a bundle's ``system`` is upload input, and one malformed
+    value must not fail the patient the way an unparsable URL would.
+    """
+    if not isinstance(system, str):
+        return False
+    value = system.strip()
+    if not value:
+        return False
+    try:
+        host = (urlsplit(value if '://' in value else '//' + value).hostname or '').lower()
+    except ValueError:
+        # e.g. 'http://[x': an authority urlsplit refuses to read.
+        return False
+    return host == 'loinc.org' or host.endswith('.loinc.org')
+
+
+def _assessment_codings(observation):
+    """The dict codings of a FHIR Observation's ``code``, from upload input.
+
+    A bundle's fields need not be the shapes FHIR prescribes, and a raise here
+    sits inside the per-patient try: one malformed coding would roll back and
+    lose the whole patient. A non-dict ``code``, a non-list ``coding`` and
+    non-dict entries are all skipped.
+    """
+    code = observation.get('code') if isinstance(observation, dict) else None
+    codings = code.get('coding') if isinstance(code, dict) else None
+    if not isinstance(codings, list):
+        return []
+    return [coding for coding in codings if isinstance(coding, dict)]
+
+
+def _coding_strings(coding):
+    """``(system, code)`` of a FHIR ``Coding``, as strings, never raising.
+
+    ``{"system": null}`` and ``{"code": ["x"]}`` are upload input; an empty
+    string reads as "no value" for both.
+    """
+    system, code = coding.get('system'), coding.get('code')
+    return (
+        system if isinstance(system, str) else '',
+        code if isinstance(code, str) else '',
+    )
 
 
 @method_decorator(csrf_exempt, name='dispatch')
@@ -3986,7 +4041,6 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     }
                     _pending_observations = []
                     for _obs_fhir in data['observations']:
-                        _obs_fhir_code = _obs_fhir.get('code', {})
                         _obs_date_str = _obs_fhir.get('effectiveDateTime') or _obs_fhir.get('effectivePeriod', {}).get('start')
                         if not _obs_date_str:
                             continue
@@ -4000,10 +4054,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         _obs_src = None
 
                         # Check for LOINC-coded assessment observations
-                        for _coding in _obs_fhir_code.get('coding', []):
-                            _sys = _coding.get('system', '')
-                            _code = _coding.get('code', '')
-                            if 'loinc.org' in _sys and _code in _ASSESSMENT_LOINC:
+                        for _coding in _assessment_codings(_obs_fhir):
+                            # Upload input: a coding's fields need not be strings,
+                            # and a raise here loses the whole patient (the call
+                            # sits inside the per-patient try).
+                            _sys, _code = _coding_strings(_coding)
+                            if _is_loinc_system(_sys) and _code in _ASSESSMENT_LOINC:
                                 _obs_concept = _cc_by_loinc(_code)
                                 _obs_src = _code
                                 break
@@ -5916,9 +5972,8 @@ def auth_test(request):
     """Test auth endpoint — DEBUG only."""
     if not settings.DEBUG:
         return Response({'detail': 'Not available'}, status=status.HTTP_404_NOT_FOUND)
-    import traceback as tb
+    step = 'start'
     try:
-        step = 'start'
         username = request.data.get('username', 'test')
         step = 'got username'
         from django.contrib.auth import authenticate as do_auth
@@ -5926,8 +5981,12 @@ def auth_test(request):
         user = do_auth(request, username=username, password='badpassword_test_only')
         step = 'authenticate done'
         return Response({'status': 'ok', 'step': step, 'user': str(user)})
-    except Exception as e:
-        return Response({'status': 'error', 'step': step, 'error': str(e), 'traceback': tb.format_exc()}, status=500)
+    except Exception:
+        # The traceback stays in the log: this endpoint is reachable without
+        # authentication, and a response body is the one place it must not go
+        # (CodeQL py/stack-trace-exposure).
+        logger.exception('auth_test failed at step %s', step)
+        return Response({'status': 'error', 'step': step}, status=500)
 
 # =============================================================================
 # Person ViewSet — identity resolution and demographic patch
@@ -11064,6 +11123,7 @@ def mapping_stats(request):
         .values_list('status', 'n'))
 
     disease_category_total = DiseaseCategoryMapping.objects.count()
+    chronic_overrides_total = ChronicConditionOverride.objects.count()
 
     return Response({
         'relevance_signals': {s: signal_pairs.get(s, 0) for s in ('proposed', 'accepted', 'rejected')},
@@ -11077,6 +11137,9 @@ def mapping_stats(request):
         },
         'disease_category': {
             'total': disease_category_total,
+        },
+        'chronic_overrides': {
+            'total': chronic_overrides_total,
         },
     })
 
@@ -11428,6 +11491,106 @@ def disease_category_mapping_detail(request, pk):
             status=status.HTTP_409_CONFLICT,
         )
     return Response({'id': obj.id, 'disease_name': obj.disease_name, 'category': obj.category})
+
+
+def _override_json(o):
+    return {'id': o.id, 'code': o.code, 'is_chronic': o.is_chronic, 'label': o.label, 'notes': o.notes}
+
+
+def _override_fields(data, obj=None):
+    """Validated column values from a request body, or (None, error Response).
+    Only the keys sent are returned, so a PATCH leaves the rest alone."""
+    from omop_core.services.chronic_conditions import normalize_icd10cm
+    if not hasattr(data, 'get'):
+        return None, Response({'detail': 'Expected a JSON object'}, status=status.HTTP_400_BAD_REQUEST)
+    out = {}
+    if obj is None or 'code' in data:
+        code = normalize_icd10cm(data.get('code') if isinstance(data.get('code'), str) else None)
+        if not code:
+            return None, Response({'detail': 'code must be an ICD-10-CM code such as E03.9'},
+                                  status=status.HTTP_400_BAD_REQUEST)
+        out['code'] = code
+    if obj is None or 'is_chronic' in data:
+        if not isinstance(data.get('is_chronic'), bool):
+            return None, Response({'detail': 'is_chronic must be true or false'},
+                                  status=status.HTTP_400_BAD_REQUEST)
+        out['is_chronic'] = data['is_chronic']
+    for key, limit in (('label', 200), ('notes', 5000)):
+        if key in data:
+            value = data[key]
+            if value is None:
+                value = ''
+            if not isinstance(value, str) or len(value) > limit:
+                return None, Response({'detail': f'{key} must be text of at most {limit} characters'},
+                                      status=status.HTTP_400_BAD_REQUEST)
+            out[key] = value.strip()
+    return out, None
+
+
+@api_view(['GET', 'POST'])
+@permission_classes([IsAuthenticated])
+def chronic_condition_override_list(request):
+    """List or create chronic-condition overrides (#2566).
+
+    GET  /api/v1/chronic-condition-overrides/?search=M85
+    POST /api/v1/chronic-condition-overrides/  {"code": "M85.8", "is_chronic": true, "label": "Osteopenia"}
+    """
+    if request.method == 'GET':
+        qs = ChronicConditionOverride.objects.all()
+        search = request.query_params.get('search', '').strip()
+        if search:
+            qs = qs.filter(Q(code__icontains=search) | Q(label__icontains=search))
+        return Response([_override_json(o) for o in qs])
+    denied = _require_mapping_admin(request)
+    if denied:
+        return denied
+    fields, error = _override_fields(request.data)
+    if error:
+        return error
+    if ChronicConditionOverride.objects.filter(code=fields['code']).exists():
+        return Response({'detail': f'An override for {fields["code"]} already exists'},
+                        status=status.HTTP_409_CONFLICT)
+    try:
+        obj = ChronicConditionOverride.objects.create(**fields)
+    except IntegrityError:
+        return Response({'detail': f'An override for {fields["code"]} already exists'},
+                        status=status.HTTP_409_CONFLICT)
+    return Response(_override_json(obj), status=status.HTTP_201_CREATED)
+
+
+@api_view(['PATCH', 'DELETE'])
+@permission_classes([IsAuthenticated])
+def chronic_condition_override_detail(request, pk):
+    """Change or delete a chronic-condition override.
+
+    PATCH  /api/v1/chronic-condition-overrides/<pk>/  {"is_chronic": false}
+    DELETE /api/v1/chronic-condition-overrides/<pk>/
+    """
+    denied = _require_mapping_admin(request)
+    if denied:
+        return denied
+    try:
+        obj = ChronicConditionOverride.objects.get(pk=pk)
+    except ChronicConditionOverride.DoesNotExist:
+        return Response({'detail': 'Not found'}, status=status.HTTP_404_NOT_FOUND)
+    if request.method == 'DELETE':
+        obj.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
+    fields, error = _override_fields(request.data, obj)
+    if error:
+        return error
+    code = fields.get('code')
+    if code and ChronicConditionOverride.objects.filter(code=code).exclude(pk=pk).exists():
+        return Response({'detail': f'An override for {code} already exists'},
+                        status=status.HTTP_409_CONFLICT)
+    for key, value in fields.items():
+        setattr(obj, key, value)
+    try:
+        obj.save()
+    except IntegrityError:
+        return Response({'detail': f'An override for {obj.code} already exists'},
+                        status=status.HTTP_409_CONFLICT)
+    return Response(_override_json(obj))
 
 
 # =============================================================================

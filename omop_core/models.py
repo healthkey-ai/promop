@@ -1180,6 +1180,14 @@ class ConditionOccurrence(models.Model):
     condition_source_value = models.CharField(max_length=50, null=True, blank=True)
     condition_source_concept = models.ForeignKey(Concept, on_delete=models.PROTECT, related_name='condition_source_occurrences', db_column='condition_source_concept_id', null=True, blank=True)
     condition_status_source_value = models.CharField(max_length=50, null=True, blank=True)
+    # What the source FHIR Condition said about itself (#2512), kept as its codes:
+    # category (problem-list-item, encounter-diagnosis, ... comma-joined),
+    # verificationStatus (confirmed, provisional, entered-in-error, ...) and
+    # clinicalStatus (active, resolved, inactive, ...). abatement[x] lands in
+    # condition_end_date. Null when the source did not say.
+    condition_category = models.CharField(max_length=100, null=True, blank=True)
+    condition_verification_status = models.CharField(max_length=40, null=True, blank=True)
+    condition_clinical_status = models.CharField(max_length=40, null=True, blank=True)
     # PHR-S FM PH.1.1#06 — entered-in-error. Flag a row as erroneous while
     # RETAINING it (FHIR status=entered-in-error semantics). Excluded from
     # normal reads by default; never deleted.
@@ -3142,6 +3150,27 @@ class DiseaseCategoryMapping(models.Model):
 
     def __str__(self):
         return f'{self.disease_name} → {self.category}'
+
+
+class ChronicConditionOverride(models.Model):
+    """HealthTree's say on whether an ICD-10-CM code is a chronic condition,
+    applied over AHRQ's Chronic Condition Indicator when the PHR lists "Other
+    diagnoses" (#2512, #2566). A code covers itself and the codes under it
+    (M85.8 covers M85.80); the longest matching code wins. Edited on the
+    Mappings page by an org admin."""
+    code = models.CharField(max_length=10, unique=True, help_text="ICD-10-CM code, dotted (E03.9)")
+    is_chronic = models.BooleanField(help_text="True forces chronic, False forces not chronic")
+    label = models.CharField(max_length=200, blank=True, default='')
+    notes = models.TextField(blank=True, default='')
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'chronic_condition_override'
+        ordering = ['code']
+
+    def __str__(self):
+        return f"{self.code} → {'chronic' if self.is_chronic else 'not chronic'}"
 
 
 class CancerStage(VocabularyLookup):

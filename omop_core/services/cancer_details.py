@@ -311,8 +311,9 @@ def projection_scope(person, field, model):
     record = PatientRecord.objects.filter(person=person).only('disease_slug', 'disease').first()
     slug = (record.disease_slug or disease_slug(record.disease)) if record else ''
     key = SLUG_FAMILY.get(slug, slug)
-    conditions = ConditionOccurrence.objects.filter(person=person, is_erroneous=False).select_related(
-        'condition_concept').order_by('-condition_start_date', '-condition_occurrence_id')
+    conditions = ConditionOccurrence.objects.filter(
+        person=person, is_erroneous=False, confidence__isnull=True,
+    ).select_related('condition_concept').order_by('-condition_start_date', '-condition_occurrence_id')
     parent = None
     for row in conditions:
         name = row.condition_concept.concept_name if row.condition_concept_id else row.condition_source_value
