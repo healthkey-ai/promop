@@ -53,6 +53,7 @@ def test_genetic_mutations_use_measurement_source_value_fallback():
         {
             'id': measurement.pk,
             'gene': 'brca1', 'genomic_feature': 'BRCA1', 'feature_type': 'Gene',
+            'gene_concept_id': 35950928,
             'variant': 'BRCA1 pathogenic variant',
             'test_date': '2024-05-01',
             'status': 'present',
@@ -75,6 +76,7 @@ def test_generic_gene_mutation_loinc_round_trips_gene_from_qualifier():
     assert _get_genetic_mutations(person)['genetic_mutations'] == [{
         'id': measurement.pk,
         'gene': 'brca1', 'genomic_feature': 'BRCA1', 'feature_type': 'Gene',
+            'gene_concept_id': 35950928,
         'variant': 'c.68_69delAG',
         'test_date': '2024-01-15',
         'status': 'present',

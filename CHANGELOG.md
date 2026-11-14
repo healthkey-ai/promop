@@ -8,6 +8,28 @@ All notable changes to PRomop are documented here.
 
 ### Added
 
+- **Derived verdicts are not offered as direct writes** — fields that
+  `refresh_patient_record`/`recompute_patient_record_fields` own
+  (`measurable_disease_imwg`, `measurable_disease_iwcll`, `metastatic_status`,
+  `renal_adequacy_status`, `no_other_active_malignancies`,
+  `no_active_infection_status`, `patient_age`) are now reported as computed with
+  the facts that drive them, on both the legacy and shared descriptors. A caller
+  could previously PATCH one of these verdicts, only for the next save to
+  overwrite it, and the dialog could not explain which inputs mattered.
+- **Complex eligibility subforms edit their source facts, not their verdict** —
+  the SLiM, CRAB, MIPI/MIPI-c and High-Risk-MCL rows stay computed and
+  non-authorable, but their inputs are now ordinary editable fields in the same
+  recursive dialog instead of being disabled by the row's compatibility gate.
+  Descriptors report `compatibility_scope: "result"` so a host can keep the
+  result read-only without freezing its sources. Editing a CRAB or SLiM input
+  re-derives that verdict in the same request from the record's canonical
+  values (`derive_meets_crab`, `derive_meets_slim`), keeping the existing
+  thresholds and the involved-chain burden guard; unknown inputs stay unknown
+  instead of asserting "not met". The CRAB renal alternative (serum creatinine
+  > 2 mg/dL when no clearance is recorded) is now applied on both the direct-edit
+  and OMOP paths. Full SLiM/MIPI-parity with Trial Details (MRI lesions, MIPI
+  result ownership) remains a documented clinical decision (#5482).
+
 - **The PHR record PDF renders Cyrillic, Greek and extended Latin names** —
   the export is set in DejaVu Sans, bundled under `patient_portal/api/phr/fonts/`
   and embedded in each PDF, instead of reportlab's built-in Helvetica, whose
@@ -63,6 +85,17 @@ All notable changes to PRomop are documented here.
   patient copy carries the confirmation with the record. The write goes through
   the packaged endpoint, so an embedding host applies its own write gate and
   per-person authorization (#1924).
+- **An ETL can write a patient's lines of therapy** — `POST
+  /api/v1/therapy-lines/bulk_upsert/` takes one person's lines as the source
+  states them (number, dates, ongoing, regimen label, outcome) and writes them
+  through the canonical line writer in one all-or-nothing request, deriving the
+  record once. Patients imported through the OMOP row endpoints had no lines,
+  because none of those endpoints writes an `Episode`, and the per-line editor
+  POST refuses the `system/etl.write` credential. Regimen labels resolve to a
+  concept only through the curated regimen table or an exact HemOnc name;
+  anything else keeps the label as the line's name and is queued as a regimen
+  mapping gap, so an abbreviation such as "R" is never guessed (#1969).
+
 - **An ETL can write a patient's lines of therapy** — `POST
   /api/v1/therapy-lines/bulk_upsert/` takes one person's lines as the source
   states them (number, dates, ongoing, regimen label, outcome) and writes them
@@ -144,6 +177,17 @@ All notable changes to PRomop are documented here.
 
 ### Changed
 
+- **A patient's own record edits are recorded as patient self-report** — a
+  `PatientRecord` PATCH by the patient (`/patient-info/me/`) or their verified
+  representative projects its OMOP facts with type 32865 (Patient self-report)
+  instead of the recipe's type, which for curated mappings defaults to EHR.
+  The patient's own facts also get a `PATIENT_SELF` provenance row, as PHR
+  entries do. Same-day matching keeps the two apart in both directions: a
+  patient's answer sits beside a clinical fact recorded the same day instead of
+  overwriting it and taking over its type and provenance, and a later clinician,
+  staff or service edit that day writes its own fact rather than the patient's.
+  Their types are otherwise unchanged. Without concept 32865 loaded, the recipe
+  type stands (#1959).
 - **The code-mapping full read takes HealthTree's export shape** —
   `GET /api/v1/code-mappings/?sort=updated_at` pages in `(updated_at, id)`
   order behind an opaque `cursor` that is signed and bound to its query, so
@@ -233,6 +277,52 @@ All notable changes to PRomop are documented here.
 
 ### Fixed
 
+- **`meets_crab` has one rule on refresh and on edit (#2480, #2482, #2485)** —
+  without an explicit 89599-5 result, a full refresh now derives CRAB with
+  `derive_meets_crab` from the record's canonical hemoglobin, calcium,
+  clearance, creatinine and bone-lesion fields, as an edit already did, instead
+  of reading its own fixed LOINCs. An approved calcium alias or a coded EHR
+  clearance sets CRAB on refresh; an old clearance no longer counts forever,
+  and a 0 mL/min clearance is a placeholder, not renal failure; eGFR no longer
+  stands in for clearance (the SME rule, CancerBot #3593, names only CrCl and
+  creatinine); only a recognised `bone_lesions` answer (Yes, Present, a count)
+  is a lesion, so "Unknown" or other text is unknown;
+  a fully negative work-up stores `False`. Creatinine is still read only when
+  no clearance is recorded (#2521), and an edit still overwrites a stated
+  89599-5 verdict (#2520). `DERIVATION_VERSION` 31.
+- **SI serum creatinine is stored in mg/dL (#2438)** — a 2160-0 or 38483-4
+  result in umol/L was stored as that many mg/dL, so a normal 80 umol/L read as
+  renal failure in CRAB, renal adequacy and matching. Derivation now converts it
+  in the same newest-result pass as hemoglobin and calcium, keeps the reported
+  pair for eGFR, and leaves the field unknown when the newest unit cannot be
+  read. `DERIVATION_VERSION` 30.
+- **Computed rows offer the pencil only when a source is editable (#2244)** —
+  a computed value whose dependency chain bottoms out in fields the record does
+  not own (No Active Infection → `active_infection_status` → OMOP condition
+  facts, and the same for No Other Active Malignancies) now renders read-only
+  with the reason instead of opening a dialog with no control. The shared
+  editor walks `inputs` and alias `canonical` through a cycle guard; genuinely
+  editable chains and the cycle explanation are unchanged.
+- **Author-sensitive medication context and partial DOB (#2129)** — mapping
+  approval no longer projects pending medication attributes without reliable
+  per-attribute authorship or duplicates patient self-report as EHR. Pending
+  answers remain visible in PatientRecord/PHR. Read-only shared DOB displays
+  only the known year/month instead of placeholder date components.
+- **Native DOB pair validation (#2129)** — normalize date and precision inside
+  the existing cross-field validator, keeping PatientRecord, Person and the
+  PATCH response consistent on both legacy and v1 routes. Promoting a partial
+  DOB to a full date requires explicit day precision.
+- **cb-v2 backmerge data contracts (#2129)** — retain raw OMOP measurement
+  numbers, units and reference ranges during import and mapping repoints;
+  canonical units remain an additive read model, preserving retry identity and
+  avoiding lossy/overflowing write-time conversion. Preserve maintenance through
+  editor serialization (including omission by older clients), keep late-line
+  progression dates per line, and honor partial DOB precision in both native
+  and shared profile writers. Patient filters retain literal diagnoses and
+  support categories; family-history/risk categories do not assert patient
+  cancer. PHR names require source-vocabulary evidence rather than guessing from
+  a bare code. Seen-count existence, totals and rebuilds agree on OID aliases
+  and truncated source-code keys. No existing clinical data is rewritten.
 - **A lookup's Seen bump is provisional** — `code-mappings/lookup/` asks once
   per code per batch, not once per record, so its sighting now adds one only
   while the instance holds no per-patient source-code rows for the code, and

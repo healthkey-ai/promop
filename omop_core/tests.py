@@ -615,6 +615,15 @@ class LegacyLaboratoryProjectionTest(_OmopBase):
 
         self.assertAlmostEqual(float(pi.albumin_level), 3.8, places=1)
 
+    def test_same_day_loinc_correction_beats_legacy_hemoglobin(self):
+        """A canonical correction must win over the legacy row it corrects."""
+        self._measurement(92337, 'Hemoglobin measurement', 9.1, code='legacy-hgb', unit='g/dL')
+        self._measurement(92338, 'Hemoglobin [Mass/volume] in Blood', 12.4, code='718-7', unit='g/dL')
+
+        pi = refresh_patient_record(self.person)
+
+        self.assertAlmostEqual(float(pi.hemoglobin_g_dl), 12.4, places=1)
+
 
 class WhiteBloodCellUnitPolicyTest(_OmopBase):
     """WBC compatibility output follows the org unit policy and fails closed (#473)."""
@@ -1254,7 +1263,7 @@ class ConditionSignalTest(_OmopBase):
 
 from django.utils import timezone
 from datetime import timedelta
-from omop_core.models import Organization, PatientGroup, GroupAccess
+from omop_core.models import Organization, PatientGroup, GroupAccess, OrgTrust
 from omop_core.services.access import get_visible_orgs
 from patient_portal.models import Identity
 
@@ -1351,6 +1360,32 @@ class GetVisibleOrgsTest(TestCase):
         )
         orgs = list(get_visible_orgs(future))
         self.assertIn(self.org_b, orgs)
+
+    def test_org_trust_from_active_granting_org_is_visible(self):
+        OrgTrust.objects.create(trusted_org=self.org_a, granting_org=self.org_b)
+        orgs = list(get_visible_orgs(self.doctor))
+        self.assertIn(self.org_b, orgs)
+
+    def test_org_trust_from_inactive_granting_org_is_not_visible(self):
+        OrgTrust.objects.create(trusted_org=self.org_a, granting_org=self.org_b)
+        Organization.objects.filter(pk=self.org_b.pk).update(is_active=False)
+        orgs = list(get_visible_orgs(self.doctor))
+        self.assertNotIn(self.org_b, orgs)
+
+    def test_domain_trust_from_active_granting_org_is_visible(self):
+        trusted = Identity.objects.create_user(email='trusted@clinic.test', password='x')
+        trusted.mark_email_verified()
+        OrgTrust.objects.create(trusted_domain='clinic.test', granting_org=self.org_b)
+        orgs = list(get_visible_orgs(trusted))
+        self.assertIn(self.org_b, orgs)
+
+    def test_domain_trust_from_inactive_granting_org_is_not_visible(self):
+        trusted = Identity.objects.create_user(email='trusted@clinic.test', password='x')
+        trusted.mark_email_verified()
+        OrgTrust.objects.create(trusted_domain='clinic.test', granting_org=self.org_b)
+        Organization.objects.filter(pk=self.org_b.pk).update(is_active=False)
+        orgs = list(get_visible_orgs(trusted))
+        self.assertNotIn(self.org_b, orgs)
 
     def test_xor_constraint_prevents_both_org_and_group_set(self):
         from django.db import IntegrityError, transaction
@@ -2805,6 +2840,31 @@ class WearableConceptMappingTest(TestCase):
             self.assertEqual(seeded['concept_name'], concept_name,
                              f'{concept_code} concept_name differs')
             self.assertEqual(seeded['domain_id'], 'Meas Value')
+            self.assertEqual(seeded['source'], 'HealthKey')
+            self.assertIsNone(seeded['standard_concept'])
+
+    def test_hk_genomics_bcma_matches_seed_definition(self):
+        """Migration 0327 duplicates its row into the fixture; no drift (#5674)."""
+        from importlib import import_module
+
+        mig = import_module(
+            'omop_core.migrations.0327_hk_genomics_bcma_marker')
+        seed_by_key = {
+            (r['vocabulary_id'], r['concept_code']): r for r in self._seed_rows()
+        }
+
+        for concept_id, concept_code, concept_name in mig._CONCEPTS:
+            key = ('HK-Genomics', concept_code)
+            self.assertIn(
+                key, seed_by_key,
+                f'migration 0327 seeds {key}, which the fixture does not')
+            seeded = seed_by_key[key]
+            self.assertEqual(seeded['concept_id'], concept_id,
+                             f'{concept_code} concept_id differs')
+            self.assertEqual(seeded['concept_name'], concept_name,
+                             f'{concept_code} concept_name differs')
+            self.assertEqual(seeded['domain_id'], 'Measurement')
+            self.assertEqual(seeded['concept_class_id'], 'Lab Test')
             self.assertEqual(seeded['source'], 'HealthKey')
             self.assertIsNone(seeded['standard_concept'])
 
@@ -4973,8 +5033,9 @@ class RefreshQueryCountTest(TestCase):
     """
 
     #: 21 for the derivation itself plus the #1924 therapy-history
-    #: attestation existence check.
-    QUERY_BUDGET = 22
+    #: attestation existence check and the #5666 explicit-negative
+    #: attestation existence check (cached for the refresh).
+    QUERY_BUDGET = 23
 
     @classmethod
     def setUpTestData(cls):

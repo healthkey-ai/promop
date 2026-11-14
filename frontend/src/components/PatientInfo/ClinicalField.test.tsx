@@ -10,10 +10,19 @@
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { vi, describe, it, expect } from 'vitest';
 import ClinicalField from './ClinicalField';
+import { PatientFormContext } from '@/federation/PatientFormContext';
 import type { FieldDescriptor } from '@/hooks/useWritableFields';
 
 vi.mock('@/hooks/useVocabulary', () => ({
   useVocabulary: () => ({ options: [], source: null, loading: false }),
+}));
+
+const federatedEditorProps = vi.hoisted(() => vi.fn());
+vi.mock('@/federation/PatientFieldEditor', () => ({
+  default: (props: Record<string, unknown>) => {
+    federatedEditorProps(props);
+    return <div data-testid="federated-editor" />;
+  },
 }));
 
 const CURATED = {
@@ -68,7 +77,89 @@ describe('ClinicalField choices', () => {
   });
 });
 
+describe('ClinicalField federated editor', () => {
+  it('forwards a reviewed label that carries its unit (#5704)', () => {
+    render(
+      <PatientFormContext.Provider value={{} as never}>
+        <ClinicalField
+          label="Hemoglobin (g/dL)" labelIncludesUnit
+          name="hemoglobin_g_dl" type="number" value={12.5}
+          onChange={vi.fn()}
+        />
+      </PatientFormContext.Provider>,
+    );
+
+    expect(screen.getByTestId('federated-editor')).toBeInTheDocument();
+    expect(federatedEditorProps).toHaveBeenCalledWith(expect.objectContaining({
+      name: 'hemoglobin_g_dl', label: 'Hemoglobin (g/dL)', labelIncludesUnit: true,
+    }));
+  });
+
+  it('forwards the tab choices for a descriptor without options', () => {
+    render(
+      <PatientFormContext.Provider value={{} as never}>
+        <ClinicalField label="Post-Transformation Outcome" name="post_transformation_outcome"
+          type="select" value="" options={['Complete response', 'Progression']} onChange={vi.fn()} />
+      </PatientFormContext.Provider>,
+    );
+
+    expect(federatedEditorProps).toHaveBeenCalledWith(expect.objectContaining({
+      name: 'post_transformation_outcome', options: ['Complete response', 'Progression'],
+    }));
+  });
+});
+
 describe('ClinicalField writability', () => {
+  it('sends a dated value without a date until one is picked (#2454)', () => {
+    const onChange = vi.fn();
+    render(
+      <ClinicalField
+        label="Ki-67" name="ki67_proliferation_index" type="number"
+        value={20}
+        descriptor={{
+          kind: 'direct', writable: true, target: 'patient_record',
+          value_kind: 'number', dated: true,
+        } as FieldDescriptor}
+        onChange={onChange}
+      />,
+    );
+
+    fireEvent.change(screen.getByDisplayValue('20'), { target: { value: '25' } });
+    expect(onChange).toHaveBeenCalledWith('ki67_proliferation_index', 25);
+
+    fireEvent.change(document.getElementById('ki67_proliferation_index-date')!,
+      { target: { value: '2026-10-01' } });
+    expect(onChange).toHaveBeenLastCalledWith(
+      'ki67_proliferation_index', 20, '2026-10-01');
+  });
+
+  it('edits a normalised canonical lab without the form store (#2425)', () => {
+    const canonical = {
+      kind: 'computed', writable: false, target: 'patient_record', inputs: ['hemoglobin_level'],
+      normalised_read_model: true, reason: 'Normalised from hemoglobin_level.',
+    } as unknown as FieldDescriptor;
+    render(
+      <ClinicalField label="Hemoglobin (g/dL)" name="hemoglobin_g_dl" type="number" value={12}
+        descriptor={canonical} onChange={vi.fn()} />,
+    );
+
+    expect(screen.getByDisplayValue('12')).not.toBeDisabled();
+    expect(screen.queryByTestId('reason-hemoglobin_g_dl')).not.toBeInTheDocument();
+  });
+
+  it('keeps a normalised canonical read-only for a caller without write access', () => {
+    const canonical = {
+      kind: 'computed', writable: false, target: 'patient_record', normalised_read_model: true,
+      read_only_for_caller: true, reason: 'You have read-only access to this patient record.',
+    } as unknown as FieldDescriptor;
+    render(
+      <ClinicalField label="Hemoglobin (g/dL)" name="hemoglobin_g_dl" type="number" value={12}
+        descriptor={canonical} onChange={vi.fn()} />,
+    );
+
+    expect(screen.getByDisplayValue('12')).toBeDisabled();
+  });
+
   it('renders read-only with the reason when the server refuses the field', () => {
     const computed = {
       kind: 'computed', writable: false, inputs: ['height', 'weight'],

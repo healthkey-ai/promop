@@ -179,16 +179,3 @@ def phr_medication_contexts(person_id, exposure_ids):
             if int(pk) in eligible:
                 result.setdefault(int(pk), {}).update(values)
     return result
-
-
-def backfill_record_contexts(mapping):
-    if mapping.status != 'approved':
-        return 0
-    count = 0
-    for pk in PatientRecord.objects.filter(user_edited_fields__contains=[RECORD_FIELD]).values_list('pk', flat=True).iterator():
-        with transaction.atomic():
-            record = PatientRecord.objects.select_for_update().select_related('person').get(pk=pk)
-            if RECORD_FIELD in (record.user_edited_fields or []) and project_record_contexts(
-                    record.person, record.medication_contexts):
-                count += 1
-    return count

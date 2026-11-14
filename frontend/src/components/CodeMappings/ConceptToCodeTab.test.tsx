@@ -50,6 +50,16 @@ async function selectConcept(canApprove = true) {
 }
 
 describe('concept-first curation', () => {
+  it('does not offer a disease category unsupported by the concept filter', async () => {
+    get.mockImplementation((url: string) => Promise.resolve({ data:
+      url === '/v1/disease-categories/' ? [{ value: 'MM', label: 'Multiple Myeloma' }, { value: 'Other', label: 'Other' }]
+        : url === '/v1/concept-to-code/' ? page([concept]) : page([source]),
+    }));
+    render(<ConceptToCodeTab canApprove />);
+    await screen.findByRole('option', { name: 'Multiple Myeloma' });
+    expect(screen.queryByRole('option', { name: 'Other' })).not.toBeInTheDocument();
+  });
+
   it('links to the mapping accuracy analytics page from the top of the tab (#2383)', async () => {
     render(<ConceptToCodeTab canWrite canApprove />);
     const link = await screen.findByRole('link', { name: 'Mapping accuracy analytics' });

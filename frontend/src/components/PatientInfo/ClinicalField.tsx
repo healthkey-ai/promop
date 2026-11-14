@@ -1,8 +1,10 @@
-import { useState } from 'react';
+import { useContext, useState } from 'react';
 import Field from './Field';
 import { today } from '@/api/clinicalFacts';
 import type { VocabSource } from '@/hooks/useVocabulary';
-import type { FieldDescriptor } from '@/hooks/useWritableFields';
+import { editableWithoutFormStore, type FieldDescriptor } from '@/hooks/useWritableFields';
+import { PatientFormReadOnlyContext, usePatientFormStore } from '@/federation/PatientFormContext';
+import PatientFieldEditor from '@/federation/PatientFieldEditor';
 
 interface Props {
   label: string;
@@ -18,7 +20,7 @@ interface Props {
    *  refuses to write. See #646. */
   unknownField?: boolean;
   descriptor?: FieldDescriptor;
-  onChange: (name: string, value: unknown) => void;
+  onChange: (name: string, value: unknown, date?: string) => void;
   /** Date precision for date fields (e.g. date_of_birth). */
   precision?: 'day' | 'month' | 'year' | null;
   /** Event date for this edit, shared across the tab. */
@@ -28,6 +30,10 @@ interface Props {
    *  one reason — repeating the same paragraph beside 25 boxes buries it. The
    *  tab states it once instead. */
   showReason?: boolean;
+  /** The tab's reviewed label already names the unit (for example
+   *  "Hemoglobin (g/dL)"). The federated editor then leaves the unit out of
+   *  its own suffix, so the row shows it once (#5704). */
+  labelIncludesUnit?: boolean;
 }
 
 /**
@@ -57,13 +63,37 @@ export default function ClinicalField({
   date,
   onDateChange,
   showReason = true,
+  labelIncludesUnit = false,
 }: Props) {
-  const writable = !!descriptor?.writable;
+  const store = usePatientFormStore();
+  const formReadOnly = useContext(PatientFormReadOnlyContext);
+  // Only the store-less path reads this; the store branch below renders its own editor.
+  const writable = editableWithoutFormStore(descriptor);
+  // The server says which booleans are three-valued (Yes / No / Unknown, with
+  // Unknown an answer of its own, #5521); the federated editor reads the same
+  // flag, so a tab never has to repeat the list.
+  const triState = descriptor?.tri_state === true;
   // A tab that shares one date across its fields passes it in — a blood panel is
   // drawn once. A tab whose results come from different specimens, as a pathology
   // report's do, can leave it out and get a date per field rather than one date
   // pretending to cover all of them.
   const [ownDate, setOwnDate] = useState(today());
+  // The date shown is a default, not an instruction: only a date the user
+  // picked travels with the value, so a value reverted before autosave sends
+  // nothing (#2454).
+  const [datePicked, setDatePicked] = useState(false);
+  const eventDate = date ?? ownDate;
+  // A field the server marks `dated` is an event: its value and the date it was
+  // observed are one edit. Tabs that share one date pass `onDateChange`; a tab
+  // that leaves the date per field still reports it here (#2439).
+  const change = (field: string, next: unknown) => {
+    if (descriptor?.dated && !onDateChange && datePicked) onChange(field, next, eventDate);
+    else onChange(field, next);
+  };
+  // Both the tabbed profile and embedded Trial Details use the same control,
+  // dependency dialogs and save queue. Dedicated authoring views remain separate.
+  if (store) return <PatientFieldEditor store={store} name={name} label={label}
+    labelIncludesUnit={labelIncludesUnit} readOnly={formReadOnly} options={options} />;
   // `absent` is stronger than "not writable": the server has no such field.
   const absent = !!unknownField;
   const curated = descriptor?.options?.map((o) => o.value);
@@ -94,6 +124,8 @@ export default function ClinicalField({
           options={choices}
           onChange={onChange}
           readOnly
+          triState={triState}
+          answerLabels={descriptor?.answer_labels}
           precision={precision}
         />
         {showReason && (
@@ -114,10 +146,12 @@ export default function ClinicalField({
         value={value}
         options={choices}
         vocabSource={vocabSource}
-        onChange={onChange}
+        triState={triState}
+        answerLabels={descriptor?.answer_labels}
+        onChange={change}
         precision={precision}
       />
-      {(onDateChange || descriptor?.projection?.omop_table === 'measurement') && (
+      {(onDateChange || descriptor?.dated) && (
         <div className="mt-1 flex items-center gap-2">
           <label
             htmlFor={`${name}-date`}
@@ -128,8 +162,18 @@ export default function ClinicalField({
           <input
             id={`${name}-date`}
             type="date"
-            value={date ?? ownDate}
-            onChange={(e) => (onDateChange ?? setOwnDate)(e.target.value)}
+            value={eventDate}
+            onChange={(e) => {
+              const next = e.target.value;
+              if (onDateChange) onDateChange(next);
+              else {
+                setOwnDate(next);
+                setDatePicked(true);
+                if (value !== undefined && value !== null && value !== '') {
+                  onChange(name, value, next);
+                }
+              }
+            }}
             className="rounded-md border border-input px-2 py-1 text-xs"
           />
         </div>

@@ -12,7 +12,7 @@ from pathlib import Path
 @lru_cache(maxsize=1)
 def catalog():
     data = json.loads((Path(__file__).resolve().parent.parent / 'data/genomics_catalog_v1.json').read_text())
-    data['version'] = 2
+    data['version'] = 3
     data['naming_decision'] = 'https://github.com/cancerbot-org/cancerbot/issues/4812#issuecomment-5633297037'
     marker = next(m for m in data['markers'] if m['key'] == 'palb1')
     marker.update(key='palb2', field_name='genomics_palb2', gene='PALB2', label='PALB2',
@@ -38,6 +38,32 @@ def canonicalize_fields(values):
 
 def patient_fields():
     return {m['field_name']: m for m in markers()}
+
+
+def gene_concepts():
+    """Reviewed gene spellings mapped to their catalog marker.
+
+    Genes are identified by an OMOP Genomic concept whose ``concept_code`` is
+    the HGNC id (cancerbot #5673), not by the display symbol. Both the current
+    symbol and the reviewed aliases resolve here so legacy source text still
+    lands on one id.
+    """
+    concepts = {}
+    for marker in markers():
+        if marker.get('kind') != 'gene' or not marker.get('omop_concept_id'):
+            continue
+        symbols = {marker['gene'], marker.get('hgnc_symbol') or '', *(marker.get('aliases') or [])}
+        for symbol in symbols:
+            symbol = str(symbol or '').strip().upper()
+            if symbol:
+                concepts[symbol] = marker
+    return concepts
+
+
+def gene_concept_id(gene):
+    """The reviewed OMOP Genomic concept id for a gene symbol, or None."""
+    marker = gene_concepts().get(str(gene or '').strip().upper())
+    return marker.get('omop_concept_id') if marker else None
 
 
 def disease_code(value):
@@ -100,6 +126,9 @@ def marker_for_variant(variant):
             return m
     if variant.get('feature_type') not in (None, '', 'Gene'):
         return None
+    reviewed = gene_concepts().get(gene)
+    if reviewed is not None:
+        return reviewed
     return next((m for m in markers() if m['gene'].upper() == gene and m['kind'] == 'gene'), None)
 
 

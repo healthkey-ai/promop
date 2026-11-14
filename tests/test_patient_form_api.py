@@ -1,0 +1,796 @@
+"""The standalone v1 API and the embedded host use the same form writer."""
+import pytest
+from django.core.exceptions import ValidationError
+from django.utils import timezone
+from rest_framework.test import APIClient
+from omop_core.models import (
+    ConditionOccurrence, Measurement, Observation, PersonalRepresentative,
+    ProvenanceRecord,
+)
+from patient_portal.models import Identity, PatientUser
+from tests.factories import (
+    ConceptFactory, DomainFactory, ObservationFactory, PatientRecordFactory,
+    VocabularyFactory,
+)
+
+pytestmark = pytest.mark.django_db
+
+
+def _client():
+    client = APIClient()
+    client.force_authenticate(Identity.objects.create_user(email='form-editor@example.test', is_staff=True))
+    return client
+
+
+def test_shared_form_api_writes_bmi_inputs_and_returns_server_computed_projection():
+    record = PatientRecordFactory()
+    vocab = VocabularyFactory(vocabulary_id='LOINC')
+    for concept_id, code, title in [(990001, '29463-7', 'Body weight'), (990002, '8302-2', 'Body height')]:
+        ConceptFactory(concept_id=concept_id, concept_code=code, concept_name=title, vocabulary=vocab)
+    ConceptFactory(concept_id=32865, vocabulary=VocabularyFactory(vocabulary_id='Type Concept'))
+    client = _client()
+    response = client.patch(f'/api/v1/patient-records/{record.person_id}/',
+                            {'height': 200, 'weight': 80}, format='json', HTTP_X_PATIENT_FORM='1')
+    assert response.status_code == 200, response.data
+    assert response.data['patient_info']['bmi'] == 20
+    assert set(response.data['write']['applied']) == {'height', 'weight'}
+    assert Measurement.objects.filter(person=record.person, measurement_concept_id__in=[990001, 990002]).count() == 2
+    descriptor = client.get('/api/v1/patient-records/writable-fields/', {'person_id': record.person_id},
+                            HTTP_X_PATIENT_FORM='1').data
+    assert descriptor['bmi']['inputs'] == ['weight', 'height']
+    assert descriptor['bmi']['writable'] is False
+
+
+def test_readonly_form_payload_is_rejected_instead_of_a_silent_200():
+    record = PatientRecordFactory()
+    response = _client().patch(f'/api/v1/patient-records/{record.person_id}/',
+                               {'bmi': 50}, format='json', HTTP_X_PATIENT_FORM='1')
+    assert response.status_code == 400, response.data
+    assert 'bmi' in response.data['rejected']
+
+
+def test_a_refused_result_date_is_answered_with_its_own_sentence():
+    """A refusal reaches the reader as a 400 with the sentence written for it.
+
+    The shared form used to catch ``ValueError`` and echo ``str(exc)``; the
+    refusal is returned as data now, so a 400 still names the field and the
+    reason without forwarding an exception's text (code scanning
+    `py/stack-trace-exposure`).
+    """
+    from datetime import date, timedelta
+    record = PatientRecordFactory()
+    # The pair is the dated editor once its LOINC concept resolves.
+    ConceptFactory(concept_code='718-7', concept_name='Hemoglobin [Mass/volume] in Blood')
+    tomorrow = (date.today() + timedelta(days=1)).isoformat()
+
+    response = _client().patch(
+        f'/api/v1/patient-records/{record.person_id}/',
+        {'hemoglobin_level': {'value': 120, 'date': tomorrow},
+         'hemoglobin_level_units': 'G/L'},
+        format='json', HTTP_X_PATIENT_FORM='1')
+
+    assert response.status_code == 400, response.data
+    assert response.data['detail'] == 'hemoglobin_level: a result date cannot be in the future.'
+
+
+def test_the_native_patch_answers_a_refused_result_date_too():
+    """The native path unwraps dated edits the same way and must keep its 400.
+
+    Here the field is not dated in the plain descriptor, so the envelope itself
+    is refused; the point is that the sentence is returned and nothing raises.
+    """
+    record = PatientRecordFactory()
+
+    response = _client().patch(
+        f'/api/patient-info/{record.person_id}/',
+        {'hemoglobin_level': {'value': 120, 'date': '2026-07-04'}},
+        format='json')
+
+    assert response.status_code == 400, response.data
+    assert response.data['detail'] == 'hemoglobin_level: this field does not accept a result date.'
+
+
+def test_complex_verdict_gate_withholds_the_result_but_not_its_source_facts():
+    """SLiM/CRAB/MIPI rows are computed: the verdict is not authorable, while the
+    clinical facts it is derived from stay ordinary writable inputs."""
+    record = PatientRecordFactory()
+    client = _client()
+    descriptor = client.get('/api/v1/patient-records/writable-fields/', {'person_id': record.person_id},
+                            HTTP_X_PATIENT_FORM='1').data
+    for verdict in ('meets_crab', 'meets_slim', 'mipi_risk', 'mipi_c_risk', 'high_risk_mcl_criteria'):
+        assert descriptor[verdict]['writable'] is False, verdict
+        assert descriptor[verdict].get('compatibility_scope') == 'result', verdict
+    # Hemoglobin's source pair is the writable target (#2318); the canonical
+    # g/dL value is the computed read-model the verdict derives from. The
+    # canonical import below still works for clients that speak the old shape.
+    assert descriptor['hemoglobin_level']['writable'] is True
+    assert descriptor['hemoglobin_g_dl']['writable'] is False
+    # The chemistry pairs follow the same contract, so a CRAB source fact is
+    # the recorded value and unit, not the normalised mg/dL read-model.
+    assert descriptor['serum_calcium_level']['writable'] is True
+    assert descriptor['serum_calcium_level_units']['writable'] is False
+    assert descriptor['serum_calcium_mg_dl']['writable'] is False
+
+    rejected = client.patch(f'/api/v1/patient-records/{record.person_id}/',
+                            {'meets_crab': True}, format='json', HTTP_X_PATIENT_FORM='1')
+    assert rejected.status_code == 400, rejected.data
+    assert 'meets_crab' in rejected.data['rejected']
+
+    applied = client.patch(f'/api/v1/patient-records/{record.person_id}/',
+                           {'hemoglobin_g_dl': 8.5}, format='json', HTTP_X_PATIENT_FORM='1')
+    assert applied.status_code == 200, applied.data
+    assert 'hemoglobin_g_dl' in applied.data['write']['applied']
+    assert 'meets_crab' not in applied.data['write']['applied']
+
+
+def test_defining_events_follow_their_edited_inputs():
+    """The computed verdict is derived again from the facts the form edited."""
+    record = PatientRecordFactory()
+    client = _client()
+    url = f'/api/v1/patient-records/{record.person_id}/'
+
+    response = client.patch(url, {'hemoglobin_g_dl': 8.5}, format='json', HTTP_X_PATIENT_FORM='1')
+    assert response.status_code == 200, response.data
+    assert response.data['patient_info']['meets_crab'] is True
+
+    response = client.patch(url, {
+        'hemoglobin_g_dl': 13.5, 'serum_calcium_mg_dl': 9.5,
+        'creatinine_clearance_ml_min': 90, 'bone_lesions': 'Absent',
+    }, format='json', HTTP_X_PATIENT_FORM='1')
+    assert response.status_code == 200, response.data
+    assert response.data['patient_info']['meets_crab'] is False
+
+    # Serum creatinine is the recorded alternative when no clearance exists.
+    response = client.patch(url, {
+        'creatinine_clearance_ml_min': None, 'serum_creatinine_mg_dl': 2.4,
+    }, format='json', HTTP_X_PATIENT_FORM='1')
+    assert response.status_code == 200, response.data
+    assert response.data['patient_info']['meets_crab'] is True
+
+    response = client.patch(url, {'clonal_plasma_cells': 70}, format='json', HTTP_X_PATIENT_FORM='1')
+    assert response.status_code == 200, response.data
+    assert response.data['patient_info']['meets_slim'] is True
+
+    response = client.patch(url, {'clonal_plasma_cells': 10, 'kappa_flc': 300, 'lambda_flc': 2},
+                            format='json', HTTP_X_PATIENT_FORM='1')
+    assert response.status_code == 200, response.data
+    # Ratio >= 100 with an involved chain >= 100 mg/L is the SLiM light-chain
+    # criterion; a low plasma-cell count alone does not establish it.
+    assert response.data['patient_info']['meets_slim'] is True
+
+
+def test_incomplete_defining_event_inputs_stay_unknown():
+    record = PatientRecordFactory()
+    client = _client()
+    url = f'/api/v1/patient-records/{record.person_id}/'
+    response = client.patch(url, {'hemoglobin_g_dl': 13.5}, format='json', HTTP_X_PATIENT_FORM='1')
+    assert response.status_code == 200, response.data
+    assert response.data['patient_info']['meets_crab'] is None
+    # A low plasma-cell count does not establish SLiM while the light-chain
+    # criterion has no recorded pair.
+    response = client.patch(url, {'clonal_plasma_cells': 10}, format='json', HTTP_X_PATIENT_FORM='1')
+    assert response.status_code == 200, response.data
+    assert response.data['patient_info']['meets_slim'] is None
+
+
+def test_shared_form_preserves_profile_phone_and_name_workflows():
+    record = PatientRecordFactory()
+    response = _client().patch(f'/api/v1/patient-records/{record.person_id}/',
+        {'phone_number': '+15551234567', 'patient_name': 'Synthetic Patient'}, format='json', HTTP_X_PATIENT_FORM='1')
+    assert response.status_code == 200, response.data
+    record.person.refresh_from_db()
+    assert record.person.phone_number == '+15551234567'
+    # The record mirrors Person only when derived, and a direct save does not
+    # derive, so the write mirrors it itself.
+    record.refresh_from_db()
+    assert record.phone_number == '+15551234567'
+    assert record.person.given_name == 'Synthetic'
+    assert record.person.family_name == 'Patient'
+    assert response.data['patient_name'] == 'Synthetic Patient'
+
+
+def test_direct_edits_survive_external_refresh_and_can_transition_to_omop():
+    from omop_core.services.patient_record_service import refresh_patient_record
+    record = PatientRecordFactory()
+    client = _client()
+    url = f'/api/v1/patient-records/{record.person_id}/'
+    response = client.patch(url, {'weight': 80, 'height': 200}, format='json', HTTP_X_PATIENT_FORM='1')
+    assert response.status_code == 200, response.data
+    record = refresh_patient_record(record.person)
+    assert record.weight == 80
+    assert record.height == 200
+    assert {'height', 'weight'} <= set(record.user_edited_fields)
+    ConceptFactory(concept_id=990001, concept_code='29463-7', vocabulary=VocabularyFactory(vocabulary_id='LOINC'))
+    ConceptFactory(concept_id=32865, vocabulary=VocabularyFactory(vocabulary_id='Type Concept'))
+    response = client.patch(url, {'weight': 100}, format='json', HTTP_X_PATIENT_FORM='1')
+    assert response.status_code == 200, response.data
+    record = refresh_patient_record(record.person)
+    assert record.weight == 100
+    assert 'weight' not in record.user_edited_fields
+    assert 'height' in record.user_edited_fields
+
+
+def test_clear_dob_clears_both_person_and_record_age():
+    record = PatientRecordFactory()
+    client = _client()
+    url = f'/api/v1/patient-records/{record.person_id}/'
+    response = client.patch(url, {'date_of_birth': '1980-01-02'}, format='json', HTTP_X_PATIENT_FORM='1')
+    assert response.status_code == 200, response.data
+    response = client.patch(url, {'date_of_birth': None}, format='json', HTTP_X_PATIENT_FORM='1')
+    assert response.status_code == 200, response.data
+    record.refresh_from_db()
+    record.person.refresh_from_db()
+    assert record.person.year_of_birth is None
+    assert record.date_of_birth is None
+    assert record.patient_age is None
+
+
+def test_long_projected_clinical_string_is_rejected_without_truncation():
+    from omop_core.services.patient_form import apply_patient_form_patch
+    from omop_core.models import Observation
+    record = PatientRecordFactory()
+    # An explicitly supplied recipe isolates the writer contract from curator
+    # seed data. No mapping is added or approved by this regression test.
+    recipe = {'progression': {'kind': 'direct', 'writable': True, 'target': 'patient_record',
+                             'value_kind': 'string', 'projection': {'omop_table': 'observation', 'concept_id': 1}}}
+    with pytest.raises(ValidationError, match='at most 60 characters'):
+        apply_patient_form_patch(record.person, {'progression': 'a' * 61}, descriptor=recipe)
+    assert not Observation.objects.filter(person=record.person).exists()
+
+
+@pytest.mark.parametrize('table', ['condition', 'procedure', 'drug_exposure'])
+def test_occurrence_projection_saves_directly_without_a_measurement(table):
+    from omop_core.services.patient_form import apply_patient_form_patch
+    record = PatientRecordFactory()
+    recipe = {'progression': {'kind': 'direct', 'writable': True, 'target': 'patient_record',
+                             'value_kind': 'string', 'projection': {'omop_table': table, 'concept_id': 1}}}
+    saved, result = apply_patient_form_patch(
+        record.person, {'progression': 'yes'}, descriptor=recipe,
+    )
+    assert result.applied == ['progression']
+    assert 'progression' not in result.rejected
+    assert saved.progression == 'yes'
+    assert not Measurement.objects.filter(person=record.person).exists()
+
+
+def test_legacy_descriptor_is_not_narrowed_by_shared_form_restrictions():
+    from omop_core.services.write_descriptor import build_writable_field_descriptor
+    record = PatientRecordFactory()
+    client = _client()
+    url = '/api/v1/patient-records/writable-fields/'
+    legacy = client.get(url, {'person_id': record.person_id}).data
+    # The plain response is the field-only mapping; the envelope is opt-in.
+    expected = build_writable_field_descriptor()
+    expected.pop('__descriptor__')
+    # Plain-descriptor hosts edit a normalised lab read-model directly.
+    expected = {name: ({**entry, 'writable': True} if entry.get('normalised_read_model') else entry)
+                for name, entry in expected.items()}
+    assert legacy == expected
+    shared = client.get(url, {'person_id': record.person_id}, HTTP_X_PATIENT_FORM='1').data
+    # The shared form authors the relapse count as a therapy override; the
+    # legacy descriptor already advertises it (no narrowing in the other
+    # direction either).
+    assert shared['relapse_count']['writable'] is True
+    # Derivation owns these columns on both surfaces: a direct write would be
+    # overwritten by the next save and would hide the facts that drive them.
+    expected_inputs = {
+        'measurable_disease_imwg': [
+            'monoclonal_protein_serum', 'monoclonal_protein_urine',
+            'kappa_flc', 'lambda_flc',
+        ],
+        'measurable_disease_iwcll': [
+            'alc_thousand_per_ul', 'largest_lymph_node_size',
+            'splenomegaly', 'hepatomegaly',
+        ],
+        'metastatic_status': ['distant_metastasis_stage'],
+        'renal_adequacy_status': ['date_of_birth', 'gender', 'serum_creatinine_mg_dl',
+                                  'creatinine_clearance_ml_min'],
+        'patient_age': ['date_of_birth'],
+    }
+    for name, inputs in expected_inputs.items():
+        assert legacy[name]['kind'] == 'computed', name
+        assert legacy[name]['writable'] is False, name
+        assert shared[name]['inputs'] == inputs, name
+    # #5666: the two derived negatives are explicit answers, not computed
+    # columns, and keep their source input list for the editor.
+    for name, inputs in (
+        ('no_active_infection_status', ['active_infection_status']),
+        ('no_other_active_malignancies', ['active_malignancies']),
+    ):
+        assert legacy[name]['kind'] == 'explicit-answer', name
+        assert legacy[name]['writable'] is False, name
+        assert legacy[name]['inputs'] == inputs, name
+
+
+def test_noncanonical_body_units_are_not_silently_relabelled_or_written():
+    record = PatientRecordFactory(height=70, height_units='in', weight=180, weight_units='lb')
+    client = _client()
+    descriptor = client.get('/api/v1/patient-records/writable-fields/', {'person_id': record.person_id},
+                            HTTP_X_PATIENT_FORM='1').data
+    assert descriptor['height']['unit'] == 'in'
+    assert descriptor['weight']['unit'] == 'lb'
+    assert not descriptor['height']['writable']
+    assert not descriptor['weight']['writable']
+    response = client.patch(f'/api/v1/patient-records/{record.person_id}/',
+                             {'height': 72, 'weight': 190}, format='json', HTTP_X_PATIENT_FORM='1')
+    assert response.status_code == 400, response.data
+    record.refresh_from_db()
+    assert record.height == 70
+    assert record.weight == 180
+
+
+def test_location_uses_its_own_limit_not_the_scalar_fact_limit():
+    from omop_core.models import Location
+    record = PatientRecordFactory()
+    country = 'a' * 70  # Location.country allows 100, not the OMOP value string's 60.
+    response = _client().patch(f'/api/v1/patient-records/{record.person_id}/',
+        {'country': country, 'planned_therapies': 'VRd'}, format='json', HTTP_X_PATIENT_FORM='1')
+    assert response.status_code == 200, response.data
+    assert set(response.data['write']['applied']) == {'country', 'planned_therapies'}
+    record.refresh_from_db()
+    record.person.refresh_from_db()
+    assert Location.objects.get(pk=record.person.location_id).country == country
+    assert record.planned_therapies == 'VRd'
+
+
+MM_FIELDS = {
+    'mgus': ('mgus', 4149022, '35601003', 'Observation'),
+    'smoldering_multiple_myeloma': ('smolderingMultipleMyeloma', 4184985, '413587002', 'Condition'),
+    'waldenstrom_macroglobulinemia': ('waldenstromMacroglobulinemia', 4098597, '190818004', 'Condition'),
+    'igm_multiple_myeloma': ('igmMultipleMyeloma', None, None, None),
+    'al_amyloidosis': ('alAmyloidosis', 4047607, '23132008', 'Condition'),
+    'poems_syndrome': ('poemsSyndrome', 4193776, '79268002', 'Condition'),
+}
+
+
+def _seed_mm_vocab(*, ehr_type=True, self_report_type=True):
+    VocabularyFactory(vocabulary_id='SNOMED')
+    type_vocab = VocabularyFactory(vocabulary_id='Type Concept')
+    if ehr_type:
+        ConceptFactory(concept_id=32817, concept_code='32817', vocabulary=type_vocab)
+    if self_report_type:
+        ConceptFactory(concept_id=32865, concept_code='32865', vocabulary=type_vocab)
+    for _binding, concept_id, code, domain in MM_FIELDS.values():
+        if concept_id is None:
+            continue
+        ConceptFactory(
+            concept_id=concept_id, concept_code=code, concept_name=code,
+            vocabulary=VocabularyFactory(vocabulary_id='SNOMED'),
+            domain=DomainFactory(domain_id=domain),
+        )
+
+
+def test_shared_form_api_advertises_the_six_current_diagnosis_fields():
+    record = PatientRecordFactory()
+    _seed_mm_vocab()
+
+    descriptor = _client().get(
+        '/api/v1/patient-records/writable-fields/', {'person_id': record.person_id},
+        HTTP_X_PATIENT_FORM='1',
+    ).data
+
+    for field, (binding, _concept_id, _code, _domain) in MM_FIELDS.items():
+        entry = descriptor[field]
+        assert entry['writable'] is True, (field, entry.get('reason'))
+        assert entry['control'] == 'boolean'
+        assert entry['tri_state'] is True
+        assert binding in entry['bindings']
+
+
+def test_shared_form_api_saves_and_projects_a_condition_field():
+    record = PatientRecordFactory()
+    _seed_mm_vocab()
+
+    response = _client().patch(
+        f'/api/v1/patient-records/{record.person_id}/',
+        {'smoldering_multiple_myeloma': True}, format='json', HTTP_X_PATIENT_FORM='1',
+    )
+
+    assert response.status_code == 200, response.data
+    assert 'smoldering_multiple_myeloma' in response.data['write']['applied']
+    record.refresh_from_db()
+    assert record.smoldering_multiple_myeloma is True
+    assert ConditionOccurrence.objects.filter(
+        person=record.person, condition_concept_id=4184985,
+    ).count() == 1
+
+
+def test_patient_self_form_write_projects_self_report_and_provenance():
+    record = PatientRecordFactory()
+    _seed_mm_vocab()
+    identity = Identity.objects.create_user(email='mm-self@example.test')
+    PatientUser.objects.create(identity=identity, person=record.person)
+    client = APIClient()
+    client.force_authenticate(identity)
+
+    response = client.patch(
+        f'/api/v1/patient-records/{record.person_id}/',
+        {'mgus': True}, format='json', HTTP_X_PATIENT_FORM='1',
+    )
+
+    assert response.status_code == 200, response.data
+    record.refresh_from_db()
+    assert record.mgus is True
+    row = Observation.objects.get(person=record.person, observation_concept_id=4149022)
+    assert row.observation_type_concept_id == 32865
+    assert ProvenanceRecord.objects.filter(
+        object_id=row.pk, source='PATIENT_SELF',
+        source_user_id=f'{identity.issuer}|{identity.sub}',
+    ).exists()
+
+
+def test_a_missing_ehr_type_concept_does_not_roll_back_the_answer():
+    from omop_core.services.write_descriptor import build_writable_field_descriptor
+
+    from omop_core.models import Concept
+
+    record = PatientRecordFactory()
+    _seed_mm_vocab(ehr_type=False)
+    # conftest seeds the standard EHR type concept; this case is a deployment
+    # where it is genuinely absent.
+    Concept.objects.filter(concept_id=32817).delete()
+
+    entry = build_writable_field_descriptor()['smoldering_multiple_myeloma']
+    assert entry['writable'] is True
+    assert 'projection' not in entry
+    assert 'type concept' in entry['reason']
+
+    response = _client().patch(
+        f'/api/v1/patient-records/{record.person_id}/',
+        {'smoldering_multiple_myeloma': True}, format='json', HTTP_X_PATIENT_FORM='1',
+    )
+
+    assert response.status_code == 200, response.data
+    record.refresh_from_db()
+    assert record.smoldering_multiple_myeloma is True
+    assert not ConditionOccurrence.objects.filter(
+        person=record.person, condition_concept_id=4184985,
+    ).exists()
+
+
+def test_a_patient_answer_skips_projection_without_the_self_report_type():
+    record = PatientRecordFactory()
+    _seed_mm_vocab(self_report_type=False)
+    clinical = ObservationFactory(
+        person=record.person, observation_concept_id=4149022,
+        observation_source_value='35601003', value_as_number=0.0,
+        observation_date=timezone.localdate(), observation_type_concept_id=32817,
+    )
+    identity = Identity.objects.create_user(email='mm-self-no-type@example.test')
+    PatientUser.objects.create(identity=identity, person=record.person)
+    client = APIClient()
+    client.force_authenticate(identity)
+
+    response = client.patch(
+        f'/api/v1/patient-records/{record.person_id}/',
+        {'mgus': True}, format='json', HTTP_X_PATIENT_FORM='1',
+    )
+
+    assert response.status_code == 200, response.data
+    record.refresh_from_db()
+    assert record.mgus is True
+    clinical.refresh_from_db()
+    assert clinical.value_as_number == 0.0
+    assert Observation.objects.filter(
+        person=record.person, observation_concept_id=4149022,
+    ).count() == 1
+
+
+def test_a_representative_answer_skips_projection_without_the_self_report_type():
+    record = PatientRecordFactory()
+    _seed_mm_vocab(self_report_type=False)
+    carer = Identity.objects.create_user(email='mm-carer-no-type@example.test')
+    PersonalRepresentative.objects.create(
+        representative=carer, person_id=record.person_id,
+        relationship='caregiver', verification_status='VERIFIED',
+    )
+    client = APIClient()
+    client.force_authenticate(carer)
+
+    response = client.patch(
+        f'/api/v1/patient-records/{record.person_id}/',
+        {'mgus': True}, format='json', HTTP_X_PATIENT_FORM='1',
+    )
+
+    assert response.status_code == 200, response.data
+    record.refresh_from_db()
+    assert record.mgus is True
+    assert not Observation.objects.filter(
+        person=record.person, observation_concept_id=4149022,
+    ).exists()
+
+
+def test_native_patient_patch_skips_pinned_projection_without_self_report_type():
+    record = PatientRecordFactory()
+    _seed_mm_vocab(self_report_type=False)
+    clinical = ObservationFactory(
+        person=record.person, observation_concept_id=4149022,
+        observation_source_value='35601003', value_as_number=0.0,
+        observation_date=timezone.localdate(), observation_type_concept_id=32817,
+    )
+    identity = Identity.objects.create_user(email='mm-native-self@example.test')
+    PatientUser.objects.create(identity=identity, person=record.person)
+    client = APIClient()
+    client.force_authenticate(identity)
+
+    response = client.patch(
+        f'/api/v1/patient-records/{record.person_id}/', {'mgus': True}, format='json',
+    )
+
+    assert response.status_code == 200, response.data
+    record.refresh_from_db()
+    assert record.mgus is True
+    clinical.refresh_from_db()
+    assert clinical.value_as_number == 0.0
+    assert Observation.objects.filter(
+        person=record.person, observation_concept_id=4149022,
+    ).count() == 1
+
+
+def test_native_representative_patch_skips_pinned_projection_without_self_report_type():
+    record = PatientRecordFactory()
+    _seed_mm_vocab(self_report_type=False)
+    carer = Identity.objects.create_user(email='mm-native-carer@example.test')
+    PersonalRepresentative.objects.create(
+        representative=carer, person_id=record.person_id,
+        relationship='caregiver', verification_status='VERIFIED',
+    )
+    client = APIClient()
+    client.force_authenticate(carer)
+
+    response = client.patch(
+        f'/api/v1/patient-records/{record.person_id}/', {'mgus': True}, format='json',
+    )
+
+    assert response.status_code == 200, response.data
+    record.refresh_from_db()
+    assert record.mgus is True
+    assert not Observation.objects.filter(
+        person=record.person, observation_concept_id=4149022,
+    ).exists()
+
+
+def test_native_patch_keeps_a_pinned_answer_pending_like_the_shared_form():
+    """A pinned current-state answer is never read back from OMOP, so neither
+    write path may strip it from user_edited_fields as 'backed by OMOP'."""
+    record = PatientRecordFactory()
+    _seed_mm_vocab()
+
+    response = _client().patch(
+        f'/api/v1/patient-records/{record.person_id}/', {'mgus': True}, format='json',
+    )
+
+    assert response.status_code == 200, response.data
+    record.refresh_from_db()
+    assert record.mgus is True
+    assert 'mgus' in record.user_edited_fields
+    assert Observation.objects.filter(
+        person=record.person, observation_concept_id=4149022, is_erroneous=False,
+    ).count() == 1
+
+
+def test_shared_form_offers_genomics_editor_but_never_writes_it_through_the_form():
+    """`genetic_mutations` has its own endpoint, so it is writable for the host's
+    Genomics editor once its vocabulary is loaded; the shared-form PATCH still
+    refuses it. Without the vocabulary the descriptor says so (#2441/#2433)."""
+    from omop_core.models import FieldConceptMapping
+    from omop_core.services.genomics import ACTOR_TYPE_CONCEPT_IDS
+    record = PatientRecordFactory()
+    client = _client()
+    FieldConceptMapping.objects.create(
+        field_name='genetic_mutations.status', source_value='genomics:status',
+        omop_table='measurement', status='approved')
+    VocabularyFactory(vocabulary_id='Type Concept')
+    VocabularyFactory(vocabulary_id='CDM')
+    ConceptFactory(concept_id=0, concept_code='0', vocabulary_id='Type Concept')
+    for concept_id in ACTOR_TYPE_CONCEPT_IDS:
+        ConceptFactory(concept_id=concept_id, concept_code=str(concept_id),
+                       vocabulary_id='Type Concept')
+    ConceptFactory(concept_id=9_500_001, concept_code='measurement.measurement_id',
+                   vocabulary_id='CDM', concept_name='measurement.measurement_id')
+    shared = client.get('/api/v1/patient-records/writable-fields/', {'person_id': record.person_id},
+                        HTTP_X_PATIENT_FORM='1').data
+    assert shared['genetic_mutations']['writable'] is True
+    assert shared['genetic_mutations']['endpoint'].endswith('/genomics/')
+    response = client.patch(f'/api/v1/patient-records/{record.person_id}/',
+                            {'genetic_mutations': [{'gene': 'TP53'}]}, format='json',
+                            HTTP_X_PATIENT_FORM='1')
+    assert response.status_code == 400, response.data
+    assert 'genetic_mutations' in response.data['rejected']
+
+
+def test_shared_form_enforces_the_native_transformation_rules():
+    """field.clean() is model validation only; the serializer's future-date and
+    flag rules must hold on the shared-form path too."""
+    from datetime import timedelta
+    record = PatientRecordFactory(transformed_to_dlbcl=False, dlbcl_transformation_date=None,
+                                  post_transformation_outcome=None)
+    client = _client()
+    url = f'/api/v1/patient-records/{record.person_id}/'
+    past = (timezone.localdate() - timedelta(days=30)).isoformat()
+    future = (timezone.localdate() + timedelta(days=30)).isoformat()
+
+    without_flag = client.patch(url, {'dlbcl_transformation_date': past}, format='json',
+                                HTTP_X_PATIENT_FORM='1')
+    assert without_flag.status_code == 400, without_flag.data
+    in_future = client.patch(url, {'transformed_to_dlbcl': True, 'dlbcl_transformation_date': future},
+                             format='json', HTTP_X_PATIENT_FORM='1')
+    assert in_future.status_code == 400, in_future.data
+    record.refresh_from_db()
+    assert record.dlbcl_transformation_date is None
+
+    valid = client.patch(url, {'transformed_to_dlbcl': True, 'dlbcl_transformation_date': past},
+                         format='json', HTTP_X_PATIENT_FORM='1')
+    assert valid.status_code == 200, valid.data
+    record.refresh_from_db()
+    assert record.dlbcl_transformation_date.isoformat() == past
+
+    unknown = client.patch(url, {'post_transformation_outcome': 'zzz-not-an-outcome'},
+                           format='json', HTTP_X_PATIENT_FORM='1')
+    assert unknown.status_code == 400, unknown.data
+    record.refresh_from_db()
+    assert record.post_transformation_outcome is None
+
+
+def test_shared_form_descriptor_keeps_the_schema_version_envelope():
+    """#2429: without the envelope the store reads every response as a legacy
+    descriptor, so its schema_version gate could never refuse a newer contract."""
+    from omop_core.services.write_descriptor import DESCRIPTOR_SCHEMA_VERSION
+    record = PatientRecordFactory()
+    url = '/api/v1/patient-records/writable-fields/'
+    writer = _client()
+    reader = APIClient()
+    reader.force_authenticate(Identity.objects.create_user(email='form-reader@example.test'))
+    for client, params in ((writer, {}), (writer, {'person_id': record.person_id}),
+                           (reader, {'person_id': record.person_id})):
+        data = client.get(url, params, HTTP_X_PATIENT_FORM='1').data
+        assert data['__descriptor__']['schema_version'] == DESCRIPTOR_SCHEMA_VERSION, params
+
+
+def test_org_client_gets_no_record_data_for_a_patient_it_cannot_read():
+    """#2433: an org client may write a NULL-org record (it passes
+    _caller_may_write_patient) but retrieve() 404s it, so the shared descriptor
+    must not carry that patient's data (here: the stored height unit)."""
+    from datetime import timedelta
+    from oauth2_provider.models import AccessToken, Application
+    from omop_core.models import ApplicationOrganization, Organization
+    org = Organization.objects.create(name='Scoped clinic')
+    owner = Identity.objects.create_user(email='scoped-app-owner@example.test')
+    app = Application.objects.create(
+        name='Scoped service', client_id='test-scoped-form-service',
+        client_type=Application.CLIENT_CONFIDENTIAL,
+        authorization_grant_type=Application.GRANT_CLIENT_CREDENTIALS, user=owner)
+    ApplicationOrganization.objects.create(application=app, organization=org)
+    token = AccessToken.objects.create(
+        application=app, user=None, token='test-scoped-form-token',
+        scope='patient/*.read patient/*.write', expires=timezone.now() + timedelta(hours=1))
+    unowned = PatientRecordFactory(organization=None, height=70, height_units='in')
+    url = '/api/v1/patient-records/writable-fields/'
+
+    staff = _client().get(url, {'person_id': unowned.person_id}, HTTP_X_PATIENT_FORM='1').data
+    assert staff['height']['unit'] == 'in'
+
+    client = APIClient()
+    client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.token}')
+    assert client.get(f'/api/v1/patient-records/{unowned.person_id}/').status_code == 404
+    scoped = client.get(url, {'person_id': unowned.person_id}, HTTP_X_PATIENT_FORM='1')
+    assert scoped.status_code == 200, scoped.data
+    assert scoped.data['height'].get('unit') != 'in'
+    # Its PATCH 404s, so nothing may claim to be writable either.
+    assert not any(entry.get('writable') for name, entry in scoped.data.items()
+                   if not name.startswith('__'))
+
+
+def test_the_plain_descriptor_is_field_only_and_the_envelope_is_opt_in():
+    """Dev's clients iterate the plain mapping and expect `writable` on every
+    entry (#2418 regression review); the versioned envelope is opt-in."""
+    from omop_core.services.write_descriptor import DESCRIPTOR_SCHEMA_VERSION
+    record = PatientRecordFactory()
+    client = _client()
+    url = '/api/v1/patient-records/writable-fields/'
+    for params in ({}, {'person_id': record.person_id}):
+        plain = client.get(url, params).data
+        assert '__descriptor__' not in plain
+        assert all('writable' in entry for entry in plain.values())
+        opted = client.get(url, {**params, 'envelope': '1'}).data
+        assert opted['__descriptor__']['schema_version'] == DESCRIPTOR_SCHEMA_VERSION
+    reader = APIClient()
+    reader.force_authenticate(Identity.objects.create_user(email='plain-reader@example.test'))
+    read_only = reader.get(url, {'person_id': record.person_id}).data
+    assert '__descriptor__' not in read_only
+    assert not any(entry['writable'] for entry in read_only.values())
+
+
+class TestMeReportsWriteAccess:
+    """The shared form reads `write_enabled` from /patient-info/me/ (#2441)."""
+
+    def _patient(self):
+        from rest_framework.test import APIClient
+        client = APIClient()
+        client.force_authenticate(
+            Identity.objects.create_user(email='self-patient@example.test'))
+        return client
+
+    def test_a_caller_with_write_access_is_enabled(self):
+        response = self._patient().get('/api/patient-info/me/')
+        assert response.status_code == 200, response.data
+        assert response.data['write_enabled'] is True
+
+    def test_a_read_only_caller_is_not(self, monkeypatch):
+        import patient_portal.api.views as views
+
+        monkeypatch.setattr(views, '_caller_may_write_patient', lambda request, person_id: False)
+        response = self._patient().get('/api/patient-info/me/')
+        assert response.status_code == 200, response.data
+        assert response.data['write_enabled'] is False
+
+    def test_a_read_only_oauth_token_is_not(self):
+        """Patient access is not enough: the token itself must carry a write
+        scope, or its PATCH is refused by ScopedTokenPermission."""
+        from datetime import timedelta
+        from oauth2_provider.models import AccessToken, Application
+
+        identity = Identity.objects.create_user(email='read-only-token@example.test')
+        app = Application.objects.create(
+            name='Read-only client', client_id='test-read-only-form-client',
+            client_type=Application.CLIENT_CONFIDENTIAL,
+            authorization_grant_type=Application.GRANT_PASSWORD, user=identity)
+        token = AccessToken.objects.create(
+            application=app, user=identity, token='test-read-only-form-token',
+            scope='patient/*.read', expires=timezone.now() + timedelta(hours=1))
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION=f'Bearer {token.token}')
+
+        response = client.get('/api/patient-info/me/')
+        assert response.status_code == 200, response.data
+        assert response.data['write_enabled'] is False
+        patch = client.patch('/api/patient-info/me/', {'weight': 80}, format='json')
+        assert patch.status_code in (401, 403), patch.data
+
+
+def test_an_internal_value_error_is_logged_without_values_and_answered_generically(
+        monkeypatch, caplog):
+    """Only a deliberate refusal reaches the client (#2489).
+
+    `apply_patient_form_patch` restated every ValueError as the 400 message,
+    so any internal error's text (a value, an id, a column) was sent to the
+    caller. Anything that is not a WriteRefused is now logged with the person
+    and field names only and answered with a fixed sentence.
+    """
+    import logging
+
+    from omop_core.services import patient_form
+
+    def broken(*args, **kwargs):
+        raise ValueError('internal detail 98765 secret-value')
+
+    monkeypatch.setattr(patient_form, 'recompute_patient_record_fields', broken)
+    record = PatientRecordFactory()
+
+    with caplog.at_level(logging.WARNING, logger='omop_core.services.patient_form'):
+        response = _client().patch(
+            f'/api/v1/patient-records/{record.person_id}/',
+            {'weight': 80}, format='json', HTTP_X_PATIENT_FORM='1')
+
+    assert response.status_code == 400, response.data
+    assert '98765' not in str(response.data)
+    assert response.data['detail'] == patient_form.UNSAVED_MESSAGE
+    logged = ' '.join(r.getMessage() for r in caplog.records)
+    assert f'person_id={record.person_id}' in logged
+    assert "'weight'" in logged
+    # Where it was raised, so the log is actionable without the text (#2489).
+    assert 'ValueError at test_patient_form_api:' in logged
+    assert '(broken)' in logged
+    assert '98765' not in logged and '80' not in logged.replace(str(record.person_id), '')
+    record.refresh_from_db()
+    assert record.weight is None
+
+
+def test_a_deliberate_refusal_raised_deep_in_the_write_keeps_its_sentence():
+    from omop_core.services.patient_form import apply_patient_form_patch
+
+    record = PatientRecordFactory()
+    with pytest.raises(ValidationError) as exc:
+        apply_patient_form_patch(record.person, {'gelf_criteria_options': 'not-a-factor'})
+
+    assert exc.value.messages == ['Select recognized GELF criteria.']

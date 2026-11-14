@@ -7,20 +7,26 @@ import BooleanControl from './controls/BooleanControl';
 import MultiSelectControl from './controls/MultiSelectControl';
 import DateControl from './controls/DateControl';
 import TextNumberControl from './controls/TextNumberControl';
-import { stringsToOptions } from './utils';
+import { optionsToObjects, type OptionInput } from './utils';
 
 interface FieldProps {
   label: string;
   name: string;
   type: 'text' | 'number' | 'date' | 'select' | 'multiselect' | 'boolean' | 'email';
   value: unknown;
-  options?: string[];
+  options?: OptionInput[];
   onChange: (name: string, value: unknown) => void;
   disabled?: boolean;
   readOnly?: boolean;
+  triState?: boolean;
+  /** Reviewed wording for a boolean's two answers (#5601). */
+  answerLabels?: { true?: string; false?: string };
   vocabSource?: VocabSource | null;
   fullWidth?: boolean;
   precision?: 'day' | 'month' | 'year' | null;
+  /** Accessible name for the control when the visible label is suppressed
+   *  (compact Trial Details mounts) or not programmatically associated. */
+  ariaLabel?: string;
 }
 
 export default function Field({
@@ -32,11 +38,17 @@ export default function Field({
   onChange,
   disabled,
   readOnly,
+  triState,
+  answerLabels,
   vocabSource,
   precision,
+  ariaLabel,
 }: FieldProps) {
+  // An empty string is not a name: fall through and emit no attribute rather
+  // than aria-label="" which some readers announce as a nameless control.
+  const accessibleName = (ariaLabel?.trim() || label?.trim() || '') || undefined;
   const isDisabled = disabled || readOnly;
-  const optionObjects = useMemo(() => stringsToOptions(options), [options]);
+  const optionObjects = useMemo(() => optionsToObjects(options), [options]);
 
   const selectedValues = useMemo<string[]>(() => {
     const v = value;
@@ -48,8 +60,7 @@ export default function Field({
   }, [value]);
 
   const selectedLabels = useMemo(() => {
-    const set = new Set(selectedValues);
-    return optionObjects.filter((o) => set.has(String(o.value))).map((o) => o.label);
+    return selectedValues.map((value) => optionObjects.find((option) => String(option.value) === value)?.label ?? value);
   }, [optionObjects, selectedValues]);
 
   const msDisplay = useMemo(() => {
@@ -77,6 +88,7 @@ export default function Field({
         return (
           <SelectControl
             value={value != null && value !== '' ? String(value) : ''}
+            ariaLabel={accessibleName}
             options={optionObjects}
             disabled={isDisabled}
             placeholder="Select…"
@@ -90,6 +102,7 @@ export default function Field({
       case 'multiselect':
         return (
           <MultiSelectControl
+            ariaLabel={accessibleName}
             options={optionObjects}
             selectedValues={selectedValues}
             display={msDisplay}
@@ -97,7 +110,7 @@ export default function Field({
             onChange={(nextValues) => {
               onChange(
                 name,
-                isStringBacked ? (nextValues as string[]).join(', ') : nextValues
+                isStringBacked ? (nextValues as string[]).join(',') : nextValues
               );
             }}
           />
@@ -107,7 +120,11 @@ export default function Field({
         return (
           <BooleanControl
             value={value as boolean | null | undefined}
+            ariaLabel={accessibleName}
             disabled={isDisabled}
+            triState={triState}
+            trueLabel={answerLabels?.true}
+            falseLabel={answerLabels?.false}
             onChange={(v) => onChange(name, v)}
           />
         );
@@ -116,6 +133,7 @@ export default function Field({
         return (
           <DateControl
             value={formatDateForInput(value as string)}
+            ariaLabel={accessibleName}
             disabled={isDisabled}
             onChange={(v) => onChange(name, v)}
             precision={precision}
@@ -126,6 +144,7 @@ export default function Field({
         return (
           <TextNumberControl
             type={type}
+            ariaLabel={accessibleName}
             value={value === 0 ? 0 : ((value ?? '') as string | number | null)}
             disabled={isDisabled}
             onChange={(v) => onChange(name, v)}
@@ -133,7 +152,8 @@ export default function Field({
         );
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [type, value, optionObjects, isDisabled, name, selectedValues, msDisplay, precision]);
+  }, [type, value, optionObjects, isDisabled, name, selectedValues, msDisplay, triState,
+      answerLabels?.true, answerLabels?.false, precision, accessibleName]);
 
   return (
     <div className="space-y-1.5">

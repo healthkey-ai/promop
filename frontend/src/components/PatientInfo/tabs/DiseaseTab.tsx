@@ -1,6 +1,7 @@
 import { useVocabulary } from '@/hooks/useVocabulary';
 import { useWritableFields } from '@/hooks/useWritableFields';
 import ClinicalField from '../ClinicalField';
+import { usePatientFormReadOnly } from '@/federation/PatientFormContext';
 import SelectControl from '../controls/SelectControl';
 import Section from '../Section';
 import FlipiAssessment from '../FlipiAssessment';
@@ -39,12 +40,14 @@ function DatePrecisionPicker({
   onChange: (field: string, value: unknown) => void;
 }) {
   const precision = (formData?.[precisionField] as string) ?? 'day';
+  const locked = usePatientFormReadOnly();
   return (
     <div className="space-y-1.5">
       <label className="text-sm font-medium text-portal-text-primary">Date Precision</label>
       <SelectControl
         value={precision}
         options={PRECISION_OPTIONS}
+        disabled={locked}
         onChange={(v) => {
           const newPrec = v ?? 'day';
           onChange(precisionField, newPrec);
@@ -110,20 +113,14 @@ function BreastCancerSection({ formData, onChange }: Omit<Props, 'diseaseType'>)
           <ClinicalField label="HR Status" name="hr_status" descriptor={descriptors.hr_status} type="select" value={formData?.hr_status} options={HR_OPTIONS} onChange={onChange} vocabSource={hrSource} />
           <ClinicalField label="HRD Status" name="hrd_status" descriptor={descriptors.hrd_status} type="select" value={formData?.hrd_status} options={HRD_OPTIONS} onChange={onChange} vocabSource={hrdSource} />
           <ClinicalField label="Androgen Receptor Status" name="androgen_receptor_status" descriptor={descriptors.androgen_receptor_status} type="select" value={formData?.androgen_receptor_status} options={ER_OPTIONS} onChange={onChange} />
-          <div className="space-y-1.5">
-            <label className="text-sm font-medium text-portal-text-primary">Triple Negative Status (Computed)</label>
-            <div className="flex h-9 w-full items-center rounded-md border border-input bg-portal-bg-secondary px-3 py-2 text-sm text-portal-text-tertiary">
-              {formData?.tnbc_status ? 'Yes' : 'No'}
-            </div>
-            <p className="text-xs text-portal-text-tertiary">Automatically computed from ER, PR, and HER2 status</p>
-          </div>
+          <ClinicalField label="Triple Negative Status" name="tnbc_status" descriptor={descriptors.tnbc_status} type="boolean" value={formData?.tnbc_status} onChange={onChange} />
         </div>
       </Section>
 
       <Section title="Additional Biomarkers">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <ClinicalField label="Ki-67 Proliferation Index (%)" name="ki67_proliferation_index" descriptor={descriptors.ki67_proliferation_index} type="number" value={formData?.ki67_proliferation_index} onChange={onChange} />
-          <ClinicalField label="PD-L1 Status (%)" name="pd_l1_tumor_cells" descriptor={descriptors.pd_l1_tumor_cells} type="number" value={formData?.pd_l1_tumor_cells} onChange={onChange} />
+          <ClinicalField label="Ki-67 Proliferation Index (%)" labelIncludesUnit name="ki67_proliferation_index" descriptor={descriptors.ki67_proliferation_index} type="number" value={formData?.ki67_proliferation_index} onChange={onChange} />
+          <ClinicalField label="PD-L1 Status (%)" labelIncludesUnit name="pd_l1_tumor_cells" descriptor={descriptors.pd_l1_tumor_cells} type="number" value={formData?.pd_l1_tumor_cells} onChange={onChange} />
           <ClinicalField label="Oncotype DX Score" name="oncotype_dx_score" descriptor={descriptors.oncotype_dx_score} type="number" value={formData?.oncotype_dx_score} onChange={onChange} />
         </div>
       </Section>
@@ -185,8 +182,8 @@ function LymphomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onCha
         <p className="mb-4 text-sm text-slate-500">Record hemoglobin in Blood and LDH in Labs.</p>
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
           <ClinicalField label="Bone Marrow Involvement" name="bone_marrow_involvement" descriptor={descriptors.bone_marrow_involvement} type="boolean" value={formData?.bone_marrow_involvement} onChange={onChange} />
-          <ClinicalField label="Clonal Bone Marrow B Lymphocytes (%)" name="clonal_bone_marrow_b_lymphocytes" descriptor={descriptors.clonal_bone_marrow_b_lymphocytes} type="number" value={formData?.clonal_bone_marrow_b_lymphocytes} onChange={onChange} />
-          <ClinicalField label="LDH Upper Limit of Normal (U/L)" name="ldh_upper_limit_normal" descriptor={descriptors.ldh_upper_limit_normal} type="number" value={formData?.ldh_upper_limit_normal} onChange={onChange} />
+          <ClinicalField label="Clonal Bone Marrow B Lymphocytes (%)" labelIncludesUnit name="clonal_bone_marrow_b_lymphocytes" descriptor={descriptors.clonal_bone_marrow_b_lymphocytes} type="number" value={formData?.clonal_bone_marrow_b_lymphocytes} onChange={onChange} />
+          <ClinicalField label="LDH Upper Limit of Normal (U/L)" labelIncludesUnit name="ldh_upper_limit_normal" descriptor={descriptors.ldh_upper_limit_normal} type="number" value={formData?.ldh_upper_limit_normal} onChange={onChange} />
           <ClinicalField label="Number of Nodal Sites" name="number_of_nodal_sites" descriptor={descriptors.number_of_nodal_sites} type="number" value={formData?.number_of_nodal_sites} onChange={onChange} />
         </div>
       </Section>
@@ -226,10 +223,25 @@ function MyelomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onChan
         </div>
       </Section>
 
+      <Section title="Myeloma Related Disorders">
+        <p className="mb-4 text-sm text-muted-foreground">
+          Current diagnosis. A previous diagnosis that has progressed to active myeloma is not a current Yes.
+        </p>
+        <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
+          <ClinicalField label="MGUS" name="mgus" descriptor={descriptors.mgus} type="boolean" value={formData?.mgus} onChange={onChange} />
+          <ClinicalField label="Smoldering Multiple Myeloma" name="smoldering_multiple_myeloma" descriptor={descriptors.smoldering_multiple_myeloma} type="boolean" value={formData?.smoldering_multiple_myeloma} onChange={onChange} />
+          <ClinicalField label="Waldenström Macroglobulinemia" name="waldenstrom_macroglobulinemia" descriptor={descriptors.waldenstrom_macroglobulinemia} type="boolean" value={formData?.waldenstrom_macroglobulinemia} onChange={onChange} />
+          <ClinicalField label="IgM Multiple Myeloma" name="igm_multiple_myeloma" descriptor={descriptors.igm_multiple_myeloma} type="boolean" value={formData?.igm_multiple_myeloma} onChange={onChange} />
+          <ClinicalField label="Light-Chain (AL) Amyloidosis" name="al_amyloidosis" descriptor={descriptors.al_amyloidosis} type="boolean" value={formData?.al_amyloidosis} onChange={onChange} />
+          <ClinicalField label="POEMS Syndrome" name="poems_syndrome" descriptor={descriptors.poems_syndrome} type="boolean" value={formData?.poems_syndrome} onChange={onChange} />
+          <ClinicalField label="Plasma Cell Leukemia" name="plasma_cell_leukemia" descriptor={descriptors.plasma_cell_leukemia} type="boolean" value={formData?.plasma_cell_leukemia} onChange={onChange} />
+        </div>
+      </Section>
+
       <Section title="Myeloma Markers">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <ClinicalField label="Serum M-Protein (g/dL)" name="monoclonal_protein_serum" descriptor={descriptors.monoclonal_protein_serum} type="number" value={formData?.monoclonal_protein_serum} onChange={onChange} />
-          <ClinicalField label="Urine M-Protein (mg/24h)" name="monoclonal_protein_urine" descriptor={descriptors.monoclonal_protein_urine} type="number" value={formData?.monoclonal_protein_urine} onChange={onChange} />
+          <ClinicalField label="Serum M-Protein (g/dL)" labelIncludesUnit name="monoclonal_protein_serum" descriptor={descriptors.monoclonal_protein_serum} type="number" value={formData?.monoclonal_protein_serum} onChange={onChange} />
+          <ClinicalField label="Urine M-Protein (mg/24h)" labelIncludesUnit name="monoclonal_protein_urine" descriptor={descriptors.monoclonal_protein_urine} type="number" value={formData?.monoclonal_protein_urine} onChange={onChange} />
           <ClinicalField label="Kappa Free Light Chains" name="kappa_flc" descriptor={descriptors.kappa_flc} type="number" value={formData?.kappa_flc} onChange={onChange} />
           <ClinicalField label="Lambda Free Light Chains" name="lambda_flc" descriptor={descriptors.lambda_flc} type="number" value={formData?.lambda_flc} onChange={onChange} />
           <ClinicalField label="Kappa/Lambda Ratio" name="kappa_lambda_ratio" descriptor={descriptors.kappa_lambda_ratio} type="number" value={formData?.kappa_lambda_ratio} onChange={onChange} />
@@ -240,7 +252,7 @@ function MyelomaSection({ formData, onChange }: Pick<Props, 'formData' | 'onChan
       <Section title="Complications">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
           <ClinicalField label="Bone Lesions" name="bone_lesions" descriptor={descriptors.bone_lesions} type="select" value={formData?.bone_lesions} options={YES_NO_OPTIONS} onChange={onChange} />
-          <ClinicalField label="Bone Marrow Plasma Cells (%)" name="clonal_plasma_cells" descriptor={descriptors.clonal_plasma_cells} type="number" value={formData?.clonal_plasma_cells} onChange={onChange} />
+          <ClinicalField label="Bone Marrow Plasma Cells (%)" labelIncludesUnit name="clonal_plasma_cells" descriptor={descriptors.clonal_plasma_cells} type="number" value={formData?.clonal_plasma_cells} onChange={onChange} />
         </div>
       </Section>
 
@@ -280,14 +292,14 @@ function CLLSection({ formData, onChange }: Pick<Props, 'formData' | 'onChange'>
 
       <Section title="Laboratory Markers">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
-          <ClinicalField label="Absolute Lymphocyte Count (×10⁹/L)" name="absolute_lymphocyte_count" descriptor={descriptors.absolute_lymphocyte_count} type="number" value={formData?.absolute_lymphocyte_count} onChange={onChange} />
-          <ClinicalField label="Lymphocyte Doubling Time (months)" name="lymphocyte_doubling_time" descriptor={descriptors.lymphocyte_doubling_time} type="number" value={formData?.lymphocyte_doubling_time} onChange={onChange} />
-          <ClinicalField label="Serum Beta-2 Microglobulin (mg/L)" name="serum_beta2_microglobulin_level" descriptor={descriptors.serum_beta2_microglobulin_level} type="number" value={formData?.serum_beta2_microglobulin_level} onChange={onChange} />
+          <ClinicalField label="Absolute Lymphocyte Count (cells/µL)" labelIncludesUnit name="absolute_lymphocyte_count" descriptor={descriptors.absolute_lymphocyte_count} type="number" value={formData?.absolute_lymphocyte_count} onChange={onChange} />
+          <ClinicalField label="Lymphocyte Doubling Time (months)" labelIncludesUnit name="lymphocyte_doubling_time" descriptor={descriptors.lymphocyte_doubling_time} type="number" value={formData?.lymphocyte_doubling_time} onChange={onChange} />
+          <ClinicalField label="Serum Beta-2 Microglobulin (mg/L)" labelIncludesUnit name="serum_beta2_microglobulin_level" descriptor={descriptors.serum_beta2_microglobulin_level} type="number" value={formData?.serum_beta2_microglobulin_level} onChange={onChange} />
           <ClinicalField label="Clonal B-Lymphocyte Count" name="clonal_b_lymphocyte_count" descriptor={descriptors.clonal_b_lymphocyte_count} type="number" value={formData?.clonal_b_lymphocyte_count} onChange={onChange} />
-          <ClinicalField label="Clonal Bone Marrow B-Lymphocytes (%)" name="clonal_bone_marrow_b_lymphocytes" descriptor={descriptors.clonal_bone_marrow_b_lymphocytes} type="number" value={formData?.clonal_bone_marrow_b_lymphocytes} onChange={onChange} />
-          <ClinicalField label="QTcF Value (ms)" name="qtcf_value" descriptor={descriptors.qtcf_value} type="number" value={formData?.qtcf_value} onChange={onChange} />
-          <ClinicalField label="Largest Lymph Node Size (cm)" name="largest_lymph_node_size" descriptor={descriptors.largest_lymph_node_size} type="number" value={formData?.largest_lymph_node_size} onChange={onChange} />
-          <ClinicalField label="Spleen Size (cm)" name="spleen_size" descriptor={descriptors.spleen_size} type="number" value={formData?.spleen_size} onChange={onChange} />
+          <ClinicalField label="Clonal Bone Marrow B-Lymphocytes (%)" labelIncludesUnit name="clonal_bone_marrow_b_lymphocytes" descriptor={descriptors.clonal_bone_marrow_b_lymphocytes} type="number" value={formData?.clonal_bone_marrow_b_lymphocytes} onChange={onChange} />
+          <ClinicalField label="QTcF Value (ms)" labelIncludesUnit name="qtcf_value" descriptor={descriptors.qtcf_value} type="number" value={formData?.qtcf_value} onChange={onChange} />
+          <ClinicalField label="Largest Lymph Node Size (cm)" labelIncludesUnit name="largest_lymph_node_size" descriptor={descriptors.largest_lymph_node_size} type="number" value={formData?.largest_lymph_node_size} onChange={onChange} />
+          <ClinicalField label="Spleen Size (cm)" labelIncludesUnit name="spleen_size" descriptor={descriptors.spleen_size} type="number" value={formData?.spleen_size} onChange={onChange} />
         </div>
       </Section>
 
@@ -318,7 +330,7 @@ function MCLSection({ formData, onChange }: Pick<Props, 'formData' | 'onChange'>
           <div className="sm:col-span-2">
             <ClinicalField label="Protein Expressions" name="protein_expressions" descriptor={descriptors.protein_expressions} type="multiselect" value={formData?.protein_expressions} options={PROTEIN_EXPRESSION_OPTIONS} onChange={onChange} />
           </div>
-          <ClinicalField label="Ki-67 Proliferation Index (%)" name="ki67_proliferation_index" descriptor={descriptors.ki67_proliferation_index} type="number" value={formData?.ki67_proliferation_index} onChange={onChange} />
+          <ClinicalField label="Ki-67 Proliferation Index (%)" labelIncludesUnit name="ki67_proliferation_index" descriptor={descriptors.ki67_proliferation_index} type="number" value={formData?.ki67_proliferation_index} onChange={onChange} />
         </div>
       </Section>
 
@@ -326,9 +338,19 @@ function MCLSection({ formData, onChange }: Pick<Props, 'formData' | 'onChange'>
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
           <ClinicalField label="Lymphadenopathy" name="lymphadenopathy" descriptor={descriptors.lymphadenopathy} type="boolean" value={formData?.lymphadenopathy} onChange={onChange} />
           <ClinicalField label="Splenomegaly" name="splenomegaly" descriptor={descriptors.splenomegaly} type="boolean" value={formData?.splenomegaly} onChange={onChange} />
-          <ClinicalField label="Spleen Size (cm)" name="spleen_size" descriptor={descriptors.spleen_size} type="number" value={formData?.spleen_size} onChange={onChange} />
+          <ClinicalField label="Spleen Size (cm)" labelIncludesUnit name="spleen_size" descriptor={descriptors.spleen_size} type="number" value={formData?.spleen_size} onChange={onChange} />
           <ClinicalField label="Hepatomegaly" name="hepatomegaly" descriptor={descriptors.hepatomegaly} type="boolean" value={formData?.hepatomegaly} onChange={onChange} />
-          <ClinicalField label="Largest Lymph Node Size (cm)" name="largest_lymph_node_size" descriptor={descriptors.largest_lymph_node_size} type="number" value={formData?.largest_lymph_node_size} onChange={onChange} />
+          <ClinicalField label="Largest Lymph Node Size (cm)" labelIncludesUnit name="largest_lymph_node_size" descriptor={descriptors.largest_lymph_node_size} type="number" value={formData?.largest_lymph_node_size} onChange={onChange} />
+        </div>
+      </Section>
+
+      <Section title="Computed Criteria">
+        <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
+          <ClinicalField label="MIPI Risk" name="mipi_risk" descriptor={descriptors.mipi_risk} type="text" value={formData?.mipi_risk} onChange={onChange} />
+          <ClinicalField label="MIPI-c Risk" name="mipi_c_risk" descriptor={descriptors.mipi_c_risk} type="text" value={formData?.mipi_c_risk} onChange={onChange} />
+          <div className="sm:col-span-2">
+            <ClinicalField label="High-Risk MCL Criteria" name="high_risk_mcl_criteria" descriptor={descriptors.high_risk_mcl_criteria} type="text" value={formData?.high_risk_mcl_criteria} onChange={onChange} />
+          </div>
         </div>
       </Section>
     </>
@@ -342,11 +364,12 @@ function StagingBiomarkersSection({ formData, onChange }: Pick<Props, 'formData'
   const personId = (formData?.person_id ?? formData?.person) as number | undefined;
   const { descriptors } = useWritableFields(personId);
 
-  const field = (label: string, name: string, type: 'text' | 'number') => (
+  const field = (label: string, name: string, type: 'text' | 'number', labelIncludesUnit = false) => (
     <ClinicalField
       label={label}
       name={name}
       type={type}
+      labelIncludesUnit={labelIncludesUnit}
       value={formData?.[name]}
       descriptor={descriptors[name]}
       onChange={onChange}
@@ -359,7 +382,7 @@ function StagingBiomarkersSection({ formData, onChange }: Pick<Props, 'formData'
         {field('Lymph Node Status', 'lymph_node_status', 'text')}
         {field('Metastasis Status', 'metastasis_status', 'text')}
         {field('PD-L1 Combined Positive Score', 'pd_l1_combined_positive_score', 'number')}
-        {field('PD-L1 IC (%)', 'pd_l1_ic_percentage', 'number')}
+        {field('PD-L1 IC (%)', 'pd_l1_ic_percentage', 'number', true)}
         {field('PD-L1 Assay', 'pd_l1_assay', 'text')}
       </div>
     </Section>

@@ -3,7 +3,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { ArrowLeft, Check, AlertCircle, ChevronDown, ShieldCheck } from "lucide-react";
 import api from "@/api/axios";
-import { fetchWritableFields, LIFECYCLE, type FieldDescriptors } from "@/hooks/useWritableFields";
+import { editableWithoutFormStore, fetchWritableFields, LIFECYCLE, type FieldDescriptors } from "@/hooks/useWritableFields";
 // Profile fields now write through PatientRecord PATCH alongside clinical fields.
 import type { User } from "@/hooks/useAuth";
 import DeleteAccountDialog from "./DeleteAccountDialog";
@@ -350,6 +350,12 @@ export default function PatientDetail({
   const saveRevisionRef = useRef(0);
   const dirtyFieldsRef = useRef(new Set<string>());
   const confirmedWritesRef = useRef<Record<string, unknown>>({});
+  // A lab value's clinical date, keyed by field. It travels with the value in
+  // the PATCH as {value, date}; a date-only change re-sends the value (#2439).
+  const pendingDatesRef = useRef<Record<string, string>>({});
+  // The result id the last PATCH confirmed, per field. A later date-only edit
+  // names that exact result; a cached measurement list goes stale on save.
+  const confirmedFactIdsRef = useRef<Record<string, number>>({});
    
   const pendingDataRef = useRef<{ info: Record<string, unknown>; name: string } | null>(null);
    
@@ -480,28 +486,45 @@ export default function PatientDetail({
       const { patient_name: _echoed, ...info } = data.info as Record<string, unknown>;
       const renamed = !!data.name && data.name !== patientNameRef.current;
       const patchFields: Record<string, unknown> = {};
+      const sentDates: Record<string, string> = {};
 
       for (const [f, v] of Object.entries(info)) {
-        if (LIFECYCLE.has(f) || v === baseline[f]) continue;
+        if (f === 'no_pre_existing_conditions' || f === 'preexisting_conditions') continue;
+        const pendingDate = pendingDatesRef.current[f];
+        if (LIFECYCLE.has(f) || (v === baseline[f] && !pendingDate)) continue;
         const desc = descriptors[f];
-        if (desc?.writable && desc.target === 'patient_record') {
-          patchFields[f] = v;
+        const factId = v === baseline[f] ? confirmedFactIdsRef.current[f] : undefined;
+        const value = pendingDate
+          ? { value: v, date: pendingDate, ...(factId ? { fact_id: factId } : {}) }
+          : v;
+        if (editableWithoutFormStore(desc) && desc?.target === 'patient_record') {
+          patchFields[f] = value;
         } else if (!(f in descriptors)) {
           // Unknown to the descriptor (e.g. custom fields) — PATCH them too.
-          patchFields[f] = v;
+          patchFields[f] = value;
         }
+        if (pendingDate) sentDates[f] = pendingDate;
       }
 
       // All fields ride the single PatientRecord PATCH.
       if (renamed || Object.keys(patchFields).length > 0) {
-        await api.patch(
+        const response = await api.patch(
           `/patient-info/${personId}/`,
           renamed ? { ...patchFields, patient_name: data.name } : patchFields,
         );
+        const returned = (response.data as { fact_ids?: Record<string, number> } | undefined)?.fact_ids;
+        if (returned) Object.assign(confirmedFactIdsRef.current, returned);
         saveRevisionRef.current += 1;
         for (const f of Object.keys(patchFields)) {
           if (patientInfoRef.current) patientInfoRef.current[f] = info[f];
           confirmedWritesRef.current[f] = info[f];
+          // A value or date changed while this PATCH was in flight belongs to
+          // the next save; only clear the pair this response confirmed.
+          if (sentDates[f]
+              && pendingDatesRef.current[f] === sentDates[f]
+              && pendingDataRef.current?.info[f] === info[f]) {
+            delete pendingDatesRef.current[f];
+          }
           if (pendingDataRef.current?.info[f] === info[f]) dirtyFieldsRef.current.delete(f);
         }
       }
@@ -510,7 +533,7 @@ export default function PatientDetail({
       // must not remain an unsaved overlay across later server refreshes.
       for (const field of dirtyFieldsRef.current) {
         const descriptor = descriptors[field];
-        if (descriptor && (!descriptor.writable || descriptor.target !== 'patient_record')
+        if (descriptor && (!editableWithoutFormStore(descriptor) || descriptor.target !== 'patient_record')
             && pendingDataRef.current?.info[field] === info[field]) {
           dirtyFieldsRef.current.delete(field);
         }
@@ -613,9 +636,11 @@ export default function PatientDetail({
       .catch(() => {});
   }, [personId, adoptServerRecord]);
 
-  const handleFieldChange = useCallback((field: string, value: unknown) => {
+  const handleFieldChange = useCallback((field: string, value: unknown, date?: string) => {
     const base = pendingDataRef.current?.info ?? editedInfoRef.current;
     const updated = { ...base, [field]: value };
+    if (date) pendingDatesRef.current[field] = date;
+    else delete pendingDatesRef.current[field];
     if (value === patientInfoRef.current?.[field]) dirtyFieldsRef.current.delete(field);
     else dirtyFieldsRef.current.add(field);
 
@@ -940,6 +965,20 @@ export default function PatientDetail({
                       onNameChange={handleNameChange}
                       onZipcodeChange={handleZipcodeChange}
                       patientMode={patientMode}
+                      onConditionsSaved={(answer) => {
+                        saveRevisionRef.current += 1;
+                        for (const [field, value] of Object.entries(answer)) {
+                          dirtyFieldsRef.current.delete(field);
+                          confirmedWritesRef.current[field] = value;
+                        }
+                        patientInfoRef.current = { ...patientInfoRef.current, ...answer };
+                        if (pendingDataRef.current) {
+                          pendingDataRef.current.info = { ...pendingDataRef.current.info, ...answer };
+                        }
+                        setPatientInfo(previous => ({ ...previous, ...answer }));
+                        setEditedInfo(previous => ({ ...previous, ...answer }));
+                        editedInfoRef.current = { ...editedInfoRef.current, ...answer };
+                      }}
                     />
                   </>
                 )}

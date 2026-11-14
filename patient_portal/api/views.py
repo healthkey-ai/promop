@@ -19,7 +19,7 @@ from patient_portal.models import Identity
 from django.contrib.auth import logout, login, authenticate
 from django.db import DataError, IntegrityError, models, transaction
 from django.db.models import Case, CharField, Count, F, IntegerField, Prefetch, Q, Value, When
-from django.db.models.functions import Cast, Concat, Length
+from django.db.models.functions import Cast, Concat, Length, Lower, Trim
 from django.views.decorators.csrf import csrf_exempt
 from django.utils.decorators import method_decorator
 from django.utils import timezone
@@ -149,9 +149,12 @@ from .permissions import (
     PatientDeletePermission, PatientSelfScopePermission, ScopedTokenPermission,
     VocabReadPermission, LabSyncPermission, EtlProvisionPermission,
     get_request_org, is_service_token, is_machine_request, has_system_read_grant,
+    credential_allows_write,
 )
 from .providers.base import TokenClaims
-from .therapy_line_import import TherapyLineImportSerializer, import_therapy_lines
+from .therapy_line_import import (
+    TherapyLineImportPersonSerializer, TherapyLineImportSerializer, import_therapy_lines,
+)
 from .provenance_org import (
     PROVENANCE_ORG_HEADER, ProvenanceContext, header_organization, raise_on_foreign_attribution,
     resolve_explicit_organization,
@@ -182,25 +185,84 @@ def _genomics_type_concept(user, person):
     return 32865 if get_actor_role(user, person.person_id) in ('self', 'representative') else 32817
 
 
-def _patient_authorship(actor, person):
-    """project_single_value keywords for the author of a PatientRecord save.
-
-    The patient or a verified representative writes patient self-report; the
-    patient's own facts also carry PATIENT_SELF provenance. Anyone else, or a
-    service credential with no Identity, writes with the recipe's type.
-    """
+def _patient_author_role(actor, person):
+    """The caller's role for this person, or None for an anonymous caller."""
     from omop_core.authorization import get_actor_role
-    from omop_core.services.omop_projection import patient_self_report_type
 
     if not getattr(actor, 'is_authenticated', False):
-        return {}
-    role = get_actor_role(actor, person.person_id)
-    if role not in ('self', 'representative') or not (self_report := patient_self_report_type()):
-        return {}
+        return None
+    return get_actor_role(actor, person.person_id)
+
+
+def _propagate_pair_fact_dates(fact_dates, fact_ids):
+    """Copy a source pair's date and result id onto its canonical read-model (#2397).
+
+    A pair editor dates the source field; the projection that writes the fact
+    is on the canonical field. Both must carry the same clinical day. The pair
+    inventory is ``SOURCE_PAIR_CANONICALS``, the one the shared form and
+    derivation read; direct bilirubin maps to itself there, which is a no-op.
+    """
+    from omop_core.services.source_pair_dates import SOURCE_PAIR_CANONICALS
+
+    for source, canonical in SOURCE_PAIR_CANONICALS.items():
+        if source in fact_dates and canonical not in fact_dates:
+            fact_dates[canonical] = fact_dates[source]
+        if source in fact_ids and canonical not in fact_ids:
+            fact_ids[canonical] = fact_ids[source]
+
+
+def _authored_pair_dates(serializer, fact_dates):
+    """The clinical day to remember for each source pair this PATCH authored (#2426).
+
+    A dated edit names its day; an undated one projects onto today, as it always
+    did. Only pairs the serializer actually authored are here, so an autosave
+    echo cannot re-date a pending pair.
+    """
+    from django.utils import timezone
+    from omop_core.services.source_pair_dates import (
+        SOURCE_PAIR_CANONICALS, pair_sources_in,
+    )
+
+    sources = pair_sources_in(getattr(serializer, '_source_pairs', ()))
+    today = timezone.localdate()
+    dates = {}
+    for source in sources:
+        dates[source] = (
+            fact_dates.get(source)
+            or fact_dates.get(SOURCE_PAIR_CANONICALS[source])
+            or today
+        )
+    return dates
+
+
+def _patient_author(actor, person):
+    """(is the caller the patient or their representative, project_single_value keywords).
+
+    One role lookup answers both. The patient or a verified representative
+    writes patient self-report; the patient's own facts also carry
+    PATIENT_SELF provenance. Anyone else, or a service credential with no
+    Identity, writes with the recipe's type. A patient author with empty
+    keywords means the self-report type concept is not loaded.
+    """
+    from omop_core.services.omop_projection import patient_self_report_type
+
+    role = _patient_author_role(actor, person)
+    patient_author = role in ('self', 'representative')
+    if not patient_author or not (self_report := patient_self_report_type()):
+        return patient_author, {}
     authorship = {'type_concept_id': self_report}
     if role == 'self':
         authorship['patient_user_id'] = f'{actor.issuer}|{actor.sub}'
-    return authorship
+    return patient_author, authorship
+
+
+def _patient_authorship(actor, person):
+    """project_single_value keywords for the author of a PatientRecord save.
+
+    The medication-context writer wants only the keywords; the record
+    editors use _patient_author for the role as well.
+    """
+    return _patient_author(actor, person)[1]
 
 
 def _write_genetic_mutations(person, mutations, type_concept_id):
@@ -643,7 +705,10 @@ def _validate_location_fields(location_patch, person, patient_info=None):
     # and also against Location values for the projection.
     existing_lat = getattr(patient_info, 'latitude', None) if patient_info else None
     existing_lng = getattr(patient_info, 'longitude', None) if patient_info else None
-    if existing_lat is None and existing_lng is None and person.location_id:
+    if patient_info is None and person.location_id:
+        # Only a caller without a PatientRecord may borrow the Location pair;
+        # the DB constraint is on PatientRecord, so a partial patch against an
+        # empty record must be rejected rather than validated against Location.
         loc = Location.objects.filter(location_id=person.location_id).first()
         if loc:
             existing_lat = loc.latitude
@@ -660,7 +725,7 @@ def _validate_location_fields(location_patch, person, patient_info=None):
         })
 
 
-def _project_profile_fields(person, direct_fields, patch_data):
+def _project_profile_fields(person, direct_fields, patch_data, patient_info=None):
     """Project profile fields from PatientRecord onto Person/Location.
 
     Called after the serializer has saved profile values to PatientRecord.
@@ -690,47 +755,9 @@ def _project_profile_fields(person, direct_fields, patch_data):
     # therefore replace every OMOP representation together; otherwise a stale
     # birth_datetime could disagree with year/month/day after an edit.
     if profile_fields & {'date_of_birth', 'date_of_birth_precision'}:
-        dob = patch_data.get('date_of_birth')
-        if dob is None and 'date_of_birth' not in patch_data:
-            # Precision-only PATCH: reconstruct DOB from Person's existing fields.
-            if person.year_of_birth:
-                from datetime import date as _date
-                try:
-                    dob = _date(
-                        person.year_of_birth,
-                        person.month_of_birth or 1,
-                        person.day_of_birth or 1,
-                    )
-                except ValueError:
-                    dob = _date(person.year_of_birth, 1, 1)
-        if isinstance(dob, str):
-            dob = parse_date(dob)
-        precision = patch_data.get('date_of_birth_precision')
-        if dob:
-            if precision == 'year':
-                month_val = None
-                day_val = None
-            elif precision == 'month':
-                month_val = dob.month
-                day_val = None
-            else:
-                month_val = dob.month
-                day_val = dob.day
-            values = {
-                'year_of_birth': dob.year,
-                'month_of_birth': month_val,
-                'day_of_birth': day_val,
-                'birth_datetime': (
-                    timezone.make_aware(datetime.combine(dob, datetime.min.time()))
-                ),
-            }
-        else:
-            values = {
-                'year_of_birth': None,
-                'month_of_birth': None,
-                'day_of_birth': None,
-                'birth_datetime': None,
-            }
+        from omop_core.services.birth_dates import normalize_birth_date, person_birth_values
+        dob, precision = normalize_birth_date(person, patch_data)
+        values = person_birth_values(dob, precision)
         for attr, value in values.items():
             if getattr(person, attr) != value:
                 setattr(person, attr, value)
@@ -770,24 +797,19 @@ def _project_profile_fields(person, direct_fields, patch_data):
             location_updates[column] = incoming
 
         if location_updates:
-            location = None
-            if person.location_id:
-                location = Location.objects.filter(
-                    location_id=person.location_id
-                ).first()
-            if location is None:
-                location = Location(location_id=next_pk(Location, 'location_id'))
-            location_changed = [
-                c for c, v in location_updates.items() if getattr(location, c) != v
-            ]
-            for column, value in location_updates.items():
-                setattr(location, column, value)
-            if location._state.adding:
-                location.save()
-                person.location_id = location.location_id
-                person_changed.append('location_id')
-            elif location_changed:
-                location.save(update_fields=location_changed)
+            if {'latitude', 'longitude'} & location_fields:
+                # Project the effective pair, not just the submitted
+                # coordinate: a half-set Location breaks the next derivation.
+                if patient_info is None:
+                    patient_info = PatientRecord.objects.filter(person=person).first()
+                location_updates['latitude'] = getattr(patient_info, 'latitude', None)
+                location_updates['longitude'] = getattr(patient_info, 'longitude', None)
+            # Reuse the shared-form clone-on-write implementation: a Location
+            # deduplicated across Persons must never be mutated in place.
+            from omop_core.services.field_write_service import apply_location
+            location_dirty = set()
+            apply_location(person, location_updates, location_dirty)
+            person_changed.extend(sorted(location_dirty))
 
     if person_changed:
         person.save(update_fields=person_changed)
@@ -842,48 +864,33 @@ def _changed_fields(patient_record, previous_values, prev_val):
     }
 
 
+def _attestation_source(request, person):
+    """Provenance for an authored answer: who stated it, never a clinical decision."""
+    from patient_portal.services import patient_person_for
+
+    user = getattr(request, 'user', None)
+    if getattr(user, 'is_staff', False):
+        return 'clinician'
+    if patient_person_for(user) == person:
+        return 'patient'
+    from omop_core.authorization import get_actor_role
+    if get_actor_role(user, person.pk) == 'representative':
+        # Keep the explicit source within the existing 20-character column.
+        return 'proxy'
+    return 'clinician'
+
+
 def _write_record_revisions(patient_record, previous_values, request):
-    """Persist field-level revision-history rows for a PatientRecord update.
-
-    PHR-S FM TI.1.2#04. ``previous_values`` maps field name -> value BEFORE the
-    update (as captured by the PATCH path). We compare against the freshly saved
-    instance and write one RecordRevision per field whose value actually
-    changed, so a record's contents can be reconstructed over time.
-
-    Returns the list of created RecordRevision instances.
-    """
-    from omop_core.models import RecordRevision
-
-    def _norm(v):
-        # Normalize to a stable string form for storage + comparison.
-        return None if v is None else str(v)
+    """Persist field-level revision-history rows for a PatientRecord update."""
+    from omop_core.services.patient_record_revisions import write_record_revisions
 
     user = getattr(request, 'user', None)
     changed_by = (
         str(user.pk) if getattr(user, 'is_authenticated', False) and user.pk is not None
         else 'system'
     )
-
-    patient_record.refresh_from_db()
-    rows = []
-    for field, old in previous_values.items():
-        # Resolve the new value the same way the PATCH path captured the old one
-        # (FK fields are stored/compared via their {field}_id attribute).
-        fk_id = f'{field}_id'
-        new = getattr(patient_record, fk_id, None) if hasattr(patient_record, fk_id) else getattr(patient_record, field, None)
-        old_s, new_s = _norm(old), _norm(new)
-        if old_s == new_s:
-            continue
-        rows.append(RecordRevision(
-            patient_record=patient_record,
-            changed_by=changed_by,
-            field=field,
-            old_value=old_s,
-            new_value=new_s,
-        ))
-    if rows:
-        RecordRevision.objects.bulk_create(rows)
-    return rows
+    return write_record_revisions(
+        patient_record, previous_values, changed_by=changed_by)
 
 
 def _delete_omop_clinical_rows(person):
@@ -1033,14 +1040,60 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
         disease = self._normalize_all_param(params.get('disease'))
         if disease:
-            # Any cancer on the record, not only the primary one (#2182). The
-            # primary match also covers records not re-derived since.
+            from omop_core.models import DiseaseCategoryMapping
             from omop_core.services.disease_episodes import disease_slug
-            match = Q(disease__iexact=disease)
-            slug = disease_slug(disease)
-            if slug:
-                match |= Q(disease_slugs__contains=[slug])
-            queryset = queryset.filter(match)
+
+            category = next((c for c in DiseaseCategory
+                if disease.casefold() in {c.value.casefold(), c.label.casefold()}), None)
+            if category is None:
+                # Any cancer on the record, not only the primary one (#2182).
+                # The primary match also covers records not re-derived since.
+                match = Q(disease__iexact=disease)
+                slug = disease_slug(disease)
+                if slug:
+                    match |= Q(disease_slugs__contains=[slug])
+                queryset = queryset.filter(match)
+            else:
+                queryset = queryset.alias(_disease_key=Lower(Trim('disease')))
+                if category == DiseaseCategory.OTHER:
+                    # Other also includes a recorded disease not classified yet;
+                    # unknown/absent disease is not a diagnosis category. A
+                    # record with a classified secondary cancer is not Other.
+                    known_names = list(
+                        DiseaseCategoryMapping.objects
+                        .exclude(category=DiseaseCategory.OTHER)
+                        .values_list('disease_name', flat=True)
+                    )
+                    known_labels = [
+                        c.label for c in DiseaseCategory
+                        if c != DiseaseCategory.OTHER
+                    ]
+                    known_q = Q(_disease_key__in=[
+                        n.casefold() for n in known_names + known_labels
+                    ])
+                    for name in known_names + known_labels:
+                        slug = disease_slug(name)
+                        if slug:
+                            known_q |= Q(disease_slugs__contains=[slug])
+                    queryset = queryset.exclude(disease__isnull=True).exclude(
+                        _disease_key='').exclude(known_q)
+                else:
+                    category_names = list(
+                        DiseaseCategoryMapping.objects
+                        .filter(category=category)
+                        .values_list('disease_name', flat=True)
+                    )
+                    match = (
+                        Q(_disease_key=category.label.casefold())
+                        | Q(_disease_key__in=[
+                            n.casefold() for n in category_names
+                        ])
+                    )
+                    for name in category_names + [category.label]:
+                        slug = disease_slug(name)
+                        if slug:
+                            match |= Q(disease_slugs__contains=[slug])
+                    queryset = queryset.filter(match)
 
         stage = self._normalize_all_param(params.get('stage'))
         if stage:
@@ -1107,7 +1160,9 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
         from omop_core.models import DiseaseCategory, DiseaseCategoryChoice, DiseaseCategoryMapping
         rows = list(DiseaseCategoryChoice.objects.values_list('label', flat=True))
-        diseases = rows if rows else [c.label for c in DiseaseCategory]
+        diseases = sorted(set(rows or [c.label for c in DiseaseCategory]) | set(
+            queryset.exclude(disease__isnull=True).exclude(disease='')
+            .values_list('disease', flat=True).distinct()))
 
         # Categories as {value, label} objects
         category_rows = list(DiseaseCategoryChoice.objects.values('code', 'label'))
@@ -1309,7 +1364,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         if request.method == 'GET':
             return Response(_find(person, variant_id))
         if request.method == 'DELETE':
-            delete_variant(person, variant_id)
+            delete_variant(person, variant_id,
+                           type_concept_id=_genomics_type_concept(request.user, person))
             return Response(status=204)
         type_id = _genomics_type_concept(request.user, person)
         return Response(save_variant(person, request.data, variant_id, type_concept_id=type_id))
@@ -1344,6 +1400,19 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             for f in list(patch_data) if f in _PROFILE_DEMOGRAPHIC_FIELDS
         }
         mutations = patch_data.pop('genetic_mutations', None) if 'genetic_mutations' in patch_data else None
+        # Episode-derived line fields are projections of a therapy line, not
+        # columns: authoring them through the serializer would be undone by the
+        # next derivation (#2106). Collect them and write the line instead.
+        from omop_core.services.therapy_line_form import (
+            THERAPY_LINE_FORM_FIELDS, changed_line_values,
+        )
+        # The editor PATCHes the complete GET representation, so every line
+        # field arrives on every save (as the derived display name, or null).
+        # Only a value that differs from the record is an instruction.
+        therapy_line_edits = changed_line_values({
+            key: patch_data.pop(key) for key in list(patch_data)
+            if key in THERAPY_LINE_FORM_FIELDS
+        }, patient_info)
         # The editor PATCHes the complete GET representation.  A projected
         # mutation list carried back unchanged is therefore an autosave echo,
         # not an instruction to replace its OMOP rows (and it may be empty
@@ -1361,11 +1430,46 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # A dated edit is {field: {"value": ..., "date": "YYYY-MM-DD"}}: one
+        # result, not a structured value. Unwrap it before the serializer sees
+        # a field value and carry its clinical date into the projection. The
+        # shared form uses the same contract; the standalone editor used to
+        # lose the date picked on a lab row (#2439).
+        fact_dates = {}
+        requested_fact_ids = {}
+        if any(isinstance(value, dict) and set(value) in (
+                {'value', 'date'}, {'value', 'date', 'fact_id'})
+               for value in patch_data.values()):
+            from omop_core.services.field_write_service import split_dated_edits
+            from omop_core.services.write_descriptor import build_writable_field_descriptor
+            for field, value in list(patch_data.items()):
+                if not (isinstance(value, dict)
+                        and set(value) == {'value', 'date', 'fact_id'}):
+                    continue
+                try:
+                    requested_fact_ids[field] = int(value['fact_id'])
+                except (TypeError, ValueError) as exc:
+                    raise ValidationError(
+                        {field: 'fact_id must identify the result being dated.'}) from exc
+                patch_data[field] = {key: item for key, item in value.items()
+                                     if key != 'fact_id'}
+            patch_data, fact_dates, refusal = split_dated_edits(
+                patch_data, build_writable_field_descriptor())
+            if refusal is not None:
+                raise ValidationError({'detail': refusal})
+            _propagate_pair_fact_dates(fact_dates, requested_fact_ids)
+
+        projected_fact_ids = {}
         with transaction.atomic():
             # Match derivation's lock order and serialize the read/modify/write
             # of user_edited_fields as well as same-day OMOP projection.
             patient_info = PatientRecord.objects.select_for_update().get(pk=patient_info.pk)
-            serializer = PatientRecordSerializer(patient_info, data=patch_data, partial=True)
+            serializer = PatientRecordSerializer(
+                patient_info, data=patch_data, partial=True,
+                # A dated correction names its day even when the number and unit
+                # are unchanged, so its pair is still the reader's fact.
+                context={'dated_fields': set(fact_dates)},
+            )
             serializer.is_valid(raise_exception=True)
             # Validate location fields early, before serializer.save() writes
             # to PatientRecord — the model has a check constraint requiring
@@ -1380,14 +1484,56 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 for field in serializer.validated_data
                 if hasattr(patient_info, field)
             }
+            derived_from_pair = set(getattr(serializer, '_derived_from_pair', ()))
+            date_only_fields = {
+                # A date with an unchanged value is a correction, not a new
+                # result: `move_owned_fact_date` moves the fact this projector
+                # owns, with the named one when the client sends a fact_id and
+                # the newest matching one otherwise. When no owned fact
+                # matches, the projection below records a new result instead
+                # of refusing (an equal value on another day is legitimate,
+                # #2454 review).
+                field for field in fact_dates
+                if field in serializer.validated_data
+                and serializer.validated_data[field] == previous_values.get(field)
+            }
             direct_fields = {
                 field for field in serializer.validated_data
                 if field in PATIENT_RECORD_OMOP_MAPPED_FIELDS
                 and (serializer.validated_data[field] != previous_values.get(field)
+                     or field in fact_dates  # a date-only correction still names its day
                      or (field in {'relapse_count', 'treatment_refractory_status'}
                          and field not in (patient_info.therapy_overrides or {})
                          and serializer.validated_data[field] is not None))
             }
+            # Direct bilirubin's pair is one fact (#2318): a changed unit with
+            # the same number still needs the projection to carry the new unit.
+            from omop_core.services import direct_bilirubin_units as _direct_units
+            if (_direct_units.PAIR_FIELD in serializer.validated_data
+                    and serializer.validated_data.get(_direct_units.UNIT_FIELD)
+                    != previous_values.get(_direct_units.UNIT_FIELD)):
+                direct_fields.add(_direct_units.PAIR_FIELD)
+            # A resend of a pending pair whose projection failed is a retry, not
+            # an authored edit, so the serializer drops it as an echo. Project
+            # it again on the day it was first entered, without dating it again
+            # (#2426); the shared form's retry has the same contract.
+            from omop_core.services.source_pair_dates import (
+                SOURCE_PAIR_CANONICALS, pair_sources_in, stored_dates,
+            )
+            pending_pair_dates = stored_dates(patient_info)
+            authored_pairs = pair_sources_in(
+                getattr(serializer, '_source_pairs', ()))
+            retried_pairs = {
+                source for source in pair_sources_in(serializer.validated_data)
+                if source in pending_pair_dates
+                and source in (patient_info.user_edited_fields or [])
+                and source not in authored_pairs
+            }
+            for source in retried_pairs:
+                canonical = SOURCE_PAIR_CANONICALS[source]
+                if canonical in serializer.validated_data:
+                    direct_fields.add(canonical)
+                    fact_dates.setdefault(canonical, pending_pair_dates[source])
             _apply_patient_name(person, patient_name)
             if priority_edits:
                 from omop_core.services.genomics import replace_priority_fields
@@ -1435,7 +1581,7 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             profile_patch_data = dict(serializer.validated_data)
             profile_patch_data.update(demographics)
             profile_projected = _project_profile_fields(
-                person, direct_fields, profile_patch_data,
+                person, direct_fields, profile_patch_data, patient_info,
             )
             if 'date_of_birth' in profile_projected:
                 # PatientRecord.save calculates age from its related Person when
@@ -1445,9 +1591,20 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             clinical_fields = direct_fields - profile_projected
 
             if clinical_fields:
-                edited = set(patient_info.user_edited_fields or []) | clinical_fields
+                # A source pair is the reader's fact; the canonical it derives
+                # is a read-model, so it must not enter the pending set as if
+                # it were a second edit (and must not retire the pair below).
+                edited = (
+                    set(patient_info.user_edited_fields or [])
+                    | (clinical_fields - derived_from_pair)
+                    | set(getattr(serializer, '_source_pairs', ()))
+                )
                 patient_info.user_edited_fields = sorted(edited)
-                patient_info.save(update_fields=['user_edited_fields'])
+                from omop_core.services.source_pair_dates import remember_dates
+                remember_dates(
+                    patient_info, _authored_pair_dates(serializer, fact_dates))
+                patient_info.save(update_fields=[
+                    'user_edited_fields', 'pending_source_pair_dates'])
             _write_record_revisions(patient_info, previous_values, request)
 
             # Handle language skills (PersonLanguageSkill rows).
@@ -1468,23 +1625,70 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     projection_data['medication_contexts'] = context_delta(
                         previous_values.get('medication_contexts') or {},
                         projection_data['medication_contexts'])
-                projected = self._project_mapped_fields(
+                projected, projected_fact_ids = self._project_mapped_fields(
                     person, clinical_fields, projection_data, actor=request.user,
+                    fact_dates=fact_dates, date_only_fields=date_only_fields,
+                    known_fact_ids=requested_fact_ids,
                 )
+                if _direct_units.PAIR_FIELD in projected:
+                    # A successful projection confirms the pair as a whole; an
+                    # orphan unit marker would re-attach the old unit to a
+                    # later import.
+                    projected.add(_direct_units.UNIT_FIELD)
                 patient_info.user_edited_fields = sorted(
                     set(patient_info.user_edited_fields or []) - projected
                 )
-                recompute_patient_record_fields(patient_info, changed_fields=clinical_fields)
+                recompute_patient_record_fields(
+                    patient_info,
+                    changed_fields=clinical_fields,
+                    pair_derived=derived_from_pair,
+                )
                 patient_info.refresh_from_db()
-            elif profile_projected or touched_languages:
+            elif profile_projected:
                 from omop_core.services.patient_record_service import recompute_patient_record_fields
                 recompute_patient_record_fields(patient_info, changed_fields=profile_projected)
                 patient_info.refresh_from_db()
 
-        return Response({**PatientRecordSerializer(patient_info).data, 'previous_values': previous_values})
+            # Rows are written above; the flattened columns the matcher reads
+            # are derived from them and were the one thing a language edit
+            # left stale until the next full derivation.
+            if touched_languages:
+                from omop_core.services.patient_record_service import sync_language_columns
+                patient_info = sync_language_columns(person, patient_info)
+
+            # Full-form autosave echoes are not confirmations (#1988). Only an
+            # actual change of the answer may create/renew its provenance.
+            # Category edits can withdraw it, but cannot authenticate an old True.
+            if ('no_pre_existing_conditions' in direct_fields
+                    or ('preexisting_conditions' in direct_fields
+                        and patient_info.no_pre_existing_conditions is not True)):
+                from omop_core.services.pre_existing_conditions import (
+                    sync_no_preexisting_conditions,
+                )
+                sync_no_preexisting_conditions(
+                    patient_info, source=_attestation_source(request, person))
+
+            # Authoring a line is part of this save, not a follow-up: a refusal
+            # must roll back the rest of the PATCH with it, as any other invalid
+            # field would, and a write must not outlive a 400.
+            if therapy_line_edits:
+                from omop_core.services.therapy_line_form import author_lines_from_form
+                applied, rejected = author_lines_from_form(
+                    person, therapy_line_edits, disease=patient_info.disease)
+                if rejected:
+                    raise ValidationError(rejected)
+                patient_info.refresh_from_db()
+
+        body = {**PatientRecordSerializer(patient_info).data, 'previous_values': previous_values}
+        if projected_fact_ids:
+            # The client uses these ids to correct a result's date later; a
+            # cached measurement list goes stale as soon as this write lands.
+            body['fact_ids'] = projected_fact_ids
+        return Response(body)
 
     @staticmethod
-    def _project_mapped_fields(person, direct_fields, patch_data, actor=None):
+    def _project_mapped_fields(person, direct_fields, patch_data, actor=None,
+                               fact_dates=None, date_only_fields=(), known_fact_ids=None):
         """Project validated edits using the editor's curated or built-in recipe.
 
         Each projection uses a savepoint so failure preserves the PatientRecord
@@ -1497,7 +1701,9 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
         PATIENT_SELF provenance row. Anyone else's keeps the recipe's type.
         """
         from omop_core.services.omop_projection import project_single_value, projection_for_descriptor
-        from omop_core.services.write_descriptor import build_writable_field_descriptor
+        from omop_core.services.write_descriptor import (
+            PINNED_PROJECTION_FIELDS, build_writable_field_descriptor,
+        )
 
         if 'medication_contexts' in direct_fields:
             from omop_core.services.medication_context import project_record_contexts
@@ -1510,24 +1716,68 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 descriptors = build_writable_field_descriptor()
         except Exception:
             logger.warning('Could not resolve OMOP projections')
-            return set()
+            return set(), {}
+        fact_dates = fact_dates or {}
+        date_only_fields = set(date_only_fields)
+        known_fact_ids = known_fact_ids or {}
         projected = set()
+        fact_ids = {}
         authorship = None
+        patient_author_without_type = False
         for field in direct_fields:
             if field == 'medication_contexts':
                 continue  # Per-exposure attributes have their dedicated forward projector.
             projection = projection_for_descriptor(descriptors.get(field))
             if projection:
                 if authorship is None:
-                    authorship = _patient_authorship(actor, person)
+                    patient_author, authorship = _patient_author(actor, person)
+                    patient_author_without_type = patient_author and not authorship
+                if field in PINNED_PROJECTION_FIELDS and patient_author_without_type:
+                    # Without 32865 the patient's fact cannot be told apart
+                    # from a clinical one; a current-state answer must not
+                    # overwrite today's clinical fact. Keep the record value.
+                    continue
+                if field in date_only_fields:
+                    from omop_core.services.omop_projection import (
+                        AmbiguousFactDateError, move_owned_fact_date,
+                    )
+                    try:
+                        moved = move_owned_fact_date(
+                            person, field, patch_data[field], projection, fact_dates[field],
+                            type_concept_id=authorship.get('type_concept_id'),
+                            fact_id=known_fact_ids.get(field),
+                        )
+                    except AmbiguousFactDateError as exc:
+                        raise ValidationError({field: str(exc)}) from exc
+                    if moved is False:
+                        raise ValidationError({field: (
+                            'This result was not written here, so its date cannot be '
+                            'corrected. Edit the value to record a corrected result.')})
+                    if moved:
+                        projected.add(field)
+                        fact_ids[field] = moved
+                        continue
                 if project_single_value(person, field, patch_data[field], projection,
-                                        acknowledge_existing=True, **authorship):
+                                        acknowledge_existing=True,
+                                        fact_date=fact_dates.get(field), **authorship):
                     # Occurrences and structured answers need their dedicated
                     # extractors before their saved values can be acknowledged.
+                    # A pinned current-state answer is never read back from
+                    # OMOP, so it stays pending here as it does on the shared
+                    # form; the two write paths must agree on what pending means.
                     if (projection['omop_table'] in ('measurement', 'observation')
-                            and projection.get('value_kind') != 'json'):
+                            and projection.get('value_kind') != 'json'
+                            and field not in PINNED_PROJECTION_FIELDS):
                         projected.add(field)
-        return projected
+                        from omop_core.services.omop_projection import projected_fact_id
+                        fact_id = projected_fact_id(
+                            person, field, patch_data[field], projection,
+                            fact_dates.get(field),
+                            type_concept_id=authorship.get('type_concept_id'),
+                        )
+                        if fact_id is not None:
+                            fact_ids[field] = fact_id
+        return projected, fact_ids
 
     @action(detail=True, methods=['get'], permission_classes=[ScopedTokenPermission, PatientSelfScopePermission])
     def provenance(self, request, pk=None):
@@ -1775,6 +2025,16 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                 'patient_info': patient_serializer.data,  # legacy wire format — preserved for frontend/federation host compatibility
                 'user': user_serializer.data,
                 'patient_name': full_name,
+                # The shared form gates its controls on this flag before the
+                # descriptor arrives. Emitted here by the same rules the writes
+                # enforce — patient access *and* the credential's write scope,
+                # so a read-only OAuth/service token is not offered controls
+                # whose PATCH is refused. A host proxy no longer has to add it
+                # (#2441).
+                'write_enabled': (
+                    credential_allows_write(request)
+                    and _caller_may_write_patient(request, person.person_id)
+                ),
             })
 
         response = self._patch_record(request, person, patient_info)
@@ -5742,12 +6002,135 @@ def _csv_row_write_error(request, person_id: int, upload_org=None) -> str | None
     return 'caller does not have write access to this patient'
 
 
+def _explicit_answer_write(request, person):
+    """``(403 response or None, attestation source)`` for a deliberate answer.
+
+    The answer endpoints (pre-existing conditions, negative answers) share one
+    write check. The second ``can_write_patient`` call does not change the
+    outcome today: ``_caller_may_write_patient`` takes its org path only for a
+    client_credentials token, which ``is_machine_request`` skips here, and
+    for every other non-staff caller it already asks ``can_write_patient``.
+    It is kept as a guard should either rule change. A host credential attests
+    as ``host-explicit``; a person as their role.
+    """
+    read_only = Response({'detail': 'You have read-only access to this patient.'}, status=403)
+    if not _caller_may_write_patient(request, person.person_id):
+        return read_only, None
+    machine = is_machine_request(request)
+    if not machine and not getattr(request.user, 'is_staff', False):
+        from omop_core.authorization import can_write_patient
+        if not can_write_patient(request.user, person.person_id):
+            return read_only, None
+    source = ('host-explicit' if machine
+              else f'{_attestation_source(request, person)}-explicit')
+    return None, source
+
+
 class PatientRecordV1ViewSet(PatientRecordViewSet):
     """v1-only PatientRecord surface.
 
     The legacy /api/patient-info/ prefix registers PatientRecordViewSet itself,
     so anything added there widens a frozen API. New actions belong here.
     """
+
+    def partial_update(self, request, pk=None):
+        # The shared field form opts into explicit per-field acknowledgements.
+        # Other v1 clients keep their existing full-record serializer contract.
+        if request.headers.get('X-Patient-Form') != '1':
+            return super().partial_update(request, pk=pk)
+        from omop_core.services.patient_form import apply_patient_form_patch
+        person, record, error = self._resolve_patient_with_auth(request, pk)
+        if error is not None:
+            return error
+        if not _caller_may_write_patient(request, person.person_id):
+            return Response({'detail': 'You have read-only access to this patient.'}, status=403)
+        if not isinstance(request.data, dict) or not request.data:
+            return Response({'detail': 'Provide a non-empty object of field edits.'}, status=400)
+        payload = request.data.copy()
+        # Sensitive profile fields are staff-only, matching the native PATCH.
+        # Silent drop (not 400) so an autosave carrying the full GET
+        # representation cannot write them.
+        if not getattr(request.user, 'is_staff', False):
+            for field in self._STAFF_ONLY_FIELDS:
+                payload.pop(field, None)
+        try:
+            patient_author, authorship = _patient_author(request.user, person)
+            # Without 32865 the patient's fact cannot be told apart from a
+            # clinical one. _project_side_effects skips pinned current-state
+            # fields; non-pinned fields project with the recipe type, matching
+            # the native PATCH. The PatientRecord answer is already saved.
+            actor = getattr(request, 'user', None)
+            changed_by = (
+                str(actor.pk) if getattr(actor, 'is_authenticated', False)
+                and actor.pk is not None else 'system'
+            )
+            record, result = apply_patient_form_patch(
+                person, payload, authorship=authorship, patient_author=patient_author,
+                changed_by=changed_by,
+            )
+        except DjangoValidationError as exc:
+            # Every refusal is a ValidationError by now, and its messages are
+            # written for the reader; nothing here forwards a caught
+            # exception's text (code scanning `py/stack-trace-exposure`).
+            detail = '; '.join(exc.messages)
+            body = {'detail': detail}
+            errors = getattr(exc, 'message_dict', None)
+            if errors:
+                body['errors'] = errors
+                # The shared-form contract reports per-field refusals here too;
+                # a computed-only assignment is one of them (#2135).
+                body['rejected'] = errors
+            return Response(body, status=400)
+        if not result.applied:
+            return Response({'detail': 'No fields were saved.', 'rejected': result.rejected}, status=400)
+        return Response({'patient_info': PatientRecordSerializer(record, context={'request': request}).data,
+                         'patient_name': _rendered_patient_name(person),
+                         'write': {'applied': result.applied, 'rejected': result.rejected,
+                                   'deferred_profile': sorted(result.profile)}})
+
+    @action(detail=True, methods=['get', 'post'], url_path='preexisting-conditions-answer',
+            permission_classes=[PatientCrudPermission, PatientSelfScopePermission])
+    def preexisting_conditions_answer(self, request, pk=None):
+        person, record, error = self._resolve_patient_with_auth(request, pk)
+        if error is not None:
+            return error
+        if request.method == 'GET':
+            return Response({'no_pre_existing_conditions': record.no_pre_existing_conditions,
+                             'preexisting_conditions': record.preexisting_conditions})
+        denied, source = _explicit_answer_write(request, person)
+        if denied is not None:
+            return denied
+        from .preexisting_conditions import write_answer
+        return write_answer(request, record, source=source,
+                            revision_writer=_write_record_revisions)
+
+    @action(detail=True, methods=['get', 'post'], url_path='negative-answer',
+            permission_classes=[PatientCrudPermission, PatientSelfScopePermission])
+    def negative_answer(self, request, pk=None):
+        """Explicit confirmation of no active infection / no other malignancy (#5666)."""
+        person, record, error = self._resolve_patient_with_auth(request, pk)
+        if error is not None:
+            return error
+        from omop_core.api.negative_answers import FIELDS, source_value, write_answer
+        if request.method == 'GET':
+            field = request.query_params.get('field')
+            if field not in FIELDS:
+                return Response({'detail': 'Choose a supported negative answer.'}, status=400)
+            from omop_core.models import ExplicitNegativeAnswer
+            attested = ExplicitNegativeAnswer.objects.filter(
+                person_id=person.pk, field=field, answer=True,
+            ).exists()
+            return Response({
+                'field': field,
+                'value': getattr(record, field),
+                'confirmed': attested,
+                'source': source_value(record, field),
+            })
+        denied, source = _explicit_answer_write(request, person)
+        if denied is not None:
+            return denied
+        return write_answer(request, record, source=source,
+                            revision_writer=_write_record_revisions)
 
     @action(detail=False, methods=['get'], url_path='writable-fields')
     def writable_fields(self, request: Request) -> Response:
@@ -5769,9 +6152,45 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
         before rendering is to be told the truth for the person doing the
         editing.
         """
-        from omop_core.services.write_descriptor import build_writable_field_descriptor
+        from omop_core.services.write_descriptor import (
+            DESCRIPTOR_META_KEY, build_writable_field_descriptor,
+        )
+        from omop_core.services.patient_form import patient_form_descriptors
 
+        shared_form = request.headers.get('X-Patient-Form') == '1'
         descriptor = build_writable_field_descriptor()
+        # patient_form_descriptors enriches fields only and drops the envelope;
+        # the store's schema_version gate needs it, or it reads every response
+        # as a legacy descriptor and never refuses an unknown version.
+        meta = descriptor.get(DESCRIPTOR_META_KEY)
+
+        def shared(entries, **kwargs):
+            enriched = patient_form_descriptors(entries, **kwargs)
+            if meta is not None:
+                enriched[DESCRIPTOR_META_KEY] = meta
+            return enriched
+
+        if shared_form:
+            descriptor = shared(descriptor)
+        elif request.query_params.get('envelope') != '1':
+            # The plain response stays dev's field-only mapping: clients that
+            # iterate it predate the envelope and break on a key without
+            # `writable`. The versioned envelope is opt-in, with the shared-form
+            # header or `?envelope=1` (#2418 regression review).
+            descriptor.pop(DESCRIPTOR_META_KEY, None)
+        if not shared_form:
+            # A normalised lab read-model (hemoglobin_g_dl, ...) is edited
+            # through its source pair only by the shared form. The native
+            # PATCH still accepts the canonical value and retires the pair, and
+            # plain-descriptor hosts (EXACT, the standalone view) have no pair
+            # editor: in dev these were writable fields. Say so here; the
+            # caller restriction below still applies (#2418 regression review).
+            descriptor = {
+                name: ({**entry, 'writable': True}
+                       if isinstance(entry, dict) and entry.get('normalised_read_model')
+                       else entry)
+                for name, entry in descriptor.items()
+            }
 
         raw_person = request.query_params.get('person_id')
         if raw_person is None:
@@ -5785,7 +6204,27 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        if _caller_may_write_patient(request, person_id):
+        record = (PatientRecord.objects.filter(person_id=person_id).first()
+                  if shared_form else None)
+        org = None if is_service_token(request) else get_request_org(request)
+        # An org client passes _caller_may_write_patient for an unowned
+        # (NULL-org) record, but the shared-form PATCH resolves the patient
+        # like retrieve() and 404s it. Describe it read-only, without this
+        # patient's data (fact dates, edit markers, stored units).
+        unreadable = (shared_form and record is not None and org is not None
+                      and record.organization != org)
+        if not unreadable and _caller_may_write_patient(request, person_id):
+            if shared_form:
+                descriptor = shared(descriptor, record=record)
+                if not getattr(request.user, 'is_staff', False):
+                    for field in self._STAFF_ONLY_FIELDS:
+                        entry = descriptor.get(field)
+                        if entry is not None:
+                            descriptor[field] = {
+                                **entry, 'writable': False,
+                                'read_only_for_caller': True,
+                                'reason': 'Staff only.',
+                            }
             return Response(descriptor)
 
         # Read-only for this caller: keep every entry, so the client still knows
@@ -5797,9 +6236,23 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
         )
         return Response({
             field: (
-                entry if not entry.get('writable')
-                else {**entry, 'writable': False, 'read_only_for_caller': True,
-                      'reason': reason}
+                # A normalised read-model is not `writable`, but the standalone
+                # editor offers it (a canonical write is honoured, #2425), so it
+                # needs the caller restriction too.
+                entry if not (entry.get('writable') or entry.get('answerable')
+                              or entry.get('normalised_read_model'))
+                else {
+                    **entry,
+                    'writable': False,
+                    'read_only_for_caller': True,
+                    # An explicit answer has its own endpoint, so its
+                    # `writable` was already false and the old branch left it
+                    # looking answerable to a read-only caller (#5665). The
+                    # permission is the same write access; this flag is what
+                    # the client honours.
+                    **({'answerable': False} if entry.get('answerable') else {}),
+                    'reason': reason,
+                }
             )
             for field, entry in descriptor.items()
         })
@@ -7359,72 +7812,6 @@ def _key_class(attribution, organization):
     return cls
 
 
-def _normalize_bulk_measurement_rows(model_cls, new_ids):
-    """Normalize units on newly-inserted Measurement rows (post-create).
-
-    Groups rows by ``measurement_source_value`` and converts each group to its
-    approved mapping's curated unit (``destination_unit_concept``). A row with
-    no approved mapping, or one whose unit an approved axis variant owns, is
-    stored as sent: neither names a unit a curator chose (#2157).
-
-    Works on already-persisted rows so the upsert identity is never altered.
-    """
-    from omop_core.models import SourceCodeAxisVariant
-    from omop_core.services.canonical_units import (
-        normalize_measurement_units, unit_code,
-    )
-
-    rows = model_cls.objects.filter(pk__in=new_ids)
-
-    # Collect unique source values from the inserted rows.
-    source_values = set(
-        rows.exclude(measurement_source_value__isnull=True)
-        .exclude(measurement_source_value='')
-        .values_list('measurement_source_value', flat=True)
-        .distinct()
-    )
-    if not source_values:
-        return
-
-    # Batch-fetch approved mappings for these source values.
-    mappings_by_sv = {}
-    sccm_qs = (
-        SourceCodeConceptMapping.objects
-        .filter(
-            source_code__in=source_values,
-            omop_table='measurement',
-            status='approved',
-        )
-        .select_related('destination_unit_concept')
-    )
-    for m in sccm_qs:
-        mappings_by_sv.setdefault(m.source_code, m)
-
-    # Units owned by approved variants, per mapping.
-    mapping_ids = [m.id for m in mappings_by_sv.values()
-                   if m.axis_variant_count and m.destination_unit_concept_id]
-    variant_units = defaultdict(set)
-    if mapping_ids:
-        for mapping_id, units in SourceCodeAxisVariant.objects.filter(
-            mapping_id__in=mapping_ids,
-            status='approved',
-            target_concept__isnull=False,
-        ).values_list('mapping_id', 'units'):
-            variant_units[mapping_id].update(units or ())
-
-    for sv, mapping in mappings_by_sv.items():
-        if not mapping.destination_unit_concept_id:
-            continue
-        sv_qs = rows.filter(measurement_source_value=sv)
-        owned = variant_units.get(mapping.id)
-        if owned:
-            spellings = [
-                raw for raw in sv_qs.values_list('unit_source_value', flat=True).distinct()
-                if raw and unit_code(raw) in owned
-            ]
-            sv_qs = sv_qs.exclude(unit_source_value__in=spellings)
-        normalize_measurement_units(sv_qs, mapping)
-
 
 def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances,
                       organization=None, content_match=True, writable=(),
@@ -8541,8 +8928,10 @@ class _OmopBulkCreateMixin:
         if any(pk_errors):
             return Response(pk_errors, status=status.HTTP_400_BAD_REQUEST)
 
-        # many=True yields positionally-aligned per-index error dicts, so the
-        # operator can tell which of N rows to fix.
+        # Preserve this bounded endpoint's positionally-aligned error contract.
+        # DRF 3.18 defaults to sparse index dictionaries; leave that global
+        # default and list-level errors intact, expanding only valid row indices
+        # after the batch-size guard above has limited the allocation.
         serializer = self.get_serializer(data=rows, many=True)
         _prefetch_bulk_related(serializer, rows)
         serializer.is_valid()
@@ -8677,16 +9066,6 @@ class _OmopBulkCreateMixin:
                         setattr(inst, pk_field, pk)
                     model_cls.objects.bulk_create(instances)
                     ids, updated = list(new_ids), 0
-
-                # Normalize units on newly-inserted Measurement rows (#2088).
-                # Done AFTER upsert/bulk_create because value_as_number is part
-                # of the Measurement upsert key — normalizing before the match
-                # would change the identity and create duplicates on a re-run.
-                # Key-matched rows were rewritten with the value as sent, so
-                # they are normalized like inserted ones.
-                if model_cls is Measurement and (new_ids or keyed_updates):
-                    _normalize_bulk_measurement_rows(
-                        model_cls, list(new_ids) + list(keyed_updates))
 
                 # Concept-duplicate detection (opt-in).
                 concept_dup_warn, concept_dup_reject = _parse_concept_dup_flags(
@@ -16080,13 +16459,20 @@ class TherapyLineViewSet(_TherapyHostPolicy, _PackagedTherapyLineViewSet):
             permission_classes=[EtlWritePermission])
     def bulk_upsert(self, request: Request) -> Response:
         """Upsert one person's lines of therapy from an ETL feed."""
+        # Authorize the patient before serializer validation consults their
+        # disease to validate outcome aliases and line identity.
+        person_serializer = TherapyLineImportPersonSerializer(
+            data=request.data,
+        )
+        person_serializer.is_valid(raise_exception=True)
+        _authorize_person_write(request, person_serializer.validated_data['person'])
         serializer = TherapyLineImportSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         person = serializer.validated_data['person']
-        _authorize_person_write(request, person)
         return import_therapy_lines(
             person, serializer.validated_data['lines'],
             _provenance_context(request, header=True), _skip_refresh_requested(request),
+            authorize_person=lambda locked_person: _authorize_person_write(request, locked_person),
         )
 
 

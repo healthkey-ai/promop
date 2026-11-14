@@ -33,12 +33,16 @@ vi.mock('@/hooks/useVocabulary', () => ({
 }));
 
 vi.mock('@/hooks/useLabMeasurements', () => ({
-  useLabMeasurements: vi.fn(() => ({ grouped: new Map(), isLoading: false })),
+  useLabMeasurements: vi.fn(() => ({ grouped: new Map([[
+    '718-7', { sourceValue: '718-7', unit: 'g/dL',
+      values: [{ measurement_id: 55, measured_at: '2026-11-10' }] },
+  ]]), isLoading: false })),
 }));
 
 import api from '@/api/axios';
 
 const DESCRIPTORS = {
+  preexisting_conditions: { kind: 'direct', writable: true, target: 'patient_record' },
   date_of_birth: {
     kind: 'direct', writable: true, target: 'patient_record',
     projection_target: 'person', value_kind: 'date',
@@ -59,7 +63,7 @@ const DESCRIPTORS = {
   },
   hemoglobin_g_dl: {
     kind: 'direct', writable: true, target: 'patient_record',
-    value_kind: 'number',
+    value_kind: 'number', dated: true,
     projection: {
       omop_table: 'measurement', concept_id: 3000963, code: '718-7',
       type_concept_id: 32856, source_value: '718-7',
@@ -68,6 +72,8 @@ const DESCRIPTORS = {
 };
 
 const PATIENT = {
+  no_pre_existing_conditions: true,
+  preexisting_conditions: [],
   person_id: 261,
   patient_name: 'Alishia Tawny Howell',
   date_of_birth: '1970-01-01',
@@ -123,6 +129,26 @@ function patchBody() {
 }
 
 describe('PatientDetail save — the edit, not the record', () => {
+  it('keeps explicit withdrawal out of pending autosave while preserving other edits', async () => {
+    (api.post as ReturnType<typeof vi.fn>).mockResolvedValue({ data: {
+      no_pre_existing_conditions: null, preexisting_conditions: [],
+    } });
+    await renderAndLoad();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Withdraw answer' })).toBeEnabled());
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    fireEvent.change(screen.getByDisplayValue('howell@example.org'), { target: { value: 'new@example.org' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Withdraw answer' }));
+    await waitFor(() => expect(screen.getByText(/Not answered/)).toBeInTheDocument());
+    await act(async () => { vi.advanceTimersByTime(2100); });
+    await waitFor(() => expect(patchBody()).toMatchObject({ email: 'new@example.org' }));
+    expect(patchBody()).not.toHaveProperty('no_pre_existing_conditions');
+    expect(patchBody()).not.toHaveProperty('preexisting_conditions');
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm no pre-existing conditions' }));
+    await waitFor(() => expect(api.post).toHaveBeenLastCalledWith(
+      '/v1/patient-records/261/preexisting-conditions-answer/', {
+        action: 'confirm_none', expected_flag: null, expected_categories: [],
+      }));
+  });
   it('routes a date-of-birth correction through the PatientRecord PATCH', async () => {
     await renderAndLoad();
     await editAndSave('1970-01-01', '1971-02-03');
@@ -139,6 +165,141 @@ describe('PatientDetail save — the edit, not the record', () => {
     await waitFor(() => expect(api.patch).toHaveBeenCalled());
     const body = patchBody();
     expect(body).toMatchObject({ anc_thousand_per_ul: 5.5 });
+  });
+
+  it('saves a normalised canonical lab through the PatientRecord PATCH (#2425)', async () => {
+    const normalised = {
+      ...DESCRIPTORS,
+      hemoglobin_g_dl: {
+        kind: 'computed', writable: false, target: 'patient_record', value_kind: 'number',
+        inputs: ['hemoglobin_level'], normalised_read_model: true,
+      },
+    };
+    (api.get as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
+      if (url.includes('writable-fields')) return Promise.resolve({ data: normalised });
+      if (url.includes('/patient-info/')) {
+        return Promise.resolve({
+          data: { patient_info: { ...PATIENT }, user: null, patient_name: PATIENT.patient_name },
+        });
+      }
+      return Promise.resolve({ data: [] });
+    });
+    await renderAndLoad();
+    await openLabsTab();
+    await editAndSave('12.5', '9.5');
+
+    await waitFor(() => expect(api.patch).toHaveBeenCalled());
+    expect(patchBody()).toMatchObject({ hemoglobin_g_dl: 9.5 });
+  });
+
+  it('sends a lab result date with its value (#2439)', async () => {
+    await renderAndLoad();
+    await openLabsTab();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    fireEvent.change(screen.getByDisplayValue('12.5'), { target: { value: '9.5' } });
+    fireEvent.change(document.getElementById('hemoglobin_g_dl-date')!,
+      { target: { value: '2026-10-01' } });
+    await act(async () => { vi.advanceTimersByTime(2100); });
+
+    await waitFor(() => expect(api.patch).toHaveBeenCalled());
+    expect(patchBody()).toMatchObject({
+      hemoglobin_g_dl: { value: 9.5, date: '2026-10-01' },
+    });
+  });
+
+  it('saves a date picked after the value was already autosaved (#2439)', async () => {
+    await renderAndLoad();
+    await openLabsTab();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    (api.patch as ReturnType<typeof vi.fn>).mockResolvedValue({
+      data: { fact_ids: { hemoglobin_g_dl: 55 } },
+    });
+    fireEvent.change(screen.getByDisplayValue('12.5'), { target: { value: '9.5' } });
+    await act(async () => { vi.advanceTimersByTime(2100); });
+    await waitFor(() => expect(api.patch).toHaveBeenCalledTimes(1));
+
+    fireEvent.change(document.getElementById('hemoglobin_g_dl-date')!,
+      { target: { value: '2026-10-01' } });
+    await act(async () => { vi.advanceTimersByTime(2100); });
+
+    await waitFor(() => expect(api.patch).toHaveBeenCalledTimes(2));
+    expect(patchBody()).toMatchObject({
+      hemoglobin_g_dl: { value: 9.5, date: '2026-10-01', fact_id: 55 },
+    });
+  });
+
+  it('keeps a date changed while the previous PATCH is in flight (#2439)', async () => {
+    await renderAndLoad();
+    await openLabsTab();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let finishFirst!: (value: unknown) => void;
+    (api.patch as ReturnType<typeof vi.fn>).mockImplementationOnce(
+      () => new Promise((resolve) => { finishFirst = resolve; }),
+    );
+    fireEvent.change(screen.getByDisplayValue('12.5'), { target: { value: '9.5' } });
+    fireEvent.change(document.getElementById('hemoglobin_g_dl-date')!,
+      { target: { value: '2026-10-01' } });
+    await act(async () => { vi.advanceTimersByTime(2100); });
+    expect(api.patch).toHaveBeenCalledTimes(1);
+
+    fireEvent.change(document.getElementById('hemoglobin_g_dl-date')!,
+      { target: { value: '2026-10-02' } });
+    await act(async () => { finishFirst({ data: {} }); await Promise.resolve(); });
+    await act(async () => { vi.advanceTimersByTime(2100); });
+
+    await waitFor(() => expect(api.patch).toHaveBeenCalledTimes(2));
+    expect(patchBody()).toMatchObject({
+      hemoglobin_g_dl: { value: 9.5, date: '2026-10-02' },
+    });
+  });
+
+  it('keeps the date when the value changes during the previous PATCH (#2439)', async () => {
+    await renderAndLoad();
+    await openLabsTab();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let finishFirst!: (value: unknown) => void;
+    (api.patch as ReturnType<typeof vi.fn>).mockImplementationOnce(
+      () => new Promise((resolve) => { finishFirst = resolve; }),
+    );
+    fireEvent.change(screen.getByDisplayValue('12.5'), { target: { value: '9.5' } });
+    fireEvent.change(document.getElementById('hemoglobin_g_dl-date')!,
+      { target: { value: '2026-10-01' } });
+    await act(async () => { vi.advanceTimersByTime(2100); });
+    expect(api.patch).toHaveBeenCalledTimes(1);
+
+    fireEvent.change(screen.getByDisplayValue('9.5'), { target: { value: '10' } });
+    await act(async () => { finishFirst({ data: {} }); await Promise.resolve(); });
+    await act(async () => { vi.advanceTimersByTime(2100); });
+
+    await waitFor(() => expect(api.patch).toHaveBeenCalledTimes(2));
+    expect(patchBody()).toMatchObject({
+      hemoglobin_g_dl: { value: 10, date: '2026-10-01' },
+    });
+  });
+
+  it('sends a changed lab value without an implicit date (#2454)', async () => {
+    await renderAndLoad();
+    await openLabsTab();
+    await editAndSave('12.5', '9.5');
+
+    await waitFor(() => expect(api.patch).toHaveBeenCalled());
+    // Only a date the user chose is an instruction; changing a value alone
+    // records it on today by backend default.
+    expect(patchBody().hemoglobin_g_dl).toBe(9.5);
+  });
+
+  it('sends nothing when a lab value is reverted before autosave (#2454)', async () => {
+    await renderAndLoad();
+    await openLabsTab();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+
+    fireEvent.change(screen.getByDisplayValue('12.5'), { target: { value: '9.5' } });
+    fireEvent.change(screen.getByDisplayValue('9.5'), { target: { value: '12.5' } });
+    await act(async () => { vi.advanceTimersByTime(2100); });
+
+    // The value is back to the committed one and no date was chosen: nothing
+    // is an instruction, so nothing is sent (and nothing can be refused).
+    expect(api.patch).not.toHaveBeenCalled();
   });
 
   it('never sends an alias in the PATCH', async () => {

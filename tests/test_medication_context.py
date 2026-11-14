@@ -48,17 +48,17 @@ def test_migration_repairs_domains_repeatably_and_preserves_curator(setup):
     migrate()
     mapping = FieldConceptMapping.objects.get(field_name='drug_exposure.role')
     assert (mapping.concept_id, mapping.omop_table, mapping.concept_code) == (role.pk, 'observation', '104803-2')
-    before = list(
-        FieldConceptMapping.objects
-        .filter(field_name__startswith='drug_exposure.')
-        .order_by('field_name')
-        .values_list('field_name', 'concept_id'))
+    # The migration's `update_or_create` can change the physical row order, so
+    # compare the mapping set by name rather than in whatever order PostgreSQL
+    # returns it. The assertion is about repeatable values, not row order.
+    before = sorted(
+        (r['field_name'], r['concept_id'])
+        for r in FieldConceptMapping.objects.filter(
+            field_name__startswith='drug_exposure.').values('field_name', 'concept_id'))
     migrate()
-    assert before == list(
-        FieldConceptMapping.objects
-        .filter(field_name__startswith='drug_exposure.')
-        .order_by('field_name')
-        .values_list('field_name', 'concept_id'))
+    after = sorted(FieldConceptMapping.objects.filter(
+        field_name__startswith='drug_exposure.').values_list('field_name', 'concept_id'))
+    assert before == after
     FieldConceptMapping.objects.filter(pk=mapping.pk).update(concept=wrong, provenance='curator')
     before = FieldConceptMapping.objects.filter(pk=mapping.pk).values().get()
     migrate()
@@ -237,7 +237,7 @@ def test_legacy_sources_typed_namespace_and_foreign_notes(setup, django_assert_n
     assert medication_contexts(record.person_id, [exposure.pk])[exposure.pk]['role'] == fact.value_as_string
 
 
-def test_later_refresh_and_mapping_approval_reconcile_pending_values(setup):
+def test_mapping_approval_without_authorship_keeps_patient_answer_pending(setup):
     from omop_core.services.patient_record_service import refresh_patient_record
     from omop_core.services.omop_projection import project_field_to_omop
     record, exposure, client, *_ = setup
@@ -250,11 +250,48 @@ def test_later_refresh_and_mapping_approval_reconcile_pending_values(setup):
     assert 'medication_contexts' in record.user_edited_fields
     FieldConceptMapping.objects.filter(field_name='drug_exposure.category').update(status='approved')
     mapping = FieldConceptMapping.objects.get(field_name='drug_exposure.category')
-    assert project_field_to_omop(mapping) == 1
-    assert medication_contexts(record.person_id, [exposure.pk])[exposure.pk]['category'] == 'Supportive'
+    assert project_field_to_omop(mapping) == 0
+    assert not Observation.objects.filter(observation_event_id=exposure.pk).exists()
+    assert client.get('/api/v1/phr/medications/').data['medications'][0]['category'] == 'Supportive'
+    refresh_patient_record(record.person)
+    record.refresh_from_db()
+    assert 'medication_contexts' in record.user_edited_fields
+    assert record.medication_contexts[str(exposure.pk)]['category'] == 'Supportive'
+
+
+def test_repeated_mapping_approval_never_duplicates_self_report_as_ehr(setup):
+    from django.contrib.contenttypes.models import ContentType
+    from omop_core.models import ProvenanceRecord
+    from omop_core.services.omop_projection import project_field_to_omop
+    from omop_core.services.patient_record_service import refresh_patient_record
+    record, exposure, client, *_ = setup
+    assert patch(client, exposure, {'role': 'Induction'}).status_code == 200
+    record.refresh_from_db()
+    assert 'medication_contexts' in record.user_edited_fields
+    mapping = FieldConceptMapping.objects.get(field_name='drug_exposure.role')
+    for _ in range(2):
+        assert project_field_to_omop(mapping) == 0
+    fact, = Observation.objects.filter(observation_event_id=exposure.pk)
+    assert fact.observation_type_concept_id == 32865
+    assert ProvenanceRecord.objects.filter(content_type=ContentType.objects.get_for_model(Observation),
+                                            object_id=fact.pk, source='PATIENT_SELF').exists()
     refresh_patient_record(record.person)
     record.refresh_from_db()
     assert 'medication_contexts' not in record.user_edited_fields
+
+
+def test_mapping_approval_does_not_invent_authorship_for_legacy_pending_json(setup):
+    from omop_core.services.omop_projection import project_field_to_omop
+    record, exposure, *_ = setup
+    values = {str(exposure.pk): {'role': 'Induction'}}
+    PatientRecord.objects.filter(pk=record.pk).update(
+        medication_contexts=values, user_edited_fields=['medication_contexts'])
+    mapping = FieldConceptMapping.objects.get(field_name='drug_exposure.role')
+    assert project_field_to_omop(mapping) == 0
+    assert not Observation.objects.filter(observation_event_id=exposure.pk).exists()
+    record.refresh_from_db()
+    assert record.medication_contexts == values
+    assert 'medication_contexts' in record.user_edited_fields
 
 
 def test_shared_medication_selection_limits_attributes(setup, settings):
@@ -296,3 +333,40 @@ def test_unchanged_retired_echo_does_not_block_another_edit(setup):
     response = client.patch(url(exposure), {'medication_contexts': values}, format='json')
     assert response.status_code == 200, response.data
     assert saved(response, other)['role'] == 'Maintenance'
+
+
+def test_pending_context_attribute_is_acknowledged_while_an_import_adds_another(setup):
+    """A fully backed pending attribute must not stay pending because an
+    imported fact also carries another attribute the edit never touched."""
+    from omop_core.services.medication_context import save_medication_context
+    from omop_core.services.patient_record_service import refresh_patient_record
+
+    record, exposure, client, *_ = setup
+    assert patch(client, exposure, {'role': 'Induction'}).status_code == 200
+    record.refresh_from_db()
+    assert 'medication_contexts' in (record.user_edited_fields or [])
+
+    save_medication_context(exposure, {'category': 'Supportive'}, type_concept_id=32817)
+    refreshed = refresh_patient_record(record.person)
+
+    assert refreshed.medication_contexts[str(exposure.pk)] == {
+        'role': 'Induction', 'category': 'Supportive',
+    }
+    assert 'medication_contexts' not in (refreshed.user_edited_fields or [])
+
+
+def test_pending_context_for_an_ineligible_exposure_is_acknowledged(setup):
+    """An exposure that is no longer eligible cannot keep a pending edit forever."""
+    from omop_core.services.patient_record_service import refresh_patient_record
+
+    record, exposure, client, *_ = setup
+    assert patch(client, exposure, {'role': 'Induction'}).status_code == 200
+    record.refresh_from_db()
+    assert 'medication_contexts' in (record.user_edited_fields or [])
+
+    exposure.is_erroneous = True
+    exposure.save(update_fields=['is_erroneous'])
+    refreshed = refresh_patient_record(record.person)
+
+    assert str(exposure.pk) not in (refreshed.medication_contexts or {})
+    assert 'medication_contexts' not in (refreshed.user_edited_fields or [])

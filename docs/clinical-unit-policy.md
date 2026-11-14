@@ -24,9 +24,12 @@ boundary for every measurement—not just white blood cell counts.
    recognized source-unit expressions. Missing or unrecognized units fail closed:
    the derived value is omitted and a warning is recorded. Source data remains
    available for repair. An exception has to be named in the projection's own
-   section: `serum_creatinine_mg_dl` reads an absent unit — including
-   `unit_concept_id = 0` — as mg/dL, the unit every canonical creatinine value
-   has been recorded in.
+   section. The chronological lab pass makes one: `hemoglobin_g_dl`, the
+   chemistry pairs (albumin, calcium, bilirubin) and `serum_creatinine_mg_dl`
+   read an absent unit — no text and no UCUM `unit_concept`, including
+   `unit_concept_id = 0` — as the lab's canonical unit, the unit every canonical
+   value of that lab has been recorded in. An unreadable unit that is present
+   still fails closed. The creatinine section below is the worked example.
 5. **Unit changes require a migration plan.** Adding a canonical unit or changing
    a conversion must include source-unit tests, boundary/range tests, documented
    backwards compatibility, and a repair/backfill plan for affected derived data.
@@ -183,21 +186,31 @@ unit or authorize a source-data repair.
 `serum_creatinine_mg_dl` and its `creatinine_mg_dl` alias are always mg/dL; the
 organization setting does not change them. Source LOINCs are [2160-0](https://loinc.org/2160-0)
 and [38483-4](https://loinc.org/38483-4), plus the display names
-`Creatinine [Mass/volume] in Serum or Plasma`, `Serum Creatinine` and `Creatinine`.
+`Creatinine [Mass/volume] in Serum or Plasma`, `Serum Creatinine` and `Creatinine`,
+and the historic concept names `creatinine` and `creatinine in serum`.
 
 | Source unit | Read as |
 | --- | --- |
 | `mg/dL` (any known spelling) | the number |
-| `umol/L` and its spellings (`µmol/L`, `micromoles/liter`, `micromol/L`) | number ÷ 88.42, half-up to 0.01 |
+| `umol/L` and its spellings (`µmol/L`, `μmol/L`, `micromol/L`, `micromoles/liter`) | number ÷ 88.42, half-up to 0.01 |
 | `mg/L`, `mmol/L`, bare `mg` — known but not convertible | unknown |
 | unreadable text, with a UCUM `unit_concept` | the concept's unit |
 | no unit at all, including `unit_concept_id = 0` | mg/dL |
 
-Conversion is `mg/dL = µmol/L / 88.42`, quantised half-up to the two decimals of
-the canonical column. The newest result owns the field across every source
-spelling: an unreadable newest unit makes the field an explicit unknown, and an
-older result is not resurrected. The unknown is explicit rather than omitted so
-an approved `FieldConceptMapping` cannot refill the field with the raw number.
+The canonical is a read-model. The source pair (`serum_creatinine_level` and
+`serum_creatinine_level_units`) keeps the number and unit the lab reported, so
+80 umol/L is stored as `80` / `UMOL/L` beside a canonical `0.90`: eGFR reads the
+pair, because the canonical's two decimals can move a threshold
+(`omop_core/services/creatinine_units.py`).
+
+Creatinine is selected in the same chronological pass as hemoglobin and the
+chemistry pairs. The newest result owns the field across every representation:
+an unreadable newest unit, or a value beyond the column (999.99 mg/dL), makes
+the field an explicit unknown, and an older result is not resurrected. The
+unknown is explicit rather than omitted so an approved `FieldConceptMapping`
+cannot refill the field with the raw number. A historic concept-name row in an
+unsupported unit is reported by the extractor as its pair with the canonical
+unknown (#475), but a refresh does not yet keep that pair on the record (#2519).
 
 ## Instance-selected LOINC units
 

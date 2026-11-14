@@ -24,7 +24,19 @@ from django.db import transaction
 
 from omop_core.models import Concept, Location, Measurement, Observation, PatientRecord, Person
 from omop_core.services.patient_record_service import _ASSERTION_FIELDS, refresh_patient_record
+from omop_core.services.creatinine_units import SOURCE_PAIRS as CREATININE_SOURCE_PAIRS
+from omop_core.services.hemoglobin_units import SOURCE_PAIRS
+from omop_core.services.blood_count_source_pairs import PAIRS as COUNT_SOURCE_PAIRS
+from omop_core.services.chemistry_units import PAIRS as CHEMISTRY_SOURCE_PAIRS
+from omop_core.services.source_pair_dates import forget_dates, pair_sources_in
+from omop_core.services.genomic_concepts import (
+    MUTATION_INTERPRETATION_CONCEPTS,
+    MUTATION_ORIGIN_CONCEPTS,
+    normalise_interpretation,
+    normalise_origin,
+)
 from omop_core.services.pk import next_pk
+from omop_core.services.write_refusal import WriteRefused
 from omop_core.services.write_descriptor import (
     build_writable_field_descriptor,
     KIND_EDITABLE,
@@ -60,7 +72,7 @@ def _invert_inverse_assertion(field, value, source_value=None, concept_code=None
             return False
         if normalized in _FALSY:
             return True
-        raise ValueError(
+        raise WriteRefused(
             f'{field} requires a boolean value; got {value!r}')
     return not bool(value)
 
@@ -179,10 +191,13 @@ PATIENT_REPORTED_TYPE_CONCEPT_ID = 32865
 
 # genetic_mutations is a LIST field, not a scalar: each mutation is one Measurement keyed by its gene
 # LOINC (patient_record_service._GENETIC_MUTATION_LOINCS), with variant→value_as_string, origin→
-# qualifier_concept, interpretation→value_as_concept (SNOMED). The widget sends {gene, mutation (=the
-# variant), origin, interpretation}. These SNOMED ids mirror the derivation's read maps.
-_MUTATION_ORIGIN_SNOMED = {'germline': 255395001, 'somatic': 255461003}
-_MUTATION_INTERPRETATION_SNOMED = {'pathogenic': 30166007, 'benign': 10828004, 'vus': 42425007}
+# qualifier_concept, interpretation→value_as_concept. The concept ids live in one module,
+# `genomic_concepts`, shared with the derivation — a second copy is how the previous maps stored
+# SNOMED *codes* in id columns and meant "Struck by" by pathogenic (#5671).
+_MUTATION_ORIGIN_BY_VALUE = {value: cid for cid, value in MUTATION_ORIGIN_CONCEPTS.items()}
+_MUTATION_INTERPRETATION_BY_VALUE = {
+    value: cid for cid, value in MUTATION_INTERPRETATION_CONCEPTS.items()
+}
 
 # Provenance sentinel (measurement_source_value) marking a mutation Measurement as authored by the CB
 # profile editor. The list-diff upsert & retire touch ONLY rows carrying it, so an imported genomic fact
@@ -225,19 +240,112 @@ class FieldWriteResult:
         return bool(self.applied)
 
 
+def split_dated_edits(changes, descriptor):
+    """Separate a dated envelope from a plain scalar edit.
+
+    A dated entry is ``{field: {"value": ..., "date": "YYYY-MM-DD"}}``. Only a
+    descriptor that advertises ``dated`` may use it. Returns
+    ``(plain_changes, dates, refusal)``; the caller keeps its own
+    clear/validation rules on the unwrapped values.
+
+    ``refusal`` is the first refused entry's sentence, written for the reader,
+    or ``None`` when every entry was accepted. It is returned rather than
+    raised so the API layer can answer with it without echoing an exception's
+    text: an unreviewed exception message may carry internals, and a caller
+    that catches ``ValueError`` and forwards ``str(exc)`` is how that reaches
+    a response (code scanning `py/stack-trace-exposure`).
+    """
+    values, dates = {}, {}
+    for field, value in changes.items():
+        entry = descriptor.get(field) or {}
+        if isinstance(value, dict) and entry.get('dated'):
+            if set(value) - {'value', 'date'} or 'value' not in value or 'date' not in value:
+                return values, dates, (
+                    f'{field}: a dated result must be '
+                    '{"value": ..., "date": "YYYY-MM-DD"}.')
+            from omop_core.services.patient_form import fact_date_or_error
+            parsed, error = fact_date_or_error(value['date'], field)
+            if error is not None:
+                return values, dates, error
+            dates[field] = parsed
+            values[field] = value['value']
+        elif (isinstance(value, dict) and set(value) == {'value', 'date'}
+                and entry.get('value_kind') != 'json'):
+            return values, dates, f'{field}: this field does not accept a result date.'
+        else:
+            values[field] = value
+    return values, dates, None
+
+
+def _retire_source_pairs(person, applied):
+    """A canonical import supersedes a pending source pair (#2318).
+
+    This applier writes the fact directly and then refreshes, but it does not
+    pass a changed-field set to the recompute. Clearing the pair's pending
+    markers first lets the refresh re-derive the source from the new canonical
+    instead of preserving the old number and unit beside it.
+
+    Returns the values that were pending, so the caller can record the
+    retirement in the revision history once the refresh has written the new
+    ones (#2426 review).
+    """
+    retired = {
+        field
+        for canonical, fields in {
+            **SOURCE_PAIRS,
+            **CREATININE_SOURCE_PAIRS,
+            **{
+                canonical: (spec['value'], spec['unit'])
+                for canonical, spec in CHEMISTRY_SOURCE_PAIRS.items()
+            },
+        }.items()
+        if canonical in applied
+        for field in fields
+    }
+    for source, spec in COUNT_SOURCE_PAIRS.items():
+        if spec['canonical'] in applied:
+            retired.add(source)
+            if spec.get('unit_field'):
+                retired.add(spec['unit_field'])
+    if not retired:
+        return {}
+    record = PatientRecord.objects.filter(person=person).first()
+    if record is None:
+        return {}
+    pending = set(record.user_edited_fields or [])
+    if not pending & retired:
+        return {}
+    retired_values = {
+        field: getattr(record, field, None) for field in retired if field in pending
+    }
+    record.user_edited_fields = sorted(pending - retired)
+    # The entered day describes a pending pair only; it must not outlive it and
+    # later make a fresh pair look older than it is (#2426).
+    forget_dates(record, pair_sources_in(retired))
+    record.save(update_fields=['user_edited_fields', 'pending_source_pair_dates'])
+    return retired_values
+
+
 @transaction.atomic
-def apply_field_writes(person, changes, today=None, descriptor=None):
+def apply_field_writes(person, changes, today=None, descriptor=None, dates=None, refresh=True):
     """Apply {projection_field: value} edits to `person` as descriptor-driven OMOP facts.
 
     Writes KIND_EDITABLE facts, buckets KIND_PROFILE for the persons endpoint, rejects the
     rest. Re-derives the PatientRecord ONCE after all fact writes (the per-fact refresh
     signal is suppressed on each write). Returns a FieldWriteResult. Raises on a genuine
     write failure — the caller's atomic() must roll the PATCH back.
+
+    ``refresh=False`` lets a caller that already saved the PatientRecord value project
+    Person/Location without a second full derivation (the shared form's profile path).
     """
     if today is None:
         today = date.today()
     if descriptor is None:
         descriptor = build_writable_field_descriptor()
+    changes, envelope_dates, refusal = split_dated_edits(changes, descriptor)
+    if refusal is not None:
+        raise WriteRefused(refusal)
+    dates = {**envelope_dates, **(dates or {})}
 
     result = FieldWriteResult()
     from omop_core.services.clinical_input_contract import (
@@ -257,6 +365,12 @@ def apply_field_writes(person, changes, today=None, descriptor=None):
         # Unlike legacy scalar partial rejection, one denied clinical command
         # rejects the whole batch. Descriptors can narrow, never grant approval.
         raise ValidationError(denied)
+    if set(clinical) & set(dates):
+        # A dedicated writer owns its own dated/correction contract.
+        raise ValidationError({
+            field: 'This clinical input does not accept a caller-supplied result date.'
+            for field in set(clinical) & set(dates)
+        })
     # Before scalar clear handling, and before any nonclinical writes. A supplied
     # descriptor is an envelope, never approval for a source recipe.
     validated_values(clinical)
@@ -294,6 +408,29 @@ def apply_field_writes(person, changes, today=None, descriptor=None):
         if d is None:
             result.rejected[field] = 'Unknown field; not part of the writable record.'
             continue
+        if d.get('read_only_for_caller'):
+            # A caller-level restriction wins over `writable` and over the
+            # canonical compatibility flag.
+            result.rejected[field] = (
+                d.get('reason') or 'Editing is not available for this caller.'
+            )
+            continue
+        if d.get('normalised_read_model'):
+            # A canonical import is honoured for compatibility (#2318); the
+            # descriptor hides it from editors in favour of the source pair.
+            # Caller-level restrictions still win.
+            d = {**d, 'kind': 'direct', 'writable': True,
+                 'target': 'patient_record'}
+        kind = d.get('kind')
+        if d.get('writable') and (
+                kind == KIND_PROFILE or d.get('projection_target') in ('person', 'location')):
+            # Profile values are Person/Location data, not OMOP facts: a clear
+            # is a real answer here, so it must not hit the scalar clear guard.
+            if _stage_profile_write(person, field, value, person_dirty, location_updates):
+                result.applied.append(field)
+            else:
+                result.profile[field] = value
+            continue
         if value is None or (isinstance(value, str) and value.strip() == ''):
             # A clear, not a write (the widget's inputs emit '' on clear, not null). There is no
             # provenance marker distinguishing a profile-write fact from an imported one, so
@@ -301,14 +438,6 @@ def apply_field_writes(person, changes, today=None, descriptor=None):
             # silently applied (safe-delete is deferred, #4833). Reported (never raised) so a batch
             # PATCH carrying an emptied field does not fail the whole request.
             result.rejected[field] = 'Clearing a value is not supported yet (#4833).'
-            continue
-        kind = d.get('kind')
-        if d.get('writable') and (
-                kind == KIND_PROFILE or d.get('projection_target') in ('person', 'location')):
-            if _stage_profile_write(person, field, value, person_dirty, location_updates):
-                result.applied.append(field)
-            else:
-                result.profile[field] = value
             continue
         projection = d.get('projection')
         if d.get('writable') and (kind == KIND_EDITABLE or projection):
@@ -325,14 +454,14 @@ def apply_field_writes(person, changes, today=None, descriptor=None):
                     'unit': projection.get('unit'),
                     'target': projection.get('omop_table', 'measurement'),
                 }
-            _write_editable_fact(person, field, d, value, today)
+            _write_editable_fact(person, field, d, value, dates.get(field, today))
             result.applied.append(field)
             continue
         if kind == KIND_PROFILE and d.get('writable'):
             if _stage_profile_write(person, field, value, person_dirty, location_updates):
                 result.applied.append(field)
             else:
-                # An identity/admin field (email/phone/validated/…) — not this applier's job.
+                # An identity/admin field (email/phone/…) — not this applier's job.
                 result.profile[field] = value
             continue
         # Writable but not a shape this applier writes, or writable=False.
@@ -342,16 +471,40 @@ def apply_field_writes(person, changes, today=None, descriptor=None):
     # fact write suppresses its own refresh signal, so the read model is rebuilt from the
     # fully-applied state, never a half-applied one).
     if location_updates:
-        _apply_location(person, location_updates, person_dirty)
+        record = PatientRecord.objects.filter(person=person).only(
+            'latitude', 'longitude').first()
+        validate_location_pair(person, location_updates, record=record)
+        apply_location(person, location_updates, person_dirty)
     if person_dirty:
         person.save(update_fields=sorted(person_dirty))
+    # A canonical import supersedes its source pair in every refresh path,
+    # including a mixed batch whose clinical inputs refresh through
+    # write_clinical_inputs and a caller-supplied `refresh=False`.
+    retired_values = {}
+    if result.applied:
+        retired_values = _retire_source_pairs(person, result.applied)
     # write_clinical_inputs derives for its readback, from the fully-applied
     # state, so a batch that carries a clinical field must not derive twice.
-    if result.applied and not clinical:
-        refresh_patient_record(person)
+    record = None
+    if refresh and result.applied and not clinical:
+        record = refresh_patient_record(person)
     if clinical:
-        write_clinical_inputs(person, clinical, today=today)
+        record = write_clinical_inputs(person, clinical, today=today)
         result.applied.extend(clinical)
+    elif retired_values and record is None:
+        # `refresh=False` skipped the derivation a retirement needs: without
+        # it the pair columns keep the old entry, and a later refresh has no
+        # marker left to audit through. Derive now; the values must follow the
+        # new fact either way.
+        record = refresh_patient_record(person)
+    if retired_values:
+        # After the refresh, so the revision compares the entry the patient had
+        # with the value the import replaced it with (#2426 review).
+        from omop_core.services.patient_record_revisions import write_record_revisions
+        if record is None:
+            record = PatientRecord.objects.filter(person=person).first()
+        if record is not None:
+            write_record_revisions(record, retired_values, changed_by='system')
     return result
 
 
@@ -381,20 +534,134 @@ def owned_writable_fields(descriptor=None):
 
 def _genetic_mutations_writable():
     """True when genetic_mutations can round-trip: the patient-report type concept AND at least one
-    reviewed gene LOINC are loaded. Keeps editable_fields honest on a stack with a partial vocab."""
+    reviewed gene LOINC are loaded. Keeps editable_fields honest on a stack with a partial vocab.
+
+    Both halves are read in one query: the descriptor build calls this for every
+    request and its cost must stay flat (#2441).
+    """
+    from django.db.models import Q
     from omop_core.services.patient_record_service import _GENETIC_MUTATION_LOINCS
-    if not Concept.objects.filter(
-            concept_id=PATIENT_REPORTED_TYPE_CONCEPT_ID, vocabulary_id='Type Concept').exists():
-        return False
     reviewed_gene_codes = [code for code, gene in _GENETIC_MUTATION_LOINCS.items() if gene]
-    return Concept.objects.filter(
-        concept_code__in=reviewed_gene_codes, vocabulary_id='LOINC').exists()
+    loaded = Concept.objects.filter(
+        Q(concept_id=PATIENT_REPORTED_TYPE_CONCEPT_ID, vocabulary_id='Type Concept')
+        | Q(concept_code__in=reviewed_gene_codes, vocabulary_id='LOINC')
+    ).values_list('concept_id', 'vocabulary_id')
+    has_type = has_gene = False
+    for concept_id, vocabulary_id in loaded:
+        if vocabulary_id == 'Type Concept' and concept_id == PATIENT_REPORTED_TYPE_CONCEPT_ID:
+            has_type = True
+        elif vocabulary_id == 'LOINC':
+            has_gene = True
+    return has_type and has_gene
+
+
+def _clean_location_value(field, value):
+    """Normalize and validate one Location value.
+
+    Returns the stored form (Decimal/str) or None for a clear. Raises
+    ``ValueError`` for a non-numeric, non-finite, out-of-range or too-long
+    value, so the caller can return 400 before touching the database.
+    """
+    column = _LOCATION_COLUMN[field]
+    if value is None or (isinstance(value, str) and value.strip() == ''):
+        return None
+    if field in _LOCATION_DECIMAL:
+        try:
+            value = Decimal(str(value))
+        except (InvalidOperation, TypeError, ValueError):
+            raise WriteRefused(f'{field}: expected a number, got {value!r}')
+        # NaN parses as a Decimal but makes the range comparison raise
+        # InvalidOperation — reject non-finite (NaN/Inf) as a 400, not a 500.
+        if not value.is_finite():
+            raise WriteRefused(f'{field}: expected a finite number, got {value!r}')
+        lo, hi = _LOCATION_RANGE[field]
+        if not (lo <= value <= hi):
+            raise WriteRefused(f'{field}: must be between {lo} and {hi}')
+        return value
+    value = str(value).strip()
+    max_len = _LOCATION_MAXLEN[column]
+    if len(value) > max_len:
+        # Match the persons endpoint: a too-long value is a 400, not a
+        # truncated write or a Postgres DataError (e.g. a full state name into
+        # varchar(2)).
+        raise WriteRefused(f'{field}: at most {max_len} characters (OMOP Location.{column})')
+    return value
+
+
+def validate_profile_changes(changes):
+    """Validate profile values before any PatientRecord write.
+
+    The shared form saves profile values to PatientRecord first. Range and
+    length errors must be raised before that save, not by the Location upsert
+    or a database constraint afterwards.
+    """
+    for field, value in changes.items():
+        if field in _LOCATION_COLUMN:
+            _clean_location_value(field, value)
+
+
+def validate_location_pair(person, changes, record=None):
+    """Reject an edit that leaves the effective latitude/longitude pair half-set.
+
+    ``changes`` uses Location column names (``latitude``/``longitude``). The
+    PatientRecord model requires both coordinates or neither, and the native
+    PATCH validates the same pair before writing. The PatientRecord pair is the
+    one the DB constraint enforces; Location is consulted only when no record
+    is supplied. Raising ``ValueError`` makes the shared form return 400
+    instead of an IntegrityError/500.
+    """
+    updates = {
+        column: _clean_location_value(column, value)
+        for column, value in changes.items()
+        if column in ('latitude', 'longitude')
+    }
+    if not updates:
+        return
+    existing_lat = existing_lng = None
+    if record is not None:
+        # The PatientRecord pair is the one the DB constraint enforces. Do not
+        # borrow a coordinate from Location here: a partial patch would then
+        # pass validation but save a half-set PatientRecord pair.
+        existing_lat = getattr(record, 'latitude', None)
+        existing_lng = getattr(record, 'longitude', None)
+    elif person.location_id:
+        location = Location.objects.filter(location_id=person.location_id).first()
+        if location is not None:
+            existing_lat, existing_lng = location.latitude, location.longitude
+    final_lat = updates.get('latitude', existing_lat)
+    final_lng = updates.get('longitude', existing_lng)
+    if (final_lat is None) != (final_lng is None):
+        missing = 'longitude' if final_lng is None else 'latitude'
+        raise WriteRefused(
+            f"'{missing}': the record requires both coordinates or neither.")
 
 
 def _stage_profile_write(person, field, value, person_dirty, location_updates):
     """Stage a KIND_PROFILE write onto `person`. Returns True if this applier owns the field
-    (demographic or location — staged for the batched save/upsert), False for identity/admin
-    fields it deliberately leaves to the caller (bucketed into result.profile)."""
+    (demographic, location, or staff-only Person column — staged for the batched save/upsert),
+    False for identity/admin fields it deliberately leaves to the caller (bucketed into
+    result.profile)."""
+    if value is None or (isinstance(value, str) and value.strip() == ''):
+        value = None
+    if field == 'facility_name':
+        # A simple Person column, not a demographic or a Location field.
+        value = None if value is None else str(value).strip() or None
+        if getattr(person, field) != value:
+            setattr(person, field, value)
+            person_dirty.add(field)
+        return True
+    if field in {
+        'validated', 'validated_by', 'validation_date',
+        'suppress_demographics_for_others',
+    }:
+        # Staff-only Person columns; the shared endpoint filters them for
+        # nonstaff, so only an authorized caller reaches this branch.
+        person_field = Person._meta.get_field(field)
+        cleaned = person_field.clean(value, person)
+        if getattr(person, field) != cleaned:
+            setattr(person, field, cleaned)
+            person_dirty.add(field)
+        return True
     if field in _DEMOGRAPHIC_FIELDS:
         from omop_core.services.demographics import resolve_concept
         # resolve_concept returns None for a non-curated value OR an unloaded vocabulary; per its
@@ -406,36 +673,20 @@ def _stage_profile_write(person, field, value, person_dirty, location_updates):
         return True
     if field in _LOCATION_COLUMN:
         column = _LOCATION_COLUMN[field]
-        if field in _LOCATION_DECIMAL:
-            try:
-                value = Decimal(str(value))
-            except (InvalidOperation, TypeError, ValueError):
-                raise ValueError(f'{field}: expected a number, got {value!r}')
-            # NaN parses as a Decimal but makes the range comparison raise InvalidOperation — reject
-            # non-finite (NaN/Inf) as a 400, not a 500.
-            if not value.is_finite():
-                raise ValueError(f'{field}: expected a finite number, got {value!r}')
-            lo, hi = _LOCATION_RANGE[field]
-            if not (lo <= value <= hi):
-                raise ValueError(f'{field}: must be between {lo} and {hi}')
-        else:
-            value = str(value).strip()
-            max_len = _LOCATION_MAXLEN[column]
-            if len(value) > max_len:
-                # Match the persons endpoint: a too-long value is a 400, not a truncated write
-                # or a Postgres DataError (e.g. a full state name into varchar(2)).
-                raise ValueError(f'{field}: at most {max_len} characters (OMOP Location.{column})')
-        location_updates[column] = value
+        location_updates[column] = _clean_location_value(field, value)
         return True
     return False
 
 
-def _apply_location(person, location_updates, person_dirty):
+def apply_location(person, location_updates, person_dirty):
     """Upsert the Person's OMOP Location row with the staged columns, linking by id (Person.
     location_id is a plain IntegerField, not the FK). Reuse the linked row when it belongs to
     this Person alone; if the OMOP ETL deduplicated it across several Persons, CLONE it and
     relink only this Person so editing one patient's address never rewrites a co-located
-    patient's (the persons endpoint mutates in place — this is stricter on purpose)."""
+    patient's (the persons endpoint mutates in place — this is stricter on purpose).
+
+    This helper validates nothing and does not save Person; the caller must
+    persist the fields it adds to ``person_dirty``."""
     location = None
     if person.location_id:
         location = Location.objects.filter(location_id=person.location_id).first()
@@ -474,17 +725,17 @@ def _coerce_value(value, value_kind):
     PATCH fails closed rather than silently storing a null-valued fact.
     """
     if value is None:
-        raise ValueError('cannot write a null value as a fact (clears are not a fact write)')
+        raise WriteRefused('cannot write a null value as a fact (clears are not a fact write)')
     if value_kind == 'number':
         try:
             number = Decimal(str(value))
         except (InvalidOperation, TypeError, ValueError):
-            raise ValueError(f'expected a number, got {value!r}')
+            raise WriteRefused(f'expected a number, got {value!r}')
         # value_as_number is DecimalField(15,5): guard the integer magnitude so an out-of-range
         # value is a 400, not a Postgres numeric overflow (500). Fractional scale beyond 5 places
         # is harmlessly rounded by PG.
         if not number.is_finite() or abs(number) >= _VALUE_MAX:
-            raise ValueError(f'value {value!r} is out of range for a measurement')
+            raise WriteRefused(f'value {value!r} is out of range for a measurement')
         return number, None
     return None, str(value)[:60]
 
@@ -590,12 +841,18 @@ def _write_genetic_mutations(person, mutations, today):
         # value that does not resolve to a loaded SNOMED concept must fail closed, not silently drop:
         # either it is unsupported, or the vocab is only partially loaded — either way the edit would
         # not round-trip, so reject it rather than accept a write that reads back missing the value.
-        key = str(raw or '').strip().lower()
-        if not key:
+        if not str(raw or '').strip():
             return None
-        concept = Concept.objects.filter(concept_id=mapping[key]).first() if key in mapping else None
+        if kind == 'origin':
+            key = normalise_origin(raw)
+        else:
+            key = normalise_interpretation(raw)
+        concept = (
+            Concept.objects.filter(concept_id=mapping[key]).first()
+            if key is not None and key in mapping else None
+        )
         if concept is None:
-            raise ValueError(
+            raise WriteRefused(
                 f'genetic_mutations ({gene}): {kind} {raw!r} is not a supported/loaded value')
         return concept
 
@@ -614,7 +871,7 @@ def _write_genetic_mutations(person, mutations, today):
         # — the mutation would vanish from the record silently. Require the variant; fail closed instead.
         variant = str(mut.get('mutation') or '').strip()
         if not variant:
-            raise ValueError(f'genetic_mutations ({gene}): a variant value is required')
+            raise WriteRefused(f'genetic_mutations ({gene}): a variant value is required')
         # source_value is a KEY (the ownership sentinel), so the upsert & retire only ever match rows we
         # authored — never an imported gene fact that happens to share the 32865 type.
         keys = {'person': person, 'measurement_concept': concept,
@@ -623,9 +880,11 @@ def _write_genetic_mutations(person, mutations, today):
         fields = {
             'measurement_date': today,
             'value_as_string': variant[:60],
-            'qualifier_concept': _resolve_attr(mut.get('origin'), _MUTATION_ORIGIN_SNOMED, 'origin', gene),
+            'qualifier_concept': _resolve_attr(
+                mut.get('origin'), _MUTATION_ORIGIN_BY_VALUE, 'origin', gene),
             'value_as_concept': _resolve_attr(
-                mut.get('interpretation'), _MUTATION_INTERPRETATION_SNOMED, 'interpretation', gene),
+                mut.get('interpretation'), _MUTATION_INTERPRETATION_BY_VALUE,
+                'interpretation', gene),
         }
         existing = Measurement.objects.filter(**keys).order_by('measurement_id').first()
         if existing is not None:
@@ -646,7 +905,7 @@ def _write_genetic_mutations(person, mutations, today):
     # the reconcile below would otherwise read the empty written_codes as "remove everything" and wipe
     # the patient's existing mutations from a malformed request. An intentional clear is an empty list.
     if mutations and not written_codes:
-        raise ValueError(
+        raise WriteRefused(
             'genetic_mutations: no recognized gene in the submitted list; send [] to clear all mutations')
 
     # Reconcile removals: OUR authored mutation rows (the ownership sentinel) for genes no longer sent →

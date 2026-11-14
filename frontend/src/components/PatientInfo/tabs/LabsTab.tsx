@@ -18,7 +18,7 @@ import type { LabMeasurementGroup } from '@/hooks/useLabMeasurements';
 
 interface Props {
   formData: Record<string, unknown>;
-  onChange: (field: string, value: unknown) => void;
+  onChange: (field: string, value: unknown, date?: string) => void;
 }
 
 /**
@@ -144,7 +144,24 @@ export default function LabsTab({ formData, onChange }: Props) {
   const personId = (formData?.person_id ?? formData?.person) as number | undefined;
   const { descriptors, loading } = useWritableFields(personId);
   const { grouped: measurementGroups } = useLabMeasurements(personId);
-  const [date, setDate] = useState(today());
+  const [dates, setDates] = useState<Record<string, string>>({});
+  const dateFor = (name: string) => dates[name] ?? today();
+  // A lab value and the date it was observed are one edit. The date is per
+  // field: changing one result's date must not relabel its neighbours (#2439).
+  // Only a date the user chose is an instruction. An unchanged value sent with
+  // today's date is not a correction the client named, so the backend records
+  // it as a new result; either way it asks for a fact nobody asserted, so a
+  // value reverted before autosave sends nothing (#2454).
+  const changeValue = (name: string, value: unknown) => (
+    dates[name] ? onChange(name, value, dates[name]) : onChange(name, value)
+  );
+  const changeDate = (name: string, next: string) => {
+    setDates((current) => ({ ...current, [name]: next }));
+    const value = formData?.[name];
+    if (value !== undefined && value !== null && value !== '') {
+      onChange(name, value, next);
+    }
+  };
   const [chartDialog, setChartDialog] = useState<{
     label: string;
     group: LabMeasurementGroup;
@@ -168,19 +185,23 @@ export default function LabsTab({ formData, onChange }: Props) {
         {fields.map(([label, name]) => {
           const group = getGroup(name);
           const hasChart = !!group && group.values.length >= MIN_CHART_POINTS;
+          // Only a descriptor the server marks `dated` accepts a result date;
+          // sending an envelope for any other field is a 400.
+          const dated = descriptors[name]?.dated === true;
           return (
             <div key={name} className="relative">
               <div className="flex items-start gap-1">
                 <div className="flex-1 min-w-0">
                   <ClinicalField
                     label={label}
+                    labelIncludesUnit
                     name={name}
                     type={type}
                     value={formData?.[name]}
                     descriptor={descriptors[name]}
-                    onChange={onChange}
-                    date={date}
-                    onDateChange={setDate}
+                    onChange={dated ? changeValue : onChange}
+                    date={dated ? dateFor(name) : undefined}
+                    onDateChange={dated ? (next) => changeDate(name, next) : undefined}
                   />
                 </div>
                 {hasChart && (
@@ -217,6 +238,13 @@ export default function LabsTab({ formData, onChange }: Props) {
       {section('Cardiac', CARDIAC)}
       {section('Tumor Markers', TUMOR_MARKERS)}
       {section('Diagnostic Tests', DIAGNOSTIC, 'boolean')}
+
+      {/*
+        Organ-function verdicts (renal, hepatic and haematological adequacy) are
+        deliberately not rendered here: Labs shows source lab inputs, while those
+        fields are derived summaries. Hiding the section changes no loading,
+        writing, derivation or stored value (#5609).
+      */}
 
       <Dialog open={!!chartDialog} onOpenChange={(open) => { if (!open) setChartDialog(null); }}>
         <DialogContent className="max-w-[40rem]">

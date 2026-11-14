@@ -44,6 +44,7 @@ DISEASE_FIELDS: dict[str, frozenset[str]] = {
         'oncotype_dx_score', 'test_methodology', 'test_date', 'test_specimen_type',
         'report_interpretation', 'lymph_node_status', 'metastasis_status',
         'pd_l1_combined_positive_score', 'pd_l1_ic_percentage', 'pd_l1_assay',
+        'tnbc_status',
     }),
     'FL': frozenset({
         'stage', 'tumor_grade', 'bulky_disease',
@@ -53,7 +54,9 @@ DISEASE_FIELDS: dict[str, frozenset[str]] = {
         'clonal_bone_marrow_b_lymphocytes', 'ldh_upper_limit_normal', 'number_of_nodal_sites',
     }),
     'MM': frozenset({
-        'myeloma_type', 'stage', 'progression', 'measurable_disease_imwg', 'mrd_status',
+        'mgus', 'smoldering_multiple_myeloma', 'waldenstrom_macroglobulinemia',
+        'igm_multiple_myeloma', 'al_amyloidosis', 'poems_syndrome',
+        'plasma_cell_leukemia', 'myeloma_type', 'stage', 'progression', 'measurable_disease_imwg', 'mrd_status',
         'meets_crab', 'meets_slim', 'stem_cell_transplant_history', 'sct_date', 'sct_eligibility',
         'monoclonal_protein_serum', 'monoclonal_protein_urine', 'kappa_flc', 'lambda_flc',
         'kappa_lambda_ratio', 'involved_uninvolved_ratio', 'bone_lesions', 'clonal_plasma_cells',
@@ -71,6 +74,7 @@ DISEASE_FIELDS: dict[str, frozenset[str]] = {
     'MCL': frozenset({
         'stage', 'protein_expressions', 'ki67_proliferation_index', 'lymphadenopathy',
         'splenomegaly', 'spleen_size', 'hepatomegaly', 'largest_lymph_node_size',
+        'mipi_risk', 'mipi_c_risk', 'high_risk_mcl_criteria',
     }),
 }
 

@@ -1,4 +1,4 @@
-"""Instance-selected LOINC units and write-time normalization.
+"""Instance-selected LOINC units; read-time normalization never changes source facts.
 
 Conversions are deliberately limited to explicit, property-compatible UCUM scales.
 No inference of molecular weight, assay calibration, missing units or free text.
@@ -556,24 +556,19 @@ def normalize_measurement_units(qs, mapping):
     value or range the column cannot hold exactly are skipped.
 
     Returns the number of rows whose ``value_as_number`` was rewritten.
+
+    .. note:: The cb-v2 back-merge deliberately excludes write-time numeric
+       normalization (``docs/canonical_units_architecture.md``): source
+       Measurements stay in the unit they arrived in, and the read-time
+       ``normalized`` object performs conversion. This helper is kept
+       unwired for the eventual policy decision and is not called by the
+       source write paths on this branch.
     """
     target_unit, prop = _curated_target_unit(mapping)
     if not target_unit or not prop:
         return 0
 
     target_ucum = _ucum_concept(target_unit)
-
-    # Group rows by their raw unit_source_value so we compute the conversion
-    # factor once per spelling, not once per row.
-    raw_units = list(
-        qs.filter(value_as_number__isnull=False)
-        .exclude(unit_source_value__isnull=True)
-        .exclude(unit_source_value='')
-        .values_list('unit_source_value', flat=True)
-        .distinct()
-    )
-    if not raw_units:
-        return 0
 
     # Skip rows already normalized to the target unit (idempotency guard).
     # Without this, a re-approve would convert already-converted values again
@@ -583,38 +578,44 @@ def normalize_measurement_units(qs, mapping):
         qs = qs.exclude(unit_concept_id=target_ucum.concept_id)
 
     total_normalized = 0
-    for raw in raw_units:
-        src = unit_code(raw)
-        if src == target_unit:
-            # Already in the target unit — just update unit_concept_id if needed.
-            if target_ucum:
-                qs.filter(unit_source_value=raw).update(
-                    unit_concept_id=target_ucum.concept_id)
-            continue
-        if not _find_property(src, target_unit):
-            continue
-
-        # Fetch rows in batches, convert individually, bulk_update. Paged by
-        # pk, not offset: a converted row leaves qs (its unit_concept is now
-        # the target), so an offset would skip as many rows as it converted.
-        batch_qs = qs.filter(
-            unit_source_value=raw, value_as_number__isnull=False,
-        ).order_by('pk')
-        BATCH = 1000
-        last_pk = None
-        while True:
-            page = batch_qs if last_pk is None else batch_qs.filter(pk__gt=last_pk)
-            rows = list(page[:BATCH])
-            if not rows:
-                break
-            last_pk = rows[-1].pk
-            changed = [row for row in rows
-                       if _convert_row(row, src, target_unit, prop, target_ucum)]
-            if changed:
-                fields = [*_VALUE_FIELDS, 'unit_concept_id', 'value_source_value']
-                from omop_core.models import Measurement
-                Measurement.objects.bulk_update(changed, fields)
-                total_normalized += len(changed)
+    # Read the unit the value is actually stored in, not unit_source_value:
+    # after one write-time conversion the stored value is in unit_concept while
+    # unit_source_value still records the hospital's original spelling. A later
+    # re-point to another curated unit must convert from the stored unit.
+    batch_qs = qs.filter(value_as_number__isnull=False).order_by('pk')
+    BATCH = 1000
+    last_pk = None
+    while True:
+        page = batch_qs if last_pk is None else batch_qs.filter(pk__gt=last_pk)
+        rows = list(page[:BATCH])
+        if not rows:
+            break
+        last_pk = rows[-1].pk
+        changed = []
+        aligned = []
+        for row in rows:
+            src = measurement_stored_unit(row)
+            if not src:
+                continue
+            src = unit_code(src)
+            if not src:
+                continue
+            if src == target_unit:
+                # Already in the target unit — align unit_concept_id but do
+                # not count it as a rewritten value.
+                if target_ucum and row.unit_concept_id != target_ucum.concept_id:
+                    row.unit_concept_id = target_ucum.concept_id
+                    aligned.append(row)
+                continue
+            if not _find_property(src, target_unit):
+                continue
+            if _convert_row(row, src, target_unit, prop, target_ucum):
+                changed.append(row)
+        if changed or aligned:
+            fields = [*_VALUE_FIELDS, 'unit_concept_id', 'value_source_value']
+            from omop_core.models import Measurement
+            Measurement.objects.bulk_update(changed + aligned, fields)
+            total_normalized += len(changed)
 
     if total_normalized:
         logger.info(

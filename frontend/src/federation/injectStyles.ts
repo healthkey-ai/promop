@@ -4,8 +4,9 @@ import { layerRemoteCss } from "./cssLayer";
 let injected = false;
 
 export function injectStyles() {
-  if (injected) return;
-  injected = true;
+  // Importing the editor barrel must stay safe outside a browser (SSR, Node
+  // tooling, a test that imports the module without a DOM).
+  if (injected || typeof document === 'undefined' || !document.head) return;
 
   const imports: string[] = [];
   const rest = css.replace(
@@ -24,4 +25,7 @@ export function injectStyles() {
   style.setAttribute("data-mf", "labs-results-remote");
   style.textContent = layerRemoteCss(rest);
   document.head.appendChild(style);
+  // Set after the insertion: a failed append must not leave the module
+  // believing the styles are present.
+  injected = true;
 }

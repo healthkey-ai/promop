@@ -13,7 +13,7 @@ from django.utils.timezone import localdate
 from rest_framework.exceptions import NotFound, ValidationError
 
 from omop_core.models import Concept, FieldConceptMapping, Measurement, Observation, PatientRecord
-from omop_core.services.genomics_catalog import marker_for_variant, patient_fields
+from omop_core.services.genomics_catalog import gene_concepts, marker_for_variant, patient_fields
 from omop_core.services.genomics_components import component_codes, components
 from omop_core.services.genomics_vocabulary import resolve_loinc
 from omop_core.services.genomics_state import ASSESSMENT_STATUS, effective_status
@@ -94,6 +94,16 @@ def mapped_concept(mapping):
     if mapping.vocabulary_id == 'LOINC' and mapping.concept_code:
         concept, source, domain = _resolve(mapping.concept_code, mapping.omop_table.title())
         return (concept if domain.lower() == mapping.omop_table else 0), source
+    if mapping.vocabulary_id and mapping.concept_code:
+        # Portable non-LOINC recipe (e.g. an OMOP Genomic gene). The code names
+        # the concept even when the fixture was seeded before Athena was loaded
+        # and the local FK was never resolved.
+        concept = Concept.objects.filter(
+            vocabulary_id=mapping.vocabulary_id, concept_code=mapping.concept_code,
+            standard_concept='S', invalid_reason__isnull=True,
+        ).first()
+        if concept is not None and concept.domain_id.lower() == mapping.omop_table:
+            return concept.pk, concept.pk
     return 0, None
 
 
@@ -114,6 +124,10 @@ def normalize_variant(payload, existing=None):
         if not existing or payload['source_gene'] != existing.get('source_gene'):
             raise ValidationError({'source_gene': 'Read-only original gene text.'})
         payload.pop('source_gene')
+    if 'gene_concept_id' in payload:
+        proposed = payload.pop('gene_concept_id')
+        if proposed != (existing or {}).get('gene_concept_id'):
+            raise ValidationError({'gene_concept_id': 'Read-only derived gene identity.'})
     allowed = set(FIELDS) | {'id', 'variant', 'mutation', 'test_date', 'assay_method', 'allelic_frequency_unit', 'clone_fraction_unit', 'marker_key'}
     unknown = set(payload) - allowed
     if unknown:
@@ -287,6 +301,46 @@ def _event_concept():
     return concept.pk
 
 
+#: The authoring type `_genomics_type_concept` selects between: patient self
+#: report and the clinical/import path.
+ACTOR_TYPE_CONCEPT_IDS = (32817, 32865)
+
+
+def variants_writable(type_concept_ids=ACTOR_TYPE_CONCEPT_IDS, *, status_recipe=None):
+    """Whether `save_variant` can create a variant on this deployment.
+
+    The descriptor asks this before offering Add/Edit. It mirrors the writer's
+    hard requirements rather than the retired list-diff writer: concept 0 for
+    unmapped rows, a CDM measurement event concept, the actor type concepts
+    the patient and clinical callers use, and the recipe every save needs for
+    its normalised status. Per-marker recipes are reported separately by the
+    catalog (`markers[].writable`).
+    """
+    if status_recipe is None:
+        status_recipe = FieldConceptMapping.objects.filter(
+            field_name='genetic_mutations.status').first()
+    if not mapping_is_usable(status_recipe):
+        return False
+    required = {0, *type_concept_ids}
+    rows = Concept.objects.filter(
+        Q(pk__in=required)
+        | Q(vocabulary_id='CDM', concept_code='measurement.measurement_id')
+        | Q(vocabulary_id='CDM', concept_name='measurement.measurement_id',
+            standard_concept='S')
+    ).values_list('pk', 'vocabulary_id', 'concept_code', 'concept_name',
+                  'standard_concept', 'invalid_reason')
+    loaded = set()
+    has_event = False
+    for pk, vocabulary_id, code, name, standard, invalid in rows:
+        if pk in required:
+            loaded.add(pk)
+        if (vocabulary_id == 'CDM' and invalid is None
+                and (code == 'measurement.measurement_id'
+                     or (name == 'measurement.measurement_id' and standard == 'S'))):
+            has_event = True
+    return required <= loaded and has_event
+
+
 def _note_context(parent_id):
     return f'genomics:overflow:{parent_id}'
 
@@ -391,11 +445,42 @@ def _find(person, variant_id):
     return variant
 
 
+_PATIENT_SELF_REPORT = 32865
+
+
+def _assert_owned(parent, type_concept_id):
+    """Refuse a patient-scoped change to a finding the patient did not author.
+
+    `type_concept_id` is the authoring scope the caller declared (the patient
+    path derives 32865 from the authenticated role). A patient request must not
+    rewrite an imported EHR fact — CB pre-checks the same boundary, and this is
+    the writer's own contract (#1918).
+
+    Clinical/import scopes (anything other than 32865) are the reviewed
+    privileged path: they may adopt and re-type an existing finding, which is
+    how a clinician corrects a patient-entered value. The Person match is
+    enforced separately, before this check.
+    """
+    if (type_concept_id == _PATIENT_SELF_REPORT
+            and parent.measurement_type_concept_id != _PATIENT_SELF_REPORT):
+        raise ValidationError({
+            'id': 'This finding comes from a clinical source and cannot be edited here.',
+        })
+
+
 @transaction.atomic
 @suppress_patient_record_refresh()
 def save_variant(person, payload, variant_id=None, type_concept_id=32817, skip_refresh=False):
     PatientRecord.objects.select_for_update().get(person=person)
     previous = _find(person, variant_id) if variant_id is not None else None
+    if variant_id is not None:
+        # `_find` proved the row is this patient's and readable; fetch the parent
+        # to check who authored it before anything is normalised or written.
+        parent = Measurement.objects.filter(
+            person=person, pk=variant_id, is_erroneous=False).first()
+        if parent is None:
+            raise NotFound('Variant not found for this patient.')
+        _assert_owned(parent, type_concept_id)
     data = normalize_variant(payload, previous)
     marker = marker_for_variant(data)
     if data.get('marker_key') and marker is None:
@@ -403,10 +488,14 @@ def save_variant(person, payload, variant_id=None, type_concept_id=32817, skip_r
     if marker:
         if data['genomic_feature']:
             expected = marker_features(marker)
-            if (data['genomic_feature'].casefold() != expected['genomic_feature'].casefold()
+            accepted = {expected['genomic_feature'].casefold(),
+                        (marker.get('hgnc_symbol') or '').casefold()}
+            if (data['genomic_feature'].casefold() not in accepted
                     or data['feature_type'] != expected['feature_type']):
                 raise ValidationError({'genomic_feature': 'The feature and its type must match the selected priority marker.'})
-        elif data['gene'].upper() != marker['gene'].upper():
+        elif (gene_concepts().get(data['gene'].upper()) is not marker
+              if marker['kind'] == 'gene'
+              else data['gene'].upper() != marker['gene'].upper()):
             raise ValidationError({'gene': 'The gene must match the selected priority marker.'})
     parent_mapping = recipe_mapping(marker['field_name']) if marker else None
     if parent_mapping and not mapping_is_usable(parent_mapping, parent=True):
@@ -435,6 +524,8 @@ def save_variant(person, payload, variant_id=None, type_concept_id=32817, skip_r
         )
     else:
         parent = Measurement.objects.get(person=person, pk=variant_id, is_erroneous=False)
+    # A patient edit keeps 32865 (the guard proved it); a clinical caller adopts
+    # the finding and records its own authoring type, as before.
     parent.measurement_type_concept_id = type_concept_id
     parent.measurement_date = data['test_date']
     parent.qualifier_source_value = data['gene']
@@ -504,9 +595,14 @@ def save_variant(person, payload, variant_id=None, type_concept_id=32817, skip_r
 
 @transaction.atomic
 @suppress_patient_record_refresh()
-def delete_variant(person, variant_id, skip_refresh=False):
+def delete_variant(person, variant_id, type_concept_id=32817, skip_refresh=False):
     PatientRecord.objects.select_for_update().get(person=person)
     previous = _find(person, variant_id)
+    parent = Measurement.objects.filter(
+        person=person, pk=variant_id, is_erroneous=False).first()
+    if parent is None:
+        raise NotFound('Variant not found for this patient.')
+    _assert_owned(parent, type_concept_id)
     marker = marker_for_variant(previous)
     if marker:
         recipe_mapping(marker['field_name'])
@@ -541,7 +637,7 @@ def replace_variants(person, payload, type_concept_id=32817):
         saved = save_variant(person, row, variant_id, type_concept_id=type_concept_id)
         keep.add(saved['id'])
     for variant_id in current.keys() - keep:
-        delete_variant(person, variant_id)
+        delete_variant(person, variant_id, type_concept_id=type_concept_id)
 
 
 @transaction.atomic
@@ -569,4 +665,4 @@ def replace_priority_fields(person, values, type_concept_id=32817):
             result = save_variant(person, {**row, 'gene': row.get('gene') or ('' if row.get('genomic_feature') else marker['gene']), 'marker_key': marker['key']}, variant_id, type_concept_id)
             keep.add(result['id'])
         for variant_id in before.keys() - keep:
-            delete_variant(person, variant_id)
+            delete_variant(person, variant_id, type_concept_id=type_concept_id)

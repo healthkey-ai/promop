@@ -1,12 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Search, X, Plus, Trash2 } from 'lucide-react';
 import {
   searchDrugConcepts, authorTherapyLine, updateTherapyLine,
   listTherapyOutcomes, type TherapyOutcomeChoice, THERAPY_INTENT_CHOICES, DISCONTINUATION_REASON_CHOICES,
   searchTherapyRegimens, listTherapyRegimens, getTherapyRegimenDetail,
   type DrugConcept, type EditableTherapyLine, type TherapyLineDrug,
+  type TherapyConnection,
 } from '@/api/therapyLines';
 import type { TherapyRegimen } from '@/types/therapy';
+import { usePatientFormStore } from '@/federation/PatientFormContext';
 
 interface Props {
   personId: number;
@@ -19,6 +22,9 @@ interface Props {
   onClose: () => void;
   /** Receives the re-derived record so the tab updates without a refetch. */
   onAuthored: (patientInfo: Record<string, unknown>) => void;
+  /** Which connection the catalogs and the write talk through. Omitted, the
+   *  module-level clinical transport the standalone app owns. */
+  connection?: TherapyConnection;
 }
 
 type SelectedDrug = DrugConcept & TherapyLineDrug & { class_names?: string[] };
@@ -50,7 +56,9 @@ export default function TherapyLineDialog({
   diseaseCode,
   onClose,
   onAuthored,
+  connection,
 }: Props) {
+  const store = usePatientFormStore();
   const episodeId = typeof line?.episode_id === 'number' ? line.episode_id : null;
   const editing = episodeId !== null;
   const [lineNumber, setLineNumber] = useState(String(line?.line ?? defaultLineNumber));
@@ -81,13 +89,13 @@ export default function TherapyLineDialog({
 
   useEffect(() => {
     let active = true;
-    listTherapyOutcomes(diseaseCode).then((items) => {
+    listTherapyOutcomes(diseaseCode, connection).then((items) => {
       if (active) setOutcomes(items);
     }).catch(() => {
       if (active) setOutcomeError('Could not load outcomes. Close and reopen to retry.');
     }).finally(() => { if (active) setLoadingOutcomes(false); });
     return () => { active = false; };
-  }, [diseaseCode]);
+  }, [diseaseCode, connection]);
 
   // Regimen picker state
   const [selectedRegimen, setSelectedRegimen] = useState<TherapyRegimen | null>(null);
@@ -141,7 +149,7 @@ export default function TherapyLineDialog({
     }
     setLoadingAvailable(true);
     try {
-      const regimens = await listTherapyRegimens(disease, r);
+      const regimens = await listTherapyRegimens(disease, r, connection);
       setAvailableRegimens(regimens);
       restoreLineRegimen(regimens);
     } catch {
@@ -151,7 +159,7 @@ export default function TherapyLineDialog({
     } finally {
       setLoadingAvailable(false);
     }
-  }, [restoreLineRegimen]);
+  }, [restoreLineRegimen, connection]);
 
   useEffect(() => {
     (async () => {
@@ -173,13 +181,13 @@ export default function TherapyLineDialog({
     setRegimenSearching(true);
     try {
       // In search mode, search all regimens (no disease/round filter).
-      setRegimenResults(await searchTherapyRegimens(q));
+      setRegimenResults(await searchTherapyRegimens(q, undefined, undefined, connection));
     } catch {
       setRegimenResults([]);
     } finally {
       setRegimenSearching(false);
     }
-  }, []);
+  }, [connection]);
 
   const selectRegimen = useCallback(async (regimen: TherapyRegimen) => {
     setRegimenQuery('');
@@ -187,7 +195,7 @@ export default function TherapyLineDialog({
     setSelectedRegimen(regimen);
     setLoadingRegimen(true);
     try {
-      const detail = await getTherapyRegimenDetail(regimen.code);
+      const detail = await getTherapyRegimenDetail(regimen.code, connection);
       // Map components to DrugConcept entries for the drug list
       const componentDrugs: SelectedDrug[] = (detail.components ?? [])
         .filter((c) => c.concept_id)
@@ -206,7 +214,7 @@ export default function TherapyLineDialog({
     } finally {
       setLoadingRegimen(false);
     }
-  }, []);
+  }, [connection]);
 
   // Clearing the regimen dissociates the label but keeps any drugs the user
   // may have added or modified — a clinician selecting a regimen to pre-fill
@@ -225,13 +233,13 @@ export default function TherapyLineDialog({
     }
     setSearching(true);
     try {
-      setResults(await searchDrugConcepts(q));
+      setResults(await searchDrugConcepts(q, connection));
     } catch {
       setResults([]);
     } finally {
       setSearching(false);
     }
-  }, []);
+  }, [connection]);
 
   useEffect(() => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
@@ -299,14 +307,17 @@ export default function TherapyLineDialog({
               ? d.source_value : (d.source_value || d.concept_name).slice(0, 50),
             ...(d.start_date !== undefined ? { start_date: d.start_date } : {}),
             ...(d.end_date !== undefined ? { end_date: d.end_date } : {}),
-            ...(d.maintenance ? { maintenance: true } : {}),
+            ...(d.maintenance !== undefined ? { maintenance: d.maintenance } : {}),
           }))
           : [],
         ...(knownComposition ? {} : { composition_unknown: true }),
       };
+      // Keep the hold through `onAuthored`: the host reload and notification
+      // start there, and the dialog may be unmounted by the time they land.
+      store?.beginBypassWrite();
       const result = episodeId !== null
-        ? await updateTherapyLine(episodeId, payload)
-        : await authorTherapyLine(payload);
+        ? await updateTherapyLine(episodeId, payload, connection)
+        : await authorTherapyLine(payload, connection);
       onAuthored(result.patient_info);
       onClose();
     } catch (err: unknown) {
@@ -328,12 +339,17 @@ export default function TherapyLineDialog({
         }
       }
       setError(detail);
+      store?.failBypassWrite(detail);
     } finally {
+      store?.endBypassWrite();
       setSaving(false);
     }
   };
 
-  return (
+  // Portal to the body: a host may mount this inside a dialog positioned with a
+  // CSS `transform`, which becomes the containing block for `position: fixed` and
+  // would clip the editor to the host modal's box.
+  return createPortal((
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
       role="dialog"
@@ -689,5 +705,5 @@ export default function TherapyLineDialog({
         </div>
       </div>
     </div>
-  );
+  ), document.body);
 }

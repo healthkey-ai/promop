@@ -514,6 +514,7 @@ class TestNormalizeMeasurementUnits:
         assert row.value_as_number == Decimal('40')
 
 
+@pytest.mark.skip(reason="cb-v2 excludes write-time normalization (docs/canonical_units_architecture.md)")
 class TestRepointNormalizesUnits:
     """Integration test: repoint_clinical_rows normalizes Measurement units."""
 
@@ -590,6 +591,7 @@ class TestRepointNormalizesUnits:
         assert 'rows_normalized' not in result
 
 
+@pytest.mark.skip(reason="cb-v2 excludes write-time normalization (docs/canonical_units_architecture.md)")
 class TestResolvePersonNormalizesUnits:
     """Integration test: resolve_person_source_codes normalizes Measurement units."""
 
@@ -624,6 +626,7 @@ class TestResolvePersonNormalizesUnits:
         assert row.value_as_number == Decimal('0.1')
 
 
+@pytest.mark.skip(reason="cb-v2 excludes write-time normalization (docs/canonical_units_architecture.md)")
 class TestVariantAwareNormalization:
     """Tests that axis variants route unit normalization to the variant's concept."""
 
@@ -778,6 +781,7 @@ class TestVariantAwareNormalization:
         assert row.value_as_number == Decimal('2')
 
 
+@pytest.mark.skip(reason="cb-v2 excludes write-time normalization (docs/canonical_units_architecture.md)")
 class TestNormalizationIdempotency:
     """Calling normalize twice must not double-convert values."""
 

@@ -254,6 +254,10 @@ export const TAB_LAYOUT: TabLayout = {
         [
           "Androgen Receptor Status",
           "androgen_receptor_status"
+        ],
+        [
+          "Triple Negative Status",
+          "tnbc_status"
         ]
       ]
     },
@@ -414,6 +418,40 @@ export const TAB_LAYOUT: TabLayout = {
       ]
     },
     {
+      "title": "Myeloma Related Disorders",
+      "component": "MyelomaSection",
+      "fields": [
+        [
+          "MGUS",
+          "mgus"
+        ],
+        [
+          "Smoldering Multiple Myeloma",
+          "smoldering_multiple_myeloma"
+        ],
+        [
+          "Waldenström Macroglobulinemia",
+          "waldenstrom_macroglobulinemia"
+        ],
+        [
+          "IgM Multiple Myeloma",
+          "igm_multiple_myeloma"
+        ],
+        [
+          "Light-Chain (AL) Amyloidosis",
+          "al_amyloidosis"
+        ],
+        [
+          "POEMS Syndrome",
+          "poems_syndrome"
+        ],
+        [
+          "Plasma Cell Leukemia",
+          "plasma_cell_leukemia"
+        ]
+      ]
+    },
+    {
       "title": "Myeloma Markers",
       "component": "MyelomaSection",
       "fields": [
@@ -488,7 +526,7 @@ export const TAB_LAYOUT: TabLayout = {
       "component": "CLLSection",
       "fields": [
         [
-          "Absolute Lymphocyte Count (×10⁹/L)",
+          "Absolute Lymphocyte Count (cells/µL)",
           "absolute_lymphocyte_count"
         ],
         [
@@ -604,6 +642,24 @@ export const TAB_LAYOUT: TabLayout = {
       ]
     },
     {
+      "title": "Computed Criteria",
+      "component": "MCLSection",
+      "fields": [
+        [
+          "MIPI Risk",
+          "mipi_risk"
+        ],
+        [
+          "MIPI-c Risk",
+          "mipi_c_risk"
+        ],
+        [
+          "High-Risk MCL Criteria",
+          "high_risk_mcl_criteria"
+        ]
+      ]
+    },
+    {
       "title": "Staging & Biomarkers",
       "component": "StagingBiomarkersSection",
       "fields": [
@@ -646,6 +702,16 @@ export const TAB_LAYOUT: TabLayout = {
         [
           "Refractory Status",
           "refractory_status"
+        ]
+      ]
+    },
+    {
+      "title": "Planned Therapies",
+      "component": "TreatmentTab",
+      "fields": [
+        [
+          "Planned Therapies",
+          "planned_therapies"
         ]
       ]
     }
@@ -960,8 +1026,16 @@ export const TAB_LAYOUT: TabLayout = {
           "pregnancy_test_result_value"
         ],
         [
+          "Negative Pregnancy Test Result",
+          "pregnancy_test_result"
+        ],
+        [
           "Using Contraceptives",
           "contraceptive_use"
+        ],
+        [
+          "Not Pregnant or Lactating",
+          "no_pregnancy_or_lactation_status"
         ]
       ]
     },

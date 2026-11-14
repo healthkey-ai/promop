@@ -1,0 +1,130 @@
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { describe, expect, it, vi } from 'vitest';
+import type { AxiosInstance } from 'axios';
+
+import { PatientFormStore, subscribeSaveState, type SaveState } from './patientFormStore';
+import TherapyLinesPanel from './TherapyLinesPanel';
+
+const completeTherapyHistory = vi.fn(async () => ({ therapy_history_complete: true, patient_info: {} }));
+vi.mock('@/api/therapyLines', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/api/therapyLines')>()),
+  setTherapyHistoryCompleteness: (...args: unknown[]) => completeTherapyHistory(...(args as [])),
+}));
+
+async function setup(patient: Record<string, unknown>, writeEnabled = true) {
+  const get = vi.fn(async (url: string) => ({ data: url.includes('writable-fields') ? {
+    therapies: { writable: false, target: 'episode', label: 'Therapies' },
+  } : {
+    patient_info: { person_id: 12, disease: 'Multiple Myeloma', write_enabled: writeEnabled, ...patient },
+    write_enabled: writeEnabled,
+  } }));
+  const store = new PatientFormStore({ get } as unknown as AxiosInstance, '/api');
+  await store.load();
+  return { store };
+}
+
+describe('therapy lines editor', () => {
+  it('starts authoring at the first missing line, not the derived count', async () => {
+    // An imported history can carry a non-zero count with no line rows. The
+    // authoring dialog must open at line 1 and load first-line regimens, not
+    // count the aggregate and start at 2 (#1969 follow-up).
+    const { store } = await setup({
+      therapy_lines_count: '1',
+      lines_of_therapy: [],
+    });
+
+    render(<TherapyLinesPanel store={store} readOnly={false} />);
+    fireEvent.click(screen.getByRole('button', { name: /Add therapy line/i }));
+
+    const input = await screen.findByRole('spinbutton', { name: 'Line number' });
+    expect(input).toHaveValue(1);
+  });
+
+  it('lists the recorded lines with their date range', async () => {
+    const { store } = await setup({
+      therapy_lines_count: '2',
+      lines_of_therapy: [
+        { line: 1, episode_id: 11, regimen: 'VRd', outcome: 'Partial response', start_date: '2024-01-01' },
+        { line: 2, episode_id: 12, regimen: 'Dara-Pd', start_date: '2024-06-01', end_date: '2024-10-01' },
+      ],
+    });
+
+    render(<TherapyLinesPanel store={store} readOnly={false} />);
+
+    expect(screen.getByText(/Line 1:/)).toBeInTheDocument();
+    expect(screen.getByText(/VRd/)).toBeInTheDocument();
+    expect(screen.getByText(/2024-06-01 to 2024-10-01/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Add therapy line/i })).toBeInTheDocument();
+  });
+
+  it('says so when no line is recorded and hides the editor when read-only', async () => {
+    const { store } = await setup({ therapy_lines_count: '0', lines_of_therapy: [] });
+
+    render(<TherapyLinesPanel store={store} readOnly />);
+
+    expect(screen.getByText('No therapy lines recorded.')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Add therapy line/i })).not.toBeInTheDocument();
+  });
+
+  it('tells the host after a mutation, because the store load alone does not', async () => {
+    const { store } = await setup({ therapy_lines_count: '1', lines_of_therapy: [], therapy_history_complete: false });
+    const onChanged = vi.fn();
+    const load = vi.spyOn(store, 'load');
+
+    render(<TherapyLinesPanel store={store} onChanged={onChanged} />);
+    fireEvent.click(screen.getByLabelText('This is the complete treatment history.'));
+
+    // No explicit connection: the standalone treatment tab leaves the helper on
+    // the module-level transport the app owns.
+    await waitFor(() => expect(completeTherapyHistory).toHaveBeenCalledWith(12, true, undefined));
+    await waitFor(() => expect(onChanged).toHaveBeenCalled());
+    // The mutation bypassed the queue, so a read that started before it must
+    // not be reused: the reload has to supersede it (#2433).
+    expect(load).toHaveBeenCalledWith(true);
+  });
+
+  it('does not call a completed write failed when the host callback throws', async () => {
+    const { store } = await setup({ therapy_lines_count: '1', lines_of_therapy: [], therapy_history_complete: false });
+    const onChanged = vi.fn(() => { throw new Error('host refresh broke'); });
+    const states: SaveState[] = [];
+    const stop = subscribeSaveState(store, (state) => states.push(state));
+
+    render(<TherapyLinesPanel store={store} onChanged={onChanged} />);
+    fireEvent.click(screen.getByLabelText('This is the complete treatment history.'));
+
+    await waitFor(() => expect(onChanged).toHaveBeenCalled());
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'The completeness setting was saved, but this screen could not refresh the record.',
+    );
+    // The write landed, so the host must not be told it failed.
+    expect(states.some((state) => state.failed)).toBe(false);
+    stop();
+  });
+
+  it('shows the line count as a lower bound until the history is confirmed', async () => {
+    const { store } = await setup({ therapy_lines_count: '1', lines_of_therapy: [], therapy_history_complete: false });
+
+    render(<TherapyLinesPanel store={store} />);
+
+    // Named by the sentence a sighted reader sees (WCAG 2.5.3, label in
+    // name), with the lower-bound hint as its description.
+    const box = screen.getByRole('checkbox', { name: 'This is the complete treatment history.' });
+    expect(box).not.toBeChecked();
+    expect(box).toHaveAccessibleDescription(/counts as a minimum/i);
+  });
+});
+
+describe('a retired store', () => {
+  it('does not offer authoring after a Retry or post-authoring reload', async () => {
+    const { store } = await setup({ therapy_lines_count: '0', lines_of_therapy: [] });
+    render(<TherapyLinesPanel store={store} readOnly={false} />);
+    expect(screen.getByRole('button', { name: /Add therapy line/i })).toBeInTheDocument();
+
+    // The host switched identity on this client; then the panel reloads.
+    store.retire();
+    await store.load();
+
+    await waitFor(() => expect(screen.queryByRole('button', { name: /Add therapy line/i }))
+      .not.toBeInTheDocument());
+  });
+});

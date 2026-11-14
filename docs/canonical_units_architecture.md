@@ -34,6 +34,19 @@ additive `normalized` object with `value`, `unit`, `range_low`, `range_high`,
 performing comparisons or analytics in instance units must use this object as a
 whole, checking `error`, rather than pairing a source number with its unit.
 
+This boundary also applies during bulk imports, source-code resolution and
+mapping repoints. Changing a destination concept does not rescale its clinical
+source rows. Import identity includes the source number; rewriting it after an
+insert would make an identical retry create another event. Implicit conversion
+to SI base units can also overflow or round to zero in `numeric(15,5)`.
+The cb-v2 backmerge therefore excludes write-time numeric normalization and
+keeps the existing read-time API and fixed-unit PatientRecord projections.
+
+This code change performs no data repair. If an instance has already run a
+write-time conversion, recover original values only from verified source
+evidence through a separately reviewed preview/apply workflow; do not guess an
+inverse conversion from the retained source-unit text.
+
 PatientRecord integration fields that explicitly specify a unit, such as
 `albumin_g_dl`, and clinical rules with fixed-unit thresholds retain their
 existing contracts. Choosing `g/L` does not put a g/L number into a field named

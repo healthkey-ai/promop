@@ -15,6 +15,7 @@ from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from datetime import date, datetime, timedelta
+from django.core.exceptions import ObjectDoesNotExist
 from django.db import DatabaseError, models, transaction
 from django.db.models import DateTimeField, Q
 from django.db.models.functions import Cast, Coalesce
@@ -35,13 +36,149 @@ from omop_core.services.mappings import (
 from omop_core.services.clinical_units import (
     BLOOD_COUNT_FIELDS,
     canonical_wbc_unit, flc_to_canonical, wbc_to_canonical, blood_count_projection,
-    count_in_cells_per_ul, measurement_count_unit, measurement_creatinine_mg_dl,
+    count_in_cells_per_ul, measurement_count_unit,
 )
 from omop_core.services.lot_regimens import (
     get_regimen_concept_id,
     get_regimen_name,
     get_regimen_concept_id_by_name,
     normalize_drug_name,
+)
+from omop_core.services.hemoglobin_units import (
+    CANONICAL_FIELD as HEMOGLOBIN_CANONICAL,
+    DEFAULT_UNIT as HEMOGLOBIN_DEFAULT_UNIT,
+    PAIR_FIELD as HEMOGLOBIN_PAIR,
+    UNIT_FIELD as HEMOGLOBIN_UNIT,
+    SOURCE_PAIRS as _SOURCE_PAIRS,
+    canonical_from_pair as hemoglobin_canonical_from_pair,
+    canonical_in_range as hemoglobin_canonical_in_range,
+    normalize_unit as normalize_hemoglobin_unit,
+    same_number,
+)
+from omop_core.services.creatinine_units import (
+    SOURCE_PAIRS as _CREATININE_SOURCE_PAIRS,
+    CANONICAL_FIELD as CREATININE_CANONICAL,
+    PAIR_FIELD as CREATININE_PAIR,
+    UNIT_FIELD as CREATININE_UNIT,
+    canonical_from_pair as creatinine_canonical_from_pair,
+    canonical_in_range as creatinine_canonical_in_range,
+    normalize_unit as creatinine_normalize_unit,
+    DEFAULT_UNIT as CREATININE_DEFAULT_UNIT,
+)
+from omop_core.services.blood_count_source_pairs import (
+    PAIRS as _COUNT_SOURCE_PAIRS,
+    canonical_from_source as count_canonical_from_source,
+    source_fields as count_source_fields,
+    source_from_canonical as count_source_from_canonical,
+)
+from omop_core.services import direct_bilirubin_units
+from omop_core.services.patient_record_revisions import write_record_revisions
+from omop_core.services.source_pair_dates import (
+    SOURCE_PAIR_CANONICALS as _SOURCE_PAIR_CANONICALS,
+    forget_unedited_dates as _forget_unedited_pair_dates,
+    fields_for as _source_pair_fields,
+    stored_dates as _stored_pair_dates,
+    superseded_sources as _superseded_pair_sources,
+)
+from omop_core.services.chemistry_units import (
+    PAIRS as _CHEMISTRY_PAIRS,
+    canonical_from_pair as chemistry_canonical_from_pair,
+    canonical_in_range as chemistry_canonical_in_range,
+    normalize_unit as normalize_chemistry_unit,
+)
+
+#: The canonical columns whose imports must be converted to the canonical unit
+#: (#2318). The LOINC and display-name projections copy `value_as_number`, so an
+#: SI-scale result would otherwise be stored at the wrong magnitude.
+_CHEMISTRY_CANONICAL_FIELDS = frozenset(_CHEMISTRY_PAIRS)
+#: The legacy concept-name path writes the source pair, not the canonical.
+_CHEMISTRY_PAIR_CANONICAL = {
+    spec['value']: canonical for canonical, spec in _CHEMISTRY_PAIRS.items()
+}
+
+#: Direct bilirubin is a source pair without a canonical column (#2318): the
+#: pair is the stored fact and the unitless alias mirrors its mg/dL value.
+_DIRECT_PAIR_FIELD = direct_bilirubin_units.PAIR_FIELD
+_DIRECT_UNIT_FIELD = direct_bilirubin_units.UNIT_FIELD
+_DIRECT_ALIAS_FIELD = direct_bilirubin_units.ALIAS_FIELD
+_CHEMISTRY_SELECTED_FIELDS = _CHEMISTRY_CANONICAL_FIELDS | {_DIRECT_PAIR_FIELD}
+#: The chronological import pass also owns hemoglobin's canonical/pair, because
+#: a LOINC 718-7 result can arrive in g/L and must not be stored as g/dL, and
+#: serum creatinine's, because 2160-0 arrives in umol/L as often as in mg/dL:
+#: 80 umol/L (normal) was stored as 80 mg/dL (#2438).
+_UNIT_PAIR_SELECTED_FIELDS = _CHEMISTRY_SELECTED_FIELDS | {
+    HEMOGLOBIN_CANONICAL, CREATININE_CANONICAL,
+}
+
+
+def _concept_unit_code(measurement):
+    """The unit concept's code, 'unknown' for a dangling one, None for none.
+
+    Concept 0 is OMOP's "No matching concept": the ETL's way of saying the row
+    has no unit concept, not a unit. Reading its code blocked hemoglobin and
+    the chemistry pairs on unitless rows that dev reads (#2418 review).
+    """
+    if not measurement.unit_concept_id:
+        return None
+    try:
+        concept = measurement.unit_concept
+    except ObjectDoesNotExist:
+        # A referenced concept that is missing is still a named unit the
+        # converter cannot read; it must block rather than default.
+        return 'unknown'
+    if concept is None:
+        return 'unknown'
+    return concept.concept_code or 'unknown'
+
+
+def _resolve_reported_unit(measurement, normalize, default):
+    """``(reported_unit, unit_code)`` for a lab row, preferring a readable unit.
+
+    The source text wins when the converter reads it. A spelling it does not
+    read ("gm/dL", a lab's local form) defers to the unit concept, where the
+    ETL puts the cleaned UCUM unit (#2248): dropping a 13.2 g/dL hemoglobin
+    because its text said "gm/dL" lost real results (#2418 regression review).
+    With neither, the field's default unit applies; an unreadable unit gives
+    ``unit_code=None`` and the caller blocks the field.
+    """
+    from omop_core.services.canonical_units import is_known_unit, unit_code
+    text = (measurement.unit_source_value or '').strip()
+    concept_unit = _concept_unit_code(measurement)
+    if not text and concept_unit is None:
+        return None, default
+    if text:
+        # The lab's own spelling, then the UCUM unit it names ("gm/dL").
+        code = normalize(text)
+        if code is None:
+            code = normalize(unit_code(text))
+        if code is not None or concept_unit is None:
+            return text, code
+        # Invariant: when the text names a unit promop knows, the snapshot
+        # holds value_as_number in THAT unit (#2249 restores proven
+        # conversions; a cross-property pair is left as sent). The concept then
+        # does not describe the number, so a known text the converter cannot
+        # read blocks the field: mg/L calcium is not mg/dL, mmol/L hemoglobin
+        # is not g/dL. Only a text promop cannot read at all defers to the
+        # concept, where the ETL puts the cleaned UCUM unit (#2248).
+        if unit_code(text) != unit_code(concept_unit) and is_known_unit(text):
+            return text, None
+    code = normalize(concept_unit)
+    if code is None and text:
+        # Neither is readable: keep the lab's own text as the reported unit.
+        return text, None
+    return concept_unit, code
+
+#: The columns of a declared source pair. They are one assertion, so a
+#: canonical match in the default unit must not acknowledge them independently.
+_SOURCE_PAIR_FIELDS = frozenset(
+    field
+    for pairs in (_SOURCE_PAIRS, _CREATININE_SOURCE_PAIRS)
+    for fields in pairs.values()
+    for field in fields
+) | count_source_fields() | frozenset(
+    field
+    for spec in _CHEMISTRY_PAIRS.values()
+    for field in (spec['value'], spec['unit'])
 )
 
 
@@ -69,7 +206,7 @@ def _usable_concept_name(concept) -> str | None:
 
 # Bump this whenever aggregation or computation logic changes in any section
 # extractor or in _compute_derived_fields.  See DERIVATION_CHANGELOG.md.
-DERIVATION_VERSION = 27
+DERIVATION_VERSION = 31
 
 # These PatientRecord columns are projections of PersonLanguageSkill, never
 # independent edits. Older PATCH requests could mark them as user-edited and
@@ -194,6 +331,7 @@ _OMOP_DERIVED_FIELDS = [
     'biopsy_grade_depr',
     # Behavior / lifestyle
     'smoking_status', 'pack_years', 'alcohol_use', 'drinks_per_week',
+    'no_tobacco_use_status', 'tobacco_use_details',
     'exercise_frequency', 'exercise_minutes_per_week', 'diet_type',
     'sleep_hours_per_night', 'sleep_quality', 'stress_level', 'social_support',
     'employment_status', 'education_level', 'marital_status', 'insurance_type',
@@ -288,6 +426,16 @@ PATIENT_RECORD_OMOP_MAPPED_FIELDS = frozenset(_OMOP_DERIVED_FIELDS) | frozenset(
     # docs/patient-record-first-writes.md.
     'no_other_active_malignancies', 'preexisting_conditions', 'myeloma_type',
     'progression', 'condition_code_icd_10', 'condition_code_snomed_ct',
+    # Current-diagnosis myeloma-related disorders (#5521). User-entered, never
+    # derived: an imported historical occurrence must not become a current Yes.
+    # They are listed here for descriptor coverage and projection, not in
+    # _OMOP_DERIVED_FIELDS, because derivation must not clear an answer.
+    'mgus', 'smoldering_multiple_myeloma', 'waldenstrom_macroglobulinemia',
+    'igm_multiple_myeloma', 'al_amyloidosis', 'poems_syndrome',
+    # A clinician's Lugano assessment. User-entered, never derived: there is
+    # no PET/CT or marrow result to compute it from. Listed for descriptor
+    # coverage (and because every concrete data column must be classified).
+    'meets_lugano',
     'supportive_therapies', 'supportive_therapy_date',
     'supportive_therapy_start_date', 'supportive_therapy_end_date',
     'supportive_therapy_intent', 'absolute_neutrophile_count_units',
@@ -425,8 +573,8 @@ _FLC_FIELDS = frozenset({'kappa_flc', 'lambda_flc'})
 # 'alkaline_phosphatase' were cleared on every refresh and never repopulated.
 # test_no_canonical_is_listed_twice guards the shape.
 _LAB_FIELD_ALIASES = {
-    'serum_calcium_mg_dl':    ['calcium_mg_dl'],
-    'serum_creatinine_mg_dl': ['creatinine_mg_dl'],
+    'serum_calcium_mg_dl':    ['calcium_mg_dl', 'serum_calcium_level'],
+    'serum_creatinine_mg_dl': ['creatinine_mg_dl', 'serum_creatinine_level'],
     'egfr_ml_min_173m2':      ['egfr', 'estimated_glomerular_filtration_rate'],
     'bun_mg_dl':              ['blood_urea_nitrogen'],
     'sodium_meq_l':           ['serum_sodium'],
@@ -435,8 +583,11 @@ _LAB_FIELD_ALIASES = {
     'alkaline_phosphatase_u_l': ['alkaline_phosphatase', 'liver_enzyme_levels_alp'],
     'ldh_u_l':                ['ldh_level', 'ldh', 'lactate_dehydrogenase_level'],
     'hemoglobin_g_dl':       ['hemoglobin_level'],
+    'albumin_g_dl':          ['albumin_level'],
+    'bilirubin_total_mg_dl': ['serum_bilirubin_level_total'],
     'anc_thousand_per_ul':    ['absolute_neutrophile_count'],
     'alc_thousand_per_ul':    ['absolute_lymphocyte_count'],
+    'platelet_count_thousand_per_ul': ['platelet_count'],
     'rbc_million_per_ul':     ['red_blood_cell_count'],
     'creatinine_clearance_ml_min': ['creatinine_clearance_rate'],
     'serum_bilirubin_level_direct': ['serum_bilirubin_level'],
@@ -448,14 +599,23 @@ _LAB_FIELD_ALIASES = {
 def _lab_alias_value(canonical, value):
     if canonical in ('anc_thousand_per_ul', 'alc_thousand_per_ul'):
         return count_in_cells_per_ul(value)
+    if canonical == 'platelet_count_thousand_per_ul':
+        return count_source_from_canonical('platelet_count', value)
     return value
 
 
 def _lab_alias_units(canonical, value):
     if canonical == 'anc_thousand_per_ul':
         return {'absolute_neutrophile_count_units': 'CELLS/UL' if value is not None else None}
+    if canonical == 'platelet_count_thousand_per_ul':
+        return {'platelet_count_units': 'CELLS/UL' if value is not None else None}
     if canonical == 'hemoglobin_g_dl':
         return {'hemoglobin_level_units': 'G/DL' if value is not None else None}
+    if canonical == 'serum_creatinine_mg_dl':
+        return {'serum_creatinine_level_units': 'MG/DL' if value is not None else None}
+    chemistry = _CHEMISTRY_PAIRS.get(canonical)
+    if chemistry is not None:
+        return {chemistry['unit']: chemistry['canonical_unit'] if value is not None else None}
     return {}
 
 # A FHIR Condition.stage summary is an asserted clinical fact, but the FHIR
@@ -1144,6 +1304,17 @@ def refresh_patient_record(person: Person) -> PatientRecord:
         for field in user_edited:
             if hasattr(patient_info, field):
                 preserved[field] = getattr(patient_info, field)
+        # A pending height/weight value is meaningless without its canonical
+        # unit: derivation clears both unit columns, and BMI would then treat
+        # the number as metres. Keep the companion unit with the value.
+        preserved_units = set()
+        for value_field, unit_field in (
+            ('height', 'height_units'), ('weight', 'weight_units'),
+            (_DIRECT_PAIR_FIELD, _DIRECT_UNIT_FIELD),
+        ):
+            if value_field in preserved and hasattr(patient_info, unit_field):
+                preserved[unit_field] = getattr(patient_info, unit_field)
+                preserved_units.add(unit_field)
 
         # Clear all OMOP-derived fields before re-deriving so deletions are reflected.
         _clear_derived_fields(patient_info)
@@ -1156,11 +1327,14 @@ def refresh_patient_record(person: Person) -> PatientRecord:
         # Explicit demo/local assessment codes are fallbacks. Real extractors
         # and approved mappings below retain precedence during imports.
         from omop_core.services.sample_disease_profiles import read_profile_rows
+        derived_fields = set()
         for field, value in read_profile_rows(snapshot.measurements + snapshot.observations).items():
             setattr(patient_info, field, value)
+            derived_fields.add(field)
 
         # Populate all sections
         lab_derived_fields = set()
+        lab_dates = {}
         for section_fn in [
             _get_demographics,
             _get_blood_type_data,
@@ -1189,11 +1363,18 @@ def refresh_patient_record(person: Person) -> PatientRecord:
             _get_mm_specific_data,
             _get_sct_cytogenetic_data,
         ]:
-            section_values = section_fn(person, snapshot)
             if section_fn is _get_laboratory_data:
+                # The extractor's own selection names the day of the winning
+                # fact per field; a newer import retires an older pending pair
+                # (#2426) without re-implementing those rules here.
+                section_values = _get_laboratory_data(
+                    person, snapshot, dates_out=lab_dates)
                 lab_derived_fields = set(section_values)
+            else:
+                section_values = section_fn(person, snapshot)
             for field, value in section_values.items():
                 setattr(patient_info, field, value)
+                derived_fields.add(field)
 
         patient_info.custom_fields = _get_custom_patient_field_data(snapshot)
         from omop_core.services.omop_projection import curated_values_from_snapshot
@@ -1208,11 +1389,13 @@ def refresh_patient_record(person: Person) -> PatientRecord:
                 value = _answer_line(field, value)
             if field not in lab_derived_fields and _fits_column(patient_info, field, value):
                 setattr(patient_info, field, value)
+            derived_fields.add(field)
 
         for field, value in linked_cancer_values.items():
             width = PatientRecord._meta.get_field(field).max_length
             # Preserve the complete source fact; this is the legacy-width mirror.
             setattr(patient_info, field, value[:width] if width and isinstance(value, str) else value)
+            derived_fields.add(field)
 
         # Pending edits (including explicit clears) win until OMOP actually
         # represents the saved value. A stale fact or a failed projection must
@@ -1221,16 +1404,107 @@ def refresh_patient_record(person: Person) -> PatientRecord:
             NEW_INPUT_FIELDS, values_from_snapshot,
         )
         clinical_values = values_from_snapshot(snapshot) if preserved else {}
+        # A source pair is confirmed only when number and unit both match the
+        # imported fact. The value alone is not evidence: the same number under
+        # another unit is a different result (#2318).
+        direct_pair_evidence = (
+            _DIRECT_PAIR_FIELD in derived_fields
+            and _DIRECT_UNIT_FIELD in derived_fields
+            and _derived_value_matches(
+                _DIRECT_PAIR_FIELD,
+                getattr(patient_info, _DIRECT_PAIR_FIELD, None),
+                preserved.get(_DIRECT_PAIR_FIELD),
+            )
+            and _derived_value_matches(
+                _DIRECT_UNIT_FIELD,
+                getattr(patient_info, _DIRECT_UNIT_FIELD, None),
+                preserved.get(_DIRECT_UNIT_FIELD),
+            )
+        )
+        # A newer imported result retires an older patient-entered pair (#2426).
+        # The pair is the reader's assertion, so only derivation's own pick for
+        # the canonical field decides: a same-day result, an unusable one, or a
+        # pair whose entered day is unknown leaves it pending. Retire before
+        # restoring, or the old number and unit would win beside the new fact.
+        superseded_pairs = _superseded_pair_sources(
+            user_edited,
+            _stored_pair_dates(patient_info),
+            lab_dates,
+            {
+                canonical: getattr(patient_info, canonical, None)
+                for canonical in set(_SOURCE_PAIR_CANONICALS.values())
+            },
+        )
+        # The entry a retirement removes leaves the record, so the change
+        # history has to keep it (#2426 review). `preserved` is the only copy
+        # of the old values: _clear_derived_fields already reset the columns.
+        retired_values = {}
+        if superseded_pairs:
+            for source in superseded_pairs:
+                for field in _source_pair_fields(source):
+                    if field in preserved:
+                        retired_values[field] = preserved[field]
+                    preserved.pop(field, None)
+                    preserved_units.discard(field)
+                    user_edited.discard(field)
+                # A legacy row can still carry a canonical marker from before
+                # the pair owned it; restoring it would put the old read-model
+                # back over the newer result this retirement is accepting.
+                canonical = _SOURCE_PAIR_CANONICALS[source]
+                if canonical != source:
+                    if canonical in preserved:
+                        retired_values[canonical] = preserved[canonical]
+                    preserved.pop(canonical, None)
+                    user_edited.discard(canonical)
+            if _forget_unedited_pair_dates(patient_info, user_edited):
+                logger.info(
+                    'Retired pending source pairs behind a newer result for '
+                    'person_id=%s: %s', person.person_id,
+                    ', '.join(sorted(superseded_pairs)),
+                )
+
         still_orphaned = []
         for field, value in preserved.items():
+            if (field == _DIRECT_UNIT_FIELD
+                    and _DIRECT_PAIR_FIELD not in preserved):
+                # An orphan unit is not a fact; do not let it outlive the pair
+                # and re-attach to a later import.
+                continue
+            if field in preserved_units:
+                # Restore the unit with its pending value; it is not an
+                # independent user edit and must not get its own marker.
+                setattr(patient_info, field, value)
+                continue
             derived_value = getattr(patient_info, field, None)
-            matches = _derived_value_matches(field, derived_value, value)
-            if field == 'medication_contexts':
+            # A retained attribute is not evidence: a field this refresh did
+            # not evaluate keeps its value only because nothing cleared it.
+            # Dropping its marker there would let a later derivation or a
+            # mapping approval treat an unbacked edit as confirmed.
+            has_evidence = field in derived_fields or field in _OMOP_DERIVED_FIELDS
+            if field in _SOURCE_PAIR_FIELDS:
+                # A source pair is one assertion, not two independently
+                # acknowledged columns. The extractor mirrors the canonical
+                # into the legacy alias in g/dL, so a numerical match would
+                # clear a g/dL pair but keep the equivalent g/L pair pending.
+                # A numerical match does not retire it either: only an explicit
+                # canonical event (recompute) or a strictly newer result above
+                # does, because the chosen unit is the reader's declaration.
+                matches = False
+            elif field == _DIRECT_PAIR_FIELD:
+                # Direct bilirubin has no canonical, so the pair is confirmed
+                # when the import carries the same number and unit together.
+                matches = has_evidence and direct_pair_evidence
+            elif field == 'medication_contexts':
                 from omop_core.services.medication_context import context_delta, merge_contexts
                 eligible = {str(row.pk) for row in snapshot.drug_exposures}
                 value = {pk: attributes for pk, attributes in (value or {}).items() if pk in eligible}
-                matches = not context_delta(derived_value or {}, value)
+                # Per-attribute evidence: the imported object may carry
+                # attributes the pending edit never touched, so whole-object
+                # equality would keep a fully backed edit pending.
+                matches = has_evidence and not context_delta(derived_value or {}, value)
                 value = merge_contexts(derived_value or {}, value or {})
+            else:
+                matches = has_evidence and _derived_value_matches(field, derived_value, value)
             if field in NEW_INPUT_FIELDS or field in clinical_values:
                 matches = matches and field in confirmed_inputs
             if (field == 'flipi_score_options' and value is None
@@ -1252,18 +1526,53 @@ def refresh_patient_record(person: Person) -> PatientRecord:
 
         patient_info.derivation_version = DERIVATION_VERSION
         patient_info.derived_at = timezone.now()
-        return recompute_patient_record_fields(
+        record = recompute_patient_record_fields(
             patient_info,
-            changed_fields=user_edited & {'flipi_score_options', 'gelf_criteria_options'},
+            changed_fields=(
+                user_edited & {'flipi_score_options', 'gelf_criteria_options'}
+            ) | ({'disease'} if 'disease' in user_edited else set()),
+            # A stated CRAB result (an 89599-5 fact or an approved mapping)
+            # stands. Otherwise the verdict comes from the record's final
+            # inputs, after pending edits and source pairs are settled, with
+            # the rule an edit uses (#2480).
+            derive_crab=patient_info.meets_crab is None,
         )
+        if retired_values:
+            write_record_revisions(record, retired_values, changed_by='system')
+        return record
 
 
-def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fields=()) -> PatientRecord:
+def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fields=(),
+                                    pair_derived=(), derive_crab=False) -> PatientRecord:
     """Save aliases and calculations from the current record without reading OMOP facts.
 
     This does not advance derived_at/version: those describe the last full
     OMOP refresh, not the last edit of PatientRecord's own values.
+    ``derive_crab`` re-derives ``meets_crab`` from the record's inputs even
+    when none of them changed; a full refresh with no stated CRAB fact sets it.
     """
+    from omop_core.services.pre_existing_conditions import (
+        contradicts_no_pre_existing_conditions,
+        supersede_no_preexisting_conditions,
+    )
+    # An explicit canonical write retires a pending source pair here, not in a
+    # full refresh. Snapshot the pair columns before this function overwrites
+    # them, so the entry it removes still leaves a revision row (#2426 review).
+    pending_fields = set(patient_info.user_edited_fields or ())
+    pair_entry_values = {
+        field: getattr(patient_info, field, None)
+        for field in _SOURCE_PAIR_FIELDS
+        if field in pending_fields
+    }
+    # The category list is the evidence; an explicit "no conditions" answer cannot
+    # stand beside it (#1988). Invalidate the answer rather than delete the list.
+    if contradicts_no_pre_existing_conditions(
+        patient_info.no_pre_existing_conditions, patient_info.preexisting_conditions,
+    ):
+        patient_info.no_pre_existing_conditions = None
+    # A recorded category is also a more specific answer than a blanket "none",
+    # so it withdraws the attestation that backed the flag (#1988).
+    supersede_no_preexisting_conditions(patient_info)
     if 'date_of_birth' in changed_fields:
         # PatientRecord.save recalculates age when a DOB exists, but it must be
         # explicitly cleared first when the date and Person birth components
@@ -1271,14 +1580,190 @@ def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fiel
         patient_info.patient_age = None
 
     pending_aliases = set(patient_info.user_edited_fields or [])
+    pair_derived = set(pair_derived)
+    # The hemoglobin source pair (#2318) is authoritative for the canonical
+    # read-model while it is pending or is the only value present. A refresh
+    # clears derived fields before extraction, so without this a failed or
+    # missing projection would leave the pair on the record and the canonical
+    # None — matching would silently read the wrong value.
+    pair_pending = HEMOGLOBIN_PAIR in pending_aliases
+    canonical_import = (HEMOGLOBIN_CANONICAL in changed_fields
+                        and HEMOGLOBIN_CANONICAL not in pair_derived)
+    if canonical_import:
+        # An explicit canonical edit/import supersedes the pair; its unit is
+        # not an independent user edit and must not outlive it.
+        pending_aliases.discard(HEMOGLOBIN_PAIR)
+        pending_aliases.discard(HEMOGLOBIN_UNIT)
+    pair_recognised, pair_value = hemoglobin_canonical_from_pair(
+        getattr(patient_info, HEMOGLOBIN_PAIR),
+        getattr(patient_info, HEMOGLOBIN_UNIT),
+    )
+    canonical_now = getattr(patient_info, HEMOGLOBIN_CANONICAL)
+    # An explicit canonical edit/clear is itself a pending user answer. A pair
+    # that is no longer pending must not re-derive over it from a stale source
+    # column: a legacy clear writes canonical None while the old source value can
+    # survive until derivation, and the pair would otherwise resurrect it.
+    canonical_pending = HEMOGLOBIN_CANONICAL in pending_aliases
+    pair_authoritative = (
+        not canonical_import and pair_recognised
+        # An import may hold a value the canonical column cannot store; that is
+        # a preserved legacy fact, not a read-model matching can consume.
+        and hemoglobin_canonical_in_range(pair_value)
+        and (pair_pending
+             or (not canonical_pending
+                 and (canonical_now is None
+                      or same_number(pair_value, canonical_now))))
+    )
+    dependency_changed = set(changed_fields)
+    if pair_authoritative:
+        if not same_number(canonical_now, pair_value):
+            setattr(patient_info, HEMOGLOBIN_CANONICAL, pair_value)
+            dependency_changed.add(HEMOGLOBIN_CANONICAL)
+        # The pair stays pending: the chosen unit is the patient's declaration
+        # and derivation cannot reproduce it from a g/dL fact. Only an explicit
+        # canonical import retires it (handled above).
+    # Creatinine's source pair (#2318 follow-up): the canonical follows the pair
+    # the patient typed rather than the inverse. It is a storage/projection
+    # read-model — the CKD-EPI matcher reads the pair, because the canonical's
+    # two decimals can move a threshold. Same precedence as hemoglobin: a
+    # pending pair wins, an explicit canonical import/clear retires it.
+    creatinine_pair_pending = CREATININE_PAIR in pending_aliases
+    creatinine_canonical_import = (
+        CREATININE_CANONICAL in changed_fields
+        and CREATININE_CANONICAL not in pair_derived
+    )
+    if creatinine_canonical_import:
+        pending_aliases.discard(CREATININE_PAIR)
+        pending_aliases.discard(CREATININE_UNIT)
+    creatinine_recognised, creatinine_pair_value = creatinine_canonical_from_pair(
+        getattr(patient_info, CREATININE_PAIR),
+        getattr(patient_info, CREATININE_UNIT),
+    )
+    creatinine_canonical_now = getattr(patient_info, CREATININE_CANONICAL)
+    creatinine_canonical_pending = CREATININE_CANONICAL in pending_aliases
+    creatinine_pair_authoritative = (
+        not creatinine_canonical_import and creatinine_recognised
+        and creatinine_canonical_in_range(creatinine_pair_value)
+        and (creatinine_pair_pending
+             or (not creatinine_canonical_pending
+                 and (creatinine_canonical_now is None
+                      or same_number(creatinine_pair_value, creatinine_canonical_now))))
+    )
+    if creatinine_pair_authoritative:
+        if not same_number(creatinine_canonical_now, creatinine_pair_value):
+            setattr(patient_info, CREATININE_CANONICAL, creatinine_pair_value)
+            dependency_changed.add(CREATININE_CANONICAL)
+
+    # The chemistry source pairs (#2318): albumin, serum calcium and total
+    # bilirubin. Same contract as creatinine — the pair is what the record and
+    # the matcher read, and the canonical is the normalised storage/projection
+    # read-model, quantised to the column's one decimal.
+    chemistry_pair_authoritative_canonicals = set()
+    for canonical, spec in _CHEMISTRY_PAIRS.items():
+        chemistry_pair = spec['value']
+        chemistry_unit = spec['unit']
+        chemistry_pair_pending = chemistry_pair in pending_aliases
+        chemistry_canonical_import = (
+            canonical in changed_fields and canonical not in pair_derived
+        )
+        if chemistry_canonical_import:
+            pending_aliases.discard(chemistry_pair)
+            pending_aliases.discard(chemistry_unit)
+        chemistry_recognised, chemistry_pair_value = chemistry_canonical_from_pair(
+            canonical,
+            getattr(patient_info, chemistry_pair),
+            getattr(patient_info, chemistry_unit),
+        )
+        chemistry_canonical_now = getattr(patient_info, canonical)
+        chemistry_canonical_pending = canonical in pending_aliases
+        chemistry_pair_authoritative = (
+            not chemistry_canonical_import and chemistry_recognised
+            and chemistry_canonical_in_range(canonical, chemistry_pair_value)
+            and (chemistry_pair_pending
+                 or (not chemistry_canonical_pending
+                     and (chemistry_canonical_now is None
+                          or same_number(chemistry_pair_value, chemistry_canonical_now))))
+        )
+        if chemistry_pair_authoritative:
+            if not same_number(chemistry_canonical_now, chemistry_pair_value):
+                setattr(patient_info, canonical, chemistry_pair_value)
+                dependency_changed.add(canonical)
+            chemistry_pair_authoritative_canonicals.add(canonical)
+
+    # The same rule for the cell-count source pairs: the trial row edits
+    # cells/µL (`absolute_neutrophile_count`, ...), and the canonical
+    # thousands/µL column must follow it rather than the inverse.
+    count_pair_authoritative = set()
+    for source, spec in _COUNT_SOURCE_PAIRS.items():
+        canonical = spec['canonical']
+        source_pending = source in pending_aliases
+        canonical_import = (canonical in changed_fields
+                            and canonical not in pair_derived)
+        if canonical_import:
+            pending_aliases.discard(source)
+            if spec.get('unit_field'):
+                pending_aliases.discard(spec['unit_field'])
+        unit = (getattr(patient_info, spec['unit_field'], None)
+                if spec.get('unit_field') else spec['unit'])
+        recognised, source_value = count_canonical_from_source(
+            source, getattr(patient_info, source), unit,
+        )
+        canonical_now = getattr(patient_info, canonical)
+        canonical_pending = canonical in pending_aliases
+        authoritative = (
+            not canonical_import and recognised
+            and (source_pending
+                 or (not canonical_pending
+                     and (canonical_now is None
+                          or same_number(source_value, canonical_now))))
+        )
+        if authoritative:
+            if not same_number(canonical_now, source_value):
+                setattr(patient_info, canonical, source_value)
+                dependency_changed.add(canonical)
+            count_pair_authoritative.add(canonical)
     for canonical, aliases in _LAB_FIELD_ALIASES.items():
+        if canonical == _DIRECT_PAIR_FIELD:
+            # The unitless mirror is always normalised to mg/dL. A pending alias
+            # edit predates the pair contract and is left for the data audit
+            # rather than silently reinterpreted.
+            if _DIRECT_ALIAS_FIELD not in pending_aliases:
+                _, alias_value = direct_bilirubin_units.alias_from_pair(
+                    getattr(patient_info, _DIRECT_PAIR_FIELD),
+                    getattr(patient_info, _DIRECT_UNIT_FIELD),
+                )
+                setattr(patient_info, _DIRECT_ALIAS_FIELD, alias_value)
+            continue
         value = getattr(patient_info, canonical)
-        if canonical in changed_fields:
+        if canonical == HEMOGLOBIN_CANONICAL and pair_authoritative:
+            # The pair already supplies the canonical; copying it back would
+            # replace the reader's chosen unit with g/dL.
+            continue
+        if canonical == CREATININE_CANONICAL and creatinine_pair_authoritative:
+            # The pair already supplies the canonical, so it must not be copied
+            # back (that would replace the reader's chosen unit with mg/dL). The
+            # canonical's other legacy alias still has to follow the value.
+            aliases = [alias for alias in aliases if alias != CREATININE_PAIR]
+        if canonical in count_pair_authoritative:
+            # The source count already supplies the canonical.
+            continue
+        if canonical in chemistry_pair_authoritative_canonicals:
+            # The chemistry pair already supplies the canonical; copying it
+            # back would replace the reader's chosen unit with the canonical
+            # one. The canonical's other legacy alias still follows the value.
+            aliases = [alias for alias in aliases
+                       if alias != _CHEMISTRY_PAIRS[canonical]['value']]
+        retire_aliases = canonical in changed_fields and canonical not in pair_derived
+        if retire_aliases:
             # A new canonical edit supersedes an older pending edit to a field
-            # that is now an alias. A refresh without such an edit must not
-            # erase the old user's value before its conflict is reviewed.
+            # that is now an alias — including the alias's chosen unit, which
+            # arrives as a separate record field (#2318). A refresh without
+            # such an edit must not erase the old user's value before its
+            # conflict is reviewed.
             pending_aliases.difference_update(aliases)
-        if (canonical == 'hemoglobin_g_dl' and canonical not in changed_fields
+            pending_aliases.difference_update(
+                {f'{alias}_units' for alias in aliases})
+        if (canonical == HEMOGLOBIN_CANONICAL and not retire_aliases
                 and value is None and patient_info.hemoglobin_level_units
                 and patient_info.hemoglobin_level_units.strip().casefold() != 'g/dl'):
             # An uncoded hemoglobin result in another unit is a legacy fact,
@@ -1288,11 +1773,29 @@ def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fiel
             if alias not in pending_aliases:
                 setattr(patient_info, alias, _lab_alias_value(canonical, value))
         if not any(alias in pending_aliases for alias in aliases):
-            for unit_field, unit in _lab_alias_units(canonical, value).items():
+            unit_updates = _lab_alias_units(canonical, value)
+            if canonical == CREATININE_CANONICAL and creatinine_pair_authoritative:
+                # The pair owns its own unit; only the ordinary alias is updated.
+                unit_updates.pop(CREATININE_UNIT, None)
+            if canonical in chemistry_pair_authoritative_canonicals:
+                unit_updates.pop(_CHEMISTRY_PAIRS[canonical]['unit'], None)
+            for unit_field, unit in unit_updates.items():
                 setattr(patient_info, unit_field, unit)
+    # A pending pair owns its canonical read-model: the pair is the reader's
+    # input and the canonical follows it, so a canonical marker left by an
+    # older edit must not outlive it. Otherwise, once a newer import retires
+    # the pair, that stale marker would restore the old canonical over the new
+    # result (#2426).
+    for source, canonical in _SOURCE_PAIR_CANONICALS.items():
+        if canonical != source and source in pending_aliases:
+            pending_aliases.discard(canonical)
     patient_info.user_edited_fields = sorted(pending_aliases)
+    # A pending pair's entered day lives only while the pair is pending: an
+    # explicit canonical write or import retires both together (#2426).
+    _forget_unedited_pair_dates(patient_info, pending_aliases)
     # Full refresh clears these before extraction. Direct edits need to clear
     # dependent results when an input is removed, without clearing other data.
+    attested = attested_negative_fields(patient_info)
     for result, inputs in {
         'hr_status': {'estrogen_receptor_status', 'progesterone_receptor_status'},
         'metastatic_status': {'distant_metastasis_stage'},
@@ -1301,7 +1804,9 @@ def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fiel
         'no_other_active_malignancies': {'active_malignancies'},
     }.items():
         if inputs.intersection(changed_fields):
-            setattr(patient_info, result, None)
+            # An explicit confirmation survives a source edit; the audit
+            # reports a resulting contradiction for review.
+            setattr(patient_info, result, True if result in attested else None)
     from omop_core.services.flipi import calculate_flipi
     if (patient_info.flipi_score_options is not None
             or 'flipi_score_options' in changed_fields):
@@ -1316,6 +1821,24 @@ def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fiel
         patient_info.gelf_criteria_status = 'Met' if patient_info.gelf_criteria_options.strip() else 'Not Met'
     elif 'gelf_criteria_options' in changed_fields:
         patient_info.gelf_criteria_status = None
+    # MM defining events are computed, but their source facts are ordinary
+    # editable inputs. A direct edit to one of those inputs must move the verdict
+    # now rather than leaving a stale result from the last OMOP refresh.
+    if derive_crab or MEETS_CRAB_INPUT_FIELDS.intersection(dependency_changed):
+        # A source-pair edit changes the canonical g/dL read-model without
+        # being an explicit canonical write, so the verdict must follow it too.
+        patient_info.meets_crab = derive_meets_crab(patient_info)
+    if MEETS_SLIM_INPUT_FIELDS.intersection(changed_fields):
+        patient_info.meets_slim = derive_meets_slim(patient_info)
+    # `disease_slug` is what the descriptor names as computed from `disease`, so a
+    # direct edit to the name has to move the slug here; the full refresh only
+    # derives it from the OMOP condition, which a record-level edit does not touch.
+    if 'disease' in changed_fields:
+        # A cleared disease has no slug; leaving the previous one would keep a
+        # machine-readable diagnosis the record no longer claims.
+        patient_info.disease_slug = (
+            _disease_name_to_slug(patient_info.disease) if patient_info.disease else None
+        )
     # Derive composite b_symptoms from the three individual B-symptom fields.
     # Only act when at least one individual field carries a value or was just
     # changed; an unrelated edit must not overwrite a previously stored
@@ -1345,6 +1868,13 @@ def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fiel
             updates['custom_fields'] = patient_info.custom_fields
         updates['updated_at'] = timezone.now()
         PatientRecord.objects.filter(pk=patient_info.pk).update(**updates)
+    pending_fields = set(patient_info.user_edited_fields or ())
+    retired_pairs = {
+        field: value for field, value in pair_entry_values.items()
+        if field not in pending_fields
+    }
+    if retired_pairs:
+        write_record_revisions(patient_info, retired_pairs, changed_by='system')
     return patient_info
 
 
@@ -1552,8 +2082,8 @@ def _get_location_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
                 'region': location.state,
                 'city': location.city,
                 'postal_code': location.zip,
-                'latitude': float(location.latitude) if location.latitude else None,
-                'longitude': float(location.longitude) if location.longitude else None,
+                'latitude': float(location.latitude) if location.latitude is not None else None,
+                'longitude': float(location.longitude) if location.longitude is not None else None,
             })
         except Location.DoesNotExist:
             pass
@@ -1627,6 +2157,14 @@ def invalidate_category_titles_cache():
     _category_titles_cache = None
 
 
+def _is_context_only_disease(name):
+    """Relevance to a cancer is not evidence the patient has that cancer."""
+    return (name or '').strip().casefold().startswith((
+        'family history', 'fh of ', 'fh:', 'at high risk', 'at increased risk',
+        'at risk for ', 'at risk of ', 'risk of ', 'screening for ',
+    ))
+
+
 def _canonicalize_disease(name: str) -> str:
     """Map a raw OMOP condition concept name to EXACT's canonical disease title.
 
@@ -1634,7 +2172,7 @@ def _canonicalize_disease(name: str) -> str:
     DiseaseCategoryMapping table for curator-maintained entries.
     Unrecognised names are returned unchanged (preserve, don't drop).
     """
-    if not name:
+    if not name or _is_context_only_disease(name):
         return name
     normalized = name.strip().lower()
     # Fast path: hardcoded aliases (most common names)
@@ -1773,6 +2311,16 @@ def _primary_cancer_condition(person, snapshot: OmopSnapshot, cancers: list):
     return max(cancers, key=rank)
 
 
+def _is_current_state_answer(cond):
+    """A row a pinned current-state recipe wrote from a PatientRecord answer (#5521).
+
+    It records that the patient answered Yes, dated the day they answered. It
+    is not a diagnosis the record is about, so it must not become the primary
+    cancer or the diagnosis date, which an EHR row for the same concept may.
+    """
+    from omop_core.services.write_descriptor import PINNED_PROJECTION_SOURCE_VALUES
+    return cond.condition_source_value in PINNED_PROJECTION_SOURCE_VALUES
+
 # Names a cancer without being one: a past cancer, a complication or symptom
 # of one (#2181), a benign or uncertain growth, a test, a visit, an inherited
 # risk or a worry, or "malignant" in its other sense (malignant hypertension).
@@ -1806,9 +2354,11 @@ def _condition_names(cond) -> tuple[str, str]:
 
 def _is_oncologic(cond):
     """Shared cancer predicate for the primary selector and scoped projections."""
-    if cond.is_erroneous:
+    if cond.is_erroneous or _is_current_state_answer(cond):
         return False
     cname, src = _condition_names(cond)
+    if _is_context_only_disease(cname) or _is_context_only_disease(src):
+        return False
     if 'screening' in cname or (not cond.condition_concept_id and 'screening' in src):
         return False
     if NOT_CANCER_NAME.search(cname) or NOT_CANCER_NAME.search(src):
@@ -1859,7 +2409,8 @@ def _get_disease_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
 
     # Any condition for diagnosis_date fallback (earliest)
     if 'diagnosis_date' not in data:
-        dated = [c for c in snapshot.conditions if c.condition_start_date]
+        dated = [c for c in snapshot.conditions
+                 if c.condition_start_date and not _is_current_state_answer(c)]
         if dated:
             earliest = min(dated, key=lambda c: c.condition_start_date)
             data['diagnosis_date'] = earliest.condition_start_date
@@ -1973,9 +2524,12 @@ def _get_active_condition_data(person: Person, snapshot: OmopSnapshot = None) ->
     """
     snapshot = snapshot or _build_snapshot(person)
     today = timezone.localdate()
+    # A current-state answer row is the patient's Yes to one of the pinned
+    # questions, not a diagnosis; it must not count as another active
+    # malignancy or infection on top of the record's own history.
     current_conditions = [
         condition for condition in snapshot.conditions
-        if _condition_is_current(condition, today)
+        if _condition_is_current(condition, today) and not _is_current_state_answer(condition)
     ]
     data = {}
 
@@ -2795,6 +3349,9 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures, sn
     later_prog = sorted(k for k in lot_progression_dates if k >= 3)
     if later_prog:
         data['later_progression_date'] = lot_progression_dates[later_prog[0]]
+    for line in data.get('later_therapies', []):
+        progression = lot_progression_dates.get(line.get('lineNumber'))
+        line['progression_date'] = progression.isoformat() if progression else None
 
     # ── POD24: progression within 24 months of first-line start ───────────
     # POD24 is an FL-specific prognostic marker; only compute for FL patients.
@@ -3999,11 +4556,136 @@ def _meets_flc_criterion(
     return involved >= _SLIM_INVOLVED_FLC_MG_L
 
 
+#: Canonical PatientRecord inputs for the two MM defining events. A direct edit
+#: to any of them re-derives the verdict for that event without waiting for the
+#: next OMOP refresh.
+MEETS_CRAB_INPUT_FIELDS = frozenset({
+    'hemoglobin_g_dl', 'serum_calcium_mg_dl', 'creatinine_clearance_ml_min',
+    'serum_creatinine_mg_dl', 'bone_lesions',
+})
+MEETS_SLIM_INPUT_FIELDS = frozenset({
+    'clonal_plasma_cells', 'kappa_flc', 'lambda_flc', 'kappa_lambda_ratio',
+})
+
+
+def _decimal_or_none(value):
+    """A finite non-negative Decimal, or None for a missing/invalid input."""
+    if value is None or value == '':
+        return None
+    try:
+        number = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    if not number.is_finite() or number < 0:
+        return None
+    return number
+
+
+#: ``bone_lesions`` answers that are a lesion and that are none. The writers
+#: emit Yes / No / Unknown (the curated choices) and Present / Absent (the OMOP
+#: extractor); CancerBot's source answers are counts (1, 2, >2).
+_BONE_LESIONS_POSITIVE = frozenset({'present', 'yes', 'true', '1', '2', '>2'})
+_BONE_LESIONS_NEGATIVE = frozenset({'absent', 'no', 'false', '0', 'none', 'negative'})
+
+
+def _bone_lesions_component(value):
+    """True for a recognised lesion, False for a recognised negative, else None.
+
+    ``bone_lesions`` is stored as free text. Only an answer known to mean a
+    lesion counts: "Unknown", "Indeterminate" or "Not detected" read as a
+    lesion set CRAB with no evidence. Treating an explicit negative as
+    evidence is what lets a fully negative CRAB work-up answer "not met"
+    instead of "unknown".
+    """
+    if value is None:
+        return None
+    text = str(value).strip().casefold()
+    if text in _BONE_LESIONS_POSITIVE:
+        return True
+    if text in _BONE_LESIONS_NEGATIVE:
+        return False
+    return None
+
+
+def derive_meets_crab(patient_info: PatientRecord):
+    """Three-valued CRAB from the record's canonical inputs.
+
+    The one CRAB rule: a direct edit and a full refresh without a stated CRAB
+    fact both call it (#2480). A stated 89599-5 fact is kept by the refresh
+    but not yet by an edit (#2520). The thresholds are the SME's (CancerBot
+    #3593, MM_Disease_Activity slides 5 and 12): 0 < hemoglobin < 10 g/dL,
+    calcium > 11 mg/dL, 0 < clearance < 40 mL/min, serum creatinine > 2 mg/dL.
+    The renal arm reads creatinine only when no usable clearance is recorded,
+    as it did before; the SME slides state "creatinine > 2 or CrCl < 40",
+    and whether to apply it as an OR is open (#2521). eGFR is not a
+    clearance there and is not read. A positive component
+    establishes CRAB; a negative answer requires every component to be
+    evaluated, otherwise the result stays unknown rather than asserting a
+    defining event that was never assessed ("not enough data" is Unknown,
+    slide 15).
+    """
+    hgb = _decimal_or_none(patient_info.hemoglobin_g_dl)
+    calcium = _decimal_or_none(patient_info.serum_calcium_mg_dl)
+    clearance = _decimal_or_none(patient_info.creatinine_clearance_ml_min)
+    if clearance is not None and clearance <= 0:
+        # 0 mL/min fits the column but is an ETL placeholder, as a 0 g/dL
+        # hemoglobin is; an anuric patient's creatinine still decides (#2485).
+        clearance = None
+    creatinine = _decimal_or_none(patient_info.serum_creatinine_mg_dl)
+    if clearance is not None:
+        renal = clearance < Decimal('40')
+    elif creatinine is not None:
+        renal = creatinine > Decimal('2')
+    else:
+        renal = None
+    components = [
+        # 0 g/dL fits the column but is an ETL placeholder, not a blood count:
+        # unknown, as in the OMOP fallback.
+        None if hgb is None or hgb <= 0 else hgb < Decimal('10'),
+        None if calcium is None else calcium > Decimal('11'),
+        renal,
+        _bone_lesions_component(patient_info.bone_lesions),
+    ]
+    if any(component is True for component in components):
+        return True
+    if all(component is not None for component in components):
+        return False
+    return None
+
+
+def derive_meets_slim(patient_info: PatientRecord):
+    """Three-valued SLiM from the record's canonical inputs.
+
+    Uses the same Sixty and Light-chain rule as :func:`_get_mm_specific_data`,
+    including the involved-chain burden guard. The MRI-lesion criterion is not
+    inferred here: ``bone_lesions`` is a shared CRAB presence flag whose value
+    set does not distinguish "one lesion" from "more than one", so treating any
+    recorded value as the SLiM-M criterion would invent a positive.
+    """
+    plasma = _decimal_or_none(patient_info.clonal_plasma_cells)
+    sixty = None if plasma is None else plasma >= Decimal('60')
+    kappa = _decimal_or_none(patient_info.kappa_flc)
+    lam = _decimal_or_none(patient_info.lambda_flc)
+    ratio = _decimal_or_none(patient_info.kappa_lambda_ratio)
+    if kappa is None or lam is None:
+        light = None
+    else:
+        light = _meets_flc_criterion(kappa, lam, ratio)
+    components = [sixty, light]
+    if any(component is True for component in components):
+        return True
+    if all(component is False for component in components):
+        return False
+    return None
+
+
 def _get_mm_specific_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
     """Derive MM-specific boolean and coded fields from OMOP Observation table.
 
     Covers fields the lab routing cannot derive (boolean / string-valued
-    observations): plasma_cell_leukemia, bone_lesions, meets_crab.
+    observations): plasma_cell_leukemia, bone_lesions, an explicit meets_crab
+    fact, and meets_slim. Without an explicit fact, meets_crab comes from
+    :func:`derive_meets_crab` at the end of :func:`refresh_patient_record`.
     Uses measurement_source_value as the LOINC lookup since Concept rows may not
     be loaded in all environments.
     """
@@ -4096,26 +4778,11 @@ def _get_mm_specific_data(person: Person, snapshot: OmopSnapshot = None) -> dict
 
     data['meets_slim'] = meets_slim
 
-    # ── meets_crab fallback: compute from OMOP Measurements when obs missing ─
-    if 'meets_crab' not in data:
-        _CRAB_CODES = ('718-7', '59260-0', '17861-6', '2000-0', '2164-2', '33914-3')
-        crab_vals = {}
-        for code in _CRAB_CODES:
-            for m in snapshot.meas_by_source.get(code, ()):
-                if m.value_as_number is not None:
-                    crab_vals.setdefault(code, []).append(float(m.value_as_number))
-
-        hgb_vals = crab_vals.get('718-7', []) or crab_vals.get('59260-0', [])
-        ca_vals = crab_vals.get('17861-6', []) or crab_vals.get('2000-0', [])
-        crcl_vals = crab_vals.get('2164-2', []) or crab_vals.get('33914-3', [])
-
-        crab_anemia = hgb_vals and min(hgb_vals) < 10.0
-        crab_calcium = ca_vals and max(ca_vals) > 11.0
-        crab_renal = crcl_vals and min(crcl_vals) < 40.0
-        crab_bone = data.get('bone_lesions') == 'Present'
-
-        if any([crab_anemia, crab_calcium, crab_renal, crab_bone]):
-            data['meets_crab'] = True
+    # meets_crab is not computed here unless an explicit 89599-5 fact states
+    # it: without one, refresh_patient_record derives it from the record's
+    # canonical inputs with derive_meets_crab(), the same rule an edit uses
+    # (#2480). Reading fixed LOINCs here bypassed the lab routing, so an
+    # approved alias or a coded EHR row set the input but not the verdict.
 
     return data
 
@@ -4225,16 +4892,51 @@ def _latest_blood_count_measurements(
     return selected_counts
 
 
-def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
+def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None,
+                         dates_out: dict = None) -> dict:
+    """Derive lab values; optionally record the winning fact's date per field.
+
+    ``dates_out`` lets the editor name the day the value it shows was measured
+    without re-implementing every selection rule here (legacy names, source
+    codes, FLC pairing, ANC/platelet selection).
+    """
     data = {}
     snapshot = snapshot or _build_snapshot(person)
     measurements = snapshot.measurements
-    # Approved FCM rows define the PatientRecord destination and approved SCCM
-    # rows supply further source-code spellings for it; see
-    # resolve_lab_code_fields for what the checked-in table still decides.
+    selected_dates = {}
+    selected_fact_keys = {}
+
+    def select_lab_value(field, value, measurement):
+        """Choose the newest usable fact across supported lab representations.
+
+        Coded LOINC, historical concept-name and source-value rows are all
+        read paths for the same PatientRecord field. They compete by clinical
+        date, then measurement ID for same-day corrections, rather than by
+        which extractor runs first.
+        """
+        fact_key = (
+            measurement.measurement_date or date.min,
+            measurement.measurement_id,
+        )
+        current_key = selected_fact_keys.get(field)
+        if current_key is not None and fact_key <= current_key:
+            return False
+        data[field] = value
+        selected_fact_keys[field] = fact_key
+        selected_dates[field] = measurement.measurement_date
+        if dates_out is not None:
+            dates_out[field] = measurement.measurement_date
+        return True
     code_fields = _lab_routing(snapshot)
-    for field, measurement in _latest_blood_count_measurements(snapshot, code_fields).items():
-        data.update(blood_count_projection(field, measurement))
+    selected_blood_counts = _latest_blood_count_measurements(snapshot, code_fields)
+    blood_count_fields = set(selected_blood_counts)
+    for field, measurement in selected_blood_counts.items():
+        projected_count = blood_count_projection(field, measurement)
+        data.update(projected_count)
+        blood_count_fields.update(projected_count)
+        selected_dates[field] = measurement.measurement_date
+        if dates_out is not None:
+            dates_out[field] = measurement.measurement_date
 
     # --- Legacy fields via exact historic concept-name matching ---
     for measurement in measurements:
@@ -4242,16 +4944,15 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
             continue
         concept_name = measurement.measurement_concept.concept_name.casefold().strip()
         field_name = _LEGACY_LAB_CONCEPT_FIELDS.get(concept_name)
-        if not field_name or field_name in data:
+        if not field_name or field_name in blood_count_fields:
             continue
-        if (field_name == 'hemoglobin_g_dl' and measurement.unit_source_value
-                and measurement.unit_source_value.strip().casefold() != 'g/dl'):
-            # We have no supported conversion for arbitrary legacy units.
-            field_name = 'hemoglobin_level'
-        if field_name in data:
+        if (field_name in _CHEMISTRY_PAIR_CANONICAL or field_name == HEMOGLOBIN_CANONICAL
+                or field_name == CREATININE_PAIR):
+            # Selected with its canonical in one chronological pass below: a
+            # pair and its read-model must come from the same newest fact.
             continue
-        data[field_name] = measurement.value_as_number
-        if measurement.unit_source_value:
+        selected = select_lab_value(field_name, measurement.value_as_number, measurement)
+        if selected and measurement.unit_source_value:
             data[f'{field_name}_units'] = measurement.unit_source_value
 
     # --- FLC values: one chronological pass across both representations ---
@@ -4281,8 +4982,12 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
                 person.person_id, m.unit_source_value,
             )
             data[field] = Decimal(str(m.value_as_number))
+            if dates_out is not None:
+                dates_out[field] = m.measurement_date
             continue
         data[field] = canonical_flc
+        if dates_out is not None:
+            dates_out[field] = m.measurement_date
 
     # The ratio-bearing values must come from one lab event, not the newest
     # kappa and the newest lambda independently. The individual fields above
@@ -4304,38 +5009,19 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
 
     loinc_ms = [m for m in measurements if m.value_as_number is not None]
     wbc_projection_blocked = False
-    # Serum creatinine arrives in mg/dL or umol/L (#2438). The newest result
-    # owns the field: if its unit cannot be read, the field stays unknown and
-    # no older result, coded or display-name, stands in for it.
-    creatinine_blocked = False
-
-    def _creatinine_mg_dl(m):
-        nonlocal creatinine_blocked
-        value = measurement_creatinine_mg_dl(m)
-        if value is None:
-            creatinine_blocked = True
-            logger.warning(
-                'serum_creatinine_mg_dl skipped for person_id=%s: unit_source_value=%r '
-                'is not convertible to mg/dL', person.person_id, m.unit_source_value,
-            )
-        return value
-
+    wbc_blocked_date = None
     for m in loinc_ms:
         code = _measurement_code(m)
         if code not in code_fields:
             continue
         field, cast = code_fields[code]
-        if field in _FLC_FIELDS:
+        if field in _FLC_FIELDS or field in blood_count_fields:
+            continue
+        if field in _UNIT_PAIR_SELECTED_FIELDS:
             continue
         if field in BLOOD_COUNT_FIELDS:
             # Owned by the blood count projection above, which reads the
             # unit; the raw cast here would land the lab's own scale.
-            continue
-        if field == 'serum_creatinine_mg_dl':
-            if field not in data and not creatinine_blocked:
-                creatinine = _creatinine_mg_dl(m)
-                if creatinine is not None:
-                    data[field] = cast(creatinine)
             continue
         canonical_value = None
         if code == '6690-2':
@@ -4347,67 +5033,285 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None) -> dict:
                 # This is the latest WBC row due to the query ordering. Do not
                 # silently substitute an older result with a known unit.
                 wbc_projection_blocked = True
+                wbc_blocked_date = m.measurement_date
                 logger.warning(
                     'WBC projections skipped for person_id=%s: unsupported or absent '
                     'unit=%r', person.person_id, unit,
                 )
                 continue
-        if field not in data:
-            if code != '6690-2' or canonical_value is not None:
-                data[field] = cast(canonical_value if code == '6690-2' else m.value_as_number)
+        if code != '6690-2' or canonical_value is not None:
+            select_lab_value(
+                field, cast(canonical_value if code == '6690-2' else m.value_as_number), m)
         if code == '6690-2' and canonical_value is not None and 'white_blood_cell_count' not in data:
             data['white_blood_cell_count'] = canonical_value
             data['white_blood_cell_count_units'] = canonical_wbc_unit(_get_unit_system())
+            selected_dates['white_blood_cell_count'] = m.measurement_date
+            if dates_out is not None:
+                dates_out['white_blood_cell_count'] = m.measurement_date
 
     # --- New UI fields via display-name source_value (legacy/generator path) ---
-    unfound = {f for (f, _) in code_fields.values() if f not in data}
-    if unfound:
-        # Serum creatinine keeps the newest result across all of its display-name
-        # spellings. The loop below takes the first spelling that yields a value,
-        # which would let an older convertible row mask a newer unreadable one;
-        # snapshot.measurements is already ordered by -date, -id.
-        if 'serum_creatinine_mg_dl' in unfound and not creatinine_blocked:
-            for m in snapshot.measurements:
-                if m.value_as_number is None:
-                    continue
-                if _SOURCE_VALUE_LAB_FIELDS.get(m.measurement_source_value) != 'serum_creatinine_mg_dl':
-                    continue
-                creatinine = _creatinine_mg_dl(m)
-                if creatinine is not None:
-                    data['serum_creatinine_mg_dl'] = float(creatinine)
+    for source_value, field in _SOURCE_VALUE_LAB_FIELDS.items():
+        if field in blood_count_fields:
+            continue
+        if field in _FLC_FIELDS or field in _UNIT_PAIR_SELECTED_FIELDS:
+            continue
+        for m in snapshot.meas_by_source.get(source_value, ()):
+            if m.value_as_number is not None:
+                if field == 'wbc_count_thousand_per_ul':
+                    if wbc_blocked_date is not None and m.measurement_date <= wbc_blocked_date:
+                        break
+                    # Keep the established source-display contract for unitless
+                    # imports (their numeric value is already stored in the
+                    # PatientRecord display scale); explicit units must be
+                    # convertible before competing with another representation.
+                    canonical_value = (
+                        float(m.value_as_number) if not (m.unit_source_value or '').strip()
+                        else wbc_to_canonical(m.value_as_number, m.unit_source_value)
+                    )
+                    if canonical_value is None:
+                        current_date = selected_dates.get(field)
+                        if current_date is None or m.measurement_date > current_date:
+                            data.pop(field, None)
+                            selected_dates.pop(field, None)
+                            data.pop('white_blood_cell_count', None)
+                            selected_dates.pop('white_blood_cell_count', None)
+                            wbc_blocked_date = m.measurement_date
+                            if dates_out is not None:
+                                dates_out.pop(field, None)
+                                dates_out.pop('white_blood_cell_count', None)
+                        break
+                    selected = select_lab_value(field, canonical_value, m)
+                    if selected:
+                        data['white_blood_cell_count'] = canonical_value
+                        data['white_blood_cell_count_units'] = canonical_wbc_unit(_get_unit_system())
+                        selected_dates['white_blood_cell_count'] = m.measurement_date
+                        if dates_out is not None:
+                            dates_out['white_blood_cell_count'] = m.measurement_date
+                else:
+                    select_lab_value(field, float(m.value_as_number), m)
                 break
-        for source_value, field in _SOURCE_VALUE_LAB_FIELDS.items():
-            if field == 'serum_creatinine_mg_dl':
-                # Selected above, across every spelling, so an older spelling
-                # cannot stand in for the newest result.
-                continue
-            if field not in unfound:
-                continue
-            if field == 'wbc_count_thousand_per_ul' and wbc_projection_blocked:
-                continue
-            if field in data or field in _FLC_FIELDS or field in BLOOD_COUNT_FIELDS:
-                continue
-            for m in snapshot.meas_by_source.get(source_value, ()):
-                if m.value_as_number is not None:
-                    data[field] = float(m.value_as_number)
-                    break
 
-    # A blocked creatinine is an explicit unknown, not an absent key: absent,
-    # refresh_patient_record would let the approved 2160-0 mapping refill it
-    # with the newest row's raw number (90 micromol/L as 90 mg/dL, #2438).
-    # The aliases go with it.
-    if creatinine_blocked and data.get('serum_creatinine_mg_dl') is None:
-        data['serum_creatinine_mg_dl'] = None
-        for alias in _LAB_FIELD_ALIASES.get('serum_creatinine_mg_dl', ()):
-            data[alias] = None
+    # --- Chemistry canonical columns: one chronological pass (#2318) ---
+    # The pair and its canonical read-model must come from the same newest fact
+    # across the legacy concept-name, coded and display-name representations.
+    # Deciding per representation let a newer unconvertible row be defeated by
+    # an older convertible one from another path. Measurements are newest-first.
+    chemistry_winners = {}
+    for measurement in measurements:
+        if measurement.value_as_number is None:
+            continue
+        field = None
+        representation = None
+        code = _measurement_code(measurement)
+        if code in code_fields:
+            candidate = code_fields[code][0]
+            if candidate in _UNIT_PAIR_SELECTED_FIELDS:
+                field, representation = candidate, 'coded'
+        if field is None:
+            candidate = _SOURCE_VALUE_LAB_FIELDS.get(
+                measurement.measurement_source_value)
+            if candidate in _UNIT_PAIR_SELECTED_FIELDS:
+                field, representation = candidate, 'display'
+        if field is None:
+            concept = measurement.measurement_concept
+            concept_name = (
+                (concept.concept_name if concept else '') or ''
+            ).casefold().strip()
+            legacy_field = _LEGACY_LAB_CONCEPT_FIELDS.get(concept_name)
+            candidate = _CHEMISTRY_PAIR_CANONICAL.get(legacy_field)
+            if candidate is None and legacy_field == HEMOGLOBIN_CANONICAL:
+                candidate = HEMOGLOBIN_CANONICAL
+            if candidate is None and legacy_field == CREATININE_PAIR:
+                candidate = CREATININE_CANONICAL
+            if candidate is not None:
+                field, representation = candidate, 'legacy'
+        if field is not None and field not in chemistry_winners:
+            chemistry_winners[field] = (measurement, representation)
+    for field, (measurement, representation) in chemistry_winners.items():
+        if field == HEMOGLOBIN_CANONICAL:
+            reported_unit, unit_code = _resolve_reported_unit(
+                measurement, normalize_hemoglobin_unit, HEMOGLOBIN_DEFAULT_UNIT)
+            recognised, canonical_value = hemoglobin_canonical_from_pair(
+                measurement.value_as_number, unit_code)
+            if (unit_code is None or not recognised
+                    or not hemoglobin_canonical_in_range(canonical_value)):
+                if representation == 'legacy' and reported_unit is not None:
+                    # A historic concept-name fact keeps the number and unit
+                    # the lab reported, as before (#475): the canonical stays
+                    # unknown rather than reinterpreting an unsupported scale.
+                    data[HEMOGLOBIN_CANONICAL] = None
+                    data[HEMOGLOBIN_PAIR] = Decimal(str(measurement.value_as_number))
+                    data[HEMOGLOBIN_UNIT] = reported_unit
+                    selected_dates[HEMOGLOBIN_PAIR] = measurement.measurement_date
+                    if dates_out is not None:
+                        dates_out[HEMOGLOBIN_PAIR] = measurement.measurement_date
+                    continue
+                # The newest coded/display result owns the pair even with an
+                # unreadable unit; explicit Nones stop the curated fallback.
+                logger.warning(
+                    'Hemoglobin projection skipped for person_id=%s: unit=%r',
+                    person.person_id, reported_unit,
+                )
+                data[HEMOGLOBIN_CANONICAL] = None
+                data[HEMOGLOBIN_PAIR] = None
+                data[HEMOGLOBIN_UNIT] = None
+                continue
+            data[HEMOGLOBIN_CANONICAL] = canonical_value
+            selected_dates[HEMOGLOBIN_CANONICAL] = measurement.measurement_date
+            if dates_out is not None:
+                dates_out[HEMOGLOBIN_CANONICAL] = measurement.measurement_date
+            if representation == 'legacy' and reported_unit is not None:
+                data[HEMOGLOBIN_PAIR] = Decimal(str(measurement.value_as_number))
+                data[HEMOGLOBIN_UNIT] = unit_code
+            else:
+                data[HEMOGLOBIN_PAIR] = canonical_value
+                data[HEMOGLOBIN_UNIT] = HEMOGLOBIN_DEFAULT_UNIT
+            selected_dates[HEMOGLOBIN_PAIR] = measurement.measurement_date
+            if dates_out is not None:
+                dates_out[HEMOGLOBIN_PAIR] = measurement.measurement_date
+            continue
+        if field == CREATININE_CANONICAL:
+            # mg/dL or umol/L (#2438); a unitless row is mg/dL, the unit every
+            # canonical value is recorded in. The pair keeps the number and
+            # unit the lab reported: eGFR reads the pair, because the
+            # canonical's two decimals can move a threshold (creatinine_units).
+            reported_unit, unit_code = _resolve_reported_unit(
+                measurement, creatinine_normalize_unit, CREATININE_DEFAULT_UNIT)
+            recognised, canonical_value = creatinine_canonical_from_pair(
+                measurement.value_as_number, unit_code)
+            if (unit_code is None or not recognised or canonical_value is None
+                    or not creatinine_canonical_in_range(canonical_value)):
+                if representation == 'legacy' and reported_unit is not None:
+                    # A historic concept-name fact reports the number and unit
+                    # the lab sent (#475); the canonical stays unknown rather
+                    # than reinterpreting an unsupported scale. The refresh
+                    # does not keep this pair on the record yet (#2519).
+                    data[CREATININE_CANONICAL] = None
+                    data[CREATININE_PAIR] = Decimal(str(measurement.value_as_number))
+                    data[CREATININE_UNIT] = reported_unit
+                    selected_dates[CREATININE_PAIR] = measurement.measurement_date
+                    if dates_out is not None:
+                        dates_out[CREATININE_PAIR] = measurement.measurement_date
+                    continue
+                # The newest result owns the field even when it is unusable: an
+                # older one must not stand in for it, and the explicit Nones
+                # stop the curated mapping from storing the raw number.
+                logger.warning(
+                    'Serum creatinine projection skipped for person_id=%s: '
+                    'unit=%r', person.person_id, reported_unit,
+                )
+                data[CREATININE_CANONICAL] = None
+                data[CREATININE_PAIR] = None
+                data[CREATININE_UNIT] = None
+                continue
+            data[CREATININE_CANONICAL] = canonical_value
+            data[CREATININE_PAIR] = Decimal(str(measurement.value_as_number))
+            data[CREATININE_UNIT] = unit_code
+            for dated in (CREATININE_CANONICAL, CREATININE_PAIR):
+                selected_dates[dated] = measurement.measurement_date
+                if dates_out is not None:
+                    dates_out[dated] = measurement.measurement_date
+            continue
+        if field == _DIRECT_PAIR_FIELD:
+            reported_unit, unit_code = _resolve_reported_unit(
+                measurement, direct_bilirubin_units.normalize_unit,
+                direct_bilirubin_units.DEFAULT_UNIT)
+            recognised, pair_value = direct_bilirubin_units.pair_value(
+                measurement.value_as_number)
+            alias_recognised, alias_value = direct_bilirubin_units.alias_from_pair(
+                measurement.value_as_number, unit_code)
+            if (unit_code is None or not recognised or not alias_recognised):
+                # The newest result owns the pair even when its unit is not one
+                # this slice can read. Explicit Nones also stop the curated
+                # mapping fallback from restoring the raw number.
+                logger.warning(
+                    'Direct bilirubin projection skipped for person_id=%s: '
+                    'unit=%r', person.person_id, reported_unit,
+                )
+                data[_DIRECT_PAIR_FIELD] = None
+                data[_DIRECT_UNIT_FIELD] = None
+                data[_DIRECT_ALIAS_FIELD] = None
+                continue
+            data[_DIRECT_PAIR_FIELD] = pair_value
+            data[_DIRECT_UNIT_FIELD] = unit_code
+            data[_DIRECT_ALIAS_FIELD] = alias_value
+            selected_dates[_DIRECT_PAIR_FIELD] = measurement.measurement_date
+            selected_dates[_DIRECT_ALIAS_FIELD] = measurement.measurement_date
+            if dates_out is not None:
+                dates_out[_DIRECT_PAIR_FIELD] = measurement.measurement_date
+                dates_out[_DIRECT_ALIAS_FIELD] = measurement.measurement_date
+            continue
+        spec = _CHEMISTRY_PAIRS[field]
+        reported_unit, unit_code = _resolve_reported_unit(
+            measurement, lambda unit, field=field: normalize_chemistry_unit(field, unit),
+            spec['canonical_unit'])
+        recognised, canonical_value = chemistry_canonical_from_pair(
+            field, measurement.value_as_number, unit_code)
+        if (unit_code is None or not recognised
+                or not chemistry_canonical_in_range(field, canonical_value)):
+            # The newest result owns the field even when it is unusable: an
+            # older fact from another representation must not resurrect it.
+            # The explicit Nones also mark all three columns as handled, so
+            # the generic curated-mapping fallback cannot fill the canonical
+            # with the same unconverted number.
+            logger.warning(
+                'Chemistry projection skipped for person_id=%s field=%s: '
+                'unit=%r', person.person_id, field, reported_unit,
+            )
+            data[field] = None
+            data[spec['value']] = None
+            data[spec['unit']] = None
+            continue
+        data[field] = canonical_value
+        selected_dates[field] = measurement.measurement_date
+        if dates_out is not None:
+            dates_out[field] = measurement.measurement_date
+        if representation == 'legacy' and reported_unit is not None:
+            # Keep what the lab reported; the canonical above is the read-model.
+            data[spec['value']] = Decimal(str(measurement.value_as_number))
+            data[spec['unit']] = unit_code
+        else:
+            data[spec['value']] = canonical_value
+            data[spec['unit']] = spec['canonical_unit']
+        selected_dates[spec['value']] = measurement.measurement_date
+        if dates_out is not None:
+            dates_out[spec['value']] = measurement.measurement_date
 
     # --- Copy canonical values to legacy aliases (issue #471) ---
     for canonical, aliases in _LAB_FIELD_ALIASES.items():
+        if canonical == _DIRECT_PAIR_FIELD:
+            # The chronological pass above writes the pair, its unit and the
+            # normalised alias together; copying the raw value back would make
+            # the unitless mirror ambiguous.
+            continue
+        if canonical == HEMOGLOBIN_CANONICAL:
+            # The pass writes the pair and its unit from the same newest fact;
+            # copying the canonical back would replace a reported g/L pair
+            # with the g/dL read-model.
+            continue
+        if canonical == CREATININE_CANONICAL:
+            # Same for creatinine: the pair keeps the reported umol/L; only the
+            # ordinary alias follows the mg/dL value.
+            aliases = [alias for alias in aliases if alias != CREATININE_PAIR]
+        chemistry = _CHEMISTRY_PAIRS.get(canonical)
+        if chemistry is not None:
+            # The pair and canonical were selected together above; copying the
+            # canonical back would replace the unit the lab reported. The
+            # ordinary legacy alias still follows the value.
+            aliases = [alias for alias in aliases
+                       if alias != chemistry['value']]
         value = data.get(canonical)
         if value is not None:
             for alias in aliases:
                 data[alias] = _lab_alias_value(canonical, value)
-            data.update(_lab_alias_units(canonical, value))
+                if dates_out is not None and canonical in dates_out:
+                    dates_out[alias] = dates_out[canonical]
+            unit_updates = _lab_alias_units(canonical, value)
+            if chemistry is not None:
+                unit_updates.pop(chemistry['unit'], None)
+            if canonical == CREATININE_CANONICAL:
+                unit_updates.pop(CREATININE_UNIT, None)
+            data.update(unit_updates)
 
     return data
 
@@ -4500,8 +5404,7 @@ def _get_genetic_mutations(person: Person, snapshot: OmopSnapshot = None) -> dic
     if 'projection' in snapshot.genomics_cache:
         return snapshot.genomics_cache['projection']
 
-    origin_concepts = {255395001: 'germline', 255461003: 'somatic'}
-    interpretation_concepts = {30166007: 'pathogenic', 10828004: 'benign', 42425007: 'vus'}
+    from omop_core.services.genomic_concepts import interpretation_for, origin_for
 
     mutations = []
     from omop_core.models import FieldConceptMapping
@@ -4549,11 +5452,13 @@ def _get_genetic_mutations(person: Person, snapshot: OmopSnapshot = None) -> dic
         if marker:
             mutation_data['marker_key'] = marker['key']
 
-        if measurement.qualifier_concept and measurement.qualifier_concept.concept_id in origin_concepts:
-            mutation_data['origin'] = origin_concepts[measurement.qualifier_concept.concept_id]
+        origin = origin_for(measurement)
+        if origin:
+            mutation_data['origin'] = origin
 
-        if measurement.value_as_concept and measurement.value_as_concept.concept_id in interpretation_concepts:
-            mutation_data['interpretation'] = interpretation_concepts[measurement.value_as_concept.concept_id]
+        interpretation = interpretation_for(measurement)
+        if interpretation:
+            mutation_data['interpretation'] = interpretation
 
         if measurement.qualifier_source_value and code not in ('36908-2', '81252-9') and not marker:
             mutation_data['assay_method'] = measurement.qualifier_source_value
@@ -4989,11 +5894,43 @@ def tp53_disruption_from_findings(findings):
     return None
 
 
+def attested_negative_fields(patient_info):
+    """The negative fields the person explicitly confirmed (#5666).
+
+    While a row exists the attestation wins over the source-fact derivation.
+    The endpoint refuses to create one against a contradiction; a later source
+    change is reported by `audit_explicit_negative_answers`, not overwritten.
+    """
+    cached = getattr(patient_info, '_attested_negative_fields', None)
+    if cached is not None:
+        return cached
+    person_id = getattr(patient_info, 'person_id', None)
+    if not person_id:
+        patient_info._attested_negative_fields = set()
+        return patient_info._attested_negative_fields
+    from omop_core.models import ExplicitNegativeAnswer
+    patient_info._attested_negative_fields = set(
+        ExplicitNegativeAnswer.objects.filter(
+            person_id=person_id, answer=True,
+        ).values_list('field', flat=True)
+    )
+    return patient_info._attested_negative_fields
+
+
 def _compute_derived_fields(patient_info: PatientRecord, *, apply_formulas=True) -> None:
     """Compute fields that depend on other PatientRecord fields being set."""
-    if patient_info.active_infection_status is not None:
+    # #5666: an explicit confirmation is an attestation, not a formula output.
+    # While it exists it wins; withdrawing it removes the row and the source
+    # facts below take over again. A later contradicting source fact is
+    # reported by audit_explicit_negative_answers, never silently overwritten.
+    attested = attested_negative_fields(patient_info)
+    if 'no_active_infection_status' in attested:
+        patient_info.no_active_infection_status = True
+    elif patient_info.active_infection_status is not None:
         patient_info.no_active_infection_status = not patient_info.active_infection_status
-    if patient_info.active_malignancies is not None:
+    if 'no_other_active_malignancies' in attested:
+        patient_info.no_other_active_malignancies = True
+    elif patient_info.active_malignancies is not None:
         # The active-malignancies list includes the primary cancer when present;
         # one entry therefore means there is no *other* active malignancy.
         patient_info.no_other_active_malignancies = len(patient_info.active_malignancies) <= 1
@@ -5186,15 +6123,26 @@ def _apply_active_field_formulas(patient_info: PatientRecord) -> set[str]:
         mode='computed', mapping__status='approved',
     ).values_list('field_name', flat=True))
     changed_fields = set()
+    # #5666/#2343: these are explicit answers. The database also refuses an
+    # active formula row, but the evaluator skips them defensively so an older
+    # schema or a stale object cannot overwrite an attestation or a
+    # self-assessment.
+    from omop_core.services.authored_answers import (
+        AUTHORED_ANSWER_FORMULA_FIELDS,
+    )
     for field_formula in FieldFormula.objects.filter(is_active=True).order_by('field_name'):
+        if field_formula.field_name in AUTHORED_ANSWER_FORMULA_FIELDS:
+            continue
         if field_formula.field_name in overrides:
             continue
         try:
             value = evaluate_formula(field_formula.formula, values)
         except ValueError:
             # Invalid legacy rows are surfaced in the mapping UI and must not
-            # abort clinical refreshes.
-            logger.warning('Skipping invalid formula for %s', field_formula.field_name)
+            # abort clinical refreshes. The row id identifies the row without
+            # writing a clinical field name to the log (code scanning
+            # `py/clear-text-logging-sensitive-data`).
+            logger.warning('Skipping an invalid field formula (row %s)', field_formula.pk)
             continue
         if field_formula.field_name in custom_field_names:
             custom_fields[field_formula.field_name] = value
@@ -5558,6 +6506,30 @@ def _compute_lymphocyte_doubling_time(alc_points):
 
 class LanguageSkillError(ValueError):
     """A language-skills payload the caller must fix."""
+
+
+def sync_language_columns(person, patient_info=None):
+    """Re-derive the eight flattened language columns and the display string.
+
+    A language edit writes PersonLanguageSkill rows, not PatientRecord columns,
+    and the flattened columns are what the trial matcher reads. Without this
+    the rows are correct and the record still says "not asked" until the next
+    full derivation, which is a silently stale answer in the direction that
+    loses a patient's own fact.
+    """
+    rows = list(person.language_skills.select_related('language_concept').all())
+    summary = person.get_language_skills_summary(rows)
+    values = _flatten_language_capabilities(
+        person.get_language_capabilities_by_code(rows))
+    values['languages_skills'] = (
+        format_language_skills(summary) if summary else None
+    )
+    if patient_info is None:
+        patient_info = PatientRecord.objects.get(person=person)
+    for field, value in values.items():
+        setattr(patient_info, field, value)
+    patient_info.save(update_fields=list(values))
+    return patient_info
 
 
 def set_language_skills(person, skills_by_alias):

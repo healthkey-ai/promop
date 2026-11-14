@@ -37,6 +37,17 @@ REFRESH_BATCH = 500
 unit_property = loinc_axes.unit_property
 
 
+def _vocabulary_spellings(vocabulary):
+    from omop_core.services.source_vocabularies import VOCABULARY_OID_ALIASES, canonical_source_vocabulary
+    canonical = canonical_source_vocabulary(vocabulary)
+    return {canonical, *(alias for alias, target in VOCABULARY_OID_ALIASES.items() if target == canonical)}
+
+
+def _source_code_limit():
+    from omop_core.models import SourceCodeConceptMapping
+    return SourceCodeConceptMapping._meta.get_field('source_code').max_length
+
+
 def observed_units(mapping, unit_counts=None):
     """Every normalized unit the code's records arrived in, commonest first."""
     if not mapping:
@@ -84,6 +95,7 @@ def unit_counts_for(mappings, include_imported=True):
     from django.db.models import Q
 
     from omop_core.models import PatientSourceCode
+    from omop_core.services.source_vocabularies import canonical_source_vocabulary
     from omop_core.services.mapping_unit_consistency import _imported_unit_counts
 
     mappings = [m for m in mappings if m is not None]
@@ -94,12 +106,15 @@ def unit_counts_for(mappings, include_imported=True):
     result = {m.pk: imported.get(m.pk, Counter()) for m in mappings}
 
     match = Q()
+    limit = _source_code_limit()
     for m in mappings:
-        match |= Q(source_value=m.source_code, source_vocabulary_id=m.source_vocabulary_id,
-                   **({'omop_table': m.omop_table} if m.omop_table else {}))
+        code_filter = 'source_value__startswith' if len(m.source_code) >= limit else 'source_value'
+        match |= Q(**{code_filter: m.source_code,
+            'source_vocabulary_id__in': _vocabulary_spellings(m.source_vocabulary_id),
+            **({'omop_table': m.omop_table} if m.omop_table else {})})
     by_key = defaultdict(list)
     for m in mappings:
-        by_key[(m.source_vocabulary_id, m.source_code)].append(m)
+        by_key[(canonical_source_vocabulary(m.source_vocabulary_id), m.source_code)].append(m)
     patient = defaultdict(Counter)
     for vocab, code, table, unit, override, count in PatientSourceCode.objects.filter(match).values_list(
             'source_vocabulary_id', 'source_value', 'omop_table', 'source_unit',
@@ -107,7 +122,7 @@ def unit_counts_for(mappings, include_imported=True):
         normalized = unit_code(override if override is not None else unit)
         if not normalized:
             continue
-        for m in by_key.get((vocab, code), ()):
+        for m in by_key.get((canonical_source_vocabulary(vocab), code[:limit]), ()):
             if not m.omop_table or m.omop_table == table:
                 patient[m.pk][normalized] += max(1, count or 0)
     return {pk: counts | patient.get(pk, Counter()) for pk, counts in result.items()}
@@ -140,17 +155,21 @@ def patient_unit_evidence(mappings, totals=None):
     from django.db.models import Q, Sum
 
     from omop_core.models import PatientSourceCode
+    from omop_core.services.source_vocabularies import canonical_source_vocabulary
 
     mappings = [m for m in mappings if m is not None]
     if not mappings:
         return {}, {}
     match = Q()
+    limit = _source_code_limit()
     for m in mappings:
-        match |= Q(source_value=m.source_code, source_vocabulary_id=m.source_vocabulary_id,
-                   **({'omop_table': m.omop_table} if m.omop_table else {}))
+        code_filter = 'source_value__startswith' if len(m.source_code) >= limit else 'source_value'
+        match |= Q(**{code_filter: m.source_code,
+            'source_vocabulary_id__in': _vocabulary_spellings(m.source_vocabulary_id),
+            **({'omop_table': m.omop_table} if m.omop_table else {})})
     by_key = defaultdict(list)
     for m in mappings:
-        by_key[(m.source_vocabulary_id, m.source_code)].append(m)
+        by_key[(canonical_source_vocabulary(m.source_vocabulary_id), m.source_code)].append(m)
     recorded = defaultdict(Counter)
     people = defaultdict(lambda: defaultdict(set))
     # Include the person's org so scoped mappings can count their own patients
@@ -161,8 +180,9 @@ def patient_unit_evidence(mappings, totals=None):
                          'person__patient_record__organization_id')
             .annotate(records=Sum('occurrence_count')))
     for vocab, code, table, unit, override, person_id, person_org, records in rows:
+        key = (canonical_source_vocabulary(vocab), code[:limit])
         if totals is not None:
-            for m in by_key.get((vocab, code), ()):
+            for m in by_key.get(key, ()):
                 if not m.omop_table or m.omop_table == table:
                     if m.organization_id is None or m.organization_id == person_org:
                         totals[m.pk] = totals.get(m.pk, 0) + max(0, records or 0)
@@ -171,7 +191,7 @@ def patient_unit_evidence(mappings, totals=None):
         normalized = unit_code(override if override is not None else unit)
         if not normalized:
             continue
-        for m in by_key.get((vocab, code), ()):
+        for m in by_key.get(key, ()):
             if not m.omop_table or m.omop_table == table:
                 recorded[m.pk][normalized] += max(1, records or 0)
                 people[m.pk][normalized].add(person_id)
@@ -326,20 +346,67 @@ def evidence_keys():
     return keys
 
 
-def _patient_rows_for(scoped=False):
-    """Per-patient rows of the outer mapping's code: same vocabulary and
-    code, exactly, which is what the rows' index answers (a case-insensitive
-    match would scan the table once per mapping); with ``scoped``, only the
-    mapping's hospital's patients."""
-    from django.db.models import OuterRef
+def _is_truncated(source_code):
+    """Whether a mapping holds its code cut at the column's limit, so that
+    its patient rows are those whose code starts with it."""
+    return len(source_code or '') >= _source_code_limit()
+
+
+def _truncated_mappings(truncated):
+    """The mappings whose code is (or is not) held cut at the limit: the
+    set-based form of :func:`_is_truncated`, to pair with
+    ``_patient_rows_for(truncated=...)``."""
+    from django.db.models import Q
+    from django.db.models.functions import Length
+    from django.db.models.lookups import GreaterThanOrEqual, LessThan
+
+    lookup = GreaterThanOrEqual if truncated else LessThan
+    return Q(lookup(Length('source_code'), _source_code_limit()))
+
+
+def _patient_rows_for(scoped=False, truncated=False, code=None):
+    """Per-patient rows of the outer mapping's code: same vocabulary, and
+    the same code exactly or, with ``truncated``, every code it is the cut
+    of; with ``scoped``, only the mapping's hospital's patients. ``code``
+    is the mapping's code when the caller holds the one mapping, so the
+    match reads a literal instead of the outer row. It must be that outer
+    mapping's own ``source_code``: vocabulary and hospital still come from
+    the outer row, so another code would silently mix two mappings.
+
+    The caller picks exact or prefix per mapping (:func:`_is_truncated`,
+    :func:`_truncated_mappings`) rather than this OR-ing both: an OR with a
+    prefix pattern taken from the outer row is a filter no index answers,
+    so the rows were scanned in full once per mapping (#2492). The
+    exact match is an index lookup on ``source_value``; the prefix one is
+    too when ``code`` is a literal; set-based, it still reads the rows once
+    per mapping, but only for the few mappings whose code was cut."""
+    from django.db.models import CharField, ExpressionWrapper, OuterRef, Q
 
     from omop_core.models import PatientSourceCode
+    from omop_core.services.source_vocabularies import VOCABULARY_OID_ALIASES
 
-    rows = PatientSourceCode.objects.filter(
-        source_vocabulary_id=OuterRef('source_vocabulary_id'), source_value=OuterRef('source_code'))
+    vocabulary = Q(source_vocabulary_id=OuterRef('source_vocabulary_id'))
+    for canonical in set(VOCABULARY_OID_ALIASES.values()):
+        spellings = _vocabulary_spellings(canonical)
+        vocabulary |= Q(source_vocabulary_id__in=spellings, _mapping_vocabulary__in=spellings)
+    mapping_code = OuterRef('source_code') if code is None else code
+    rows = PatientSourceCode.objects.annotate(
+        _mapping_vocabulary=ExpressionWrapper(OuterRef('source_vocabulary_id'), output_field=CharField()),
+    ).filter(vocabulary).filter(
+        Q(source_value__startswith=mapping_code) if truncated else Q(source_value=mapping_code))
     if scoped:
         rows = rows.filter(person__patient_record__organization_id=OuterRef('organization_id'))
     return rows
+
+
+def _seen_key_filter(keys):
+    from django.db.models import Q
+    match = Q(pk__in=[])
+    for vocabulary, code in keys:
+        if code:
+            match |= Q(source_vocabulary_id__in=_vocabulary_spellings(vocabulary),
+                       source_code=code[:_source_code_limit()])
+    return match
 
 
 def rebuild_seen_counts(keys=None):
@@ -351,7 +418,8 @@ def rebuild_seen_counts(keys=None):
     per-patient rows are keyed per vocabulary, code and table, so each coding
     system gets its own sum: the rows on the mapping's table, or on any table
     for a mapping with none; a hospital-scoped mapping counts its hospital's
-    patients only. Codes match exactly, as the rows' index allows. Set-based, four statements, so it costs the same whatever
+    patients only. Codes match exactly, as the rows' index allows, and a
+    code held cut at the limit by prefix. Set-based, eight statements, so it costs the same whatever
     the walk's key set; a code with no rows here keeps its count. The
     extract's label-group figure is cleared on the rows rebuilt, since it no
     longer describes the members' counts. ``keys`` limits the pass to those
@@ -360,33 +428,29 @@ def rebuild_seen_counts(keys=None):
     patient rows existed (#2123) gives way to the rows as soon as they land.
     Returns the rows updated.
     """
-    from django.db.models import Exists, OuterRef, Q, Subquery, Sum
+    from django.db.models import Exists, OuterRef, Subquery, Sum, Value
 
     from omop_core.models import SourceCodeConceptMapping
 
     def total(queryset):
-        return Subquery(queryset.order_by().values('source_vocabulary_id')
+        # A constant group sums all equivalent vocabulary spellings together.
+        return Subquery(queryset.order_by().annotate(_group=Value(1)).values('_group')
                         .annotate(n=Sum('occurrence_count')).values('n')[:1])
 
-    match = None
-    if keys is not None:
-        keys = {(vocab or '', code) for vocab, code in keys if code}
-        if not keys:
-            return 0
-        match = Q()
-        for vocab, code in keys:
-            match |= Q(source_vocabulary_id=vocab, source_code=code)
+    match = _seen_key_filter(keys) if keys is not None else None
     updated = 0
     for scoped in (False, True):
-        rows = _patient_rows_for(scoped)
-        on_table = rows.filter(omop_table=OuterRef('omop_table'))
-        mappings = SourceCodeConceptMapping.objects.filter(organization__isnull=not scoped)
-        if match is not None:
-            mappings = mappings.filter(match)
-        updated += mappings.filter(omop_table='').filter(Exists(rows)).update(
-            occurrence_count=total(rows), source_group_occurrence_count=None)
-        updated += mappings.exclude(omop_table='').filter(Exists(on_table)).update(
-            occurrence_count=total(on_table), source_group_occurrence_count=None)
+        for truncated in (False, True):
+            rows = _patient_rows_for(scoped, truncated)
+            on_table = rows.filter(omop_table=OuterRef('omop_table'))
+            mappings = SourceCodeConceptMapping.objects.filter(
+                _truncated_mappings(truncated), organization__isnull=not scoped)
+            if match is not None:
+                mappings = mappings.filter(match)
+            updated += mappings.filter(omop_table='').filter(Exists(rows)).update(
+                occurrence_count=total(rows), source_group_occurrence_count=None)
+            updated += mappings.exclude(omop_table='').filter(Exists(on_table)).update(
+                occurrence_count=total(on_table), source_group_occurrence_count=None)
     return updated
 
 
@@ -396,7 +460,7 @@ def rebuilt_seen_keys(keys=None):
     rebuild has completed here. A seed or inventory load does not raise a
     count over them (#2121); every other key takes the load's count. ``keys``
     limits the answer to the keys given; ``None`` answers for all."""
-    from django.db.models import Exists, Q
+    from django.db.models import Exists
 
     from omop_core.models import AxisVariantRefresh, SourceCodeConceptMapping
 
@@ -404,14 +468,10 @@ def rebuilt_seen_keys(keys=None):
         return set()
     mappings = SourceCodeConceptMapping.objects.all()
     if keys is not None:
-        keys = {(vocab or '', code) for vocab, code in keys if code}
-        if not keys:
-            return set()
-        match = Q()
-        for vocab, code in keys:
-            match |= Q(source_vocabulary_id=vocab, source_code=code)
-        mappings = mappings.filter(match)
-    return set(mappings.filter(Exists(_patient_rows_for())).values_list('source_vocabulary_id', 'source_code'))
+        mappings = mappings.filter(_seen_key_filter(keys))
+    return {key for truncated in (False, True)
+            for key in mappings.filter(_truncated_mappings(truncated), Exists(_patient_rows_for(truncated=truncated)))
+            .values_list('source_vocabulary_id', 'source_code')}
 
 
 def _specimen_systems(mapping):

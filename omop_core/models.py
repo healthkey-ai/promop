@@ -16,6 +16,7 @@ import uuid
 from pgvector.django import VectorField
 
 from omop_core.services import source_labels, source_vocabularies
+from omop_core.services.authored_answers import AUTHORED_ANSWER_FORMULA_FIELDS
 
 
 # Person.year_of_birth values that mean "not known" rather than a birth year.
@@ -3407,6 +3408,69 @@ class TherapyHistoryAttestation(models.Model):
         return f'Person {self.person_id} therapy history confirmed {self.confirmed_at:%Y-%m-%d}'
 
 
+class PreexistingConditionsAttestation(models.Model):
+    """The person's explicit statement that they have no pre-existing conditions.
+
+    ``PatientRecord.no_pre_existing_conditions`` answers a question, it is not a
+    derivation of an empty category list (#1988). Absence of this row means
+    "not answered" -- the projection stays NULL. Adding a category is the more
+    specific statement and withdraws this one, because both cannot be true.
+    """
+    person = models.OneToOneField(
+        Person, on_delete=models.CASCADE,
+        related_name='preexisting_conditions_attestation',
+    )
+    confirmed_at = models.DateTimeField()
+    # Where the statement came from ('patient', 'clinician', 'host'); provenance
+    # only, never a clinical decision.
+    source = models.CharField(max_length=20, default='patient')
+
+    class Meta:
+        db_table = 'preexisting_conditions_attestation'
+
+    def __str__(self):
+        return (f'Person {self.person_id} no pre-existing conditions '
+                f'{self.confirmed_at:%Y-%m-%d}')
+
+
+class ExplicitNegativeAnswer(models.Model):
+    """A person's explicit confirmation of a derived negative state (#5666).
+
+    ``no_active_infection_status`` and ``no_other_active_malignancies`` are
+    formulas over recorded facts, so a generic PATCH is undone by the next
+    derivation. The confirmation is an attestation: it is answered through its
+    own endpoint with a snapshot, wins over the formula while it exists, and can
+    be withdrawn. Absence of the row means "not answered" -- the derived value
+    stays in charge.
+
+    Only a confirmation of the negative is accepted here. A recorded active
+    infection or more than one active malignancy is the source fact; the
+    endpoint refuses to confirm against it instead of silently overwriting it.
+    """
+    ANSWER_FIELDS = ('no_active_infection_status', 'no_other_active_malignancies')
+
+    person = models.ForeignKey(
+        Person, on_delete=models.CASCADE,
+        related_name='explicit_negative_answers',
+    )
+    field = models.CharField(max_length=64)
+    answer = models.BooleanField(default=True)
+    confirmed_at = models.DateTimeField()
+    # Where the statement came from ('patient', 'clinician', 'host'); provenance
+    # only, never a clinical decision.
+    source = models.CharField(max_length=20, default='patient')
+
+    class Meta:
+        db_table = 'explicit_negative_answer'
+        constraints = [
+            models.UniqueConstraint(
+                fields=['person', 'field'],
+                name='uq_explicit_negative_answer_person_field',
+            ),
+        ]
+
+    def __str__(self):
+        return f'Person {self.person_id} {self.field}={self.answer}'
 DATE_PRECISION_CHOICES = [('day', 'Day'), ('month', 'Month'), ('year', 'Year')]
 
 
@@ -3512,6 +3576,28 @@ class PatientRecord(models.Model):
     plasma_cell_leukemia = models.BooleanField(blank=True, null=True, default=None)
     myeloma_type = models.CharField(max_length=100, blank=True, null=True, help_text="Myeloma subtype from MyelomaType vocabulary")
     progression = models.TextField(blank=True, null=True)
+    # Current-diagnosis myeloma-related disorders (#5521). Nullable on purpose:
+    # None = Unknown, False = No, True = Yes. These are user-entered current
+    # state, not an OMOP-derived history; an imported old diagnosis must not
+    # become a current Yes without confirmation.
+    mgus = models.BooleanField(
+        blank=True, null=True, default=None,
+        help_text="Does the patient currently have MGUS?")
+    smoldering_multiple_myeloma = models.BooleanField(
+        blank=True, null=True, default=None,
+        help_text="Does the patient currently have smoldering multiple myeloma?")
+    waldenstrom_macroglobulinemia = models.BooleanField(
+        blank=True, null=True, default=None,
+        help_text="Does the patient currently have Waldenström macroglobulinemia?")
+    igm_multiple_myeloma = models.BooleanField(
+        blank=True, null=True, default=None,
+        help_text="Does the patient currently have IgM multiple myeloma?")
+    al_amyloidosis = models.BooleanField(
+        blank=True, null=True, default=None,
+        help_text="Does the patient currently have light-chain (AL) amyloidosis?")
+    poems_syndrome = models.BooleanField(
+        blank=True, null=True, default=None,
+        help_text="Does the patient currently have POEMS syndrome?")
 
     # Vital signs
     heartrate = models.IntegerField(help_text="Patient's heart rate", blank=True, null=True)
@@ -3709,10 +3795,13 @@ class PatientRecord(models.Model):
     hematocrit_percent = models.DecimalField(decimal_places=1, max_digits=5, blank=True, null=True, help_text="Hematocrit (%)")
     wbc_count_thousand_per_ul = models.DecimalField(decimal_places=1, max_digits=6, blank=True, null=True, help_text="White Blood Cell Count (10³/µL)")
     rbc_million_per_ul = models.DecimalField(decimal_places=2, max_digits=5, blank=True, null=True, help_text="Red Blood Cell Count (10⁶/µL)")
-    platelet_count_thousand_per_ul = models.DecimalField(decimal_places=1, max_digits=6, blank=True, null=True, help_text="Platelet Count (10³/µL)")
-    anc_thousand_per_ul = models.DecimalField(decimal_places=1, max_digits=6, blank=True, null=True, help_text="Absolute Neutrophil Count (10³/µL)")
-    alc_thousand_per_ul = models.DecimalField(decimal_places=1, max_digits=6, blank=True, null=True, help_text="Absolute Lymphocyte Count (10³/µL)")
-    amc_thousand_per_ul = models.DecimalField(decimal_places=1, max_digits=6, blank=True, null=True, help_text="Absolute Monocyte Count (10³/µL)")
+    # Three decimals keep a cells/µL source exact after the /1000 normalisation
+    # (1550 cells/µL is 1.550 thousand/µL, not 1.6). The trial row converts the
+    # canonical back to cells/µL, so one decimal used to round 1550 to 1600.
+    platelet_count_thousand_per_ul = models.DecimalField(decimal_places=3, max_digits=8, blank=True, null=True, help_text="Platelet Count (10³/µL)")
+    anc_thousand_per_ul = models.DecimalField(decimal_places=3, max_digits=8, blank=True, null=True, help_text="Absolute Neutrophil Count (10³/µL)")
+    alc_thousand_per_ul = models.DecimalField(decimal_places=3, max_digits=8, blank=True, null=True, help_text="Absolute Lymphocyte Count (10³/µL)")
+    amc_thousand_per_ul = models.DecimalField(decimal_places=3, max_digits=8, blank=True, null=True, help_text="Absolute Monocyte Count (10³/µL)")
     
     # Additional kidney and electrolyte fields (simplified names for UI)
     serum_calcium_mg_dl = models.DecimalField(decimal_places=1, max_digits=5, blank=True, null=True, help_text="Serum Calcium (mg/dL)")
@@ -3818,7 +3907,7 @@ class PatientRecord(models.Model):
     consent_capability = models.BooleanField(help_text="Does the patient have cognitive ability to consent?", blank=True, null=True, default=None)
     caregiver_availability_status = models.BooleanField(help_text="Is there an available caregiver for the patient?", blank=True, null=True, default=None)
     contraceptive_use = models.BooleanField(help_text="Does the patient use contraceptives?", blank=True, null=True, default=None)
-    no_pregnancy_or_lactation_status = models.BooleanField(help_text="Does the patient self assess as not pregnant or lactating?", blank=False, null=False, default=True)
+    no_pregnancy_or_lactation_status = models.BooleanField(help_text="Does the patient self assess as not pregnant or lactating?", blank=True, null=True, default=None)
     pregnancy_test_result = models.BooleanField(help_text="Does the female patient of childbearing age have a negative test result for pregnancy?", blank=False, null=False, default=False)
     no_mental_health_disorder_status = models.BooleanField(help_text="Does the patient have a mental health disorder?", blank=True, null=True, default=None)
     no_concomitant_medication_status = models.BooleanField(help_text="Does the patient have concomitant medication?", blank=False, null=False, default=True)
@@ -3870,7 +3959,7 @@ class PatientRecord(models.Model):
     pregnancy_test_date = models.DateField(blank=True, null=True, help_text="Pregnancy Test Date")
     pregnancy_test_result_value = models.CharField(max_length=50, blank=True, null=True, help_text="Pregnancy Test Result (Positive/Negative)")
 
-    no_tobacco_use_status = models.BooleanField(help_text="Does the patient use tobacco?", blank=False, null=False, default=True)
+    no_tobacco_use_status = models.BooleanField(help_text="Does the patient use tobacco?", blank=True, null=True, default=None)
     tobacco_use_details = models.CharField(max_length=255, help_text="Details about the patient's tobacco use", blank=True, null=True)
     no_substance_use_status = models.BooleanField(help_text="Does the patient use substances?", blank=True, null=True, default=None)
     substance_use_details = models.CharField(max_length=255, help_text="Details about the patient's substance use", blank=True, null=True)
@@ -4076,6 +4165,13 @@ class PatientRecord(models.Model):
     b_symptom_weight_loss = models.BooleanField(blank=True, null=True,
         help_text="B symptom: unintentional weight loss > 10% in 6 months")
     gelf_criteria_options = models.TextField(blank=True, null=True)
+    # A clinician's Lugano assessment (PET/CT plus bone-marrow involvement).
+    # It is an INPUT, not a derivation: the record has no PET/CT or marrow
+    # result to compute it from, so a reader who knows the answer enters it.
+    meets_lugano = models.BooleanField(
+        blank=True, null=True, default=None,
+        help_text="Clinician-confirmed Lugano criteria (PET/CT and bone-marrow assessment).",
+    )
     ldh_upper_limit_normal = models.PositiveIntegerField(blank=True, null=True)
     # Histologic transformation of FL to DLBCL — derived from OMOP (DLBCL
     # ConditionOccurrence, or a transformation Observation as fallback).
@@ -4178,6 +4274,14 @@ class PatientRecord(models.Model):
             "field, and auto-cleans entries once an OMOP fact is projected."
         ),
     )
+    pending_source_pair_dates = models.JSONField(
+        default=dict, blank=True, null=True,
+        help_text=(
+            "Server-managed: the clinical day (YYYY-MM-DD) each pending source "
+            "pair was entered for, so a newer imported result retires the pair "
+            "(#2426). Never written by clients."
+        ),
+    )
     # Values for administrator-defined fields.  Runtime definitions cannot be
     # Django columns (that would require a schema migration for every field), so
     # the durable projection is a keyed JSON object instead.
@@ -4242,6 +4346,56 @@ class PatientRecord(models.Model):
         if not skills:
             return "No languages recorded"
         return format_language_skills(skills)
+
+    @property
+    def abnormal_kappa_lambda_ratio(self) -> bool | None:
+        """Whether the kappa/lambda free-light-chain ratio is outside 0.26-1.65.
+
+        The window and the Decimal comparison are the reviewed rule shared with
+        CB (CB #858/#5481, PROMOP #1928): a boundary ratio such as 1.65 must stay
+        on the normal side, which a binary float cannot guarantee. `None` when
+        either concentration is missing, non-finite, or the denominator is zero.
+
+        The IMWG derivation in `patient_record_service` computes the same
+        component from a same-event pair, so the two are deliberately separate:
+        that path refuses to reconstruct a ratio from fields that may belong to
+        different draws.
+        """
+        from decimal import Decimal, InvalidOperation
+
+        if self.kappa_flc is None or self.lambda_flc is None:
+            return None
+        try:
+            kappa = Decimal(str(self.kappa_flc))
+            lam = Decimal(str(self.lambda_flc))
+        except (InvalidOperation, TypeError, ValueError):
+            return None
+        if not kappa.is_finite() or not lam.is_finite() or lam == 0:
+            return None
+        ratio = kappa / lam
+        return ratio < Decimal('0.26') or ratio > Decimal('1.65')
+
+    @property
+    def day_since_stem_cell_transplant(self) -> int | None:
+        """Days from the recorded transplant date to today, or `None`.
+
+        A future date is not a negative day count: it is not a completed
+        transplant, so the trial criterion stays unknown (CB's rule).
+        """
+        from datetime import date, datetime
+
+        sct_date = self.sct_date
+        # `DateField` hands back a `date` once loaded, but an instance that was
+        # assigned a `datetime` before saving keeps it; comparing the two types
+        # raises, so normalize instead of relying on the caller.
+        if isinstance(sct_date, datetime):
+            sct_date = sct_date.date()
+        if sct_date is None:
+            return None
+        today = date.today()
+        if sct_date > today:
+            return None
+        return (today - sct_date).days
 
     def save(self, *args, **kwargs):
         """Calculate BMI, age, and update therapy-related computed fields when saving"""
@@ -4762,6 +4916,20 @@ class FieldFormula(models.Model):
 
     class Meta:
         db_table = 'field_formula'
+        constraints = [
+            # #5666: these fields are explicit answers. A formula may be
+            # seeded or re-activated only by mistake; the database refuses an
+            # active row rather than letting the next refresh overwrite an
+            # attestation. Built from the one authored-answer set so the two
+            # cannot drift again (#2489); sorted so the migration is stable.
+            models.CheckConstraint(
+                condition=(
+                    ~Q(field_name__in=tuple(sorted(AUTHORED_ANSWER_FORMULA_FIELDS)))
+                    | Q(is_active=False)
+                ),
+                name='field_formula_explicit_answer_inactive',
+            ),
+        ]
 
     def __str__(self):
         return f"{self.field_name}: {self.formula[:50]}"

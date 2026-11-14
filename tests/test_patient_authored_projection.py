@@ -178,3 +178,34 @@ def test_patient_editing_their_representatives_fact_today_records_their_provenan
     row = _facts(record, concept).get()
     assert row.value_as_string == 'BR next'
     assert list(_patient_provenance(row).values_list('source_user_id', flat=True)) == ['urn:local|abc']
+
+
+@pytest.mark.parametrize('patient_first', [False, True])
+def test_alternating_authors_keep_the_latest_correction_current(record, concept, patient_first):
+    from omop_core.services.patient_record_service import refresh_patient_record
+
+    for index, is_patient in enumerate((patient_first, not patient_first, patient_first)):
+        value = f'correction {index}'
+        kwargs = {'type_concept_id': PATIENT_SELF_REPORT_TYPE,
+                  'patient_user_id': 'urn:local|abc'} if is_patient else {}
+        assert project_single_value(record.person, 'planned_therapies', value,
+                                    _recipe(concept), acknowledge_existing=True, **kwargs)
+        refreshed = refresh_patient_record(record.person)
+        assert refreshed.planned_therapies == value
+    # The later correction must not mutate the first author's historical row
+    # behind the other author's newer fact.
+    assert _facts(record, concept).count() == 3
+    assert _facts(record, concept).order_by('pk').first().value_as_string == 'correction 0'
+
+
+def test_acknowledging_an_identical_representative_fact_records_patient_provenance(record, concept):
+    assert project_single_value(record.person, 'planned_therapies', 'same answer', _recipe(concept),
+                                type_concept_id=PATIENT_SELF_REPORT_TYPE)
+    row = _facts(record, concept).get()
+    assert not _patient_provenance(row).exists()
+    for _ in range(2):
+        assert project_single_value(record.person, 'planned_therapies', 'same answer', _recipe(concept),
+                                    type_concept_id=PATIENT_SELF_REPORT_TYPE,
+                                    patient_user_id='urn:local|abc', acknowledge_existing=True)
+    assert _facts(record, concept).count() == 1
+    assert list(_patient_provenance(row).values_list('source_user_id', flat=True)) == ['urn:local|abc']

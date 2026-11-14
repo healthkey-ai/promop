@@ -12,6 +12,7 @@ export default function MultiSelectControl({
   display,
   disabled,
   maxListHeight = "14rem",
+  ariaLabel,
   onChange,
 }: {
   options: Option[];
@@ -19,11 +20,22 @@ export default function MultiSelectControl({
   display: string;
   disabled?: boolean;
   maxListHeight?: string;
+  ariaLabel?: string;
   onChange: (nextValues: unknown[]) => void;
 }) {
+  // A plain button has no separate accessible value, and aria-label replaces
+  // its text. Include the current selection so the value is announced too.
+  const accessibleName = [ariaLabel, display].filter(Boolean).join(': ') || undefined;
   const selectedSet = useMemo(() => {
     return new Set(selectedValues.map(optionKey));
   }, [selectedValues]);
+
+  // Some lists carry an exclusive "none" answer beside real choices (planned
+  // therapies: "No planned therapy"). It is an answer, not a clear control:
+  // selecting it must replace the other answers, and selecting a real choice
+  // must remove it.
+  const noneKey = optionKey('none');
+  const hasNone = options.some((o) => optionKey(o.value) === noneKey);
 
   const toggle = (v: unknown) => {
     const next = new Set(selectedSet);
@@ -31,9 +43,26 @@ export default function MultiSelectControl({
     if (next.has(k)) next.delete(k);
     else next.add(k);
 
+    if (hasNone) {
+      if (k === noneKey) {
+        if (next.has(noneKey)) {
+          onChange([v]);
+          return;
+        }
+      } else {
+        next.delete(noneKey);
+      }
+    }
+
     const ordered = options
       .filter((o) => next.has(optionKey(o.value)))
       .map((o) => o.value);
+    // Keep persisted unresolved codes visible and intact; selecting a known
+    // answer must not silently delete an unknown answer from the record.
+    for (const existing of selectedValues) {
+      if (!options.some((option) => optionKey(option.value) === optionKey(existing))
+          && next.has(optionKey(existing))) ordered.push(existing);
+    }
 
     onChange(ordered);
   };
@@ -43,6 +72,7 @@ export default function MultiSelectControl({
       <PopoverTrigger asChild>
         <Button
           type="button"
+          aria-label={accessibleName}
           variant="outline"
           disabled={disabled}
           className={[

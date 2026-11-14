@@ -134,10 +134,25 @@ it.each([
   }
 });
 
+it('does not refetch when only the filter_options identity changes', async () => {
+  // The response replaces `filter_options` on every page-1 answer; keying a
+  // fetch dependency on that array made the list re-request for ever.
+  vi.mocked(api.get).mockImplementation(() => Promise.resolve({ data: { ...cohort, filter_options: {
+    orgs: [{ value: 'example', label: 'Example' }], diseases: [], stages: [],
+  } } }));
+  render(<MemoryRouter><PatientList /></MemoryRouter>);
+  await screen.findByText('Recorded regimen');
+  // A response-triggered loop issues its next request immediately; let those
+  // turns pass before counting.
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  expect(vi.mocked(api.get).mock.calls.filter(([url]) => url === '/patient-info/')).toHaveLength(1);
+});
+
 it('adds the Organization column once the list spans more than one organization', async () => {
   vi.mocked(api.get).mockResolvedValue({ data: { ...cohort, filter_options: {
     orgs: [{ value: 'a', label: 'A' }, { value: 'b', label: 'B' }], diseases: [], stages: [],
   } } });
+
   render(<MemoryRouter><PatientList /></MemoryRouter>);
   await screen.findByText('Recorded regimen');
   expect(screen.getByRole('columnheader', { name: 'Organization' })).toBeInTheDocument();

@@ -70,6 +70,14 @@ Patient name uses the same PATCH and updates Person's name columns; its response
 field is not a stored PatientRecord column. Clinician validation fields retain
 their staff access checks.
 
+Birth-date precision is part of that profile contract on both native PATCH and
+the shared form. A date-only edit preserves Person's known precision; changing
+from year/month to a full date requires an explicit precision edit. Year-only
+and month-only values use day/month 1 as PatientRecord placeholders, while the
+unknown Person components and `birth_datetime` remain null. Precision and date
+may be sent together in either order; a precision-only edit updates both the
+read-model pair and Person without a full history refresh.
+
 ## Write Descriptor Changes
 
 The `build_writable_field_descriptor()` function now returns `KIND_DIRECT` with
@@ -107,11 +115,57 @@ mappings carry a `projection` key:
 }
 ```
 
-### KIND_EDITABLE is retired
+### Episode-derived therapy lines
 
-The `KIND_EDITABLE` constant still exists for backward compatibility but is no
-longer emitted by the descriptor builder. All writable clinical fields are
-`KIND_DIRECT`.
+`first_line_*`, `second_line_*` and `later_*` are projections of a persisted
+therapy line (an `Episode` grouping its `DrugExposure`s, plus `LOT-<n>-outcome`
+and friends). A direct column write is accepted and then replaced by the next
+derivation — that was #2106 — so the descriptor offers exactly the first line of
+each group as a **writable control that authors the line**:
+
+```python
+{
+    'kind': 'direct',
+    'writable': True,
+    'target': 'patient_record',
+    'value_kind': 'string',
+    'options': [{'value': 'vrd', 'label': 'VRd'}, ...],
+    'authored_episode': {'line_number': 3, 'part': 'therapy'},
+    'reason': 'Written as a therapy line (an Episode grouping its facts); '
+              'this column is derived from that line.',
+}
+```
+
+Both PATCH routes route those names to
+`omop_core/services/therapy_line_form.py`, which calls `author_therapy_line`
+(the same service the therapy-lines editor uses) and then refreshes the record
+once. Nothing writes `user_edited_fields` for them: that marker means "keep this
+column against derivation", which is the opposite of what a projection needs —
+and a marker left by an older direct write is cleared when the line is authored,
+so it cannot pin the old value over the new line. The audit for a line is the
+line itself (`Episode`, `TherapyLineAssertion`), exactly as in the editor.
+
+Three further rules, each of which has a test:
+
+- the value is compared with the record before it is treated as an edit, because
+  the native editor PATCHes the whole GET representation and every line field
+  arrives on every save;
+- a line that already has a recorded composition refuses a therapy change: the
+  editor owns the drug list, and asserting a different regimen here would leave
+  the stored exposures describing the old one;
+- the write joins the request's transaction, so a refusal rolls back the rest of
+  the PATCH instead of committing half of it.
+
+`later_therapies` (the per-line read model) stays computed and unwritable; a
+second 3L+ line is authored in the editor, where the per-line contract lives.
+
+### KIND_EDITABLE is retired for clinical fields
+
+The `KIND_EDITABLE` constant still exists for backward compatibility. It is no
+longer emitted for clinical PatientRecord fields; all writable clinical fields
+are `KIND_DIRECT`. The descriptor still uses it to label the dedicated
+genomics/structured editors (`genomics_*` and `genetic_mutations`), which have
+their own recipes rather than the scalar PATCH path.
 
 ### Vocabulary not loaded
 
@@ -143,7 +197,9 @@ LOINC/SNOMED recipes and approved curated mappings, to call
   Other editors keep the recipe's type (curated recipes default to EHR,
   32817) and never update a patient's self-report fact, unless the recipe is
   itself typed self-report. Without concept 32865 loaded, the recipe's type
-  stands (#1959).
+  stands (#1959), except for pinned current-state fields (#5521): their
+  best-effort projection is skipped so a patient answer cannot take over a
+  clinical fact.
 - Serializes same-day writes with database locks. Projection uses a savepoint,
   so a failed projection leaves the PatientRecord edit pending.
 - A cleared Measurement or Observation stores null answer columns with
@@ -153,6 +209,24 @@ LOINC/SNOMED recipes and approved curated mappings, to call
   reuses today's row and removes the marker.
 - Occurrence tables cannot express null or negative answers. Such edits remain
   pending on PatientRecord until an appropriate answer mapping is available.
+- A field whose answer is current state rather than an OMOP-readable result may
+  mark its projection `best_effort` (for example the current-diagnosis
+  myeloma-related disorders). The shared form writes PatientRecord first and
+  mirrors an affirmative answer into its occurrence as a side effect; a
+  projection failure never fails the save. No/Unknown creates no fact and
+  retracts the rows an earlier Yes wrote (flagged `is_erroneous`, never
+  deleted), scoped to the recipe's own rows and the same kind of author, so a
+  later derivation cannot keep reading a fact the record has withdrawn.
+  The rows such a recipe writes carry a `patient-record:<field>` source value:
+  derivation never reads them back into the answer, and the primary-cancer
+  selector, the diagnosis-date fallback and the active-condition flags all skip
+  them, so a current-state answer can neither become a Yes from imported
+  history, nor displace the diagnosis the record is about, nor count as another
+  active malignancy.
+- The shared form (`apply_patient_form_patch`) follows the same rule as the
+  native PATCH: a direct edit never calls `refresh_patient_record()`. It
+  recomputes the record's own dependent fields and returns; derivation, when it
+  next runs, sees the OMOP side effect alongside the record's history.
 - Sets `_skip_patient_record_refresh = True` on the OMOP instance to avoid
   recursive derivation.
 - Direct UI saves never call `refresh_patient_record()` or load the patient's
@@ -176,6 +250,10 @@ When a curator approves a `FieldConceptMapping`, the `post_save` signal triggers
 pending user-edited value for that field. It filters by `user_edited_fields`,
 not by comparing typed columns to an empty string, and uses the same dated
 writer and unit recipe as PATCH. Records with no pending edits are untouched.
+Dedicated writers and pinned current-state fields that require author-aware
+projection are exceptions: approval does not invent authorship from a recipe.
+Medication contexts likewise stay pending when no per-attribute author is
+available; existing self-report facts are not duplicated as EHR facts.
 
 ## Derivation Preservation
 
@@ -184,6 +262,54 @@ restores pending values, including nulls, until derivation represents the saved
 value. Matching fields drop from `user_edited_fields`; stale facts cannot erase
 a pending edit after a projection failure. Dependent calculations run after
 pending values are restored.
+
+### Source pairs and their units
+
+A source pair is one assertion: the number and the unit the reader chose. Once
+the pair is authoritative, derivation keeps both pending — the extractor can
+reproduce the canonical number but not the reader's unit — so a later import
+cannot relabel `120 g/L` as `12 g/dL` in the pair. A full refresh restores a
+pending pair before recompute. An explicit canonical event (a `changed_fields`
+canonical write or import) retires it regardless of dates, and a numerical
+match alone does not. This is the `_SOURCE_PAIR_FIELDS` rule in
+`patient_record_service.py`.
+
+A newer imported result also retires it (#2426). Otherwise a patient's older
+answer — its pending pair masking derivation for good — would keep hiding
+today's result from CRAB, SLiM and the trial matcher. The recorded day decides:
+the pair is retired when the result derivation now selects for the field's
+canonical is *strictly later* than the day the pair was entered. A same-day
+result leaves it pending, an unusable or unproven newer result leaves it pending
+(the extractor records no day for one), and a pair whose entered day is unknown
+does too. The old projected fact stays history; nothing is deleted.
+
+Every retirement path writes one `RecordRevision` row (`changed_by='system'`)
+per pair column whose stored value changes: the full refresh above, an explicit
+canonical write through `recompute_patient_record_fields()` or the
+descriptor-driven `_retire_source_pairs()`, so the entry that leaves the record
+is still in its history — the pair value, its unit, and a canonical marker the
+patient had edited. A pair column that was not marked pending is derived, not a
+patient entry, and gets no row.
+
+The pair is also the dated target (#2397): a patient-entered lab result carries
+the day it was drawn, not the day it was typed, and the canonical projection is
+that same dated result. The pair is marked `dated` only when its canonical has a
+resolved projection — without a target there is no fact to carry the date, so a
+dated envelope is refused rather than silently stamped with today.
+
+The entered day is kept in `PatientRecord.pending_source_pair_dates`, a
+server-managed mapping of the pair's source field to `YYYY-MM-DD` (the
+serializer exposes it read-only and omits it from responses). It is written
+before projection, so a failed projection keeps both the value and its day, and
+a retry records the answer on the day it was first entered instead of today.
+Only an authored pair is dated: an autosave echo of a pending pair keeps its
+recorded day, and an undated *change* is a new result on the day it is saved. An
+entry lives only while its pair is pending; retiring the pair removes it with
+the marker.
+
+Because the pair stays pending until one of those events, an older dated pair
+remains the record's current answer even though its fact is history — the
+editor must not promise otherwise.
 
 ## Frontend Simplification
 
@@ -233,8 +359,9 @@ import/ingestion path, not an interactive save.
 3. **Derivation cannot overwrite user edits** — `user_edited_fields` tracking
    ensures user values persist until derivation represents the saved value.
 
-4. **Mapping approval triggers backfill** — existing user edits are projected
-   when a mapping is approved, without any manual step.
+4. **Mapping approval triggers eligible backfill** — existing user edits are
+   projected when a mapping is approved, except author-sensitive fields whose
+   pending data cannot establish fact authorship.
 
 5. **The frontend has one write path** — no more split between OMOP and
    PatientRecord. The descriptor still carries projection metadata for the date

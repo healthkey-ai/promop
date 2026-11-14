@@ -19,7 +19,36 @@ from django.utils.timezone import localdate
 from django.utils import timezone
 from omop_core.services.access import get_admin_access_paths, has_org_admin_access, has_explicit_org_admin_access
 from omop_core.services.patient_record_service import PATIENT_RECORD_OMOP_MAPPED_FIELDS
-from omop_core.services.write_descriptor import get_serializer_read_only_fields
+from omop_core.services.hemoglobin_units import (
+    CANONICAL_FIELD, DEFAULT_UNIT, PAIR_FIELD, UNIT_FIELD,
+    canonical_from_pair, canonical_in_range, normalize_unit,
+)
+from omop_core.services.creatinine_units import (
+    CANONICAL_FIELD as CREATININE_CANONICAL,
+    DEFAULT_UNIT as CREATININE_DEFAULT_UNIT,
+    PAIR_FIELD as CREATININE_PAIR,
+    UNIT_FIELD as CREATININE_UNIT,
+    canonical_from_pair as creatinine_canonical_from_pair,
+    canonical_in_range as creatinine_canonical_in_range,
+    normalize_unit as normalize_creatinine_unit,
+)
+from omop_core.services.blood_count_source_pairs import (
+    PAIRS as COUNT_SOURCE_PAIRS,
+    canonical_from_source as count_canonical_from_source,
+    normalize_unit as normalize_count_unit,
+    source_fields as count_source_fields,
+)
+from omop_core.services.chemistry_units import (
+    PAIRS as CHEMISTRY_SOURCE_PAIRS,
+    canonical_from_pair as chemistry_canonical_from_pair,
+    canonical_in_range as chemistry_canonical_in_range,
+    normalize_unit as normalize_chemistry_unit,
+    unit_hint as chemistry_unit_hint,
+)
+from omop_core.services import direct_bilirubin_units
+from omop_core.services.write_descriptor import (
+    computed_only_assignments, get_serializer_read_only_fields,
+)
 
 #: Columns that Measurement and Observation validate as one value.
 _VALUE_FIELDS = frozenset({'value_as_number', 'value_as_string'})
@@ -506,6 +535,156 @@ class PatientRecordSerializer(serializers.ModelSerializer):
 
     def to_internal_value(self, data):
         """Accept the historical misspelling on writes during API migration."""
+        data = data.copy() if hasattr(data, 'copy') else dict(data)
+        # A direct computed-only assignment is dropped on this native path,
+        # as dev did: its callers PATCH whole records and predate the refusal,
+        # so a 400 there rolled back their real edits (#2418 regression
+        # review). The shared form (X-Patient-Form, apply_patient_form_patch)
+        # still refuses it atomically (#2135); the descriptor marks these
+        # fields read-only on both.
+        for field_name in computed_only_assignments(data, self.instance):
+            data.pop(field_name, None)
+        # Hemoglobin's source pair (#2318). Normalise the unit spelling BEFORE
+        # field validation: the column's `TextChoices` only accepts the stored
+        # code, and a reader may send the display label.
+        pair = PAIR_FIELD
+        unit_field = UNIT_FIELD
+        if unit_field in data and pair not in data:
+            raise serializers.ValidationError({
+                unit_field: 'Send the unit together with its value.',
+            })
+        code = None
+        if pair in data:
+            sent = (data.get(unit_field)
+                    or (self.instance and getattr(self.instance, unit_field, None))
+                    or DEFAULT_UNIT)
+            code = normalize_unit(sent)
+            if code is None:
+                raise serializers.ValidationError({
+                    unit_field: 'Choose one of: g/dL, g/L.',
+                })
+            data[unit_field] = code
+
+        # Creatinine's source pair (#2318 follow-up): normalise the unit before
+        # field validation, because the column's TextChoices accept only codes.
+        creatinine_code = None
+        if CREATININE_UNIT in data and CREATININE_PAIR not in data:
+            raise serializers.ValidationError({
+                CREATININE_UNIT: 'Send the unit together with its value.',
+            })
+        if CREATININE_PAIR in data:
+            sent = (data.get(CREATININE_UNIT)
+                    or (self.instance and getattr(self.instance, CREATININE_UNIT, None))
+                    or CREATININE_DEFAULT_UNIT)
+            creatinine_code = normalize_creatinine_unit(sent)
+            if creatinine_code is None:
+                raise serializers.ValidationError({
+                    CREATININE_UNIT: 'Choose one of: mg/dL, umol/L.',
+                })
+            data[CREATININE_UNIT] = creatinine_code
+
+        # The chemistry pairs (#2318) carry a unit choice too; normalise it
+        # before field validation because the column stores codes only.
+        chemistry_codes = {}
+        for canonical, spec in CHEMISTRY_SOURCE_PAIRS.items():
+            chemistry_pair = spec['value']
+            chemistry_unit = spec['unit']
+            if chemistry_unit in data and chemistry_pair not in data:
+                raise serializers.ValidationError({
+                    chemistry_unit: 'Send the unit together with its value.',
+                })
+            if chemistry_pair not in data:
+                continue
+            sent = (data.get(chemistry_unit)
+                    or (self.instance
+                        and getattr(self.instance, chemistry_unit, None))
+                    or spec['default_unit'])
+            chemistry_code = normalize_chemistry_unit(canonical, sent)
+            if chemistry_code is None:
+                raise serializers.ValidationError({
+                    chemistry_unit: chemistry_unit_hint(canonical),
+                })
+            data[chemistry_unit] = chemistry_code
+            chemistry_codes[canonical] = chemistry_code
+
+        # Direct bilirubin's pair (#2318): the value and unit are one fact, and
+        # the unitless alias is derived on recompute. Reject a unit on its own:
+        # silently dropping it would store the number under another scale.
+        direct_code = None
+        if (direct_bilirubin_units.UNIT_FIELD in data
+                and direct_bilirubin_units.PAIR_FIELD not in data):
+            raise serializers.ValidationError({
+                direct_bilirubin_units.UNIT_FIELD:
+                    'Send the unit together with its value.',
+            })
+        if direct_bilirubin_units.PAIR_FIELD in data:
+            if direct_bilirubin_units.UNIT_FIELD in data:
+                # An explicit null/empty is a bad unit, not "use the default".
+                sent = data.get(direct_bilirubin_units.UNIT_FIELD)
+            else:
+                sent = ((self.instance and getattr(
+                    self.instance, direct_bilirubin_units.UNIT_FIELD, None))
+                    or direct_bilirubin_units.DEFAULT_UNIT)
+            direct_code = direct_bilirubin_units.normalize_unit(sent)
+            if direct_code is None:
+                raise serializers.ValidationError({
+                    direct_bilirubin_units.UNIT_FIELD:
+                        'Choose one of: mg/dL, umol/L.',
+                })
+            data[direct_bilirubin_units.UNIT_FIELD] = direct_code
+
+        # The count source pairs use the same pattern: the client writes the
+        # legacy cells/µL field and the canonical thousands/µL value follows.
+        count_units = {}
+        for source, spec in COUNT_SOURCE_PAIRS.items():
+            source_unit = spec.get('unit_field')
+            if source_unit and source_unit in data and source not in data:
+                raise serializers.ValidationError({
+                    source_unit: 'Send the unit together with its value.',
+                })
+            if source not in data:
+                continue
+            if source_unit and source_unit in data:
+                unit_code = normalize_count_unit(data[source_unit])
+                if unit_code is None:
+                    raise serializers.ValidationError({
+                        source_unit: 'Choose a supported count unit.',
+                    })
+            else:
+                stored = (getattr(self.instance, source_unit, None)
+                          if (self.instance and source_unit) else None)
+                unit_code = normalize_count_unit(stored)
+                if unit_code is None:
+                    if stored not in (None, ''):
+                        raise serializers.ValidationError({
+                            source_unit or source: 'Choose a supported count unit.',
+                        })
+                    unit_code = spec['unit']
+            if source_unit:
+                data[source_unit] = unit_code
+            count_units[source] = unit_code
+        # Keep the schema-only gate even if this package's SDK is unavailable.
+        source_fields = {
+            'prothrombin_time_uln', 'activated_partial_thromboplastin_time_uln',
+            'able_to_swallow_tablets_capsules',
+        } & data.keys()
+        if source_fields:
+            try:
+                from omop_core.services.clinical_input_contract import CLINICAL_INPUT_CONTRACT_VERSION
+            except ModuleNotFoundError as exc:
+                if exc.name != 'omop_core.services.clinical_input_contract':
+                    raise
+                CLINICAL_INPUT_CONTRACT_VERSION = None
+            if CLINICAL_INPUT_CONTRACT_VERSION != 2:
+                blocked = {field for field in source_fields
+                           if data[field] is not None or getattr(self.instance, field, None) is not None}
+                if blocked:
+                    raise serializers.ValidationError({
+                        field: 'Clinical source-input SDK is not available.' for field in blocked
+                    })
+                data = data.copy()
+                for field in source_fields:
+                    data.pop(field)
         from django.core.exceptions import ValidationError as ModelValidationError
         from omop_core.services.clinical_input_contract import (
             CLINICAL_INPUT_FIELDS, capabilities, uses_dedicated_writer, validated_values,
@@ -562,7 +741,132 @@ class PatientRecordSerializer(serializers.ModelSerializer):
             data['cytogenetic_markers'] = legacy_value
         from omop_core.services.genomics_catalog import canonicalize_fields
         data = canonicalize_fields(data)
-        return super().to_internal_value(data)
+        validated = super().to_internal_value(data)
+        self._source_pairs = set()
+        self._derived_from_pair = set()
+        if pair in validated:
+            # `hemoglobin_g_dl` is a read-model the editor never offers, but a
+            # legacy client may still write it alone. When the source pair is
+            # present it wins, and the normalised value is added here for the
+            # projection and the record save.
+            recognised, canonical = canonical_from_pair(
+                validated[pair], code or DEFAULT_UNIT,
+            )
+            if not recognised:
+                raise serializers.ValidationError({pair: 'Enter a number.'})
+            if not canonical_in_range(canonical):
+                raise serializers.ValidationError({
+                    pair: 'Hemoglobin is outside the storable range.',
+                })
+            validated[unit_field] = code or DEFAULT_UNIT
+            validated[CANONICAL_FIELD] = canonical
+            # The view must treat these two differently: the canonical is a
+            # derived read-model (project it, but do not let it count as a new
+            # canonical edit that would retire the source pair), while the
+            # source is what the reader owns.
+            self._source_pairs = {pair, unit_field}
+            self._derived_from_pair = {CANONICAL_FIELD}
+
+        if CREATININE_PAIR in validated:
+            recognised, canonical = creatinine_canonical_from_pair(
+                validated[CREATININE_PAIR],
+                creatinine_code or CREATININE_DEFAULT_UNIT,
+            )
+            if not recognised:
+                raise serializers.ValidationError({CREATININE_PAIR: 'Enter a number.'})
+            if not creatinine_canonical_in_range(canonical):
+                raise serializers.ValidationError({
+                    CREATININE_PAIR: 'Creatinine is outside the storable range.',
+                })
+            validated[CREATININE_UNIT] = creatinine_code or CREATININE_DEFAULT_UNIT
+            validated[CREATININE_CANONICAL] = canonical
+            self._source_pairs |= {CREATININE_PAIR, CREATININE_UNIT}
+            self._derived_from_pair.add(CREATININE_CANONICAL)
+
+        for canonical, spec in CHEMISTRY_SOURCE_PAIRS.items():
+            chemistry_pair = spec['value']
+            if chemistry_pair not in validated:
+                continue
+            recognised, canonical_value = chemistry_canonical_from_pair(
+                canonical, validated[chemistry_pair],
+                chemistry_codes.get(canonical) or spec['default_unit'],
+            )
+            if not recognised:
+                raise serializers.ValidationError({
+                    chemistry_pair: 'Enter a number.',
+                })
+            if not chemistry_canonical_in_range(canonical, canonical_value):
+                raise serializers.ValidationError({
+                    chemistry_pair: f'{spec["label"]} is outside the storable range.',
+                })
+            validated[spec['unit']] = (
+                chemistry_codes.get(canonical) or spec['default_unit'])
+            validated[canonical] = canonical_value
+            self._source_pairs |= {chemistry_pair, spec['unit']}
+            self._derived_from_pair.add(canonical)
+
+        if direct_bilirubin_units.PAIR_FIELD in validated:
+            recognised, pair_value = direct_bilirubin_units.pair_value(
+                validated[direct_bilirubin_units.PAIR_FIELD])
+            if not recognised:
+                raise serializers.ValidationError({
+                    direct_bilirubin_units.PAIR_FIELD:
+                        'Enter a valid direct bilirubin value.',
+                })
+            validated[direct_bilirubin_units.PAIR_FIELD] = pair_value
+            validated[direct_bilirubin_units.UNIT_FIELD] = (
+                direct_code or direct_bilirubin_units.DEFAULT_UNIT)
+            self._source_pairs |= {
+                direct_bilirubin_units.PAIR_FIELD,
+                direct_bilirubin_units.UNIT_FIELD,
+            }
+
+        for source, spec in COUNT_SOURCE_PAIRS.items():
+            if source not in validated:
+                continue
+            unit_code = count_units.get(source) or spec['unit']
+            recognised, canonical = count_canonical_from_source(
+                source, validated[source], unit_code,
+            )
+            if not recognised:
+                raise serializers.ValidationError({
+                    source: 'Enter a valid count in the chosen unit.',
+                })
+            validated[spec['canonical']] = canonical
+            self._source_pairs.add(source)
+            if spec.get('unit_field'):
+                validated[spec['unit_field']] = unit_code
+                self._source_pairs.add(spec['unit_field'])
+            self._derived_from_pair.add(spec['canonical'])
+
+        # An equal echo of a source pair is not an authoring command: the record
+        # already holds those numbers, so marking the pair pending would hide a
+        # later import behind a value the reader never changed (#2426). A pair
+        # is authored as one unit: when either half differs, both halves stay.
+        if self._source_pairs:
+            groups = [
+                {pair, unit_field},
+                {CREATININE_PAIR, CREATININE_UNIT},
+                {direct_bilirubin_units.PAIR_FIELD, direct_bilirubin_units.UNIT_FIELD},
+            ]
+            groups += [
+                {spec['value'], spec['unit']} for spec in CHEMISTRY_SOURCE_PAIRS.values()
+            ]
+            groups += [
+                {source} | ({spec['unit_field']} if spec.get('unit_field') else set())
+                for source, spec in COUNT_SOURCE_PAIRS.items()
+            ]
+            authored = set()
+            dated = set(self.context.get('dated_fields') or ())
+            for group in groups:
+                fields = group & self._source_pairs
+                if fields and any(
+                        validated.get(field) != getattr(self.instance, field, None)
+                        or field in dated
+                        for field in fields):
+                    authored |= fields
+            self._source_pairs = authored
+        return validated
 
     def get_supportive_therapy_courses(self, obj):
         from patient_portal.api.supportive_therapies import SupportiveTherapySerializer
@@ -571,26 +875,23 @@ class PatientRecordSerializer(serializers.ModelSerializer):
         ).data
 
     def validate_flipi_score_options(self, value):
-        from omop_core.services.flipi import parse_factors
+        from omop_core.services.clinical_field_validation import normalize_flipi_score_options
         try:
-            selected = parse_factors(value)
+            return normalize_flipi_score_options(value)
         except ValueError:
             raise serializers.ValidationError('Select recognized FLIPI risk factors.') from None
-        return None if selected is None else ','.join(selected)
 
     def validate_gelf_criteria_options(self, value):
-        from omop_core.services.sample_disease_profiles import GELF_FACTORS
-        if value is None:
-            return None
-        selected = {part.strip() for part in value.split(',') if part.strip()}
-        if selected - GELF_FACTORS.keys():
-            raise serializers.ValidationError('Select recognized GELF criteria.')
-        return ','.join(key for key in GELF_FACTORS if key in selected)
+        from omop_core.services.clinical_field_validation import normalize_gelf_criteria_options
+        try:
+            return normalize_gelf_criteria_options(value)
+        except ValueError:
+            raise serializers.ValidationError('Select recognized GELF criteria.') from None
 
     def validate_tumor_grade(self, value):
-        from omop_core.services.flipi import normalize_grade
+        from omop_core.services.clinical_field_validation import normalize_tumor_grade
         try:
-            return normalize_grade(value)
+            return normalize_tumor_grade(value)
         except ValueError:
             raise serializers.ValidationError(
                 'Use grade 1, 2, 3A, or 3B (3 for an unspecified historical grade).'
@@ -674,8 +975,12 @@ class PatientRecordSerializer(serializers.ModelSerializer):
 
     def get_fields(self):
         fields = super().get_fields()
+        # Hemoglobin's source pair is an exception the descriptor states
+        # (#2318): `hemoglobin_level` is the write target and its unit rides
+        # beside it. The pair validator below rejects a unit on its own.
+        unit_pair = {PAIR_FIELD, UNIT_FIELD} | count_source_fields()
         for name in get_serializer_read_only_fields():
-            if name in fields:
+            if name in fields and name not in unit_pair:
                 fields[name].read_only = True
         return fields
 
@@ -705,6 +1010,9 @@ class PatientRecordSerializer(serializers.ModelSerializer):
             if concept_ids else {}
         )
         data = super().to_representation(instance)
+        # Server-managed bookkeeping, not a clinical value the client reads or
+        # writes (#2426). `fields = '__all__'` would otherwise expose it.
+        data.pop('pending_source_pair_dates', None)
         return self._apply_demographic_redaction(instance, data)
 
     # PHR-S FM PH.1.2#05 — consent/preference-driven demographic rendering.
@@ -875,6 +1183,10 @@ class PatientRecordSerializer(serializers.ModelSerializer):
         return value
 
     def validate(self, data):
+        if self.instance is not None and {'date_of_birth', 'date_of_birth_precision'} & data.keys():
+            from omop_core.services.birth_dates import normalize_birth_date
+            dob, precision = normalize_birth_date(self.instance.person, data)
+            data.update(date_of_birth=dob, date_of_birth_precision=precision)
         dob = data.get(
             'date_of_birth', getattr(self.instance, 'date_of_birth', None))
         death = data.get(
@@ -897,6 +1209,25 @@ class PatientRecordSerializer(serializers.ModelSerializer):
                 "dlbcl_transformation_date and post_transformation_outcome "
                 "require transformed_to_dlbcl to be true."
             )
+
+        # "No pre-existing conditions" and recorded categories are contradictory;
+        # the write is rejected so the client chooses instead of the server guessing
+        # (#1988). A partial update falls back to the stored counterpart.
+        from omop_core.services.pre_existing_conditions import (
+            contradicts_no_pre_existing_conditions,
+        )
+        conditions_flag = data.get(
+            'no_pre_existing_conditions',
+            getattr(self.instance, 'no_pre_existing_conditions', None))
+        categories = data.get(
+            'preexisting_conditions',
+            getattr(self.instance, 'preexisting_conditions', None))
+        if contradicts_no_pre_existing_conditions(conditions_flag, categories):
+            raise serializers.ValidationError({
+                'no_pre_existing_conditions':
+                    'Recorded pre-existing condition categories contradict '
+                    '"no pre-existing conditions"; clear one of them.',
+            })
         return data
 
     def validate_stem_cell_transplant_history(self, value):
@@ -1980,15 +2311,55 @@ class FieldFormulaSerializer(serializers.ModelSerializer):
             created_by=request.user if request else None,
         )
 
+    def validate(self, attrs):
+        # Partial updates can activate a formula without validate_field_name.
+        # Judge the effective state: a PATCH that omits is_active keeps the
+        # stored value, so editing an inactive formula is not an activation.
+        if self.instance is not None and attrs.get(
+                'is_active', self.instance.is_active) is not False:
+            self._assert_computable(attrs.get('field_name', self.instance.field_name))
+        return attrs
+
     def validate_field_name(self, value):
+        # Field-level validation runs before `validate` and sees the raw
+        # payload. The formula editor always sends field_name with is_active,
+        # so an edit of an inactive formula must not be refused here as if it
+        # activated it (#2489). Creation is always checked.
+        if self.instance is not None and self._requested_is_active() is False:
+            return value
+        self._assert_computable(value)
+        return value
+
+    def _requested_is_active(self):
+        """The is_active this update leaves in place: the submitted value,
+        else the stored one. An unparseable value counts as active; the field's
+        own validation reports it."""
+        data = getattr(self, 'initial_data', None) or {}
+        if 'is_active' not in data:
+            return self.instance.is_active
+        try:
+            return serializers.BooleanField().to_internal_value(data['is_active'])
+        except serializers.ValidationError:
+            return True
+
+    @staticmethod
+    def _assert_computable(field_name):
+        # The authored-answer set, not just the two derived negatives: the
+        # field_formula_explicit_answer_inactive CHECK also covers pregnancy,
+        # so activating its formula raised IntegrityError (a 500) instead of
+        # this 400 (#2418 regression review).
+        from omop_core.services.authored_answers import is_authored_answer_field
+        if is_authored_answer_field(field_name):
+            raise serializers.ValidationError({
+                'field_name': 'This field is an explicit answer; a formula cannot be active.',
+            })
         from omop_core.services.field_descriptor import _COMPUTED_FIELDS
-        if value not in _COMPUTED_FIELDS and not CustomPatientField.objects.filter(
-            field_name=value, mode='computed',
+        if field_name not in _COMPUTED_FIELDS and not CustomPatientField.objects.filter(
+            field_name=field_name, mode='computed',
         ).exists():
             raise serializers.ValidationError(
-                f"'{value}' is not an application-computed PatientRecord field."
+                {'field_name': f"'{field_name}' is not an application-computed PatientRecord field."}
             )
-        return value
 
     def validate_formula(self, value):
         from omop_core.services.formula_evaluator import validate_formula

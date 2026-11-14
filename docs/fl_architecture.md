@@ -106,10 +106,11 @@ default False). This is a per-drug, per-line flag — not a separate Episode.
 2. **FHIR upload** parses the extension and sets `is_maintenance=True` on the
    `TherapyLineExposure` row.
 3. **Editor API** (`POST/PATCH /v1/therapy-lines/`) accepts `maintenance: true`
-   on each drug dict in the `drugs` array.
+   or `false` on each drug dict in the `drugs` array. Omission preserves the
+   existing flag, including when an older client echoes the drugs list.
 4. **Import API** (`POST /v1/therapy-lines/bulk_upsert/`) accepts
-   `maintenance_drugs` per line — dicts merged into the drug list with
-   `maintenance=True`.
+   `maintenance_drugs` per line, marking matching existing line exposures
+   without replacing the line's drug composition.
 5. **Derivation** reads `TherapyLineExposure.is_maintenance` and includes
    `has_maintenance` and `maintenance_drugs` in the `later_therapies` JSON
    (structured `lines_of_therapy` payload).
@@ -134,7 +135,10 @@ Created by `episode_service.upsert_therapy_line_episode(progression_date=...)`.
 `patient_record_service._get_treatment_data_from_episodes()`:
 1. Collects all `LOT-N-progression` Observations, grouped by line number.
 2. Sets `first_line_progression_date`, `second_line_progression_date`,
-   `later_progression_date` on PatientRecord.
+   `later_progression_date` on PatientRecord. The flat later field is a summary;
+   each `later_therapies` entry carries its own `progression_date`, which the
+   editable `lines_of_therapy` payload uses. A sibling line's date is never an
+   editable default for a line with no progression recorded.
 3. Computes POD24: `(first_prog - first_start).days <= 730`.
 
 ### API Entry Points

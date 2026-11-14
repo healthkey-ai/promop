@@ -15,22 +15,37 @@ Coverage is openly reported: every projection field is classified, including
 computed values, aliases and values authored through a dedicated resource.
 """
 
+from decimal import Decimal, InvalidOperation
+
+from django.core.exceptions import FieldDoesNotExist
+from django.db import models as django_models
 from django.db.models import Q
+
+from rest_framework.fields import BooleanField
 
 from omop_core.models import (
     Concept, ConditionOccurrence, DrugExposure, FieldChoice, Measurement,
-    Observation, PatientRecord, ProcedureOccurrence,
+    Observation, PatientRecord, PreExistingConditionCategory, ProcedureOccurrence,
 )
+from omop_core.services.boolean_answers import BOOLEAN_ANSWERS
 from omop_core.services.demographics import choices as demographic_choices
 from omop_core.services.mappings import (
     CONCEPT_EHR_TYPE, CONCEPT_LAB_TYPE, CONCEPT_PATIENT_REPORTED_TYPE,
-    DERIVED_FIELD_TO_CODE, LAB_FIELD_TO_LOINC,
+    DERIVED_FIELD_TO_CODE, FIELD_COMMON_UNITS, LAB_FIELD_TO_LOINC,
 )
 from omop_core.services.patient_record_service import (
     DERIVED_LANGUAGE_FIELDS,
     PATIENT_RECORD_OMOP_MAPPED_FIELDS,
     _LAB_FIELD_ALIASES,
 )
+from omop_core.services.blood_count_source_pairs import (
+    PAIRS as COUNT_SOURCE_PAIRS,
+    UNIT_OPTIONS as COUNT_UNIT_OPTIONS,
+)
+from omop_core.services.chemistry_units import PAIRS as CHEMISTRY_SOURCE_PAIRS
+from omop_core.services import direct_bilirubin_units
+
+_NULLABLE_BOOLEAN = BooleanField(allow_null=True)
 
 # Every field resolves to exactly one kind. A binary writable/not left a third of
 # the record looking broken — a field is not "unwritable" because it is a unit
@@ -44,10 +59,24 @@ KIND_EDITABLE = 'editable'      # write an OMOP fact; derivation follows
 KIND_SELECTABLE = 'selectable'  # choose from a bounded set, carried on the fact
 KIND_COMPUTED = 'computed'      # derived from other fields; never authored alone
 KIND_ALIAS = 'alias'            # mirrors a canonical field; edit that one instead
+KIND_NEGATED = 'negated'        # the opposite of a canonical boolean; write it inverted
+KIND_EXPLICIT_ANSWER = 'explicit-answer'  # its own endpoint and snapshot; never a PATCH
 KIND_PROFILE = 'profile'        # a Person attribute, written at the persons endpoint
 KIND_UNMAPPED = 'unmapped'      # no write path yet — grouped by WHY, not lumped
 KIND_AUTHORED = 'authored'      # written by authoring a different resource entirely
 KIND_DIRECT = 'direct'          # write to PatientRecord; no OMOP fact required yet
+
+#: Bumped only when a client-visible MEANING changes: a new kind, a renamed
+#: capability key, different `writable`/`answerable` semantics, or a new write
+#: or readback path. Adding a field, an option or a binding does NOT bump it.
+#: A client that does not know this version must not guess: see
+#: docs/writable-field-descriptor.md.
+DESCRIPTOR_SCHEMA_VERSION = 1
+
+#: Reserved key for the descriptor's own envelope. It is not a field: clients
+#: look fields up by name, so it never collides with one, and iterators must
+#: skip keys beginning with `__`.
+DESCRIPTOR_META_KEY = '__descriptor__'
 
 # Athena Cancer Modifier: Dimension of Largest Lymph Node.  Unlike the generic
 # Size Tumor LOINC, this is the specific standard concept for the CLL field.
@@ -101,6 +130,63 @@ _EPISODE_COMPUTED_FIELDS = frozenset(
     for field in PatientRecord._meta.concrete_fields
     if field.name.startswith(('first_line_', 'second_line_', 'later_'))
 )
+
+#: Flat shared-form fields that author one therapy line each. They stay
+#: projections of an Episode, so the descriptor offers them as writable and the
+#: write path routes them to the line authoring service instead of the column
+#: (`omop_core/services/therapy_line_form.py`). Only the first line of each group
+#: is flat: derivation reads `later_therapy`/`later_date`/`later_outcome` back
+#: from the first 3L+ line, so a second flat later line would have no column to
+#: land in.
+_AUTHORABLE_LINE_FIELDS = {
+    'first_line_therapy': (1, 'string', 'therapy'),
+    'first_line_date': (1, 'date', 'start_date'),
+    'first_line_outcome': (1, 'string', 'outcome'),
+    'second_line_therapy': (2, 'string', 'therapy'),
+    'second_line_date': (2, 'date', 'start_date'),
+    'second_line_outcome': (2, 'string', 'outcome'),
+    'later_therapy': (3, 'string', 'therapy'),
+    'later_date': (3, 'date', 'start_date'),
+    'later_outcome': (3, 'string', 'outcome'),
+}
+
+
+def _therapy_line_options():
+    """The catalog choices the three line fields take.
+
+    A regimen is stored by its catalog `code` and resolved to its HemOnc
+    concept by the writer, so the option VALUE has to be PROMOP's code — a host
+    slug would author a line whose regimen derivation cannot name. Outcomes are
+    the disease-independent catalog; the writer narrows to the patient's disease.
+    """
+    from omop_core.models import TherapyRegimen
+    from omop_core.services.treatment_catalog import OUTCOMES
+
+    return {
+        # `value` is the title because that is what the record's derived column
+        # holds, so the control preselects it; `code` is what the writer
+        # resolves. A regimen with no concept cannot author a line, so it is
+        # not offered — a choice that always refuses is worse than none.
+        'therapy': [
+            {
+                # `value` is the concept's own name because that is what
+                # derivation writes into the column, so the control preselects
+                # the record's value; `code` is what the writer resolves.
+                'value': concept_name or title,
+                'code': code,
+                'label': title,
+            }
+            for code, title, concept_name in (
+                TherapyRegimen.objects.filter(concept__isnull=False)
+                .order_by('title')
+                .values_list('code', 'title', 'concept__concept_name')
+            )
+        ],
+        'outcome': [
+            {'value': value, 'label': label} for _key, value, label in OUTCOMES
+        ],
+    }
+
 
 # How a therapy line is authored. Not a missing mapping — the write path exists
 # and works; it is simply not a single fact, so no concept could describe it. A
@@ -180,6 +266,26 @@ _SERIALIZER_ALIASES = {
     'refractory_status': 'treatment_refractory_status',
 }
 
+#: Negated views of a stored boolean. The record keeps the POSITIVE status; a
+#: trial asks "No HIV required" / "No Hepatitis B required", so the row is the
+#: opposite of the column and a write has to go to the column INVERTED (#5663).
+#:
+#: These are not aliases: reading `hiv_status = false` through an alias would
+#: show "No" beside a trial that says "No HIV", which is the wrong answer, and
+#: writing the displayed value unchanged would store the opposite of the
+#: patient's answer. The dedicated kind makes that impossible to miss — a
+#: client that does not understand `negated` must leave the field alone rather
+#: than write the display value.
+#:
+#: The `no_*` columns were removed in #2119; nothing here resurrects them. The
+#: entry is a description of the QUESTION, and `canonical` is the only field a
+#: write may touch.
+_NEGATED_ALIASES = {
+    'no_hiv_status': 'hiv_status',
+    'no_hepatitis_b_status': 'hepatitis_b_status',
+    'no_hepatitis_c_status': 'hepatitis_c_status',
+}
+
 # SerializerMethodFields. Read-only by construction — DRF has nowhere to write a
 # method — and each is assembled at serialization time from data that lives
 # elsewhere.
@@ -233,6 +339,17 @@ _WEARABLE_METRIC = {
     'body_mass_avg_30d': 'body_mass',
 }
 
+#: `inputs` that name a RESOURCE, not a PatientRecord field.
+#:
+#: A computed value may be built from an authored resource — therapy lines come
+#: from Episode/EpisodeEvent, language skills from PersonLanguageSkill — or from
+#: a wearable metric the device pipeline owns. They are still inputs a UI can
+#: offer (by opening that resource's editor), so the contract test accepts them;
+#: everything else an `inputs` list names must resolve to a descriptor entry.
+DESCRIPTOR_RESOURCE_INPUTS = frozenset(
+    {'Episode', 'EpisodeEvent', 'PersonLanguageSkill'} | set(_WEARABLE_METRIC.values())
+)
+
 
 # field → the field it mirrors. Writing an alias directly would collide with its
 # canonical on the same LOINC row, which is the failure #471 removed.
@@ -242,16 +359,38 @@ _ALIAS_TO_CANONICAL = {
     for alias in aliases
 }
 
+#: An alias the MATCHER recomputes from other record fields.
+#:
+#: eGFR is a stored lab fact on the record, but EXACT derives it from the
+#: CKD-EPI inputs before scoring, so a correction typed into the alias — or
+#: into its canonical column — is replaced by the next derivation (#5664).
+#: Naming the inputs is what lets a client offer the fields that actually move
+#: the value instead of a box that silently does nothing.
+_ALIAS_INPUTS = {
+    'estimated_glomerular_filtration_rate': [
+        'serum_creatinine_level', 'patient_age', 'gender',
+    ],
+}
+
 # Values computed during derivation from other projected fields, with the inputs
-# a UI needs in order to say why the box is not typeable.
+# a UI needs in order to say why the box is not typeable. A field belongs here
+# when `refresh_patient_record`/`recompute_patient_record_fields` owns its value:
+# offering it as a direct write would let a caller replace a verdict that the
+# next save recomputes, and would hide the facts that actually drive it.
 _COMPUTED_INPUTS = {
     'gelf_criteria_status': ['gelf_criteria_options'],
     'flipi_score': ['flipi_score_options'],
     'flipi_risk_category': ['flipi_score_options'],
+    'patient_age': ['date_of_birth'],
     'bmi': ['height', 'weight'],
+    'meets_crab': [
+        'serum_calcium_mg_dl', 'creatinine_clearance_ml_min',
+        'serum_creatinine_mg_dl', 'hemoglobin_g_dl', 'bone_lesions',
+    ],
     'tnbc_status': [
         'estrogen_receptor_status', 'progesterone_receptor_status', 'her2_status',
     ],
+    'hr_status': ['estrogen_receptor_status', 'progesterone_receptor_status'],
     'tp53_disruption': ['genetic_mutations'],
     'involved_uninvolved_ratio': ['kappa_flc', 'lambda_flc'],
     'molecular_markers': ['genetic_mutations'],
@@ -259,7 +398,188 @@ _COMPUTED_INPUTS = {
         'liver_enzyme_levels_ast', 'liver_enzyme_levels_alt',
         'liver_enzyme_levels_alp',
     ],
+    'measurable_disease_imwg': [
+        'monoclonal_protein_serum', 'monoclonal_protein_urine',
+        'kappa_flc', 'lambda_flc',
+    ],
+    'measurable_disease_iwcll': [
+        'alc_thousand_per_ul', 'largest_lymph_node_size',
+        'splenomegaly', 'hepatomegaly',
+    ],
+    'metastatic_status': ['distant_metastasis_stage'],
+    'renal_adequacy_status': ['egfr_ml_min_173m2', 'serum_creatinine_mg_dl'],
+    'no_active_infection_status': ['active_infection_status'],
+    'no_other_active_malignancies': ['active_malignancies'],
+    # The HIV/hepatitis negatives were derived from the paired status fact by
+    # `_latest_result`, so a direct write was replaced by the next derivation:
+    # offering them as editable reported `applied` and then silently reverted
+    # (#2106). They were then removed as columns altogether (#2119). The positive
+    # field is the one to edit; its two answers are labelled by the descriptor
+    # (`BOOLEAN_ANSWERS` in patient_form), not by a second column.
+    # Same class, found by writing each field and re-deriving (#2113). These four
+    # are derived from record fields, so the inputs are the edit surface:
+    # `recompute_patient_record_fields` owns the verdict, the components do not.
+    'b_symptoms': [
+        'b_symptom_fever', 'b_symptom_night_sweats', 'b_symptom_weight_loss',
+    ],
+    'meets_slim': [
+        'clonal_plasma_cells', 'kappa_flc', 'lambda_flc', 'kappa_lambda_ratio',
+    ],
+    'disease_slug': ['disease'],
+    # These two have no record component at all: they are read off OMOP condition
+    # facts (SNOMED 40733004 / 363346000). Computed with no inputs, so a client
+    # shows the value read-only instead of offering a field that cannot exist.
+    'active_infection_status': [],
+    'active_malignancies': [],
 }
+
+def computed_only_fields():
+    """The one computed-only classification (#2135).
+
+    A field belongs here when derivation owns its value; a caller assigning it
+    directly would replace a verdict the next save recomputes. Fields merely
+    populated from OMOP are not computed-only and stay editable.
+    """
+    return frozenset(_COMPUTED_INPUTS)
+
+
+def computed_only_message(field_name):
+    inputs = _COMPUTED_INPUTS.get(field_name) or []
+    if inputs:
+        return (f'{field_name} is computed from ' + ', '.join(inputs)
+                + '; edit those fields instead.')
+    return f'{field_name} is computed by the server from OMOP facts; it is read-only.'
+
+
+def _same_computed_value(field_name, current, submitted):
+    """Compare a requested value to the record without duplicating DRF coercion."""
+    if current is None and submitted is None:
+        return True
+    try:
+        model_field = PatientRecord._meta.get_field(field_name)
+    except FieldDoesNotExist:
+        return current == submitted
+    if isinstance(model_field, django_models.BooleanField):
+        # Use DRF's own field so the vocabulary (including null spellings and
+        # the 0/1-only numeric rule) cannot drift. Invalid input is never an
+        # echo; a changed verdict must always reach the refusal.
+        from rest_framework.exceptions import ValidationError as DrfValidationError
+        unknown = object()
+
+        def coerce(value):
+            try:
+                return _NULLABLE_BOOLEAN.run_validation(value)
+            except (DrfValidationError, TypeError, ValueError):
+                return unknown
+
+        left, right = coerce(current), coerce(submitted)
+        if left is unknown or right is unknown:
+            return False
+        return left == right
+    if isinstance(model_field, django_models.DecimalField):
+        try:
+            quantum = Decimal(1).scaleb(-model_field.decimal_places)
+            return (Decimal(str(current)).quantize(quantum)
+                    == Decimal(str(submitted)).quantize(quantum))
+        except (InvalidOperation, TypeError, ValueError):
+            return False
+    if isinstance(model_field, (django_models.IntegerField, django_models.FloatField)):
+        try:
+            return float(current) == float(submitted)
+        except (TypeError, ValueError):
+            return False
+    return current == submitted
+
+
+def computed_only_assignments(values, record):
+    """Computed-only fields the request actually assigns, with their messages.
+
+    An unchanged echo of the current value is not an assignment: editors PATCH
+    the whole GET representation. A different value (including a clear) is.
+    """
+    if not values:
+        return {}
+    rejected = {}
+    for field_name in computed_only_fields():
+        if field_name not in values:
+            continue
+        submitted = values.get(field_name)
+        if record is None:
+            if submitted in (None, '', [], {}):
+                continue
+        elif _same_computed_value(
+                field_name, getattr(record, field_name, None), submitted):
+            continue
+        rejected[field_name] = computed_only_message(field_name)
+    return rejected
+
+# Current-diagnosis myeloma-related disorders (#5521). These are direct
+# PatientRecord fields; an affirmative answer projects to the reviewed OMOP
+# fact, while No/Unknown remains pending on PatientRecord because occurrence
+# tables cannot express a negative. Concepts come from the clinical owner's
+# list in CB #5521; IgM myeloma has no standard concept and stays direct-only.
+_MYELOMA_RELATED_DISORDER_PROJECTIONS = {
+    'mgus': {
+        'concept_id': 4149022, 'omop_table': 'observation',
+        'concept_code': '35601003', 'vocabulary': 'SNOMED',
+        'label': 'MGUS',
+    },
+    'smoldering_multiple_myeloma': {
+        'concept_id': 4184985, 'omop_table': 'condition',
+        'concept_code': '413587002', 'vocabulary': 'SNOMED',
+        'label': 'Smoldering multiple myeloma',
+    },
+    'waldenstrom_macroglobulinemia': {
+        'concept_id': 4098597, 'omop_table': 'condition',
+        'concept_code': '190818004', 'vocabulary': 'SNOMED',
+        'label': 'Waldenström macroglobulinemia',
+    },
+    'igm_multiple_myeloma': {
+        'label': 'IgM multiple myeloma',
+    },
+    'al_amyloidosis': {
+        'concept_id': 4047607, 'omop_table': 'condition',
+        'concept_code': '23132008', 'vocabulary': 'SNOMED',
+        'label': 'Light-chain (AL) amyloidosis',
+    },
+    'poems_syndrome': {
+        'concept_id': 4193776, 'omop_table': 'condition',
+        'concept_code': '79268002', 'vocabulary': 'SNOMED',
+        'label': 'POEMS syndrome',
+    },
+}
+
+# Fields whose projection is fixed by a reviewed built-in recipe. A curator
+# mapping must not replace their descriptor semantics or read OMOP facts back
+# into a current answer (#5521).
+PINNED_PROJECTION_FIELDS = frozenset(_MYELOMA_RELATED_DISORDER_PROJECTIONS)
+
+
+def _dated_with_canonical(canonical_entry):
+    """Copy the canonical's date marker onto its editable source pair (#2397).
+
+    The pair is the fact a patient edits; the canonical is the read-model that
+    carries the projection. A date the editor attaches to the pair must land on
+    the same result, so the pair is only dated when its canonical is.
+    """
+    return {'dated': True} if (canonical_entry or {}).get('dated') else {}
+
+
+def pinned_projection_source_value(field):
+    """The source value that marks an OMOP row as this field's own answer.
+
+    The rows a pinned recipe writes are told apart from imported history by
+    this, never by the concept: an EHR row for the same SNOMED code is a
+    diagnosis, this is a patient's current-state answer dated the day they
+    gave it. Derivation uses it to keep such a row from becoming the record's
+    primary cancer, and a later No/Unknown uses it to find the rows it retracts.
+    """
+    return 'patient-record:' + field
+
+
+PINNED_PROJECTION_SOURCE_VALUES = frozenset(
+    pinned_projection_source_value(field) for field in PINNED_PROJECTION_FIELDS
+)
 
 # Lifecycle columns are not clinical data and are never writable regardless of
 # mapping state; they are excluded rather than reported as unwritable fields.
@@ -368,7 +688,8 @@ _WRITE_RECIPE_INCOMPLETE = {
     ),
 }
 
-def _curated_writes(choice_options=None, genomics_recipes=None, clinical_mappings=None):
+def _curated_writes(choice_options=None, genomics_recipes=None, clinical_mappings=None,
+                    genetic_recipes=None):
     """Editable entries built from reviewer-approved concept mappings.
 
     The curation interface records a decision per field; this is what acts on
@@ -399,6 +720,12 @@ def _curated_writes(choice_options=None, genomics_recipes=None, clinical_mapping
     )
     if genomics_recipes is not None:
         genomics_recipes.update({r.field_name: r for r in fetched if r.field_name.startswith('genomics_')})
+    if genetic_recipes is not None:
+        # The variant writer always normalises a status, so that recipe must be
+        # usable even when the caller sends only a gene. Collected from the
+        # same read as the rest.
+        genetic_recipes.update(
+            {r.field_name: r for r in fetched if r.field_name == 'genetic_mutations.status'})
     if clinical_mappings is not None:
         clinical_mappings.update({r.field_name: r for r in fetched if r.field_name in CLINICAL_INPUT_FIELDS})
     rows = [r for r in fetched if r.status == 'approved']
@@ -431,12 +758,15 @@ def _curated_writes(choice_options=None, genomics_recipes=None, clinical_mapping
             # can hide this invalid approved mapping.
             entries[row.field_name] = {
                 'kind': KIND_DIRECT,
-                'writable': False,
+                'writable': True,
+                'target': 'patient_record',
                 'curated': True,
+                'value_kind': row.value_kind or _value_kind(row.field_name),
                 'reason': (
-                    f'Approved mapping source_value exceeds the {width}-character '
-                    f'limit of {source_field.model._meta.db_table}.{source_field.name}. '
-                    'Shorten the mapping source_value before writing this field.'
+                    f'Written directly to PatientRecord. The approved mapping '
+                    f'source_value exceeds the {width}-character limit of '
+                    f'{source_field.model._meta.db_table}.{source_field.name}; '
+                    'fix the mapping before projection is available.'
                 ),
             }
             continue
@@ -464,10 +794,14 @@ def _curated_writes(choice_options=None, genomics_recipes=None, clinical_mapping
             options = titles.get(row.value_vocabulary) or ()
             if options:
                 entry['options'] = [{'value': t} for t in options]
-                entry['multiple'] = row.multiple
         elif choice_options and row.field_name in choice_options:
             entry['options'] = choice_options[row.field_name]
-            entry['multiple'] = row.multiple
+        # `multiple` describes the field's shape, not the presence of a picker
+        # vocabulary. A list field whose vocabulary is not loaded (or that has
+        # no vocabulary at all) is still a list: without this the client fell
+        # back to a single select and wrote a scalar over the list.
+        if row.multiple:
+            entry['multiple'] = True
         if (row.field_name == 'cytogenetic_markers' and row.multiple
                 and row.vocabulary_id == 'SNOMED' and row.concept_code == '107675007'):
             from omop_core.services.cytogenetics import descriptor as cytogenetic_descriptor
@@ -542,6 +876,10 @@ def get_serializer_read_only_fields():
         return _CACHED_SERIALIZER_READ_ONLY
 
     read_only = set()
+    # Server-managed bookkeeping, never a clinical value (#2426): the day a
+    # pending source pair was entered. The pair write paths maintain it.
+    from omop_core.services.source_pair_dates import FIELD as _PAIR_DATES_FIELD
+    read_only.add(_PAIR_DATES_FIELD)
     # KIND_COMPUTED: episode-derived line fields
     read_only |= _EPISODE_COMPUTED_FIELDS
     # KIND_COMPUTED: wearable aggregates + KIND_UNMAPPED: wearable metadata
@@ -569,9 +907,42 @@ def get_serializer_read_only_fields():
     for field in PatientRecord._meta.concrete_fields:
         if field.name.endswith('_units'):
             read_only.add(field.name)
+    # A source pair's own value is the write target even though the canonical it
+    # feeds lists it as a legacy alias (#2318 follow-up). Hemoglobin is not in
+    # `_LAB_FIELD_ALIASES` for the same reason; creatinine needs the alias entry
+    # so a canonical import still propagates back into the pair. The subtraction
+    # is after the unit loop on purpose: that loop re-adds every `*_units`.
+    read_only -= {'serum_creatinine_level', 'serum_creatinine_level_units'}
+    read_only -= {
+        field
+        for spec in CHEMISTRY_SOURCE_PAIRS.values()
+        for field in (spec['value'], spec['unit'])
+    }
+    # Direct bilirubin's pair is the write target too (#2318); the unitless
+    # alias stays read-only below.
+    read_only -= {direct_bilirubin_units.PAIR_FIELD, direct_bilirubin_units.UNIT_FIELD}
+    # The unitless direct-bilirubin mirror is derived from its source pair
+    # (#2318); a direct write would be overwritten by the next recompute.
+    read_only.add('serum_bilirubin_level')
     read_only -= {'relapse_count', 'treatment_refractory_status'}
     _CACHED_SERIALIZER_READ_ONLY = frozenset(read_only)
     return _CACHED_SERIALIZER_READ_ONLY
+
+
+def _descriptor_unit(unit):
+    """The unit to show, or None when the mapping has only a placeholder.
+
+    `LAB_FIELD_TO_LOINC` spells "no physical unit" as `{score}` for ECOG,
+    Karnofsky and the other ordinal scales. Sending that to a client put the
+    literal `{score}` beside an edit box (and in the projection metadata).
+    A placeholder is not a unit; the field is a score, and the value needs no
+    suffix.
+    """
+    if isinstance(unit, str):
+        stripped = unit.strip()
+        if stripped.startswith('{') and stripped.endswith('}'):
+            return None
+    return unit
 
 
 def build_writable_field_descriptor():
@@ -583,14 +954,33 @@ def build_writable_field_descriptor():
         {code for code, _unit, _display in LAB_FIELD_TO_LOINC.values()}, 'LOINC'
     )
     unit_ids = _resolve_concept_ids(
-        {unit for _code, unit, _display in LAB_FIELD_TO_LOINC.values()}, 'UCUM'
+        {unit for _code, unit, _display in LAB_FIELD_TO_LOINC.values()}
+        | {'umol/L'}, 'UCUM'
     )
     derived_concepts = _resolve_concepts(
         {(vocab, code) for code, vocab, _fn in DERIVED_FIELD_TO_CODE.values()}
     )
-    largest_lymph_node_concept = Concept.objects.filter(
-        concept_id=CONCEPT_LARGEST_LYMPH_NODE_DIMENSION
-    ).only('concept_id', 'concept_code', 'concept_name', 'vocabulary_id').first()
+    # The reviewed myeloma concepts come from the same vocabulary tables and are
+    # resolved in this one query with the largest-lymph-node concept, so adding
+    # them does not add a query per field or a new query overall (#5521).
+    myeloma_concept_ids = {
+        spec['concept_id'] for spec in _MYELOMA_RELATED_DISORDER_PROJECTIONS.values()
+        if spec.get('concept_id')
+    }
+    concept_by_id = {
+        concept.concept_id: concept
+        for concept in Concept.objects.filter(
+            concept_id__in=myeloma_concept_ids
+            | {CONCEPT_LARGEST_LYMPH_NODE_DIMENSION, CONCEPT_EHR_TYPE},
+        ).only('concept_id', 'concept_code', 'concept_name', 'vocabulary_id')
+    }
+    largest_lymph_node_concept = concept_by_id.get(CONCEPT_LARGEST_LYMPH_NODE_DIMENSION)
+    ehr_type_loaded = CONCEPT_EHR_TYPE in concept_by_id
+    myeloma_concepts = {
+        field: concept_by_id.get(spec['concept_id'])
+        for field, spec in _MYELOMA_RELATED_DISORDER_PROJECTIONS.items()
+        if spec.get('concept_id')
+    }
 
     choice_options = {
         field_name: [
@@ -601,10 +991,13 @@ def build_writable_field_descriptor():
     }
     from omop_core.services.genomics import mapping_is_usable
     genomics_recipes = {}
+    genetic_recipes = {}
     clinical_mappings = {}
-    curated = _curated_writes(choice_options, genomics_recipes, clinical_mappings)
+    curated = _curated_writes(
+        choice_options, genomics_recipes, clinical_mappings, genetic_recipes)
 
     descriptor = {}
+    line_options = None
     for field in sorted(PATIENT_RECORD_OMOP_MAPPED_FIELDS - _LIFECYCLE_FIELDS):
         if field in DERIVED_LANGUAGE_FIELDS:
             descriptor[field] = {
@@ -633,11 +1026,51 @@ def build_writable_field_descriptor():
             }
             continue
         if field == 'genetic_mutations':
+            # The entry advertises the Genomics CRUD endpoint, so ask that
+            # writer what it needs: concept 0, a CDM measurement event concept
+            # and the actor type concepts. The retired list-diff writer's gene
+            # LOINC requirement is a different path (`field_write_service`).
+            # Advertising Add regardless offered a control whose save could
+            # only 400 (#2441/#2433).
+            from omop_core.services.genomics import variants_writable
+            writable = variants_writable(
+                status_recipe=genetic_recipes.get('genetic_mutations.status'))
             descriptor[field] = {
-                'kind': KIND_EDITABLE, 'writable': True, 'target': 'genomics',
+                'kind': KIND_EDITABLE, 'writable': writable, 'target': 'genomics',
                 'endpoint': '/api/v1/patient-records/{person_id}/genomics/',
-                'reason': 'Edit individual variants in the Genomics tab; each variant writes linked OMOP facts.',
+                'reason': (
+                    'Edit individual variants in the Genomics tab; each variant '
+                    'writes linked OMOP facts.'
+                    if writable else
+                    'The OMOP CDM and type vocabularies needed to store variants '
+                    'are not loaded.'
+                ),
             }
+            continue
+        if field in _AUTHORABLE_LINE_FIELDS:
+            line_number, value_kind, part = _AUTHORABLE_LINE_FIELDS[field]
+            if line_options is None:
+                line_options = _therapy_line_options()
+            descriptor[field] = {
+                'kind': KIND_DIRECT,
+                'writable': True,
+                'target': 'patient_record',
+                'value_kind': value_kind,
+                # Which line the write authors. The client shows the control;
+                # the writer owns the conversion to Episode/EpisodeEvent and the
+                # derivation that fills this column back.
+                'authored_episode': {'line_number': line_number, 'part': part},
+                # The published recipe stays: a host that explains how to
+                # author a line keeps its answer, and this control is the
+                # in-form route to exactly that write.
+                'authored_via': _THERAPY_RECIPE,
+                'reason': (
+                    'Written as a therapy line (an Episode grouping its facts); '
+                    'this column is derived from that line.'
+                ),
+            }
+            if line_options.get(part):
+                descriptor[field]['options'] = line_options[part]
             continue
         if field in _EPISODE_COMPUTED_FIELDS:
             descriptor[field] = {
@@ -661,6 +1094,8 @@ def build_writable_field_descriptor():
                 'canonical': canonical,
                 'reason': f'Mirrors {canonical}; edit that field instead.',
             }
+            if field in _ALIAS_INPUTS:
+                descriptor[field]['inputs'] = _ALIAS_INPUTS[field]
             continue
 
         if field in _PROFILE_DEMOGRAPHIC:
@@ -717,10 +1152,73 @@ def build_writable_field_descriptor():
             }
             continue
 
-        if field in curated:
-            descriptor[field] = curated[field]
+        if field in _MYELOMA_RELATED_DISORDER_PROJECTIONS:
+            entry = {
+                'kind': KIND_DIRECT,
+                'writable': True,
+                'target': 'patient_record',
+                'value_kind': 'boolean',
+                'label': _MYELOMA_RELATED_DISORDER_PROJECTIONS[field]['label'],
+                # Yes / No / Unknown are three distinct answers here; the
+                # shared form must offer Unknown explicitly instead of relying
+                # on a generic clear (#5521).
+                'tri_state': True,
+            }
+            spec = _MYELOMA_RELATED_DISORDER_PROJECTIONS[field]
+            concept = myeloma_concepts.get(field)
+            if concept is not None and ehr_type_loaded:
+                entry['projection'] = {
+                    'omop_table': spec['omop_table'],
+                    'concept_id': concept.concept_id,
+                    'code': concept.concept_code,
+                    'vocabulary': concept.vocabulary_id,
+                    'display': concept.concept_name,
+                    'type_concept_id': CONCEPT_EHR_TYPE,
+                    'source_value': pinned_projection_source_value(field),
+                    # No/Unknown must not become a negative occurrence; the
+                    # answer stays pending on PatientRecord, and the rows an
+                    # earlier Yes wrote are retracted.
+                    'affirmative_only': True,
+                    # The shared form writes PatientRecord first and treats this
+                    # fact as a side effect: an occurrence cannot be derived back
+                    # into a current answer, so it must not be the only write.
+                    'best_effort': True,
+                }
+                entry['reason'] = (
+                    'Written directly to PatientRecord; an affirmative answer '
+                    'projects to the reviewed OMOP fact. No/Unknown stays pending '
+                    'because occurrence tables cannot express a negative.'
+                )
+            elif not spec.get('concept_id'):
+                entry['reason'] = (
+                    'Written directly to PatientRecord. No standard OMOP concept '
+                    'is available for IgM myeloma; no projection is attempted.'
+                )
+            elif not ehr_type_loaded:
+                entry['reason'] = (
+                    'Written directly to PatientRecord. The EHR type concept '
+                    f'{CONCEPT_EHR_TYPE} is not loaded — no OMOP projection available.'
+                )
+            else:
+                entry['reason'] = (
+                    f"Written directly to PatientRecord. {spec['vocabulary']} "
+                    f"{spec['concept_code']} is not loaded — no OMOP projection available."
+                )
+            descriptor[field] = entry
             continue
 
+        if field in _COMPUTED_INPUTS:
+            inputs = _COMPUTED_INPUTS[field]
+            descriptor[field] = {
+                'kind': KIND_COMPUTED,
+                'writable': False,
+                'inputs': inputs,
+                'reason': (
+                    'Computed from ' + ', '.join(inputs) + '.' if inputs else
+                    'Computed from OMOP facts; there is no record field to edit.'
+                ),
+            }
+            continue
         if field in _WEARABLE_METRIC:
             metric = _WEARABLE_METRIC[field]
             descriptor[field] = {
@@ -735,16 +1233,10 @@ def build_writable_field_descriptor():
             }
             continue
 
-        if field in _COMPUTED_INPUTS:
-            descriptor[field] = {
-                'kind': KIND_COMPUTED,
-                'writable': False,
-                'inputs': _COMPUTED_INPUTS[field],
-                'reason': (
-                    'Computed from ' + ', '.join(_COMPUTED_INPUTS[field]) + '.'
-                ),
-            }
+        if field in curated:
+            descriptor[field] = curated[field]
             continue
+
 
         if field.endswith('_units'):
             # A unit is not a fact of its own — it is the unit_concept carried on
@@ -882,6 +1374,7 @@ def build_writable_field_descriptor():
             continue
 
         code, unit, display = mapping
+        unit = _descriptor_unit(unit)
         concept_id = loinc_ids.get(code)
         if concept_id is None:
             # The mapping exists but the vocabulary doesn't carry the concept.
@@ -918,6 +1411,45 @@ def build_writable_field_descriptor():
                 'source_value': code,
             },
         }
+    # A curator-managed answer set applies to every field that stores one, not
+    # only to the unmapped KIND_NEEDS_CONCEPT branch above. `bone_lesions` is
+    # mapped to SNOMED 363817008 and still needs its Yes/No/Unknown choices: a
+    # shared editor that renders from the descriptor (and ignores a tab's local
+    # options) otherwise shows an empty picker (#5603). An existing entry's
+    # options win, so curated concept-valued sets are never replaced here.
+    for field, options in choice_options.items():
+        entry = descriptor.get(field)
+        if entry is not None and options and 'options' not in entry:
+            entry['options'] = options
+    # The five-step toxicity scale is a closed vocabulary. Without it the
+    # shared editor falls back to a free-text number box; the values are the
+    # grades the trial rows already use, and the column takes the number.
+    if 'toxicity_grade' in descriptor and 'options' not in descriptor['toxicity_grade']:
+        descriptor['toxicity_grade']['options'] = [
+            {'value': grade, 'label': label}
+            for grade, label in (
+                (0, 'Grade 0 (None)'),
+                (1, 'Grade 1 (Mild)'),
+                (2, 'Grade 2 (Moderate)'),
+                (3, 'Grade 3 (Severe)'),
+                (4, 'Grade 4 (Life-Threatening)'),
+            )
+        ]
+    # A scalar measurement/observation may carry the clinical date it was
+    # observed (docs/clinical-event-time-policy.md). The editor offers the date
+    # control only when this marker is present; a best-effort side effect is not
+    # read back from the fact, and JSON values keep their dedicated contract.
+    # Only the numeric laboratory fields whose value a shared derivation selects
+    # get a date control: categorical, occurrence-scoped and non-lab measurements
+    # need their own winning-fact rules before an editor can correct them here.
+    for field, entry in descriptor.items():
+        projection = entry.get('projection') or {}
+        if ((entry.get('writable') or entry.get('normalised_read_model'))
+                and not projection.get('best_effort')
+                and field in LAB_FIELD_TO_LOINC
+                and projection.get('omop_table') == 'measurement'
+                and entry.get('value_kind') == 'number'):
+            entry['dated'] = True
     # Fields the serializer adds that no PatientRecord column backs.
     #
     # The loop above walks PATIENT_RECORD_OMOP_MAPPED_FIELDS, so it can only
@@ -938,6 +1470,165 @@ def build_writable_field_descriptor():
             'canonical': canonical,
             'reason': f'Mirrors {canonical}; edit that field instead.',
         })
+    # The trial catalog still spells the legacy summary `cytogenic_markers`
+    # (no second "t"); the record and the serializer alias use
+    # `cytogenetic_markers`. Describe that spelling rather than leaving an
+    # editor with no entry at all (healthkey-ai/exact#755).
+    descriptor.setdefault('cytogenic_markers', {
+        'kind': KIND_ALIAS,
+        'writable': False,
+        'canonical': 'cytogenetic_markers',
+        'reason': (
+            'Legacy summary of cytogenetic_markers; that column is read-only. '
+            'Record individual findings in Genomics.'
+        ),
+    })
+
+    # The trial vocabulary asks the negated question ("No Hepatitis B
+    # required"), while the record keeps the positive answer. The descriptor
+    # carries BOTH halves — the field to write and the fact that the value
+    # must be inverted — because a client that guessed one without the other
+    # would store the opposite of what the reader answered (#5663).
+    for negated, positive in _NEGATED_ALIASES.items():
+        descriptor.setdefault(negated, {
+            'kind': KIND_NEGATED,
+            'writable': False,
+            'canonical': positive,
+            'inverted': True,
+            'value_kind': 'boolean',
+            # Navigation only: it tells an editor which field the answer comes
+            # from, so the dialog can open on the canonical control instead of
+            # guessing. It is NOT evidence that the value was present — see
+            # EXACT's raw-boundary provenance (`available`/`value`), which is
+            # the only thing that may say whether the source was supplied
+            # (#5667). A client that treats `inputs` as presence shows a
+            # confident answer for a patient who never answered.
+            'inputs': [positive],
+            'reason': (
+                f'Inverted view of {positive}: the record stores the positive '
+                f'status, and this row asks the negated question. Write '
+                f'{positive} with the opposite value.'
+            ),
+        })
+
+    # The words the dedicated dialog asks in (#5667). `answer_labels` is
+    # already what the form descriptor shows; the trial writable descriptor
+    # carries it too, so a federated client reading only this endpoint can say
+    # "HIV Positive" / "No HIV" instead of a generic Yes/No over a polarity
+    # boundary. Metadata only: it changes no write path.
+    for positive in _NEGATED_ALIASES.values():
+        labels = BOOLEAN_ANSWERS.get(positive)
+        if labels and positive in descriptor:
+            descriptor[positive]['answer_labels'] = {
+                'true': labels[0],
+                'false': labels[1],
+            }
+
+    # The birth date is stored at one of three precisions. A full date typed
+    # into a year-only record must not silently promote it (or be truncated
+    # to January 1st) — the editor needs the precision as its own control
+    # (#5664). `normalize_birth_date` treats an empty value as the default
+    # `day`, so a client that sends only the date still gets a full date.
+    if 'date_of_birth_precision' in descriptor:
+        descriptor['date_of_birth_precision'].update({
+            'value_kind': 'string',
+            'options': [
+                {'value': 'year', 'label': 'Year only'},
+                {'value': 'month', 'label': 'Month and year'},
+                {'value': 'day', 'label': 'Full date'},
+            ],
+        })
+
+    # A pre-existing-conditions answer is an ATTESTATION, not a column write:
+    # it has its own endpoint, its own audit rows, and a snapshot that refuses
+    # an answer whose starting point has moved (#1988). A generic PATCH here
+    # would race another tab's answer, and a stale dialog would silently
+    # overwrite it. The descriptor names the endpoint, the actions and the
+    # vocabulary so a host can build the editor without hardcoding any of the
+    # three; `writable: false` is the truth — the field is answered, not
+    # written.
+    category_options = [
+        {'value': code, 'label': title}
+        for code, title in (
+            PreExistingConditionCategory.objects
+            .order_by('title')
+            .values_list('code', 'title')
+        )
+    ]
+    descriptor['pre_existing_condition_categories'] = {
+        'kind': KIND_EXPLICIT_ANSWER,
+        'writable': False,
+        'target': 'patient_record',
+        'endpoint': 'preexisting-conditions-answer',
+        'actions': ['confirm_none', 'set_categories', 'withdraw'],
+        # Every offered action needs its label: a client that refuses to
+        # invent clinical wording drops an unlabelled action, so an incomplete
+        # set turns into an empty dialog (exact#750 follow-up, #2396).
+        'action_labels': {
+            'confirm_none': 'No pre-existing conditions',
+            'set_categories': 'Save these conditions',
+            'withdraw': 'Withdraw answer',
+        },
+        'value_kind': 'string',
+        'multiple': True,
+        # `writable: false` is about the PATCH; the endpoint is a separate
+        # permission. A read-only caller must not be offered the dialog at
+        # all, so the caller-aware view clears this flag with the rest.
+        'answerable': True,
+        'options': category_options,
+        'reason': (
+            'Answered explicitly through the patient-record '
+            'pre-existing-conditions endpoint. The answer is an attestation '
+            'with a snapshot, not a field PATCH, so a concurrent answer '
+            'cannot be overwritten.'
+        ),
+    }
+
+    # #5666: the two derived negatives are answers too. The formula is
+    # deactivated; while an attestation exists it wins, and withdrawing it
+    # hands the value back to the source facts. Only the negative is
+    # confirmed here — a recorded active infection or a second active
+    # malignancy is the fact to correct, not a value to overwrite.
+    for field_name, label, confirm_label in (
+        ('no_active_infection_status', 'No Active Infection',
+         'Confirm no active infection'),
+        ('no_other_active_malignancies', 'No Other Active Malignancies',
+         'Confirm no other active malignancies'),
+    ):
+        descriptor[field_name] = {
+            'kind': KIND_EXPLICIT_ANSWER,
+            'writable': False,
+            'target': 'patient_record',
+            'endpoint': 'negative-answer',
+            'actions': ['confirm_negative', 'withdraw'],
+            'action_labels': {
+                'confirm_negative': confirm_label,
+                'withdraw': 'Withdraw confirmation',
+            },
+            'value_kind': 'boolean',
+            'answerable': True,
+            'inputs': list(_COMPUTED_INPUTS[field_name]),
+            'reason': (
+                f'Answered explicitly through the patient-record negative-answer '
+                f'endpoint as an attestation with a snapshot. While confirmed, '
+                f'the answer wins over the {label.lower()} source fact; '
+                f'withdraw it to return to the derived value.'
+            ),
+        }
+
+    # A clinician's Lugano assessment has no PET/CT or bone-marrow result in
+    # the record to derive it from, so it is an input the reader supplies.
+    # The row was read-only with no door at all (#5667 follow-up).
+    descriptor['meets_lugano'] = {
+        'kind': KIND_DIRECT,
+        'writable': True,
+        'target': 'patient_record',
+        'value_kind': 'boolean',
+        'reason': (
+            'Clinician-confirmed Lugano criteria (PET/CT and bone-marrow '
+            'assessment), entered directly on the record.'
+        ),
+    }
 
     # Fields whose OMOP write recipe is broken — the curated mapping writes to
     # the wrong table/concept.  They are still directly writable on PatientRecord;
@@ -976,9 +1667,339 @@ def build_writable_field_descriptor():
             'source_value': 'patient-record:' + field,
         }
     descriptor['death_date']['reason'] = 'Corrections are dated OMOP observations; earlier facts remain as history.'
+    # The shared form stores the record answer first and mirrors it as a
+    # best-effort side effect. Death date is that same dated assertion the
+    # native PATCH writes (`project_single_value`); without this flag the
+    # shared form saved the column and never recorded the observation.
+    descriptor['death_date']['projection']['best_effort'] = True
     from omop_core.services.clinical_input_contract import NEW_INPUT_FIELDS, descriptors
     for field, entry in descriptors(mappings=clinical_mappings).items():
         row = clinical_mappings.get(field)
         if field in NEW_INPUT_FIELDS or (row is not None and row.concept_id == 0):
             descriptor[field] = entry
+
+    # Hemoglobin's source pair (#2318). The patient records the number in the
+    # unit their lab used; `hemoglobin_g_dl` becomes the normalised read-model
+    # that matching and CRAB consume. The pair is the write target and the
+    # canonical value is derived from it: the old entry pointed the other way,
+    # so an editor wrote g/dL and derivation overwrote whatever unit the reader
+    # had chosen.
+    canonical_hemoglobin = descriptor.get('hemoglobin_g_dl') or {}
+    descriptor['hemoglobin_level'] = {
+        'kind': KIND_DIRECT,
+        'writable': True,
+        'target': 'patient_record',
+        'value_kind': 'number',
+        **_dated_with_canonical(canonical_hemoglobin),
+    }
+    descriptor['hemoglobin_level_units'] = {
+        'kind': KIND_SELECTABLE,
+        'writable': False,
+        'qualifies': 'hemoglobin_level',
+        'reason': (
+            'Unit of hemoglobin_level; selected alongside that value and '
+            'stored with it. The canonical g/dL value is derived from the pair.'
+        ),
+    }
+    descriptor['hemoglobin_g_dl'] = {
+        # Keep the canonical's diagnostics: a curated mapping, an overlong
+        # source value, the projection recipe and the date marker all still
+        # belong to this read-model.
+        **canonical_hemoglobin,
+        'kind': KIND_COMPUTED,
+        'writable': False,
+        'value_kind': 'number',
+        'inputs': ['hemoglobin_level'],
+        # A canonical import (an approved mapping, a plain-descriptor host,
+        # an older client that speaks g/dL) may write this column directly;
+        # the server then retires the pending pair. The shared form edits the
+        # source pair; the plain writable-fields response reports this entry
+        # writable for hosts without a pair editor (writable_fields view).
+        'normalised_read_model': True,
+        'reason': canonical_hemoglobin.get('reason') or (
+            'Normalised from hemoglobin_level in the default unit (g/dL); '
+            'the shared form edits that field and its unit.'
+        ),
+        'unit': canonical_hemoglobin.get('unit') or 'g/dL',
+    }
+
+    # Creatinine's source pair (#2318 follow-up). The CKD-EPI matcher reads the
+    # normalised mg/dL value, and the record keeps what the lab reported. A host
+    # that withholds the pair would leave the eGFR row with no editable source.
+    canonical_creatinine = descriptor.get('serum_creatinine_mg_dl') or {}
+    descriptor['serum_creatinine_level'] = {
+        'kind': KIND_DIRECT,
+        'writable': True,
+        'target': 'patient_record',
+        'value_kind': 'number',
+        **_dated_with_canonical(canonical_creatinine),
+    }
+    descriptor['serum_creatinine_level_units'] = {
+        'kind': KIND_SELECTABLE,
+        'writable': False,
+        'qualifies': 'serum_creatinine_level',
+        'reason': (
+            'Unit of serum_creatinine_level; selected alongside that value and '
+            'stored with it. The canonical mg/dL value is derived from the pair.'
+        ),
+    }
+    descriptor['serum_creatinine_mg_dl'] = {
+        **canonical_creatinine,
+        'kind': KIND_COMPUTED,
+        'writable': False,
+        'value_kind': 'number',
+        'inputs': ['serum_creatinine_level'],
+        'normalised_read_model': True,
+        'reason': canonical_creatinine.get('reason') or (
+            'Normalised from serum_creatinine_level in the default unit (mg/dL); '
+            'the shared form edits that field and its unit.'
+        ),
+        'unit': canonical_creatinine.get('unit') or 'mg/dL',
+    }
+
+    # The chemistry source pairs (#2318): albumin, serum calcium and total
+    # bilirubin. Same contract as creatinine — the record keeps what the lab
+    # reported, the canonical is the normalised read-model, and an editor names
+    # the source instead of the derived column.
+    for canonical, spec in CHEMISTRY_SOURCE_PAIRS.items():
+        pair = spec['value']
+        unit = spec['unit']
+        canonical_entry = descriptor.get(canonical) or {}
+        descriptor[pair] = {
+            'kind': KIND_DIRECT,
+            'writable': True,
+            'target': 'patient_record',
+            'value_kind': 'number',
+            **_dated_with_canonical(canonical_entry),
+        }
+        descriptor[unit] = {
+            'kind': KIND_SELECTABLE,
+            'writable': False,
+            'qualifies': pair,
+            'reason': (
+                f'Unit of {pair}; selected alongside that value and stored '
+                f'with it. The canonical {spec["canonical_unit"]} value is '
+                'derived from the pair.'
+            ),
+        }
+        descriptor[canonical] = {
+            # Keep the canonical's diagnostics, as the creatinine read-model
+            # does: the curated mapping, projection recipe and date marker are
+            # still this column's.
+            **canonical_entry,
+            'kind': KIND_COMPUTED,
+            'writable': False,
+            'value_kind': 'number',
+            'inputs': [pair],
+            'normalised_read_model': True,
+            'reason': canonical_entry.get('reason') or (
+                f'Normalised from {pair} in the default unit '
+                f'({spec["canonical_unit"]}); the shared form edits that field and its unit.'
+            ),
+            'unit': canonical_entry.get('unit') or spec['canonical_unit'],
+        }
+
+    # Direct bilirubin's source pair (#2318). It has no separate canonical
+    # column: the pair is the stored fact and the matcher converts it, so the
+    # OMOP projection must carry the unit the reader chose rather than the
+    # recipe's static mg/dL. The unitless `serum_bilirubin_level` mirror is
+    # normalised to mg/dL and is not editable.
+    direct_pair = direct_bilirubin_units.PAIR_FIELD
+    direct_unit = direct_bilirubin_units.UNIT_FIELD
+    direct_entry = descriptor.get(direct_pair) or {}
+    direct_projection = dict(direct_entry.get('projection') or {})
+    direct_projection['unit_from'] = direct_unit
+    direct_projection['unit_by_code'] = {
+        code: {'label': label, 'concept_id': unit_ids.get(label)}
+        for code, label in direct_bilirubin_units.UNIT_LABELS.items()
+    }
+    descriptor[direct_pair] = {
+        **direct_entry,
+        'kind': KIND_DIRECT,
+        'writable': True,
+        'target': 'patient_record',
+        'value_kind': 'number',
+        'unit_by_code': direct_projection['unit_by_code'],
+        'projection': direct_projection,
+    }
+    descriptor[direct_unit] = {
+        **(descriptor.get(direct_unit) or {}),
+        'kind': KIND_SELECTABLE,
+        'writable': False,
+        'qualifies': direct_pair,
+        'reason': (
+            'Unit of serum_bilirubin_level_direct; selected alongside that '
+            'value and stored with it. The OMOP fact carries this unit.'
+        ),
+    }
+    descriptor[direct_bilirubin_units.ALIAS_FIELD] = {
+        'kind': KIND_COMPUTED,
+        'writable': False,
+        'value_kind': 'number',
+        'inputs': [direct_pair, direct_unit],
+        'reason': (
+            'Read-only mg/dL mirror of the direct bilirubin source pair; edit '
+            'the pair and its unit instead.'
+        ),
+        'unit': 'mg/dL',
+    }
+
+    # The unit choices (#2318). `FIELD_COMMON_UNITS` is the curated list per
+    # field, already ordered; the client draws its picker from it rather than
+    # spelling the values a second time. Both the field a write lands in and the
+    # `*_units` entry beside it carry the same list, so a client that resolves
+    # either shape sees one answer.
+    for name, units in FIELD_COMMON_UNITS.items():
+        entry = descriptor.get(name)
+        if entry is not None and units:
+            entry['unit_options'] = [
+                {'value': unit, 'label': unit} for unit in units
+            ]
+    for field, entry in descriptor.items():
+        if not field.endswith('_units') or entry.get('kind') != KIND_SELECTABLE:
+            continue
+        units = FIELD_COMMON_UNITS.get(entry.get('qualifies') or '')
+        if units:
+            entry['unit_options'] = [
+                {'value': unit, 'label': unit} for unit in units
+            ]
+
+    # Stored unit codes vs display labels (#2318 follow-up). The model columns
+    # are `TextChoices` whose values are the stored codes (`MG/DL`, `G/DL`, `lb`),
+    # while `FIELD_COMMON_UNITS` holds the display notation a curator writes
+    # (`mg/dL`, `g/dL`, `lbs`). Emitting the display string as the option's value
+    # advertised a choice the write side refuses: a client that sent it got a
+    # validation error, and `weight` even advertised `lbs` for a column whose
+    # code is `lb`. Each pair below names the stored code and the display the
+    # picker shows, and the test asserts every value is a real model choice.
+    unit_code_options = {
+        'weight_units': [('kg', 'kg'), ('lb', 'lb')],
+        'height_units': [('cm', 'cm'), ('in', 'in')],
+        'albumin_level_units': [('G/DL', 'g/dL'), ('G/L', 'g/L')],
+        'serum_calcium_level_units': [('MG/DL', 'mg/dL'), ('MMOL/L', 'mmol/L')],
+        'serum_creatinine_level_units': [('MG/DL', 'mg/dL'), ('UMOL/L', 'umol/L')],
+        'serum_bilirubin_level_total_units': [('MG/DL', 'mg/dL'), ('UMOL/L', 'umol/L')],
+        'serum_bilirubin_level_direct_units': [('MG/DL', 'mg/dL'), ('UMOL/L', 'umol/L')],
+    }
+    for units_field, code_pairs in unit_code_options.items():
+        entry = descriptor.get(units_field)
+        if entry is None:
+            continue
+        options = [{'value': code, 'label': label} for code, label in code_pairs]
+        entry['unit_options'] = options
+        qualified = descriptor.get(entry.get('qualifies') or '')
+        if qualified is not None:
+            qualified['unit_options'] = options
+
+    # Hemoglobin's slice (#2318) offers the two scales it can convert today.
+    # The value is the stored code (`G/L`), the label the display text — the
+    # model's `TextChoices`, not the curated display strings, because the
+    # write side validates against the column's choices. mmol/L waits for a
+    # reviewed factor.
+    hemoglobin_units = [
+        {'value': 'G/DL', 'label': 'g/dL'},
+        {'value': 'G/L', 'label': 'g/L'},
+    ]
+    for field in ('hemoglobin_level', 'hemoglobin_level_units'):
+        entry = descriptor.get(field)
+        if entry is not None:
+            entry['unit_options'] = hemoglobin_units
+
+    # Blood-count source pairs (#5700 follow-up). EXACT's rows speak cells/µL
+    # (`absolute_neutrophile_count`, ...), so the legacy column is the write
+    # target; the canonical thousands/µL column becomes the computed
+    # read-model that carries the projection. The old alias direction sent the
+    # typed 1550 straight into a thousands field and derivation read it back as
+    # 1,550,000 cells/µL.
+    for source, spec in COUNT_SOURCE_PAIRS.items():
+        canonical = spec['canonical']
+        source_entry = descriptor.get(source) or {}
+        # Without a unit column there is nowhere to store a chosen scale, so
+        # the field advertises only the cells/µL it actually reads and writes.
+        source_units = (COUNT_UNIT_OPTIONS if spec.get('unit_field')
+                        else [{'value': spec['unit'], 'label': 'cells/µL'}])
+        descriptor[source] = {
+            **{key: value for key, value in source_entry.items()
+               if key not in ('canonical', 'reason', 'unit_options')},
+            'kind': KIND_DIRECT,
+            'writable': True,
+            'target': 'patient_record',
+            'value_kind': 'number',
+            'unit': spec['unit'],
+            'unit_options': source_units,
+            **_dated_with_canonical(descriptor.get(canonical)),
+        }
+        if spec.get('unit_field'):
+            descriptor[spec['unit_field']] = {
+                'kind': KIND_SELECTABLE,
+                'writable': False,
+                'qualifies': source,
+                'unit_options': COUNT_UNIT_OPTIONS,
+                'reason': (
+                    f'Unit of {source}; selected alongside that value and '
+                    f'stored with it. The canonical {spec["canonical_unit"]} '
+                    'value is derived from the pair.'
+                ),
+            }
+        canonical_entry = descriptor.get(canonical) or {}
+        descriptor[canonical] = {
+            **canonical_entry,
+            'kind': KIND_COMPUTED,
+            'writable': False,
+            'value_kind': 'number',
+            'inputs': [source],
+            'normalised_read_model': True,
+            'reason': (
+                f'Normalised from {source} in {spec["canonical_unit"]}; '
+                'the shared form edits that field and its unit.'
+            ),
+            'unit': spec['canonical_unit'],
+        }
+    # These values are inferred by the matcher and can be overridden by the
+    # patient; the flag tells a federated client to offer the editor rather
+    # than treating every recomputed attribute as read-only (#751). Applied
+    # last: later blocks rebuild some of these entries.
+    for field in (
+        'treatment_refractory_status',
+        'progression',
+        'stem_cell_transplant_history',
+        # A stored fact, but EXACT drops it when prior therapy is 'None' — the
+        # one case where a transplant date cannot be true. The patient may
+        # still correct it, so offer the editor beside the derived day count.
+        'sct_date',
+    ):
+        entry = descriptor.get(field)
+        if entry is not None and entry.get('writable'):
+            entry['overridable'] = True
+
+    # A unit choice the column cannot store is worse than no picker: a client
+    # that sends it is refused. Keep only stored codes; a pair left with none
+    # (RBC: curated 10*6/uL and 10*12/L, column stores CELLS/UL and CELLS/L)
+    # advertises no list until its codes and migration land.
+    record_fields = {field.name: field for field in PatientRecord._meta.fields}
+    for units_field, entry in list(descriptor.items()):
+        if not units_field.endswith('_units') or 'unit_options' not in entry:
+            continue
+        column = record_fields.get(units_field)
+        if column is None or not column.choices:
+            continue
+        stored = {code for code, _label in column.choices}
+        kept = [option for option in entry['unit_options'] if option['value'] in stored]
+        qualified = descriptor.get(entry.get('qualifies') or '')
+        for target in (entry, qualified):
+            if target is None or 'unit_options' not in target:
+                continue
+            if kept:
+                target['unit_options'] = kept
+            else:
+                del target['unit_options']
+
+    # The envelope goes last so no field block can overwrite it. It is a dict
+    # like any entry, but it is not one: `kind` is absent on purpose, and the
+    # form enrichment skips reserved keys.
+    descriptor[DESCRIPTOR_META_KEY] = {
+        'schema_version': DESCRIPTOR_SCHEMA_VERSION,
+        'documentation': 'docs/writable-field-descriptor.md',
+    }
+
     return descriptor

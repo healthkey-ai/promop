@@ -100,6 +100,11 @@ export function extractTabLayout(source) {
     if (node.type === 'JSXOpeningElement' && node.name.name === 'ClinicalField') {
       add(current, attr(node, 'label'), attr(node, 'name'));
     }
+    // The deliberate-answer editor replaces the generic category field, but
+    // those recorded categories still belong in the downloaded medical history.
+    if (node.type === 'JSXOpeningElement' && node.name.name === 'PreexistingConditionsAnswer') {
+      add(current, 'Pre-existing Conditions', 'preexisting_conditions');
+    }
     if (node.type === 'CallExpression' && node.callee.type === 'Identifier') {
       const [first, second] = node.arguments;
       if (node.callee.name === 'field') add(current, literal(first), literal(second));

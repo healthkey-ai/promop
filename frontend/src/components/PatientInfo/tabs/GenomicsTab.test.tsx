@@ -89,6 +89,29 @@ describe('Genomics tab', () => {
     expect(screen.getByText('0 %')).toBeInTheDocument();
   });
 
+  it.each(['View', 'Edit', 'Add genomic finding'])('uses the bounded shared dialog and returns focus to %s', async (name) => {
+    render(<GenomicsTab formData={{ person_id: 42 }} />);
+    const opener = await screen.findByRole('button', { name, exact: true });
+    opener.focus();
+    fireEvent.click(opener);
+    const dialog = screen.getByRole('dialog');
+    expect(dialog).toHaveAttribute('data-promop-dialog');
+    expect(dialog).toHaveClass('inset-0', 'm-auto', 'h-fit', 'max-h-[calc(100dvh-2rem)]');
+    expect(dialog).not.toHaveClass('translate-x-[-50%]', 'translate-y-[-50%]', 'max-h-[90vh]');
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Close' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    await waitFor(() => expect(opener).toHaveFocus());
+  });
+
+  it('returns focus to a keyboard-activated finding row', async () => {
+    render(<GenomicsTab formData={{ person_id: 42 }} />);
+    const row = await screen.findByRole('row', { name: 'BRCA1 c.68_69delAG' });
+    row.focus();
+    fireEvent.keyDown(row, { key: 'Enter' });
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Close' }));
+    await waitFor(() => expect(row).toHaveFocus());
+  });
+
   it('creates only after Save and permits genes outside preset lists', async () => {
     render(<GenomicsTab formData={{ person_id: 42 }} />);
     fireEvent.click(await screen.findByRole('button', { name: 'Add genomic finding' }));

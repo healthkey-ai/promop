@@ -30,9 +30,9 @@ from omop_core.services.mappings import (
     CONCEPT_DRUG_EXPOSURE_FIELD,
 )
 from omop_oncology.models import Episode, EpisodeEvent
-from omop_core.services.therapy_errors import TherapyLineValidationError
+from omop_core.services.therapy_errors import MESSAGES, TherapyLineValidationError
 from omop_core.services.therapy_transactions import (
-    lock_therapy_patients, run_therapy_write,
+    TherapyLineRejected, lock_therapy_patients, run_therapy_write,
 )
 from omop_core.signals import suppress_patient_record_refresh
 
@@ -53,7 +53,7 @@ class TherapyLineEpisodeResult:
     event_ids   — EpisodeEvent pks touched (created or pre-existing links)
     """
 
-    __slots__ = ('episode', 'created', 'event_ids',
+    __slots__ = ('episode', 'created', 'event_ids', 'created_observations',
                  # Attached by author_therapy_line, which also writes the
                  # exposures the episode groups.
                  'drug_exposure_ids', 'drugs_created')
@@ -62,6 +62,7 @@ class TherapyLineEpisodeResult:
         self.episode = episode
         self.created = created
         self.event_ids = event_ids
+        self.created_observations = []
 
 # SNOMED CT response-assessment codes for per-line outcomes. Anything without a
 # mapping (e.g. "Very Good Partial Response") still records value_as_string.
@@ -100,6 +101,7 @@ def upsert_therapy_line_episode(
     overwrite_source_concept=False,
     assert_line=True,
     asserted_by='authoring',
+    write_guard=None,
 ):
     """Upsert one line-of-therapy Episode and its links; return the Episode.
 
@@ -249,36 +251,47 @@ def upsert_therapy_line_episode(
 
     if replace_metadata is None:
         replace_metadata = replace_events
+    created_observations = []
     if outcome is not _UNSET and outcome:
         _upsert_outcome_observation(person, line_number, outcome, ehr_type_concept, no_match_concept,
                                     obs_date=effective_end or effective_start or today,
-                                    line=episode, adopt=adopts_unparented)
+                                    line=episode, adopt=adopts_unparented, write_guard=write_guard,
+                                    created_observations=created_observations)
     elif outcome is not _UNSET and replace_metadata:
-        _delete_outcome_observation(person, line_number, line=episode, adopt=adopts_unparented)
+        _delete_outcome_observation(person, line_number, line=episode, adopt=adopts_unparented,
+                                    write_guard=write_guard)
 
     obs_date = effective_end or effective_start or today
     if intent is not _UNSET and intent:
         _upsert_line_observation(person, line_number, 'intent', intent,
                                  ehr_type_concept, no_match_concept, obs_date=obs_date,
-                                 line=episode, adopt=adopts_unparented)
+                                 line=episode, adopt=adopts_unparented, write_guard=write_guard,
+                                 created_observations=created_observations)
     elif intent is not _UNSET and replace_metadata:
-        _delete_line_observation(person, line_number, 'intent', line=episode, adopt=adopts_unparented)
+        _delete_line_observation(person, line_number, 'intent', line=episode, adopt=adopts_unparented,
+                                 write_guard=write_guard)
 
     if discontinuation_reason is not _UNSET and discontinuation_reason:
         _upsert_line_observation(person, line_number, 'discontinuation', discontinuation_reason,
                                  ehr_type_concept, no_match_concept, obs_date=obs_date,
-                                 line=episode, adopt=adopts_unparented)
+                                 line=episode, adopt=adopts_unparented, write_guard=write_guard,
+                                 created_observations=created_observations)
     elif discontinuation_reason is not _UNSET and replace_metadata:
-        _delete_line_observation(person, line_number, 'discontinuation', line=episode, adopt=adopts_unparented)
+        _delete_line_observation(person, line_number, 'discontinuation', line=episode, adopt=adopts_unparented,
+                                 write_guard=write_guard)
 
     if progression_date is not _UNSET and progression_date:
         _upsert_line_observation(person, line_number, 'progression', 'Progressive Disease',
                                  ehr_type_concept, no_match_concept, obs_date=progression_date,
-                                 line=episode, adopt=adopts_unparented)
+                                 line=episode, adopt=adopts_unparented, write_guard=write_guard,
+                                 created_observations=created_observations)
     elif progression_date is not _UNSET and replace_metadata:
-        _delete_line_observation(person, line_number, 'progression', line=episode, adopt=adopts_unparented)
+        _delete_line_observation(person, line_number, 'progression', line=episode, adopt=adopts_unparented,
+                                 write_guard=write_guard)
 
-    return TherapyLineEpisodeResult(episode, created, event_ids)
+    result = TherapyLineEpisodeResult(episode, created, event_ids)
+    result.created_observations = created_observations
+    return result
 
 
 def _assert_therapy_line(episode, source):
@@ -396,7 +409,7 @@ def _line_observations(person, src_value, line, adopt):
 
 
 def _upsert_outcome_observation(person, line_number, outcome, type_concept, no_match_concept, obs_date,
-                                line=None, adopt=True):
+                                line=None, adopt=True, write_guard=None, created_observations=None):
     src_value = f'LOT-{line_number}-outcome'
     snomed_code = OUTCOME_SNOMED_CODES.get(outcome)
     outcome_concept = (
@@ -408,7 +421,7 @@ def _upsert_outcome_observation(person, line_number, outcome, type_concept, no_m
     value = outcome[:60]
 
     field = _episode_field() if line is not None else None
-    existing = _line_observations(person, src_value, line, adopt).first()
+    existing = _writable_line_observations(person, src_value, line, adopt, write_guard, single=True).first()
     if existing:
         if line is not None and (existing.observation_event_id != line.episode_id
                                  or existing.obs_event_field_concept_id != (field.concept_id if field else None)):
@@ -446,14 +459,16 @@ def _upsert_outcome_observation(person, line_number, outcome, type_concept, no_m
     )
     obs._skip_patient_record_refresh = True
     obs.save()
+    if created_observations is not None:
+        created_observations.append(obs)
 
 
-def _delete_outcome_observation(person, line_number, line=None, adopt=True):
-    _line_observations(person, f'LOT-{line_number}-outcome', line, adopt).delete()
+def _delete_outcome_observation(person, line_number, line=None, adopt=True, write_guard=None):
+    _writable_line_observations(person, f'LOT-{line_number}-outcome', line, adopt, write_guard).delete()
 
 
 def _upsert_line_observation(person, line_number, suffix, value, type_concept, no_match_concept, obs_date,
-                             line=None, adopt=True):
+                             line=None, adopt=True, write_guard=None, created_observations=None):
     """Upsert a LOT-{n}-{suffix} Observation (intent, discontinuation, etc.)."""
     src_value = f'LOT-{line_number}-{suffix}'
     obs_concept = no_match_concept
@@ -462,7 +477,7 @@ def _upsert_line_observation(person, line_number, suffix, value, type_concept, n
     text = value[:60]
 
     field = _episode_field() if line is not None else None
-    existing = _line_observations(person, src_value, line, adopt).first()
+    existing = _writable_line_observations(person, src_value, line, adopt, write_guard, single=True).first()
     if existing:
         dirty = []
         if line is not None and existing.observation_event_id != line.episode_id:
@@ -495,10 +510,26 @@ def _upsert_line_observation(person, line_number, suffix, value, type_concept, n
     )
     obs._skip_patient_record_refresh = True
     obs.save()
+    if created_observations is not None:
+        created_observations.append(obs)
 
 
-def _delete_line_observation(person, line_number, suffix, line=None, adopt=True):
-    _line_observations(person, f'LOT-{line_number}-{suffix}', line, adopt).delete()
+def _delete_line_observation(person, line_number, suffix, line=None, adopt=True, write_guard=None):
+    _writable_line_observations(person, f'LOT-{line_number}-{suffix}', line, adopt, write_guard).delete()
+
+
+def _writable_line_observations(person, source, line, adopt, write_guard, *, single=False):
+    rows = _line_observations(person, source, line, adopt)
+    if write_guard is None:
+        return rows
+    locked = rows.select_for_update(nowait=True).order_by('pk')
+    if single:
+        locked = locked[:1]
+    ids = list(locked.values_list('pk', flat=True))
+    write_guard(Observation, ids)
+    # Freeze exactly the checked set; a later matching insert is not permission
+    # to mutate/delete a foreign row that was never locked or attributed here.
+    return rows.filter(pk__in=ids)
 
 
 def author_therapy_line(person, *, line_number, drugs=_UNSET, **kwargs):
@@ -518,11 +549,15 @@ def author_therapy_line(person, *, line_number, drugs=_UNSET, **kwargs):
 
 def author_therapy_lines(
     person: Person, lines: Iterable[Mapping[str, Any]], *, asserted_by: str = 'authoring',
+    write_guard=None, retry=True,
 ) -> list[TherapyLineEpisodeResult] | None:
     """Author several lines of one person as one all-or-nothing write.
 
     Each entry holds ``author_therapy_line`` kwargs without ``person``.
     Returns None and writes nothing when the Treatment Regimen concept is not loaded.
+    The optional guard runs on existing episodes and affected observations under locks,
+    before mutation. A caller disabling retries must own the complete transaction
+    retry boundary, including any preparation and post-write work.
     """
     # Copied once so every retry replays the same input
     lines = [dict(line) for line in lines]
@@ -534,17 +569,22 @@ def author_therapy_lines(
             results = []
             for index, line in enumerate(lines):
                 try:
-                    result = _author_therapy_line_inner(person, asserted_by=asserted_by, **line)
+                    result = _author_therapy_line_inner(
+                        person, asserted_by=asserted_by,
+                        write_guard=write_guard, **line,
+                    )
                 except TherapyLineValidationError as exc:
-                    exc.index = index  # which request line was refused
-                    raise
+                    # The bulk endpoint reports which submitted line failed; the
+                    # catalog text is the message. ``str(exc)`` would add the
+                    # ``[detail]`` suffix, which is for logs and Python callers.
+                    raise TherapyLineRejected(MESSAGES[exc.code], index=index) from exc
                 if result.episode is None:
                     transaction.set_rollback(True)
                     return None
                 results.append(result)
             return results
 
-    return run_therapy_write(once, backoff=_sleep)
+    return run_therapy_write(once, backoff=_sleep) if retry else once()
 
 
 def _author_therapy_line_once(
@@ -564,6 +604,7 @@ def _author_therapy_line_once(
     disease=None,
     episode=None,
     asserted_by='authoring',
+    write_guard=None,
 ):
     """Record a line of therapy: its drug exposures, its Episode, and the links.
 
@@ -637,6 +678,7 @@ def _author_therapy_line_once(
             disease=disease,
             episode=episode,
             asserted_by=asserted_by,
+            write_guard=write_guard,
         )
         if result.episode is None:
             transaction.set_rollback(True)
@@ -660,6 +702,7 @@ def _author_therapy_line_inner(
     disease=None,
     episode=None,
     asserted_by='authoring',
+    write_guard=None,
 ):
     from omop_core.models import DrugExposure
     from omop_oncology.models import TherapyLineExposure
@@ -685,6 +728,9 @@ def _author_therapy_line_inner(
         episode = _find_line(person, line_number, parent, primary)
         if episode is not None:
             episode = Episode.objects.select_for_update(nowait=True).get(pk=episode.pk)
+
+    if episode is not None and write_guard is not None:
+        write_guard(Episode, [episode.pk])
 
     start = (episode.episode_start_date if episode else None) if start_date is _UNSET else start_date
     end = (episode.episode_end_date if episode else None) if end_date is _UNSET else end_date
@@ -752,6 +798,7 @@ def _author_therapy_line_inner(
         replace_events=replace and composition_supplied,
         replace_metadata=replace,
         asserted_by=asserted_by,
+        write_guard=write_guard,
     )
     if result.episode is None:
         raise TherapyLineValidationError('vocabulary_lost')
@@ -811,8 +858,10 @@ def _author_therapy_line_inner(
             event_id=existing.pk, episode_event_field_concept_id=CONCEPT_DRUG_EXPOSURE_FIELD,
         ).exclude(episode_id=line.pk).exists()
         if existing is not None and existing.person_id != person.pk:
-            raise ValueError('Exposure ownership does not match the patient.')
-        is_maint = bool(values.get('maintenance', False))
+            raise TherapyLineRejected('Exposure ownership does not match the patient.')
+        # Older clients omit this attribute even when echoing the drugs list.
+        # Absence preserves an authored flag; explicit False clears it.
+        is_maint = values.get('maintenance', owned.is_maintenance if owned else False)
         if existing is not None and (existing.drug_concept_id == concept.pk
                        and existing.drug_source_value == raw
                        and existing.drug_exposure_start_date == drug_start
@@ -872,7 +921,7 @@ def _author_therapy_line_inner(
                 event_id=old.pk, episode_event_field_concept_id=CONCEPT_DRUG_EXPOSURE_FIELD,
             ).exclude(episode_id=line.pk).exists()
             if old.person_id != person.pk:
-                raise ValueError('Exposure ownership does not match the patient.')
+                raise TherapyLineRejected('Exposure ownership does not match the patient.')
             if not shared and not old.is_erroneous:
                 old.is_erroneous = True
                 old.erroneous_reason = 'Superseded by an explicit therapy-line edit.'

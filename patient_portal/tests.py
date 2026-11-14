@@ -16209,6 +16209,50 @@ class SelfSignupEmailTrustTest(TestCase):
         grant.refresh_from_db()
         self.assertEqual(grant.role, 'patient')
 
+    def _pending_domain_signup(self, email='promote@trusted.org'):
+        """A signup at a trusted-domain org that had to wait for the mailbox."""
+        from omop_core.models import OrgTrust
+        identity = Identity.objects.create_user(email=email, password=self.PASSWORD)
+        OrgTrust.objects.create(granting_org=self.private, trusted_domain='trusted.org')
+        grant = GroupAccess.objects.create(
+            identity=identity, org=self.private, role='patient',
+            pending_email_verification=True,
+        )
+        return identity, grant
+
+    def test_verification_promotes_a_pending_domain_trust_grant(self):
+        """#1454: proving the address turns the held-back patient grant into doctor.
+
+        It was 'analyst' until that role stopped reading patients (#2416).
+        """
+        from patient_portal.api.email_verification import make_verification_link
+        identity, grant = self._pending_domain_signup()
+        token = make_verification_link(identity).split('token=')[1]
+        self.assertEqual(APIClient().post('/api/v1/auth/verify-email/', {'token': token}).status_code, 200)
+        grant.refresh_from_db()
+        self.assertEqual(grant.role, 'doctor')
+        self.assertFalse(grant.pending_email_verification)
+
+    def test_verification_does_not_promote_from_an_inactive_granting_org(self):
+        """A suspended organization cannot hand out access through its domain trust."""
+        from patient_portal.api.email_verification import make_verification_link
+        identity, grant = self._pending_domain_signup()
+        Organization.objects.filter(pk=self.private.pk).update(is_active=False)
+        token = make_verification_link(identity).split('token=')[1]
+        self.assertEqual(APIClient().post('/api/v1/auth/verify-email/', {'token': token}).status_code, 200)
+        grant.refresh_from_db()
+        self.assertEqual(grant.role, 'patient')
+        self.assertTrue(grant.pending_email_verification)
+
+    def test_promotion_counts_nothing_before_the_address_is_proved(self):
+        """An unproved address must leave its pending grant untouched."""
+        from patient_portal.api.email_verification import promote_trusted_domain_grants
+        identity, grant = self._pending_domain_signup(email='unproved@trusted.org')
+        self.assertEqual(promote_trusted_domain_grants(identity), 0)
+        grant.refresh_from_db()
+        self.assertEqual(grant.role, 'patient')
+        self.assertTrue(grant.pending_email_verification)
+
     def test_changing_the_email_clears_its_verification(self):
         identity = Identity.objects.create_user(email='first@example.com', password=self.PASSWORD)
         identity.mark_email_verified()
@@ -19393,6 +19437,62 @@ class BulkOmopWriteTest(TestCase):
         self.assertEqual(resp.data[0], {})
         self.assertIn('measurement_id', resp.data[1])
         self.assertFalse(Measurement.objects.filter(measurement_id=999999).exists())
+
+    def test_sparse_validation_errors_stay_aligned_on_all_bulk_resources(self):
+        from rest_framework.settings import api_settings
+
+        # Do not restore the old format globally to make the endpoint pass.
+        self.assertTrue(api_settings.LIST_SERIALIZER_ERRORS_AS_DICT)
+        cases = [
+            ('conditions', ConditionOccurrence, 'condition_start_date', {
+                'condition_concept': self.m_concept.concept_id,
+                'condition_type_concept': self.type_concept.concept_id,
+            }),
+            ('drug-exposures', DrugExposure, 'drug_exposure_start_date', {
+                'drug_concept': self.drug_concept.concept_id,
+                'drug_type_concept': self.type_concept.concept_id,
+            }),
+            ('measurements', Measurement, 'measurement_date', {
+                'measurement_concept': self.m_concept.concept_id,
+                'measurement_type_concept': self.type_concept.concept_id,
+            }),
+            ('observations', Observation, 'observation_date', {
+                'observation_concept': self.m_concept.concept_id,
+                'observation_type_concept': self.type_concept.concept_id,
+            }),
+            ('procedures', ProcedureOccurrence, 'procedure_date', {
+                'procedure_concept': self.m_concept.concept_id,
+                'procedure_type_concept': self.type_concept.concept_id,
+            }),
+        ]
+        for prefix in ('/api', '/api/v1'):
+            for route, model, date_field, fields in cases:
+                with self.subTest(prefix=prefix, route=route):
+                    before = model.objects.count()
+                    rows = [dict(fields, person=self.person.person_id,
+                                 **{date_field: '2024-01-01'}) for _ in range(3)]
+                    del rows[0][date_field]
+                    del rows[2][date_field]
+                    resp = self.client.post(f'{prefix}/{route}/', rows, format='json')
+                    self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+                    self.assertIsInstance(resp.data, list)
+                    self.assertEqual(len(resp.data), 3)
+                    self.assertIn(date_field, resp.data[0])
+                    self.assertEqual(resp.data[1], {})
+                    self.assertIn(date_field, resp.data[2])
+                    self.assertEqual(model.objects.count(), before)
+
+    def test_bulk_list_level_validation_errors_are_not_expanded(self):
+        from rest_framework.exceptions import ValidationError
+        from unittest.mock import patch
+
+        before = Measurement.objects.count()
+        with patch('rest_framework.serializers.ListSerializer.validate',
+                   side_effect=ValidationError({'non_field_errors': ['Invalid batch.']})):
+            resp = self.client.post('/api/v1/measurements/', self._rows(3), format='json')
+        self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(resp.data, {'non_field_errors': ['Invalid batch.']})
+        self.assertEqual(Measurement.objects.count(), before)
 
     def test_mixed_person_batch_is_rejected(self):
         """One batch is one person; a mixed batch is a client bug, not a merge."""
@@ -25521,10 +25621,16 @@ class WritableFieldsPerCallerTest(TestCase):
         self.assertEqual(resp.status_code, 200, resp.data)
         return resp.data
 
+    @staticmethod
+    def _fields(data):
+        """The field entries; `__descriptor__` is the versioned envelope."""
+        return {name: entry for name, entry in data.items()
+                if not name.startswith('__')}
+
     def test_a_permitted_caller_sees_the_writable_fields(self):
         data = self._descriptor(self.staff, '?person_id=770101')
         self.assertTrue(
-            any(entry['writable'] for entry in data.values()),
+            any(entry['writable'] for entry in self._fields(data).values()),
             'a caller who may write should be offered something to write',
         )
 
@@ -25536,7 +25642,7 @@ class WritableFieldsPerCallerTest(TestCase):
         """
         data = self._descriptor(self.reader, '?person_id=770101')
 
-        offered = [f for f, e in data.items() if e['writable']]
+        offered = [f for f, e in self._fields(data).items() if e['writable']]
         self.assertEqual(offered, [], f'offered to a read-only caller: {offered[:5]}')
 
     def test_the_fields_are_still_described_so_the_ui_can_explain_itself(self):
@@ -25547,16 +25653,36 @@ class WritableFieldsPerCallerTest(TestCase):
 
         self.assertEqual(set(reader_view), set(writer_view))
         blocked = next(
-            f for f, e in writer_view.items() if e['writable']
+            f for f, e in self._fields(writer_view).items() if e['writable']
         )
         self.assertTrue(reader_view[blocked]['read_only_for_caller'])
         self.assertIn('read-only access', reader_view[blocked]['reason'])
+
+    def test_a_read_only_caller_is_not_offered_the_explicit_answer(self):
+        """`writable: false` was already true for this field.
+
+        The explicit answer goes through its own endpoint, so the old
+        `writable`-only mask left it looking answerable to a reader whose
+        every POST would be refused (#5665).
+        """
+        writer_view = self._descriptor(self.staff, '?person_id=770101')
+        reader_view = self._descriptor(self.reader, '?person_id=770101')
+
+        self.assertTrue(
+            writer_view['pre_existing_condition_categories']['answerable']
+        )
+        reader_entry = reader_view['pre_existing_condition_categories']
+        self.assertFalse(reader_entry['answerable'])
+        self.assertTrue(reader_entry['read_only_for_caller'])
+        self.assertIn('read-only access', reader_entry['reason'])
 
     def test_without_a_person_the_answer_describes_the_deployment(self):
         # The old behaviour, kept: "which fields could be written by someone
         # permitted to write them" is a real question, asked by tooling.
         data = self._descriptor(self.reader)
-        self.assertTrue(any(entry['writable'] for entry in data.values()))
+        self.assertTrue(
+            any(entry['writable'] for entry in self._fields(data).values())
+        )
 
     def test_a_non_numeric_person_id_is_refused(self):
         client = APIClient()
@@ -25776,8 +25902,8 @@ class FieldFormulaAPITest(TestCase):
 
     def test_delete_formula(self):
         resp = self.client.post('/api/v1/field-formulas/', {
-            'field_name': 'no_active_infection_status',
-            'formula': '@not(active_infection_status)',
+            'field_name': 'bmi',
+            'formula': 'weight / (height / 100) ^ 2',
             'is_active': False,
         }, format='json')
         self.assertEqual(resp.status_code, 201, resp.data)
@@ -25785,6 +25911,14 @@ class FieldFormulaAPITest(TestCase):
 
         resp = self.client.delete(f'/api/v1/field-formulas/{pk}/')
         self.assertEqual(resp.status_code, 204)
+
+    def test_explicit_answer_formula_is_rejected(self):
+        resp = self.client.post('/api/v1/field-formulas/', {
+            'field_name': 'no_active_infection_status',
+            'formula': '@not(active_infection_status)',
+            'is_active': False,
+        }, format='json')
+        self.assertEqual(resp.status_code, 400, resp.data)
 
 
 class FhirUploadDeniedWriteRollbackTest(TestCase):
@@ -26089,6 +26223,23 @@ class PersonLanguageSkillPatchTest(_SmartBase):
     def test_the_flattened_columns_are_derived_in_the_same_request(self):
         """A 200 that left the read model stale would be a lie about the write."""
         self._patch({'english': ['read']})
+        record = self._record()
+        self.assertTrue(record.english_read)
+        self.assertFalse(record.english_speak)
+        self.assertEqual(record.languages_skills, 'English language: read')
+
+    def test_the_patient_info_patch_derives_the_read_model_too(self):
+        """The legacy /api/patient-info/ route must not leave a stale read model.
+
+        `/api/persons/` refreshes the whole record; `/api/patient-info/` built
+        only the rows and left `english_read` null, so the matcher kept
+        answering "not asked" after a successful language edit.
+        """
+        resp = self.client.patch(
+            f'/api/patient-info/{self.person.person_id}/',
+            {'language_skills': {'english': ['read']}},
+            content_type='application/json', **self._auth())
+        self.assertEqual(resp.status_code, status.HTTP_200_OK)
         record = self._record()
         self.assertTrue(record.english_read)
         self.assertFalse(record.english_speak)
@@ -30097,7 +30248,8 @@ class PatientSelfEditClinicalFieldsTest(TestCase):
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
 
     def test_computed_field_silently_ignored(self):
-        """KIND_COMPUTED fields (e.g. bmi) must be silently ignored, not 405."""
+        """KIND_COMPUTED fields (e.g. bmi) are ignored on the native PATCH, as in
+        dev; the shared form refuses them (#2135, tests/test_computed_only_patch)."""
         self.patient_record.bmi = None
         self.patient_record.save(update_fields=['bmi'])
         resp = self._client().patch(
@@ -30105,7 +30257,6 @@ class PatientSelfEditClinicalFieldsTest(TestCase):
             {'bmi': '99.9'},
             format='json',
         )
-        # Should be 200, but the bmi value should NOT have been written
         self.assertEqual(resp.status_code, status.HTTP_200_OK, resp.data)
         self.patient_record.refresh_from_db()
         self.assertIsNone(self.patient_record.bmi)

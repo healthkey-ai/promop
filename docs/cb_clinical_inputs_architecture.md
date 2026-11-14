@@ -74,13 +74,19 @@ of this port. The existing refresh query budget remains 21.
 
 ## Schema boundary
 
-`0310_cb_clinical_input_sources` depends on `0309_condition_context_mappings` and adds
-exactly three nullable columns. Existing `sct_date` is not re-added. The migration
-contains neither mapping approvals nor data backfill.
+Exactly three nullable columns carry this contract:
+`able_to_swallow_tablets_capsules`, `prothrombin_time_uln` and
+`activated_partial_thromboplastin_time_uln`. Existing `sct_date` is not re-added,
+and neither migration contains mapping approvals or data backfill.
 
-This migration targets the `dev` predecessor. It does not claim compatibility
-with databases already migrated through the separate `cb-v2` attestation/clinical
-chain; convergence of those histories needs a separate plan.
+Both branches added those columns, so since the 2026-10-28 back-merge the
+migration that owns them is
+`0306_patientrecord_able_to_swallow_tablets_capsules_and_more` (dev). It adds a
+column only where `introspection.get_table_description` does not already see it,
+which makes it safe on a database where the `cb-v2` copy
+(`0310_cb_clinical_input_sources`) ran first. `0310` keeps its identifier and
+dependency on `0309_condition_context_mappings` with no operations, so a
+database migrated through either history reaches the same schema.
 
 Delivery status, verification and rollout gates live in
 [the delivery plan](cb_clinical_inputs_plan.md).

@@ -26,6 +26,7 @@ class TherapyLineDrugSerializer(serializers.Serializer):
     # Existing administrations are addressed by their own row, so repeated doses
     # of one drug survive a save (#1926).
     drug_exposure_id = serializers.IntegerField(required=False, min_value=1)
+    maintenance = serializers.BooleanField(required=False)
     concept_id = serializers.IntegerField(min_value=1)
     start_date = serializers.DateField(required=False)
     end_date = serializers.DateField(required=False, allow_null=True)

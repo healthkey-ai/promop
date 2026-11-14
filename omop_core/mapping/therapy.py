@@ -222,11 +222,25 @@ def _ensure_hk_vocab(vocabulary_id):
 def _get_or_create_quarantine_concept(*, vocabulary_id, domain_id,
                                       concept_class_id, concept_code,
                                       concept_name):
-    concept = Concept.objects.filter(
-        vocabulary_id=vocabulary_id, concept_code=concept_code,
-    ).first()
-    if concept is not None:
-        if normalize_regimen_name(concept.concept_name) == normalize_regimen_name(concept_name):
+    original_code = concept_code
+    normalized_name = normalize_regimen_name(concept_name)
+    if len(concept_name) > 255:
+        # The display cannot preserve the full identity. Put a digest of the
+        # original source slug and complete normalized input in the code, so
+        # both source-code identity and differences beyond the display survive.
+        identity = f'{original_code}\0{normalized_name}'
+        digest = hashlib.sha256(identity.encode('utf-8')).hexdigest()[:40]
+        concept_code = f'{concept_code[:9]}-{digest}'
+    base_code = concept_code
+    stored_name = normalize_regimen_name(concept_name[:255])
+    collision_index = 0
+    while True:
+        concept = Concept.objects.filter(
+            vocabulary_id=vocabulary_id, concept_code=concept_code,
+        ).first()
+        if concept is None:
+            break
+        if normalize_regimen_name(concept.concept_name) == stored_name:
             return concept
         # Slug collision: a different name already owns this code (punctuation
         # collapse / 50-char truncation can map distinct names to one slug).
@@ -235,16 +249,13 @@ def _get_or_create_quarantine_concept(*, vocabulary_id, domain_id,
         # Not a security use: this only disambiguates a slug collision so two
         # distinct regimen names get distinct concept rows. Flagged explicitly so
         # the SAST gate does not have to carry it as a baselined false positive.
+        identity = normalized_name if collision_index == 0 else f'{normalized_name}\0{collision_index}'
         digest = hashlib.sha1(
-            normalize_regimen_name(concept_name).encode('utf-8'),
+            identity.encode('utf-8'),
             usedforsecurity=False,
         ).hexdigest()[:8]
-        concept_code = f'{concept_code[:41]}-{digest}'[:50]
-        concept = Concept.objects.filter(
-            vocabulary_id=vocabulary_id, concept_code=concept_code,
-        ).first()
-        if concept is not None:
-            return concept
+        concept_code = f'{base_code[:41]}-{digest}'[:50]
+        collision_index += 1
 
     domain, _ = Domain.objects.get_or_create(
         domain_id=domain_id,
@@ -258,18 +269,31 @@ def _get_or_create_quarantine_concept(*, vocabulary_id, domain_id,
             'concept_class_concept_id': 0,
         },
     )
-    return Concept.objects.create(
-        concept_id=next_pk(Concept, 'concept_id'),
-        concept_name=concept_name[:255],
-        domain=domain,
+    # Another import may have claimed this unique vocabulary/code since the
+    # initial lookup. Match only that key, never the proposed PK or name.
+    concept, created = Concept.objects.get_or_create(
         vocabulary=vocabulary,
-        concept_class=concept_class,
-        standard_concept=None,
-        source=SOURCE_HEALTHKEY,
         concept_code=concept_code,
-        valid_start_date=date(1970, 1, 1),
-        valid_end_date=date(2099, 12, 31),
+        defaults={
+            'concept_id': next_pk(Concept, 'concept_id'),
+            'concept_name': concept_name[:255],
+            'domain': domain,
+            'concept_class': concept_class,
+            'standard_concept': None,
+            'source': SOURCE_HEALTHKEY,
+            'valid_start_date': date(1970, 1, 1),
+            'valid_end_date': date(2099, 12, 31),
+        },
     )
+    if not created and normalize_regimen_name(concept.concept_name) != stored_name:
+        # A different name won the slug race: apply the same disambiguation as
+        # an ordinary existing-row collision rather than aliasing the regimens.
+        return _get_or_create_quarantine_concept(
+            vocabulary_id=vocabulary_id, domain_id=domain_id,
+            concept_class_id=concept_class_id, concept_code=original_code,
+            concept_name=concept_name,
+        )
+    return concept
 
 
 def get_or_create_quarantine_regimen(name, source_system='fhir-upload'):

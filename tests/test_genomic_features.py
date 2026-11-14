@@ -143,3 +143,20 @@ def test_feature_recipe_migration_is_additive_idempotent_and_preserves_curation(
         seed(apps, editor)
     assert FieldConceptMapping.objects.filter(pk=mapping.pk).values().get() == before
     assert list_variants(person) == [saved]
+
+
+@pytest.mark.parametrize('variant', ['exon 19 deletion', 'EGFR exon 20 insertion/duplication +2',
+                                     'BRCA1 rearrangement'])
+def test_an_explicit_sequence_variant_category_wins_over_the_text_heuristic(variant):
+    """The docstring says explicit type and category win; only a structural
+    category did, so a categorised sequence variant whose text reads
+    structural lost its gene identity (#2489)."""
+    from omop_core.services.genomics_features import is_gene_level
+
+    finding = {'gene': 'EGFR', 'feature_type': 'Gene', 'variant': variant}
+    assert is_gene_level({**finding, 'finding_category': 'Sequence variant'}) is True
+    # Without a category the heuristic still decides, as before.
+    assert is_gene_level(finding) is False
+    # A non-gene catalog marker still wins over the category.
+    assert is_gene_level({**finding, 'finding_category': 'Sequence variant'},
+                         marker={'kind': 'structural'}) is False

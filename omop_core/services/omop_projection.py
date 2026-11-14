@@ -7,8 +7,8 @@ from django.db import transaction
 from django.utils import timezone
 
 from omop_core.models import (
-    ConditionOccurrence, DrugExposure, FieldConceptMapping, Measurement, Observation,
-    PatientRecord, Person, ProcedureOccurrence,
+    Concept, ConditionOccurrence, DrugExposure, FieldConceptMapping, Measurement,
+    Observation, PatientRecord, Person, ProcedureOccurrence,
 )
 from omop_core.services.breast_mapping_safety import wrong_breast_field_mappings
 from omop_core.services.mappings import CONCEPT_PATIENT_REPORTED_TYPE
@@ -56,9 +56,22 @@ def _is_empty(value):
 
 
 def projection_for_descriptor(entry):
-    """Use the same recipe and value/unit semantics the editor advertises."""
+    """Use the same recipe and value/unit semantics the editor advertises.
+
+    A computed entry normally has no projection: it follows from inputs stored
+    on the record. The one exception is a normalised read-model, such as
+    hemoglobin's g/dL value derived from the source pair (#2318): the source is
+    what the reader writes, and this entry is what reaches OMOP. Such an entry
+    states its projection explicitly and is never a client write target, so the
+    writable check does not apply to it.
+    """
     if (not entry or entry.get('clinical_input_contract')
-            or not entry.get('writable') or entry.get('target') != 'patient_record'):
+            or entry.get('read_only_for_caller')):
+        return None
+    normalised_read_model = bool(entry.get('normalised_read_model'))
+    if (not normalised_read_model
+            and (not entry.get('writable')
+                 or entry.get('target') != 'patient_record')):
         return None
     if not entry.get('projection'):
         return None
@@ -87,7 +100,7 @@ def curated_values_from_snapshot(snapshot, *, confirmed_clinical_fields=None):
     )
     from omop_core.services.field_write_service import _invert_inverse_assertion
     from omop_core.services.write_descriptor import (
-        _LIFECYCLE_FIELDS, _WRITE_RECIPE_INCOMPLETE,
+        PINNED_PROJECTION_FIELDS, _LIFECYCLE_FIELDS, _WRITE_RECIPE_INCOMPLETE,
         get_serializer_read_only_fields, mapping_target_for,
     )
 
@@ -97,6 +110,7 @@ def curated_values_from_snapshot(snapshot, *, confirmed_clinical_fields=None):
         and field.name not in get_serializer_read_only_fields()
         and field.name not in _LIFECYCLE_FIELDS
         and field.name not in _WRITE_RECIPE_INCOMPLETE
+        and field.name not in PINNED_PROJECTION_FIELDS
         and field.get_internal_type() != 'JSONField'
     }
 
@@ -200,6 +214,10 @@ def curated_values_from_snapshot(snapshot, *, confirmed_clinical_fields=None):
                 )
                 value = normalise_cytogenetic_markers(read_cytogenetic_summary(row))
             values[name] = value
+            if name == 'sct_date' and confirmed_clinical_fields is not None:
+                # A valid custom source is the final curated winner. Its source
+                # evidence, not an older invalid SDK row, resolves pending intent.
+                confirmed_clinical_fields.add(name)
         except (ValidationError, ValueError, TypeError):
             continue
     sct = select_sct_source(snapshot, sct_mapping)
@@ -217,14 +235,23 @@ def project_field_to_omop(mapping) -> int:
     projection and refresh, using the same lock as the PATCH handler.
     """
     from omop_core.services.patient_record_service import refresh_patient_record
-    from omop_core.services.write_descriptor import build_writable_field_descriptor
+    from omop_core.services.write_descriptor import (
+        PINNED_PROJECTION_FIELDS, build_writable_field_descriptor,
+    )
     from omop_core.services.clinical_input_contract import uses_dedicated_writer
 
     if mapping.field_name in ('drug_exposure.role', 'drug_exposure.category'):
-        from omop_core.services.medication_context import backfill_record_contexts
-        return backfill_record_contexts(mapping)
+        # The pending JSON/revision log does not preserve per-attribute fact
+        # authorship. Curation cannot turn a patient answer into an EHR fact.
+        return 0
     if uses_dedicated_writer(mapping.field_name):
         # Curation is not evidence of who authored pending projection values.
+        return 0
+    if mapping.field_name in PINNED_PROJECTION_FIELDS:
+        # A reviewed built-in recipe owns these fields. A curator mapping must
+        # not re-project a pending current-state answer: the backfill has no
+        # author, so it would write the recipe type and could take over a
+        # clinical fact (#5521).
         return 0
     if mapping.status != 'approved':
         return 0
@@ -254,13 +281,32 @@ def project_field_to_omop(mapping) -> int:
     return count
 
 
+def _projection_unit_for_person(person, projection):
+    """The stored source unit a dynamic-unit recipe projects (#2318).
+
+    Returns ``(label, concept_id)`` or ``(None, None)`` when the record has no
+    usable unit. The descriptor supplies the code -> label/concept map, so the
+    projection does not carry a second unit table.
+    """
+    from omop_core.models import PatientRecord
+    field = projection['unit_from']
+    record = PatientRecord.objects.filter(person=person).only(field).first()
+    code = getattr(record, field, None) if record is not None else None
+    choice = (projection.get('unit_by_code') or {}).get(code)
+    if not choice or not choice.get('label'):
+        return None, None
+    return choice['label'], choice.get('concept_id')
+
+
 def project_single_value(person, field_name, value, projection, *, acknowledge_existing=False,
-                         after_pk=None, type_concept_id=None, patient_user_id=None):
-    """Update a matching non-erroneous fact today, or create today's fact.
+                         after_pk=None, type_concept_id=None, patient_user_id=None,
+                         fact_date=None):
+    """Update a matching non-erroneous fact on ``fact_date``, or create it.
 
     Matching includes the concept and source key. Earlier dates are history and
     are never updated. The person lock serializes concurrent first writes for a
     day; an atomic savepoint keeps projection failures from poisoning PATCH.
+    ``fact_date`` is the clinical date of a dated edit; it defaults to today.
 
     *type_concept_id* types the fact by who wrote it, overriding the recipe's
     type: 32865 when a patient or their representative is the author. It then
@@ -287,6 +333,14 @@ def project_single_value(person, field_name, value, projection, *, acknowledge_e
         except Exception:
             logger.warning('Cytogenetic projection failed; edit remains pending')
             return False
+    # Some descriptors project affirmative answers only: No/Unknown is not a
+    # negative occurrence, so it stays pending on PatientRecord. Distinct from
+    # an ordinary boolean observation, which records No as 0.0 (#5521). The
+    # rows an earlier Yes wrote are withdrawn, or derivation would keep
+    # reading a fact the record no longer asserts.
+    if projection.get('affirmative_only') and (value is False or _is_empty(value)):
+        _retract_affirmative_facts(person, projection, type_concept_id)
+        return False
     target = projection.get('omop_table')
     concept_id = projection.get('concept_id')
     source_value = projection.get('source_value')
@@ -303,8 +357,32 @@ def project_single_value(person, field_name, value, projection, *, acknowledge_e
     if val_num is None and (_is_empty(value) or value is False):
         return False
 
-    today = timezone.localdate()
+    # A source pair projects the unit it was stored with (#2318). Resolve it
+    # before touching a fact: an unknown unit must keep the edit pending, not
+    # write a number under the recipe's static unit.
+    if projection.get('unit_from'):
+        unit_source, unit_concept_id = _projection_unit_for_person(person, projection)
+        if unit_source is None:
+            logger.warning(
+                'OMOP projection skipped for %s: the source unit is missing or '
+                'unsupported; edit remains pending', field_name,
+            )
+            return False
+    else:
+        unit_source = projection.get('unit')
+        unit_concept_id = projection.get('unit_concept_id')
+
+    today = fact_date or timezone.localdate()
     fact_type = type_concept_id or projection.get('type_concept_id') or 32817
+    if not Concept.objects.filter(pk=fact_type).exists():
+        # A missing type concept would fail the deferred FK check at commit,
+        # outside this savepoint, and roll back the PatientRecord edit. Keep
+        # the edit pending instead; the projection is best-effort.
+        logger.warning(
+            'OMOP projection skipped: type concept %s is not loaded; edit remains pending',
+            fact_type,
+        )
+        return False
     try:
         with transaction.atomic():
             Person.objects.select_for_update().get(pk=person.pk)
@@ -314,6 +392,12 @@ def project_single_value(person, field_name, value, projection, *, acknowledge_e
                 person=person, is_erroneous=False,
                 **{concept_field: concept_id, src_field: source_value, date_field: today}, **scope,
             )
+            # Reusing an older same-author row behind another author's newer
+            # fact acknowledges a correction that refresh will immediately undo.
+            # Only the current same-day fact is eligible for in-place reuse.
+            current_pk = candidates.order_by('-' + pk_field).values_list(pk_field, flat=True).first()
+            if current_pk is not None:
+                candidates = candidates.filter(pk=current_pk)
             if type_concept_id is not None:
                 candidates = candidates.filter(**{type_field: type_concept_id})
             elif fact_type != PATIENT_SELF_REPORT_TYPE:
@@ -356,20 +440,86 @@ def project_single_value(person, field_name, value, projection, *, acknowledge_e
                             instance.value_as_number = float(value)
                         except (ValueError, TypeError):
                             instance.value_as_string = str(value)
-                instance.unit_source_value = projection.get('unit') or None
-                instance.unit_concept_id = projection.get('unit_concept_id') or None
+                instance.unit_source_value = unit_source or None
+                instance.unit_concept_id = unit_concept_id or None
             if existing and not note_changed and all(getattr(instance, f) == v for f, v in previous.items()):
+                if acknowledge_existing and patient_user_id:
+                    _record_patient_provenance(instance, patient_user_id)
                 return acknowledge_existing
+            if (existing and target == 'measurement' and today != timezone.localdate()
+                    and not _projection_owned(instance)):
+                # A dated correction never rewrites a past result this
+                # projector did not write (an EHR/FHIR import, a lab feed): that
+                # destroyed the source value and its unit (#2431). The result it
+                # corrects is retired as erroneous, its value and unit intact
+                # for audit, so no reader counts it any more (all-history CRAB
+                # extrema included); the correction is a new row. Our own row is
+                # still corrected in place, so repeated edits and typo fixes do
+                # not pile up. Today's edit keeps dev's same-day behaviour
+                # (test_patient_record_edit_history).
+                model.objects.filter(pk=instance.pk).update(is_erroneous=True)
+                correction = model(**{
+                    pk_field: next_pk(model, pk_field), 'person': person,
+                    concept_field: concept_id, src_field: source_value,
+                    date_field: today, type_field: fact_type, **scope,
+                })
+                for field in answer_fields:
+                    setattr(correction, field, getattr(instance, field))
+                instance = correction
+                existing = False
             if scope and any(value is not None for value in scope.values()):
                 setattr(instance, f'{target}_datetime', timezone.now())
             instance._skip_patient_record_refresh = True
             instance.save()
             if patient_user_id:
-                _record_patient_provenance(instance, patient_user_id)
+                _record_patient_provenance(instance, patient_user_id,
+                                           owned=not existing and target == 'measurement')
+            elif not existing and target == 'measurement':
+                _record_projection_provenance(instance)
         return True
     except Exception:
         logger.warning('OMOP value projection failed; edit remains pending')
         return False
+
+
+def _retract_affirmative_facts(person, projection, type_concept_id=None):
+    """Mark the facts an affirmative-only recipe wrote as entered in error.
+
+    Only this recipe's own rows are touched, found by the source value it
+    writes, so an imported diagnosis with the same concept is never flagged.
+    The author rule is project_single_value's: a patient's No retracts only
+    self-report rows, and anyone else's No retracts only the rest. Flagging
+    rather than deleting keeps the history and takes effect the same day; an
+    end date of today would still count as current.
+    """
+    target = projection.get('omop_table')
+    concept_id = projection.get('concept_id')
+    source_value = projection.get('source_value')
+    if target not in _TARGET_CONFIG or concept_id is None or not source_value:
+        return
+    model, _pk, concept_field, _date, type_field, src_field, _num, _str = _TARGET_CONFIG[target]
+    fact_type = type_concept_id or projection.get('type_concept_id') or 32817
+    rows = model.objects.filter(
+        person=person, is_erroneous=False,
+        **{concept_field: concept_id, src_field: source_value},
+    )
+    if type_concept_id is not None:
+        rows = rows.filter(**{type_field: type_concept_id})
+    elif fact_type != PATIENT_SELF_REPORT_TYPE:
+        rows = rows.exclude(**{type_field: PATIENT_SELF_REPORT_TYPE})
+    try:
+        with transaction.atomic():
+            # The same lock the Yes path takes, so a No cannot evaluate its
+            # rows before a concurrent Yes has committed its own.
+            Person.objects.select_for_update().get(pk=person.pk)
+            for row in rows:
+                row.is_erroneous = True
+                row.erroneous_reason = 'retracted by a later PatientRecord answer'
+                row._skip_patient_record_refresh = True
+                row.save(update_fields=['is_erroneous', 'erroneous_reason'])
+                del row._skip_patient_record_refresh
+    except Exception:
+        logger.warning('Could not retract the earlier affirmative fact; edit remains pending')
 
 
 def patient_self_report_type():
@@ -389,13 +539,170 @@ def patient_self_report_type():
     return None
 
 
-def _record_patient_provenance(instance, patient_user_id):
+#: modification_reason on the provenance row this projector writes for a
+#: Measurement it inserted on someone's behalf. It is the ownership marker that
+#: lets a later edit correct that row in place (#2431).
+PROJECTION_PROVENANCE_REASON = 'promop record edit'
+
+
+def _projection_owned(instance):
+    """Whether this projector wrote the fact (patient or on-behalf edit)."""
+    from django.contrib.contenttypes.models import ContentType
+    from omop_core.models import ProvenanceRecord
+
+    # The reason, not the source, is the marker: imports and patient lab
+    # uploads write PATIENT_SELF too, and those rows are not ours to rewrite.
+    return ProvenanceRecord.objects.filter(
+        content_type=ContentType.objects.get_for_model(type(instance)), object_id=instance.pk,
+        source__in=('PATIENT_SELF', 'ADMIN_CORRECTION'),
+        modification_reason=PROJECTION_PROVENANCE_REASON,
+    ).exists()
+
+
+def _same_projection_value(row, value, val_num, val_str):
+    if val_num is not None:
+        try:
+            return float(getattr(row, val_num)) == float(value)
+        except (TypeError, ValueError):
+            return False
+    if val_str is not None:
+        return str(getattr(row, val_str) or '') == str(value)
+    return False
+
+
+class AmbiguousFactDateError(Exception):
+    """More than one owned result holds the value an unnamed correction dates."""
+
+
+def move_owned_fact_date(person, field_name, value, projection, fact_date, *,
+                         type_concept_id=None, fact_id=None):
+    """Move the fact this projector owns to ``fact_date``, if it can.
+
+    Returns the fact's primary key when it is already on that day or was moved,
+    None when no fact this edit may move matches (the caller may create one),
+    and False when an owned fact cannot move: a different result already
+    occupies the target day. ``fact_id`` is the id a previous PATCH returned for
+    this result; without it the newest fact is the candidate when it holds the
+    value being dated, and a newer fact with another value cannot hide an owned
+    result that does (the record may have been edited without a re-derive); two
+    owned results with that value cannot be told apart, so the correction is
+    refused. An unnamed edit falls through to a new result when nothing movable
+    matches (an equal value on another day is legitimate, #2454 review). A named
+    fact that does not move is a refused correction.
+    """
+    target = projection.get('omop_table')
+    concept_id = projection.get('concept_id')
+    source_value = projection.get('source_value')
+    if target not in _TARGET_CONFIG or concept_id is None or not source_value:
+        return False
+    model, pk_field, concept_field, date_field, type_field, src_field, val_num, val_str = (
+        _TARGET_CONFIG[target])
+    if value is None or _is_empty(value):
+        return False
+    from omop_core.services.cancer_details import projection_scope
+    scope = projection_scope(person, field_name, model)
+    rows = model.objects.select_for_update().filter(
+        person=person, is_erroneous=False,
+        **{concept_field: concept_id, src_field: source_value}, **scope,
+    )
+    if fact_id is not None:
+        rows = rows.filter(pk=fact_id)
+    ordered = list(rows.order_by('-' + date_field, '-' + pk_field))
+    if not ordered:
+        return None if fact_id is None else False
+    newest = ordered[0]
+
+    def movable(candidate):
+        candidate_type = getattr(candidate, type_field)
+        if type_concept_id is not None:
+            if candidate_type != type_concept_id:
+                return False
+        elif candidate_type == PATIENT_SELF_REPORT_TYPE and (
+                projection.get('type_concept_id') or 32817) != PATIENT_SELF_REPORT_TYPE:
+            return False
+        return (_projection_owned(candidate)
+                and _same_projection_value(candidate, value, val_num, val_str))
+
+    if _same_projection_value(newest, value, val_num, val_str):
+        # The value on screen is the newest fact: correct that one or, when it
+        # is not ours, let the projection record a new result. An older owned
+        # result with the same value is not what the user is dating (#2454).
+        current = newest if movable(newest) else None
+    else:
+        # The newest fact holds another value (the record was edited without a
+        # re-derive). Find the owned fact with the value being corrected; when
+        # several do, an unnamed edit cannot know which one the user means, so
+        # it refuses instead of moving the wrong result (#2454 review).
+        candidates = [candidate for candidate in ordered if movable(candidate)]
+        if len(candidates) > 1:
+            raise AmbiguousFactDateError(
+                'More than one result holds this value, so an unnamed correction cannot '
+                'tell them apart.')
+        current = candidates[0] if candidates else None
+    if current is None:
+        return None if fact_id is None else False
+    if getattr(current, date_field) == fact_date:
+        return current.pk
+    siblings = model.objects.filter(
+        person=person, is_erroneous=False,
+        **{concept_field: concept_id, src_field: source_value, date_field: fact_date},
+        **scope,
+    ).exclude(pk=current.pk)
+    if siblings.exists():
+        return False
+    model.objects.filter(pk=current.pk).update(**{date_field: fact_date})
+    return current.pk
+
+
+def projected_fact_id(person, field_name, value, projection, fact_date, *,
+                       type_concept_id=None):
+    """The id of the fact this write projected, for a later date correction."""
+    target = projection.get('omop_table')
+    concept_id = projection.get('concept_id')
+    source_value = projection.get('source_value')
+    if target not in _TARGET_CONFIG or concept_id is None or not source_value:
+        return None
+    model, pk_field, concept_field, date_field, type_field, src_field, _num, _str = (
+        _TARGET_CONFIG[target])
+    from omop_core.services.cancer_details import projection_scope
+    scope = projection_scope(person, field_name, model)
+    rows = model.objects.filter(
+        person=person, is_erroneous=False,
+        **{concept_field: concept_id, src_field: source_value,
+           date_field: fact_date or timezone.localdate()}, **scope,
+    )
+    if type_concept_id is not None:
+        rows = rows.filter(**{type_field: type_concept_id})
+    else:
+        fact_type = projection.get('type_concept_id') or 32817
+        if fact_type != PATIENT_SELF_REPORT_TYPE:
+            rows = rows.exclude(**{type_field: PATIENT_SELF_REPORT_TYPE})
+    return rows.order_by('-' + pk_field).values_list(pk_field, flat=True).first()
+
+
+def _record_projection_provenance(instance):
+    from django.contrib.contenttypes.models import ContentType
+    from omop_core.models import ProvenanceRecord
+
+    ProvenanceRecord.objects.get_or_create(
+        content_type=ContentType.objects.get_for_model(type(instance)), object_id=instance.pk,
+        source='ADMIN_CORRECTION', modification_reason=PROJECTION_PROVENANCE_REASON,
+        defaults={'target_patient_id': str(instance.person_id)},
+    )
+
+
+def _record_patient_provenance(instance, patient_user_id, owned=False):
+    """Record the patient as the author. ``owned`` marks a row this projector
+    inserted, so a later edit may correct it in place; an acknowledged or
+    pre-existing row is never claimed."""
     from django.contrib.contenttypes.models import ContentType
     from omop_core.models import ProvenanceRecord
 
     ProvenanceRecord.objects.get_or_create(
         content_type=ContentType.objects.get_for_model(type(instance)), object_id=instance.pk,
         source='PATIENT_SELF', source_user_id=patient_user_id,
+        defaults={'modification_reason': PROJECTION_PROVENANCE_REASON if owned else None,
+                  'target_patient_id': str(instance.person_id)},
     )
 
 
