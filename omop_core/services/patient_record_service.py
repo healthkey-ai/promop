@@ -809,6 +809,16 @@ class OmopSnapshot:
     obs_by_source: dict         # source_value → [Observation]
     death_date_assertion: object | None = None  # Latest UI assertion, including an explicit clear
     cytogenetic_observations: list = dataclasses.field(default_factory=list)
+    # Rows whose concept is a proposed mapping's (confidence is not null). The
+    # lists above hold real rows only, so a provisional value never reaches
+    # patient_record (docs/provisional_data_plan.md, invariant 3).
+    # Raw: not read through _read_values_in_source_units (#2249), so a consumer of
+    # these lists must prove the unit itself before trusting a value.
+    provisional_measurements: list = dataclasses.field(default_factory=list)
+    provisional_observations: list = dataclasses.field(default_factory=list)
+    provisional_conditions: list = dataclasses.field(default_factory=list)
+    provisional_drug_exposures: list = dataclasses.field(default_factory=list)
+    provisional_procedures: list = dataclasses.field(default_factory=list)
     # Per-refresh memoization only; never cache database mappings process-wide.
     genomics_cache: dict = dataclasses.field(default_factory=dict, compare=False)
     # Keep clear markers for the corrected breast questions: a source-only
@@ -926,8 +936,25 @@ def _read_values_in_source_units(person, measurements):
         )
 
 
+def _split_provisional(rows) -> tuple[list, list]:
+    """Split *rows* into (real, provisional) by the clinical row's confidence.
+
+    A real row has no confidence; a number marks a row whose concept came from
+    a proposed mapping. Done in memory over the rows already fetched, so it adds
+    no query.
+    """
+    real, provisional = [], []
+    for row in rows:
+        (real if row.confidence is None else provisional).append(row)
+    return real, provisional
+
+
 def _build_snapshot(person: Person) -> OmopSnapshot:
-    """Fetch all OMOP rows for *person* in ~6 SQL queries and build lookup indexes."""
+    """Fetch all OMOP rows for *person* in ~6 SQL queries and build lookup indexes.
+
+    The snapshot's own lists hold real rows only; provisional rows (confidence
+    set) are kept apart in ``provisional_*`` so no extractor can read one.
+    """
     measurements = list(
         Measurement.objects
         .filter(person=person, is_erroneous=False)
@@ -939,6 +966,7 @@ def _build_snapshot(person: Person) -> OmopSnapshot:
         )
         .order_by('-measurement_date', '-measurement_id')
     )
+    measurements, provisional_measurements = _split_provisional(measurements)
     _read_values_in_source_units(person, measurements)
     observations = list(
         Observation.objects
@@ -968,6 +996,10 @@ def _build_snapshot(person: Person) -> OmopSnapshot:
         .select_related('procedure_concept')
         .order_by('-procedure_date')
     )
+    observations, provisional_observations = _split_provisional(observations)
+    conditions, provisional_conditions = _split_provisional(conditions)
+    drug_exposures, provisional_drug_exposures = _split_provisional(drug_exposures)
+    procedures, provisional_procedures = _split_provisional(procedures)
     death = Death.objects.filter(person=person).only('death_date').first()
 
     death_date_assertion = next((o for o in observations
@@ -1024,6 +1056,11 @@ def _build_snapshot(person: Person) -> OmopSnapshot:
         obs_by_code=dict(obs_by_code),
         meas_by_source=dict(meas_by_source),
         obs_by_source=dict(obs_by_source),
+        provisional_measurements=provisional_measurements,
+        provisional_observations=provisional_observations,
+        provisional_conditions=provisional_conditions,
+        provisional_drug_exposures=provisional_drug_exposures,
+        provisional_procedures=provisional_procedures,
     )
 
 
@@ -2312,7 +2349,7 @@ def _apply_inferred_lots(data: dict, lots, drug_exposures=None) -> None:
         if exposures is None:
             exposures = (
                 DrugExposure.objects
-                .filter(drug_exposure_id__in=exp_ids)
+                .filter(drug_exposure_id__in=exp_ids, confidence__isnull=True)
                 .select_related('drug_concept')
             )
         for de in exposures:
@@ -2445,7 +2482,7 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures, sn
     all_event_ids = [eid for ids in ee_by_episode.values() for eid in ids]
     de_by_id: dict = {
         de.drug_exposure_id: de
-        for de in DrugExposure.objects.filter(person=person, is_erroneous=False,
+        for de in DrugExposure.objects.filter(person=person, is_erroneous=False, confidence__isnull=True,
                                               drug_exposure_id__in=all_event_ids).select_related('drug_concept')
     } if all_event_ids else {}
 
@@ -2733,6 +2770,7 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures, sn
                 Q(observation_event_id__isnull=True) | Q(observation_event_id__in=line_ids),
                 person=person,
                 is_erroneous=False,
+                confidence__isnull=True,
                 observation_source_value__startswith='LOT-',
                 observation_source_value__endswith='-outcome',
             )
@@ -2774,6 +2812,7 @@ def _get_treatment_data_from_episodes(person, data, episodes, drug_exposures, sn
                 Q(observation_event_id__isnull=True) | Q(observation_event_id__in=line_ids),
                 person=person,
                 is_erroneous=False,
+                confidence__isnull=True,
                 observation_source_value__startswith='LOT-',
                 observation_source_value__endswith='-progression',
             )
@@ -2854,7 +2893,7 @@ def _apply_treatment_assertions(data, person, episodes, snapshot: OmopSnapshot =
     # below uses last-write-wins, so iterate in ascending order so the
     # latest observation wins.
     obs_list = list(reversed(snapshot.observations)) if snapshot else list(
-        Observation.objects.filter(person=person, is_erroneous=False)
+        Observation.objects.filter(person=person, is_erroneous=False, confidence__isnull=True)
         .select_related('value_as_concept').order_by('observation_date', 'observation_id')
     )
     line_ids = {getattr(e, 'episode_id', None) for e in episodes}
@@ -2888,7 +2927,7 @@ def _apply_treatment_assertions(data, person, episodes, snapshot: OmopSnapshot =
         intent_measurements = deduped
     else:
         intent_measurements = list(
-            Measurement.objects.filter(person=person, is_erroneous=False)
+            Measurement.objects.filter(person=person, is_erroneous=False, confidence__isnull=True)
             .select_related('measurement_concept', 'value_as_concept')
             .filter(
                 models.Q(measurement_concept__concept_code__in=_INTENT_CODES)

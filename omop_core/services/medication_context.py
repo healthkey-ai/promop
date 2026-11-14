@@ -39,8 +39,10 @@ def medication_contexts(person_id, exposure_ids, *, type_concept_id=None):
     mappings = _mappings()
     keys = {key: {source, mappings[key].source_value} - {''} if key in mappings
             else {source} for key, source in SOURCES.items()}
+    # Real rows only: a provisional context (confidence set) must neither set a
+    # value nor, as a newer blank, clear one (docs/provisional_data_plan.md).
     rows = list(Observation.objects.filter(
-        person_id=person_id, is_erroneous=False,
+        person_id=person_id, is_erroneous=False, confidence__isnull=True,
         observation_event_id__in=DrugExposure.objects.filter(
             person_id=person_id, pk__in=ids, is_erroneous=False).values('pk'),
         obs_event_field_concept_id__in=drug_event_concepts().values('pk'),
