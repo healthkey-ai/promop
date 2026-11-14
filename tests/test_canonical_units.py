@@ -1,3 +1,4 @@
+import re
 from datetime import date
 from decimal import Decimal
 from types import SimpleNamespace
@@ -11,7 +12,7 @@ from omop_core.models import (
     SourceCodeAxisVariant, SourceCodeConceptMapping,
 )
 from omop_core.services.canonical_units import (
-    LoincAxes, convert, loinc_axes_for_concepts, normalize, property_for,
+    LoincAxes, PROPERTY_NAMES, convert, loinc_axes_for_concepts, normalize, property_for,
     normalize_measurement_units,
 )
 from patient_portal.models import Identity
@@ -92,6 +93,24 @@ def test_imported_property_wins_over_name():
     assert property_for(concept) == 'MCnc'
     assert property_for(concept, SimpleNamespace(property='SCnc', scale_type='Qn')) == 'SCnc'
     assert property_for(concept, SimpleNamespace(property='MCnc', scale_type='Ord')) == ''
+
+
+def test_property_scans_the_name_brackets_and_cannot_backtrack():
+    def from_name(name):
+        return property_for(SimpleNamespace(
+            vocabulary_id='LOINC', domain_id='Measurement', concept_name=name))
+
+    # The first non-empty [...] group, which is what re.search returned.
+    for name in ('Test [Mass/volume]', 'Test []x] [Mass/volume]', 'Test [[[Mass/volume]'):
+        match = re.search(r'\[([^]]+)\]', name)
+        expected = PROPERTY_NAMES.get(match.group(1).lower(), '') if match else ''
+        assert from_name(name) == expected
+
+    # A long run of opening brackets with no closing one made the pattern
+    # visit every bracket (CodeQL py/polynomial-redos); the scan stops at the
+    # first missing bracket instead.
+    assert from_name('Test ' + '[' * 20000) == ''
+    assert from_name('Test ' + '[]' * 20000) == ''
 
 
 def _link_axis(source, relationship_id, target_name, target_code, invalid_reason=None):
