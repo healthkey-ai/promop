@@ -1062,34 +1062,40 @@ describe('single unit display (#5704)', () => {
 });
 
 describe('a read-only source pair (#2577)', () => {
-  it('names the stored unit, not the descriptor recipe unit', async () => {
-    const fields = {
-      serum_bilirubin_level_direct: {
-        writable: true, target: 'patient_record', control: 'number',
-        label: 'Direct Bilirubin', value_kind: 'number',
-        unit: 'mg/dL', projection: { unit: 'mg/dL' },
-        unit_options: [
-          { value: 'MG/DL', label: 'mg/dL' },
-          { value: 'UMOL/L', label: 'umol/L' },
-        ],
-      },
-      serum_bilirubin_level_direct_units: {
-        writable: false, kind: 'selectable', qualifies: 'serum_bilirubin_level_direct',
-        unit_options: [
-          { value: 'MG/DL', label: 'mg/dL' },
-          { value: 'UMOL/L', label: 'umol/L' },
-        ],
-      },
-    };
+  const fields = {
+    serum_bilirubin_level_direct: {
+      writable: true, target: 'patient_record', control: 'number',
+      label: 'Direct Bilirubin', value_kind: 'number',
+      unit: 'mg/dL', projection: { unit: 'mg/dL' },
+      unit_options: [
+        { value: 'MG/DL', label: 'mg/dL' },
+        { value: 'UMOL/L', label: 'umol/L' },
+      ],
+    },
+    serum_bilirubin_level_direct_units: {
+      writable: false, kind: 'selectable', qualifies: 'serum_bilirubin_level_direct',
+      unit_options: [
+        { value: 'MG/DL', label: 'mg/dL' },
+        { value: 'UMOL/L', label: 'umol/L' },
+      ],
+    },
+  };
+
+  it.each([
+    ['UMOL/L', 'umol/L'],
+    ['umol/L', 'umol/L'],
+    ['µmol/L', 'umol/L'],
+    ['bananas', 'unit unknown'],
+  ])('names the stored unit %s, not the descriptor recipe unit', async (storedUnit, expected) => {
     const { store } = await setup(fields, {
       serum_bilirubin_level_direct: 17.1,
-      serum_bilirubin_level_direct_units: 'UMOL/L',
+      serum_bilirubin_level_direct_units: storedUnit,
     }, false);
     render(<PatientFieldEditor store={store} name="serum_bilirubin_level_direct"
       label="Direct Bilirubin" />);
 
     expect(screen.getByText('17.1')).toBeVisible();
-    expect(screen.getByText('umol/L')).toBeVisible();
+    expect(screen.getByText(expected)).toBeVisible();
     expect(screen.queryByText('mg/dL')).not.toBeInTheDocument();
   });
 });

@@ -40,6 +40,11 @@ function todayIso() {
   return local.toISOString().slice(0, 10);
 }
 
+/** Unit labels accept the same micro spellings as the server's pair reader. */
+function normaliseUnitLabel(value: string): string {
+  return value.trim().toLowerCase().replace(/[μµ]/g, 'u').replace(/\s+/g, '');
+}
+
 interface DependencyGraph {
   /** Some reachable field is writable on PatientRecord. */
   editable: boolean;
@@ -252,11 +257,25 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
   // A source pair's unit lives beside the value, not in the descriptor's
   // static recipe. Read-only rows have no picker, so the suffix must still
   // name the unit the pair is actually stored in (#2577): a direct bilirubin
-  // 17.1 UMOL/L is not 17.1 mg/dL.
-  const storedUnitLabel = storedUnit
-    ? unitOptions.find((option) => option.value === storedUnit)?.label
+  // 17.1 UMOL/L is not 17.1 mg/dL. Match the stored spelling against both the
+  // option code and its display label (legacy rows carry `umol/L`/`µmol/L`).
+  // An explicitly set unit we cannot recognise is said to be unknown; it is
+  // never relabelled with the descriptor's unit.
+  const matchedUnit = storedUnit
+    ? unitOptions.find((option) => {
+        const stored = normaliseUnitLabel(storedUnit);
+        return normaliseUnitLabel(String(option.value)) === stored
+          || normaliseUnitLabel(String(option.label ?? '')) === stored;
+      })
     : undefined;
-  const displayUnit = storedUnitLabel ?? field.unit ?? field.projection?.unit;
+  const storedUnitLabel = matchedUnit
+    ? (matchedUnit.label ?? matchedUnit.value)
+    : undefined;
+  const displayUnit = storedUnit
+    ? (storedUnitLabel ?? 'unit unknown')
+    : (unitOptions.length
+      ? (unitOptions[0].label ?? unitOptions[0].value)
+      : field.unit ?? field.projection?.unit);
   const chosenUnit = dated
     ? (unitDraft ?? authoritativeUnit)
     : (value == null || value === '')
