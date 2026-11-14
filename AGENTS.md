@@ -2284,9 +2284,10 @@ Run generator:
 - This is a standing user preference: do not run pytest, Django, frontend or
   async e2e suites for documentation-only changes, and do not ask the user to
   approve skipping them again.
-- For an authorized documentation-only merge, run any lightweight docs-only
-  status gates GitHub requires and complete the merge without asking for another
-  confirmation. These status gates do not require application test results.
+- For a documentation-only PR, run any lightweight docs-only status gates GitHub
+  requires and then hand it to the user as merge-ready, without asking again to
+  skip the application suites. These status gates do not require application test
+  results; the user merges.
 - Do not use `[skip ci]` for a protected-branch PR when it would leave required
   statuses missing and block the merge. Let the existing docs-only detector
   skip the application jobs and satisfy the required status gates instead.
@@ -2353,9 +2354,9 @@ so a stale green check does not catch it.
   `0295_merge_source_code_upload_and_facility_review`). Check that nobody has
   already opened the same fix, because two identical merge migrations create a
   new pair of leaves (#1833).
-- **Merge migration PRs one at a time.** When several open PRs add
-  migrations, merge one, then rebase the next onto the new `dev`, check it, and
-  let CI pass before merging it.
+- **Hand migration PRs over one at a time.** When several open PRs add
+  migrations, wait for the user to merge one, then rebase the next onto the new
+  `dev`, check it, and let CI pass before presenting it.
 
 #### Documentation naming and ownership
 
