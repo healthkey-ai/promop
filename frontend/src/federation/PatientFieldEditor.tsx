@@ -249,6 +249,14 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
   // rejected clear). Once the shared value is non-empty, the saved/pending pair
   // is the authority; the draft is ignored and cleared by the next queued edit.
   const authoritativeUnit = storedUnit || unitOptions[0]?.value || '';
+  // A source pair's unit lives beside the value, not in the descriptor's
+  // static recipe. Read-only rows have no picker, so the suffix must still
+  // name the unit the pair is actually stored in (#2577): a direct bilirubin
+  // 17.1 UMOL/L is not 17.1 mg/dL.
+  const storedUnitLabel = storedUnit
+    ? (unitOptions.find((option) => option.value === storedUnit)?.label ?? storedUnit)
+    : undefined;
+  const displayUnit = storedUnitLabel ?? field.unit ?? field.projection?.unit;
   const chosenUnit = dated
     ? (unitDraft ?? authoritativeUnit)
     : (value == null || value === '')
@@ -484,8 +492,8 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
         {(reason || infoHref || field.retryable) && <p className="text-xs text-muted-foreground">{reason} {infoHref && <a href={infoHref}>Open Your Info</a>} {field.retryable &&
           <button type="button" className="underline" onClick={() => void store.load()}>Retry</button>}</p>}</>}
     {field.options_note && <p role="status" className="text-xs text-muted-foreground">{field.options_note}</p>}
-    {!showUnitPicker && !labelIncludesUnit && (field.unit ?? field.projection?.unit)
-      && <span className="text-xs text-muted-foreground">{field.unit ?? field.projection?.unit}</span>}
+    {!showUnitPicker && !labelIncludesUnit && displayUnit
+      && <span className="text-xs text-muted-foreground">{displayUnit}</span>}
     {writable && field.projection?.omop_table === 'measurement' && !dated
       && <p className="text-xs text-muted-foreground">This edit is recorded with today’s date.</p>}
     {pairPending && <span role="status" className="text-xs">Saving…</span>}

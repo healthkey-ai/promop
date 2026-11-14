@@ -258,6 +258,38 @@ describe('PatientDetail save — the edit, not the record', () => {
     expect(api.patch).not.toHaveBeenCalled();
   });
 
+  it('keeps a confirmed page edit when a late lab response arrives (#2578 review)', async () => {
+    await renderAndLoad();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let resolveLab!: (value: unknown) => void;
+    const labResponse = new Promise((resolve) => { resolveLab = resolve; });
+    (api.patch as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
+      if (url.includes('/v1/patient-records/')) return labResponse;
+      return Promise.resolve({ data: {} });
+    });
+
+    // A non-lab edit is queued, then a lab edit starts its own PATCH.
+    fireEvent.change(screen.getByDisplayValue('howell@example.org'),
+      { target: { value: 'new@example.org' } });
+    await openLabsTab();
+    fireEvent.change(screen.getByDisplayValue('3.1'), { target: { value: '5.5' } });
+    await act(async () => { vi.advanceTimersByTime(600); });
+    // The page's 2s autosave lands while the lab request is still open.
+    await act(async () => { vi.advanceTimersByTime(2100); });
+
+    // The lab response predates that page edit: it carries the old email.
+    await act(async () => {
+      resolveLab({ data: {
+        patient_info: { ...PATIENT, email: 'howell@example.org', anc_thousand_per_ul: 5.5 },
+        write: { applied: ['anc_thousand_per_ul'] },
+      } });
+      await Promise.resolve();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'General' }));
+    expect(screen.getByDisplayValue('new@example.org')).toBeInTheDocument();
+  });
+
   it('never sends an alias in the PATCH', async () => {
     await renderAndLoad();
     await openLabsTab();

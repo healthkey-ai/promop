@@ -438,10 +438,12 @@ export default function PatientDetail({
     if (!labsStore) return undefined;
     void labsStore.load();
     return labsStore.onUpdated((result) => {
-      adoptServerRecord(
-        result.patient_info as Record<string, unknown>,
-        saveRevisionRef.current,
-      );
+      // The lab response may have been built before the page's last PATCH.
+      // Adopting it without a request marker keeps the page's confirmed
+      // non-lab writes over the older record instead of clearing them; the
+      // store's lab fields are not in that confirmed set, so they still move
+      // (#2578 review).
+      adoptServerRecord(result.patient_info as Record<string, unknown>);
     });
   }, [labsStore, adoptServerRecord]);
 

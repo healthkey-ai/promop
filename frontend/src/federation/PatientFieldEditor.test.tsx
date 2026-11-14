@@ -1061,6 +1061,39 @@ describe('single unit display (#5704)', () => {
   });
 });
 
+describe('a read-only source pair (#2577)', () => {
+  it('names the stored unit, not the descriptor recipe unit', async () => {
+    const fields = {
+      serum_bilirubin_level_direct: {
+        writable: true, target: 'patient_record', control: 'number',
+        label: 'Direct Bilirubin', value_kind: 'number',
+        unit: 'mg/dL', projection: { unit: 'mg/dL' },
+        unit_options: [
+          { value: 'MG/DL', label: 'mg/dL' },
+          { value: 'UMOL/L', label: 'umol/L' },
+        ],
+      },
+      serum_bilirubin_level_direct_units: {
+        writable: false, kind: 'selectable', qualifies: 'serum_bilirubin_level_direct',
+        unit_options: [
+          { value: 'MG/DL', label: 'mg/dL' },
+          { value: 'UMOL/L', label: 'umol/L' },
+        ],
+      },
+    };
+    const { store } = await setup(fields, {
+      serum_bilirubin_level_direct: 17.1,
+      serum_bilirubin_level_direct_units: 'UMOL/L',
+    }, false);
+    render(<PatientFieldEditor store={store} name="serum_bilirubin_level_direct"
+      label="Direct Bilirubin" />);
+
+    expect(screen.getByText('17.1')).toBeVisible();
+    expect(screen.getByText('umol/L')).toBeVisible();
+    expect(screen.queryByText('mg/dL')).not.toBeInTheDocument();
+  });
+});
+
 describe('source-pair unit picker (#5700)', () => {
   const pairFields = {
     hemoglobin_level: {
