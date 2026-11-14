@@ -84,7 +84,7 @@ def test_a_patient_sees_only_their_own_conditions():
     response = signed_in(mine).get('/api/v1/phr/diagnoses/')
 
     assert response.status_code == 200
-    assert response.data == {'cancer': [], 'other': []}
+    assert response.data == {'cancer': [], 'other': [], 'historical_procedures': []}
 
 
 # ---------------------------------------------------------------- about
