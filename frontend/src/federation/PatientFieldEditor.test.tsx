@@ -408,6 +408,99 @@ describe('tab choices for a descriptor without options', () => {
   });
 });
 
+describe('a tab that declares its own closed answer set', () => {
+  it('renders a numeric scale as the tab picker and still writes a number', async () => {
+    const user = userEvent.setup();
+    const { store, patch } = await setup({
+      ecog_performance_status: { writable: true, target: 'patient_record',
+        control: 'number', value_kind: 'number', label: 'ECOG Performance Status' },
+    }, { ecog_performance_status: 2 });
+    render(<PatientFieldEditor store={store} name="ecog_performance_status"
+      label="ECOG Performance Status" controlType="select"
+      options={['0', '1', '2', '3', '4', '5']} />);
+
+    // A number box would accept values the scale does not have.
+    expect(screen.queryByRole('spinbutton')).not.toBeInTheDocument();
+    await user.click(screen.getByRole('combobox'));
+    await user.click(screen.getByRole('option', { name: '4' }));
+    await act(async () => { await store.flush(); });
+    // The numeric column receives a number, not the option's "4" string.
+    expect(patch.mock.calls.at(-1)?.[1]).toEqual({ ecog_performance_status: 4 });
+  });
+
+  it('clears a numeric picker to null, not an empty string', async () => {
+    const user = userEvent.setup();
+    const { store, patch } = await setup({
+      ecog_performance_status: { writable: true, target: 'patient_record',
+        control: 'number', value_kind: 'number', label: 'ECOG Performance Status' },
+    }, { ecog_performance_status: 2 });
+    render(<PatientFieldEditor store={store} name="ecog_performance_status"
+      label="ECOG Performance Status" controlType="select"
+      options={['0', '1', '2']} />);
+
+    await user.click(screen.getByRole('combobox'));
+    await user.click(screen.getByRole('option', { name: '— None —' }));
+    await act(async () => { await store.flush(); });
+    expect(patch.mock.calls.at(-1)?.[1]).toEqual({ ecog_performance_status: null });
+  });
+
+  it('does not erase a numeric answer when the choice is not a number', async () => {
+    const user = userEvent.setup();
+    const { store, patch } = await setup({
+      ecog_performance_status: { writable: true, target: 'patient_record',
+        control: 'number', value_kind: 'number', label: 'ECOG Performance Status' },
+    }, { ecog_performance_status: 2 });
+    render(<PatientFieldEditor store={store} name="ecog_performance_status"
+      label="ECOG Performance Status" controlType="select"
+      options={['0', '1', 'Unknown']} />);
+
+    await user.click(screen.getByRole('combobox'));
+    await user.click(screen.getByRole('option', { name: 'Unknown' }));
+    await act(async () => { await store.flush(); });
+    // Sent as-is so the server refuses it visibly; null would silently clear.
+    expect(patch.mock.calls.at(-1)?.[1]).toEqual({ ecog_performance_status: 'Unknown' });
+  });
+
+  it('keeps the declared email input type', async () => {
+    // Production shape: the profile email is a patient_record write with
+    // projection_target person (write_descriptor), so the branch is live.
+    const { store } = await setup({
+      email: { writable: true, target: 'patient_record',
+        control: 'text', value_kind: 'string', label: 'Email' },
+    }, { email: 'patient@example.com' });
+    const { container } = render(<PatientFieldEditor store={store} name="email"
+      label="Email" controlType="email" />);
+
+    expect(container.querySelector('input')?.getAttribute('type')).toBe('email');
+  });
+
+  it('keeps a declared multiselect a single select until #2574 lands', async () => {
+    // Deliberate: multi-answer writes are not supported yet, so a tab that
+    // declares multiselect over a non-multiple descriptor gets one select.
+    const { store } = await setup({
+      protein_expressions: { writable: true, target: 'patient_record',
+        control: 'text', value_kind: 'string', label: 'Protein Expressions' },
+    }, { protein_expressions: 'CD5 +ve' });
+    render(<PatientFieldEditor store={store} name="protein_expressions"
+      label="Protein Expressions" controlType="multiselect"
+      options={['CD5 +ve', 'CD5 -ve']} />);
+
+    expect(screen.getByRole('combobox')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /CD5/ })).not.toBeInTheDocument();
+  });
+
+  it('never turns a date into a list of strings', async () => {
+    const { store } = await setup({
+      diagnosis_date: { writable: true, target: 'patient_record',
+        control: 'date', value_kind: 'date', label: 'Diagnosis Date' },
+    }, { diagnosis_date: '2025-01-02' });
+    const { container } = render(<PatientFieldEditor store={store} name="diagnosis_date"
+      label="Diagnosis Date" controlType="select" options={['2025-01-02']} />);
+
+    expect(container.querySelector('input')?.getAttribute('type')).toBe('date');
+  });
+});
+
 describe('read-only multiple answers', () => {
   it('lists an array value by its labels instead of JSON', async () => {
     const { store } = await setup({

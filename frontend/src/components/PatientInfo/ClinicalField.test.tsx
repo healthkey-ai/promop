@@ -105,6 +105,19 @@ describe('ClinicalField federated editor', () => {
 
     expect(federatedEditorProps).toHaveBeenCalledWith(expect.objectContaining({
       name: 'post_transformation_outcome', options: ['Complete response', 'Progression'],
+      controlType: 'select',
+    }));
+  });
+
+  it('forwards the declared input type so an email keeps its keyboard', () => {
+    render(
+      <PatientFormContext.Provider value={{} as never}>
+        <ClinicalField label="Email" name="email" type="email" value="a@b.c" onChange={vi.fn()} />
+      </PatientFormContext.Provider>,
+    );
+
+    expect(federatedEditorProps).toHaveBeenCalledWith(expect.objectContaining({
+      name: 'email', controlType: 'email',
     }));
   });
 });
