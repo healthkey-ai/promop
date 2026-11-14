@@ -254,7 +254,7 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
   // name the unit the pair is actually stored in (#2577): a direct bilirubin
   // 17.1 UMOL/L is not 17.1 mg/dL.
   const storedUnitLabel = storedUnit
-    ? (unitOptions.find((option) => option.value === storedUnit)?.label ?? storedUnit)
+    ? unitOptions.find((option) => option.value === storedUnit)?.label
     : undefined;
   const displayUnit = storedUnitLabel ?? field.unit ?? field.projection?.unit;
   const chosenUnit = dated

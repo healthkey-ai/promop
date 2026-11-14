@@ -85,9 +85,8 @@ def test_the_descriptor_exposes_the_pair_and_a_read_only_alias():
     assert pair['projection']['unit_from'] == units.UNIT_FIELD
     assert pair['projection']['unit_by_code']['UMOL/L']['label'] == 'umol/L'
 
-    # The shared source-pair editor needs the stored codes, not the display
-    # labels the generic list uses: a label is not one of the column's choices,
-    # so the final stored-code filter would drop the picker entirely (#2577).
+    # The shared source-pair editor needs the stored codes, not display labels;
+    # these are the column's choices and the picker uses them (#2577).
     expected_units = [
         {'value': 'MG/DL', 'label': 'mg/dL'},
         {'value': 'UMOL/L', 'label': 'umol/L'},

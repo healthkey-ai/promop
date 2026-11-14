@@ -91,6 +91,19 @@ def test_the_provider_record_read_reports_write_access(staff):
     assert response.data['write_enabled'] is True
 
 
+def test_the_provider_record_read_reports_read_only(staff, monkeypatch):
+    import patient_portal.api.views as views
+
+    monkeypatch.setattr(views, '_caller_may_write_patient',
+                        lambda request, person_id: False)
+    record = PatientRecordFactory()
+
+    response = staff.get(f'/api/patient-info/{record.person_id}/')
+
+    assert response.status_code == 200, response.data
+    assert response.data['write_enabled'] is False
+
+
 def test_a_caller_without_write_access_sees_them_read_only():
     record = PatientRecordFactory()
     client = APIClient()

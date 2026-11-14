@@ -2014,21 +2014,6 @@ def build_writable_field_descriptor():
             else:
                 del target['unit_options']
 
-    # Direct bilirubin's pair can be stored in mg/dL or µmol/L and has no
-    # canonical column, so a value-only write would keep the stored scale. The
-    # generic list above uses display labels (`mg/dL`) while the column stores
-    # codes (`MG/DL`), so the stored-code filter removed both options. Put the
-    # codes back after it: the shared source-pair editor needs two real choices
-    # or it silently writes the number in the old unit (#2577).
-    direct_units = [
-        {'value': code, 'label': label}
-        for code, label in direct_bilirubin_units.UNIT_LABELS.items()
-    ]
-    for field in (direct_pair, direct_unit):
-        entry = descriptor.get(field)
-        if entry is not None:
-            entry['unit_options'] = direct_units
-
     # The envelope goes last so no field block can overwrite it. It is a dict
     # like any entry, but it is not one: `kind` is absent on purpose, and the
     # form enrichment skips reserved keys.

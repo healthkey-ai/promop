@@ -258,6 +258,27 @@ describe('PatientDetail save — the edit, not the record', () => {
     expect(api.patch).not.toHaveBeenCalled();
   });
 
+  it('shows the standalone Labs rows read-only when the record read says so (#2577)', async () => {
+    (api.get as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
+      if (url.includes('writable-fields')) return Promise.resolve({ data: DESCRIPTORS });
+      if (url.includes('/patient-info/')) {
+        return Promise.resolve({
+          data: {
+            patient_info: { ...PATIENT }, user: null,
+            patient_name: PATIENT.patient_name, write_enabled: false,
+          },
+        });
+      }
+      return Promise.resolve({ data: [] });
+    });
+    await renderAndLoad();
+    fireEvent.click(screen.getByRole('button', { name: 'Labs' }));
+
+    await waitFor(() => expect(screen.getByText('3.1')).toBeInTheDocument());
+    expect(screen.queryByRole('spinbutton', { name: /ANC/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Save result' })).not.toBeInTheDocument();
+  });
+
   it('keeps a confirmed page edit when a late lab response arrives (#2578 review)', async () => {
     await renderAndLoad();
     vi.useFakeTimers({ shouldAdvanceTime: true });
