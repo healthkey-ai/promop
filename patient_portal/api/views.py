@@ -931,6 +931,34 @@ def _is_loinc_system(system):
     return host == 'loinc.org' or host.endswith('.loinc.org')
 
 
+def _assessment_codings(observation):
+    """The dict codings of a FHIR Observation's ``code``, from upload input.
+
+    A bundle's fields need not be the shapes FHIR prescribes, and a raise here
+    sits inside the per-patient try: one malformed coding would roll back and
+    lose the whole patient. A non-dict ``code``, a non-list ``coding`` and
+    non-dict entries are all skipped.
+    """
+    code = observation.get('code') if isinstance(observation, dict) else None
+    codings = code.get('coding') if isinstance(code, dict) else None
+    if not isinstance(codings, list):
+        return []
+    return [coding for coding in codings if isinstance(coding, dict)]
+
+
+def _coding_strings(coding):
+    """``(system, code)`` of a FHIR ``Coding``, as strings, never raising.
+
+    ``{"system": null}`` and ``{"code": ["x"]}`` are upload input; an empty
+    string reads as "no value" for both.
+    """
+    system, code = coding.get('system'), coding.get('code')
+    return (
+        system if isinstance(system, str) else '',
+        code if isinstance(code, str) else '',
+    )
+
+
 @method_decorator(csrf_exempt, name='dispatch')
 class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = PatientRecordSerializer
@@ -4014,7 +4042,6 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                     }
                     _pending_observations = []
                     for _obs_fhir in data['observations']:
-                        _obs_fhir_code = _obs_fhir.get('code', {})
                         _obs_date_str = _obs_fhir.get('effectiveDateTime') or _obs_fhir.get('effectivePeriod', {}).get('start')
                         if not _obs_date_str:
                             continue
@@ -4028,13 +4055,11 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
                         _obs_src = None
 
                         # Check for LOINC-coded assessment observations
-                        for _coding in _obs_fhir_code.get('coding', []):
+                        for _coding in _assessment_codings(_obs_fhir):
                             # Upload input: a coding's fields need not be strings,
                             # and a raise here loses the whole patient (the call
                             # sits inside the per-patient try).
-                            _sys = _coding.get('system', '')
-                            _sys = _sys if isinstance(_sys, str) else ''
-                            _code = _coding.get('code', '')
+                            _sys, _code = _coding_strings(_coding)
                             if _is_loinc_system(_sys) and _code in _ASSESSMENT_LOINC:
                                 _obs_concept = _cc_by_loinc(_code)
                                 _obs_src = _code

@@ -6,12 +6,14 @@
 * The assessment reader accepted any `Coding.system` that contained
   `'loinc.org'` (`py/incomplete-url-substring-sanitization`), so
   `https://example.test/loinc.org` read as LOINC. The system is matched on its
-  parsed host now.
+  parsed host now, and the codings it reads are normalised: the loop sits
+  inside the per-patient try, so a shape FHIR does not prescribe would drop the
+  patient rather than skip the coding.
 """
 import pytest
 from rest_framework.test import APIClient
 
-from patient_portal.api.views import _is_loinc_system
+from patient_portal.api.views import _assessment_codings, _coding_strings, _is_loinc_system
 
 # The probe request traverses AuditLogMiddleware, which writes an AuditEvent.
 pytestmark = pytest.mark.django_db
@@ -76,3 +78,28 @@ def test_auth_test_reports_the_step_it_reached(settings, monkeypatch):
 
     assert response.status_code == 500
     assert response.data['step'] == 'start'
+
+
+@pytest.mark.parametrize('observation', [
+    {}, {'code': None}, {'code': 'LOINC'}, {'code': {}}, {'code': {'coding': None}},
+    {'code': {'coding': {}}}, {'code': {'coding': [None, 1, 'x']}},
+])
+def test_a_malformed_code_yields_no_codings(observation):
+    assert _assessment_codings(observation) == []
+
+
+def test_a_code_with_a_bad_coding_keeps_the_good_one():
+    codings = [None, {'system': None, 'code': None}, {'system': 'http://loinc.org', 'code': '89247-1'}]
+    assert _assessment_codings({'code': {'coding': codings}}) == [
+        {'system': None, 'code': None}, {'system': 'http://loinc.org', 'code': '89247-1'}]
+
+
+@pytest.mark.parametrize('coding,expected', [
+    ({'system': 'http://loinc.org', 'code': '89247-1'}, ('http://loinc.org', '89247-1')),
+    ({'system': None, 'code': None}, ('', '')),
+    ({'system': {}, 'code': ['89247-1']}, ('', '')),
+    ({'system': 42, 'code': 718}, ('', '')),
+    ({}, ('', '')),
+])
+def test_a_coding_is_read_as_strings(coding, expected):
+    assert _coding_strings(coding) == expected

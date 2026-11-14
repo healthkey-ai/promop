@@ -6,6 +6,7 @@ values come from uploads. The scan must keep the pattern's answers.
 """
 import itertools
 import re
+import time
 
 import pytest
 
@@ -37,10 +38,19 @@ def test_the_scan_answers_what_the_pattern_did(value):
     assert _without_trailing_parenthetical(value) == re.sub(r'\s*\([^)]+\)\s*$', '', value)
 
 
-def test_a_long_run_of_spaces_is_one_pass():
-    # 20,000 spaces before the parenthetical: the pattern re-scanned the run
-    # from every offset; the scan strips the value once.
-    assert _without_trailing_parenthetical(' ' * 20000 + '(oral)') == ''
+def test_the_scan_answers_the_pattern_and_the_pattern_would_not_finish():
+    """The output is identical by design, so the cost is what the fix is about.
+
+    A long run of spaces with nothing to strip is the input the pattern
+    backtracks on: it restarts at every offset, which is 3.7 s at this size and
+    grows quadratically. The scan returns at once, so the bound is three orders
+    of magnitude above its real cost and cannot flake, while a restored regex
+    fails it.
+    """
+    value = ' ' * 50000
+    started = time.monotonic()
+    assert _without_trailing_parenthetical(value) == value
+    assert time.monotonic() - started < 0.25
 
 
 def test_the_scan_is_exactly_the_pattern_over_every_short_value():

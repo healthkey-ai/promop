@@ -70,10 +70,11 @@ def run_bulk_resolve(run_id: uuid.UUID, person_ids: list[int] | None = None) -> 
                 error_details.append({'person_id': pid, 'error': str(exc)})
                 # The run row names the person; the log line must not, because
                 # the id comes from a PatientRecord query and CodeQL reads it
-                # as private data (py/clear-text-logging-sensitive-data).
+                # as private data (py/clear-text-logging-sensitive-data). The
+                # position is enough to line a log entry up with error_detail.
                 logger.exception(
-                    'Source-code resolution failed for one person in run %s; '
-                    'the run row records which person', run_id)
+                    'Source-code resolution failed for entry %d of %d in run %s',
+                    i + 1, len(person_ids), run_id)
 
             run.done = i + 1
             run.resolved = total_resolved

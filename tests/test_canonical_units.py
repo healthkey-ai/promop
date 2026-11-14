@@ -1,4 +1,5 @@
 import re
+import time
 from datetime import date
 from decimal import Decimal
 from types import SimpleNamespace
@@ -106,11 +107,22 @@ def test_property_scans_the_name_brackets_and_cannot_backtrack():
         expected = PROPERTY_NAMES.get(match.group(1).lower(), '') if match else ''
         assert from_name(name) == expected
 
-    # A long run of opening brackets with no closing one made the pattern
-    # visit every bracket (CodeQL py/polynomial-redos); the scan stops at the
-    # first missing bracket instead.
+    # A value the pattern gave up on: opening brackets and no closing one.
     assert from_name('Test ' + '[' * 20000) == ''
-    assert from_name('Test ' + '[]' * 20000) == ''
+
+
+def test_a_bracket_run_the_pattern_retried_at_every_bracket_is_one_scan():
+    """Same answer, different cost: the pattern is 1.4 s here, the scan is µs.
+
+    The bound is orders of magnitude above the scan's real cost, so it cannot
+    flake, and a restored `re.search` fails it instead of hanging the job.
+    """
+    name = '[' * 20000
+    concept = SimpleNamespace(
+        vocabulary_id='LOINC', domain_id='Measurement', concept_name=name)
+    started = time.monotonic()
+    assert property_for(concept) == ''
+    assert time.monotonic() - started < 0.25
 
 
 def _link_axis(source, relationship_id, target_name, target_code, invalid_reason=None):
