@@ -909,9 +909,10 @@ def _is_loinc_system(system):
 
     Compared on the parsed host, not by substring: ``'loinc.org'`` may appear
     anywhere in a URL (CodeQL ``py/incomplete-url-substring-sanitization``),
-    and ``https://example.test/loinc.org`` is not LOINC. A value with no
-    scheme ("loinc.org", "loinc.org/x") is read as a host plus path, which is
-    what the substring test accepted before.
+    and neither ``https://example.test/loinc.org`` nor
+    ``example.test?next=www.loinc.org`` is LOINC. A value with no ``://``
+    ("loinc.org", "loinc.org/x") is parsed as a host plus path, so a query, a
+    fragment or an opaque URI cannot stand in for one.
 
     Never raises: a bundle's ``system`` is upload input, and one malformed
     value must not fail the patient the way an unparsable URL would.
@@ -922,12 +923,10 @@ def _is_loinc_system(system):
     if not value:
         return False
     try:
-        host = (urlsplit(value).hostname or '').lower()
+        host = (urlsplit(value if '://' in value else '//' + value).hostname or '').lower()
     except ValueError:
         # e.g. 'http://[x': an authority urlsplit refuses to read.
         return False
-    if not host and '://' not in value:
-        host = value.split('/', 1)[0].lower()
     return host == 'loinc.org' or host.endswith('.loinc.org')
 
 

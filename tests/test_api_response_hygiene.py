@@ -41,6 +41,11 @@ def test_a_loinc_system_is_recognised(system):
     'https://example.test/?next=http://loinc.org',
     'http://loinc.org.example.test',
     'https://notloinc.org',
+    # A host read from text that is not a host: query, fragment, opaque URI.
+    'example.test?next=www.loinc.org',
+    'loinc.org.example.test?next=.loinc.org',
+    'urn:example.loinc.org',
+    'mailto:loinc.org',
     # Upload input: an authority urlsplit refuses must decline, not raise.
     'http://[x',
 ])
