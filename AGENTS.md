@@ -565,8 +565,8 @@ gh issue close <n> --repo healthkey-ai/promop --comment \
 
 Keep `Fixes #N` in the PR body as the reference a reader follows from the issue.
 Automatic closure on a later promotion needs a closing keyword in a commit message
-that reaches `dev`, or in the promotion PR's description; the PR body of the
-`cb-v2` PR itself does it nothing, and a squash promotion does not preserve the
+that reaches `dev`, or in the promotion PR's description; the body of the `cb-v2`
+PR itself counts for nothing there, and a squash promotion does not preserve the
 original commits. So do not rely on it. An issue left open beside a merged `cb-v2`
 PR is not evidence of unfinished work; check for the merge before picking it up.
 
