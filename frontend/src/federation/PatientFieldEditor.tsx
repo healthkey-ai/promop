@@ -42,7 +42,11 @@ function todayIso() {
 
 /** Unit labels accept the same micro spellings as the server's pair reader. */
 function normaliseUnitLabel(value: string): string {
-  return value.trim().toLowerCase().replace(/[μµ]/g, 'u').replace(/\s+/g, '');
+  return value.trim().toLowerCase()
+    .replace(/[μµ]/g, 'u')
+    .replace(/³/g, '3').replace(/⁹/g, '9')
+    .replace(/\^/g, '*')
+    .replace(/\s+/g, '');
 }
 
 interface DependencyGraph {
