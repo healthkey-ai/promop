@@ -89,4 +89,4 @@ def test_the_entry_can_still_be_shared_and_the_section_has_one_shape():
     catalog = sharing.catalog(record.person, record)
     items = next(s for s in catalog if s['id'] == 'diagnoses')['items']
     assert f'condition-{transplant.pk}' in {i['key'] for i in items}
-    assert set(diagnoses(record.person, record)) == {'cancer', 'other', 'historical_procedures'}
+    assert set(diagnoses(record.person, record)) == {'cancer', 'other', 'other_hidden', 'historical_procedures'}

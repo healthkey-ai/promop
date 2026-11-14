@@ -9,8 +9,10 @@ from __future__ import annotations
 import logging
 import re
 from collections.abc import Iterable
+from datetime import date
 from typing import Any
 
+from django.utils import timezone
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -155,6 +157,43 @@ _CANCER_WORDS = re.compile(
 # transplant status). It records a procedure that was done, not a condition to
 # manage, so the PHR lists it apart from the diagnoses (#2567).
 _ICD10_HISTORICAL_PROCEDURE = re.compile(r'^Z94(\.|$|[0-9A-Z])', re.IGNORECASE)
+
+
+# Why a condition is listed apart from the active diagnoses (#2568). The
+# source's own words decide; a row with none of them stays where it is, since
+# no data (synced before #2565, or never sent) is not a reason to hide it.
+HIDDEN_REASONS = {
+    'entered_in_error': 'Entered in error',
+    'refuted': 'Refuted',
+    'not_confirmed': 'Not confirmed',
+    'care_plan_item': 'Care-plan item',
+    'resolved': 'Resolved',
+}
+_NOT_CONFIRMED = {'unconfirmed', 'provisional', 'differential'}
+_RESOLVED = {'resolved', 'inactive', 'remission'}
+_REAL_CATEGORIES = {'problem-list-item', 'encounter-diagnosis'}
+
+
+def _codes(value: str | None) -> set[str]:
+    return {part.strip().lower() for part in (value or '').split(',') if part.strip()}
+
+
+def hidden_reason(row: ConditionOccurrence, today: date) -> str | None:
+    """The reason a condition is not an active diagnosis, most definite first."""
+    verification = _codes(row.condition_verification_status)
+    if 'entered-in-error' in verification:
+        return 'entered_in_error'
+    if 'refuted' in verification:
+        return 'refuted'
+    if verification & _NOT_CONFIRMED:
+        return 'not_confirmed'
+    categories = _codes(row.condition_category)
+    if categories and not categories & _REAL_CATEGORIES:
+        return 'care_plan_item'
+    if _codes(row.condition_clinical_status) & _RESOLVED or (
+            row.condition_end_date and row.condition_end_date <= today):
+        return 'resolved'
+    return None
 
 
 def is_historical_procedure(row: ConditionOccurrence) -> bool:
@@ -482,12 +521,15 @@ def diagnoses(person, record: PatientRecord | None, *, log_unresolved: bool = Fa
         ConditionOccurrence, rows, type_attr='condition_type_concept', date_attr='condition_start_date'
     )
     families: dict[str, list] = {}
-    other_rows, historical_rows = [], []
+    other_rows, historical_rows, hidden_rows = [], [], []
+    today = timezone.localdate()
     for row in rows:
         if is_cancer_condition(row):
             families.setdefault(cancer_family(row), []).append(row)
         elif is_historical_procedure(row):
             historical_rows.append(row)
+        elif hidden_reason(row, today):
+            hidden_rows.append(row)
         else:
             other_rows.append(row)
     families, general_names = _same_disease(families)
@@ -549,9 +591,11 @@ def diagnoses(person, record: PatientRecord | None, *, log_unresolved: bool = Fa
         ).values_list('subject_key', flat=True)
     )
 
-    def cards(card_rows):
-        """One entry per condition, dated from its first record, newest first."""
-        cards, seen = [], set()
+    def cards(card_rows, *, skip=frozenset(), reasons=False):
+        """One entry per condition, dated from its first record, newest first.
+        `skip` names conditions already listed elsewhere; `reasons` adds why
+        a hidden one is hidden."""
+        cards, seen = [], set(skip)
         for row in card_rows:
             name = _condition_name(row)
             if not name:
@@ -570,11 +614,19 @@ def diagnoses(person, record: PatientRecord | None, *, log_unresolved: bool = Fa
                 'status': 'Resolved' if row.condition_end_date else _text(row.condition_status_source_value),
                 'source': sources[row.pk] if dated else {**sources[row.pk], 'date': None},
             }
+            if reasons:
+                reason = hidden_reason(row, today)
+                entry.update(reason=reason, reason_label=HIDDEN_REASONS[reason])
             cards.append({k: v for k, v in entry.items() if v is not None})
         cards.sort(key=lambda e: e.get('date') or '9999', reverse=True)
         return cards
 
-    return {'cancer': cancer, 'other': cards(other_rows), 'historical_procedures': cards(historical_rows)}
+    shown = cards(other_rows)
+    # A condition with a live record is shown, not hidden because an older record of it ended.
+    hidden = cards(hidden_rows, skip={c['name'].lower() for c in shown}, reasons=True)
+
+    return {'cancer': cancer, 'other': shown, 'other_hidden': hidden,
+            'historical_procedures': cards(historical_rows)}
 
 
 class DiagnosesView(PhrView):

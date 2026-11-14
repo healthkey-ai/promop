@@ -569,8 +569,9 @@ class SharedDiagnosesView(SharedRecordMixin, DiagnosesView):
 
     def share_filter(self, data):
         ok = allowed(self.share.selection, 'diagnoses')
-        return {key: [d for d in data[key] if ok(d['id'])]
-                for key in ('cancer', 'other', 'historical_procedures')}
+        # What the provider sent but the patient sees apart is not shared.
+        return {key: [d for d in data[key] if ok(d['id'])] if key != 'other_hidden' else []
+                for key in ('cancer', 'other', 'other_hidden', 'historical_procedures')}
 
 
 class SharedTherapyView(SharedRecordMixin, TherapyView):
