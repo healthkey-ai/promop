@@ -136,7 +136,9 @@ the identity: a real row and a provisional row for the same event are two
 rows until the provisional one is promoted, at which point the next collapse
 folds them. On the bulk write path (`_plan_bulk_upsert`), a proposal that
 matches a real row for the same content key folds into that real row: the real
-row survives and the proposal leaves no row (#2543).
+row survives and the proposal leaves no row (#2543). The FHIR sync keeps the
+same survivor and, when it rewrites a provisional row, clears its confidence: a
+sync is a real EHR write, so the row stops being a proposal (#2581).
 
 Unit normalization on approval (`normalize_measurement_units`) runs on
 promoted rows as on re-pointed ones. Provisional rows are **not** normalized

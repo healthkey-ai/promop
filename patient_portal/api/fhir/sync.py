@@ -258,10 +258,28 @@ def _is_daily_rollup(obs):
     return False
 
 
-def _same_attribution_extras(rows):
-    """Later rows from the same hospital as the first; another hospital's row
-    is a separate fact, not a duplicate."""
-    return [row for row in rows[1:] if row.attribution == rows[0].attribution]
+def _is_real_row(row, concept_field):
+    """A stored row holds an approved fact: no proposal score, a mapped concept.
+
+    The same predicate the bulk planner uses (#2543), applied to the sync paths
+    so a proposal never outlives the approved fact it duplicates (#2581).
+    """
+    return getattr(row, 'confidence', None) is None and getattr(row, concept_field) != 0
+
+
+def _preferred_keep(rows, concept_field):
+    """Keep the first approved row; fall back to the first row if none is.
+
+    ``rows`` are ordered by pk. A later real row is the survivor when an earlier
+    provisional one matches the same event.
+    """
+    return next((row for row in rows if _is_real_row(row, concept_field)), rows[0])
+
+
+def _same_attribution_extras(rows, keep):
+    """Later rows from the same hospital as *keep*; another hospital's row is a
+    separate fact, not a duplicate."""
+    return [row for row in rows if row is not keep and row.attribution == keep.attribution]
 
 
 class FhirSyncRequestSerializer(serializers.Serializer):
@@ -832,7 +850,8 @@ class FhirSyncView(APIView):
                     ))
                     continue
 
-                keep, extras = existing[0], _same_attribution_extras(existing)
+                keep = _preferred_keep(existing, 'measurement_concept_id')
+                extras = _same_attribution_extras(existing, keep)
                 if extras:  # collapse historical stacked rows for this concept/day
                     extra_ids = [m.measurement_id for m in extras]
                     ProvenanceRecord.objects.filter(
@@ -845,6 +864,7 @@ class FhirSyncView(APIView):
                 # -- and writing 0 over a good concept would lose curation that
                 # already happened.
                 next_cid = cid or keep.measurement_concept_id
+                promoted = keep.confidence is not None
                 changed = (
                     keep.measurement_concept_id != next_cid
                     or _norm_num(keep.value_as_number) != _norm_num(o['value'])
@@ -856,9 +876,13 @@ class FhirSyncView(APIView):
                     or keep.range_low != o['range_low']
                     or keep.range_high != o['range_high']
                 )
-                if changed:
+                if changed or promoted:
                     # Concept updated in place, so approving a mapping upgrades
                     # the stored row instead of stranding a duplicate beside it.
+                    # The sync is a real EHR write: a proposal it rewrites is no
+                    # longer a proposal (#2581).
+                    if promoted:
+                        keep.confidence = None
                     keep.measurement_concept_id = next_cid
                     keep.value_as_number = o['value']
                     keep.measurement_datetime = o['dt']
@@ -869,12 +893,15 @@ class FhirSyncView(APIView):
                     keep.range_low = o['range_low']
                     keep.range_high = o['range_high']
                     keep._skip_patient_record_refresh = True
-                    keep.save(update_fields=['measurement_concept_id',
-                                             'value_as_number', 'measurement_datetime',
-                                             'value_as_string', 'value_as_concept',
-                                             'unit_source_value', 'value_source_value',
-                                             'range_low', 'range_high'])
-                if changed or extras:
+                    fields = ['measurement_concept_id',
+                              'value_as_number', 'measurement_datetime',
+                              'value_as_string', 'value_as_concept',
+                              'unit_source_value', 'value_source_value',
+                              'range_low', 'range_high']
+                    if promoted:
+                        fields.append('confidence')
+                    keep.save(update_fields=fields)
+                if changed or promoted or extras:
                     touched.append(keep.measurement_id)
             inserted = self._bulk_insert(
                 Measurement, 'measurement_id', new_rows, source_user_id, person, org)
@@ -1141,11 +1168,13 @@ class FhirSyncView(APIView):
         resolves. If a row already exists for that key, its concept is updated in
         place when it changed (so a vocabulary load upgrading 'No matching
         concept' to a real concept doesn't strand a duplicate) and any stacked
-        duplicates are collapsed onto the earliest row; otherwise the row is
-        inserted. `rows` is a list of unsaved model instances (person already
-        set). `refresh_fields` are further columns a re-sync fills on a matched
-        row, but only with a value the source gave (never blanking a stored one).
-        Returns touched + inserted pk ids."""
+        duplicates are collapsed onto the first approved row (null confidence and
+        a mapped concept), or onto the earliest when none is; a provisional row
+        it rewrites is promoted, because the sync is a real EHR write (#2581).
+        Otherwise the row is inserted. `rows` is a list of unsaved model
+        instances (person already set). `refresh_fields` are further columns a
+        re-sync fills on a matched row, but only with a value the source gave
+        (never blanking a stored one). Returns touched + inserted pk ids."""
         if not rows:
             return []
         from omop_core.services.cancer_details import EVENT_FIELDS
@@ -1170,7 +1199,8 @@ class FhirSyncView(APIView):
                 if not existing:
                     new_rows.append(inst)
                     continue
-                keep, extras = existing[0], _same_attribution_extras(existing)
+                keep = _preferred_keep(existing, cid_field)
+                extras = _same_attribution_extras(existing, keep)
                 if extras:  # collapse historical stacked rows for this event
                     extra_ids = [getattr(m, pk_field) for m in extras]
                     ProvenanceRecord.objects.filter(
@@ -1188,6 +1218,11 @@ class FhirSyncView(APIView):
                     if value is not None and getattr(keep, field) != value:
                         setattr(keep, field, value)
                         changed.append(field)
+                if getattr(keep, 'confidence', None) is not None:
+                    # The sync is a real EHR write; the row it rewrites is no
+                    # longer a proposal (#2581).
+                    keep.confidence = None
+                    changed.append('confidence')
                 if changed:
                     keep._skip_patient_record_refresh = True
                     keep.save(update_fields=changed)
