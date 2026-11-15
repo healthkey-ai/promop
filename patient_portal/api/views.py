@@ -7880,6 +7880,15 @@ def _key_class(attribution, organization):
 
 
 
+def _is_real_row(confidence, concept_id):
+    """A stored row holds an approved fact: no proposal score, a mapped concept.
+
+    One predicate for the three sites that must agree — the content keep choice,
+    the real-beats-provisional branch, and the keyed-update guard (#2543).
+    """
+    return confidence is None and concept_id != 0
+
+
 def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances,
                       organization=None, content_match=True, writable=(),
                       may_write_confidence=False):
@@ -7887,7 +7896,9 @@ def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances,
 
     Same three outcomes as ``_upsert_clinical``: an event already on file is left
     in place (its concept updated when it changed, its stacked historical
-    duplicates collapsed onto the earliest row), and anything else is inserted.
+    duplicates collapsed onto the first real row — null confidence and a mapped
+    concept — or onto the earliest when every candidate is provisional), and
+    anything else is inserted.
     Only the concept is rewritten on a matched row — every other column is left
     as stored, so a re-run cannot quietly overwrite a value someone corrected.
     Repeats of one event *within* the batch collapse to a single row, last
@@ -7998,6 +8009,21 @@ def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances,
         for key, pks in existing.items()
     }
 
+    def preferred_keep(pks):
+        """The row a content match keeps: a mapped approved row wins, else the first.
+
+        "Approved" means null confidence and a mapped concept (``_is_real_row``);
+        an unmapped row at concept 0 is not evidence, so a proposal may still
+        lift it. The earliest row can be a provisional proposal while a later
+        row holds the approved fact (append-only writes produce that order);
+        keeping the earliest would let the next proposal rewrite it and delete
+        the real row as a duplicate (#2543).
+        """
+        for pk in pks:
+            if _is_real_row(confidence_by_pk[pk], cid_by_pk[pk]):
+                return pk
+        return pks[0]
+
     skipped = {}
     for key in list(existing):
         pks = existing[key]
@@ -8012,25 +8038,12 @@ def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances,
             continue
         del existing[key]
         if by_class[UNATTRIBUTED]:
-            skipped[key] = by_class[UNATTRIBUTED][0]
+            skipped[key] = preferred_keep(by_class[UNATTRIBUTED])
 
     to_insert, row_slots = [], [None] * len(instances)
     insert_slot, collapse_ids, to_update, touched_ids = {}, [], [], []
     keyed_updates, key_ambiguous = {}, []
     unattributed_matches = 0
-
-    def preferred_keep(pks):
-        """The row a content match keeps: real beats provisional, then pk order.
-
-        The earliest row can be a provisional proposal while a later row holds
-        the approved fact (append-only writes produce that order). Keeping the
-        earliest would let the next proposal rewrite it and delete the real row
-        as a duplicate (#2543).
-        """
-        for pk in pks:
-            if confidence_by_pk[pk] is None and cid_by_pk[pk] != 0:
-                return pk
-        return pks[0]
 
     def match_content(i, key):
         """Today's outcome for a row whose content key is on file."""
@@ -8046,7 +8059,7 @@ def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances,
             # Only a machine credential or staff may promote a provisional row.
             if extras:
                 touched_ids.append(keep)
-        elif old_conf is None and new_conf is not None and cid_by_pk[keep] != 0:
+        elif _is_real_row(old_conf, cid_by_pk[keep]) and new_conf is not None:
             # Real beats provisional: a proposal never touches a row an approved
             # mapping wrote (#2434). A row at concept 0 holds no mapping, so a
             # proposal may lift it.
@@ -8239,7 +8252,7 @@ def _apply_upsert_plan(plan, model_cls, pk_field, model_name):
         for pk, (row, _cls) in plan.keyed_updates.items():
             old_conf, old_cid = stored.get(pk, (None, None))
             new_conf = getattr(row, 'confidence', None)
-            if new_conf is not None and old_conf is None and old_cid != 0:
+            if new_conf is not None and _is_real_row(old_conf, old_cid):
                 dropped.add(pk)            # a proposal never touches a real row
             elif new_conf is None and old_conf is not None and not plan.may_write_confidence:
                 dropped.add(pk)            # promotion is not a user's to make

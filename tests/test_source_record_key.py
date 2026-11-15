@@ -378,7 +378,7 @@ def test_a_proposal_keeps_a_later_real_row_when_it_collapses_duplicates(api):
     _stored_measurement(api.person, api.concept, type_concept, 9001, 50)
     _stored_measurement(api.person, api.concept, type_concept, 9002, None)
 
-    response = api.post([api.row(value='37.1', confidence=50)])
+    response = api.post([api.row(value='37.1', confidence=50, key=None)])
 
     assert response.status_code == 201, response.content
     rows = list(_rows(api.person))
@@ -412,11 +412,31 @@ def test_a_real_row_first_still_collapses_a_later_proposal(api):
     _stored_measurement(api.person, api.concept, type_concept, 9005, None)
     _stored_measurement(api.person, api.concept, type_concept, 9006, 50)
 
-    response = api.post([api.row(value='37.1', confidence=50)])
+    response = api.post([api.row(value='37.1', confidence=50, key=None)])
 
     assert response.status_code == 201, response.content
     rows = list(_rows(api.person))
     assert [row.measurement_id for row in rows] == [9005]
+    assert rows[0].confidence is None
+
+
+@override_settings(PROVISIONAL_DATA_ENABLED=True)
+def test_repeated_batch_rows_point_at_the_surviving_real_row(api):
+    """Two rows of one batch share a content key; both returned ids must name the
+    real row the last occurrence keeps, not the provisional one it collapses."""
+    type_concept = ConceptFactory(concept_code='EHR-2543', concept_name='EHR')
+    _stored_measurement(api.person, api.concept, type_concept, 9009, 50)
+    _stored_measurement(api.person, api.concept, type_concept, 9010, None)
+
+    response = api.post([
+        api.row(value='37.1', confidence=50, key=None),
+        api.row(value='37.1', confidence=50, key=None),
+    ])
+
+    assert response.status_code == 201, response.content
+    assert response.json()['ids'] == [9010, 9010]
+    rows = list(_rows(api.person))
+    assert [row.measurement_id for row in rows] == [9010]
     assert rows[0].confidence is None
 
 
@@ -426,7 +446,7 @@ def test_the_earliest_row_is_kept_when_every_candidate_is_a_proposal(api):
     _stored_measurement(api.person, api.concept, type_concept, 9007, 50)
     _stored_measurement(api.person, api.concept, type_concept, 9008, 40)
 
-    response = api.post([api.row(value='37.1', confidence=30)])
+    response = api.post([api.row(value='37.1', confidence=30, key=None)])
 
     assert response.status_code == 201, response.content
     rows = list(_rows(api.person))
