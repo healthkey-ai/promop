@@ -46,6 +46,9 @@ from omop_core.services.chemistry_units import (
     unit_hint as chemistry_unit_hint,
 )
 from omop_core.services import direct_bilirubin_units
+from omop_core.services.source_pair_dates import (
+    SOURCE_PAIR_FIELDS, pair_fields_match,
+)
 from omop_core.services.write_descriptor import (
     computed_only_assignments, get_serializer_read_only_fields,
 )
@@ -844,26 +847,19 @@ class PatientRecordSerializer(serializers.ModelSerializer):
         # later import behind a value the reader never changed (#2426). A pair
         # is authored as one unit: when either half differs, both halves stay.
         if self._source_pairs:
-            groups = [
-                {pair, unit_field},
-                {CREATININE_PAIR, CREATININE_UNIT},
-                {direct_bilirubin_units.PAIR_FIELD, direct_bilirubin_units.UNIT_FIELD},
-            ]
-            groups += [
-                {spec['value'], spec['unit']} for spec in CHEMISTRY_SOURCE_PAIRS.values()
-            ]
-            groups += [
-                {source} | ({spec['unit_field']} if spec.get('unit_field') else set())
-                for source, spec in COUNT_SOURCE_PAIRS.items()
-            ]
+            # One grouping, owned by `source_pair_dates`: a pair registered
+            # there gets the unit comparison without a second inventory here.
+            groups = list(SOURCE_PAIR_FIELDS.values())
             authored = set()
             dated = set(self.context.get('dated_fields') or ())
             for group in groups:
                 fields = group & self._source_pairs
-                if fields and any(
-                        validated.get(field) != getattr(self.instance, field, None)
-                        or field in dated
-                        for field in fields):
+                # A unit compares by its storage code (#2508): an unchanged
+                # re-send of `G/DL` over a stored `g/dl` is an echo, while a
+                # genuinely different unit stays an authored edit. An explicit
+                # date makes the pair authored even when both halves match.
+                if fields and (fields & dated
+                               or not pair_fields_match(fields, validated, self.instance)):
                     authored |= fields
             self._source_pairs = authored
         return validated

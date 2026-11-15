@@ -47,6 +47,7 @@ from omop_core.services import direct_bilirubin_units
 from omop_core.services.source_pair_dates import (
     SOURCE_PAIR_CANONICALS,
     SOURCE_PAIR_FIELDS,
+    pair_fields_match,
     pair_sources_in,
     remember_dates,
     stored_dates,
@@ -493,11 +494,10 @@ def _pair_write_plan(direct, pair_pending, fact_dates, record):
             dates[source] = day
             continue
         fields = SOURCE_PAIR_FIELDS[source] & sent
-        changed = any(
-            (direct.get(field) if field in direct else getattr(record, field, None))
-            != getattr(record, field, None)
-            for field in fields
-        )
+        # A unit compares by its storage code: a stored `g/dl` is the same unit
+        # as the submitted `G/DL`, so an autosave echo is not dated today and
+        # does not hide a later import (#2508).
+        changed = not pair_fields_match(fields, direct, record)
         if not changed and source in pending and source in stored:
             day = stored[source]
         elif changed:

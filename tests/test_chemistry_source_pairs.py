@@ -519,3 +519,38 @@ def test_a_same_day_import_keeps_the_dated_pair(case):
     assert getattr(record, case['canonical']) == case['expected']
     assert getattr(record, case['pair']) == Decimal(case['value'])
     assert record.pending_source_pair_dates == {case['pair']: draw.isoformat()}
+
+
+@pytest.mark.parametrize('case', CASES, ids=list(PAIR_CASES))
+def test_a_stored_unit_spelling_is_an_echo_on_the_shared_form(case):
+    from omop_core.services.patient_form import apply_patient_form_patch
+
+    record = _record()
+    setattr(record, case['pair'], Decimal(case['value']))
+    setattr(record, case['unit'], case['source_unit'].lower())
+    setattr(record, case['canonical'], case['expected'])
+    record.save()
+
+    saved, result = apply_patient_form_patch(record.person, {
+        case['pair']: case['value'], case['unit']: case['source_unit'],
+    })
+
+    saved.refresh_from_db()
+    assert case['pair'] not in (saved.user_edited_fields or [])
+    assert not saved.pending_source_pair_dates
+
+
+@pytest.mark.parametrize('case', CASES, ids=list(PAIR_CASES))
+def test_a_stored_unit_spelling_is_an_echo_on_the_native_patch(api, case):
+    record = _record()
+    setattr(record, case['pair'], Decimal(case['value']))
+    setattr(record, case['unit'], case['source_unit'].lower())
+    setattr(record, case['canonical'], case['expected'])
+    record.save()
+
+    _edit(api, record, {
+        case['pair']: case['value'], case['unit']: case['source_unit'],
+    })
+
+    assert not record.user_edited_fields
+    assert not record.pending_source_pair_dates

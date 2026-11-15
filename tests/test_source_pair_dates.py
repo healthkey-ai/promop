@@ -11,8 +11,12 @@ import pytest
 from omop_core.models import PatientRecord, Person
 from omop_core.services.source_pair_dates import (
     SOURCE_PAIR_CANONICALS,
+    SOURCE_PAIR_FIELDS,
+    UNIT_FIELD_DEFAULTS,
+    UNIT_FIELD_NORMALIZERS,
     forget_dates,
     forget_unedited_dates,
+    pair_fields_match,
     pair_sources_in,
     remember_dates,
     stored_dates,
@@ -118,3 +122,178 @@ def test_a_pair_that_is_no_longer_pending_forgets_its_day():
 
     assert forget_dates(record, {'hemoglobin_level'})
     assert stored_dates(record) == {}
+
+
+def _pair_record(**values):
+    from types import SimpleNamespace
+    return SimpleNamespace(**values)
+
+
+def test_a_stored_unit_spelling_matches_its_canonical_code():
+    record = _pair_record(
+        hemoglobin_level=120, hemoglobin_level_units='g/dl')
+    submitted = {'hemoglobin_level': 120, 'hemoglobin_level_units': 'G/DL'}
+
+    assert pair_fields_match(
+        {'hemoglobin_level', 'hemoglobin_level_units'}, submitted, record)
+
+
+def test_an_unknown_stored_unit_is_not_an_echo():
+    record = _pair_record(
+        hemoglobin_level=120, hemoglobin_level_units='bananas')
+    submitted = {'hemoglobin_level': 120, 'hemoglobin_level_units': 'G/DL'}
+
+    assert not pair_fields_match(
+        {'hemoglobin_level', 'hemoglobin_level_units'}, submitted, record)
+
+
+def test_an_identical_unknown_spelling_is_unchanged():
+    record = _pair_record(
+        hemoglobin_level=120, hemoglobin_level_units='bananas')
+
+    assert pair_fields_match(
+        {'hemoglobin_level', 'hemoglobin_level_units'},
+        {'hemoglobin_level': 120, 'hemoglobin_level_units': 'bananas'}, record)
+
+
+def test_two_unknown_spellings_are_not_evidence_of_the_same_unit():
+    record = _pair_record(
+        hemoglobin_level=120, hemoglobin_level_units='bananas')
+    submitted = {'hemoglobin_level': 120, 'hemoglobin_level_units': 'plantains'}
+
+    assert not pair_fields_match(
+        {'hemoglobin_level', 'hemoglobin_level_units'}, submitted, record)
+
+
+def test_plain_equality_still_covers_none_and_a_shared_unknown():
+    record = _pair_record(
+        hemoglobin_level=None, hemoglobin_level_units=None)
+    fields = {'hemoglobin_level', 'hemoglobin_level_units'}
+
+    assert pair_fields_match(
+        fields, {'hemoglobin_level': None, 'hemoglobin_level_units': None}, record)
+    assert pair_fields_match(
+        fields, {'hemoglobin_level': None}, record)
+
+
+def test_a_missing_unit_falls_back_to_the_stored_one():
+    record = _pair_record(
+        absolute_neutrophile_count=1550,
+        absolute_neutrophile_count_units='K/UL')
+
+    # The shared form lists the companion unit without writing it.
+    assert pair_fields_match(
+        {'absolute_neutrophile_count', 'absolute_neutrophile_count_units'},
+        {'absolute_neutrophile_count': 1550}, record)
+
+
+def test_a_missing_stored_unit_reads_as_the_default():
+    fields = {'hemoglobin_level', 'hemoglobin_level_units'}
+    submitted = {'hemoglobin_level': 120, 'hemoglobin_level_units': 'G/DL'}
+
+    for stored in (None, '', '   '):
+        record = _pair_record(
+            hemoglobin_level=120, hemoglobin_level_units=stored)
+        assert pair_fields_match(fields, submitted, record)
+
+    # A non-default unit over a missing stored unit is a new assertion.
+    other = {'hemoglobin_level': 120, 'hemoglobin_level_units': 'G/L'}
+    record = _pair_record(hemoglobin_level=120, hemoglobin_level_units=None)
+    assert not pair_fields_match(fields, other, record)
+
+
+def test_a_float_source_value_compares_exactly():
+    # ALC is a FloatField: the value re-read from the column must not read as
+    # an authored edit because of a type mismatch.
+    fields = {'absolute_lymphocyte_count'}
+    record = _pair_record(absolute_lymphocyte_count=1.5)
+
+    assert pair_fields_match(
+        fields, {'absolute_lymphocyte_count': 1.5}, record)
+    assert not pair_fields_match(
+        fields, {'absolute_lymphocyte_count': 1.6}, record)
+
+
+def test_every_pair_unit_column_has_a_normalizer_and_default():
+    units = {
+        field for fields in SOURCE_PAIR_FIELDS.values()
+        for field in fields if field.endswith('_units')
+    }
+
+    assert units == set(UNIT_FIELD_NORMALIZERS)
+    assert units == set(UNIT_FIELD_DEFAULTS)
+
+
+def test_a_changed_number_is_never_an_echo():
+    record = _pair_record(
+        hemoglobin_level=120, hemoglobin_level_units='G/DL')
+
+    assert not pair_fields_match(
+        {'hemoglobin_level', 'hemoglobin_level_units'},
+        {'hemoglobin_level': 130, 'hemoglobin_level_units': 'G/DL'}, record)
+
+
+def test_count_units_normalize_to_their_storage_codes():
+    fields = {'absolute_neutrophile_count', 'absolute_neutrophile_count_units'}
+    record = _pair_record(
+        absolute_neutrophile_count=1550,
+        absolute_neutrophile_count_units='K/UL')
+
+    assert pair_fields_match(
+        fields,
+        {'absolute_neutrophile_count': 1550,
+         'absolute_neutrophile_count_units': '10*3/uL'}, record)
+    # Uppercase G/L is the legacy giga-count spelling; lowercase g/L is a mass
+    # concentration and must never be read as the same unit.
+    record.absolute_neutrophile_count_units = 'G/L'
+    assert not pair_fields_match(
+        fields,
+        {'absolute_neutrophile_count': 1550,
+         'absolute_neutrophile_count_units': 'g/L'}, record)
+
+
+def test_each_chemistry_pair_uses_its_own_unit_codes():
+    record = _pair_record(
+        albumin_level=40, albumin_level_units='g/l',
+        serum_bilirubin_level_total=17.1,
+        serum_bilirubin_level_total_units='umol/l')
+
+    assert pair_fields_match(
+        {'albumin_level', 'albumin_level_units'},
+        {'albumin_level': 40, 'albumin_level_units': 'G/L'}, record)
+    assert pair_fields_match(
+        {'serum_bilirubin_level_total', 'serum_bilirubin_level_total_units'},
+        {'serum_bilirubin_level_total': 17.1,
+         'serum_bilirubin_level_total_units': 'UMOL/L'}, record)
+    # The bilirubin unit is not valid for albumin's canonical.
+    assert not pair_fields_match(
+        {'serum_bilirubin_level_total', 'serum_bilirubin_level_total_units'},
+        {'serum_bilirubin_level_total': 17.1,
+         'serum_bilirubin_level_total_units': 'G/L'}, record)
+
+
+def test_direct_bilirubin_and_creatinine_normalize_their_units():
+    record = _pair_record(
+        serum_creatinine_level=80.0,
+        serum_creatinine_level_units='µmol/L',
+        serum_bilirubin_level_direct=3.4,
+        serum_bilirubin_level_direct_units='µmol/L')
+
+    assert pair_fields_match(
+        {'serum_creatinine_level', 'serum_creatinine_level_units'},
+        {'serum_creatinine_level': 80.0,
+         'serum_creatinine_level_units': 'UMOL/L'}, record)
+    assert pair_fields_match(
+        {'serum_bilirubin_level_direct',
+         'serum_bilirubin_level_direct_units'},
+        {'serum_bilirubin_level_direct': 3.4,
+         'serum_bilirubin_level_direct_units': 'UMOL/L'}, record)
+
+
+def test_a_real_unit_change_is_never_an_echo():
+    record = _pair_record(
+        hemoglobin_level=120, hemoglobin_level_units='g/dl')
+
+    assert not pair_fields_match(
+        {'hemoglobin_level', 'hemoglobin_level_units'},
+        {'hemoglobin_level': 120, 'hemoglobin_level_units': 'G/L'}, record)
