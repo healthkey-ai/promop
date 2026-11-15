@@ -396,3 +396,45 @@ def test_a_named_hospital_inserts_beside_a_foreign_provisional(sync):
     assert own_rows.count() == 1
     assert own_rows.get().measurement_concept_id == sync.incoming.concept_id
     assert own_rows.get().confidence is None
+
+
+def test_a_foreign_current_key_row_does_not_hide_our_legacy_row(sync):
+    """A foreign row under the new spelling must not stop the legacy lookup for
+    our own row: the re-sync renames it instead of inserting a duplicate."""
+    from django.contrib.contenttypes.models import ContentType
+
+    from omop_core.models import ProvenanceRecord
+    from tests.factories import OrganizationFactory
+
+    own_org, foreign_org = OrganizationFactory(), OrganizationFactory()
+    ours = _stored(
+        sync.person, sync.stored, sync.ehr, 9130, 50, source='2823-3')
+    foreign = _stored(
+        sync.person, sync.stored, sync.ehr, 9131, None, source='NEW-2581')
+    for row, org in ((ours, own_org), (foreign, foreign_org)):
+        ProvenanceRecord.objects.create(
+            source='fhir-sync',
+            target_patient_id=str(sync.person.person_id),
+            organization=org,
+            content_type=ContentType.objects.get_for_model(Measurement),
+            object_id=row.pk,
+        )
+    incoming = Measurement(
+        person=sync.person,
+        measurement_concept=sync.incoming,
+        measurement_type_concept=sync.ehr,
+        measurement_date=DAY,
+        measurement_datetime=datetime(2025, 10, 24, 8, 0, tzinfo=dt_timezone.utc),
+        measurement_source_value='NEW-2581',
+        value_as_number=4.0,
+    )
+    incoming._legacy_source_value = '2823-3'
+
+    sync.clinical(incoming, org=own_org)
+
+    ours.refresh_from_db()
+    foreign.refresh_from_db()
+    assert ours.measurement_source_value == 'NEW-2581'
+    assert ours.measurement_concept_id == sync.incoming.concept_id
+    assert Measurement.objects.filter(person=sync.person).count() == 2
+    assert foreign.measurement_source_value == 'NEW-2581'
