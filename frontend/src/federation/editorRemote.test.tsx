@@ -134,7 +134,10 @@ describe('the PROMOP editors for a host that shares the React tree', () => {
     expect(host.get).toHaveBeenCalledWith('/fed/patient-info/me/');
     expect(host.get).toHaveBeenCalledWith(
       '/fed/v1/patient-records/writable-fields/',
-      expect.objectContaining({ headers: { 'X-Patient-Form': '1' } }),
+      expect.objectContaining({
+        params: { person_id: 12 },
+        headers: { 'X-Patient-Form': '1' },
+      }),
     );
   });
 
@@ -214,7 +217,9 @@ describe('the PROMOP editors for a host that shares the React tree', () => {
     expect(result.current.entryFor('heightAtTrial')?.control).toBe('number');
     expect(host.get).toHaveBeenCalledWith(
       '/fed/v1/patient-records/writable-fields/',
-      expect.objectContaining({ headers: { 'X-Patient-Form': '1' } }),
+      expect.objectContaining({
+        headers: { 'X-Patient-Form': '1' },
+      }),
     );
   });
 
@@ -314,7 +319,12 @@ describe('the PROMOP editors for a host that shares the React tree', () => {
     expect(host.patch).toHaveBeenCalledWith(
       '/v1/patient-records/12/',
       { height: 180 },
-      expect.objectContaining({ headers: { 'X-Patient-Form': '1' } }),
+      expect.objectContaining({
+        headers: {
+          'X-Patient-Form': '1',
+          'X-Client-Timezone': expect.any(String),
+        },
+      }),
     );
     expect(onChanged).toHaveBeenCalledTimes(1);
   });

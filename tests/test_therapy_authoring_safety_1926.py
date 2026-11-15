@@ -1,8 +1,10 @@
 """Authoring identity belongs to a line, not a patient's name/date coincidence."""
 from datetime import date
+from datetime import datetime, timezone as datetime_timezone
 
 import pytest
 from rest_framework.test import APIClient
+from django.utils import timezone
 
 from omop_core.models import Concept, DrugExposure, Observation
 from omop_core.services.episode_service import author_therapy_line
@@ -121,6 +123,39 @@ def test_outcome_only_patch_preserves_drugs_dates_and_regimen(setup):
     result.episode.refresh_from_db()
     assert result.episode.episode_source_concept_id == a.pk
     assert response.data['drug_exposure_ids'] == result.drug_exposure_ids
+
+
+def test_therapy_line_api_accepts_browser_local_today_across_utc_midnight(
+    setup, monkeypatch,
+):
+    person, a, _ = setup
+    identity = Identity.objects.create_user(email='therapy-local-day@example.test')
+    PatientUser.objects.create(identity=identity, person=person)
+    client = APIClient()
+    client.force_authenticate(identity)
+    monkeypatch.setattr(
+        timezone, 'now',
+        lambda: datetime(2026, 1, 1, 12, 0, tzinfo=datetime_timezone.utc),
+    )
+
+    response = client.post(
+        '/api/v1/therapy-lines/',
+        {
+            'person': person.person_id,
+            'line_number': 1,
+            'start_date': '2026-01-02',
+            'progression_date': '2026-01-02',
+            'drugs': [{
+                'concept_id': a.pk,
+                'source_value': 'reported-drug',
+                'start_date': '2026-01-02',
+            }],
+        },
+        format='json',
+        HTTP_X_CLIENT_TIMEZONE='Pacific/Kiritimati',
+    )
+
+    assert response.status_code == 201, response.data
 
 
 def test_regimen_correction_updates_both_concept_slots(setup):

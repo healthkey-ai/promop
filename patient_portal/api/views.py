@@ -1436,6 +1436,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
     def _patch_record(self, request, person, patient_info):
         """Shared save path after the provider or self-service access check."""
+        from omop_core.services.client_timezone import use_request_timezone
+        with use_request_timezone(request):
+            return self._patch_record_with_timezone(request, person, patient_info)
+
+    def _patch_record_with_timezone(self, request, person, patient_info):
+        """Apply a native PatientRecord PATCH under its client calendar day."""
         # patient_name targets Person, not PatientRecord, so it is handled by hand
         # here exactly as /patient-info/me/ handles it — through the same pair of
         # helpers, so the two routes cannot drift apart again. This is the route
@@ -6143,10 +6149,12 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
                 str(actor.pk) if getattr(actor, 'is_authenticated', False)
                 and actor.pk is not None else 'system'
             )
-            record, result = apply_patient_form_patch(
-                person, payload, authorship=authorship, patient_author=patient_author,
-                changed_by=changed_by,
-            )
+            from omop_core.services.client_timezone import use_request_timezone
+            with use_request_timezone(request):
+                record, result = apply_patient_form_patch(
+                    person, payload, authorship=authorship, patient_author=patient_author,
+                    changed_by=changed_by,
+                )
         except DjangoValidationError as exc:
             # Every refusal is a ValidationError by now, and its messages are
             # written for the reader; nothing here forwards a caught

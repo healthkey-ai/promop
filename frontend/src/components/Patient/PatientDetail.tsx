@@ -3,6 +3,7 @@ import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { ArrowLeft, Check, AlertCircle, ChevronDown, ShieldCheck } from "lucide-react";
 import api from "@/api/axios";
+import { clientTimezoneHeaders } from "@/api/clientTimezone";
 import { editableWithoutFormStore, fetchWritableFields, LIFECYCLE, type FieldDescriptors } from "@/hooks/useWritableFields";
 // Profile fields now write through PatientRecord PATCH alongside clinical fields.
 import type { User } from "@/hooks/useAuth";
@@ -541,6 +542,7 @@ export default function PatientDetail({
         const response = await api.patch(
           `/patient-info/${personId}/`,
           renamed ? { ...patchFields, patient_name: data.name } : patchFields,
+          { headers: clientTimezoneHeaders() },
         );
         const returned = (response.data as { fact_ids?: Record<string, number> } | undefined)?.fact_ids;
         if (returned) Object.assign(confirmedFactIdsRef.current, returned);

@@ -8,6 +8,11 @@ All notable changes to PRomop are documented here.
 
 ### Added
 
+- **Interactive date validation follows the browser's calendar day** —
+  PatientRecord and therapy-line writes include the browser's IANA timezone,
+  including serializer validation, so a valid local "today" is not rejected
+  around UTC midnight. Missing or invalid timezone hints use the configured
+  server timezone.
 - **Derived verdicts are not offered as direct writes** — fields that
   `refresh_patient_record`/`recompute_patient_record_fields` own
   (`measurable_disease_imwg`, `measurable_disease_iwcll`, `metastatic_status`,

@@ -29,6 +29,13 @@ interface Props {
 
 type SelectedDrug = DrugConcept & TherapyLineDrug & { class_names?: string[] };
 
+function localDateString(date = new Date()): string {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
 /** Map line number to the therapy round code used by the disease-therapy-round table. */
 function lineToRound(lineNumber: number): string {
   if (lineNumber === 1) return 'first_line_therapy';
@@ -279,7 +286,7 @@ export default function TherapyLineDialog({
       setError('A drug administration needs its actual start date. Restore it or remove the incorrect entry.');
       return;
     }
-    const today = new Date().toISOString().slice(0, 10);
+    const today = localDateString();
     if (drugs.some((drug) => drug.start_date && drug.start_date > today)) {
       setError('A future drug administration is planned, not received treatment.');
       return;
@@ -442,7 +449,7 @@ export default function TherapyLineDialog({
             <input
               type="date" value={progressionDate}
               onChange={(e) => setProgressionDate(e.target.value)}
-              max={new Date().toISOString().split('T')[0]}
+              max={localDateString()}
               className="w-full rounded-md border border-input px-2 py-1.5 text-sm"
             />
           </label>

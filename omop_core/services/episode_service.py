@@ -18,9 +18,11 @@ per line of therapy per person. Previously the FHIR/enrich paths keyed on
 """
 import logging
 from datetime import date
-from typing import Any, Iterable, Mapping
 from time import sleep as _sleep
+from typing import Any, Iterable, Mapping
+
 from django.db import transaction
+from django.utils import timezone
 
 from omop_core.models import Concept, Observation, Person
 from omop_core.services.pk import next_pk
@@ -783,7 +785,7 @@ def _author_therapy_line_inner(
         validated[key] = (values, concept, raw)
     if not start:
         raise TherapyLineValidationError('start_date_required')
-    if start > date.today():
+    if start > timezone.localdate():
         raise TherapyLineValidationError('future_line')
 
     # Establish the line before exposures. Any later failure rolls back this
@@ -852,7 +854,7 @@ def _author_therapy_line_inner(
         drug_end = values.get('end_date', existing.drug_exposure_end_date if existing else end)
         if not drug_start or (drug_end and drug_end < drug_start):
             raise TherapyLineValidationError('drug_dates_invalid')
-        if drug_start > date.today():
+        if drug_start > timezone.localdate():
             raise TherapyLineValidationError('future_drug')
         shared = existing is not None and EpisodeEvent.objects.filter(
             event_id=existing.pk, episode_event_field_concept_id=CONCEPT_DRUG_EXPOSURE_FIELD,
