@@ -2,6 +2,15 @@
 
 Issue: #721
 
+> **Superseded workflow (2026-11-15).** The remaining work for #721 is planned
+> in [section 10.3 of the field concept mapping plan](field_concept_mapping_plan.md#103-creating-and-scoping-a-field-from-a-patient-tab):
+> the tab's Add field action is an org-admin link to the Field Mappings page,
+> one Field Concept Mapping dialog creates or remaps a field, and a field is
+> either part of the base record or specific to named diseases. The two UI
+> items checked below (the inline Add field control and the "Additional
+> fields" section) were built and are no longer mounted on any patient tab;
+> the data model, migration and API items stand.
+
 ## Delivery checklist
 
 - [x] Define the runtime-safe data model: a `CustomPatientField` definition and
