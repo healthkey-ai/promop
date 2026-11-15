@@ -151,7 +151,12 @@ are not. What the code does, where the plan left a choice:
   code came from), ranked, at or above the floor, and a standard valid
   concept in the table's own domain. Proposals for one code under different
   source systems that disagree on the destination write nothing; agreeing
-  ones take the lowest confidence. `suggestion_confidence` (0-1) becomes the
+  ones take the lowest confidence. When the person's inventory
+  (`PatientSourceCode`) says which systems the code arrived under, every one
+  must have a qualifying proposal; with no inventory row the lookup is by
+  code alone, as the approved-mapping lookups are. Promotion skips a person
+  whose code also arrived under a system with no approval to the destination
+  (`_persons_coded_elsewhere`). `suggestion_confidence` (0-1) becomes the
   percentage by rounding.
 - **Writers.** `_create_missing_clinical_rows` creates a row for a code with
   no approved mapping and no row yet. `resolve_person_source_codes` turns a
@@ -169,11 +174,15 @@ are not. What the code does, where the plan left a choice:
   rows already sit on (called by the repoint job), and in resolve. Rows keep
   their confidence through the collapse and lose it afterwards, so a real row
   for the same event survives whatever the primary keys say (the collapse
-  orders real rows first, #2584).
+  orders real rows first, #2584). Promotion and resolve delete only
+  provisional duplicates, never a real row, so a keyed real row is safe.
 - **Reverts** (`revert_provisional_rows`): a rejection or a moved proposal in
   `_upsert_source_code_mapping`, Suggest's Replace, and a CSV upload that
   points a proposal elsewhere. A patient-page save reverts that patient only.
-  Nothing is deleted.
+  Nothing is deleted. Revert and promote match rows on the code only, never the
+  import description, and revert runs in the table the rows are in before any
+  relocation the same save queues. A writer that keys a provisional row on
+  display text (the ETL, phase 2) will need that matching revisited.
 - **Table relocation** keeps a row provisional: it moves with its concept and
   confidence, because the proposal it follows has not changed.
 - **Not yet:** `code-mappings/lookup/` and the ETL (phase 2), FHIR sync
