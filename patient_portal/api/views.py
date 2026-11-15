@@ -1436,6 +1436,12 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
 
     def _patch_record(self, request, person, patient_info):
         """Shared save path after the provider or self-service access check."""
+        from omop_core.services.client_timezone import use_request_timezone
+        with use_request_timezone(request):
+            return self._patch_record_with_timezone(request, person, patient_info)
+
+    def _patch_record_with_timezone(self, request, person, patient_info):
+        """Apply a native PatientRecord PATCH under its client calendar day."""
         # patient_name targets Person, not PatientRecord, so it is handled by hand
         # here exactly as /patient-info/me/ handles it — through the same pair of
         # helpers, so the two routes cannot drift apart again. This is the route
@@ -1748,10 +1754,8 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             # field would, and a write must not outlive a 400.
             if therapy_line_edits:
                 from omop_core.services.therapy_line_form import author_lines_from_form
-                from omop_core.services.client_timezone import use_request_timezone
-                with use_request_timezone(request):
-                    applied, rejected = author_lines_from_form(
-                        person, therapy_line_edits, disease=patient_info.disease)
+                applied, rejected = author_lines_from_form(
+                    person, therapy_line_edits, disease=patient_info.disease)
                 if rejected:
                     raise ValidationError(rejected)
                 patient_info.refresh_from_db()
