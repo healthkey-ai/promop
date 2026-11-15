@@ -131,10 +131,10 @@ Provisional rows sit at the proposal's concept, so three cases extend it:
 
 Every one of those marks the patients stale (`derivation_version=0`) and
 leaves the derivation to `backfill_patient_records`, as the re-point does.
-Collapse of duplicates (`_collapse_duplicates`) treats `confidence` as part of
-the identity: a real row and a provisional row for the same event are two
-rows until the provisional one is promoted, at which point the next collapse
-folds them. On the bulk write path (`_plan_bulk_upsert`), a proposal that
+Collapse of duplicates (`_collapse_duplicates`) keeps the first approved row
+(null confidence, mapped concept) when a re-point makes it identical to a
+provisional row; the proposal folds into the approved row. When every candidate
+is provisional the earliest survives. On the bulk write path (`_plan_bulk_upsert`), a proposal that
 matches a real row for the same content key folds into that real row: the real
 row survives and the proposal leaves no row (#2543). The FHIR sync keeps the
 same survivor and, when it rewrites a provisional row, clears its confidence: a

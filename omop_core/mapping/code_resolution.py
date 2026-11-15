@@ -957,7 +957,8 @@ def _collapse_duplicates(model, concept_col, source_col, match,
     path, not just (person, date). Measurement and Observation carry more of it
     on purpose: a patient legitimately has several distinct results for one
     analyte on one day, and keying on the date alone would delete real results
-    rather than dedupe a re-point.
+    rather than dedupe a re-point. Within one key the approved row survives over
+    a provisional one, whatever the pk order (#2584).
     """
     identity_cols = _COLLAPSE_IDENTITY[concept_col]
     pk_col = model._meta.pk.name
@@ -970,16 +971,26 @@ def _collapse_duplicates(model, concept_col, source_col, match,
     rows = (
         with_attribution(candidates)
         .order_by(pk_col)
-        .values_list(pk_col, ATTRIBUTION, 'person_id', *identity_cols)
+        .values_list(pk_col, ATTRIBUTION, 'person_id', 'confidence', *identity_cols)
     )
 
-    seen, doomed = set(), []
+    # A provisional row repointed onto a concept that already has the approved
+    # fact for the same event must not displace that fact (the defect #2581
+    # fixed in the bulk and sync paths). Keep the first approved row; only when
+    # every row of the key is provisional does the earliest survive.
+    survivors = {}   # key -> (pk, approved)
+    doomed = []
     for row in rows:
-        pk, key = row[0], (tuple(row[1]),) + row[2:]
-        if key in seen:
-            doomed.append(pk)
+        pk, attribution, person_id, confidence = row[:4]
+        key = (tuple(attribution), person_id) + tuple(row[4:])
+        approved = confidence is None and concept_id != 0
+        if key not in survivors:
+            survivors[key] = (pk, approved)
+        elif approved and not survivors[key][1]:
+            doomed.append(survivors[key][0])
+            survivors[key] = (pk, True)
         else:
-            seen.add(key)
+            doomed.append(pk)
     if doomed:
         # Provenance points at these by object_id; leaving it behind would
         # strand rows referring to facts that no longer exist.
