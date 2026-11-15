@@ -16,6 +16,10 @@ first, so the preview runs the real refresh and throws the result away:
    ``INSERT`` into ``patient_record`` (which would draw a sequence value, and
    sequences do not roll back) -- raises ``PreviewWriteBlocked`` before it
    reaches the database, and fails the preview even if the refresh catches it.
+   The refresh's two side writes are suppressed instead: revision rows (their id
+   is a sequence, and an audit row is not a derived value) and the withdrawal of
+   a superseded "no pre-existing conditions" attestation (nothing in derivation
+   reads it, so the previewed values are unchanged).
 3. Publishing a Celery message raises the same way. ``on_commit`` callbacks
    need nothing extra: Django discards those registered in a block that rolls
    back.
@@ -42,6 +46,8 @@ from unittest import mock
 from django.db import DatabaseError, connections, transaction
 
 from omop_core.models import PatientRecord
+from omop_core.services.patient_record_revisions import suppress_record_revisions
+from omop_core.services.pre_existing_conditions import suppress_attestation_withdrawal
 
 # Bookkeeping that every refresh changes, or that refresh never sets. Reporting
 # them would put a line on every record and say nothing about its values.
@@ -81,7 +87,7 @@ _INTO = re.compile(r'\bINTO\b', re.IGNORECASE)
 # server-side lo_import/lo_export reach other databases or files. set_config
 # and lo_create are transactional but refused anyway (fail closed). The guard
 # catches accidental writes by the refresh code; it is not a sandbox -- the
-# real boundary is a role with SELECT plus UPDATE on patient_record only.
+# real boundary is a least-privilege role (see docs/DERIVATION_CHANGELOG.md).
 _SIDE_EFFECT_FUNCTION = re.compile(
     r'\b(nextval|setval|pg_advisory_\w*lock\w*|pg_try_advisory_\w*|set_config|lo_\w+|dblink\w*)\s*\(',
     re.IGNORECASE,
@@ -89,7 +95,7 @@ _SIDE_EFFECT_FUNCTION = re.compile(
 
 
 class PreviewWriteBlocked(RuntimeError):
-    """The refresh tried to write something other than its own PatientRecord."""
+    """The refresh tried to write outside the preview's allowlist."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -102,7 +108,7 @@ class FieldChange:
 
 
 def _statement_is_allowed(sql: str) -> bool:
-    """Whether ``sql`` can only read, or update patient_record.
+    """Whether ``sql`` is a read, the record update, or the attestation delete.
 
     Errs towards refusing: a refused statement fails one person's preview,
     a wrongly allowed one could write.
@@ -397,7 +403,11 @@ def preview_record(record: PatientRecord,
                     stored_record = PatientRecord.objects.select_for_update().get(pk=record.pk)
                     stored = _values(stored_record)
                     pending = set(stored_record.user_edited_fields or [])
-                    with _refresh_logging_silenced():
+                    with (
+                        _refresh_logging_silenced(),
+                        suppress_record_revisions(),
+                        suppress_attestation_withdrawal(),
+                    ):
                         refresh_patient_record(stored_record.person)
                     rederived = _values(PatientRecord.objects.get(pk=record.pk))
                 finally:
