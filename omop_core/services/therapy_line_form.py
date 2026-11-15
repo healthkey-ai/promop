@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from datetime import date
 
+from django.utils import timezone
 from django.utils.dateparse import parse_date
 
 from omop_core.services.therapy_errors import MESSAGES, TherapyLineValidationError
@@ -229,7 +230,7 @@ def author_lines_from_form(person, changes, *, disease=None):
                 refusal = (names, MESSAGES['start_date_invalid'])
             elif start is None:
                 refusal = (names, MESSAGES['start_date_required'])
-            elif start > date.today():
+            elif start > timezone.localdate():
                 refusal = (names, MESSAGES['future_line'])
             else:
                 kwargs['start_date'] = start

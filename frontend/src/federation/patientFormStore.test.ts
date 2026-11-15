@@ -491,7 +491,7 @@ describe('shared patient-form queue', () => {
     await vi.advanceTimersByTimeAsync(1);
     expect(patch).toHaveBeenCalledOnce();
     expect(patch).toHaveBeenCalledWith('/api/v1/patient-records/12/', { height: 180, weight: 80 },
-      { headers: { 'X-Patient-Form': '1' } });
+      { headers: { 'X-Patient-Form': '1', 'X-Client-Timezone': expect.any(String) } });
     expect(store.getSnapshot().values.bmi).toBe(24.22);
     expect(store.getSnapshot().pending).toEqual({});
   });
@@ -676,7 +676,7 @@ describe('dated result edits', () => {
 
     expect(patch).toHaveBeenCalledWith('/api/v1/patient-records/12/',
       { hemoglobin_g_dl: { value: 13, date: '2026-08-02' } },
-      { headers: { 'X-Patient-Form': '1' } });
+      { headers: { 'X-Patient-Form': '1', 'X-Client-Timezone': expect.any(String) } });
   });
 
   it('takes the correction target from the server, not the submitted batch', async () => {
@@ -959,7 +959,7 @@ describe('shared patient-form queue', () => {
     await vi.advanceTimersByTimeAsync(1);
     expect(patch).toHaveBeenCalledOnce();
     expect(patch).toHaveBeenCalledWith('/api/v1/patient-records/12/', { height: 180, weight: 80 },
-      { headers: { 'X-Patient-Form': '1' } });
+      { headers: { 'X-Patient-Form': '1', 'X-Client-Timezone': expect.any(String) } });
     expect(store.getSnapshot().values.bmi).toBe(24.22);
     expect(store.getSnapshot().pending).toEqual({});
   });
@@ -1301,7 +1301,7 @@ describe('source-pair writes (#5700)', () => {
 
     expect(patch).toHaveBeenCalledWith('/api/v1/patient-records/12/',
       { hemoglobin_level: 120, hemoglobin_level_units: 'G/L' },
-      { headers: { 'X-Patient-Form': '1' } });
+      { headers: { 'X-Patient-Form': '1', 'X-Client-Timezone': expect.any(String) } });
     expect(store.getSnapshot().pending).toEqual({});
   });
 
@@ -1316,7 +1316,7 @@ describe('source-pair writes (#5700)', () => {
     expect(patch).toHaveBeenCalledWith('/api/v1/patient-records/12/',
       { hemoglobin_level: { value: 120, date: '2026-08-01' },
         hemoglobin_level_units: 'G/L' },
-      { headers: { 'X-Patient-Form': '1' } });
+      { headers: { 'X-Patient-Form': '1', 'X-Client-Timezone': expect.any(String) } });
   });
 
   it('refuses a companion entry that does not qualify the field', async () => {

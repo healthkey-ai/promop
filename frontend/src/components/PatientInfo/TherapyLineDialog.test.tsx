@@ -490,7 +490,11 @@ it('loads disease-specific outcomes and submits the selected response', async ()
   await addDrug('lenalidomide');
   fireEvent.change(screen.getByLabelText(/outcome/i), { target: { value: 'Very Good Partial Response' } });
   fireEvent.click(screen.getByRole('button', { name: /record line/i }));
-  await waitFor(() => expect(mockPost).toHaveBeenCalledWith('/v1/therapy-lines/', expect.objectContaining({ outcome: 'Very Good Partial Response' })));
+  await waitFor(() => expect(mockPost).toHaveBeenCalledWith(
+    '/v1/therapy-lines/',
+    expect.objectContaining({ outcome: 'Very Good Partial Response' }),
+    { headers: { 'X-Client-Timezone': expect.any(String) } },
+  ));
 });
 
 

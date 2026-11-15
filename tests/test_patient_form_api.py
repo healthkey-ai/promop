@@ -73,6 +73,28 @@ def test_a_refused_result_date_is_answered_with_its_own_sentence():
     assert response.data['detail'] == 'hemoglobin_level: a result date cannot be in the future.'
 
 
+def test_shared_form_uses_the_browser_calendar_day_for_dated_results(monkeypatch):
+    """A date that is today east of UTC is not rejected as future."""
+    from datetime import datetime, timezone as datetime_timezone
+
+    record = PatientRecordFactory()
+    ConceptFactory(concept_code='718-7', concept_name='Hemoglobin [Mass/volume] in Blood')
+    monkeypatch.setattr(
+        timezone, 'now',
+        lambda: datetime(2026, 1, 1, 12, 0, tzinfo=datetime_timezone.utc),
+    )
+
+    response = _client().patch(
+        f'/api/v1/patient-records/{record.person_id}/',
+        {'hemoglobin_level': {'value': 120, 'date': '2026-01-02'},
+         'hemoglobin_level_units': 'G/L'},
+        format='json', HTTP_X_PATIENT_FORM='1',
+        HTTP_X_CLIENT_TIMEZONE='Pacific/Kiritimati',
+    )
+
+    assert response.status_code == 200, response.data
+
+
 def test_the_native_patch_answers_a_refused_result_date_too():
     """The native path unwraps dated edits the same way and must keep its 400.
 

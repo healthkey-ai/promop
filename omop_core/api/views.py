@@ -97,19 +97,21 @@ class TherapyLineViewSet(viewsets.ViewSet):
             'source_value',
         ) if key in data}
         try:
-            with transaction.atomic():
-                # Each exposure save would re-derive the whole record; derive
-                # once, after the episode exists, so inference never reads a
-                # half-written line.
-                with suppress_patient_record_refresh():
-                    result = author_therapy_line(
-                        person,
-                        line_number=line_number,
-                        disease=data.get('disease') or None,
-                        episode=episode,
-                        replace=episode is not None,
-                        **submitted,
-                    )
+            from omop_core.services.client_timezone import use_request_timezone
+            with use_request_timezone(request):
+                with transaction.atomic():
+                    # Each exposure save would re-derive the whole record; derive
+                    # once, after the episode exists, so inference never reads a
+                    # half-written line.
+                    with suppress_patient_record_refresh():
+                        result = author_therapy_line(
+                            person,
+                            line_number=line_number,
+                            disease=data.get('disease') or None,
+                            episode=episode,
+                            replace=episode is not None,
+                            **submitted,
+                        )
         except TherapyLineWriteConflict:
             # The message is a constant; the exception is never serialized.
             logger.warning('Therapy line write lost the retry race; the client was told to retry')

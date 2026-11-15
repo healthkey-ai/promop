@@ -1,6 +1,7 @@
 import type { AxiosInstance } from 'axios';
 
 import { clinicalClient, clinicalUrl } from '@/api/clinicalTransport';
+import { clientTimezoneHeaders } from '@/api/clientTimezone';
 import type { TherapyRegimen } from '@/types/therapy';
 
 /** Which connection the therapy helpers talk through.
@@ -174,7 +175,7 @@ export async function authorTherapyLine(
   connection?: TherapyConnection,
 ): Promise<TherapyLineResult> {
   const { client, url } = target('/v1/therapy-lines/', connection);
-  const resp = await client.post(url, payload);
+  const resp = await client.post(url, payload, { headers: clientTimezoneHeaders() });
   return resp.data as TherapyLineResult;
 }
 
@@ -184,7 +185,7 @@ export async function updateTherapyLine(
   connection?: TherapyConnection,
 ): Promise<TherapyLineResult> {
   const { client, url } = target(`/v1/therapy-lines/${episodeId}/`, connection);
-  const resp = await client.patch(url, payload);
+  const resp = await client.patch(url, payload, { headers: clientTimezoneHeaders() });
   return resp.data as TherapyLineResult;
 }
 

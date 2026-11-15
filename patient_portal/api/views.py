@@ -6143,10 +6143,12 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
                 str(actor.pk) if getattr(actor, 'is_authenticated', False)
                 and actor.pk is not None else 'system'
             )
-            record, result = apply_patient_form_patch(
-                person, payload, authorship=authorship, patient_author=patient_author,
-                changed_by=changed_by,
-            )
+            from omop_core.services.client_timezone import use_request_timezone
+            with use_request_timezone(request):
+                record, result = apply_patient_form_patch(
+                    person, payload, authorship=authorship, patient_author=patient_author,
+                    changed_by=changed_by,
+                )
         except DjangoValidationError as exc:
             # Every refusal is a ValidationError by now, and its messages are
             # written for the reader; nothing here forwards a caught

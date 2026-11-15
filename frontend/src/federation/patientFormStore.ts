@@ -1,4 +1,5 @@
 import type { AxiosInstance } from 'axios';
+import { clientTimezoneHeaders } from '@/api/clientTimezone';
 import type { FieldDescriptor } from '@/hooks/useWritableFields';
 import { diseaseToDiseaseCode, plannedTherapyRound } from '@/api/therapyContext';
 import { parseWritableDescriptor } from './descriptorVersion';
@@ -683,7 +684,7 @@ export class PatientFormStore {
     try {
       const { data } = await this.client.patch<PatientFormResult>(
         `${this.base}/v1/patient-records/${this.snapshot.personId}/`, batch,
-        { headers: { 'X-Patient-Form': '1' } },
+        { headers: { 'X-Patient-Form': '1', ...clientTimezoneHeaders() } },
       );
       if (!data.patient_info || !Array.isArray(data.write?.applied)) {
         unconfirmed = true;
