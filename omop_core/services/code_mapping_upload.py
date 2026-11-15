@@ -354,7 +354,7 @@ def import_upload(*, upload, vocabulary, provenance, actor, can_approve=True):
                     pending_repoints.add(previous_concept_id)
                 if (not approved and destination_changed
                         and previous_concept_id != NO_MATCHING_CONCEPT_ID):
-                    reverts.append((mapping, previous_concept_id))
+                    reverts.append((mapping, previous_concept_id, mapping.omop_table))
                 if approval_changed:
                     old_concept_ids = pending_repoints | deferred_repoints
                     if destination_changed:
@@ -423,10 +423,12 @@ def import_upload(*, upload, vocabulary, provenance, actor, can_approve=True):
                  'updated_by', 'updated_at'],
                 batch_size=1_000,
             )
+        # In the table the rows are in now, before a queued relocation moves them.
+        for reverted_mapping, off_concept_id, rows_table in reverts:
+            revert_provisional_rows(
+                mapping=reverted_mapping, concept_id=off_concept_id, omop_table=rows_table)
         for moved_mapping, from_table, to_table in relocations:
             queue_relocation(moved_mapping, from_table, to_table)
-        for reverted_mapping, off_concept_id in reverts:
-            revert_provisional_rows(mapping=reverted_mapping, concept_id=off_concept_id)
         if approval_repoints:
             approved = {
                 mapping.source_code: mapping

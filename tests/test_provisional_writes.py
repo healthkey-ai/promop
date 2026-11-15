@@ -81,7 +81,8 @@ def state(pk):
 
 def source_code(person, value=CODE):
     return PatientSourceCode.objects.create(
-        person=person, source_value=value, omop_table='measurement')
+        person=person, source_value=value, omop_table='measurement',
+        source_vocabulary_id='Local')
 
 
 # --- which proposals qualify ------------------------------------------------------
@@ -527,3 +528,126 @@ def test_a_relocated_provisional_row_stays_provisional(world):
     assert not Measurement.objects.filter(pk=stored.pk).exists()
     moved = Observation.objects.get(person=world['person'])
     assert (moved.observation_concept_id, moved.confidence) == (world['proposed'].pk, 90)
+
+
+# --- review findings (#2587) -------------------------------------------------------
+
+def test_promotion_never_deletes_a_real_row_even_a_keyed_duplicate(world):
+    """Two real results that share an event identity but carry their own source
+    record keys are two facts; settling a provisional twin must not merge them."""
+    person = world['person']
+    first = row(person, world['proposed'].pk, source_record_key='epic:a/Observation/1')
+    second = row(person, world['proposed'].pk, source_record_key='epic:a/Observation/2')
+    twin = row(person, world['proposed'].pk, confidence=90)
+    mapping = approved(world['proposed'])
+
+    result = promote_provisional_rows(mapping=mapping)
+
+    assert result['rows_collapsed'] == 1
+    assert set(Measurement.objects.filter(person=person).values_list('pk', flat=True)) == {first.pk, second.pk}
+    assert not Measurement.objects.filter(pk=twin.pk).exists()
+
+
+def test_a_code_held_under_a_system_without_a_proposal_gets_no_provisional_row(world):
+    """An Epic proposal for flowsheet "6" says nothing about a patient whose "6"
+    came from Cerner."""
+    person = world['person']
+    proposal(world['proposed'], source_vocabulary_id='EpicA')
+    PatientSourceCode.objects.create(
+        person=person, source_value=CODE, omop_table='measurement', source_vocabulary_id='CernerB')
+    unresolved = row(person, NO_MATCHING_CONCEPT_ID)
+
+    resolve_person_source_codes(person)
+
+    assert state(unresolved.pk) == (NO_MATCHING_CONCEPT_ID, None)
+    assert Measurement.objects.filter(person=person).count() == 1
+
+
+def test_a_code_held_under_the_proposing_system_gets_one(world):
+    person = world['person']
+    proposal(world['proposed'], source_vocabulary_id='EpicA')
+    PatientSourceCode.objects.create(
+        person=person, source_value=CODE, omop_table='measurement', source_vocabulary_id='EpicA')
+
+    resolve_person_source_codes(person)
+
+    assert Measurement.objects.get(person=person).confidence == 85
+
+
+def test_every_system_a_code_arrived_under_must_have_a_qualifying_proposal(world):
+    person = world['person']
+    proposal(world['proposed'], source_vocabulary_id='EpicA')
+    proposal(world['proposed'], source_vocabulary_id='CernerB', confidence=0.75)
+    for vocabulary in ('EpicA', 'CernerB'):
+        PatientSourceCode.objects.create(
+            person=person, source_value=CODE, omop_table='measurement',
+            source_vocabulary_id=vocabulary)
+
+    resolve_person_source_codes(person)
+
+    assert Measurement.objects.get(person=person).confidence == 75, 'the lowest of the two'
+
+
+def test_approval_does_not_make_real_the_rows_of_a_person_coded_elsewhere(world):
+    person = world['person']
+    stored = row(person, world['proposed'].pk, confidence=90)
+    for vocabulary in ('EpicA', 'CernerB'):
+        PatientSourceCode.objects.create(
+            person=person, source_value=CODE, omop_table='measurement',
+            source_vocabulary_id=vocabulary)
+    mapping = approved(world['proposed'], source_vocabulary_id='EpicA')
+
+    result = promote_provisional_rows(mapping=mapping)
+
+    assert result['rows_promoted'] == 0
+    assert state(stored.pk) == (world['proposed'].pk, 90)
+
+
+def test_approval_and_rejection_leave_another_mappings_rows_alone(world):
+    """An import mapping's description ("Glucose") can be another mapping's code."""
+    person = world['person']
+    stored = row(person, world['proposed'].pk, confidence=90, code='Glucose')
+    mapping = proposal(world['proposed'], origin='import', source_code_description='Glucose')
+
+    revert_provisional_rows(mapping=mapping, concept_id=world['proposed'].pk)
+    assert state(stored.pk) == (world['proposed'].pk, 90)
+
+    mapping.status = 'approved'
+    mapping.save()
+    promote_provisional_rows(mapping=mapping)
+    assert state(stored.pk) == (world['proposed'].pk, 90)
+
+
+def test_rejecting_while_the_table_moves_still_reverts_the_rows_where_they_are(client, world):
+    mapping = proposal(world['proposed'])
+    stored = row(world['person'], world['proposed'].pk, confidence=90)
+
+    patch(client, mapping, {'status': 'rejected', 'omop_table': 'observation',
+                            'domain_id': 'Observation'})
+
+    assert state(stored.pk) == (NO_MATCHING_CONCEPT_ID, None)
+
+
+def test_rejecting_while_the_table_moves_between_tables_that_cannot_relocate(client, world):
+    mapping = proposal(world['proposed'])
+    stored = row(world['person'], world['proposed'].pk, confidence=90)
+
+    patch(client, mapping, {'status': 'rejected', 'omop_table': 'condition',
+                            'domain_id': 'Condition'})
+
+    assert state(stored.pk) == (NO_MATCHING_CONCEPT_ID, None)
+
+
+def test_resolve_issues_no_writes_for_unmapped_codes_when_nothing_is_provisional(
+        world, settings, django_assert_num_queries):
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+    settings.PROVISIONAL_DATA_ENABLED = False
+    person = world['person']
+    for index in range(5):
+        row(person, NO_MATCHING_CONCEPT_ID, code=f'UNMAPPED-{index}')
+    with CaptureQueriesContext(connection) as queries:
+        resolve_person_source_codes(person)
+    writes = [q['sql'] for q in queries if q['sql'].lstrip().upper().startswith('UPDATE')
+              and 'measurement' in q['sql'].lower()]
+    assert writes == []
