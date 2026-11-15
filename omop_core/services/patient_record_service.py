@@ -206,7 +206,7 @@ def _usable_concept_name(concept) -> str | None:
 
 # Bump this whenever aggregation or computation logic changes in any section
 # extractor or in _compute_derived_fields.  See DERIVATION_CHANGELOG.md.
-DERIVATION_VERSION = 31
+DERIVATION_VERSION = 32
 
 # These PatientRecord columns are projections of PersonLanguageSkill, never
 # independent edits. Older PATCH requests could mark them as user-edited and
@@ -1805,6 +1805,14 @@ def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fiel
                 and patient_info.hemoglobin_level_units.strip().casefold() != 'g/dl'):
             # An uncoded hemoglobin result in another unit is a legacy fact,
             # not a g/dL canonical value. Keep its number and recorded unit.
+            continue
+        if (canonical == CREATININE_CANONICAL and not retire_aliases
+                and value is None and patient_info.serum_creatinine_level_units
+                and patient_info.serum_creatinine_level_units.strip().casefold() != 'mg/dl'):
+            # The same case for creatinine (#2519): a historic concept-name
+            # result in a unit this slice cannot read is a legacy fact. Without
+            # this the alias copy below wrote the canonical None over the pair
+            # and cleared its recorded unit.
             continue
         for alias in aliases:
             if alias not in pending_aliases:
@@ -5224,7 +5232,8 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None,
                     # A historic concept-name fact reports the number and unit
                     # the lab sent (#475); the canonical stays unknown rather
                     # than reinterpreting an unsupported scale. The refresh
-                    # does not keep this pair on the record yet (#2519).
+                    # keeps the pair with the hemoglobin-style guard below
+                    # (#2519).
                     data[CREATININE_CANONICAL] = None
                     data[CREATININE_PAIR] = Decimal(str(measurement.value_as_number))
                     data[CREATININE_UNIT] = reported_unit
