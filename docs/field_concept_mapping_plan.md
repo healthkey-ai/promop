@@ -1026,7 +1026,7 @@ no shared source:
 | Where | What |
 |---|---|
 | `DiseaseTab.tsx` | A `switch` on disease type renders a hand-authored section per disease; BC also gets a staging/biomarker section |
-| `omop_core/services/disease_relevance.py::DISEASE_FIELDS` | A frozenset per disease that mirrors the tab, guarded by a drift test: BC 27 fields, CLL 21, MM 19, FL 13, MCL 8, eleven of them shared by two or more diseases |
+| `omop_core/services/disease_relevance.py::DISEASE_FIELDS` | A frozenset per disease that mirrors the tab, guarded by a drift test: BC 28 fields, CLL 21, MM 26, FL 13, MCL 11, eleven of them shared by two or more diseases |
 | Genomics catalog markers' `diseases` | Per-disease priority markers (#1180, #1311) |
 | The federated editor (`frontend/src/federation/` on `cb-v2`) | Renders the same tab components for the host app, taking each control's options from the descriptor, and already disagrees with `dev` where one column means different things per disease (#2551) |
 | CancerBot `trials/services/patient_info/configs.py` | Each attribute carries an optional `"disease"` gate (one code or a list) read by `disease_attr_applies`; an attribute with no gate applies to every disease. At CancerBot `a840f8d9` its gates name MCL on 21 attribute entries against the 8 fields here (#1149) |
