@@ -121,9 +121,12 @@ no longer depends on obtaining another export or transferring a chat.
    integrations (#1227–#1230), then transfer/reconciliation (#1231). Review the
    preserved earlier implementation against the completed inventory and current
    dev before reusing it. Full tests use a local database.
-5. Two gaps sections 1–9 never covered, where a field renders and which
-   disease it belongs to, are specified in [section 10](#10-field-placement-and-per-disease-record-structure)
-   and tracked by [#2327](https://github.com/healthkey-ai/promop/issues/2327).
+5. Three gaps sections 1–9 never covered are specified in
+   [section 10](#10-field-placement-and-disease-profiles) and tracked by
+   [#2327](https://github.com/healthkey-ai/promop/issues/2327): where a field
+   renders, which disease profile it belongs to (the base record or a
+   disease's extension), and how an org admin creates or remaps a field from
+   a patient tab.
 
 All #1223–#1231 and parent #21/#26 remain open at the user's instruction.
 Priority-field coverage is additionally tracked by [#1311](https://github.com/healthkey-ai/promop/issues/1311).
@@ -899,13 +902,25 @@ The #21 implementation is tracked by #1227 and depends on the shared inventory
 and answer-resolution work. #1231 supplies the final reconciliation and rollout
 checks for both parent issues.
 
-## 10. Field placement and per-disease record structure
+## 10. Field placement and disease profiles
 
 Added 2026-11-05 against `dev` at `a78fddcf`. Sections 1–9 decide what a
 field *means* (its concept, destination and answer values). They do not say
 where a field **renders** or which **disease** it belongs to, and the code
 decides both by hand today. Tracking issue:
 [#2327](https://github.com/healthkey-ai/promop/issues/2327).
+
+Amended 2026-11-15 against `dev` at `de558218`:
+
+- 10.2 is restated as **disease profiles**: a base record every patient has,
+  plus one extension per disease. It is the membership model that was already
+  planned, under the name a curator sees. The disease list is now the managed
+  `DiseaseCategoryChoice` table (#2120), not the enum, and a field a curator
+  creates carries a scope like a built-in one.
+- 10.3 is new: creating or remapping a field from a patient tab through one
+  Field Concept Mapping dialog. It replaces the "Curation UI" bullet of 10.1
+  and the inline dialog of #721, and settles #1147.
+- The implementation issues moved to 10.4.
 
 ### 10.1 Where a field renders: tab placement
 
@@ -915,7 +930,7 @@ decides both by hand today. Tracking issue:
 |---|---|
 | Backend descriptor, `omop_core/services/field_descriptor.py::_classify_tab` | `_TAB_GENERAL`, `_TAB_DISEASE`, `_TAB_TREATMENT`, `_TAB_BLOOD`, `_TAB_LABS`, `_TAB_BEHAVIOR` frozensets, a `genomics_` prefix rule and a therapy keyword fallback; everything else is `other` |
 | Patient tab components, `frontend/src/components/PatientInfo/tabs/*.tsx` | Each tab hand-codes the fields and controls it renders |
-| `CustomPatientField.tab` | Its own `TAB_CHOICES` (`general`, `disease`, `treatment`, `blood`, `labs`, `behavior`, `wearable`); custom fields render in the "Additional fields" section at the bottom of that tab |
+| `CustomPatientField.tab` | Its own `TAB_CHOICES` (`general`, `disease`, `treatment`, `blood`, `labs`, `behavior`, `wearable`) until #2328 gave it `FIELD_TAB_CHOICES`. The "Additional fields" section that rendered custom fields at the bottom of a tab (`CustomPatientFields.tsx`) is no longer mounted by any patient tab, so a created field derives and is stored but shows on no tab until #2330 |
 | Field Mappings page, `FieldMappingPage.tsx` | `TAB_ORDER` of seven tabs with no `other`, so an `other` field is reachable only by search |
 | `disease_relevance._common_fields` | Uses `_classify_tab` to decide which fields count as clinical for extractor relevance (#1942) |
 
@@ -961,10 +976,10 @@ visibility; the rest is #2329 and #2330.
   covers. Built-in and custom fields share that slot. A drift test fails when
   a tab component renders a field the registry places elsewhere, as
   `tests/test_disease_relevance.py` already does for `DISEASE_FIELDS`.
-- **Curation UI** (#2329). The concept-assign dialog and the custom-field
-  dialog use one tab control; #721's "Add field" action on a tab preselects
-  that tab. Admin/staff only (#1147). A placement edit never changes a concept
-  mapping or a stored value.
+- **Curation UI** (#2329). The tab is one control in the Field Concept
+  Mapping dialog of [10.3](#103-creating-and-scoping-a-field-from-a-patient-tab),
+  which is the one place a field is created or remapped. A placement edit
+  never changes a concept mapping or a stored value.
 
 This absorbs #624's "organise by tab" (the mapping page already has tabs; the
 missing piece was that the grouping is code), #661's reclassification of
@@ -980,63 +995,127 @@ mapping API sets and refuses it; placements round-trip through
 and a tab renders last on that tab with no frontend change (#2330); existing
 tabs render exactly today's field sets.
 
-### 10.2 PatientRecord structure per disease
+### 10.2 Disease profiles: a base record plus disease extensions
 
 #### Verified baseline
 
 `PatientRecord` is one flat table of about 326 columns for every disease. A
 patient's disease is the free-text `disease`, `disease_slug` and
-`disease_slugs`; `DiseaseCategory` (`BC`, `MM`, `FL`, `CLL`, `MCL`, `Other`)
-is the coded identity `disease_relevance.DISEASES` uses. Which fields belong
-to which disease is encoded in three places with no shared source:
+`disease_slugs`. Disease Category management (#2120, #2090, #2242) already
+turns that into a coded identity as reference data a curator maintains on
+the Disease Category Mappings page:
+
+| Table | Holds | Managed at |
+|---|---|---|
+| `DiseaseCategoryChoice` | The categories: `BC`, `MM`, `FL`, `CLL`, `MCL`, `Other` as seeded, plus any a curator adds | `/api/v1/disease-categories/` |
+| `DiseaseCategoryMapping` | Which category a disease name belongs to | The same page |
+
+`disease_code` currently resolves built-in aliases before consulting
+`DiseaseCategoryMapping`; the intended resolver below reverses that precedence.
+`disease_relevance.patient_diseases` returns a record's categories, primary
+first. Both tables travel with `copy_reference_data`. The `DiseaseCategory`
+enum is a legacy reference.
+
+Field structure does not use any of it yet. `disease_relevance.DISEASES`
+hardcodes the five supported codes, and the patient page picks the disease
+tab by substring match on the disease name
+(`PatientDetail.tsx::getDiseaseType`), so a category a curator adds, or a
+disease name a curator maps to an existing one, gets no tab and no field
+set. Which fields belong to which disease is encoded in several places with
+no shared source:
 
 | Where | What |
 |---|---|
 | `DiseaseTab.tsx` | A `switch` on disease type renders a hand-authored section per disease; BC also gets a staging/biomarker section |
-| `omop_core/services/disease_relevance.py::DISEASE_FIELDS` | A frozenset per disease that mirrors the tab, guarded by a drift test |
+| `omop_core/services/disease_relevance.py::DISEASE_FIELDS` | A frozenset per disease that mirrors the tab, guarded by a drift test: BC 28 fields, CLL 21, MM 26, FL 13, MCL 11, eleven of them shared by two or more diseases |
 | Genomics catalog markers' `diseases` | Per-disease priority markers (#1180, #1311) |
+| The federated editor (`frontend/src/federation/` on `cb-v2`) | Renders the same tab components for the host app, taking each control's options from the descriptor, and already disagrees with `dev` where one column means different things per disease (#2551) |
+| CancerBot `trials/services/patient_info/configs.py` | Each attribute carries an optional `"disease"` gate (one code or a list) read by `disease_attr_applies`; an attribute with no gate applies to every disease. At CancerBot `a840f8d9` its gates name MCL on 21 attribute entries against the 8 fields here (#1149) |
 
 `FieldConceptMapping`, `FieldChoice`, `CustomPatientField` and the serializer
 have no disease scope. The consequences are already filed: a BC-only field
 accepts a value on an MM patient (#1148); one `stage` column must mean ISS for
-MM, Ann Arbor/Lugano for FL and MCL, Rai/Binet for CLL (section 3); every
-parity issue adds columns to every disease (#1149, #468, #542); the API
+MM, Ann Arbor/Lugano for FL and MCL, Rai/Binet for CLL (section 3, #2551);
+every parity issue adds columns to every disease (#1149, #468, #542); the API
 advertises every field as writable for every patient (#2113); the PHR bridge
-cannot ask for one disease's record (#1825).
+cannot ask for one disease's record (#1825). And a field a curator creates
+(#721) can only be a field of every patient.
 
 #### Intended result
 
-**Structure per disease is membership, not schema.** The physical table stays.
-A disease's record is the set of fields that are present in the descriptor,
-rendered, writable, validated, derived and relevant for it. No column is
-dropped, no per-disease table or model is added, and #54's `CancerTypePlugin`
+**A patient's record is a profile: the base record plus the extension of each
+disease the patient has.** In a repository of many diseases every patient
+carries the same base attributes, and the patients of one disease carry that
+disease's extended attributes as well.
+
+| Term | Meaning |
+|---|---|
+| Base record | The fields common to every patient, whatever the disease |
+| Disease extension | The fields that exist only for one disease, or for a named few |
+| Profile | Base record + one disease's extension: the schema of that disease's patients |
+| Scope | What a field declares about itself: `base`, or disease-specific for an enumerated set of diseases |
+
+**A profile is a logical schema, not a physical one.** Scope is membership:
+the physical table stays, no column is dropped, and no per-disease table or
+model is added. A built-in field stays a column; a field a curator creates
+stays a `CustomPatientField` whose value lives in `PatientRecord.custom_fields`.
+Nothing alters the database schema at runtime. #54's `CancerTypePlugin`
 remains a way to *contribute* memberships, not a replacement for them.
 
-- **Membership rows** `(field, disease)` with optional `required`, `section`,
-  `sort_order` and provenance, on the placement registry of 10.1 or beside it.
-  A field with no membership rows is **common** to every disease. Seeded from
-  `DISEASE_FIELDS`, the `DiseaseTab.tsx` sections and the genomics catalog,
-  additive on replay; `DISEASE_FIELDS` becomes the seed source and
-  `disease_relevance` reads the rows. Reference data, copied and fixtured like
-  placements.
-- **The patient's selected disease decides what is shown.** A patient's
-  record is the union of the memberships of every disease in `disease_slugs`
-  plus the common fields. By default every existing field that is not on the
-  Disease tab applies to all diseases; only the Disease tab's fields start
-  with memberships. `Other` gets common fields only.
-- **The descriptor exposes it.** Each field carries `diseases`; the
-  writable-fields endpoint accepts `?disease=`; `export_field_mapping_inventory`
-  and #1311's per-disease coverage read the same rows. The legacy
-  `/api/patient-info/` response and `fields = '__all__'` do not change.
-- **The disease tab renders from memberships.** The `switch` becomes the seed;
+- **Scope is membership rows** `(field, disease)` with optional `required`,
+  `section`, `sort_order` and provenance, keyed by the mapping's field name so
+  a column and a created field are scoped the same way. A field with no rows
+  is **base**; a field with rows is in the extension of each disease it
+  names. One field may be in several extensions (`stage`, `tumor_grade`,
+  `spleen_size`), which is why scope is a set and not one disease.
+- **Disease Category management is the one disease identity.** No second
+  disease list is added. The enumerated set is `DiseaseCategoryChoice`: a
+  membership names a category code and is refused for an unknown one. Which
+  profile a record gets is decided by `DiseaseCategoryMapping` through
+  `disease_code`, with an explicit curator mapping taking precedence over a
+  built-in alias. Mapping a disease name—even one currently recognized by a
+  built-in alias—to a category on the Disease Category Mappings page gives its
+  patients that category's profile with no deploy. `disease_relevance.DISEASES`
+  and `getDiseaseType`'s substring match
+  are replaced by those two tables, and the scope control of 10.3 lists
+  categories from the same endpoint the General tab's Disease Category
+  dropdown reads. `Other` has no extension: its profile is the base record. A
+  category a curator adds starts with an empty extension and gains fields
+  through 10.3. A category that still has member fields cannot be deleted.
+  The Disease Category Mappings page shows each category's extension size
+  and links to the Field Mappings page filtered to it.
+- **Seeded from what is already known.** MM, BC, FL, MCL and CLL start with
+  the field sets of `DISEASE_FIELDS` and the `DiseaseTab.tsx` sections, the
+  federated editor and the genomics catalog, additive on replay.
+  `DISEASE_FIELDS` becomes the seed source and `disease_relevance` reads the
+  rows. CancerBot's `"disease"` gates are the reference the seed is
+  reconciled against, and each attribute CancerBot scopes to a disease that
+  has no field here is a dated disposition in #1149: a column, a created
+  field, or not carried. Reference data, copied and fixtured like placements.
+- **The patient's diseases decide the profile.** A patient's record is the
+  base record plus the extension of every disease `patient_diseases` returns;
+  a patient with two cancers gets the union. By default every existing field
+  that is not on the Disease tab is base; only the Disease tab's fields start
+  with memberships.
+- **The descriptor exposes it.** Each field carries `scope` and `diseases`;
+  the writable-fields endpoint accepts `?disease=` and returns that profile;
+  `export_field_mapping_inventory` and #1311's per-disease coverage read the
+  same rows. The legacy `/api/patient-info/` response and `fields = '__all__'`
+  do not change, and `custom_fields` keeps every stored key.
+- **Scope and tab are separate.** Scope says whose record a field is part of;
+  the tab of 10.1 says where it renders. A disease-specific field may be
+  placed on Labs, and then renders there only for that disease's patients.
+- **The disease tab renders the extension.** The `switch` becomes the seed;
   hand-authored disease sections render only member fields, with the generic
-  slot for members that have no control. Adding MCL (#1149) becomes membership
-  rows plus controls, not a new branch. The Field Mappings page gets a disease
-  filter and a membership control.
+  slot of #2330 for members that have no control, created fields included.
+  The tab appears for any category whose extension has a field placed on it,
+  so MCL (#1149) and a newly added category are membership rows plus optional
+  controls, not a new branch. The federated editor renders from the same
+  descriptor and keeps no field list of its own.
 - **Disease-scoped choices.** #1224's stable scoped choices gain a disease
   scope so `stage` offers ISS values to an MM patient and Ann Arbor/Lugano to
-  FL/MCL. One choice table, scoped, not a second one.
-- **Interactive writes only.** Membership governs what the UI and the
+  FL/MCL (#2551). One choice table, scoped, not a second one.
+- **Interactive writes only.** Scope governs what the UI and the
   PatientRecord PATCH accept. Derivation from OMOP (`refresh_patient_record`),
   the bulk OMOP endpoints, FHIR sync and `copy_patient` are never blocked: the
   record is derived from facts, and a fact does not stop being true when a
@@ -1063,30 +1142,148 @@ This is the impactful change and it ships in three stages, each gated:
 
 Throughout: changing `disease`/`disease_slugs` never clears a value; a
 multi-disease patient gets the union; membership edits never rewrite stored
-values; the frozen legacy wire format is untouched; reviewer and provenance
-are recorded on every membership change as on a mapping change.
+values, a created field's key in `custom_fields` included; moving a field
+between base and an extension is a membership edit and nothing else; the
+frozen legacy wire format is untouched; reviewer and provenance are recorded
+on every membership change as on a mapping change.
 
 #### Acceptance
 
 Each disease's tab renders exactly today's field set under per-disease
-field-list tests; `writable-fields/?disease=MM` returns MM members plus common
-fields and nothing BC-only; a curator can add a field to a disease without a
-deploy; the choice list a patient sees follows their disease where a scoped
-choice exists; tests cover warn-only, enforced 400, derivation/ETL/sync
-unaffected, disease change preserving values, multi-disease union and `Other`.
+field-list tests; `writable-fields/?disease=MM` returns the MM profile, the
+base record plus MM's extension and nothing BC-only; a membership naming a
+code that is not a `DiseaseCategoryChoice` is refused; a curator can add a
+field to a disease's extension without a deploy; a category added at
+`/api/v1/disease-categories/` gets a profile and, once a field is placed, a
+disease tab; a record whose disease name is mapped to a category on the
+Disease Category Mappings page renders that category's extension, and
+re-mapping the name, including a built-in alias such as Multiple Myeloma,
+changes the profile without clearing a value; no code path decides a record's
+disease by matching on its name; the choice list a
+patient sees follows their disease where a
+scoped choice exists; tests cover warn-only, enforced 400,
+derivation/ETL/sync unaffected, disease change preserving values,
+multi-disease union and `Other`.
 
-### 10.3 Implementation issues
+### 10.3 Creating and scoping a field from a patient tab
+
+#### Verified baseline
+
+| Piece | Today |
+|---|---|
+| Field's globe on a patient tab, `FieldMappingLink.tsx` | Links to `/field-mappings?field=<name>`; shown to staff and org admins outside patient mode (`FieldMappingLinksContext`, set from `canViewOmop`) |
+| Field Mappings page, `FieldMappingPage.tsx` | On `?field=`, switches to the field's tab and opens `ConceptAssignDialog` when the field is mappable and the user may write mappings; otherwise filters to the row |
+| Creating a field, `AddCustomFieldDialog` | A second dialog with its own concept search, OMOP table picker and unit, opened from the mapping page's "Add field" button only. It takes a tab and no disease |
+| `POST /api/v1/custom-patient-fields/` | Creates the `CustomPatientField` and an **approved** `FieldConceptMapping` in one transaction. Gated by `_can_manage_mappings`, so an analyst can create an approved mapping although approval is otherwise staff and org admin only (`_can_approve_mappings`) |
+| A created field's values | Derived from OMOP into `PatientRecord.custom_fields` on refresh and carried by `copy_reference_data` and the fixture; not rendered on any patient tab (10.1) |
+| [adding_fields.md](adding_fields.md) (#721) | Describes an inline "Add field" control and an "Additional fields" section on every tab; neither is mounted now |
+
+#721 asks for an "Add field" action on each tab. #1147 asked for the inline
+control to be removed from the patient UI; that is already true on `dev`, and
+it was closed on 2026-11-15.
+
+#### Intended result
+
+**One dialog, reached from the field's own tab.** An org admin looking at a
+patient tab goes to the Field Mappings page with the Field Concept Mapping
+dialog already open, whether they are remapping a field that exists or
+creating one for that tab.
+
+- **Org admins see Add field; patients never do.** Two entry points on a
+  patient tab, both shown to org admins and staff outside patient mode and to
+  nobody else, both links to the Field Mappings page:
+  - the existing globe on a field, `/field-mappings?field=<name>`, which
+    opens the dialog on that field's mapping;
+  - a new **Add field** action at the foot of every tab,
+    `/field-mappings?new=1&tab=<tab>` with `&disease=<code>` from the disease
+    tab, which opens the dialog in create mode.
+
+  The link carries the tab and the disease code and nothing about the
+  patient. Saving or cancelling returns to the patient tab the admin came
+  from through router state, and the tab reloads its descriptor so the new
+  field is there.
+- **One Field Concept Mapping dialog.** `ConceptAssignDialog` gains a create
+  mode and `AddCustomFieldDialog` is folded into it, so there is one concept
+  search and one table picker. Create mode asks first for what a new field
+  needs (display name, field name, value type, editable or computed and the
+  formula, and the confirmation that it is added to PatientRecord); both
+  modes then share:
+
+  | Control | Sets |
+  |---|---|
+  | Concept | The OMOP concept the field means |
+  | OMOP table | The table its facts are written to and derived from, with the unit |
+  | Tab | Where it renders (10.1); `omop` leaves it unplaced |
+  | Scope | **Base record**, or **Disease-specific** with one or more diseases from `DiseaseCategoryChoice` (10.2) |
+
+  Remap mode shows the same controls on an existing field, so a built-in
+  field's scope and tab are edited where its concept is.
+- **Defaults follow the tab the admin came from.**
+
+  | Opened from | Tab | Scope |
+  |---|---|---|
+  | The disease tab (Multiple Myeloma, Breast Cancer, …) | `disease` | Disease-specific, tied to the disease currently on that record: the category the tab is showing |
+  | Any other patient tab | That tab | Base record |
+  | The Field Mappings page's own "Add field" | The page's active tab | Base record, or the disease the page is filtered to |
+
+  Every default can be changed before saving: the admin may add further
+  diseases to a field created from the Multiple Myeloma tab, or make it base.
+  A disease-specific scope with no disease chosen is refused.
+- **Creating a field is an approval, so it is the org admin's.** The create
+  request is gated by `_can_approve_mappings` (staff and org admins) instead
+  of `_can_manage_mappings`, on the tab action, the mapping page's button and
+  the API alike. An analyst keeps proposing and remapping existing fields and
+  gets 403 on a create. `AGENTS.md`'s role table, which lists custom fields
+  among the analyst's writes, changes in the same PR.
+- **The API carries scope.** `POST /api/v1/custom-patient-fields/` takes
+  `diseases` (category codes; empty or omitted is base) and writes the
+  definition, the approved mapping, the tab and the membership rows in one
+  transaction. The mapping endpoints set `tab` and `diseases` on an existing
+  field. A created field's name still cannot collide with a column or
+  another created field, and its definition is still visible only once its
+  mapping is approved.
+- **Where the field then shows.** A base field renders last on its tab for
+  every patient; a disease-specific field renders last on its tab for
+  patients with that disease, through the generic slot of #2330. Until #2330
+  ships a created field is stored and derived but not rendered, so #721 is
+  not done before it.
+- **Not patient-facing, which is what #1147 asked.** No patient, doctor or
+  analyst sees the action, and no dialog opens on the patient page. The
+  federated editor renders created fields from the descriptor and offers no
+  Add field action: the host app has no Field Mappings page.
+
+#### Acceptance
+
+From the Multiple Myeloma tab an org admin clicks Add field, lands on the
+Field Mappings page with the dialog open in create mode, tab `disease` and
+scope Disease-specific / MM preselected, picks a concept and an OMOP table,
+saves, and is returned to the tab where the field now renders last; the same
+field does not render for a breast cancer patient and is absent from
+`writable-fields/?disease=BC`. From the Labs tab the default is base and the
+field renders for every patient. The globe on an existing field opens the
+same dialog on its mapping with its tab and scope shown. Tests cover a 403
+for an analyst and a doctor on create, the action hidden in patient mode and
+from every role but org admin and staff, that refusal, an unknown
+disease code, and round-trip of scope through
+`dump_field_curation`/`load_field_curation` and `copy_reference_data`.
+
+### 10.4 Implementation issues
 
 | Issue | Work | Dependencies |
 |---|---|---|
-| [#2327](https://github.com/healthkey-ai/promop/issues/2327) | Tracking: field placement and per-disease PatientRecord structure | — |
-| [#2328](https://github.com/healthkey-ai/promop/issues/2328) | `FieldConceptMapping.tab`: the tab a field renders on; unplaced means OMOP-only; descriptor, API, transfer and mapping page carry it | None |
-| [#2329](https://github.com/healthkey-ai/promop/issues/2329) | Placement curation: choose a tab when adding or mapping a field; Unplaced group | #2328 |
-| [#2330](https://github.com/healthkey-ai/promop/issues/2330) | Patient tabs render registry-placed fields through a generic slot; drift test | #2328 |
-| [#2331](https://github.com/healthkey-ai/promop/issues/2331) | Field disease membership as reference data; descriptor `diseases`; relevance reads it | #2328 |
-| [#2332](https://github.com/healthkey-ai/promop/issues/2332) | Per-disease UI and curation: DiseaseTab from memberships, disease filter, disease-scoped choices | #2330, #2331, #1224 |
+| [#2327](https://github.com/healthkey-ai/promop/issues/2327) | Tracking: field placement and disease profiles | — |
+| [#2328](https://github.com/healthkey-ai/promop/issues/2328) | ~~`FieldConceptMapping.tab`: the tab a field renders on; unplaced means OMOP-only; descriptor, API, transfer and mapping page carry it~~ | **Closed** |
+| [#2329](https://github.com/healthkey-ai/promop/issues/2329) | Placement curation: the tab control in the Field Concept Mapping dialog; Unplaced group | #2328 |
+| [#2330](https://github.com/healthkey-ai/promop/issues/2330) | Patient tabs render registry-placed fields, created ones included, through a generic slot; drift test | #2328 |
+| [#2331](https://github.com/healthkey-ai/promop/issues/2331) | Field scope as membership reference data keyed to `DiseaseCategoryChoice`, a record's profile resolved through `DiseaseCategoryMapping`; seed and CancerBot reconciliation; descriptor `scope`/`diseases`; relevance reads it | #2328 |
+| [#721](https://github.com/healthkey-ai/promop/issues/721) | Add field from a patient tab: the tab action and deep link, create mode in the one dialog, scope on the create API, org-admin gate (10.3) | #2329, #2330, #2331 |
+| [#2332](https://github.com/healthkey-ai/promop/issues/2332) | Per-disease UI and curation: DiseaseTab from memberships, chosen by the record's category instead of a name match, a tab for any category with an extension, extension size on the Disease Category Mappings page, disease filter, scope control on existing fields, disease-scoped choices | #2330, #2331, #1224 |
 | [#2333](https://github.com/healthkey-ai/promop/issues/2333) | Per-disease write validation: audit, warn-only, enforce behind a setting | #2331 |
+| [#1147](https://github.com/healthkey-ai/promop/issues/1147) | ~~Remove the inline Add field control from the patient tabs~~ Already true on `dev`; #721 carries the requirement that the new tab action is never patient-facing | **Closed** |
 
-Existing issues this coordinates with: #624, #661, #662, #721, #1147
-(placement); #54, #1076, #1148, #1149, #468, #542, #1311, #2113, #1224,
-#1825 (disease).
+The issue bodies of #721, #2329, #2331 and #2332 predate the 2026-11-15
+amendment; where they differ, this section is the plan.
+
+Existing issues this coordinates with: #624, #661, #662 (placement); #54,
+#1076, #1148, #1149, #468, #542, #1311, #2113, #2120, #2551, #1224, #1825
+(disease).
