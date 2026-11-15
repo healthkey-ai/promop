@@ -8019,12 +8019,25 @@ def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances,
     keyed_updates, key_ambiguous = {}, []
     unattributed_matches = 0
 
+    def preferred_keep(pks):
+        """The row a content match keeps: real beats provisional, then pk order.
+
+        The earliest row can be a provisional proposal while a later row holds
+        the approved fact (append-only writes produce that order). Keeping the
+        earliest would let the next proposal rewrite it and delete the real row
+        as a duplicate (#2543).
+        """
+        for pk in pks:
+            if confidence_by_pk[pk] is None and cid_by_pk[pk] != 0:
+                return pk
+        return pks[0]
+
     def match_content(i, key):
         """Today's outcome for a row whose content key is on file."""
-        keep = existing[key][0]
+        keep = preferred_keep(existing[key])
         row_slots[i] = ('old', keep)
-        extras = [pk for pk in existing[key][1:]
-                  if pk not in keyed_pks and pk not in collapse_ids]
+        extras = [pk for pk in existing[key]
+                  if pk != keep and pk not in keyed_pks and pk not in collapse_ids]
         collapse_ids.extend(extras)
         new_cid = getattr(instances[i], cid_attr, None)
         new_conf = getattr(instances[i], 'confidence', None)
@@ -8077,8 +8090,9 @@ def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances,
         # With a hospital named, only its own rows are candidates: one group.
         groups = len(unkeyed_groups[key]) if organization is None else 1
         if len(idxs) == 1 and groups == 1:
-            i, keep = idxs[0], candidates[0]
-            collapse_ids.extend(pk for pk in candidates[1:] if pk not in collapse_ids)
+            i, keep = idxs[0], preferred_keep(candidates)
+            collapse_ids.extend(
+                pk for pk in candidates if pk != keep and pk not in collapse_ids)
             keyed_updates[keep] = (instances[i], _key_class(attribution_by_pk[keep], organization))
             touched_ids.append(keep)
             row_slots[i] = ('old', keep)
@@ -8116,7 +8130,7 @@ def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances,
 
         if key in existing:
             if last_index[key] != i:
-                row_slots[i] = ('old', existing[key][0])
+                row_slots[i] = ('old', preferred_keep(existing[key]))
                 continue                      # decide the key once, on its last row
             match_content(i, key)
             continue

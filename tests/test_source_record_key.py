@@ -4,6 +4,7 @@ from datetime import date
 
 import pytest
 from django.db import IntegrityError, transaction
+from django.test import override_settings
 
 from omop_core.models import Measurement, Observation
 from tests.factories import ConceptFactory, PersonFactory
@@ -346,3 +347,88 @@ def test_with_a_header_only_the_hospitals_own_row_is_a_candidate(api):
     assert resp.status_code == 201, resp.content
     assert (resp.json()['ids'], resp.json()['key_ambiguous']) == ([first], [])
     assert _rows(api.person).get(source_record_key=KEY).pk == first
+
+
+# --- real rows survive a proposal's duplicate collapse (#2543) ----------------
+
+def _stored_measurement(person, concept, type_concept, pk, confidence):
+    """A stored row with no key, so the batch matches it by content."""
+    from datetime import datetime, timezone as dt_timezone
+
+    return Measurement.objects.create(
+        measurement_id=pk,
+        person=person,
+        measurement_concept=concept,
+        measurement_type_concept=type_concept,
+        measurement_date=date(2026, 11, 1),
+        measurement_datetime=datetime(2026, 11, 1, 8, 0, tzinfo=dt_timezone.utc),
+        measurement_source_value='8310-5',
+        value_as_number=Decimal('37.1'),
+        value_source_value='37.1',
+        unit_source_value='Cel',
+        confidence=confidence,
+    )
+
+
+@override_settings(PROVISIONAL_DATA_ENABLED=True)
+def test_a_proposal_keeps_a_later_real_row_when_it_collapses_duplicates(api):
+    """The earliest row is provisional, the approved fact comes later. A new
+    proposal must keep the real row and must not rewrite it (#2543)."""
+    type_concept = ConceptFactory(concept_code='EHR-2543', concept_name='EHR')
+    _stored_measurement(api.person, api.concept, type_concept, 9001, 50)
+    _stored_measurement(api.person, api.concept, type_concept, 9002, None)
+
+    response = api.post([api.row(value='37.1', confidence=50)])
+
+    assert response.status_code == 201, response.content
+    rows = list(_rows(api.person))
+    assert [row.measurement_id for row in rows] == [9002]
+    assert rows[0].confidence is None
+    assert response.json()['ids'] == [9002]
+
+
+@override_settings(PROVISIONAL_DATA_ENABLED=True)
+def test_a_proposal_keeps_a_later_real_row_in_the_keyed_fallback(api):
+    """The keyed fallback stamps the key on one content candidate; when a real
+    candidate exists, that one is kept and the proposal does not rewrite it."""
+    type_concept = ConceptFactory(concept_code='EHR-2543', concept_name='EHR')
+    _stored_measurement(api.person, api.concept, type_concept, 9003, 50)
+    _stored_measurement(api.person, api.concept, type_concept, 9004, None)
+
+    response = api.post([api.row(value='37.1', confidence=50, key=KEY)])
+
+    assert response.status_code == 201, response.content
+    rows = list(_rows(api.person))
+    assert [row.measurement_id for row in rows] == [9004]
+    assert rows[0].confidence is None
+    assert rows[0].source_record_key is None
+    assert response.json()['ids'] == [9004]
+
+
+@override_settings(PROVISIONAL_DATA_ENABLED=True)
+def test_a_real_row_first_still_collapses_a_later_proposal(api):
+    """The reversed order was already safe; keep it pinned."""
+    type_concept = ConceptFactory(concept_code='EHR-2543', concept_name='EHR')
+    _stored_measurement(api.person, api.concept, type_concept, 9005, None)
+    _stored_measurement(api.person, api.concept, type_concept, 9006, 50)
+
+    response = api.post([api.row(value='37.1', confidence=50)])
+
+    assert response.status_code == 201, response.content
+    rows = list(_rows(api.person))
+    assert [row.measurement_id for row in rows] == [9005]
+    assert rows[0].confidence is None
+
+
+@override_settings(PROVISIONAL_DATA_ENABLED=True)
+def test_the_earliest_row_is_kept_when_every_candidate_is_a_proposal(api):
+    type_concept = ConceptFactory(concept_code='EHR-2543', concept_name='EHR')
+    _stored_measurement(api.person, api.concept, type_concept, 9007, 50)
+    _stored_measurement(api.person, api.concept, type_concept, 9008, 40)
+
+    response = api.post([api.row(value='37.1', confidence=30)])
+
+    assert response.status_code == 201, response.content
+    rows = list(_rows(api.person))
+    assert [row.measurement_id for row in rows] == [9007]
+    assert rows[0].confidence == 30
