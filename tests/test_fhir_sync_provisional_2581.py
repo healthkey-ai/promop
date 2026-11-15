@@ -122,6 +122,94 @@ def test_the_generic_upsert_keeps_a_later_real_row(sync):
     assert rows[0].measurement_concept_id == sync.incoming.concept_id
 
 
+def test_the_daily_rollup_promotes_when_only_confidence_changes(sync):
+    _stored(sync.person, sync.incoming, sync.ehr, 9105, 50, value='5.0')
+
+    sync.rollup([_daily('5.0')], {('*', '2823-3'): sync.incoming})
+
+    assert Measurement.objects.get(pk=9105).confidence is None
+
+
+def test_the_generic_upsert_promotes_when_only_confidence_changes(sync):
+    _stored(sync.person, sync.incoming, sync.ehr, 9115, 50, source='FHIR-2581')
+    incoming = Measurement(
+        person=sync.person,
+        measurement_concept=sync.incoming,
+        measurement_type_concept=sync.ehr,
+        measurement_date=DAY,
+        measurement_datetime=datetime(2025, 10, 24, 8, 0, tzinfo=dt_timezone.utc),
+        measurement_source_value='FHIR-2581',
+        value_as_number=4.0,
+    )
+
+    sync.clinical(incoming)
+
+    assert Measurement.objects.get(pk=9115).confidence is None
+
+
+def test_a_patient_self_service_sync_does_not_clear_confidence(sync):
+    from patient_portal.api.fhir.sync import FhirPatientSyncView
+
+    _stored(sync.person, sync.stored, sync.ehr, 9116, 50, source='FHIR-2581')
+    incoming = Measurement(
+        person=sync.person,
+        measurement_concept=sync.incoming,
+        measurement_type_concept=sync.ehr,
+        measurement_date=DAY,
+        measurement_datetime=datetime(2025, 10, 24, 8, 0, tzinfo=dt_timezone.utc),
+        measurement_source_value='FHIR-2581',
+        value_as_number=4.0,
+    )
+
+    FhirPatientSyncView()._upsert_clinical(
+        Measurement, 'measurement_id', 'measurement_concept_id',
+        'measurement_date', 'measurement_source_value', sync.person,
+        [incoming], 'iss|sub', None)
+
+    assert Measurement.objects.get(pk=9116).confidence == 50
+
+
+def test_an_incoming_proposal_does_not_clear_confidence_of_the_survivor(sync):
+    _stored(sync.person, sync.stored, sync.ehr, 9117, 50, source='FHIR-2581')
+    incoming = Measurement(
+        person=sync.person,
+        measurement_concept=sync.incoming,
+        measurement_type_concept=sync.ehr,
+        measurement_date=DAY,
+        measurement_datetime=datetime(2025, 10, 24, 8, 0, tzinfo=dt_timezone.utc),
+        measurement_source_value='FHIR-2581',
+        value_as_number=4.0,
+        confidence=50,
+    )
+
+    sync.clinical(incoming)
+
+    assert Measurement.objects.get(pk=9117).confidence == 50
+
+
+def test_promotion_marks_the_patient_stale(sync):
+    from omop_core.models import PatientRecord
+    from tests.factories import PatientRecordFactory
+
+    record = PatientRecordFactory(person=sync.person)
+    PatientRecord.objects.filter(pk=record.pk).update(derivation_version=7)
+    _stored(sync.person, sync.stored, sync.ehr, 9118, 50, source='FHIR-2581')
+    incoming = Measurement(
+        person=sync.person,
+        measurement_concept=sync.incoming,
+        measurement_type_concept=sync.ehr,
+        measurement_date=DAY,
+        measurement_datetime=datetime(2025, 10, 24, 8, 0, tzinfo=dt_timezone.utc),
+        measurement_source_value='FHIR-2581',
+        value_as_number=4.0,
+    )
+
+    sync.clinical(incoming)
+
+    record.refresh_from_db()
+    assert record.derivation_version == 0
+
+
 def test_the_generic_upsert_keeps_an_unresolved_proposal_provisional(sync):
     _stored(sync.person, sync.stored, sync.ehr, 9114, 50, source='FHIR-2581')
     incoming = Measurement(
@@ -138,6 +226,7 @@ def test_the_generic_upsert_keeps_an_unresolved_proposal_provisional(sync):
 
     row = Measurement.objects.get(pk=9114)
     assert row.confidence == 50
+    assert row.measurement_concept_id == sync.stored.concept_id
 
 
 def test_the_generic_upsert_promotes_a_lone_provisional_row(sync):
@@ -177,6 +266,21 @@ def test_a_real_row_from_another_hospital_is_not_the_survivor():
 
     assert keep is provisional
     assert _same_attribution_extras([provisional, other_hospital], keep) == []
+
+
+def test_the_callers_own_row_is_preferred_over_an_earlier_foreign_one():
+    from types import SimpleNamespace
+
+    from patient_portal.api.fhir.sync import _preferred_keep
+
+    foreign_real = _Candidate(1, None, 5, (2,))
+    own_provisional = _Candidate(2, 50, 5, (1,))
+
+    keep = _preferred_keep(
+        [foreign_real, own_provisional], 'measurement_concept_id',
+        SimpleNamespace(pk=1))
+
+    assert keep is own_provisional
 
 
 def test_a_real_row_from_the_same_hospital_is_the_survivor():

@@ -1957,6 +1957,11 @@ below. Inserted rows and key matches get a `ProvenanceRecord` when a source is
 sent. `?upsert=false` restores append-only writes for unkeyed rows; a row
 carrying a source record key is still matched by key.
 
+The FHIR sync (`_upsert_clinical` and the daily rollup) applies the same
+survivor rule. It promotes a provisional row it rewrites only when the sync
+resolves a concept and the caller is not patient self-service, and marks the
+patient stale for the next derivation (#2581).
+
 | Model | Event identity |
 |---|---|
 | ConditionOccurrence, DrugExposure, ProcedureOccurrence | `(source_value, date)` |
