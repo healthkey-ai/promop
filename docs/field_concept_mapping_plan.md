@@ -1161,8 +1161,9 @@ multi-disease union and `Other`.
 | A created field's values | Derived from OMOP into `PatientRecord.custom_fields` on refresh and carried by `copy_reference_data` and the fixture; not rendered on any patient tab (10.1) |
 | [adding_fields.md](adding_fields.md) (#721) | Describes an inline "Add field" control and an "Additional fields" section on every tab; neither is mounted now |
 
-#721 asks for an "Add field" action on each tab and #1147 asks for it to be
-removed from the patient UI. Both are open.
+#721 asks for an "Add field" action on each tab. #1147 asked for the inline
+control to be removed from the patient UI; that is already true on `dev`, and
+it was closed on 2026-11-15.
 
 #### Intended result
 
@@ -1261,7 +1262,7 @@ disease code, and round-trip of scope through
 | [#721](https://github.com/healthkey-ai/promop/issues/721) | Add field from a patient tab: the tab action and deep link, create mode in the one dialog, scope on the create API, org-admin gate (10.3) | #2329, #2330, #2331 |
 | [#2332](https://github.com/healthkey-ai/promop/issues/2332) | Per-disease UI and curation: DiseaseTab from memberships, chosen by the record's category instead of a name match, a tab for any category with an extension, extension size on the Disease Category Mappings page, disease filter, scope control on existing fields, disease-scoped choices | #2330, #2331, #1224 |
 | [#2333](https://github.com/healthkey-ai/promop/issues/2333) | Per-disease write validation: audit, warn-only, enforce behind a setting | #2331 |
-| [#1147](https://github.com/healthkey-ai/promop/issues/1147) | Close with #721: the inline control is already gone and the tab action is an admin-only link | #721 |
+| [#1147](https://github.com/healthkey-ai/promop/issues/1147) | ~~Remove the inline Add field control from the patient tabs~~ Already true on `dev`; #721 carries the requirement that the new tab action is never patient-facing | **Closed** |
 
 The issue bodies of #721, #2329, #2331 and #2332 predate the 2026-11-15
 amendment; where they differ, this section is the plan.
