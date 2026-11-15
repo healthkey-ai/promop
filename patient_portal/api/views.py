@@ -31,6 +31,7 @@ from django.core.exceptions import ValidationError as DjangoValidationError
 from django.core.validators import validate_email
 from omop_core.services.source_descriptions import source_metadata_description
 from omop_core.services.source_fhir_context import based_on_labels as _source_based_on
+from omop_core.services.provisional import is_real_row as _is_real_row
 from omop_core.models import (
     Organization,
     Person, PatientRecord, Concept, ConceptClass, Domain, ProvenanceRecord, Vocabulary,
@@ -7889,15 +7890,6 @@ def _key_class(attribution, organization):
         raise _SourceKeyConflict()
     return cls
 
-
-
-def _is_real_row(confidence, concept_id):
-    """A stored row holds an approved fact: no proposal score, a mapped concept.
-
-    One predicate for the three sites that must agree — the content keep choice,
-    the real-beats-provisional branch, and the keyed-update guard (#2543).
-    """
-    return confidence is None and concept_id != 0
 
 
 def _plan_bulk_upsert(model_cls, pk_field, model_name, person, instances,
