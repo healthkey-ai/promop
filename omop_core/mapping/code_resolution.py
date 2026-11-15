@@ -30,6 +30,7 @@ import logging
 from contextvars import ContextVar
 from datetime import date
 
+from django.conf import settings
 from django.contrib.contenttypes.models import ContentType
 from django.db import IntegrityError, transaction
 from django.db.models import Case, F, IntegerField, Q, When
@@ -940,6 +941,13 @@ def repoint_clinical_rows(*, mapping, old_concept_id, new_concept_id,
             # Snapshot PKs before the concept update: the lazy queryset filters
             # on old_concept_id, so after .update() it would find zero rows.
             repointed_pks = set(qs.values_list('pk', flat=True)) if model is Measurement else None
+            # Rows a proposal wrote are provisional until this approval says
+            # otherwise. They keep their confidence through the collapses so a
+            # real twin outranks them, and lose it once those are settled.
+            provisional_pks = (
+                set(qs.filter(confidence__isnull=False).values_list('pk', flat=True))
+                if has_provisional_rows(model) else set()
+            )
             qs.update(**{concept_col: new_concept_id})
             result['rows_collapsed'] = _collapse_duplicates(
                 model, concept_col, source_col, match,
@@ -947,33 +955,15 @@ def repoint_clinical_rows(*, mapping, old_concept_id, new_concept_id,
                 organization_id=mapping.organization_id,
             )
 
-            # Normalize units on repointed Measurement rows (#2088) to the
-            # mapping's curated unit. Not for a variant approval (units set):
-            # the variant has no curated unit of its own, and the mapping's
-            # was chosen for the mapping's LOINC, not the variant's (#2157).
-            # The savepoint keeps a failed conversion from undoing the move.
-            if repointed_pks and units is None:
-                try:
-                    from omop_core.services.canonical_units import (
-                        normalize_measurement_units,
-                    )
-                    with transaction.atomic():
-                        norm_qs = model.objects.filter(pk__in=repointed_pks)
-                        result['rows_normalized'] = normalize_measurement_units(
-                            norm_qs, mapping)
-                        # Re-collapse: one result reported in two units (1 g/L
-                        # and 100 mg/dL) is one value once both are converted.
-                        if result['rows_normalized']:
-                            result['rows_collapsed'] += _collapse_duplicates(
-                                model, concept_col, source_col, match,
-                                new_concept_id, person_ids,
-                                organization_id=mapping.organization_id,
-                            )
-                except Exception:
-                    logger.exception(
-                        'Unit normalization failed for mapping %s',
-                        mapping.id,
-                    )
+            # Not for a variant approval (units set): the variant has no
+            # curated unit of its own, and the mapping's was chosen for the
+            # mapping's LOINC, not the variant's (#2157).
+            if units is None:
+                _normalize_moved_measurements(
+                    model, concept_col, source_col, match, mapping,
+                    repointed_pks, new_concept_id, person_ids, result)
+            if provisional_pks:
+                result['rows_promoted'] = _promote_rows(model, provisional_pks)
 
     logger.info(
         'Mapping %s: re-pointed %s %s row(s) from concept %s to %s '
@@ -983,6 +973,193 @@ def repoint_clinical_rows(*, mapping, old_concept_id, new_concept_id,
         result.get('rows_normalized', 0), result['persons_marked_stale'],
     )
     return result
+
+
+def _normalize_moved_measurements(model, concept_col, source_col, match, mapping,
+                                  pks, concept_id, person_ids, result):
+    """Normalize units on moved Measurement rows (#2088) to the mapping's curated unit.
+
+    The savepoint keeps a failed conversion from undoing the move.
+    """
+    if not pks:
+        return
+    try:
+        from omop_core.services.canonical_units import normalize_measurement_units
+        with transaction.atomic():
+            norm_qs = model.objects.filter(pk__in=pks)
+            result['rows_normalized'] = normalize_measurement_units(norm_qs, mapping)
+            # Re-collapse: one result reported in two units (1 g/L and
+            # 100 mg/dL) is one value once both are converted.
+            if result['rows_normalized']:
+                result['rows_collapsed'] += _collapse_duplicates(
+                    model, concept_col, source_col, match,
+                    concept_id, person_ids,
+                    organization_id=mapping.organization_id,
+                )
+    except Exception:
+        logger.exception('Unit normalization failed for mapping %s', mapping.id)
+
+
+# --------------------------------------------------------------------------
+# Provisional rows: written from a proposal, promoted or reverted with it
+# (#2434, docs/provisional_data_plan.md)
+# --------------------------------------------------------------------------
+
+_PK_CHUNK = 10_000
+
+
+def has_provisional_rows(model):
+    """True when the table holds any provisional row.
+
+    Answered by the partial index on ``confidence IS NOT NULL``, so it is
+    cheap on a table that holds none, which lets approval, rejection and the
+    batch writers ask before they run a query that would scan the table.
+    """
+    return model.objects.filter(confidence__isnull=False).exists()
+
+
+def _promote_rows(model, pks):
+    """Make these provisional rows real. Returns how many lost their confidence."""
+    pks = list(pks)
+    cleared = 0
+    for start in range(0, len(pks), _PK_CHUNK):
+        cleared += model.objects.filter(
+            pk__in=pks[start:start + _PK_CHUNK], confidence__isnull=False,
+        ).update(confidence=None)
+    return cleared
+
+
+def promote_provisional_rows(*, mapping, person_id=None):
+    """Approval of a proposal at the concept its rows already sit on.
+
+    ``repoint_clinical_rows`` moves rows off one concept onto another and has
+    nothing to do when the two are the same, which is exactly the case where a
+    curator agrees with the proposal. The provisional rows at the destination
+    become real here: duplicates of a real row are folded into it first, units
+    are normalised as a re-point would, and the confidence is cleared last.
+
+    Returns ``{'rows_promoted', 'persons_marked_stale', 'person_ids',
+    'rows_collapsed'}``.
+    """
+    result = {'rows_promoted': 0, 'persons_marked_stale': 0, 'rows_collapsed': 0,
+              'person_ids': set()}
+    concept_id = mapping.target_concept_id
+    entry = CLINICAL_TABLES.get(normalize_omop_table(mapping.omop_table))
+    if concept_id is None or entry is None:
+        return result
+    model, concept_col, source_col = entry
+    if not has_provisional_rows(model):
+        return result
+
+    match = _source_value_match(model, source_col, mapping)
+    qs = model.objects.filter(match, **{concept_col: concept_id}, confidence__isnull=False)
+    if person_id is not None:
+        qs = qs.filter(person_id=person_id)
+    if mapping.organization_id:
+        qs = exclusively_attributed(qs, mapping.organization_id)
+    person_ids = set(qs.values_list('person_id', flat=True).distinct())
+    if not person_ids:
+        return result
+
+    with transaction.atomic():
+        result['person_ids'] = set(person_ids)
+        result['persons_marked_stale'] = PatientRecord.objects.filter(
+            person_id__in=person_ids).update(derivation_version=0)
+        with suppress_patient_record_refresh():
+            pks = set(qs.values_list('pk', flat=True))
+            result['rows_collapsed'] = _collapse_duplicates(
+                model, concept_col, source_col, match, concept_id, person_ids,
+                organization_id=mapping.organization_id)
+            _normalize_moved_measurements(
+                model, concept_col, source_col, match, mapping,
+                pks if model is Measurement else None, concept_id, person_ids, result)
+            result['rows_promoted'] = _promote_rows(model, pks)
+    logger.info('Mapping %s: promoted %s provisional row(s) (%s collapsed).',
+                mapping.id, result['rows_promoted'], result['rows_collapsed'])
+    return result
+
+
+def revert_provisional_rows(*, mapping, concept_id, person_id=None):
+    """A proposal stopped being the answer: its rows go back to unresolved.
+
+    Rows at *concept_id* that a proposal wrote (a confidence on them) return to
+    concept 0 with no confidence, which is what ingest would have stored had it
+    never acted on the proposal. A real row at the same concept is not touched,
+    and nothing is deleted: the ETL would re-send a deleted row (plan, open
+    decision 2). Called when the proposal is rejected or points somewhere else.
+
+    A patient-page save passes *person_id* and reverts that patient only; the
+    others are corrected when Generate OMOP next runs for them.
+
+    Returns ``{'rows_reverted', 'persons_marked_stale', 'person_ids'}``.
+    """
+    result = {'rows_reverted': 0, 'persons_marked_stale': 0, 'person_ids': set()}
+    entry = CLINICAL_TABLES.get(normalize_omop_table(mapping.omop_table))
+    if concept_id in (None, NO_MATCHING_CONCEPT_ID) or entry is None:
+        return result
+    model, concept_col, source_col = entry
+    if not has_provisional_rows(model):
+        return result
+
+    match = _source_value_match(model, source_col, mapping)
+    qs = model.objects.filter(match, **{concept_col: concept_id}, confidence__isnull=False)
+    if person_id is not None:
+        qs = qs.filter(person_id=person_id)
+    if mapping.organization_id:
+        qs = exclusively_attributed(qs, mapping.organization_id)
+    person_ids = set(qs.values_list('person_id', flat=True).distinct())
+    if not person_ids:
+        return result
+
+    with transaction.atomic():
+        result['person_ids'] = set(person_ids)
+        result['persons_marked_stale'] = PatientRecord.objects.filter(
+            person_id__in=person_ids).update(derivation_version=0)
+        with suppress_patient_record_refresh():
+            result['rows_reverted'] = qs.update(
+                **{concept_col: NO_MATCHING_CONCEPT_ID, 'confidence': None})
+    logger.info('Mapping %s: reverted %s provisional row(s) off concept %s.',
+                mapping.id, result['rows_reverted'], concept_id)
+    return result
+
+
+def _confidence_percent(value):
+    """A ranker's 0-1 score as the whole percentage a clinical row carries."""
+    return max(0, min(100, int(round(float(value) * 100))))
+
+
+def provisional_proposal(source_code, omop_table):
+    """The ranked proposal a provisional row may be written from, or None.
+
+    Returns ``(concept, percent)``. Only a proposal qualifies that is
+    unscoped (the per-patient inventory cannot say which hospital a code came
+    from), carries a ranker's confidence at or above
+    ``PROVISIONAL_CONFIDENCE_FLOOR``, and points at a standard, valid concept
+    in the table's own domain, which leaves out an import's ``HK-*``
+    placeholder. When proposals for the same code (under different source
+    systems) disagree on the destination nothing qualifies, because the row
+    cannot say which system its code came from. Agreeing proposals take the
+    lowest of their confidences.
+    """
+    table = normalize_omop_table(omop_table)
+    if table not in CLINICAL_TABLES or not source_code:
+        return None
+    proposals = SourceCodeConceptMapping.objects.filter(
+        source_code__iexact=source_code[:SOURCE_CODE_MAX], omop_table=table,
+        status='proposed', organization__isnull=True,
+        target_concept__isnull=False, suggestion_confidence__isnull=False,
+    ).select_related('target_concept')
+    floor = settings.PROVISIONAL_CONFIDENCE_FLOOR
+    qualifying = {}
+    for proposal in proposals:
+        percent = _confidence_percent(proposal.suggestion_confidence)
+        if percent >= floor and _usable_destination(proposal.target_concept, table):
+            qualifying.setdefault(proposal.target_concept_id, []).append(
+                (proposal.target_concept, percent))
+    if len(qualifying) != 1:
+        return None
+    entries = next(iter(qualifying.values()))
+    return entries[0][0], min(percent for _concept, percent in entries)
 
 
 def _collapse_duplicates(model, concept_col, source_col, match,
@@ -1003,9 +1180,13 @@ def _collapse_duplicates(model, concept_col, source_col, match,
     )
     if organization_id:
         candidates = exclusively_attributed(candidates, organization_id)
+    # A real row outranks a provisional one for the same event whatever the
+    # pks say: the survivor keeps the provenance and any hand edit, and a
+    # provisional twin behind it is the one that goes (#2584). Among rows of
+    # equal standing the earliest wins, as before.
     rows = (
         with_attribution(candidates)
-        .order_by(pk_col)
+        .order_by(F('confidence').asc(nulls_first=True), pk_col)
         .values_list(pk_col, ATTRIBUTION, 'person_id', *identity_cols)
     )
 
@@ -1039,8 +1220,12 @@ _EHR_TYPE_CONCEPT_ID = 32817
 def _create_missing_clinical_rows(person, *, omop_tables=None, source_values=None):
     """Create clinical rows for PatientSourceCode entries with no existing row.
 
-    Only creates rows where an approved SCCM mapping exists and no clinical row
+    Creates rows where an approved SCCM mapping exists and no clinical row
     with the same source value exists for this person in the target table.
+    With ``PROVISIONAL_DATA_ENABLED``, a code with no approved mapping but a
+    ranked proposal at or above the floor gets a *provisional* row instead:
+    at the proposal's concept, carrying its confidence (outcome
+    ``provisional``).
 
     *source_values*: optional list of source strings to limit creation to.
     *omop_tables*: optional list of table keys (e.g. ``['measurement']``).
@@ -1090,8 +1275,17 @@ def _create_missing_clinical_rows(person, *, omop_tables=None, source_values=Non
                 .select_related('target_concept')
                 .first()
             )
-            if not mapping or not mapping.target_concept_id:
-                continue
+            confidence = None
+            if mapping and mapping.target_concept_id:
+                target_concept = mapping.target_concept
+            else:
+                proposal = (
+                    provisional_proposal(sv, table_key)
+                    if settings.PROVISIONAL_DATA_ENABLED else None
+                )
+                if proposal is None:
+                    continue
+                target_concept, confidence = proposal
 
             # Skip if any clinical row with this source value already exists
             # for this person (the repoint pass handles those).
@@ -1101,22 +1295,25 @@ def _create_missing_clinical_rows(person, *, omop_tables=None, source_values=Non
             # Allocate PK and create the row.
             row_pk = next_pk(model, pk_field)
             row_date = psc.first_seen.date() if psc.first_seen else date.today()
+            extra = {} if confidence is None else {'confidence': confidence}
             model.objects.create(**{
                 pk_field: row_pk,
                 'person': person,
-                concept_fk: mapping.target_concept,
+                concept_fk: target_concept,
                 source_col: sv,
                 date_col: row_date,
                 type_fk: ehr_type_concept,
+                **extra,
             })
             created += 1
             details.append({
                 'source_value': sv,
                 'table': table_key,
                 'rows': 1,
-                'outcome': 'created',
-                'target': mapping.target_concept.concept_name or str(mapping.target_concept_id),
-                'target_concept_id': mapping.target_concept_id,
+                'outcome': 'created' if confidence is None else 'provisional',
+                'target': target_concept.concept_name or str(target_concept.concept_id),
+                'target_concept_id': target_concept.concept_id,
+                **extra,
             })
 
     return created, details
@@ -1126,11 +1323,60 @@ def _create_missing_clinical_rows(person, *, omop_tables=None, source_values=Non
 # Per-patient source code resolution
 # ------------------------------------------------------------------
 
+def _reconcile_with_proposal(model, concept_col, source_col, table_key, rows, sv,
+                             quarantine_concept_ids, table_has_provisional):
+    """One code with no approved mapping: line its rows up with the proposal.
+
+    *rows* is the person's rows for the code. Returns ``None`` when nothing
+    applies (no qualifying proposal and no provisional row to take back), else
+    the code-detail dict: outcome ``provisional`` (rows written or rewritten at
+    the proposal's concept, with its ``confidence``) or ``reverted``.
+    """
+    proposal = (
+        provisional_proposal(sv, table_key) if settings.PROVISIONAL_DATA_ENABLED else None
+    )
+    if proposal is None:
+        if not table_has_provisional:
+            return None
+        with transaction.atomic(), suppress_patient_record_refresh():
+            changed = rows.filter(confidence__isnull=False).update(
+                **{concept_col: NO_MATCHING_CONCEPT_ID, 'confidence': None})
+        return {'rows': changed, 'outcome': 'reverted'} if changed else None
+
+    concept, percent = proposal
+    unresolved = Q(**{concept_col: NO_MATCHING_CONCEPT_ID})
+    if quarantine_concept_ids:
+        unresolved |= Q(**{f'{concept_col}__in': quarantine_concept_ids})
+    # What an earlier proposal wrote, if it is not what this one says.
+    stale = Q(confidence__isnull=False) & ~Q(**{concept_col: concept.pk, 'confidence': percent})
+    with transaction.atomic(), suppress_patient_record_refresh():
+        changed = rows.filter(
+            (Q(confidence__isnull=True) & unresolved) | stale,
+        ).update(**{concept_col: concept.pk, 'confidence': percent})
+    if not changed:
+        return None
+    return {
+        'rows': changed, 'outcome': 'provisional', 'confidence': percent,
+        'target': concept.concept_name or str(concept.concept_id),
+        'target_concept_id': concept.concept_id,
+    }
+
+
 def resolve_person_source_codes(person, *, source_values=None, omop_tables=None):
     """Re-resolve clinical rows for *person* with unresolved or prior targets.
 
     Uses the current approved SCCM mappings.  Returns a dict with counts:
-    ``{'resolved': N, 'skipped': N, 'already_resolved': N}``.
+    ``{'resolved': N, 'created': N, 'provisional': N, 'reverted': N,
+    'skipped': N, 'already_resolved': N}``.
+
+    A code with no approved mapping is brought in line with its ranked
+    proposal (:func:`provisional_proposal`): with ``PROVISIONAL_DATA_ENABLED``
+    its unresolved rows become provisional at the proposal's concept, and
+    provisional rows an earlier proposal wrote are rewritten to the current
+    one. Provisional rows whose proposal no longer qualifies (rejected, moved
+    to another concept, below the floor, or the switch off) go back to
+    unresolved, so a missed hook cannot leave one behind. A code that has an
+    approved mapping promotes its provisional rows with the rest.
 
     *source_values*: optional list of source strings to limit resolution to.
     *omop_tables*: optional list of table keys (e.g. ``['measurement']``).
@@ -1140,6 +1386,8 @@ def resolve_person_source_codes(person, *, source_values=None, omop_tables=None)
     resolved = 0
     skipped = 0
     already_resolved = 0
+    provisional = 0
+    reverted = 0
     code_details: list[dict] = []
     person_ids_touched: set[int] = set()
 
@@ -1167,6 +1415,7 @@ def resolve_person_source_codes(person, *, source_values=None, omop_tables=None)
             .annotate(row_count=Count('pk'))
             .order_by(source_col)
         )
+        table_has_provisional = has_provisional_rows(model)
 
         for group in groups:
             sv = group[source_col]
@@ -1186,12 +1435,25 @@ def resolve_person_source_codes(person, *, source_values=None, omop_tables=None)
                 .first()
             )
             if mapping is None:
-                skipped += group['row_count']
-                code_details.append({
-                    'source_value': sv, 'table': table_key,
-                    'rows': group['row_count'], 'outcome': 'skipped',
-                    'reason': 'no approved mapping',
-                })
+                outcome = _reconcile_with_proposal(
+                    model, concept_col, source_col, table_key,
+                    qs.filter(**{source_col: sv}), sv, quarantine_concept_ids,
+                    table_has_provisional)
+                if outcome is None:
+                    skipped += group['row_count']
+                    code_details.append({
+                        'source_value': sv, 'table': table_key,
+                        'rows': group['row_count'], 'outcome': 'skipped',
+                        'reason': 'no approved mapping',
+                    })
+                    continue
+                person_ids_touched.add(person.person_id)
+                if outcome['outcome'] == 'provisional':
+                    provisional += outcome['rows']
+                else:
+                    reverted += outcome['rows']
+                already_resolved += group['row_count'] - outcome['rows']
+                code_details.append({'source_value': sv, 'table': table_key, **outcome})
                 continue
 
             target_concept_id = mapping.target_concept_id
@@ -1212,6 +1474,10 @@ def resolve_person_source_codes(person, *, source_values=None, omop_tables=None)
                 unresolved_q |= Q(**{f'{concept_col}__in': quarantine_concept_ids})
             if mapping.deferred_repoint_concept_ids:
                 unresolved_q |= Q(**{f'{concept_col}__in': mapping.deferred_repoint_concept_ids})
+            # An approval is the end of a proposal: the rows it wrote, at
+            # whatever concept, become real at the approved one.
+            if table_has_provisional:
+                unresolved_q |= Q(confidence__isnull=False)
 
             rows_to_update = qs.filter(**{source_col: sv}).filter(unresolved_q)
 
@@ -1233,7 +1499,17 @@ def resolve_person_source_codes(person, *, source_values=None, omop_tables=None)
                         set(rows_to_update.values_list('pk', flat=True))
                         if model is Measurement else None
                     )
+                    # Kept through the collapse so a real twin outranks them.
+                    provisional_pks = (
+                        set(rows_to_update.filter(confidence__isnull=False)
+                            .values_list('pk', flat=True))
+                        if table_has_provisional else set()
+                    )
                     rows_to_update.update(**{concept_col: target_concept_id})
+                    if provisional_pks:
+                        _collapse_duplicates(
+                            model, concept_col, source_col, Q(**{source_col: sv}),
+                            target_concept_id, {person.person_id})
                     # Normalize units on resolved Measurement rows (#2088).
                     # Wrapped in a savepoint and try/except so a normalization
                     # failure does not roll back the concept update or abort
@@ -1251,6 +1527,8 @@ def resolve_person_source_codes(person, *, source_values=None, omop_tables=None)
                                 'Unit normalization failed for %s (mapping %s)',
                                 sv, mapping.id,
                             )
+                    if provisional_pks:
+                        _promote_rows(model, provisional_pks)
                 person_ids_touched.add(person.person_id)
                 resolved += count
                 already_resolved += group['row_count'] - count
@@ -1285,6 +1563,10 @@ def resolve_person_source_codes(person, *, source_values=None, omop_tables=None)
     return {
         'resolved': resolved,
         'created': rows_created,
+        # Rows written as provisional by this run, creations included.
+        'provisional': provisional + sum(
+            1 for detail in creation_details if detail['outcome'] == 'provisional'),
+        'reverted': reverted,
         'skipped': skipped,
         'already_resolved': already_resolved,
         'code_details': code_details,

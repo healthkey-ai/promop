@@ -94,6 +94,7 @@ from omop_core.mapping.code_resolution import (
     normalize_omop_table,
     repoint_clinical_rows,
     resolve_source_code,
+    revert_provisional_rows,
 )
 from omop_core.mapping.suggestions import (
     CURATOR_PROVENANCE,
@@ -7374,7 +7375,10 @@ def _normalize_bulk_measurement_rows(model_cls, new_ids):
         normalize_measurement_units, unit_code,
     )
 
-    rows = model_cls.objects.filter(pk__in=new_ids)
+    # Not a provisional row: its concept came from a proposal, which has no
+    # curated unit, and converting at write time is an approved mapping's
+    # privilege. The row is converted when an approval promotes it (#2530).
+    rows = model_cls.objects.filter(pk__in=new_ids, confidence__isnull=True)
 
     # Collect unique source values from the inserted rows.
     source_values = set(
@@ -13714,6 +13718,19 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None, person_id=Non
             outcome.pop('person_ids', None)
             mapping.relocation = {'queued': False, 'from_table': rows_table, 'to_table': new_table, **outcome}
             deferred_repoints = list(mapping.deferred_repoint_concept_ids)
+
+    # A proposal that is rejected, or now points somewhere else, takes back the
+    # provisional rows it wrote: they return to unresolved, and a later Generate
+    # OMOP run writes new ones for whatever proposal stands then (#2530). After
+    # the relocation above, so the rows are already in the table the mapping
+    # names. A patient-page save reverts that patient and leaves the rest to
+    # Generate OMOP, as an approval does.
+    if (status_value != 'approved'
+            and previous_concept_id not in (None, NO_MATCHING_CONCEPT_ID)
+            and (status_value == 'rejected' or concept is None
+                 or concept.pk != previous_concept_id)):
+        revert_provisional_rows(
+            mapping=mapping, concept_id=previous_concept_id, person_id=person_id)
 
     repoint = None
     if status_value == 'approved' and concept is not None:

@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from django.db import connection, transaction
 from django.utils import timezone
 
-from omop_core.mapping.code_resolution import NO_MATCHING_CONCEPT_ID
+from omop_core.mapping.code_resolution import NO_MATCHING_CONCEPT_ID, revert_provisional_rows
 from omop_core.mapping.table_relocation import relocatable
 from omop_core.models import CodeMappingUpload, Concept, SourceCodeConceptMapping
 from omop_core.services.concept_lock import check_concept_locks
@@ -291,6 +291,9 @@ def import_upload(*, upload, vocabulary, provenance, actor, can_approve=True):
         unchanged = 0
         approval_repoints = []
         relocations = []
+        # Proposals the file pointed at another concept: the provisional rows
+        # they wrote go back to unresolved (#2530). A file cannot reject.
+        reverts = []
         for row in rows:
             mapping = existing.get(row.source_code)
             concept = concepts.get(row.destination_concept_id)
@@ -349,6 +352,9 @@ def import_upload(*, upload, vocabulary, provenance, actor, can_approve=True):
                 deferred_repoints = set(mapping.deferred_repoint_concept_ids)
                 if not approved and destination_changed:
                     pending_repoints.add(previous_concept_id)
+                if (not approved and destination_changed
+                        and previous_concept_id != NO_MATCHING_CONCEPT_ID):
+                    reverts.append((mapping, previous_concept_id))
                 if approval_changed:
                     old_concept_ids = pending_repoints | deferred_repoints
                     if destination_changed:
@@ -419,6 +425,8 @@ def import_upload(*, upload, vocabulary, provenance, actor, can_approve=True):
             )
         for moved_mapping, from_table, to_table in relocations:
             queue_relocation(moved_mapping, from_table, to_table)
+        for reverted_mapping, off_concept_id in reverts:
+            revert_provisional_rows(mapping=reverted_mapping, concept_id=off_concept_id)
         if approval_repoints:
             approved = {
                 mapping.source_code: mapping

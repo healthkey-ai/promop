@@ -21,7 +21,9 @@ import logging
 from django.conf import settings
 from django.db import connection, transaction
 
-from omop_core.mapping.code_resolution import NO_MATCHING_CONCEPT_ID, repoint_clinical_rows
+from omop_core.mapping.code_resolution import (
+    NO_MATCHING_CONCEPT_ID, promote_provisional_rows, repoint_clinical_rows,
+)
 from omop_core.models import SourceCodeConceptMapping
 
 logger = logging.getLogger(__name__)
@@ -141,6 +143,11 @@ def run_repoint(mapping_id):
                 moved_ids.add(old_concept_id)
                 for key in ('rows_updated', 'rows_collapsed'):
                     totals[key] += outcome[key]
+            # Rows a proposal wrote at the concept the curator approved are
+            # already where they belong; the approval only makes them real.
+            promoted = promote_provisional_rows(mapping=mapping)
+            persons |= promoted['person_ids']
+            totals['rows_collapsed'] += promoted['rows_collapsed']
             with transaction.atomic():
                 current = SourceCodeConceptMapping.objects.select_for_update().filter(pk=mapping_id).first()
                 if current is None:
