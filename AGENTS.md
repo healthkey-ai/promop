@@ -1945,7 +1945,9 @@ event identity in `_UPSERT_KEYS`, the same identity
 `fhir/sync.py::_upsert_clinical` uses — so an ETL re-run, a retry after a read
 timeout, or a re-parse converges instead of duplicating. Semantics per key:
 event already present → left in place, its concept updated when it changed and
-any stacked historical duplicates collapsed onto the earliest row; otherwise
+any stacked historical duplicates collapsed onto the first real row (null
+confidence and a mapped concept), or onto the earliest when no candidate holds
+an approved mapping; otherwise
 inserted. Repeats within one batch collapse to a single row (last occurrence
 wins). A content match rewrites only the concept column — every other column is
 left as stored, so a re-run cannot quietly overwrite a corrected value — unless
