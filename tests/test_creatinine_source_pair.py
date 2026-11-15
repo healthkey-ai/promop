@@ -315,3 +315,39 @@ def test_the_ordinary_alias_follows_the_pair():
 def test_both_micro_signs_spell_umol_per_litre(unit):
     from omop_core.services.creatinine_units import canonical_from_pair
     assert canonical_from_pair(88.42, unit) == (True, Decimal('1.00'))
+
+
+def test_a_stored_unit_spelling_is_an_echo_on_the_shared_form():
+    from omop_core.services.patient_form import apply_patient_form_patch
+
+    record = _record()
+    record.serum_creatinine_level = Decimal('88.42')
+    record.serum_creatinine_level_units = 'umol/l'
+    record.serum_creatinine_mg_dl = Decimal('1.00')
+    record.save()
+
+    saved, _result = apply_patient_form_patch(
+        record.person,
+        {'serum_creatinine_level': '88.42',
+         'serum_creatinine_level_units': 'umol/L'},
+    )
+
+    saved.refresh_from_db()
+    assert 'serum_creatinine_level' not in (saved.user_edited_fields or [])
+    assert not saved.pending_source_pair_dates
+
+
+def test_a_stored_unit_spelling_is_an_echo_on_the_native_patch(api):
+    record = _record()
+    record.serum_creatinine_level = Decimal('88.42')
+    record.serum_creatinine_level_units = 'umol/l'
+    record.serum_creatinine_mg_dl = Decimal('1.00')
+    record.save()
+
+    _edit(api, record, {
+        'serum_creatinine_level': '88.42',
+        'serum_creatinine_level_units': 'umol/L',
+    })
+
+    assert 'serum_creatinine_level' not in (record.user_edited_fields or [])
+    assert not record.pending_source_pair_dates

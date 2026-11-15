@@ -46,6 +46,7 @@ from omop_core.services.chemistry_units import (
     unit_hint as chemistry_unit_hint,
 )
 from omop_core.services import direct_bilirubin_units
+from omop_core.services.source_pair_dates import pair_fields_match
 from omop_core.services.write_descriptor import (
     computed_only_assignments, get_serializer_read_only_fields,
 )
@@ -860,10 +861,12 @@ class PatientRecordSerializer(serializers.ModelSerializer):
             dated = set(self.context.get('dated_fields') or ())
             for group in groups:
                 fields = group & self._source_pairs
-                if fields and any(
-                        validated.get(field) != getattr(self.instance, field, None)
-                        or field in dated
-                        for field in fields):
+                # A unit compares by its storage code (#2508): an unchanged
+                # re-send of `G/DL` over a stored `g/dl` is an echo, while a
+                # genuinely different unit stays an authored edit. An explicit
+                # date makes the pair authored even when both halves match.
+                if fields and (fields & dated
+                               or not pair_fields_match(fields, validated, self.instance)):
                     authored |= fields
             self._source_pairs = authored
         return validated

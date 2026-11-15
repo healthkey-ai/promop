@@ -730,3 +730,99 @@ def test_a_retired_pair_also_drops_a_legacy_canonical_marker(lab):
     assert not {'hemoglobin_level', 'hemoglobin_level_units',
                 'hemoglobin_g_dl'} & set(record.user_edited_fields or [])
     assert record.pending_source_pair_dates == {}
+
+
+def _record_with_stored_unit(lab, value, unit, canonical):
+    record = lab['record']
+    record.hemoglobin_level = Decimal(str(value))
+    record.hemoglobin_level_units = unit
+    record.hemoglobin_g_dl = Decimal(str(canonical))
+    record.save()
+    return record
+
+
+def test_a_stored_unit_spelling_is_not_an_authored_pair_on_the_form(lab):
+    record = _record_with_stored_unit(lab, 12, 'g/dl', '12.0')
+
+    _patch_pair(lab, 12, 'G/DL')
+
+    record.refresh_from_db()
+    assert 'hemoglobin_level' not in (record.user_edited_fields or [])
+    assert not record.pending_source_pair_dates
+    assert not _hemoglobin_rows(lab, SELF_REPORT_TYPE).exists()
+
+
+def test_a_stored_unit_spelling_is_not_an_authored_pair_on_the_native_patch(lab):
+    record = _record_with_stored_unit(lab, 12, 'g/dl', '12.0')
+
+    _patch_native(lab, 12, 'G/DL')
+
+    record.refresh_from_db()
+    assert 'hemoglobin_level' not in (record.user_edited_fields or [])
+    assert not record.pending_source_pair_dates
+    assert not _hemoglobin_rows(lab, SELF_REPORT_TYPE).exists()
+
+
+def test_an_echo_with_a_stored_spelling_keeps_the_pending_day(lab):
+    draw = TODAY - timedelta(days=3)
+    _patch_pair(lab, 12, 'G/DL', draw)
+    record = lab['record']
+    assert record.pending_source_pair_dates == {
+        'hemoglobin_level': draw.isoformat()}
+
+    # A row written another way spells the same unit differently.
+    from omop_core.models import PatientRecord
+    PatientRecord.objects.filter(pk=record.pk).update(
+        hemoglobin_level_units='g/dl')
+
+    _patch_pair(lab, 12, 'G/DL')
+
+    record.refresh_from_db()
+    assert record.pending_source_pair_dates == {
+        'hemoglobin_level': draw.isoformat()}
+    assert _hemoglobin_rows(lab, SELF_REPORT_TYPE).count() == 1
+
+
+def test_a_real_unit_change_after_a_stored_spelling_is_authored(lab):
+    _record_with_stored_unit(lab, 12, 'g/dl', '12.0')
+
+    _patch_pair(lab, 12, 'G/L')
+
+    record = lab['record']
+    assert 'hemoglobin_level' in (record.user_edited_fields or [])
+    assert record.pending_source_pair_dates == {
+        'hemoglobin_level': TODAY.isoformat()}
+
+
+def test_an_explicitly_dated_equal_pair_is_still_authored(lab):
+    _record_with_stored_unit(lab, 12, 'g/dl', '12.0')
+    draw = TODAY - timedelta(days=4)
+
+    _patch_pair(lab, 12, 'G/DL', draw)
+
+    record = lab['record']
+    assert 'hemoglobin_level' in (record.user_edited_fields or [])
+    assert record.pending_source_pair_dates == {
+        'hemoglobin_level': draw.isoformat()}
+
+
+def test_a_legacy_null_date_store_stays_undated_and_a_change_dates_today(lab):
+    record = lab['record']
+    record.hemoglobin_level = Decimal('120')
+    record.hemoglobin_level_units = 'G/L'
+    record.hemoglobin_g_dl = Decimal('12.0')
+    record.user_edited_fields = ['hemoglobin_level', 'hemoglobin_level_units']
+    record.pending_source_pair_dates = None
+    record.save()
+
+    _patch_pair(lab, 120, 'G/L')
+
+    record.refresh_from_db()
+    assert not record.pending_source_pair_dates
+    assert 'hemoglobin_level' in (record.user_edited_fields or [])
+
+    _patch_pair(lab, 130, 'G/L')
+
+    record.refresh_from_db()
+    assert record.pending_source_pair_dates == {
+        'hemoglobin_level': TODAY.isoformat()}

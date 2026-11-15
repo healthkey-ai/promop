@@ -514,3 +514,39 @@ def test_a_vanishingly_small_count_is_refused_and_stores_nothing(api, value):
     record.refresh_from_db()
     assert record.absolute_neutrophile_count is None
     assert record.anc_thousand_per_ul is None
+
+
+def test_a_stored_count_unit_spelling_is_an_echo_on_the_shared_form():
+    from omop_core.services.patient_form import apply_patient_form_patch
+
+    record = _record()
+    record.absolute_neutrophile_count = 1550
+    record.absolute_neutrophile_count_units = 'K/UL'
+    record.anc_thousand_per_ul = Decimal('1.550')
+    record.save()
+
+    saved, _result = apply_patient_form_patch(
+        record.person,
+        {'absolute_neutrophile_count': 1550,
+         'absolute_neutrophile_count_units': '10*3/uL'},
+    )
+
+    saved.refresh_from_db()
+    assert 'absolute_neutrophile_count' not in (saved.user_edited_fields or [])
+    assert not saved.pending_source_pair_dates
+
+
+def test_a_stored_count_unit_spelling_is_an_echo_on_the_native_patch(api):
+    record = _record()
+    record.absolute_neutrophile_count = 1550
+    record.absolute_neutrophile_count_units = 'K/UL'
+    record.anc_thousand_per_ul = Decimal('1.550')
+    record.save()
+
+    _edit(api, record, {
+        'absolute_neutrophile_count': 1550,
+        'absolute_neutrophile_count_units': '10*3/uL',
+    })
+
+    assert 'absolute_neutrophile_count' not in (record.user_edited_fields or [])
+    assert not record.pending_source_pair_dates

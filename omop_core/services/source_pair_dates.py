@@ -26,6 +26,7 @@ from __future__ import annotations
 from datetime import date, datetime
 
 from omop_core.services import (
+    blood_count_source_pairs,
     chemistry_units,
     creatinine_units,
     direct_bilirubin_units,
@@ -83,6 +84,30 @@ _PAIR_OF_FIELD = {
     for field in fields
 }
 
+#: Unit column -> the serializer's own normalizer for it. A stored spelling
+#: such as `g/dl` and the submitted code `G/DL` name the same unit; comparing
+#: the raw columns would read an autosave echo as an authored edit (#2508).
+#: Chemistry's normalizer is bound to its canonical because the same spelling
+#: can be valid for one analyte and not another. The numeric half needs no
+#: normalizer: the serializer and the model both store its column type.
+UNIT_FIELD_NORMALIZERS = {
+    hemoglobin_units.UNIT_FIELD: hemoglobin_units.normalize_unit,
+    creatinine_units.UNIT_FIELD: creatinine_units.normalize_unit,
+    direct_bilirubin_units.UNIT_FIELD: direct_bilirubin_units.normalize_unit,
+    **{
+        spec['unit']: (
+            lambda value, canonical=canonical: chemistry_units.normalize_unit(
+                canonical, value)
+        )
+        for canonical, spec in chemistry_units.PAIRS.items()
+    },
+    **{
+        spec['unit_field']: blood_count_source_pairs.normalize_unit
+        for spec in COUNT_PAIRS.values()
+        if spec.get('unit_field')
+    },
+}
+
 
 def fields_for(source: str) -> frozenset[str]:
     """Every record field pending with ``source`` (the pair and its unit)."""
@@ -97,6 +122,34 @@ def pair_of(field: str) -> str | None:
 def pair_sources_in(fields) -> set[str]:
     """The pair source fields named by any of ``fields``."""
     return {source for source in map(pair_of, fields) if source is not None}
+
+
+def pair_fields_match(fields, submitted, record) -> bool:
+    """Whether every submitted half of these pairs matches what is stored.
+
+    Used to tell an autosave echo from an authored edit. A value compares
+    exactly; a unit compares as its recognized storage code, so a stored
+    `g/dl` and a submitted `G/DL` are the same unit (#2508). Two spellings are
+    only equal when both normalize to the same recognized code: an unknown
+    stored spelling is not evidence that the pair is unchanged, and two
+    different unknowns are not equal either. A field absent from ``submitted``
+    keeps the stored value: the shared form lists a companion unit there
+    without writing it.
+    """
+    for field in fields:
+        current = getattr(record, field, None)
+        value = submitted[field] if field in submitted else current
+        if value == current:
+            continue
+        normalizer = UNIT_FIELD_NORMALIZERS.get(field)
+        if normalizer is None:
+            return False
+        submitted_code = normalizer(value)
+        stored_code = normalizer(current)
+        if (submitted_code is None or stored_code is None
+                or submitted_code != stored_code):
+            return False
+    return True
 
 
 def _parse_day(value) -> date | None:
