@@ -353,11 +353,13 @@ def test_a_stored_unit_spelling_is_an_echo_on_the_native_patch(api):
     assert not record.pending_source_pair_dates
 
 
-def test_a_historic_unsupported_unit_pair_survives_a_refresh():
-    """A legacy concept-name row in a unit this slice cannot read keeps its pair.
 
-    Hemoglobin has the same guard (#475); creatinine lost the number and the
-    unit on the next recompute (#2519).
+def test_a_historic_unsupported_unit_result_is_not_kept():
+    """The number is deliberately not kept (#2519).
+
+    The pair's choices and the serializer know only mg/dL and umol/L; a raw
+    spelling such as mg/L would 400 the next save and be reinterpreted by the
+    next edit, so the extractor reports no pair and the refresh keeps none.
     """
     from datetime import date
 
@@ -369,35 +371,6 @@ def test_a_historic_unsupported_unit_pair_survives_a_refresh():
         person=person,
         measurement_concept=ConceptFactory(concept_name='Creatinine'),
         measurement_source_value=None,
-        measurement_date=date(2024, 5, 1),
-        value_as_number=Decimal('5'),
-        unit_source_value='mg/L',
-    )
-
-    record = refresh_patient_record(person)
-    assert record.serum_creatinine_mg_dl is None
-    assert record.serum_creatinine_level == Decimal('5')
-    assert record.serum_creatinine_level_units == 'mg/L'
-
-    # A second refresh keeps the same legacy fact.
-    record = refresh_patient_record(person)
-    assert record.serum_creatinine_mg_dl is None
-    assert record.serum_creatinine_level == Decimal('5')
-    assert record.serum_creatinine_level_units == 'mg/L'
-
-
-def test_a_coded_unsupported_unit_result_still_clears_the_pair():
-    """The legacy guard keeps a historic fact, not an unusable current result."""
-    from datetime import date
-
-    from omop_core.services.patient_record_service import refresh_patient_record
-    from tests.factories import MeasurementFactory
-
-    person = Person.objects.create(person_id=PERSON_ID + 41)
-    MeasurementFactory(
-        person=person,
-        measurement_concept=ConceptFactory(concept_code=LOINC_CREATININE),
-        measurement_source_value=LOINC_CREATININE,
         measurement_date=date(2024, 5, 1),
         value_as_number=Decimal('5'),
         unit_source_value='mg/L',

@@ -206,7 +206,7 @@ def _usable_concept_name(concept) -> str | None:
 
 # Bump this whenever aggregation or computation logic changes in any section
 # extractor or in _compute_derived_fields.  See DERIVATION_CHANGELOG.md.
-DERIVATION_VERSION = 32
+DERIVATION_VERSION = 31
 
 # These PatientRecord columns are projections of PersonLanguageSkill, never
 # independent edits. Older PATCH requests could mark them as user-edited and
@@ -1805,14 +1805,6 @@ def recompute_patient_record_fields(patient_info: PatientRecord, *, changed_fiel
                 and patient_info.hemoglobin_level_units.strip().casefold() != 'g/dl'):
             # An uncoded hemoglobin result in another unit is a legacy fact,
             # not a g/dL canonical value. Keep its number and recorded unit.
-            continue
-        if (canonical == CREATININE_CANONICAL and not retire_aliases
-                and value is None and patient_info.serum_creatinine_level_units
-                and patient_info.serum_creatinine_level_units.strip().casefold() != 'mg/dl'):
-            # The same case for creatinine (#2519): a historic concept-name
-            # result in a unit this slice cannot read is a legacy fact. Without
-            # this the alias copy below wrote the canonical None over the pair
-            # and cleared its recorded unit.
             continue
         for alias in aliases:
             if alias not in pending_aliases:
@@ -5228,26 +5220,26 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None,
                 measurement.value_as_number, unit_code)
             if (unit_code is None or not recognised or canonical_value is None
                     or not creatinine_canonical_in_range(canonical_value)):
-                if representation == 'legacy' and reported_unit is not None:
-                    # A historic concept-name fact reports the number and unit
-                    # the lab sent (#475); the canonical stays unknown rather
-                    # than reinterpreting an unsupported scale. The refresh
-                    # keeps the pair with the hemoglobin-style guard below
-                    # (#2519).
-                    data[CREATININE_CANONICAL] = None
-                    data[CREATININE_PAIR] = Decimal(str(measurement.value_as_number))
-                    data[CREATININE_UNIT] = reported_unit
-                    selected_dates[CREATININE_PAIR] = measurement.measurement_date
-                    if dates_out is not None:
-                        dates_out[CREATININE_PAIR] = measurement.measurement_date
-                    continue
                 # The newest result owns the field even when it is unusable: an
                 # older one must not stand in for it, and the explicit Nones
                 # stop the curated mapping from storing the raw number.
-                logger.warning(
-                    'Serum creatinine projection skipped for person_id=%s: '
-                    'unit=%r', person.person_id, reported_unit,
-                )
+                if representation == 'legacy' and reported_unit is not None:
+                    # A historic concept-name fact cannot be kept as the pair
+                    # either: the pair's choices and the serializer know only
+                    # mg/dL and umol/L, so the raw spelling would be rejected
+                    # on the next save and reinterpreted on the next edit
+                    # (#2519 review). Report no pair rather than an unreadable
+                    # one; the number is deliberately not kept.
+                    logger.warning(
+                        'Serum creatinine legacy pair skipped for person_id=%s: '
+                        'unit=%r is not convertible', person.person_id,
+                        reported_unit,
+                    )
+                else:
+                    logger.warning(
+                        'Serum creatinine projection skipped for person_id=%s: '
+                        'unit=%r', person.person_id, reported_unit,
+                    )
                 data[CREATININE_CANONICAL] = None
                 data[CREATININE_PAIR] = None
                 data[CREATININE_UNIT] = None
