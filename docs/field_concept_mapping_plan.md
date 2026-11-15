@@ -1010,10 +1010,11 @@ the Disease Category Mappings page:
 | `DiseaseCategoryChoice` | The categories: `BC`, `MM`, `FL`, `CLL`, `MCL`, `Other` as seeded, plus any a curator adds | `/api/v1/disease-categories/` |
 | `DiseaseCategoryMapping` | Which category a disease name belongs to | The same page |
 
-`disease_code` resolves a name through its built-in rules and then
-`DiseaseCategoryMapping`; `disease_relevance.patient_diseases` returns a
-record's categories, primary first. Both tables travel with
-`copy_reference_data`. The `DiseaseCategory` enum is a legacy reference.
+`disease_code` currently resolves built-in aliases before consulting
+`DiseaseCategoryMapping`; the intended resolver below reverses that precedence.
+`disease_relevance.patient_diseases` returns a record's categories, primary
+first. Both tables travel with `copy_reference_data`. The `DiseaseCategory`
+enum is a legacy reference.
 
 Field structure does not use any of it yet. `disease_relevance.DISEASES`
 hardcodes the five supported codes, and the patient page picks the disease
@@ -1071,9 +1072,11 @@ remains a way to *contribute* memberships, not a replacement for them.
   disease list is added. The enumerated set is `DiseaseCategoryChoice`: a
   membership names a category code and is refused for an unknown one. Which
   profile a record gets is decided by `DiseaseCategoryMapping` through
-  `disease_code`, so mapping a disease name to a category on the Disease
-  Category Mappings page gives its patients that category's profile with no
-  deploy. `disease_relevance.DISEASES` and `getDiseaseType`'s substring match
+  `disease_code`, with an explicit curator mapping taking precedence over a
+  built-in alias. Mapping a disease name—even one currently recognized by a
+  built-in alias—to a category on the Disease Category Mappings page gives its
+  patients that category's profile with no deploy. `disease_relevance.DISEASES`
+  and `getDiseaseType`'s substring match
   are replaced by those two tables, and the scope control of 10.3 lists
   categories from the same endpoint the General tab's Disease Category
   dropdown reads. `Other` has no extension: its profile is the base record. A
@@ -1154,8 +1157,9 @@ field to a disease's extension without a deploy; a category added at
 `/api/v1/disease-categories/` gets a profile and, once a field is placed, a
 disease tab; a record whose disease name is mapped to a category on the
 Disease Category Mappings page renders that category's extension, and
-re-mapping the name changes the profile without clearing a value; no code
-path decides a record's disease by matching on its name; the choice list a
+re-mapping the name, including a built-in alias such as Multiple Myeloma,
+changes the profile without clearing a value; no code path decides a record's
+disease by matching on its name; the choice list a
 patient sees follows their disease where a
 scoped choice exists; tests cover warn-only, enforced 400,
 derivation/ETL/sync unaffected, disease change preserving values,
