@@ -583,3 +583,36 @@ def test_a_stored_unit_spelling_is_an_echo_on_the_shared_form():
     saved.refresh_from_db()
     assert units.PAIR_FIELD not in (saved.user_edited_fields or [])
     assert not saved.pending_source_pair_dates
+
+
+def test_a_stored_unit_spelling_is_an_echo_in_the_native_serializer():
+    from patient_portal.api.serializers import PatientRecordSerializer
+
+    record = PatientRecordFactory(
+        serum_bilirubin_level_direct=Decimal('34.20'),
+        serum_bilirubin_level_direct_units='umol/l',
+        serum_bilirubin_level=Decimal('2.00'),
+    )
+    serializer = PatientRecordSerializer(
+        record, data={
+            units.PAIR_FIELD: '34.2', units.UNIT_FIELD: 'umol/L',
+        }, partial=True)
+
+    assert serializer.is_valid(), serializer.errors
+    assert serializer._source_pairs == set()
+
+
+def test_a_stored_unit_spelling_is_an_echo_on_the_native_patch(api):
+    record = PatientRecordFactory(
+        serum_bilirubin_level_direct=Decimal('34.20'),
+        serum_bilirubin_level_direct_units='umol/l',
+        serum_bilirubin_level=Decimal('2.00'),
+    )
+
+    _edit(api, record, {
+        units.PAIR_FIELD: '34.2', units.UNIT_FIELD: 'umol/L',
+    })
+
+    assert units.PAIR_FIELD not in (record.user_edited_fields or [])
+    assert units.UNIT_FIELD not in (record.user_edited_fields or [])
+    assert not Measurement.objects.filter(person=record.person).exists()

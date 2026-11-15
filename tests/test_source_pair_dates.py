@@ -11,6 +11,9 @@ import pytest
 from omop_core.models import PatientRecord, Person
 from omop_core.services.source_pair_dates import (
     SOURCE_PAIR_CANONICALS,
+    SOURCE_PAIR_FIELDS,
+    UNIT_FIELD_DEFAULTS,
+    UNIT_FIELD_NORMALIZERS,
     forget_dates,
     forget_unedited_dates,
     pair_fields_match,
@@ -144,6 +147,15 @@ def test_an_unknown_stored_unit_is_not_an_echo():
         {'hemoglobin_level', 'hemoglobin_level_units'}, submitted, record)
 
 
+def test_an_identical_unknown_spelling_is_unchanged():
+    record = _pair_record(
+        hemoglobin_level=120, hemoglobin_level_units='bananas')
+
+    assert pair_fields_match(
+        {'hemoglobin_level', 'hemoglobin_level_units'},
+        {'hemoglobin_level': 120, 'hemoglobin_level_units': 'bananas'}, record)
+
+
 def test_two_unknown_spellings_are_not_evidence_of_the_same_unit():
     record = _pair_record(
         hemoglobin_level=120, hemoglobin_level_units='bananas')
@@ -175,14 +187,19 @@ def test_a_missing_unit_falls_back_to_the_stored_one():
         {'absolute_neutrophile_count': 1550}, record)
 
 
-def test_a_missing_or_empty_stored_unit_is_not_an_echo():
+def test_a_missing_stored_unit_reads_as_the_default():
     fields = {'hemoglobin_level', 'hemoglobin_level_units'}
     submitted = {'hemoglobin_level': 120, 'hemoglobin_level_units': 'G/DL'}
 
-    for stored in (None, ''):
+    for stored in (None, '', '   '):
         record = _pair_record(
             hemoglobin_level=120, hemoglobin_level_units=stored)
-        assert not pair_fields_match(fields, submitted, record)
+        assert pair_fields_match(fields, submitted, record)
+
+    # A non-default unit over a missing stored unit is a new assertion.
+    other = {'hemoglobin_level': 120, 'hemoglobin_level_units': 'G/L'}
+    record = _pair_record(hemoglobin_level=120, hemoglobin_level_units=None)
+    assert not pair_fields_match(fields, other, record)
 
 
 def test_a_float_source_value_compares_exactly():
@@ -195,6 +212,16 @@ def test_a_float_source_value_compares_exactly():
         fields, {'absolute_lymphocyte_count': 1.5}, record)
     assert not pair_fields_match(
         fields, {'absolute_lymphocyte_count': 1.6}, record)
+
+
+def test_every_pair_unit_column_has_a_normalizer_and_default():
+    units = {
+        field for fields in SOURCE_PAIR_FIELDS.values()
+        for field in fields if field.endswith('_units')
+    }
+
+    assert units == set(UNIT_FIELD_NORMALIZERS)
+    assert units == set(UNIT_FIELD_DEFAULTS)
 
 
 def test_a_changed_number_is_never_an_echo():

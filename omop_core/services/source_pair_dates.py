@@ -55,6 +55,8 @@ SOURCE_PAIR_CANONICALS: dict[str, str] = {
 
 #: Pair source field -> every record field that is pending with it. A pair is
 #: one assertion: its unit column (when it has one) is not an independent edit.
+#: A new pair registers here **and** in UNIT_FIELD_NORMALIZERS/DEFAULTS; the
+#: invariant test in tests/test_source_pair_dates.py holds the three together.
 SOURCE_PAIR_FIELDS: dict[str, frozenset[str]] = {
     hemoglobin_units.PAIR_FIELD: frozenset({
         hemoglobin_units.PAIR_FIELD, hemoglobin_units.UNIT_FIELD,
@@ -108,6 +110,25 @@ UNIT_FIELD_NORMALIZERS = {
     },
 }
 
+#: Unit column -> the unit a missing stored value reads as. Every writer and
+#: converter already substitutes it (`canonical_from_pair`: "a missing unit
+#: means the default"), so an unchanged re-send of that default is an echo,
+#: while a differently named unit stays an authored edit.
+UNIT_FIELD_DEFAULTS = {
+    hemoglobin_units.UNIT_FIELD: hemoglobin_units.DEFAULT_UNIT,
+    creatinine_units.UNIT_FIELD: creatinine_units.DEFAULT_UNIT,
+    direct_bilirubin_units.UNIT_FIELD: direct_bilirubin_units.DEFAULT_UNIT,
+    **{
+        spec['unit']: spec['default_unit']
+        for spec in chemistry_units.PAIRS.values()
+    },
+    **{
+        spec['unit_field']: spec['unit']
+        for spec in COUNT_PAIRS.values()
+        if spec.get('unit_field')
+    },
+}
+
 
 def fields_for(source: str) -> frozenset[str]:
     """Every record field pending with ``source`` (the pair and its unit)."""
@@ -124,28 +145,38 @@ def pair_sources_in(fields) -> set[str]:
     return {source for source in map(pair_of, fields) if source is not None}
 
 
+def _unit_code(field, value):
+    """The recognized storage code, or the pair's default for a missing value."""
+    normalizer = UNIT_FIELD_NORMALIZERS.get(field)
+    if normalizer is None:
+        return None
+    code = normalizer(value)
+    if code is None and (value is None or not str(value).strip()):
+        return UNIT_FIELD_DEFAULTS.get(field)
+    return code
+
+
 def pair_fields_match(fields, submitted, record) -> bool:
     """Whether every submitted half of these pairs matches what is stored.
 
     Used to tell an autosave echo from an authored edit. A value compares
     exactly; a unit compares as its recognized storage code, so a stored
-    `g/dl` and a submitted `G/DL` are the same unit (#2508). Two spellings are
-    only equal when both normalize to the same recognized code: an unknown
-    stored spelling is not evidence that the pair is unchanged, and two
-    different unknowns are not equal either. A field absent from ``submitted``
-    keeps the stored value: the shared form lists a companion unit there
-    without writing it.
+    `g/dl` and a submitted `G/DL` are the same unit (#2508). An identical
+    stored value is unchanged by definition; two *different* spellings are
+    equal only when both normalize to the same recognized code, so an unknown
+    stored spelling is not evidence that a different submitted spelling names
+    the same unit. A field absent from ``submitted`` keeps the stored value:
+    the shared form lists a companion unit there without writing it.
     """
     for field in fields:
         current = getattr(record, field, None)
         value = submitted[field] if field in submitted else current
         if value == current:
             continue
-        normalizer = UNIT_FIELD_NORMALIZERS.get(field)
-        if normalizer is None:
+        if field not in UNIT_FIELD_NORMALIZERS:
             return False
-        submitted_code = normalizer(value)
-        stored_code = normalizer(current)
+        submitted_code = _unit_code(field, value)
+        stored_code = _unit_code(field, current)
         if (submitted_code is None or stored_code is None
                 or submitted_code != stored_code):
             return False

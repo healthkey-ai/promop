@@ -758,7 +758,7 @@ def test_a_stored_unit_spelling_is_not_an_authored_pair_on_the_native_patch(lab)
     _patch_native(lab, 12, 'G/DL')
 
     record.refresh_from_db()
-    assert 'hemoglobin_level' not in (record.user_edited_fields or [])
+    assert not record.user_edited_fields
     assert not record.pending_source_pair_dates
     assert not _hemoglobin_rows(lab, SELF_REPORT_TYPE).exists()
 
@@ -826,3 +826,55 @@ def test_a_legacy_null_date_store_stays_undated_and_a_change_dates_today(lab):
     record.refresh_from_db()
     assert record.pending_source_pair_dates == {
         'hemoglobin_level': TODAY.isoformat()}
+
+
+def test_the_native_retry_accepts_a_stored_unit_spelling(lab):
+    from omop_core.models import Concept, PatientRecord
+    Concept.objects.filter(concept_id__in=(EHR_TYPE, SELF_REPORT_TYPE)).delete()
+    draw = TODAY - timedelta(days=5)
+    _patch_native(lab, 120, 'G/L', draw)
+    record = lab['record']
+    assert record.pending_source_pair_dates == {
+        'hemoglobin_level': draw.isoformat()}
+    PatientRecord.objects.filter(pk=record.pk).update(
+        hemoglobin_level_units='g/l')
+
+    ConceptFactory(concept_id=EHR_TYPE, concept_code='ehr-type')
+    ConceptFactory(concept_id=SELF_REPORT_TYPE, concept_code='patient-report-type')
+    _patch_native(lab, 120, 'G/L')
+
+    patient = _hemoglobin_rows(lab, SELF_REPORT_TYPE).get()
+    assert patient.measurement_date == draw
+    record.refresh_from_db()
+    assert record.pending_source_pair_dates == {
+        'hemoglobin_level': draw.isoformat()}
+
+
+def test_a_missing_stored_unit_is_an_echo_with_the_default(lab):
+    record = lab['record']
+    record.hemoglobin_level = Decimal('12')
+    record.hemoglobin_level_units = None
+    record.hemoglobin_g_dl = Decimal('12.0')
+    record.save()
+
+    _patch_pair(lab, 12, 'G/DL')
+
+    record.refresh_from_db()
+    assert not record.user_edited_fields
+    assert not record.pending_source_pair_dates
+    assert not _hemoglobin_rows(lab, SELF_REPORT_TYPE).exists()
+
+
+def test_a_missing_stored_unit_is_an_echo_on_the_native_patch(lab):
+    record = lab['record']
+    record.hemoglobin_level = Decimal('12')
+    record.hemoglobin_level_units = None
+    record.hemoglobin_g_dl = Decimal('12.0')
+    record.save()
+
+    _patch_native(lab, 12, 'G/DL')
+
+    record.refresh_from_db()
+    assert not record.user_edited_fields
+    assert not record.pending_source_pair_dates
+    assert not _hemoglobin_rows(lab, SELF_REPORT_TYPE).exists()

@@ -552,5 +552,5 @@ def test_a_stored_unit_spelling_is_an_echo_on_the_native_patch(api, case):
         case['pair']: case['value'], case['unit']: case['source_unit'],
     })
 
-    assert case['pair'] not in (record.user_edited_fields or [])
+    assert not record.user_edited_fields
     assert not record.pending_source_pair_dates

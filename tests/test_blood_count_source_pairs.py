@@ -548,5 +548,5 @@ def test_a_stored_count_unit_spelling_is_an_echo_on_the_native_patch(api):
         'absolute_neutrophile_count_units': '10*3/uL',
     })
 
-    assert 'absolute_neutrophile_count' not in (record.user_edited_fields or [])
+    assert not record.user_edited_fields
     assert not record.pending_source_pair_dates

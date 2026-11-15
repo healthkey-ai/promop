@@ -1572,20 +1572,31 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             # Direct bilirubin's pair is one fact (#2318): a changed unit with
             # the same number still needs the projection to carry the new unit.
             from omop_core.services import direct_bilirubin_units as _direct_units
+            from omop_core.services.source_pair_dates import (
+                SOURCE_PAIR_CANONICALS, SOURCE_PAIR_FIELDS,
+                pair_fields_match, pair_sources_in, stored_dates,
+            )
+            authored_fields = set(getattr(serializer, '_source_pairs', ()))
+            authored_pairs = pair_sources_in(authored_fields)
+            # The submitted unit is normalised to its storage code, so a stored
+            # spelling difference is an echo, not an edit: do not mark that
+            # unit pending on its own (#2508). A pending pair's markers already
+            # exist; the retry below re-projects its canonical.
+            direct_fields -= {
+                field for fields in SOURCE_PAIR_FIELDS.values()
+                for field in fields - authored_fields
+                if field in direct_fields and field.endswith('_units')
+            }
             if (_direct_units.PAIR_FIELD in serializer.validated_data
-                    and serializer.validated_data.get(_direct_units.UNIT_FIELD)
-                    != previous_values.get(_direct_units.UNIT_FIELD)):
+                    and not pair_fields_match(
+                        {_direct_units.PAIR_FIELD, _direct_units.UNIT_FIELD},
+                        serializer.validated_data, patient_info)):
                 direct_fields.add(_direct_units.PAIR_FIELD)
             # A resend of a pending pair whose projection failed is a retry, not
             # an authored edit, so the serializer drops it as an echo. Project
             # it again on the day it was first entered, without dating it again
             # (#2426); the shared form's retry has the same contract.
-            from omop_core.services.source_pair_dates import (
-                SOURCE_PAIR_CANONICALS, pair_sources_in, stored_dates,
-            )
             pending_pair_dates = stored_dates(patient_info)
-            authored_pairs = pair_sources_in(
-                getattr(serializer, '_source_pairs', ()))
             retried_pairs = {
                 source for source in pair_sources_in(serializer.validated_data)
                 if source in pending_pair_dates
