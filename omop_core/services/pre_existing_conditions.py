@@ -109,8 +109,12 @@ def supersede_no_preexisting_conditions(record):
     left behind would claim an answer the record no longer carries.
     """
     if record.preexisting_conditions not in (None, []):
-        PreexistingConditionsAttestation.objects.filter(
-            person_id=record.person_id).delete()
+        rows = PreexistingConditionsAttestation.objects.filter(
+            person_id=record.person_id)
+        # A no-op DELETE still reaches the database (and the read-only preview
+        # guard): only withdraw an attestation that exists.
+        if rows.exists():
+            rows.delete()
 
 
 def _write_flag(person, value):

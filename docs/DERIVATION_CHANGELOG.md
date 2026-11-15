@@ -47,19 +47,22 @@ runs the same refresh for real, still logs them.
 It keeps nothing, but it is not read-only: each record runs the real
 `refresh_patient_record`, including its `UPDATE` of `patient_record`, inside a
 transaction that is always rolled back, while a guard refuses any SQL other
-than reads and the `patient_record` update (and, within reads, sequence,
-advisory-lock, setting and `SELECT ... INTO` calls), and any Celery publish.
-The guard catches accidental writes by the refresh code; it is not a sandbox,
-so run it as a role with SELECT plus UPDATE on `patient_record` only. A
+than reads, the `patient_record` update, and the transactional `DELETE` of the
+pre-existing-conditions attestation that a superseded blanket "none" answer
+issues (the re-derived flags depend on it; the rollback removes it), plus any
+Celery publish. Within reads it also refuses sequence, advisory-lock, setting
+and `SELECT ... INTO` calls. The guard catches accidental writes by the refresh
+code; it is not a sandbox, so run it as a role with SELECT, UPDATE on
+`patient_record` and DELETE on `preexisting_conditions_attestation` only. A
 refused write is reported, by statement verb and table, as an error for that
 person and the command exits non-zero.
 
-On `cb-v2` the refresh makes two more writes than dev's: it supersedes a
-"no pre-existing conditions" attestation (a `DELETE` on
-`preexisting_conditions_attestation` whenever `preexisting_conditions` is set)
-and writes `record_revision` rows when a newer OMOP fact retires a pending
-source pair. The guard refuses both, so those records are reported as errors
-rather than previewed (#2542).
+Revision rows are suppressed while the preview runs: a newer OMOP fact that
+retires a pending source pair would otherwise write `record_revision`, and
+that table's id is a sequence (it would not roll back). An audit row is not a
+derived value, so there is nothing to simulate; the retirement itself is
+previewed normally. The no-op attestation `DELETE` is not issued at all when
+no row exists (#2542).
 
 **Run it on staging, or on a restored copy of production -- never against
 `PROD_DATABASE_URL`.** Production is for read-only checks (see AGENTS.md), and

@@ -11,11 +11,15 @@ first, so the preview runs the real refresh and throws the result away:
    record is read back from the database inside that transaction, so the
    "after" side is exactly what the refresh stored.
 2. While it runs, every SQL statement on every connection passes a guard that
-   allows reads, savepoints and an ``UPDATE`` of ``patient_record`` only. Any
-   other write -- an OMOP row, a ``RecordRevision``, a projection, even an
+   allows reads, savepoints, an ``UPDATE`` of ``patient_record``, and the
+   transactional ``DELETE`` of the pre-existing-conditions attestation that a
+   superseded blanket "none" answer issues (the re-derived flags depend on it).
+   Any other write -- an OMOP row, a ``RecordRevision``, a projection, even an
    ``INSERT`` into ``patient_record`` (which would draw a sequence value, and
    sequences do not roll back) -- raises ``PreviewWriteBlocked`` before it
    reaches the database, and fails the preview even if the refresh catches it.
+   Revision rows are suppressed rather than allowed: their id is a sequence and
+   an audit row is not a derived value.
 3. Publishing a Celery message raises the same way. ``on_commit`` callbacks
    need nothing extra: Django discards those registered in a block that rolls
    back.
@@ -42,6 +46,7 @@ from unittest import mock
 from django.db import DatabaseError, connections, transaction
 
 from omop_core.models import PatientRecord
+from omop_core.services.patient_record_revisions import suppress_record_revisions
 
 # Bookkeeping that every refresh changes, or that refresh never sets. Reporting
 # them would put a line on every record and say nothing about its values.
@@ -67,6 +72,13 @@ _EXPANDED_JSON_FIELDS = ('custom_fields',)
 UNDEFINED_CUSTOM_FIELD = 'custom_fields.<undefined>'
 
 _ALLOWED_WRITE = re.compile(r'^\s*UPDATE\s+"?patient_record"?\s', re.IGNORECASE)
+#: The one DELETE a refresh issues that the preview must simulate: withdrawing
+#: an attestation that contradicts the recorded categories. It is transactional,
+#: so the rollback removes it, and a stub would change the re-derived flags.
+_ALLOWED_DELETE = re.compile(
+    r'^\s*DELETE\s+FROM(?:\s+ONLY)?\s+"?preexisting_conditions_attestation"?\s',
+    re.IGNORECASE,
+)
 _READ_OR_CONTROL = re.compile(
     r'^\s*(SELECT|SAVEPOINT|RELEASE\s+SAVEPOINT|ROLLBACK\s+TO\s+SAVEPOINT|SHOW)\b',
     re.IGNORECASE,
@@ -114,7 +126,7 @@ def _statement_is_allowed(sql: str) -> bool:
         return False
     if _SIDE_EFFECT_FUNCTION.search(body):
         return False
-    if _ALLOWED_WRITE.match(body):
+    if _ALLOWED_WRITE.match(body) or _ALLOWED_DELETE.match(body):
         return True
     if _READ_OR_CONTROL.match(body):
         # FOR UPDATE takes a lock, released by the rollback, and writes nothing.
@@ -172,7 +184,7 @@ def _statement_kind(sql: str) -> str:
 
 @contextlib.contextmanager
 def read_only_guard() -> Iterator[list[str]]:
-    """Refuse every write except the PatientRecord update, and every task send.
+    """Refuse every write except the record update and the attestation delete.
 
     Yields the list of refusals. A refusal raises where it happens, but code
     under the guard could catch that and carry on; the caller checks the list
@@ -397,7 +409,7 @@ def preview_record(record: PatientRecord,
                     stored_record = PatientRecord.objects.select_for_update().get(pk=record.pk)
                     stored = _values(stored_record)
                     pending = set(stored_record.user_edited_fields or [])
-                    with _refresh_logging_silenced():
+                    with _refresh_logging_silenced(), suppress_record_revisions():
                         refresh_patient_record(stored_record.person)
                     rederived = _values(PatientRecord.objects.get(pk=record.pk))
                 finally:
