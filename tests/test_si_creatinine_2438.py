@@ -209,10 +209,12 @@ def test_a_newer_coded_result_beats_an_older_legacy_concept_name_row():
     assert data['serum_creatinine_level_units'] == 'UMOL/L'
 
 
-def test_the_extractor_reports_a_legacy_row_in_an_unsupported_unit_as_sent():
-    """#475's rule for historic concept-name facts, as hemoglobin has it: the
-    extractor reports the number and unit as sent, the canonical unknown. The
-    refresh does not keep that pair yet (#2519), so this is extractor-only."""
+def test_a_legacy_row_in_an_unsupported_unit_is_not_reported_as_a_pair():
+    """The pair's choices and the serializer know only mg/dL and umol/L.
+
+    A raw spelling cannot be round-tripped: it would 400 the next save and be
+    reinterpreted by the next edit, so the extractor reports no pair (#2519).
+    """
     person = PersonFactory()
     legacy = ConceptFactory(concept_code='LEGACY-CREAT2', concept_name='Creatinine')
     MeasurementFactory(
@@ -223,8 +225,8 @@ def test_the_extractor_reports_a_legacy_row_in_an_unsupported_unit_as_sent():
     data = _get_laboratory_data(person)
 
     assert data['serum_creatinine_mg_dl'] is None
-    assert data['serum_creatinine_level'] == Decimal('12')
-    assert data['serum_creatinine_level_units'] == 'mg/L'
+    assert data['serum_creatinine_level'] is None
+    assert data['serum_creatinine_level_units'] is None
 
 
 # ---------------------------------------------------------------------------

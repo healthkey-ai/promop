@@ -5220,25 +5220,26 @@ def _get_laboratory_data(person: Person, snapshot: OmopSnapshot = None,
                 measurement.value_as_number, unit_code)
             if (unit_code is None or not recognised or canonical_value is None
                     or not creatinine_canonical_in_range(canonical_value)):
-                if representation == 'legacy' and reported_unit is not None:
-                    # A historic concept-name fact reports the number and unit
-                    # the lab sent (#475); the canonical stays unknown rather
-                    # than reinterpreting an unsupported scale. The refresh
-                    # does not keep this pair on the record yet (#2519).
-                    data[CREATININE_CANONICAL] = None
-                    data[CREATININE_PAIR] = Decimal(str(measurement.value_as_number))
-                    data[CREATININE_UNIT] = reported_unit
-                    selected_dates[CREATININE_PAIR] = measurement.measurement_date
-                    if dates_out is not None:
-                        dates_out[CREATININE_PAIR] = measurement.measurement_date
-                    continue
                 # The newest result owns the field even when it is unusable: an
                 # older one must not stand in for it, and the explicit Nones
                 # stop the curated mapping from storing the raw number.
-                logger.warning(
-                    'Serum creatinine projection skipped for person_id=%s: '
-                    'unit=%r', person.person_id, reported_unit,
-                )
+                if representation == 'legacy' and reported_unit is not None:
+                    # A historic concept-name fact cannot be kept as the pair
+                    # either: the pair's choices and the serializer know only
+                    # mg/dL and umol/L, so the raw spelling would be rejected
+                    # on the next save and reinterpreted on the next edit
+                    # (#2519 review). Report no pair rather than an unreadable
+                    # one; the number is deliberately not kept.
+                    logger.warning(
+                        'Serum creatinine legacy pair skipped for person_id=%s: '
+                        'unit=%r is not convertible', person.person_id,
+                        reported_unit,
+                    )
+                else:
+                    logger.warning(
+                        'Serum creatinine projection skipped for person_id=%s: '
+                        'unit=%r', person.person_id, reported_unit,
+                    )
                 data[CREATININE_CANONICAL] = None
                 data[CREATININE_PAIR] = None
                 data[CREATININE_UNIT] = None
