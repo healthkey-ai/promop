@@ -1748,8 +1748,10 @@ class PatientRecordViewSet(viewsets.ReadOnlyModelViewSet):
             # field would, and a write must not outlive a 400.
             if therapy_line_edits:
                 from omop_core.services.therapy_line_form import author_lines_from_form
-                applied, rejected = author_lines_from_form(
-                    person, therapy_line_edits, disease=patient_info.disease)
+                from omop_core.services.client_timezone import use_request_timezone
+                with use_request_timezone(request):
+                    applied, rejected = author_lines_from_form(
+                        person, therapy_line_edits, disease=patient_info.disease)
                 if rejected:
                     raise ValidationError(rejected)
                 patient_info.refresh_from_db()

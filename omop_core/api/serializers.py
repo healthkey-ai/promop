@@ -4,9 +4,8 @@ Moved out of ``patient_portal``: the validation is clinical, not a property of t
 in-place product, and an embedder that mounts the editor needs exactly it. The
 in-place serializer imports these names, so both surfaces validate identically.
 """
-from datetime import date
-
 from rest_framework import serializers
+from django.utils import timezone
 
 from omop_core.models import Observation, PatientRecord, Person
 from omop_core.services.treatment_catalog import outcomes_for_disease
@@ -35,7 +34,7 @@ class TherapyLineDrugSerializer(serializers.Serializer):
     )
 
     def validate_start_date(self, value):
-        if value > date.today():
+        if value > timezone.localdate():
             raise serializers.ValidationError(
                 'A future drug administration is planned, not received treatment.')
         return value
@@ -74,12 +73,12 @@ class TherapyLineWriteSerializer(serializers.Serializer):
     progression_date = serializers.DateField(required=False, allow_null=True)
 
     def validate_start_date(self, value):
-        if value and value > date.today():
+        if value and value > timezone.localdate():
             raise serializers.ValidationError('start_date cannot be in the future.')
         return value
 
     def validate_progression_date(self, value):
-        if value and value > date.today():
+        if value and value > timezone.localdate():
             raise serializers.ValidationError('progression_date cannot be in the future.')
         return value
 

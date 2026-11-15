@@ -174,6 +174,10 @@ describe('PatientDetail save — the edit, not the record', () => {
 
     await waitFor(() => expect(api.patch).toHaveBeenCalled());
     expect(patchBody()).toEqual({ date_of_birth: '1971-02-03' });
+    const call = (api.patch as ReturnType<typeof vi.fn>).mock.calls.at(-1)!;
+    expect(call[2]).toMatchObject({
+      headers: { 'X-Client-Timezone': expect.any(String) },
+    });
   });
 
   it('routes a clinical edit to the PatientRecord PATCH', async () => {

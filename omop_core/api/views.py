@@ -146,8 +146,10 @@ class TherapyLineViewSet(viewsets.ViewSet):
         )
 
     def create(self, request):
+        from omop_core.services.client_timezone import use_request_timezone
         serializer = TherapyLineWriteSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
+        with use_request_timezone(request):
+            serializer.is_valid(raise_exception=True)
         return self._write(
             request,
             person=serializer.validated_data['person'],
@@ -219,8 +221,10 @@ class TherapyLineViewSet(viewsets.ViewSet):
         payload = dict(request.data)
         payload['person'] = episode.person_id
         payload['line_number'] = episode.episode_number
+        from omop_core.services.client_timezone import use_request_timezone
         serializer = TherapyLineWriteSerializer(data=payload, partial=True)
-        serializer.is_valid(raise_exception=True)
+        with use_request_timezone(request):
+            serializer.is_valid(raise_exception=True)
         return self._write(
             request,
             person=episode.person,
