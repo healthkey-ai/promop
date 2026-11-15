@@ -847,8 +847,12 @@ class FhirSyncView(APIView):
                 existing_qs = Measurement.objects.filter(
                     match, person=person, measurement_date=obs_date,
                     measurement_event_id__isnull=True, meas_event_field_concept_id__isnull=True,
+                    is_erroneous=False,
                 )
                 existing = list(with_attribution(existing_qs).order_by('measurement_id'))
+                if org is not None:
+                    existing = [row for row in existing
+                                if classify(row.attribution, org.pk) == OWN]
                 if not existing:
                     # Nothing stored yet, but a row for this same concept and
                     # day may already be staged from an earlier entry in this
@@ -1222,14 +1226,21 @@ class FhirSyncView(APIView):
                 sv, date = key[:2]
                 scope = dict(zip(event_fields, key[2:]))
                 existing = list(with_attribution(model.objects.filter(**{
-                    'person': person, sv_field: sv, date_field: date, **scope})).order_by(pk_field))
+                    'person': person, sv_field: sv, date_field: date, **scope,
+                    'is_erroneous': False})).order_by(pk_field))
                 legacy = getattr(inst, '_legacy_source_value', None)
                 renamed = False
                 if not existing and legacy:
                     # Stored before #2168 under the bare code: the same event.
                     existing = list(with_attribution(model.objects.filter(**{
-                        'person': person, sv_field: legacy, date_field: date, **scope})).order_by(pk_field))
+                        'person': person, sv_field: legacy, date_field: date, **scope,
+                        'is_erroneous': False})).order_by(pk_field))
                     renamed = bool(existing)
+                if org is not None:
+                    # A named hospital never rewrites another hospital's row; a
+                    # foreign-only match is a separate fact and inserts here.
+                    existing = [row for row in existing
+                                if classify(row.attribution, org.pk) == OWN]
                 if not existing:
                     new_rows.append(inst)
                     continue

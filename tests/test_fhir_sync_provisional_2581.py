@@ -59,15 +59,15 @@ def sync():
         return view._ingest_observations(
             person, observations, ehr, cache or {}, 'iss|sub', None, {})
 
-    def clinical(instance):
+    def clinical(instance, org=None):
         return view._upsert_clinical(
             Measurement, 'measurement_id', 'measurement_concept_id',
             'measurement_date', 'measurement_source_value', person,
-            [instance], 'iss|sub', None)
+            [instance], 'iss|sub', org)
 
     return SimpleNamespace(
         person=person, ehr=ehr, stored=stored, incoming=incoming,
-        rollup=rollup, clinical=clinical,
+        rollup=rollup, clinical=clinical, view=view,
     )
 
 
@@ -327,3 +327,72 @@ def test_a_real_row_from_the_same_hospital_is_the_survivor():
 
     assert keep is real
     assert _same_attribution_extras([provisional, real], keep) == [provisional]
+
+
+def test_the_daily_rollup_ignores_an_erroneous_row(sync):
+    _stored(sync.person, sync.stored, sync.ehr, 9120, 50)
+    _stored(sync.person, sync.stored, sync.ehr, 9121, None)
+    Measurement.objects.filter(pk=9121).update(
+        is_erroneous=True, erroneous_reason='wrong patient')
+
+    sync.rollup([_daily('5.5')], {('*', '2823-3'): sync.incoming})
+
+    assert Measurement.objects.get(pk=9120).confidence is None
+    assert Measurement.objects.get(pk=9121).is_erroneous is True
+
+
+def test_the_generic_upsert_ignores_an_erroneous_row(sync):
+    _stored(sync.person, sync.stored, sync.ehr, 9122, 50, source='FHIR-ERR')
+    _stored(sync.person, sync.stored, sync.ehr, 9123, None, source='FHIR-ERR')
+    Measurement.objects.filter(pk=9123).update(
+        is_erroneous=True, erroneous_reason='wrong patient')
+    incoming = Measurement(
+        person=sync.person,
+        measurement_concept=sync.incoming,
+        measurement_type_concept=sync.ehr,
+        measurement_date=DAY,
+        measurement_datetime=datetime(2025, 10, 24, 8, 0, tzinfo=dt_timezone.utc),
+        measurement_source_value='FHIR-ERR',
+        value_as_number=4.0,
+    )
+
+    sync.clinical(incoming)
+
+    assert Measurement.objects.get(pk=9122).confidence is None
+    assert Measurement.objects.get(pk=9123).is_erroneous is True
+
+
+def test_a_named_hospital_inserts_beside_a_foreign_provisional(sync):
+    from django.contrib.contenttypes.models import ContentType
+
+    from omop_core.models import ProvenanceRecord
+    from tests.factories import OrganizationFactory
+
+    own, foreign = OrganizationFactory(), OrganizationFactory()
+    foreign_row = _stored(
+        sync.person, sync.stored, sync.ehr, 9124, 50, source='FHIR-FOREIGN')
+    ProvenanceRecord.objects.create(
+        source='fhir-sync',
+        target_patient_id=str(sync.person.person_id),
+        organization=foreign,
+        content_type=ContentType.objects.get_for_model(Measurement),
+        object_id=foreign_row.pk,
+    )
+    incoming = Measurement(
+        person=sync.person,
+        measurement_concept=sync.incoming,
+        measurement_type_concept=sync.ehr,
+        measurement_date=DAY,
+        measurement_datetime=datetime(2025, 10, 24, 8, 0, tzinfo=dt_timezone.utc),
+        measurement_source_value='FHIR-FOREIGN',
+        value_as_number=4.0,
+    )
+
+    sync.clinical(incoming, org=own)
+
+    foreign_row.refresh_from_db()
+    assert foreign_row.confidence == 50
+    own_rows = Measurement.objects.filter(person=sync.person).exclude(pk=foreign_row.pk)
+    assert own_rows.count() == 1
+    assert own_rows.get().measurement_concept_id == sync.incoming.concept_id
+    assert own_rows.get().confidence is None
