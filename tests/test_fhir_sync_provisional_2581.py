@@ -50,6 +50,10 @@ def sync():
     stored = ConceptFactory(concept_name='Potassium (stored)', concept_code='LOCAL-2581')
     incoming = ConceptFactory(concept_name='Potassium (sync)', concept_code='NEW-2581')
     view = FhirSyncView()
+    # The direct-ingest tests bypass dispatch; the shared confidence rule reads
+    # the request, and a staff user is what the real EHR sync presents.
+    view.request = SimpleNamespace(
+        user=SimpleNamespace(is_staff=True, issuer=None), auth=None)
 
     def rollup(observations, cache=None):
         return view._ingest_observations(
@@ -161,12 +165,42 @@ def test_a_patient_self_service_sync_does_not_clear_confidence(sync):
         value_as_number=4.0,
     )
 
-    FhirPatientSyncView()._upsert_clinical(
+    view = FhirPatientSyncView()
+    view.request = SimpleNamespace(
+        user=SimpleNamespace(is_staff=True, issuer=None), auth=None)
+    view._upsert_clinical(
         Measurement, 'measurement_id', 'measurement_concept_id',
         'measurement_date', 'measurement_source_value', sync.person,
         [incoming], 'iss|sub', None)
 
     assert Measurement.objects.get(pk=9116).confidence == 50
+
+
+def test_a_patient_oauth_token_cannot_promote_via_the_ehr_sync_view(sync):
+    """A delegated patient token reaches FhirSyncView; the shared rule still
+    refuses to clear confidence because it is not a machine credential/staff."""
+    from patient_portal.api.fhir.sync import FhirSyncView
+
+    _stored(sync.person, sync.stored, sync.ehr, 9119, 50, source='FHIR-2581')
+    incoming = Measurement(
+        person=sync.person,
+        measurement_concept=sync.incoming,
+        measurement_type_concept=sync.ehr,
+        measurement_date=DAY,
+        measurement_datetime=datetime(2025, 10, 24, 8, 0, tzinfo=dt_timezone.utc),
+        measurement_source_value='FHIR-2581',
+        value_as_number=4.0,
+    )
+    view = FhirSyncView()
+    view.request = SimpleNamespace(
+        user=SimpleNamespace(is_staff=False, issuer=None), auth=None)
+
+    view._upsert_clinical(
+        Measurement, 'measurement_id', 'measurement_concept_id',
+        'measurement_date', 'measurement_source_value', sync.person,
+        [incoming], 'iss|sub', None)
+
+    assert Measurement.objects.get(pk=9119).confidence == 50
 
 
 def test_an_incoming_proposal_does_not_clear_confidence_of_the_survivor(sync):

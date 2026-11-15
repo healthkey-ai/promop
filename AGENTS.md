@@ -1947,8 +1947,8 @@ timeout, or a re-parse converges instead of duplicating. Semantics per key:
 event already present → left in place, its concept updated when it changed and
 any stacked historical duplicates collapsed onto the first real row (null
 confidence and a mapped concept), or onto the earliest when no candidate holds
-an approved mapping; otherwise
-inserted. Repeats within one batch collapse to a single row (last occurrence
+an approved mapping; otherwise inserted. Repeats within one batch collapse to a
+single row (last occurrence
 wins). A content match rewrites only the concept column — every other column is
 left as stored, so a re-run cannot quietly overwrite a corrected value — unless
 the incoming row carries a source record key: the key is then stamped on the

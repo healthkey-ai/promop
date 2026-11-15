@@ -800,6 +800,21 @@ class FhirSyncView(APIView):
             ))
         return self._bulk_insert(Measurement, 'measurement_id', rows, source_user_id, person, org)
 
+    def _may_promote_confidence(self, incoming=None):
+        """Whether this caller may clear a provisional row's confidence (#2434).
+
+        The shared authorization rule, not the endpoint: a patient presenting a
+        delegated OAuth token may reach the EHR sync view and still may not
+        approve a proposed mapping. Patient self-service never promotes, and an
+        incoming proposal does not promote the row it matches.
+        """
+        if self.self_service_only:
+            return False
+        if incoming is not None and getattr(incoming, 'confidence', None) is not None:
+            return False
+        from patient_portal.api.serializers import may_write_confidence
+        return may_write_confidence(getattr(self, 'request', None))
+
     def _upsert_rollup_observations(self, person, observations, ehr_type, cache, source_user_id, org, skipped):
         """Replace any prior row for (person, concept, date) with the new daily
         value, collapsing stale stacked rows — so a changed daily aggregate
@@ -879,7 +894,7 @@ class FhirSyncView(APIView):
                 # into an approved fact, and patient self-service may not clear
                 # confidence (#2434, #2581).
                 promoted = (keep.confidence is not None and cid != 0
-                            and not self.self_service_only)
+                            and self._may_promote_confidence())
                 changed = (
                     keep.measurement_concept_id != next_cid
                     or _norm_num(keep.value_as_number) != _norm_num(o['value'])
@@ -1244,8 +1259,7 @@ class FhirSyncView(APIView):
                         changed.append(field)
                 if (getattr(keep, 'confidence', None) is not None
                         and incoming_cid not in (None, 0)
-                        and getattr(inst, 'confidence', None) is None
-                        and not self.self_service_only):
+                        and self._may_promote_confidence(inst)):
                     # The sync resolved a concept, so the row it rewrites is a
                     # real fact, not a proposal (#2581). An unresolved code or
                     # a patient self-service write keeps it provisional.
