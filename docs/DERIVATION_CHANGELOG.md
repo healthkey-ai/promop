@@ -47,22 +47,23 @@ runs the same refresh for real, still logs them.
 It keeps nothing, but it is not read-only: each record runs the real
 `refresh_patient_record`, including its `UPDATE` of `patient_record`, inside a
 transaction that is always rolled back, while a guard refuses any SQL other
-than reads, the `patient_record` update, and the transactional `DELETE` of the
-pre-existing-conditions attestation that a superseded blanket "none" answer
-issues (the re-derived flags depend on it; the rollback removes it), plus any
-Celery publish. Within reads it also refuses sequence, advisory-lock, setting
-and `SELECT ... INTO` calls. The guard catches accidental writes by the refresh
-code; it is not a sandbox, so run it as a role with SELECT, UPDATE on
-`patient_record` and DELETE on `preexisting_conditions_attestation` only. A
-refused write is reported, by statement verb and table, as an error for that
-person and the command exits non-zero.
+than reads and the `patient_record` update (and, within reads, sequence,
+advisory-lock, setting and `SELECT ... INTO` calls), plus any Celery publish.
+The guard catches accidental writes by the refresh code; it is not a sandbox,
+so run it as a role with SELECT and UPDATE on `patient_record` only. A refused
+write is reported, by statement verb and table, as an error for that person and
+the command exits non-zero.
 
-Revision rows are suppressed while the preview runs: a newer OMOP fact that
-retires a pending source pair would otherwise write `record_revision`, and
-that table's id is a sequence (it would not roll back). An audit row is not a
-derived value, so there is nothing to simulate; the retirement itself is
-previewed normally. The no-op attestation `DELETE` is not issued at all when
-no row exists (#2542).
+The refresh's other two writes are suppressed while the preview runs, so no
+extra grant is needed and nothing is simulated:
+
+- Revision rows: a newer OMOP fact that retires a pending source pair would
+  write `record_revision`, and that table's id is a sequence (it would not roll
+  back). An audit row is not a derived value; the retirement itself is
+  previewed normally.
+- The withdrawal of a superseded "no pre-existing conditions" attestation:
+  nothing in derivation reads that table, and the rollback would restore the
+  row anyway, so the previewed values are identical whether it runs or not.
 
 **Run it on staging, or on a restored copy of production -- never against
 `PROD_DATABASE_URL`.** Production is for read-only checks (see AGENTS.md), and

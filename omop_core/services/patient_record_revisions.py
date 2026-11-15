@@ -40,8 +40,13 @@ def write_record_revisions(patient_record, previous_values, *, changed_by='syste
 
     Returns no rows while `suppress_record_revisions()` is active: a preview
     re-derives the record only to compare it, and its transaction rolls back.
+    The record is still refreshed, so a caller that reads it afterwards sees
+    the stored row.
     """
     if _SUPPRESS.get():
+        # Keep the function's documented post-condition: callers read the
+        # instance after this returns.
+        patient_record.refresh_from_db()
         return []
     patient_record.refresh_from_db()
     rows = []

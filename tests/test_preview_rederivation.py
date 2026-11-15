@@ -698,22 +698,19 @@ def test_a_refusal_says_why(sql, reason):
     assert _refusal_reason(sql) == reason
 
 
-@pytest.mark.parametrize('sql', [
-    'DELETE FROM "preexisting_conditions_attestation" WHERE "person_id" = %s',
-    'DELETE FROM ONLY "preexisting_conditions_attestation" WHERE "person_id" = %s',
-    'DELETE FROM preexisting_conditions_attestation WHERE person_id = %s',
-])
-def test_the_guard_allows_the_attestation_delete(sql):
-    # Transactional, and the re-derived flags depend on it; it rolls back.
-    assert _statement_is_allowed(sql)
-
-
-def test_the_guard_still_refuses_other_deletes():
+def test_the_guard_refuses_an_attestation_delete():
+    # The preview suppresses the withdrawal instead of allowing the write.
+    assert not _statement_is_allowed(
+        'DELETE FROM "preexisting_conditions_attestation" WHERE "person_id" = %s')
     assert not _statement_is_allowed('DELETE FROM "record_revision"')
-    assert not _statement_is_allowed('DELETE FROM "preexisting_conditions_attestation_archive"')
+    assert not _statement_is_allowed(
+        'DELETE FROM "preexisting_conditions_attestation_archive"')
 
 
-def test_a_superseded_attestation_is_deleted_inside_the_preview():
+def test_a_superseded_attestation_is_left_for_the_rollback():
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+
     from omop_core.models import PreexistingConditionsAttestation
     from django.utils import timezone
 
@@ -722,12 +719,40 @@ def test_a_superseded_attestation_is_deleted_inside_the_preview():
         person=record.person, confirmed_at=timezone.now(), source='patient')
     _stale(record, race='Asian')
 
-    document = _json()
+    with CaptureQueriesContext(connection) as queries:
+        document = _json()
 
-    # The superseded attestation is deleted inside the rolled-back preview.
     assert document['summary']['errors'] == 0
     assert document['summary']['records_changed'] == 1
+    assert not [
+        query['sql'] for query in queries.captured_queries
+        if 'DELETE FROM "preexisting_conditions_attestation"' in query['sql']
+    ]
     assert PreexistingConditionsAttestation.objects.filter(
+        person=record.person).exists()
+    from omop_core.services import pre_existing_conditions
+    assert pre_existing_conditions._WITHDRAWAL_SUPPRESSED.get() is False
+
+
+def test_attestation_withdrawal_is_suppressed_for_a_preview_scope():
+    from django.utils import timezone
+
+    from omop_core.models import PreexistingConditionsAttestation
+    from omop_core.services.pre_existing_conditions import (
+        supersede_no_preexisting_conditions, suppress_attestation_withdrawal,
+    )
+
+    record = _settled(preexisting_conditions=['diabetes'])
+    PreexistingConditionsAttestation.objects.create(
+        person=record.person, confirmed_at=timezone.now(), source='patient')
+
+    with suppress_attestation_withdrawal():
+        supersede_no_preexisting_conditions(record)
+    assert PreexistingConditionsAttestation.objects.filter(
+        person=record.person).exists()
+
+    supersede_no_preexisting_conditions(record)
+    assert not PreexistingConditionsAttestation.objects.filter(
         person=record.person).exists()
 
 
@@ -785,6 +810,8 @@ def test_a_retired_pending_pair_previews_without_its_revision():
             'hemoglobin_g_dl'} <= changed
     # The preview did not keep the audit row it would have written.
     assert not RecordRevision.objects.filter(patient_record=record).exists()
+    from omop_core.services import patient_record_revisions
+    assert patient_record_revisions._SUPPRESS.get() is False
 
 
 def test_revision_rows_are_suppressed_for_a_preview_scope():
@@ -798,3 +825,44 @@ def test_revision_rows_are_suppressed_for_a_preview_scope():
         assert write_record_revisions(record, {'race': 'Asian'}) == []
 
     assert not RecordRevision.objects.filter(patient_record=record).exists()
+
+
+def test_a_record_with_categories_and_no_attestation_issues_no_delete_under_the_preview():
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+
+    record = _settled(preexisting_conditions=['diabetes'])
+    _stale(record, race='Asian')
+
+    with CaptureQueriesContext(connection) as queries:
+        document = _json()
+
+    assert document['summary']['errors'] == 0
+    assert not [
+        query['sql'] for query in queries.captured_queries
+        if 'DELETE FROM "preexisting_conditions_attestation"' in query['sql']
+    ]
+    from omop_core.services import pre_existing_conditions
+    assert pre_existing_conditions._WITHDRAWAL_SUPPRESSED.get() is False
+
+
+def test_revision_suppression_resets_after_an_exception_and_nesting():
+    from omop_core.services.patient_record_revisions import (
+        suppress_record_revisions, write_record_revisions,
+    )
+
+    record = _settled()
+
+    with pytest.raises(RuntimeError):
+        with suppress_record_revisions():
+            raise RuntimeError('leave the context')
+
+    assert write_record_revisions(record, {'race': 'Asian'})
+    assert RecordRevision.objects.filter(
+        patient_record=record, field='race').count() == 1
+
+    with suppress_record_revisions():
+        with suppress_record_revisions():
+            assert write_record_revisions(record, {'ethnicity': 'x'}) == []
+    assert not RecordRevision.objects.filter(
+        patient_record=record, field='ethnicity').exists()

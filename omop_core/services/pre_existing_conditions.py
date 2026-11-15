@@ -10,9 +10,28 @@ if both exist the list wins and the flag is invalidated, rather than the reverse
 "none". It is the durable provenance the repair relies on: after the old formula
 rows are cleared, an answer exists again only because someone gave it.
 """
+import contextlib
+import contextvars
+
 from django.utils import timezone
 
 from omop_core.models import Person, PreexistingConditionsAttestation
+
+#: Suppresses the withdrawal for a re-derivation preview, which rolls back and
+#: must not issue a write the guard would refuse. Nothing in derivation reads the
+#: attestation table, so the previewed values are identical either way.
+_WITHDRAWAL_SUPPRESSED = contextvars.ContextVar(
+    'suppress_attestation_withdrawal', default=False)
+
+
+@contextlib.contextmanager
+def suppress_attestation_withdrawal():
+    """Run a block that must not withdraw the attestation (a preview)."""
+    token = _WITHDRAWAL_SUPPRESSED.set(True)
+    try:
+        yield
+    finally:
+        _WITHDRAWAL_SUPPRESSED.reset(token)
 
 # Only the dedicated deliberate-answer action writes these. Legacy generic
 # attestations may have been produced by full-form autosave echoes.
@@ -108,13 +127,13 @@ def supersede_no_preexisting_conditions(record):
     (`[""]`) included: the guard nulls the flag for those, and an attestation
     left behind would claim an answer the record no longer carries.
     """
+    if _WITHDRAWAL_SUPPRESSED.get():
+        return
     if record.preexisting_conditions not in (None, []):
-        rows = PreexistingConditionsAttestation.objects.filter(
-            person_id=record.person_id)
-        # A no-op DELETE still reaches the database (and the read-only preview
-        # guard): only withdraw an attestation that exists.
-        if rows.exists():
-            rows.delete()
+        # One statement, so a concurrent attestation commit cannot slip between
+        # a check and the delete. The preview suppresses this instead.
+        PreexistingConditionsAttestation.objects.filter(
+            person_id=record.person_id).delete()
 
 
 def _write_flag(person, value):
