@@ -270,10 +270,13 @@ def _is_real_row(row, concept_field):
 def _preferred_keep(rows, concept_field):
     """Keep the first approved row; fall back to the first row if none is.
 
-    ``rows`` are ordered by pk. A later real row is the survivor when an earlier
-    provisional one matches the same event.
+    ``rows`` are ordered by pk. Only the first row's hospital is a candidate: a
+    row from another hospital is a separate fact, so it is neither chosen as the
+    survivor nor collapsed. A later real row of the same hospital is the
+    survivor when an earlier provisional one matches the same event.
     """
-    return next((row for row in rows if _is_real_row(row, concept_field)), rows[0])
+    group = [row for row in rows if row.attribution == rows[0].attribution]
+    return next((row for row in group if _is_real_row(row, concept_field)), rows[0])
 
 
 def _same_attribution_extras(rows, keep):
@@ -864,7 +867,9 @@ class FhirSyncView(APIView):
                 # -- and writing 0 over a good concept would lose curation that
                 # already happened.
                 next_cid = cid or keep.measurement_concept_id
-                promoted = keep.confidence is not None
+                # Only a resolved incoming concept confirms the proposal;
+                # an unresolved code must not turn it into an approved fact.
+                promoted = keep.confidence is not None and cid != 0
                 changed = (
                     keep.measurement_concept_id != next_cid
                     or _norm_num(keep.value_as_number) != _norm_num(o['value'])
@@ -1218,9 +1223,12 @@ class FhirSyncView(APIView):
                     if value is not None and getattr(keep, field) != value:
                         setattr(keep, field, value)
                         changed.append(field)
-                if getattr(keep, 'confidence', None) is not None:
-                    # The sync is a real EHR write; the row it rewrites is no
-                    # longer a proposal (#2581).
+                incoming_cid = getattr(inst, cid_field, None)
+                if (getattr(keep, 'confidence', None) is not None
+                        and incoming_cid not in (None, 0)):
+                    # The sync resolved a concept, so the row it rewrites is a
+                    # real fact, not a proposal (#2581). An unresolved code
+                    # keeps the proposal provisional.
                     keep.confidence = None
                     changed.append('confidence')
                 if changed:

@@ -51,8 +51,9 @@ def sync():
     incoming = ConceptFactory(concept_name='Potassium (sync)', concept_code='NEW-2581')
     view = FhirSyncView()
 
-    def rollup(observations):
-        return view._ingest_observations(person, observations, ehr, {}, 'iss|sub', None, {})
+    def rollup(observations, cache=None):
+        return view._ingest_observations(
+            person, observations, ehr, cache or {}, 'iss|sub', None, {})
 
     def clinical(instance):
         return view._upsert_clinical(
@@ -81,11 +82,23 @@ def test_the_daily_rollup_keeps_a_later_real_row(sync):
 def test_the_daily_rollup_promotes_a_lone_provisional_row(sync):
     _stored(sync.person, sync.stored, sync.ehr, 9103, 50)
 
-    sync.rollup([_daily('5.5')])
+    sync.rollup([_daily('5.5')], {('*', '2823-3'): sync.incoming})
 
     row = Measurement.objects.get(pk=9103)
     assert row.confidence is None
+    assert row.measurement_concept_id == sync.incoming.concept_id
     assert row.value_as_number == 5.5
+
+
+def test_the_daily_rollup_keeps_an_unresolved_proposal_provisional(sync):
+    """A code the sync cannot resolve does not confirm the proposed mapping."""
+    _stored(sync.person, sync.stored, sync.ehr, 9104, 50)
+
+    sync.rollup([_daily('5.5')])
+
+    row = Measurement.objects.get(pk=9104)
+    assert row.confidence == 50
+    assert row.measurement_concept_id == sync.stored.concept_id
 
 
 def test_the_generic_upsert_keeps_a_later_real_row(sync):
@@ -109,6 +122,24 @@ def test_the_generic_upsert_keeps_a_later_real_row(sync):
     assert rows[0].measurement_concept_id == sync.incoming.concept_id
 
 
+def test_the_generic_upsert_keeps_an_unresolved_proposal_provisional(sync):
+    _stored(sync.person, sync.stored, sync.ehr, 9114, 50, source='FHIR-2581')
+    incoming = Measurement(
+        person=sync.person,
+        measurement_concept_id=0,
+        measurement_type_concept=sync.ehr,
+        measurement_date=DAY,
+        measurement_datetime=datetime(2025, 10, 24, 8, 0, tzinfo=dt_timezone.utc),
+        measurement_source_value='FHIR-2581',
+        value_as_number=4.0,
+    )
+
+    sync.clinical(incoming)
+
+    row = Measurement.objects.get(pk=9114)
+    assert row.confidence == 50
+
+
 def test_the_generic_upsert_promotes_a_lone_provisional_row(sync):
     _stored(sync.person, sync.stored, sync.ehr, 9113, 50, source='FHIR-2581')
     incoming = Measurement(
@@ -126,3 +157,35 @@ def test_the_generic_upsert_promotes_a_lone_provisional_row(sync):
     row = Measurement.objects.get(pk=9113)
     assert row.confidence is None
     assert row.measurement_concept_id == sync.incoming.concept_id
+
+
+class _Candidate:
+    def __init__(self, pk, confidence, concept_id, attribution):
+        self.pk = pk
+        self.confidence = confidence
+        self.measurement_concept_id = concept_id
+        self.attribution = attribution
+
+
+def test_a_real_row_from_another_hospital_is_not_the_survivor():
+    from patient_portal.api.fhir.sync import _preferred_keep, _same_attribution_extras
+
+    provisional = _Candidate(1, 50, 5, ('A',))
+    other_hospital = _Candidate(2, None, 5, ('B',))
+
+    keep = _preferred_keep([provisional, other_hospital], 'measurement_concept_id')
+
+    assert keep is provisional
+    assert _same_attribution_extras([provisional, other_hospital], keep) == []
+
+
+def test_a_real_row_from_the_same_hospital_is_the_survivor():
+    from patient_portal.api.fhir.sync import _preferred_keep, _same_attribution_extras
+
+    provisional = _Candidate(1, 50, 5, ('A',))
+    real = _Candidate(2, None, 6, ('A',))
+
+    keep = _preferred_keep([provisional, real], 'measurement_concept_id')
+
+    assert keep is real
+    assert _same_attribution_extras([provisional, real], keep) == [provisional]
