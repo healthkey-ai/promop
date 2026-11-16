@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { ArrowLeft, ChevronDown, ChevronRight, Download, Search, BookOpen, Check, X, Pencil, Plus, Sparkles } from "lucide-react";
 import api from "@/api/axios";
+import { fetchDiseaseCategories } from "@/api/mappingHub";
 import { useAuth } from "@/hooks/useAuth";
 import { ConceptAssignDialog } from "./ConceptAssignDialog";
 import { SynonymDialog } from "./SynonymDialog";
@@ -13,9 +14,9 @@ import { AddCustomFieldDialog } from "@/components/PatientInfo/CustomPatientFiel
 import { canWriteMappings, isStaffOrOrgAdmin } from "@/utils/roles";
 import { blobErrorMessage, filenameFromDisposition, saveBlob } from "@/utils/download";
 import {
-  BASE_FILTER, OTHER_DISEASE, fieldDiseases, inDiseaseView,
-  type DiseaseCategoryOption, type DiseaseSet, type FieldScoped,
-} from "@/types/fieldScope";
+  BASE_FILTER, OTHER_DISEASE, canHaveScope, fieldDiseases, inDiseaseView, resolveDiseaseFilter,
+} from "@/utils/fieldScope";
+import type { DiseaseCategoryOption, DiseaseSet, FieldScoped } from "@/types/fieldScope";
 
 interface FieldDescriptor extends FieldScoped {
   field_name: string;
@@ -123,15 +124,19 @@ const getDisplayCategory = (d: FieldDescriptor): string => {
   return d.category;
 };
 
-/** A `?set=` value from the page's own URL; anything else is the default. */
+/**
+ * A `?set=` value from the page's own URL. The page opens a disease on its
+ * own fields unless the full record is asked for; the list endpoint's
+ * default is the full record.
+ */
 const diseaseSetParam = (value: string | null): DiseaseSet =>
   value === "profile" ? "profile" : "extension";
 
-/** A `?disease=` value from the page's own URL: Other's record is the base record. */
-const diseaseFilterParam = (value: string | null): string => {
-  const code = (value || "").trim();
-  return code === OTHER_DISEASE ? BASE_FILTER : code;
-};
+/** Which download is in flight, for the button that started it. */
+type Download = DiseaseSet | "base";
+
+const DOWNLOAD_BUTTON =
+  "inline-flex h-9 items-center gap-1.5 rounded border border-gray-300 bg-white px-3 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50";
 
 /** Stored provenance as written; the two pre-#1719 labels get their old names. */
 const provenanceLabel = (mapping: FieldDescriptor["mapping"]): string => {
@@ -173,11 +178,13 @@ export default function FieldMappingPage() {
   // Disease Category's; for a category, its disease-specific fields (the
   // extension) or its full record (base + extension). Applied to the
   // descriptors already loaded, so choosing a disease is no further request.
-  // ?disease=<code>&set=extension|profile opens the page on that view.
-  const [diseaseFilter, setDiseaseFilter] = useState(() => diseaseFilterParam(searchParams.get("disease")));
+  // ?disease=<code>&set=extension|profile opens the page on that view; like
+  // ?field=, it is read once and the filter is the page's own state after.
+  const [diseaseChoice, setDiseaseChoice] = useState(() => (searchParams.get("disease") || "").trim());
   const [diseaseSet, setDiseaseSet] = useState<DiseaseSet>(() => diseaseSetParam(searchParams.get("set")));
   const [categories, setCategories] = useState<DiseaseCategoryOption[]>([]);
-  const [downloading, setDownloading] = useState(false);
+  const [categoriesState, setCategoriesState] = useState<"loading" | "loaded" | "failed">("loading");
+  const [downloading, setDownloading] = useState<Download | null>(null);
 
   const fetchDescriptors = useCallback(async () => {
     setLoading(true);
@@ -229,12 +236,15 @@ export default function FieldMappingPage() {
   useEffect(() => {
     (async () => {
       try {
-        const resp = await api.get("/v1/disease-categories/");
-        setCategories(Array.isArray(resp.data)
-          ? resp.data.filter((c: DiseaseCategoryOption) => c && typeof c.value === "string")
-          : []);
+        const loaded: unknown = await fetchDiseaseCategories();
+        if (!Array.isArray(loaded)) throw new Error("not a category list");
+        setCategories(loaded.filter((c): c is DiseaseCategoryOption => (
+          !!c && typeof c.value === "string" && typeof c.label === "string"
+        )));
+        setCategoriesState("loaded");
       } catch {
-        // Non-critical: see above.
+        // The scope control says so; the filter needs no more than the fields.
+        setCategoriesState("failed");
       }
     })();
   }, []);
@@ -250,8 +260,16 @@ export default function FieldMappingPage() {
     return [...options, ...unlisted.map((code) => ({ value: code, label: code }))];
   }, [categories, descriptors]);
 
-  // The filter also lists a disease the URL named that is not one of those,
-  // so the select always shows what the list is filtered to.
+  // The view the choice names. A URL may spell a category as the list
+  // endpoint accepts it: any case, or by its label. One that names no
+  // category is no filter, and the page says so, once the categories have
+  // loaded: until then a category no field names yet cannot be told from a
+  // mistyped one, so the value is kept as written.
+  const resolvedChoice = resolveDiseaseFilter(diseaseChoice, diseaseOptions);
+  const unknownDisease = resolvedChoice === null && categoriesState === "loaded" ? diseaseChoice : "";
+  const diseaseFilter = resolvedChoice ?? (unknownDisease ? "" : diseaseChoice);
+
+  // The select always has an option for what the list is filtered to.
   const filterOptions = useMemo(() => (
     !diseaseFilter || diseaseFilter === BASE_FILTER || diseaseOptions.some((c) => c.value === diseaseFilter)
       ? diseaseOptions
@@ -352,14 +370,20 @@ export default function FieldMappingPage() {
     return counts;
   }, [descriptors]);
 
-  const activeTabUnmapped = useMemo(() => (
-    inView.filter((d) =>
+  // Unmapped fields on the shown tab: in the view, for the count, and on the
+  // whole tab, which is what Suggest proposes for whatever the disease filter.
+  const { viewUnmapped, tabUnmapped } = useMemo(() => {
+    const unmapped = descriptors.filter((d) =>
       d.tab === shownTab
       && d.mappable
       && !d.mapping
       && getDisplayCategory(d) !== "computed"
-    ).length
-  ), [shownTab, inView]);
+    );
+    return {
+      tabUnmapped: unmapped.length,
+      viewUnmapped: unmapped.filter((d) => inDiseaseView(d, diseaseFilter, diseaseSet)).length,
+    };
+  }, [shownTab, descriptors, diseaseFilter, diseaseSet]);
 
   /** The Disease Category the filter names, or "" for All and Base record. */
   const selectedDisease = diseaseFilter && diseaseFilter !== BASE_FILTER ? diseaseFilter : "";
@@ -369,22 +393,35 @@ export default function FieldMappingPage() {
    * disease-specific fields, or the base record when no disease is named.
    * The file is named by the server.
    */
-  const handleDownload = async (set: DiseaseSet) => {
-    setDownloading(true);
+  const handleDownload = async (which: Download) => {
+    setDownloading(which);
     try {
-      const params = selectedDisease ? { disease: selectedDisease, set } : {};
+      const params = which === "base" ? {} : { disease: selectedDisease, set: which };
       const response = await api.get<Blob>("/v1/field-mappings/export/", { params, responseType: "blob" });
       saveBlob(response.data, filenameFromDisposition(
         response.headers?.["content-disposition"],
-        `field-mappings-${selectedDisease || "base"}-${set}.csv`,
+        which === "base" ? "field-mappings-base.csv" : `field-mappings-${selectedDisease}-${which}.csv`,
       ));
       setError("");
     } catch (err) {
-      setError(await blobErrorMessage(err, "Failed to download the field list."));
+      setError((await blobErrorMessage(err)) ?? "Failed to download the field list.");
     } finally {
-      setDownloading(false);
+      setDownloading(null);
     }
   };
+
+  const downloadButton = (which: Download, label: string, title: string) => (
+    <button
+      type="button"
+      onClick={() => handleDownload(which)}
+      disabled={downloading !== null}
+      title={title}
+      className={DOWNLOAD_BUTTON}
+    >
+      <Download size={14} />
+      {downloading === which ? "Downloading…" : label}
+    </button>
+  );
 
   const toggleSection = (cat: string) => {
     setCollapsedSections((prev) => {
@@ -850,14 +887,14 @@ export default function FieldMappingPage() {
 
       <div className="mb-4 flex flex-wrap items-center gap-3 text-sm text-gray-600">
         <span className="rounded-full bg-amber-100 px-2.5 py-1 text-xs font-medium text-amber-800">
-          Unmapped Fields: {activeTabUnmapped}
+          Unmapped Fields: {viewUnmapped}
         </span>
         {canWrite && (
           <button
             type="button"
             onClick={handleSuggestCurrentTab}
-            disabled={activeTabUnmapped === 0}
-            title={diseaseFilter ? "Suggests for every unmapped field on this tab, whatever its scope" : undefined}
+            disabled={tabUnmapped === 0 || inView.length === 0}
+            title={diseaseFilter ? `Suggests for all ${tabUnmapped} unmapped fields on this tab, whatever their scope` : undefined}
             className="inline-flex items-center gap-2 rounded border border-gray-300 bg-white px-3 py-1.5 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
           >
             <Sparkles size={15} />
@@ -893,8 +930,8 @@ export default function FieldMappingPage() {
         <select
           aria-label="Disease"
           value={diseaseFilter}
-          onChange={(e) => setDiseaseFilter(e.target.value)}
-          className="h-9 rounded border border-gray-300 px-3 text-sm focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
+          onChange={(e) => setDiseaseChoice(e.target.value)}
+          className="h-9 max-w-full rounded border border-gray-300 px-3 text-sm focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary"
         >
           <option value="">All diseases ({descriptors.length})</option>
           <option value={BASE_FILTER}>Base record ({scopeCounts[BASE_FILTER]})</option>
@@ -912,7 +949,7 @@ export default function FieldMappingPage() {
                 type="button"
                 aria-pressed={diseaseSet === value}
                 onClick={() => setDiseaseSet(value)}
-                className={`px-3 font-medium ${
+                className={`px-3 font-medium focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-current ${
                   diseaseSet === value ? "bg-primary text-primary-foreground" : "bg-white text-gray-700 hover:bg-gray-50"
                 }`}
               >
@@ -922,55 +959,41 @@ export default function FieldMappingPage() {
           </div>
         )}
         {/* Review copies for a curator working offline; nothing loads them back. */}
-        <div className="ml-auto flex flex-wrap items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2 sm:ml-auto" aria-busy={downloading !== null}>
           {selectedDisease ? (
             <>
-              <button
-                type="button"
-                onClick={() => handleDownload("profile")}
-                disabled={downloading}
-                title={`Every field of a ${selectedDisease} patient's record with its concept: the base record plus ${selectedDisease}'s own fields`}
-                className="inline-flex h-9 items-center gap-1.5 rounded border border-gray-300 bg-white px-3 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-              >
-                <Download size={14} />
-                Full record (CSV)
-              </button>
-              <button
-                type="button"
-                onClick={() => handleDownload("extension")}
-                disabled={downloading}
-                title={`Only ${selectedDisease}'s disease-specific fields with their concepts`}
-                className="inline-flex h-9 items-center gap-1.5 rounded border border-gray-300 bg-white px-3 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-              >
-                <Download size={14} />
-                Disease-specific (CSV)
-              </button>
+              {downloadButton(
+                "profile", "Full record (CSV)",
+                `Every field of a ${selectedDisease} patient's record with its concept: the base record plus ${selectedDisease}'s own fields`,
+              )}
+              {downloadButton(
+                "extension", "Disease-specific (CSV)",
+                `Only ${selectedDisease}'s disease-specific fields with their concepts`,
+              )}
             </>
-          ) : (
-            <button
-              type="button"
-              onClick={() => handleDownload("profile")}
-              disabled={downloading}
-              title="The fields every patient has, with their concepts. Choose a disease to download its record."
-              className="inline-flex h-9 items-center gap-1.5 rounded border border-gray-300 bg-white px-3 text-sm font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-            >
-              <Download size={14} />
-              Base record (CSV)
-            </button>
+          ) : downloadButton(
+            "base", "Base record (CSV)",
+            "The fields every patient has, with their concepts. Choose a disease to download its record.",
           )}
         </div>
       </div>
 
-      {/* Disease view indicator */}
-      {diseaseFilter && (
-        <div role="status" aria-label="Disease view" className="mb-3 text-sm text-gray-500">
-          {diseaseFilter === BASE_FILTER
-            ? `Showing the base record: the ${inView.length} fields every patient has.`
-            : diseaseSet === "extension"
+      {/* Disease view indicator: always mounted, so a change is announced. */}
+      <div
+        role="status"
+        aria-label="Disease view"
+        className={diseaseFilter || unknownDisease ? "mb-3 text-sm text-gray-500" : "sr-only"}
+      >
+        {unknownDisease
+          ? `"${unknownDisease}" is not a Disease Category, so every field is listed.`
+          : diseaseFilter === BASE_FILTER
+            ? `Showing the base record: ${inView.length} fields.`
+            : selectedDisease && diseaseSet === "extension"
               ? `Showing ${selectedDisease}'s disease-specific fields (${inView.length}).`
-              : `Showing ${selectedDisease}'s full record: the base record plus its disease-specific fields (${inView.length}).`}
-        </div>
-      )}
+              : selectedDisease
+                ? `Showing ${selectedDisease}'s full record: the base record plus its disease-specific fields (${inView.length}).`
+                : ""}
+      </div>
 
       {/* Error banner (non-fatal) */}
       {error && (
@@ -1038,9 +1061,13 @@ export default function FieldMappingPage() {
           initialStatus={selectedField.mapping?.status as "proposed" | "approved" | "rejected" | undefined}
           initialNotes={selectedField.mapping?.notes}
           canApprove={canApprove}
-          canEditScope={canWrite}
-          initialDiseases={selectedField.diseases}
-          diseaseOptions={diseaseOptions}
+          storedUnit={selectedField.mapping?.unit}
+          storedOmopTable={selectedField.mapping?.omop_table}
+          fieldScope={canHaveScope(selectedField.field_name) ? {
+            diseases: fieldDiseases(selectedField),
+            options: diseaseOptions,
+            optionsIncomplete: categoriesState === "failed",
+          } : undefined}
           commonUnits={selectedField.unit_options}
           choices={selectedField.choices}
           onEditChoices={() => {

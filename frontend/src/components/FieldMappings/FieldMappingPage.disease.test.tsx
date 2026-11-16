@@ -28,6 +28,10 @@ vi.mock("@/api/axios", () => ({
   },
 }));
 
+vi.mock("./FieldChoiceEditor", () => ({ FieldChoiceEditor: () => null }));
+vi.mock("./FormulaEditDialog", () => ({ FormulaEditDialog: () => null }));
+vi.mock("@/components/PatientInfo/CustomPatientFields", () => ({ AddCustomFieldDialog: () => null }));
+
 const field = (field_name: string, tab: string, diseases: string[], extra: Record<string, unknown> = {}) => ({
   field_name,
   field_type: "text",
@@ -91,9 +95,12 @@ const chooseDisease = (value: string) => fireEvent.change(diseaseSelect(), { tar
 const tabName = (label: string) => new RegExp(`^${label}\\s*\\(\\d+\\)$`);
 const tab = (label: string) => screen.getByRole("button", { name: tabName(label) });
 const queryTab = (label: string) => screen.queryByRole("button", { name: tabName(label) });
-const fieldNames = () => screen.queryAllByRole("row")
-  .map((row) => within(row).queryAllByRole("cell")[1]?.textContent)
-  .filter(Boolean);
+/** The field names listed, read from each table's own Field Name column. */
+const fieldNames = () => screen.queryAllByRole("table").flatMap((table) => {
+  const column = within(table).getAllByRole("columnheader").findIndex((th) => th.textContent === "Field Name");
+  return within(table).getAllByRole("row").slice(1)
+    .map((row) => within(row).getAllByRole("cell")[column].textContent);
+});
 
 let saved: string[];
 
@@ -115,6 +122,7 @@ beforeEach(() => {
   });
   mockPatch.mockResolvedValue({ data: {} });
   mockPut.mockResolvedValue({ data: {} });
+  mockPost.mockResolvedValue({ data: { created: 0, fields: [] } });
   Object.assign(URL, { createObjectURL: vi.fn(() => "blob:csv"), revokeObjectURL: vi.fn() });
   vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (this: HTMLAnchorElement) {
     saved.push(this.download);
@@ -187,7 +195,7 @@ describe("disease filter", () => {
     await screen.findByText("weight");
     chooseDisease("__base__");
     expect(screen.getByRole("status", { name: "Disease view" }))
-      .toHaveTextContent("Showing the base record: the 2 fields every patient has.");
+      .toHaveTextContent("Showing the base record: 2 fields.");
     expect(queryTab("Disease")).not.toBeInTheDocument();
     expect(fieldNames()).toEqual(["weight"]);
     expect(screen.queryByRole("group", { name: "Fields shown" })).not.toBeInTheDocument();
@@ -218,6 +226,80 @@ describe("disease filter", () => {
     expect(within(diseaseSelect()).getAllByRole("option").map((o) => o.textContent)).toEqual([
       "All diseases (5)", "Base record (2)", "BC (1)", "FL (1)", "MM (2)",
     ]);
+    chooseDisease("FL");
+    expect(fieldNames()).toEqual(["stage"]);
+  });
+
+  it("says so when a category has no disease-specific field yet", async () => {
+    renderPage();
+    await screen.findByText("weight");
+    chooseDisease("CLL");
+    expect(screen.getByRole("status", { name: "Disease view" }))
+      .toHaveTextContent("Showing CLL's disease-specific fields (0).");
+    expect(fieldNames()).toEqual([]);
+    expect(screen.getByText("No fields match the current filters.")).toBeInTheDocument();
+    // Its full record is the base record.
+    fireEvent.click(screen.getByRole("button", { name: "Full record" }));
+    expect(fieldNames()).toEqual(["weight"]);
+  });
+
+  it.each([
+    ["mm", "MM"],
+    ["multiple%20myeloma", "MM"],
+    ["other", "__base__"],
+  ])("reads ?disease=%s as the list endpoint does", async (written, value) => {
+    renderPage(`?disease=${written}`);
+    await screen.findByText("Total: 2");
+    expect(diseaseSelect()).toHaveValue(value);
+    // No stray option for the spelling in the URL.
+    expect(within(diseaseSelect()).getAllByRole("option")).toHaveLength(6);
+  });
+
+  it("lists every field and says so when the URL names no Disease Category", async () => {
+    renderPage("?disease=XYZ");
+    await screen.findByText("weight");
+    await waitFor(() => expect(screen.getByRole("status", { name: "Disease view" }))
+      .toHaveTextContent('"XYZ" is not a Disease Category, so every field is listed.'));
+    expect(diseaseSelect()).toHaveValue("");
+    expect(within(diseaseSelect()).getAllByRole("option")).toHaveLength(6);
+    expect(screen.getByText("Total: 5")).toBeInTheDocument();
+    // The download offered is the one for no disease, not a request the server would refuse.
+    expect(screen.getByRole("button", { name: "Base record (CSV)" })).toBeInTheDocument();
+    // Choosing a disease clears the notice.
+    chooseDisease("MM");
+    expect(screen.getByRole("status", { name: "Disease view" })).toHaveTextContent("Showing MM's");
+  });
+
+  it("is silent while every field is listed, with the region there to announce a change", async () => {
+    renderPage();
+    await screen.findByText("weight");
+    expect(screen.getByRole("status", { name: "Disease view" })).toBeEmptyDOMElement();
+  });
+});
+
+describe("Suggest under a disease filter", () => {
+  it("counts the view's unmapped fields but proposes for the tab, as its tooltip says", async () => {
+    mockGet.mockImplementation((url: string) => Promise.resolve({ data: url === "/v1/field-mappings/"
+      ? [...DESCRIPTORS, field("ldh", "labs", [])]
+      : url === "/v1/disease-categories/" ? CATEGORIES : {} }));
+    renderPage();
+    await screen.findByText("weight");
+    chooseDisease("MM");
+    fireEvent.click(tab("Labs"));
+    // kappa_flc, MM's one Labs field, is mapped; ldh on the same tab is not.
+    expect(screen.getByText("Unmapped Fields: 0")).toBeInTheDocument();
+    const suggest = screen.getByRole("button", { name: /Suggest/ });
+    expect(suggest).toBeEnabled();
+    expect(suggest).toHaveAttribute("title", "Suggests for all 1 unmapped fields on this tab, whatever their scope");
+    fireEvent.click(suggest);
+    await waitFor(() => expect(mockPost).toHaveBeenCalledWith("/v1/field-mappings/propose-all/", { tab: "labs" }));
+  });
+
+  it("is off when the view lists nothing", async () => {
+    renderPage();
+    await screen.findByText("weight");
+    chooseDisease("CLL");
+    expect(screen.getByRole("button", { name: /Suggest/ })).toBeDisabled();
   });
 });
 
@@ -283,6 +365,29 @@ describe("CSV downloads", () => {
     expect(mockGet).toHaveBeenCalledWith(
       "/v1/field-mappings/export/", { params: { disease: "BC", set: "extension" }, responseType: "blob" },
     );
+  });
+
+  it("shows which download is running and holds the others until it ends", async () => {
+    let finish: (value: unknown) => void = () => {};
+    mockGet.mockImplementation((url: string) => {
+      if (url === "/v1/field-mappings/") return Promise.resolve({ data: DESCRIPTORS });
+      if (url === "/v1/field-mappings/export/") return new Promise((resolve) => { finish = resolve; });
+      return Promise.resolve({ data: CATEGORIES });
+    });
+    renderPage();
+    await screen.findByText("weight");
+    chooseDisease("MM");
+    fireEvent.click(screen.getByRole("button", { name: "Full record (CSV)" }));
+
+    const running = await screen.findByRole("button", { name: "Downloading…" });
+    expect(running).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Disease-specific (CSV)" })).toBeDisabled();
+    expect(screen.queryByRole("button", { name: "Full record (CSV)" })).not.toBeInTheDocument();
+
+    finish({ data: new Blob(["x"]), headers: {} });
+    await waitFor(() => expect(saved).toEqual(["field-mappings-MM-profile.csv"]));
+    expect(screen.getByRole("button", { name: "Full record (CSV)" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Disease-specific (CSV)" })).toBeEnabled();
   });
 
   it("names the file itself when the server sends no filename", async () => {
@@ -351,6 +456,20 @@ describe("scope control from the page", () => {
     expect(mockPost).not.toHaveBeenCalled();
     await waitFor(() => expect(listRequests()).toHaveLength(2));
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  });
+});
+
+describe("a field that decides the record's profile", () => {
+  it("gets no scope control: the server gives disease no scope", async () => {
+    mockGet.mockImplementation((url: string) => Promise.resolve({ data: url === "/v1/field-mappings/"
+      ? [...DESCRIPTORS, field("disease", "general", [])]
+      : url === "/v1/disease-categories/" ? CATEGORIES : {} }));
+    renderPage();
+    await screen.findByText("weight");
+    fireEvent.click(within(screen.getByText("disease").closest("tr")!).getByTitle("Click to assign or edit concept"));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByRole("heading", { name: "Assign Concept" })).toBeInTheDocument();
+    expect(within(dialog).queryByRole("radio", { name: "Disease-specific" })).not.toBeInTheDocument();
   });
 });
 

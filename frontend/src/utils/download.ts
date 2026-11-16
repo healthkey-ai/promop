@@ -16,16 +16,17 @@ export function saveBlob(blob: Blob, filename: string): void {
 }
 
 /**
- * The message in a failed blob request. With `responseType: "blob"` the error
- * body arrives as a Blob too, so a JSON `detail` has to be read out of it.
+ * The server's message in a failed blob request, or `null` when it sent
+ * none. With `responseType: "blob"` the error body arrives as a Blob too, so
+ * a JSON `detail` has to be read out of it.
  */
-export async function blobErrorMessage(error: unknown, fallback: string): Promise<string> {
+export async function blobErrorMessage(error: unknown): Promise<string | null> {
   const data = (error as { response?: { data?: unknown } })?.response?.data;
-  if (!(data instanceof Blob)) return fallback;
+  if (!(data instanceof Blob)) return null;
   try {
     const parsed = JSON.parse(await data.text()) as { error?: string; detail?: string };
-    return parsed.error || parsed.detail || fallback;
+    return parsed.error || parsed.detail || null;
   } catch {
-    return fallback;
+    return null;
   }
 }

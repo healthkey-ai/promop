@@ -48,18 +48,28 @@ interface Props {
   onEditChoices?: () => void;
   canApprove?: boolean;
   /**
-   * Offer the scope control (#2332). Only for a caller who may write
-   * mappings: the API refuses a scope from anyone else.
+   * The unit and table the mapping row holds, when the dialog opens on
+   * something else (a suggestion's, or the default table). What the dialog
+   * shows and the row lacks then counts as a change to save.
    */
-  canEditScope?: boolean;
-  /** The Disease Category codes the field is scoped to; none is the base record. */
-  initialDiseases?: string[];
-  /** The categories a scope may name: Disease Category management's, without Other. */
-  diseaseOptions?: DiseaseCategoryOption[];
+  storedUnit?: string;
+  storedOmopTable?: string;
+  /**
+   * The field's scope, for a caller who may change it (#2332): the Disease
+   * Category codes it is scoped to (none is the base record) and the
+   * categories a scope may name. Without it the dialog offers no scope
+   * control and no save carries a scope, which is what a caller without
+   * mapping write access, or a field that cannot have a scope, gets.
+   */
+  fieldScope?: {
+    diseases: string[];
+    options: DiseaseCategoryOption[];
+    /** The categories could not be loaded; `options` are those already in use. */
+    optionsIncomplete?: boolean;
+  };
 }
 
 const NO_DISEASES: string[] = [];
-const NO_OPTIONS: DiseaseCategoryOption[] = [];
 
 /** A DRF error for one key as text: a string, a list, or a list per index. */
 function errorText(value: unknown): string {
@@ -102,8 +112,11 @@ export function ConceptAssignDialog({
   initialConceptCode, initialVocabularyId, initialUnit, initialOmopTable,
   existingMappingId, initialConceptId, initialConceptName, initialStatus, initialNotes, commonUnits,
   choices, onEditChoices, canApprove = true,
-  canEditScope = false, initialDiseases = NO_DISEASES, diseaseOptions = NO_OPTIONS,
+  storedUnit, storedOmopTable, fieldScope,
 }: Props) {
+  const canEditScope = fieldScope !== undefined;
+  const initialDiseases = fieldScope?.diseases ?? NO_DISEASES;
+  const initialScope: FieldScope = initialDiseases.length ? "disease" : "base";
   const isEditing = !!existingMappingId;
   const isNewMapping = !isEditing;
   const [searchQuery, setSearchQuery] = useState("");
@@ -130,7 +143,7 @@ export function ConceptAssignDialog({
     initialStatus || "proposed"
   );
   const [notes, setNotes] = useState(initialNotes || "");
-  const [scope, setScope] = useState<FieldScope>(initialDiseases.length ? "disease" : "base");
+  const [scope, setScope] = useState<FieldScope>(initialScope);
   const [diseases, setDiseases] = useState<string[]>(initialDiseases);
   const [scopeError, setScopeError] = useState("");
   const [saving, setSaving] = useState(false);
@@ -196,22 +209,31 @@ export function ConceptAssignDialog({
   // The scope to save: ticked categories count only while the choice is
   // disease-specific, and the base record is no categories at all.
   const scopedDiseases = scope === "disease" ? [...diseases].sort() : NO_DISEASES;
-  const scopeDirty = canEditScope
-    && scopedDiseases.join("|") !== [...initialDiseases].sort().join("|");
-  // Whether anything but the scope differs from what the dialog opened with.
+  // Choosing disease-specific is a change even before a category is ticked,
+  // so that Save can say one is needed.
+  const scopeDirty = canEditScope && (
+    scope !== initialScope
+    || JSON.stringify(scopedDiseases) !== JSON.stringify([...initialDiseases].sort())
+  );
+  // Whether anything but the scope differs from what the mapping row holds.
   const mappingDirty = (selected?.concept_id ?? null) !== (initialConceptId ?? null)
-    || effectiveUnit !== (initialUnit || "")
-    || omopTable !== (initialOmopTable || "Measurement")
+    || effectiveUnit !== (storedUnit ?? initialUnit ?? "")
+    || omopTable !== (storedOmopTable ?? initialOmopTable ?? "Measurement")
     || notes !== (initialNotes || "")
     || mappingStatus !== (initialStatus || "proposed");
   // A field with no mapping row and no concept chosen: only its scope can be saved.
   const scopeOnly = !selected && !isEditing;
+  // A save that changes the scope and nothing else is a membership edit by
+  // the field's name. It creates no empty mapping row, leaves an existing one
+  // untouched (so nothing is re-projected over the patient records), and no
+  // rule about mappings can refuse it.
+  const scopeSave = scopeDirty && (scopeOnly || !mappingDirty);
 
   const handleSubmit = async () => {
     if (scopeOnly && !scopeDirty) return;
     // Disease-specific with no category is not an answer: saved as sent it
     // would make the field base, which is the other choice.
-    if (canEditScope && scope === "disease" && scopedDiseases.length === 0) {
+    if (scopeDirty && scope === "disease" && scopedDiseases.length === 0) {
       setScopeError("Choose at least one Disease Category, or make the field part of the base record.");
       return;
     }
@@ -219,8 +241,7 @@ export function ConceptAssignDialog({
     setError("");
     setScopeError("");
     try {
-      if (scopeOnly) {
-        // Scope is keyed by field name, so this creates no empty mapping row.
+      if (scopeSave) {
         await api.put(`/v1/field-mappings/${encodeURIComponent(fieldName)}/diseases/`, {
           diseases: scopedDiseases,
         });
@@ -245,26 +266,25 @@ export function ConceptAssignDialog({
       // the scope cannot undo another curator's.
       const scopePayload = scopeDirty ? { diseases: scopedDiseases } : {};
       if (isEditing) {
-        // A scope-only save sends the scope alone: the server then leaves the
-        // mapping row untouched instead of re-projecting every patient record.
-        await api.patch(
-          `/v1/field-mappings/${existingMappingId}/`,
-          scopeDirty && !mappingDirty ? scopePayload : { ...mappingPayload, ...scopePayload },
-        );
+        await api.patch(`/v1/field-mappings/${existingMappingId}/`, { ...mappingPayload, ...scopePayload });
       } else {
         await api.post("/v1/field-mappings/", { field_name: fieldName, ...mappingPayload, ...scopePayload });
       }
       onSaved();
     } catch (err: unknown) {
-      const data = err && typeof err === "object" && "response" in err
-        ? (err as { response?: { data?: unknown } }).response?.data
+      const response = err && typeof err === "object" && "response" in err
+        ? (err as { response?: { status?: number; data?: unknown } }).response
         : undefined;
-      if (data === undefined) {
+      const data = response?.data;
+      if (scopeSave && response?.status === 404) {
+        // The by-name endpoint knows no such field: one the server gives no scope.
+        setScopeError("This field cannot have a scope.");
+      } else if (data === undefined) {
         setError("Failed to save mapping.");
       } else if (data && typeof data === "object" && !Array.isArray(data) && "diseases" in data) {
         // A scope the server refused (an unknown category, or Other) is said
         // under the scope control; anything else it refused stays below.
-        const { diseases: refused, ...rest } = data as Record<string, unknown>;
+        const { diseases: refused, ...rest } = data;
         setScopeError(errorText(refused) || "This scope was refused.");
         if (Object.keys(rest).length) setError(JSON.stringify(rest));
       } else {
@@ -556,11 +576,12 @@ export function ConceptAssignDialog({
           </div>
 
           {/* Scope */}
-          {canEditScope && (
+          {fieldScope && (
             <FieldScopeControl
               scope={scope}
               diseases={diseases}
-              options={diseaseOptions}
+              options={fieldScope.options}
+              optionsIncomplete={fieldScope.optionsIncomplete}
               error={scopeError}
               disabled={saving}
               onChange={(nextScope, nextDiseases) => {
@@ -655,10 +676,10 @@ export function ConceptAssignDialog({
             >
               {saving
                 ? "Saving..."
-                : isEditing
-                  ? "Update Mapping"
-                  : scopeOnly && scopeDirty
-                    ? "Save Scope"
+                : scopeSave
+                  ? "Save Scope"
+                  : isEditing
+                    ? "Update Mapping"
                     : "Save Mapping"}
             </button>
           </div>

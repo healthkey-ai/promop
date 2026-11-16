@@ -180,25 +180,40 @@ The Field Mappings page is where a curator reads and edits scope (#2332):
   record is the base record), each with its count, and for a category a
   **Disease-specific** / **Full record** toggle. It is applied in the browser
   to the descriptors the page already holds, by the rule the list endpoint's
-  `?disease=<code>&set=extension|profile` applies
-  (`inDiseaseView` in `frontend/src/types/fieldScope.ts`), so choosing a
-  disease is no further request. The tab bar and the counts follow the view,
-  and the page opens on a view from its own `?disease=<code>&set=` query.
+  `?disease=<code>&set=extension|profile` applies (`inDiseaseView` in
+  `frontend/src/utils/fieldScope.ts`), so choosing a disease is no further
+  request. The tab bar and the counts follow the view. The page opens on a
+  view from its own `?disease=&set=` query, read once: a code or a category's
+  label in any case, `Other` for the base record, and a value that names no
+  category lists every field and says so. With no `set` the page opens on
+  the disease-specific fields, where the endpoint's default is the full
+  record.
 - **Two CSV downloads** for the chosen category, **Full record (CSV)** and
   **Disease-specific (CSV)**, from the export endpoint under the filename the
   server sends; with no category chosen, the base record alone. They follow
   mapping read access, so a doctor may download.
 - **Scope control** in the Field Concept Mapping dialog
   (`FieldScopeControl.tsx`), for a caller with mapping write access: base
-  record, or disease-specific with one or more categories. It is sent as
-  `diseases` with the mapping save only when it changed, alone when nothing
-  else did, and through the by-name `PUT` for a field with no mapping row and
-  no concept chosen. A refusal under `diseases` is shown under the control.
-  The dialog opens only for a mappable field, so a computed field's scope is
-  read on the page and set through the API.
+  record, or disease-specific with one or more categories. A save that
+  changes the scope and nothing else goes through the by-name `PUT`, whether
+  or not the field has a mapping row, so no mapping rule can refuse a
+  membership edit and no row is re-saved. A save that also changes the
+  mapping carries `diseases` with it, and one that leaves the scope alone
+  sends no `diseases`. A refusal under `diseases` is shown under the
+  control. `disease`, `disease_slug` and `disease_slugs` get no control,
+  since they decide the profile. The dialog opens only for a mappable field,
+  so a computed field's scope is read on the page and set through the API.
+
+The page does not list the location fields or the legacy alias fields (it
+never has: neither can be mapped there), while the list endpoint and the
+CSV include them. A category's disease-specific list therefore matches its
+CSV unless an alias is one of its members, as `absolute_lymphocyte_count`
+is for CLL, and a full-record or base-record CSV holds those 27 further
+rows.
 
 No patient tab and no patient save consults the rows yet: what the disease
-tab renders (#2332) and what a PATCH accepts (#2333) are unchanged.
+tab renders (the rest of #2332) and what a PATCH accepts (#2333) are
+unchanged.
 
 ### Lab derivation reads the mapping tables
 
