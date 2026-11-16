@@ -17,6 +17,12 @@ vi.mock('@/hooks/useVocabulary', () => ({
   useVocabulary: () => ({ options: [], source: null, loading: false }),
 }));
 
+const answerTransport = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn() }));
+vi.mock('@/api/clinicalTransport', () => ({
+  clinicalClient: () => answerTransport,
+  clinicalUrl: (path: string) => `/host${path}`,
+}));
+
 const federatedEditorProps = vi.hoisted(() => vi.fn());
 vi.mock('@/federation/PatientFieldEditor', () => ({
   default: (props: Record<string, unknown>) => {
@@ -209,5 +215,69 @@ describe('ClinicalField writability', () => {
 
     expect(screen.queryByTestId('reason-bmi')).not.toBeInTheDocument();
     expect(screen.getByDisplayValue('24.2')).toBeDisabled();
+  });
+});
+
+describe('ClinicalField explicit answers', () => {
+  it('renders the descriptor actions instead of a read-only reason', async () => {
+    answerTransport.get.mockResolvedValue({ data: {
+      field: 'no_active_infection_status', value: false, confirmed: false, source: false,
+    } });
+    answerTransport.post.mockResolvedValue({ data: {
+      field: 'no_active_infection_status', value: true, confirmed: true, source: false,
+    } });
+    const onServerValues = vi.fn();
+    render(
+      <ClinicalField
+        label="No Active Infection" name="no_active_infection_status" type="boolean"
+        value={false} personId={12} onServerValues={onServerValues}
+        descriptor={{
+          kind: 'explicit-answer', writable: false, answerable: true,
+          endpoint: 'negative-answer', actions: ['confirm_negative', 'withdraw'],
+          action_labels: {
+            confirm_negative: 'Confirm no active infection',
+            withdraw: 'Withdraw confirmation',
+          },
+          inputs: ['active_infection_status'],
+          reason: 'Answered explicitly through the negative-answer endpoint.',
+        } as unknown as FieldDescriptor}
+        onChange={vi.fn()}
+      />,
+    );
+
+    // The misleading "derived, not editable" sentence is replaced by the
+    // controls the server advertises (#2606).
+    expect(screen.queryByTestId('reason-no_active_infection_status')).toBeNull();
+    const confirm = screen.getByRole('button', { name: 'Confirm no active infection' });
+    await waitFor(() => expect(confirm).toBeEnabled());
+    fireEvent.click(confirm);
+
+    await waitFor(() => expect(answerTransport.post).toHaveBeenCalledWith(
+      '/host/v1/patient-records/12/negative-answer/',
+      expect.objectContaining({ field: 'no_active_infection_status', action: 'confirm_negative' }),
+    ));
+    await waitFor(() => expect(onServerValues).toHaveBeenCalledWith({
+      no_active_infection_status: true,
+    }));
+  });
+
+  it('stays read-only when the surface cannot apply the answer', () => {
+    render(
+      <ClinicalField
+        label="No Active Infection" name="no_active_infection_status" type="boolean"
+        value={false}
+        descriptor={{
+          kind: 'explicit-answer', writable: false, answerable: true,
+          endpoint: 'negative-answer', actions: ['confirm_negative'],
+          action_labels: { confirm_negative: 'Confirm no active infection' },
+          reason: 'Answered explicitly through the negative-answer endpoint.',
+        } as unknown as FieldDescriptor}
+        onChange={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId('reason-no_active_infection_status')).toHaveTextContent(
+      /Answered explicitly through the negative-answer endpoint/,
+    );
   });
 });

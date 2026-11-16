@@ -1002,7 +1002,7 @@ export default function PatientDetail({
                       onNameChange={handleNameChange}
                       onZipcodeChange={handleZipcodeChange}
                       patientMode={patientMode}
-                      onConditionsSaved={(answer) => {
+                      onServerValues={(answer) => {
                         saveRevisionRef.current += 1;
                         for (const [field, value] of Object.entries(answer)) {
                           dirtyFieldsRef.current.delete(field);

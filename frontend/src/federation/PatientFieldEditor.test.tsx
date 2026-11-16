@@ -6,6 +6,7 @@ import PatientFieldEditor from './PatientFieldEditor';
 import { labelNamesUnit } from './unitPresentation';
 import { PatientFormStore } from './patientFormStore';
 
+
 async function setup(extraFields = {}, extraValues = {}, writeEnabled = true) {
   const fields = {
     height: { writable: true, target: 'patient_record', control: 'number', label: 'Height', unit: 'cm' },
@@ -13,17 +14,25 @@ async function setup(extraFields = {}, extraValues = {}, writeEnabled = true) {
     bmi: { writable: false, kind: 'computed', label: 'BMI', inputs: ['height', 'weight'], bindings: ['bmiMin'] },
     ...extraFields,
   };
-  const get = vi.fn(async (url: string) => ({ data: url.includes('writable-fields') ? fields : {
-    patient_info: { person_id: 12, height: 170, weight: 60, bmi: 20.76,
-      ldh_upper_limit_normal: 250, ...extraValues }, write_enabled: writeEnabled,
-  } }));
+  const get = vi.fn(async (url: string) => {
+    if (url.includes('negative-answer')) {
+      return { data: { field: 'no_other_active_malignancies', value: false, confirmed: false, source: [] } };
+    }
+    return { data: url.includes('writable-fields') ? fields : {
+      patient_info: { person_id: 12, height: 170, weight: 60, bmi: 20.76,
+        ldh_upper_limit_normal: 250, ...extraValues }, write_enabled: writeEnabled,
+    } };
+  });
   const patch = vi.fn(async (_url: string, values: Record<string, unknown>) => ({ data: {
     patient_info: { person_id: 12, height: 170, weight: 60, ...values, bmi: 27.68 },
     write: { applied: Object.keys(values) },
   } }));
-  const store = new PatientFormStore({ get, patch } as unknown as AxiosInstance, '/api');
+  const post = vi.fn(async (_url: string, body: Record<string, unknown>) => ({ data: {
+    ...body, value: true, confirmed: true, source: [],
+  } }));
+  const store = new PatientFormStore({ get, patch, post } as unknown as AxiosInstance, '/api');
   await store.load();
-  return { store, patch, get };
+  return { store, patch, get, post };
 }
 
 describe('computed patient field input dialogs', () => {
@@ -1026,6 +1035,36 @@ describe('single unit display (#5704)', () => {
     expect(screen.getByText('INR')).toBeVisible();
 
     expect(screen.queryByText('{INR}')).not.toBeInTheDocument();
+  });
+
+  it('renders the explicit answer actions instead of a derived dead end', async () => {
+    const { store, post } = await setup({
+      no_other_active_malignancies: {
+        kind: 'explicit-answer', writable: false, answerable: true,
+        target: 'patient_record', endpoint: 'negative-answer',
+        actions: ['confirm_negative', 'withdraw'],
+        action_labels: {
+          confirm_negative: 'Confirm no other active malignancies',
+          withdraw: 'Withdraw confirmation',
+        },
+        inputs: ['active_malignancies'], value_kind: 'boolean',
+        reason: 'Answered explicitly through the negative-answer endpoint.',
+      },
+    }, { no_other_active_malignancies: false });
+    render(<PatientFieldEditor store={store} name="no_other_active_malignancies"
+      label="No Other Active Malignancies" />);
+
+    expect(screen.getByText(/No Other Active Malignancies/)).toBeVisible();
+    expect(screen.queryByText(/not editable in this view/)).toBeNull();
+    const confirm = screen.getByRole('button', { name: 'Confirm no other active malignancies' });
+    await waitFor(() => expect(confirm).toBeEnabled());
+    fireEvent.click(confirm);
+    await waitFor(() => expect(post).toHaveBeenCalledWith(
+      '/api/v1/patient-records/12/negative-answer/',
+      expect.objectContaining({
+        field: 'no_other_active_malignancies', action: 'confirm_negative', expected_value: false,
+      }),
+    ));
   });
 
   it('marks a computed value and states what it is computed from (#2620)', async () => {

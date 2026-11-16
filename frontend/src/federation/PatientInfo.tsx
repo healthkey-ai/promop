@@ -110,7 +110,7 @@ function PatientInfoInner({ readOnly, federated, onPatientUpdated, showHeading =
       <div className="min-w-0" data-patient-info-panel>
         {tabKey === 'general' && <GeneralTab showCoordinates={!federated} patientMode={federated}
           conditionsReadOnly={locked}
-          onConditionsSaved={(answer) => {
+          onServerValues={(answer) => {
             store.applyServerValues({ ...answer });
             // The attestation endpoint bypasses the save queue, so the host's
             // `onUpdated` listeners would never hear about it.

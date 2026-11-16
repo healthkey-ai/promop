@@ -3,6 +3,7 @@ import * as Dialog from '@radix-ui/react-dialog';
 import { Pencil } from 'lucide-react';
 import Field from '@/components/PatientInfo/Field';
 import { PatientFormRenewContext, usePatientFormSnapshot } from './PatientFormContext';
+import ExplicitAnswerActions from '@/components/PatientInfo/ExplicitAnswerActions';
 import type { FormFieldDescriptor, PatientFormStore } from './patientFormStore';
 import { displayUnitLabel, labelNamesUnit } from './unitPresentation';
 
@@ -381,8 +382,16 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
     .filter((descriptor) => descriptor?.endpoint && descriptor.writable !== true)
     .map((descriptor) => descriptor?.reason)
     .find(Boolean);
+  // An explicit answer is not a derived dead end: it has its own endpoint and
+  // the row renders its labelled actions (#2606). Its `inputs` list is the
+  // source fact the attestation is checked against, so it must not turn into
+  // the "not editable in this view" sentence.
+  const explicitAnswer = field.answerable === true && field.endpoint === 'negative-answer'
+    ? field.endpoint : undefined;
   const blocked = inputsUnavailable || (inputs.length > 0 && !editPath);
-  const reason = blocked
+  const reason = explicitAnswer
+    ? field.compatibility_reason ?? field.reason
+    : blocked
     ? [
       dedicated
         ? `Computed from ${inputLabels.join(', ')}. Edit them in ${dedicated}.`
@@ -571,6 +580,18 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
         </Dialog.Root>
       </div>
       {derived && reason && <p className="text-xs text-muted-foreground">{reason}</p>}
+    </> : explicitAnswer ? <>
+      <div>{!compact && <span className="text-sm font-medium">{shownLabel}: </span>}{formatted}</div>
+      {state.personId && <ExplicitAnswerActions personId={state.personId} name={canonical}
+        store={store}
+        endpoint={explicitAnswer} actions={field.actions} actionLabels={field.action_labels}
+        value={value} readOnly={readOnly || !state.writable}
+        onSaved={async (values) => {
+          // The endpoint bypasses the PATCH queue; the record view and the
+          // host's listeners must hear about it without a save.
+          store.applyServerValues(values);
+          store.announceUpdated();
+        }} />}
     </> : writable ? <>
       {showUnitPicker ? <div className="flex items-end gap-2">
         <div className="min-w-0 flex-1">{controlNode}</div>

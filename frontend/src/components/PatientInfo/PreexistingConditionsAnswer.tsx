@@ -6,6 +6,9 @@ import { usePatientFormStore } from '@/federation/PatientFormContext';
 export interface ConditionsAnswer {
   no_pre_existing_conditions: boolean | null;
   preexisting_conditions: string[] | null;
+  /** The generic "adopt these server values" channel (#2606) also carries an
+   * explicit answer's field, so the payload is not closed to these two keys. */
+  [field: string]: unknown;
 }
 
 export default function PreexistingConditionsAnswer({

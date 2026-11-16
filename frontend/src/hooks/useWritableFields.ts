@@ -85,6 +85,13 @@ export interface FieldDescriptor {
   /** Set when the field is mapped but this caller may not edit this patient —
    *  read-only for who is asking, rather than read-only in principle. */
   read_only_for_caller?: boolean;
+  /** An answer with its own attestation endpoint rather than a column write
+   *  (#5666). `writable` stays false: the `actions` below are the write, with
+   *  a snapshot the endpoint checks, and their wording comes from
+   *  `action_labels` — never from the client. */
+  answerable?: boolean;
+  actions?: string[];
+  action_labels?: Record<string, string>;
   /** A canonical value this PR derives from a value + unit source pair
    *  (`hemoglobin_g_dl` from `hemoglobin_level`). Not `writable`: the form store
    *  edits the pair. The server still honours a canonical write, so a view

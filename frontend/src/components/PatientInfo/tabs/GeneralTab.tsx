@@ -9,7 +9,7 @@ import { Input } from '@/components/shadcn/input';
 import { usePatientFormReadOnly } from '@/federation/PatientFormContext';
 import SelectControl from '../controls/SelectControl';
 import { today } from '@/api/clinicalFacts';
-import PreexistingConditionsAnswer, { type ConditionsAnswer } from '../PreexistingConditionsAnswer';
+import PreexistingConditionsAnswer from '../PreexistingConditionsAnswer';
 import {
   COUNTRY_OPTIONS, US_STATES,
   ECOG_OPTIONS, KARNOFSKY_OPTIONS,
@@ -25,7 +25,9 @@ interface Props {
   /** Precise coordinates are matched from the host's own address data; a federated
    *  host that withholds them must not be offered inputs whose save it refuses. */
   showCoordinates?: boolean;
-  onConditionsSaved?: (answer: ConditionsAnswer) => void | Promise<void>;
+  /** Server values to adopt without a write: an explicit answer's response,
+   *  which travels through its own endpoint rather than the PATCH queue. */
+  onServerValues?: (values: Record<string, unknown>) => void | Promise<void>;
   conditionsReadOnly?: boolean;
 }
 
@@ -51,7 +53,7 @@ export default function GeneralTab({
   formData, onChange, editedName, onNameChange, onZipcodeChange,
   patientMode = false,
   showCoordinates = true,
-  onConditionsSaved,
+  onServerValues,
   conditionsReadOnly = false,
 }: Props) {
   // Ask about *this* patient: whether a field may be edited depends on who is
@@ -131,6 +133,8 @@ export default function GeneralTab({
         options={extra.options}
         vocabSource={extra.vocabSource}
         onChange={changeWithDate}
+        personId={personId}
+        onServerValues={onServerValues}
         precision={prec as 'day' | 'month' | 'year' | undefined}
         date={dated ? dateFor(name) : undefined}
         onDateChange={dated ? (next) => changeDate(name, next) : undefined}
@@ -298,7 +302,7 @@ export default function GeneralTab({
       <Section title="Medical History" description="Pre-existing conditions and clinical status.">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
           <div className="sm:col-span-2">
-            {personId && onConditionsSaved ? <PreexistingConditionsAnswer
+            {personId && onServerValues ? <PreexistingConditionsAnswer
               key={personId}
               personId={personId}
               flag={formData.no_pre_existing_conditions}
@@ -308,7 +312,7 @@ export default function GeneralTab({
               // (a PATCH to these columns is not how they are authored). The
               // host's write gate and that endpoint's own 409 are the authority.
               readOnly={conditionsReadOnly || loading}
-              onSaved={onConditionsSaved}
+              onSaved={onServerValues}
             /> : <p className="text-sm">Pre-existing conditions require the explicit answer editor.</p>}
           </div>
           {field('Peripheral Neuropathy Grade', 'peripheral_neuropathy_grade', 'number')}
