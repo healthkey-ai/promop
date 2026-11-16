@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { clinicalClient, clinicalUrl } from '@/api/clinicalTransport';
 import { useVocabulary } from '@/hooks/useVocabulary';
 import { usePatientFormStore } from '@/federation/PatientFormContext';
+import { Button } from '@/components/shadcn/button';
 
 export interface ConditionsAnswer {
   no_pre_existing_conditions: boolean | null;
@@ -30,14 +31,24 @@ export default function PreexistingConditionsAnswer({
   );
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
-  // A saved answer comes back as new props. Re-seed the selection from them
-  // during render instead of remounting on a key: a remount also dropped the
-  // "Answer saved." confirmation the save had just set.
-  const answerKey = JSON.stringify([flag ?? null, categories ?? null]);
+  const [loaded, setLoaded] = useState<ConditionsAnswer | null>(null);
+  const needsSnapshot = flag === undefined;
+  const answerFlag = needsSnapshot ? loaded?.no_pre_existing_conditions : flag;
+  const answerCategories = needsSnapshot ? loaded?.preexisting_conditions : categories;
+  const ready = !needsSnapshot || loaded !== null;
+  // A saved answer comes back as new props — or, on a host that withholds the
+  // flag, as the snapshot this component fetched. Re-seed from the effective
+  // answer during render instead of remounting on a key: a remount also dropped
+  // the "Answer saved." confirmation the save had just set. The disclosure opens
+  // with stored categories so the record never hides what it holds (#2607).
+  const answerKey = JSON.stringify([answerFlag ?? null, answerCategories ?? null]);
   const [seededFrom, setSeededFrom] = useState(answerKey);
   if (seededFrom !== answerKey) {
     setSeededFrom(answerKey);
-    setSelected(Array.isArray(categories) ? categories.filter((v): v is string => typeof v === 'string') : []);
+    const stored = Array.isArray(answerCategories)
+      ? answerCategories.filter((v): v is string => typeof v === 'string') : [];
+    setSelected(stored);
+    if (stored.length > 0) setChooserOpen(true);
     // An answer that changed outside this editor answers its old alert ("This
     // answer changed. Reload…") and outdates its old confirmation. Our own
     // save is still busy when its result arrives, and sets its message after.
@@ -46,11 +57,6 @@ export default function PreexistingConditionsAnswer({
       setMessage('');
     }
   }
-  const [loaded, setLoaded] = useState<ConditionsAnswer | null>(null);
-  const needsSnapshot = flag === undefined;
-  const answerFlag = needsSnapshot ? loaded?.no_pre_existing_conditions : flag;
-  const answerCategories = needsSnapshot ? loaded?.preexisting_conditions : categories;
-  const ready = !needsSnapshot || loaded !== null;
   useEffect(() => {
     if (!needsSnapshot) return;
     let cancelled = false;
@@ -68,9 +74,15 @@ export default function PreexistingConditionsAnswer({
   const hasCategories = answerCategories != null && JSON.stringify(answerCategories) !== '[]';
   const malformed = answerCategories != null && !Array.isArray(answerCategories);
   const unknownCodes = selected.filter(code => !options.some(option => option.value === code));
-  const selectedLabels = options
-    .filter(option => selected.includes(option.value))
-    .map(option => option.label ?? option.value);
+  const labelFor = (code: string) => options.find(option => option.value === code)?.label || code;
+  // Every counted code is named, including one the vocabulary does not carry and
+  // one whose label has not loaded yet (#2607 review).
+  const selectedLabels = selected.map(labelFor);
+  const recordedCodes = Array.isArray(answerCategories)
+    ? answerCategories.filter((v): v is string => typeof v === 'string') : [];
+  const recordedLabels = recordedCodes.map(labelFor);
+  const pendingDiffers = JSON.stringify([...selected].sort()) !== JSON.stringify([...recordedCodes].sort());
+  const locked = readOnly || busy || !ready;
 
   const save = async (action: 'confirm_none' | 'withdraw' | 'set_categories') => {
     setBusy(true);
@@ -100,8 +112,8 @@ export default function PreexistingConditionsAnswer({
     }
   };
 
-  return <fieldset disabled={readOnly || busy || !ready} className="space-y-3">
-    <legend className="text-sm font-medium">Pre-existing Conditions</legend>
+  return <div className="space-y-3">
+    <p className="text-sm font-medium">Pre-existing Conditions</p>
     <p className="text-sm">
       {!ready ? 'Loading the current answer…' : hasCategories ? 'Recorded categories are listed below.' : answerFlag === true
         ? 'Stored answer: no pre-existing conditions. Use Confirm to explicitly reaffirm it.'
@@ -110,40 +122,46 @@ export default function PreexistingConditionsAnswer({
     </p>
     {malformed && <p role="alert">Categories need review. Confirmation is unavailable.</p>}
     {!malformed && <>
-      <button type="button" aria-expanded={chooserOpen}
-        className="inline-flex items-center gap-2 rounded-md border border-input px-3 py-1.5 text-sm"
+      {/* Reading the list is not an edit: the disclosure stays usable for a
+          read-only caller, while the checkboxes inside are disabled. */}
+      <Button type="button" variant="outline" size="sm" aria-expanded={chooserOpen}
+        disabled={busy || !ready}
         onClick={() => setChooserOpen((open) => !open)}>
         {selected.length
           ? `Choose conditions (${selected.length} selected)`
           : 'Choose conditions'}
         <span aria-hidden>{chooserOpen ? '▴' : '▾'}</span>
-      </button>
+      </Button>
       {selectedLabels.length > 0 && <p className="text-sm">Selected: {selectedLabels.join(', ')}</p>}
+      {pendingDiffers && recordedLabels.length > 0 && (
+        <p className="text-sm text-muted-foreground">Recorded: {recordedLabels.join(', ')}</p>
+      )}
       {chooserOpen && <div role="group" aria-label="Pre-existing condition categories"
         className="space-y-1 rounded-md border border-input p-3">
         {loading ? <p>Loading categories…</p> : options.map(option => <label
           key={option.value} className="flex items-center gap-2 text-sm">
-          <input type="checkbox" checked={selected.includes(option.value)} onChange={e => {
+          <input type="checkbox" disabled={locked} checked={selected.includes(option.value)} onChange={e => {
             setSelected(e.target.checked ? [...selected, option.value]
               : selected.filter(code => code !== option.value));
           }} />{option.label}
         </label>)}
       </div>}
       {unknownCodes.length > 0 && <p role="alert">Some recorded category codes need review.</p>}
-      <button type="button" className="rounded-md border border-input px-3 py-1.5 text-sm disabled:opacity-50"
-        disabled={loading || !options.length || unknownCodes.length > 0}
-        onClick={() => save('set_categories')}>Save categories and withdraw “none”</button>
+      <Button type="button" variant="outline" size="sm"
+        disabled={locked || loading || !options.length || unknownCodes.length > 0}
+        onClick={() => save('set_categories')}>Save categories and withdraw “none”</Button>
     </>}
     <p className="text-xs text-muted-foreground">These answers save only when you press a button, not through autosave.</p>
     <div className="flex flex-wrap gap-2">
-      <button type="button" className="rounded-md border border-input px-3 py-1.5 text-sm disabled:opacity-50"
-        disabled={hasCategories || selected.length > 0}
-        onClick={() => save('confirm_none')}>Confirm no pre-existing conditions</button>
-      <button type="button" className="rounded-md border border-input px-3 py-1.5 text-sm"
-        onClick={() => save('withdraw')}>Withdraw answer</button>
+      <Button type="button" variant="outline" size="sm"
+        disabled={locked || hasCategories || selected.length > 0}
+        onClick={() => save('confirm_none')}>Confirm no pre-existing conditions</Button>
+      <Button type="button" variant="outline" size="sm"
+        disabled={locked}
+        onClick={() => save('withdraw')}>Withdraw answer</Button>
     </div>
     {busy && <p role="status">Saving answer…</p>}
     {message && <p role="status">{message}</p>}
     {error && <p role="alert">{error}</p>}
-  </fieldset>;
+  </div>;
 }

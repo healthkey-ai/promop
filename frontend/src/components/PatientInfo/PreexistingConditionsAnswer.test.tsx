@@ -120,6 +120,34 @@ describe('explicit pre-existing-conditions answers', () => {
     expect(screen.getByLabelText('Infections')).toBeChecked();
   });
 
+  it('opens the stored answer delivered by the snapshot, not only by props (#2607 review)', async () => {
+    get.mockResolvedValue({ data: { no_pre_existing_conditions: null, preexisting_conditions: ['infections'] } });
+    render(<PreexistingConditionsAnswer personId={42} flag={undefined} categories={[]}
+      readOnly={false} onSaved={vi.fn()} />);
+
+    const toggle = await screen.findByRole('button', { name: 'Choose conditions (1 selected)' });
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByLabelText('Infections')).toBeChecked();
+    expect(screen.getByText('Selected: Infections')).toBeVisible();
+  });
+
+  it('lets a read-only caller open the list but not change it (#2607 review)', () => {
+    editor(true, ['infections'], true);
+    const toggle = screen.getByRole('button', { name: 'Choose conditions (1 selected)' });
+    // The stored answer starts open, and reading it is not an edit.
+    expect(toggle).toBeEnabled();
+    expect(screen.getByLabelText('Infections')).toBeDisabled();
+    fireEvent.click(toggle);
+    expect(screen.queryByLabelText('Infections')).toBeNull();
+    fireEvent.click(toggle);
+    expect(screen.getByLabelText('Infections')).toBeDisabled();
+  });
+
+  it('names a selected code the vocabulary does not carry (#2607 review)', () => {
+    editor(null, ['mystery-code']);
+    expect(screen.getByText('Selected: mystery-code')).toBeVisible();
+  });
+
   it('reports conflict without claiming confirmation succeeded', async () => {
     post.mockRejectedValue({ response: { status: 409 } });
     const saved = editor();
