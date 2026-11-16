@@ -17,8 +17,11 @@ export default function GelfAssessment({ value, descriptor, onChange }: {
   const locked = usePatientFormReadOnly();
   const selected = value == null ? null : String(value).split(',').filter(Boolean);
   const write = (next: string[] | null) => onChange('gelf_criteria_options', next == null ? null : next.join(','));
-  return <fieldset className="space-y-3 rounded-md border p-4" disabled={locked || !descriptor?.writable}>
-    <legend className="px-1 font-medium">GELF high tumor burden</legend>
+  // A dedicated editor shares the tab's chrome: a field-labelled block in the
+  // same flat list as the descriptor rows, not a bordered card of its own
+  // (#2619).
+  return <fieldset className="space-y-3" disabled={locked || !descriptor?.writable}>
+    <legend className="text-sm font-medium text-portal-text-primary">GELF high tumor burden</legend>
     <p className="text-sm text-muted-foreground">Any selected criterion meets this GELF definition. Nodal count or marrow involvement alone is insufficient.</p>
     {FACTORS.map(([key, label]) => <label className="flex items-center gap-3 text-sm" key={key}>
       <input type="checkbox" checked={selected?.includes(key) ?? false} onChange={event => write(FACTORS.map(([id]) => id).filter(id => id === key ? event.target.checked : selected?.includes(id)))} />
