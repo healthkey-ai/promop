@@ -18,6 +18,7 @@ import type { EditableTherapyLine } from '@/api/therapyLines';
 import type { SupportiveTherapyCourse } from '@/api/supportiveTherapies';
 import { TAB_LAYOUT } from './tabLayout.generated';
 import type { TabLayoutSection } from './tabLayoutTypes';
+import { displayUnitLabel } from '@/federation/unitPresentation';
 
 export type DiseaseType = 'breast' | 'lymphoma' | 'myeloma' | 'cll' | 'mcl' | 'other';
 
@@ -148,8 +149,15 @@ function layoutSections(
 }
 
 /** GeneralTab offers `region` as a US State picker or as free text. */
-const relabel = (record: Row, name: string, label: string) =>
-  name === 'region' && record.country !== 'United States' ? 'Region/State' : label;
+const relabel = (record: Row, name: string, label: string) => {
+  if (name === 'region' && record.country !== 'United States') return 'Region/State';
+  // A reviewed label names the usual unit ("Weight (kg)"); a record stored in
+  // another unit must export the one it holds, not the label's default (#2610).
+  const stored = record[`${name}_units`];
+  if (typeof stored !== 'string' || !stored) return label;
+  const shown = displayUnitLabel(stored) ?? stored;
+  return label.replace(/\s*\(([^)]*)\)\s*$/, ` (${shown})`);
+};
 
 const loadedTable = <T,>(
   title: string,
