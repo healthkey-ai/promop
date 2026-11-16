@@ -1980,6 +1980,20 @@ class FieldConceptMappingSerializer(serializers.ModelSerializer):
                     )
         return value
 
+    def validate_unit(self, value):
+        """A `{...}` marker says "no physical unit", so it is not a unit (#2605).
+
+        Stored, the marker came back through the descriptor as a label beside
+        the edit box. Leaving the unit blank says the same thing without
+        leaking it to a client.
+        """
+        marker = value.strip() if isinstance(value, str) else ''
+        if marker.startswith('{') and marker.endswith('}'):
+            raise serializers.ValidationError(
+                'A {...} placeholder means "no physical unit"; leave the unit blank.'
+            )
+        return value
+
     def validate(self, attrs):
         field_name = attrs.get('field_name', getattr(self.instance, 'field_name', None))
         # Verify field_name is a real PatientRecord field.
