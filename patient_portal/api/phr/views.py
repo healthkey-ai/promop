@@ -485,7 +485,12 @@ def _apply_cancer_details(entry, details, sources, family):
         text, origin = take(stage_field)
         entry.pop('stage', None)
         if text:
-            entry['stage'] = {'label': stage_label, 'value': text, 'source': origin}
+            # The linked fact carries the same SNOMED display the record's stage
+            # is normalised from; the card and its export must read the reviewed
+            # label, not the tag (#2618).
+            from omop_core.services.stage_labels import normalise_stage_label
+            entry['stage'] = {'label': stage_label,
+                              'value': normalise_stage_label(text), 'source': origin}
         detail_sources['stage'] = origin
     if family in RISK_FIELDS and RISK_FIELDS[family][0] in details:
         field, label = RISK_FIELDS[family]
