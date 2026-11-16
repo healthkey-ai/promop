@@ -106,7 +106,9 @@ function ResultDetail({
       {!isQualitative && values.length > 0 && (
         <Card>
           <CardContent className="p-4">
-            <LabTrendChart values={values} unit={displayUnitLabel(unit) ?? ''} />
+            {/* The chart filters measurements by this exact string: the raw
+                unit keeps working; only the text a reader sees is mapped. */}
+            <LabTrendChart values={values} unit={unit} />
           </CardContent>
         </Card>
       )}
