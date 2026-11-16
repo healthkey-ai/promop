@@ -13,7 +13,7 @@ fixture that only test code imports. Deployments load the real vocabulary; see
 CHANGELOG 1.2.
 
 Locally-minted ``HK-Wearable`` concepts — the one thing Athena cannot supply —
-are installed by migration 0143, which runs on every deploy. They are duplicated
+are installed by migrations 0143 and 0343, which run on every deploy. They are duplicated
 here so a test database has them too.
 """
 from datetime import date

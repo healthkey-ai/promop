@@ -77,6 +77,12 @@ def mint_openwearables_local_concepts(apps, schema_editor):
         if held is not None:
             if not held.source:
                 Concept.objects.filter(pk=held.pk).update(source='HealthKey')
+            if held.domain_id != row['domain_id']:
+                # Kept as found: mappings and clinical rows may be filed by it.
+                logger.warning(
+                    '%s is already here in domain %s, not %s; left as it is.',
+                    row['concept_code'], held.domain_id, row['domain_id'],
+                )
             continue
 
         concept_id = row['concept_id']

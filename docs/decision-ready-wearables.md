@@ -113,7 +113,7 @@ Eighteen metrics, thirteen of which have a genuine LOINC code:
 | `spo2` | 59408-5 | Oxygen saturation in arterial blood by pulse oximetry | `measurement` | `%` | mean |
 | `respiratory_rate` | 9279-1 | Respiratory rate | `measurement` | `/min` | mean |
 | `vo2_max` | 94122-9 | Oxygen consumption (VO2)/body weight | `measurement` | `mL/kg/min` | mean |
-| `distance` | 41953-1 | Walking distance 24 hour Calculated | `measurement` | `km` | sum |
+| `distance` | 112427-0 | Distance walking or running | `measurement` | `km` | sum |
 | `walking_speed` | 41957-2 | Walking speed 24 hour mean Calculated | `measurement` | `km/hr` | mean |
 | `active_energy` | 93819-1 | Calories burned in unspecified time --during activity | `measurement` | `kcal` | sum |
 | `body_mass` | 29463-7 | Body weight | `measurement` | `kg` | mean |

@@ -21,7 +21,7 @@ from django.db import IntegrityError, ProgrammingError, connection, transaction
 from django.test import TestCase, override_settings
 
 from omop_core.models import (
-    Concept, ConceptClass, Domain, Vocabulary,
+    Concept, ConceptClass, ConceptMappingLock, Domain, Vocabulary,
     Organization, Person, PatientRecord, ConditionOccurrence, DrugExposure, Measurement, Observation,
     PersonLanguageSkill, SourceCodeConceptMapping,
 )
@@ -7051,17 +7051,29 @@ class SeedOpenWearablesMappingsTest(TestCase):
             self._row('lean_body_mass').target_concept_id, self.lean_mass_old.concept_id)
 
     def test_update_seeded_repoints_an_untouched_row(self):
-        held = self._seed_then_hold(
-            'lean_body_mass', target_concept=self.lean_mass_old, suggestion_confidence=0.4)
+        held = self._seed_then_hold('lean_body_mass', target_concept=self.lean_mass_old)
         call_command('seed_openwearables_mappings', '--update-seeded', verbosity=0)
         row = self._row('lean_body_mass')
         self.assertEqual(row.target_concept_id, self.lean_mass.concept_id)
         self.assertEqual(row.destination_vocabulary_id, 'LOINC')
-        self.assertIsNone(row.suggestion_confidence)
+        self.assertGreater(row.updated_at, held.updated_at)
+        # Still the seed's row, so a later change of target can move it again.
         self.assertEqual(row.status, 'proposed')
         self.assertEqual(row.origin_system, 'open-wearables-seed')
         self.assertEqual(row.decision_surface, '')
-        self.assertGreater(row.updated_at, held.updated_at)
+        self.assertIsNone(row.updated_by_id)
+
+    def test_update_seeded_fills_a_row_suggest_declined_and_drops_its_note(self):
+        """A declined Suggest run leaves a note and no destination; the row is still the seed's."""
+        self._seed_then_hold(
+            'walking_step_length', target_concept=None, destination_vocabulary_id='',
+            last_suggest_attempt='v0.4-both',
+            notes='No candidate concept found by any enabled strategy.')
+        call_command('seed_openwearables_mappings', '--update-seeded', verbosity=0)
+        row = self._row('walking_step_length')
+        self.assertEqual(row.target_concept.concept_code, 'HK-WEAR-STEP-LENGTH')
+        self.assertEqual(row.notes, '')
+        self.assertEqual(row.last_suggest_attempt, 'v0.4-both')
 
     def test_update_seeded_fills_an_untouched_row_with_no_destination(self):
         self._seed_then_hold(
@@ -7086,8 +7098,14 @@ class SeedOpenWearablesMappingsTest(TestCase):
             ('rejected', {'status': 'rejected'}),
             ('suggest answered', {'origin_system': 'suggest v0.4'}),
             ('another importer', {'origin': 'user'}),
+            ('suggest score', {'suggestion_confidence': 0.4}),
+            ('suggest candidate', {'suggested_target_concept': self.hr_concept}),
             ('curator decision', {'decision_surface': 'code2concept'}),
             ('curator save before decision_surface', {'updated_by': curator}),
+            ('curator note on a copied row', {'curator_note_at': timezone.now()}),
+            ('curator unit', {'destination_unit_concept': self.hr_concept}),
+            ('curator axes', {'loinc_axes': {'system': 'Bld'}}),
+            ('curator attributes', {'snomed_attributes': {'reference_concept_id': 1}}),
         ):
             with self.subTest(label):
                 SourceCodeConceptMapping.objects.filter(
@@ -7099,15 +7117,49 @@ class SeedOpenWearablesMappingsTest(TestCase):
                 call_command('seed_openwearables_mappings', '--update-seeded', stdout=out)
                 self.assertEqual(self._snapshot(), before)
                 self.assertIn('[LEFT ALONE] lean_body_mass', out.getvalue())
-                self.assertIn('0 re-pointed, 1 differing', out.getvalue())
+                self.assertIn('0 re-pointed, 1 left alone', out.getvalue())
+
+    def test_update_seeded_skips_a_target_a_curator_has_locked(self):
+        """A locked concept refuses every write that names it (#2390)."""
+        curator = Identity.objects.create_user(email='locker-2595@test.com', password='x')
+        ConceptMappingLock.objects.create(concept=self.lean_mass, locked_by=curator)
+        self._seed_then_hold('lean_body_mass', target_concept=self.lean_mass_old)
+        before = self._snapshot()
+        out = io.StringIO()
+        call_command('seed_openwearables_mappings', '--update-seeded', stdout=out)
+        self.assertEqual(self._snapshot(), before)
+        self.assertIn('locked by a curator', out.getvalue())
+
+    def test_target_in_another_domain_is_not_used(self):
+        """The row is filed by the seed's domain, so a concept elsewhere is no target."""
+        Concept.objects.filter(pk=self.lean_mass.pk).update(domain_id='Observation')
+        out = io.StringIO()
+        call_command('seed_openwearables_mappings', stdout=out)
+        self.assertIsNone(self._row('lean_body_mass').target_concept)
+        self.assertIn('Concept is in domain Observation', out.getvalue())
+
+        SourceCodeConceptMapping.objects.filter(
+            source_vocabulary_id='OpenWearables', source_code='lean_body_mass',
+        ).update(target_concept=self.lean_mass_old)
+        call_command('seed_openwearables_mappings', '--update-seeded', verbosity=0)
+        self.assertEqual(
+            self._row('lean_body_mass').target_concept_id, self.lean_mass_old.concept_id)
+
+    def test_retired_target_is_not_used(self):
+        Concept.objects.filter(pk=self.fvc.pk).update(invalid_reason='D')
+        call_command('seed_openwearables_mappings', verbosity=0)
+        self.assertIsNone(self._row('forced_vital_capacity').target_concept)
 
     def test_update_seeded_never_clears_a_destination(self):
         """The seed names no target for average_met; a destination there stays."""
         self._seed_then_hold(
             'average_met', target_concept=self.hr_concept, destination_vocabulary_id='LOINC')
-        call_command('seed_openwearables_mappings', '--update-seeded', verbosity=0)
+        out = io.StringIO()
+        call_command('seed_openwearables_mappings', '--update-seeded', stdout=out)
         self.assertEqual(
             self._row('average_met').target_concept_id, self.hr_concept.concept_id)
+        self.assertIn('[KEPT] average_met', out.getvalue())
+        self.assertIn('0 left alone at another destination, 1 kept', out.getvalue())
 
     def test_update_seeded_keeps_a_destination_when_the_target_is_not_loaded(self):
         """SNOMED 250825003 is not in this database: the row keeps what it has."""
@@ -7172,6 +7224,17 @@ class MintOpenWearablesLocalConceptsMigrationTest(TestCase):
             self.assertEqual(concept.source, 'HealthKey')
             self.assertEqual(concept.concept_name, 'Entered by hand')
         self.assertEqual(self._concepts().count(), 2)
+
+    def test_concept_under_another_id_is_kept_and_not_minted_again(self):
+        """Matched on the code: an instance that minted it elsewhere keeps its id."""
+        Concept.objects.filter(
+            vocabulary_id='HK-Wearable', concept_code='HK-WEAR-OW-CARDIO-AGE',
+        ).update(concept_id=2_100_999_001)
+        self._run()
+        self.assertEqual(
+            sorted(self._concepts().values_list('concept_id', flat=True)),
+            [2029606355, 2_100_999_001])
+        self.assertFalse(Concept.objects.filter(concept_id=2029606356).exists())
 
     def test_taken_id_mints_at_the_next_free_local_id(self):
         """An id another concept holds must not fail the deploy or be overwritten."""

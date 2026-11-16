@@ -130,9 +130,9 @@ continue upward from there.
 
 The last two are vendor scores (an estimated workout effort and a cardiovascular age) that are not
 comparable across vendors, so they get a local concept rather than a generic LOINC or SNOMED one.
-No runtime metric uses them. A migration mints by `(vocabulary_id, concept_code)`, not by id: a
-HealthKey-minted id is not guaranteed to agree across instances, so 0343 keeps a concept that is
-already present at whatever id it has and only fills in a missing `source`.
+No runtime metric uses them. 0343 matches on `(vocabulary_id, concept_code)`, not on the id as
+0143 does: a HealthKey-minted id is not guaranteed to agree across instances, so it keeps a concept
+that is already present at whatever id it has and only fills in a missing `source`.
 
 **Never mint a real LOINC code under `vocabulary_id='LOINC'`.** Doing so creates a duplicate
 `(vocabulary_id, concept_code)` pair, and `concept_by_vocab` resolves duplicates arbitrarily
@@ -200,8 +200,9 @@ the one seeded (#2595):
 | `air_temperature` | SNOMED 250825003 Ambient temperature | none |
 | `blood_alcohol_content` | SNOMED 54791000237107 Ethanol mass concentration in blood | none |
 
-The five gait and HRV rows now name the same concept as the Apple and Garmin source codes for the
-same quantity, so one metric is one concept whichever source sent it.
+The three gait rows and `flights_climbed` now name the same concept as the Apple HealthKit code
+for the same quantity, and the RMSSD row the same as Garmin's, so one metric is one concept
+whichever source sent it.
 
 A metric the proposal has no verified code for is seeded with no destination and waits on the
 Wearables tab for Suggest or a curator. `average_met` is one of them on purpose: SNOMED 16821004
@@ -222,17 +223,26 @@ python manage.py seed_openwearables_mappings --update-seeded
 ```
 
 `--update-seeded` re-points an existing row to the seed's target only while nothing but the seed
-has written it:
+has set its destination or curated it:
 
 - `status` is `proposed` (never an approved or rejected row),
-- `origin` is `import` and `origin_system` is `open-wearables-seed` (Suggest stamps its own
-  `origin_system` when it proposes a destination, which takes the row out),
-- no curator has saved it (`decision_surface` is blank and `updated_by` is empty).
+- `origin` is `import` and `origin_system` is `open-wearables-seed`, and the row carries no
+  Suggest candidate or score (Suggest stamps its own `origin_system` when it proposes a
+  destination, which takes the row out),
+- no curator has saved it: `decision_surface` is blank, `updated_by` is empty, and it has no
+  curator note, destination unit, LOINC axes or SNOMED attributes. The last four matter on an
+  instance loaded by `copy_reference_data`, which clears `updated_by`.
 
-It never clears a destination: a row the seed names no target for, or whose target concept is not
-loaded on the instance, keeps what it has. Every row that differs from the seed and is not moved
-is listed as `[LEFT ALONE]` with the reason, and a target with no concept is reported as
-`Concept not found`.
+A row Suggest tried and declined has no destination and is still the seed's; filling it drops the
+note that run left. A target a curator has locked on the Concept to Code tab is not written to.
+
+A target is used only when its concept is loaded, not retired, and in the domain the seed files
+the metric under; otherwise it is reported (`Concept not found`, `Concept is retired`,
+`Concept is in domain …`) and the row is created or left without it.
+
+It never clears a destination. The run lists each row it does not bring into line:
+`[LEFT ALONE]` where the seed names a target and the row keeps another destination, with the
+reason, and `[KEPT]` where the seed names no target and the row has one.
 
 ---
 

@@ -9,8 +9,8 @@ the HL7 PHR code list disagree, the HL7 code is the one seeded.
 Idempotent: uses get_or_create on (source_vocabulary_id, source_code), so a
 row that exists is left exactly as it is. A target that changes here reaches an
 already seeded instance only with ``--update-seeded``, which re-points a row
-nothing but this command has written (see ``_not_seed_owned``) and never clears
-a destination.
+whose destination nothing but this command has set (see ``_not_seed_owned``)
+and never clears a destination.
 """
 
 import logging
@@ -18,7 +18,7 @@ import logging
 from django.core.management.base import BaseCommand
 from django.db import transaction
 
-from omop_core.models import Concept, SourceCodeConceptMapping
+from omop_core.models import Concept, ConceptMappingLock, SourceCodeConceptMapping
 from omop_core.services.source_vocabularies import DOMAIN_TO_TABLE
 
 logger = logging.getLogger(__name__)
@@ -156,18 +156,38 @@ SEED_ORIGIN_SYSTEM = 'open-wearables-seed'
 def _not_seed_owned(row):
     """Why ``--update-seeded`` must leave *row* alone, or '' when it may move it.
 
-    A row is the seed's only while nothing else has written it. Suggest stamps
-    its own ``origin_system`` when it proposes a destination, and every curator
-    save records ``decision_surface`` (and ``updated_by``, which also marks a
-    save made before that column existed), so each of those takes the row out.
+    A row is the seed's only while nothing else has set its destination or
+    curated it. Suggest stamps its own ``origin_system`` when it proposes a
+    destination, and every curator save records ``decision_surface`` and
+    ``updated_by``. ``copy_reference_data`` clears ``updated_by``, so what only
+    a person enters (a note, a unit, LOINC axes, SNOMED attributes) is checked
+    too. A run Suggest declined leaves the destination empty and the row the
+    seed's; ``_repoint`` drops the note that run left.
     """
     if row.status != 'proposed':
         return f'status is {row.status}'
     if row.origin != 'import' or row.origin_system != SEED_ORIGIN_SYSTEM:
         return f'destination set by {row.origin_system or row.origin or "another writer"}'
-    if row.decision_surface or row.updated_by_id:
+    if row.suggested_target_concept_id or row.suggestion_confidence is not None:
+        return 'carries a Suggest answer'
+    if (row.decision_surface or row.updated_by_id or row.reviewer_id or row.curator_note_at
+            or row.destination_unit_concept_id or row.loinc_axes or row.snomed_attributes):
         return 'saved by a curator'
     return ''
+
+
+def _repoint(row, target):
+    """Move a seed-owned *row* to *target*. The caller holds the row lock."""
+    row.target_concept = target
+    row.destination_vocabulary_id = target.vocabulary_id
+    fields = ['target_concept', 'destination_vocabulary_id', 'updated_at']
+    if row.notes:
+        # No curator wrote it (_not_seed_owned): it is the rationale of a
+        # Suggest run that found nothing, and would now read beside a
+        # destination as if it were about it.
+        row.notes = ''
+        fields.append('notes')
+    row.save(update_fields=fields)
 
 
 class Command(BaseCommand):
@@ -203,11 +223,18 @@ class Command(BaseCommand):
             for c in Concept.objects.filter(
                 vocabulary_id=vocab,
                 concept_code__in=codes,
-            ).only('concept_id', 'concept_code', 'vocabulary_id'):
+            ).only('concept_id', 'concept_code', 'vocabulary_id', 'domain_id',
+                   'invalid_reason'):
                 concepts[(vocab, c.concept_code)] = c
+        # A concept a curator holds refuses every write that names it (#2390).
+        locked = set(
+            ConceptMappingLock.objects
+            .filter(concept_id__in=[c.pk for c in concepts.values()])
+            .values_list('concept_id', flat=True)
+        )
 
-        created = existed = unresolved = repointed = 0
-        left_alone = []  # (source_code, reason) for rows that differ from the seed
+        created = existed = unresolved = repointed = kept = 0
+        left_alone = []  # (source_code, reason): the seed's target was not applied
         with transaction.atomic():
             existing = {
                 row.source_code: row
@@ -221,13 +248,20 @@ class Command(BaseCommand):
                 omop_table = DOMAIN_TO_TABLE.get(domain, '')
                 wanted = f'{t_vocab or "-"}:{t_code or "-"}'
 
+                unusable = ''
                 if t_vocab and t_code and not target:
-                    logger.warning(
-                        'Concept not found: %s %s for metric %s',
-                        t_vocab, t_code, ow_code,
-                    )
-                    detail(self.style.WARNING(
-                        f'  Concept not found: {wanted} for metric {ow_code}'))
+                    unusable = 'Concept not found'
+                elif target and target.invalid_reason:
+                    unusable = f'Concept is retired ({target.invalid_reason})'
+                elif target and target.domain_id != domain:
+                    # The row is filed by the seed's domain; a concept of
+                    # another domain would sit in the wrong clinical table.
+                    unusable = (f'Concept is in domain {target.domain_id}, '
+                                f'the seed files the metric under {domain}')
+                if unusable:
+                    logger.warning('%s: %s %s for metric %s', unusable, t_vocab, t_code, ow_code)
+                    detail(self.style.WARNING(f'  {unusable}: {wanted} for metric {ow_code}'))
+                    target = None
                 if not target:
                     unresolved += 1
 
@@ -272,33 +306,30 @@ class Command(BaseCommand):
                             f'(--update-seeded would consider it)')
                     continue
                 if not t_code:
-                    reason = 'seed names no target; a destination is never cleared'
-                elif not target:
-                    reason = f'seed target {wanted} has no concept here'
+                    # A destination is never cleared.
+                    kept += 1
+                    detail(f'  [KEPT] {ow_code}: {held} (the seed names no target)')
+                    continue
+                if not target:
+                    reason = f'seed target {wanted} is not usable here'
+                elif target.pk in locked:
+                    reason = f'{wanted} is locked by a curator'
                 else:
                     reason = _not_seed_owned(row)
                 if not reason and not dry_run:
-                    # Re-read under a lock: a curator may have saved the row
-                    # since it was loaded above.
-                    row = SourceCodeConceptMapping.objects.select_for_update().get(pk=row.pk)
-                    reason = _not_seed_owned(row)
+                    # Re-read under a lock: a curator may have saved or deleted
+                    # the row since it was loaded above.
+                    row = (SourceCodeConceptMapping.objects
+                           .select_for_update().filter(pk=row.pk).first())
+                    reason = _not_seed_owned(row) if row else 'row deleted during the run'
                 if reason:
                     left_alone.append((ow_code, reason))
                     detail(f'  [LEFT ALONE] {ow_code}: {held}, seed {wanted} ({reason})')
                     continue
                 repointed += 1
                 detail(f'  [RE-POINT] {ow_code}: {held} -> {wanted}')
-                if dry_run:
-                    continue
-                row.target_concept = target
-                row.destination_vocabulary_id = target.vocabulary_id
-                # A ranker's score was for the destination it chose (#2382).
-                row.suggestion_confidence = None
-                row.decision_confidence = None
-                row.save(update_fields=[
-                    'target_concept', 'destination_vocabulary_id',
-                    'suggestion_confidence', 'decision_confidence', 'updated_at',
-                ])
+                if not dry_run:
+                    _repoint(row, target)
 
         total = len(OPENWEARABLES_METRICS)
         prefix = 'DRY RUN: would have ' if dry_run else 'Done: '
@@ -309,7 +340,8 @@ class Command(BaseCommand):
         if update_seeded:
             summary += (
                 f' --update-seeded: {repointed} re-pointed, '
-                f'{len(left_alone)} differing from the seed left alone.'
+                f'{len(left_alone)} left alone at another destination, '
+                f'{kept} kept where the seed names no target.'
             )
         self.stdout.write(
             self.style.WARNING(summary) if dry_run else self.style.SUCCESS(summary))
