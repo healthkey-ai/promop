@@ -16,6 +16,7 @@ from omop_core.services.mappings import (
     DERIVED_FIELD_TO_CODE,
     FIELD_COMMON_UNITS,
     STANDARD_UNIT_CHOICES,
+    physical_unit,
     SUGGESTED_FIELD_CODES,
 )
 from omop_core.services.patient_record_service import (
@@ -512,7 +513,9 @@ def _build_suggestion(name: str, prov_dict: dict | None) -> dict | None:
         return {
             'concept_code': code,
             'vocabulary_id': 'LOINC',
-            'unit': unit,
+            # A `{score}` here is "no unit", and the form now refuses to store
+            # it (#2605), so do not suggest it either.
+            'unit': physical_unit(unit),
             'omop_table': 'Measurement',
             'common_units': common_units,
         }

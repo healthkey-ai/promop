@@ -61,6 +61,10 @@ export default function TreatingInstitutionField({ value, descriptor, onChange }
           <Input id={id} role="combobox" aria-autocomplete="list" aria-expanded={open}
             aria-controls={`${id}-list`} aria-activedescendant={open && active >= 0 ? `${id}-option-${active}` : undefined}
             aria-describedby={`${id}-help`} autoComplete="off" value={query} maxLength={255}
+            // The input owns the leftover width. `flex-1` sets the basis and
+            // `min-w-0` removes the automatic minimum — both are load-bearing;
+            // the shadcn `w-full` is inert here (#2615).
+            className="min-w-0 flex-1"
             placeholder="Search center name, city, or state"
             onFocus={() => setOpen(true)}
             onBlur={() => { setOpen(false); setActive(-1); setDraft(null); }}
@@ -82,7 +86,11 @@ export default function TreatingInstitutionField({ value, descriptor, onChange }
           // as "not yours to edit" (#5576).
           <p className="flex h-9 items-center text-sm text-portal-text-primary">{value || '—'}</p>
         )}
-        {writable && value && <button type="button" className="text-sm text-muted-foreground" onClick={() => choose('')} aria-label="Clear treating institution">Clear</button>}
+        {writable && value && <button type="button"
+          // The action keeps its natural width and never wraps; the input shrinks
+          // instead (#2615).
+          className="shrink-0 whitespace-nowrap text-sm text-muted-foreground"
+          onClick={() => choose('')} aria-label="Clear treating institution">Clear</button>}
       </div>
       {open && options.length > 0 && (
         <ul id={`${id}-list`} role="listbox" aria-label="Treating institutions" className="absolute z-30 max-h-60 w-full overflow-auto rounded-md border bg-white py-1 shadow-md">

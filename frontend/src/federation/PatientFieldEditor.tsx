@@ -285,6 +285,8 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
   // is the stored one when the record holds another ("lb") (#2610 review).
   const descriptorUnit = field.unit ?? field.projection?.unit ?? unitOptions[0]?.value;
   const unitInPlay = storedUnit || descriptorUnit;
+  // `displayUnitLabel` also returns nothing for a `{score}`-style placeholder,
+  // so the #2605 guard and this mapping stay one reader.
   const displayUnit = displayUnitLabel(
     storedUnit ? (storedUnitLabel ?? 'unit unknown')
       : (unitOptions.length
