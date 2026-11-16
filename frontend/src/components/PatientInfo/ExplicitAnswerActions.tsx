@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { clinicalClient, clinicalUrl } from '@/api/clinicalTransport';
 import { usePatientFormStore } from '@/federation/PatientFormContext';
+import type { PatientFormStore } from '@/federation/patientFormStore';
 
 /** The negative-answer endpoint's answer (#5666): the stored value, whether an
  * attestation exists, and the source fact the confirmation was made against. */
@@ -26,6 +27,10 @@ interface Props {
   readOnly?: boolean;
   /** The endpoint's response, applied to the record view without a PATCH. */
   onSaved: (values: Record<string, unknown>) => void | Promise<void>;
+  /** The editor's store. A federated host injects its own authenticated client
+   *  and base path there, so the answer must travel on that connection rather
+   *  than the module-level transport (#2606 review). */
+  store?: PatientFormStore | null;
 }
 
 /**
@@ -43,8 +48,19 @@ interface Props {
  */
 export default function ExplicitAnswerActions({
   personId, name, endpoint, actions, actionLabels, value, readOnly = false, onSaved,
+  store: providedStore,
 }: Props) {
-  const store = usePatientFormStore();
+  const contextStore = usePatientFormStore();
+  const store = providedStore ?? contextStore;
+  // Another mounted editor of the same answer publishes through the store;
+  // re-read the snapshot instead of keeping a stale "Explicitly confirmed".
+  const [answersRevision, setAnswersRevision] = useState(
+    () => store?.getSnapshot().answersRevision ?? 0,
+  );
+  useEffect(() => {
+    if (!store) return undefined;
+    return store.subscribe(() => setAnswersRevision(store.getSnapshot().answersRevision));
+  }, [store]);
   // Keyed by the question, so a changed row never shows the previous row's
   // answer while the new one loads (and no state is set synchronously in the
   // effect body).
@@ -59,12 +75,16 @@ export default function ExplicitAnswerActions({
 
   useEffect(() => {
     let cancelled = false;
-    clinicalClient()
-      .get<ExplicitAnswerState>(
-        clinicalUrl(`/v1/patient-records/${personId}/${endpoint}/`),
-        { params: { field: name } },
-      )
-      .then(({ data }) => {
+    const load = store
+      ? store.explicitAnswerState(personId, endpoint, name) as Promise<ExplicitAnswerState>
+      : clinicalClient()
+        .get<ExplicitAnswerState>(
+          clinicalUrl(`/v1/patient-records/${personId}/${endpoint}/`),
+          { params: { field: name } },
+        )
+        .then(({ data }) => data);
+    load
+      .then((data) => {
         if (!cancelled) setLoaded({ key: queryKey, data });
       })
       .catch(() => {
@@ -78,7 +98,7 @@ export default function ExplicitAnswerActions({
         }
       });
     return () => { cancelled = true; };
-  }, [personId, endpoint, name, queryKey]);
+  }, [personId, endpoint, name, queryKey, store, answersRevision]);
 
   // The snapshot is the authority: the record value alone cannot tell a
   // confirmation from a derived answer, and the endpoint checks the source fact.
@@ -97,15 +117,17 @@ export default function ExplicitAnswerActions({
     // response and `onSaved` land.
     store?.beginBypassWrite();
     try {
-      const { data } = await clinicalClient().post<ExplicitAnswerState>(
-        clinicalUrl(`/v1/patient-records/${personId}/${endpoint}/`),
-        {
-          field: name,
-          action,
-          expected_value: snapshot?.value ?? value ?? null,
-          expected_source: snapshot?.source ?? null,
-        },
-      );
+      const payload = {
+        field: name,
+        action,
+        expected_value: snapshot?.value ?? value ?? null,
+        expected_source: snapshot?.source ?? null,
+      };
+      const data = store
+        ? await store.explicitAnswer(personId, endpoint, payload) as ExplicitAnswerState
+        : (await clinicalClient().post<ExplicitAnswerState>(
+          clinicalUrl(`/v1/patient-records/${personId}/${endpoint}/`), payload,
+        )).data;
       setLoaded({ key: queryKey, data });
       await onSaved({ [name]: data.value });
       setMessage(data.confirmed ? 'Answer confirmed.' : 'Confirmation withdrawn.');

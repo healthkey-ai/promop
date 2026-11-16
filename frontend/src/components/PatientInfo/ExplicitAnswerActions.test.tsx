@@ -2,6 +2,7 @@ import type { ComponentProps } from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import ExplicitAnswerActions from './ExplicitAnswerActions';
+import { PatientFormStore } from '@/federation/patientFormStore';
 
 const get = vi.fn();
 const post = vi.fn();
@@ -126,5 +127,54 @@ describe('explicit negative answers', () => {
     const withdraw = await screen.findByRole('button', { name: 'Withdraw confirmation' });
     await waitFor(() => expect(withdraw).toBeDisabled());
     expect(screen.getByText('Explicitly confirmed.')).toBeVisible();
+  });
+});
+
+
+describe('explicit answers travel on the editor connection (#2606 review)', () => {
+  it('uses the store client, not the module-level transport', async () => {
+    const client = {
+      get: vi.fn(async () => ({ data: { value: false, confirmed: false, source: [] } })),
+      post: vi.fn(async () => ({ data: { value: true, confirmed: true, source: [] } })),
+    };
+    const store = new PatientFormStore(client as never, '/host');
+    render(<ExplicitAnswerActions personId={42} name="no_other_active_malignancies"
+      endpoint="negative-answer" actions={NEGATIVE.actions} actionLabels={NEGATIVE.actionLabels}
+      value={false} store={store} onSaved={vi.fn()} />);
+
+    const confirm = await screen.findByRole('button', { name: 'Confirm no other active malignancies' });
+    await waitFor(() => expect(confirm).toBeEnabled());
+    fireEvent.click(confirm);
+
+    await waitFor(() => expect(client.post).toHaveBeenCalledWith(
+      '/host/v1/patient-records/42/negative-answer/',
+      expect.objectContaining({ field: 'no_other_active_malignancies', action: 'confirm_negative' }),
+    ));
+    expect(client.get).toHaveBeenCalledWith(
+      '/host/v1/patient-records/42/negative-answer/', { params: { field: 'no_other_active_malignancies' } },
+    );
+    // The module-level transport is only for a surface with no store.
+    expect(get).not.toHaveBeenCalled();
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  it('re-reads the attestation when another mounted editor writes', async () => {
+    const client = {
+      get: vi.fn(async () => ({ data: { value: false, confirmed: false, source: [] } })),
+      post: vi.fn(async () => ({ data: { value: true, confirmed: true, source: [] } })),
+    };
+    const store = new PatientFormStore(client as never, '');
+    const saved = vi.fn(async (values: Record<string, unknown>) => store.applyServerValues(values));
+    const props = { personId: 42, name: 'no_other_active_malignancies', endpoint: 'negative-answer',
+      actions: NEGATIVE.actions, actionLabels: NEGATIVE.actionLabels, value: false, store, onSaved: saved };
+    render(<><ExplicitAnswerActions {...props} /><ExplicitAnswerActions {...props} /></>);
+
+    await waitFor(() => expect(client.get).toHaveBeenCalledTimes(2));
+    const [first] = screen.getAllByRole('button', { name: 'Confirm no other active malignancies' });
+    await waitFor(() => expect(first).toBeEnabled());
+    fireEvent.click(first);
+
+    // Both editors re-read the snapshot after the store announced the answer.
+    await waitFor(() => expect(client.get.mock.calls.length).toBeGreaterThan(2));
   });
 });
