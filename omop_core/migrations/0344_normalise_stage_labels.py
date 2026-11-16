@@ -66,7 +66,9 @@ def normalise_stages(apps, schema_editor):
             untouched.append(record.stage)
     if changed:
         PatientRecord.objects.bulk_update(changed, ['stage'], batch_size=500)
-    logger.info('0344_normalise_stage_labels: normalised %s stage values', len(changed))
+    # WARNING, not INFO: the deploy log only surfaces WARNING for this module,
+    # so an INFO line would make a bulk rewrite invisible.
+    logger.warning('0344_normalise_stage_labels: normalised %s stage values', len(changed))
     if untouched:
         logger.warning(
             '0344_normalise_stage_labels: left %s stage values unchanged: %s',

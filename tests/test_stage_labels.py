@@ -85,7 +85,8 @@ def test_the_migration_normalises_stored_values_and_is_idempotent():
     from tests.migration_utils import run_data_migration
 
     seen = {}
-    for value in ('Stage 4 (qualifier value)', 'stage iv', 'Stage 2A',
+    for value in ('Stage 4 (qualifier value)', 'stage iv', 'Stage 2A', 'Stage 2 A',
+                  'American Joint Committee on Cancer stage IA (qualifier val',
                   'ISS II', 'Rai 0', 'III', 'Stage 1 (qualifier value)'):
         record = PatientRecordFactory(stage=value)
         seen[record.pk] = value
@@ -96,6 +97,8 @@ def test_the_migration_normalises_stored_values_and_is_idempotent():
     assert after_first[by_value['Stage 4 (qualifier value)']] == 'Stage IV'
     assert after_first[by_value['stage iv']] == 'Stage IV'
     assert after_first[by_value['Stage 2A']] == 'Stage IIA'
+    assert after_first[by_value['Stage 2 A']] == 'Stage IIA'
+    assert after_first[by_value['American Joint Committee on Cancer stage IA (qualifier val']] == 'Stage IA'
     assert after_first[by_value['Stage 1 (qualifier value)']] == 'Stage I'
     # Other staging systems and already-plain roman values are untouched.
     for value in ('ISS II', 'Rai 0', 'III'):
@@ -122,3 +125,20 @@ def test_a_linked_stage_fact_reads_as_the_reviewed_label():
     )
 
     assert out['stage']['value'] == 'Stage IV'
+
+
+def test_a_pending_stage_edit_survives_the_refresh():
+    """A reader's stage edit wins over the derived fact, normalisation included."""
+    from omop_core.services.patient_record_service import refresh_patient_record
+
+    loinc = VocabularyFactory(vocabulary_id='LOINC', vocabulary_name='LOINC')
+    concept = ConceptFactory(concept_code='21908-9', concept_name='Stage group', vocabulary=loinc)
+    record = PatientRecordFactory(stage='Stage II A', user_edited_fields=['stage'])
+    MeasurementFactory(person=record.person, measurement_concept=concept,
+                       measurement_source_value='21908-9',
+                       value_as_string='Stage 4 (qualifier value)')
+
+    refresh_patient_record(record.person)
+
+    record.refresh_from_db()
+    assert record.stage == 'Stage II A'
