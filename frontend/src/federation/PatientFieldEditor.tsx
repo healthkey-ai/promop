@@ -122,6 +122,26 @@ function inspectInputs(
   return graph;
 }
 
+/** The surface that authors a descriptor, if it has one of its own.
+ *
+ * A computed field whose source is authored by a dedicated writer has no PATCH
+ * target, so the row must name that surface instead of claiming the data is not
+ * editable at all (#2614). `target` is the descriptor's own answer; the
+ * endpoint tail is only a fallback for older entries.
+ */
+const DEDICATED_SURFACES: Record<string, string> = {
+  genomics: 'Genomics',
+};
+
+function dedicatedSurface(
+  target?: string | null, endpoint?: string | null,
+): string | undefined {
+  if (target && DEDICATED_SURFACES[target]) return DEDICATED_SURFACES[target];
+  if (!endpoint) return undefined;
+  const segment = endpoint.replace(/\/$/, '').split('/').pop() || '';
+  return DEDICATED_SURFACES[segment];
+}
+
 /** CB's computed → source-input dialog, with recursive drill-in. Medical
  * metadata and values come only from PROMOP, never the host's trial uoptions. */
 export default function PatientFieldEditor({ store, name, readOnly, infoHref, ancestors = [], compact, label: callerLabel, labelIncludesUnit = false, options: tabOptions, controlType }: Props) {
@@ -335,19 +355,59 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
   // dialog must not promise that every edit saves itself.
   // The gate reason used to be reachable inside the dialog. Rows that lose the
   // dialog must keep it, or the clinical restriction disappears with the pencil.
+  // A derived value says so in the same words on both surfaces (#2620): the
+  // native app marks it "(computed)" and prints the descriptor's explanation,
+  // and the federated row must not look like an ordinary empty input.
+  const derived = field.kind === 'computed';
+  // The inputs' own labels read better than the descriptor's snake_case reason,
+  // and name where a dedicated source is authored (#2614).
+  const inputLabels = inputs.map((input) => {
+    const child = store.resolve(input);
+    const descriptor = child ? state.fields[child] : undefined;
+    return descriptor?.label || input.replace(/_/g, ' ');
+  });
+  // A dedicated surface is worth naming only when it can actually store the
+  // fact: an endpoint is attached even where its vocabulary is missing and the
+  // editor refuses every write (#2614 review).
+  const inputDescriptors = inputs
+    .map((input) => store.resolve(input))
+    .map((child) => (child ? state.fields[child] : undefined));
+  const dedicated = inputDescriptors
+    .filter((descriptor) => descriptor?.writable === true)
+    .map((descriptor) => dedicatedSurface(descriptor?.target, descriptor?.endpoint))
+    .find(Boolean);
+  // A dedicated writer that exists but refuses explains itself on its own
+  // descriptor; the computed row should carry that sentence (#2614 review).
+  const blockedInputReason = inputDescriptors
+    .filter((descriptor) => descriptor?.endpoint && descriptor.writable !== true)
+    .map((descriptor) => descriptor?.reason)
+    .find(Boolean);
   // An explicit answer is not a derived dead end: it has its own endpoint and
   // the row renders its labelled actions (#2606). Its `inputs` list is the
   // source fact the attestation is checked against, so it must not turn into
   // the "not editable in this view" sentence.
   const explicitAnswer = field.answerable === true && field.endpoint === 'negative-answer'
     ? field.endpoint : undefined;
+  const blocked = inputsUnavailable || (inputs.length > 0 && !editPath);
   const reason = explicitAnswer
     ? field.compatibility_reason ?? field.reason
-    : inputsUnavailable || (inputs.length > 0 && !editPath)
-      ? ['This value is derived from data that is not editable in this view.',
-        field.compatibility_reason].filter(Boolean).join(' ')
-      : field.compatibility_reason ?? field.reason
-        ?? (lockedByView ? undefined : 'Derived value; edit the source inputs.');
+    : blocked
+    ? [
+      dedicated
+        ? `Computed from ${inputLabels.join(', ')}. Edit them in ${dedicated}.`
+        : 'This value is derived from data that is not editable in this view.',
+      field.compatibility_reason,
+      dedicated ? undefined : blockedInputReason ?? field.reason,
+    ].filter(Boolean).join(' ')
+    : field.compatibility_reason
+      // A reviewed explanation ("Normalised from … in the default unit") says
+      // more than the mechanical "Computed from height, weight."; only the
+      // mechanical form is worth replacing with the inputs' own labels.
+      ?? (field.reason && !/^Computed from [a-z0-9_, ]+\.$/.test(field.reason)
+        ? field.reason
+        : derived && inputs.length
+          ? `Computed from ${inputLabels.join(', ')}.`
+          : (lockedByView ? undefined : 'Derived value; edit the source inputs.'));
   // A compatibility gate withholds the RESULT, not the clinical facts it is
   // computed from. Editing an input never writes the verdict; the result remains
   // read-only and is recalculated by PROMOP.
@@ -482,7 +542,9 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
     onChange={onChangeValue} />;
   return <div className={ROW_CLASS} data-field={canonical}>
     {inputs.length && !inputsUnavailable && editPath ? <>
-      {!compact && <div className="text-sm font-medium">{shownLabel}</div>}
+      {!compact && <div className="text-sm font-medium">{shownLabel}
+        {derived && <span className="ml-1 text-xs font-normal text-muted-foreground">(computed)</span>}
+      </div>}
       <div className="flex items-center gap-2"><span>{formatted}</span>
         <Dialog.Root open={open} onOpenChange={setOpen}>
           {/* A pencil, not an "Edit inputs" label: the row already shows the
@@ -498,7 +560,9 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
               both moves apply (see ui-labs/dialog.tsx). */}
           <Dialog.Portal><Dialog.Overlay className="fixed inset-0 z-[60] bg-black/40" />
             <Dialog.Content className="promop-root fixed inset-0 z-[61] m-auto h-fit max-h-[85vh] w-[min(32rem,calc(100%-2rem))] space-y-4 overflow-y-auto rounded-xl bg-background p-6 shadow-xl">
-              <Dialog.Title className="font-semibold">{shownLabel}</Dialog.Title>
+              <Dialog.Title className="font-semibold">{shownLabel}
+                {derived && <span className="ml-1 text-xs font-normal text-muted-foreground">(computed)</span>}
+              </Dialog.Title>
               <Dialog.Description className="text-sm text-muted-foreground">{readOnly || !state.writable
                 ? 'These inputs are read-only in this view.'
                 : !inputGraph.editable
@@ -515,8 +579,9 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
             </Dialog.Content></Dialog.Portal>
         </Dialog.Root>
       </div>
+      {derived && reason && <p className="text-xs text-muted-foreground">{reason}</p>}
     </> : explicitAnswer ? <>
-      <div>{!compact && <span className="text-sm font-medium">{label}: </span>}{formatted}</div>
+      <div>{!compact && <span className="text-sm font-medium">{shownLabel}: </span>}{formatted}</div>
       {state.personId && <ExplicitAnswerActions personId={state.personId} name={canonical}
         store={store}
         endpoint={explicitAnswer} actions={field.actions} actionLabels={field.action_labels}
@@ -591,7 +656,7 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
             : 'Older than the latest recorded result; your answer stays the current value and is recorded with this result date.'}
         </p>}
     </>
-      : <><div>{!compact && <span className="text-sm font-medium">{shownLabel}: </span>}{formatted}</div>
+      : <><div>{!compact && <span className="text-sm font-medium">{shownLabel}{derived ? ' (computed)' : ''}: </span>}{formatted}</div>
         {(reason || infoHref || field.retryable) && <p className="text-xs text-muted-foreground">{reason} {infoHref && <a href={infoHref}>Open Your Info</a>} {field.retryable &&
           <button type="button" className="underline" onClick={() => void store.load()}>Retry</button>}</p>}</>}
     {field.options_note && <p role="status" className="text-xs text-muted-foreground">{field.options_note}</p>}
