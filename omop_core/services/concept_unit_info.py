@@ -46,15 +46,21 @@ def get_loinc_to_unit() -> dict[str, str]:
     Returns an empty dict (no error) when the loinc_code_class table has not
     been populated yet.
     """
-    from omop_core.services.mappings import LAB_FIELD_TO_LOINC
+    from omop_core.services.mappings import LAB_FIELD_TO_LOINC, physical_unit
 
-    # Base: DB-sourced LOINC example units (broad coverage).
-    result = _db_loinc_units()
+    # Base: DB-sourced LOINC example units (broad coverage). A `{...}` marker
+    # means "no physical unit" and must not be offered as a suggested unit: the
+    # mapping form refuses to save it (#2605).
+    result = {
+        code: shown for code, unit in _db_loinc_units().items()
+        if (shown := physical_unit(unit))
+    }
 
     # Override: curated units always win.
-    result.update(
-        {code: unit for code, unit, _display in LAB_FIELD_TO_LOINC.values() if unit}
-    )
+    result.update({
+        code: shown for code, unit, _display in LAB_FIELD_TO_LOINC.values()
+        if unit and (shown := physical_unit(unit))
+    })
     return result
 
 

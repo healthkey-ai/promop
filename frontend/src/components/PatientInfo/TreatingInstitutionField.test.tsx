@@ -42,6 +42,19 @@ it('preserves existing free text, cancels search, and supports a custom center a
   expect(onChange).toHaveBeenLastCalledWith('facility_name', '');
 });
 
+it('keeps Clear at its natural width and lets the input shrink (#2615)', () => {
+  render(<TreatingInstitutionField value="Local hospital" descriptor={descriptor} onChange={vi.fn()} />);
+
+  // The inline row is a flex line: the input takes the leftover width and the
+  // action keeps its own, instead of the button collapsing to one letter per
+  // line. jsdom has no layout, so this pins the classes the fix relies on.
+  expect(screen.getByRole('combobox')).toHaveClass('min-w-0', 'flex-1');
+  // The children only work inside one flex line.
+  expect(screen.getByRole('combobox').parentElement).toHaveClass('flex');
+  expect(screen.getByRole('button', { name: 'Clear treating institution' }))
+    .toHaveClass('shrink-0', 'whitespace-nowrap');
+});
+
 it('renders a read-only field as text and never opens a search', () => {
   render(<TreatingInstitutionField value="Local hospital" descriptor={{ ...descriptor, writable: false, reason: 'Read access only' }} onChange={vi.fn()} />);
   // #5576: the control used to stay a focusable combobox with a search placeholder

@@ -24824,6 +24824,28 @@ class FieldConceptMappingTest(TestCase):
         }, format='json')
         self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
 
+    def test_a_placeholder_unit_is_not_accepted(self):
+        """#2605: `{score}` means "no physical unit"; leaving it blank says so.
+
+        Stored, the marker came back through the descriptor as a label beside
+        the edit box for ECOG, Karnofsky, INR and the FLC ratio.
+        """
+        mapping = FieldConceptMapping.objects.create(
+            field_name='pack_years', vocabulary_id='SNOMED', concept_code='S1',
+        )
+        self.client.force_authenticate(user=self.staff)
+
+        for marker in ('{score}', '{INR}', ' {ratio} '):
+            with self.subTest(marker=marker):
+                resp = self.client.patch(
+                    f'/api/v1/field-mappings/{mapping.pk}/',
+                    {'unit': marker}, format='json',
+                )
+                self.assertEqual(resp.status_code, status.HTTP_400_BAD_REQUEST)
+                self.assertIn('unit', resp.data)
+                mapping.refresh_from_db()
+                self.assertEqual(mapping.unit, '')
+
     def test_loinc_collision_rejected(self):
         self.client.force_authenticate(user=self.staff)
         # 718-7 is hemoglobin in LAB_FIELD_TO_LOINC
