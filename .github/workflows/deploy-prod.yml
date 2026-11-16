@@ -20,10 +20,11 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# GCP_PROJECT_ID, GCP_REGION and ARTIFACT_REPO are set per job by the
+# "Resolve production settings" step, not here: a workflow-level `vars`
+# expression sees only repository variables (staging's), never the production
+# environment's.
 env:
-  GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
-  GCP_REGION: ${{ vars.GCP_REGION || 'us-central1' }}
-  ARTIFACT_REPO: ${{ vars.GCP_REGION || 'us-central1' }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/ht-phr
   SERVICE_NAME: promop-prod
   IMAGE_TAG: ${{ github.sha }}
 
@@ -52,6 +53,21 @@ jobs:
         with:
           # Publisher catalogs must be real payloads in the migration image.
           lfs: true
+
+      - name: Resolve production settings
+        env:
+          PROJECT: ${{ vars.GCP_PROJECT_ID }}
+          REGION: ${{ vars.GCP_REGION || 'us-central1' }}
+        run: |
+          if [ -z "$PROJECT" ]; then
+            echo "::error::GCP_PROJECT_ID is not set on the production environment"
+            exit 1
+          fi
+          {
+            echo "GCP_PROJECT_ID=${PROJECT}"
+            echo "GCP_REGION=${REGION}"
+            echo "ARTIFACT_REPO=${REGION}-docker.pkg.dev/${PROJECT}/ht-phr"
+          } >> "$GITHUB_ENV"
 
       - id: auth
         uses: google-github-actions/auth@v2
@@ -90,6 +106,21 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Resolve production settings
+        env:
+          PROJECT: ${{ vars.GCP_PROJECT_ID }}
+          REGION: ${{ vars.GCP_REGION || 'us-central1' }}
+        run: |
+          if [ -z "$PROJECT" ]; then
+            echo "::error::GCP_PROJECT_ID is not set on the production environment"
+            exit 1
+          fi
+          {
+            echo "GCP_PROJECT_ID=${PROJECT}"
+            echo "GCP_REGION=${REGION}"
+            echo "ARTIFACT_REPO=${REGION}-docker.pkg.dev/${PROJECT}/ht-phr"
+          } >> "$GITHUB_ENV"
+
       - id: auth
         uses: google-github-actions/auth@v2
         with:
