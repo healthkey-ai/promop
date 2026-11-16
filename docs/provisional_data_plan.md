@@ -141,6 +141,53 @@ promoted rows as on re-pointed ones. Provisional rows are **not** normalized
 at write time: the proposal has no curated `destination_unit_concept`, and a
 write-time conversion is an approved mapping's privilege (#2157).
 
+### As built in phase 1b (#2530)
+
+Generate OMOP is the writer built so far; the lookup contract and FHIR sync
+are not. What the code does, where the plan left a choice:
+
+- **Which proposals qualify** (`provisional_proposal`): unscoped (no
+  organization, because the per-patient inventory cannot say which hospital a
+  code came from), ranked, at or above the floor, and a standard valid
+  concept in the table's own domain. Proposals for one code under different
+  source systems that disagree on the destination write nothing; agreeing
+  ones take the lowest confidence. When the person's inventory
+  (`PatientSourceCode`) says which systems the code arrived under, every one
+  must have a qualifying proposal; with no inventory row the lookup is by
+  code alone, as the approved-mapping lookups are. Promotion skips a person
+  whose code also arrived under a system with no approval to the destination
+  (`_persons_coded_elsewhere`). `suggestion_confidence` (0-1) becomes the
+  percentage by rounding.
+- **Writers.** `_create_missing_clinical_rows` creates a row for a code with
+  no approved mapping and no row yet. `resolve_person_source_codes` turns a
+  code's unresolved rows (concept 0 or an `HK-*` placeholder) into provisional
+  rows, with the switch on.
+- **Self-correcting resolve.** The same pass rewrites a provisional row whose
+  proposal moved or changed confidence, and takes one back to unresolved when
+  its proposal no longer qualifies (rejected, moved off the concept, below the
+  floor, deleted, or the switch off), so a writer that moves a proposal
+  without calling `revert_provisional_rows` cannot leave a row behind. That
+  correction needs no switch.
+- **Promotion** happens in `repoint_clinical_rows` (the old concept set
+  carries the proposed concept, as `deferred_repoint_concept_ids` already
+  does), in `promote_provisional_rows` for an approval at the concept the
+  rows already sit on (called by the repoint job), and in resolve. Rows keep
+  their confidence through the collapse and lose it afterwards, so a real row
+  for the same event survives whatever the primary keys say (the collapse
+  orders real rows first, #2584). Promotion and resolve delete only
+  provisional duplicates, never a real row, so a keyed real row is safe.
+- **Reverts** (`revert_provisional_rows`): a rejection or a moved proposal in
+  `_upsert_source_code_mapping`, Suggest's Replace, and a CSV upload that
+  points a proposal elsewhere. A patient-page save reverts that patient only.
+  Nothing is deleted. Revert and promote match rows on the code only, never the
+  import description, and revert runs in the table the rows are in before any
+  relocation the same save queues. A writer that keys a provisional row on
+  display text (the ETL, phase 2) will need that matching revisited.
+- **Table relocation** keeps a row provisional: it moves with its concept and
+  confidence, because the proposal it follows has not changed.
+- **Not yet:** `code-mappings/lookup/` and the ETL (phase 2), FHIR sync
+  (#2581), and the readers listed on #2530 that bypass `patient_record`.
+
 ## Derivation
 
 `refresh_patient_record` builds one snapshot of a person's rows and runs 26

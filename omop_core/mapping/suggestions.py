@@ -2327,8 +2327,14 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
             mapping.suggest_strategy = job['strategy_used'] or ''
             mapping.umls_cui = job['umls_cui'] or ''
             fields = ['last_suggest_attempt', 'suggest_strategy', 'umls_cui', 'updated_at']
+            # Replace can move a proposal off the concept it had. Rows a
+            # provisional write put on that concept follow the proposal back to
+            # unresolved (#2530); the next Generate OMOP run writes new ones.
+            moved_off = None
 
             if concept is not None and not athena_duplicate:
+                if concept.pk != mapping.target_concept_id:
+                    moved_off = mapping.target_concept_id
                 if mapping.suggestion_outcome:
                     from omop_core.models import MappingSuggestionReview
                     MappingSuggestionReview.objects.create(
@@ -2403,6 +2409,9 @@ def suggest_mappings(omop_table, *, min_occurrences=DEFAULT_MIN_OCCURRENCES,
                 mapping.source_code_description = job['source_description'][:255]
                 fields.append('source_code_description')
             mapping.save(update_fields=fields)
+            if moved_off:
+                from omop_core.mapping.code_resolution import revert_provisional_rows
+                revert_provisional_rows(mapping=mapping, concept_id=moved_off)
         entry['updated'] = True
         results.append(entry)
         emit('result', **entry, dry_run=False)

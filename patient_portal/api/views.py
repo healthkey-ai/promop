@@ -94,6 +94,7 @@ from omop_core.mapping.code_resolution import (
     normalize_omop_table,
     repoint_clinical_rows,
     resolve_source_code,
+    revert_provisional_rows,
 )
 from omop_core.mapping.suggestions import (
     CURATOR_PROVENANCE,
@@ -7374,7 +7375,10 @@ def _normalize_bulk_measurement_rows(model_cls, new_ids):
         normalize_measurement_units, unit_code,
     )
 
-    rows = model_cls.objects.filter(pk__in=new_ids)
+    # Not a provisional row: its concept came from a proposal, which has no
+    # curated unit, and converting at write time is an approved mapping's
+    # privilege. The row is converted when an approval promotes it (#2530).
+    rows = model_cls.objects.filter(pk__in=new_ids, confidence__isnull=True)
 
     # Collect unique source values from the inserted rows.
     source_values = set(
@@ -13656,6 +13660,24 @@ def _upsert_source_code_mapping(concept, data, user, mapping=None, person_id=Non
             'Choose a destination concept before approving. This mapping has '
             'none yet — its code was seen at ingest but its concept is not loaded.'
         )})
+
+    # A proposal that is rejected, or now points somewhere else, takes back the
+    # provisional rows it wrote: they return to unresolved, and a later Generate
+    # OMOP run writes new ones for whatever proposal stands then (#2530). Before
+    # any relocation below, in the table each row sits in now: a relocation that
+    # is only queued, or between tables that cannot be relocated, would leave
+    # them where the mapping no longer points. A patient-page save reverts that
+    # patient and leaves the rest to Generate OMOP, as an approval does.
+    if (status_value != 'approved'
+            and previous_concept_id not in (None, NO_MATCHING_CONCEPT_ID)
+            and (status_value == 'rejected' or concept is None
+                 or concept.pk != previous_concept_id)):
+        listed_under = normalize_omop_table(data.get('rows_omop_table')) if person_id is not None else ''
+        for revert_table in {previous_table, normalize_omop_table(mapping.omop_table), listed_under}:
+            if revert_table in CLINICAL_TABLES:
+                revert_provisional_rows(
+                    mapping=mapping, concept_id=previous_concept_id,
+                    person_id=person_id, omop_table=revert_table)
 
     # The curator re-filed the code under another table: the rows ingest put
     # in the old one follow it, or the patient page keeps listing the code as
