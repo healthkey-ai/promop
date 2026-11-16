@@ -909,6 +909,10 @@ Amended 2026-11-15 against `dev` at `de558218`:
   and the inline dialog of #721, and settles #1147.
 - The implementation issues moved to 10.4.
 
+Amended 2026-11-16 against `dev` at `6cbc60df`: 10.2 adds two requirements,
+the per-disease field list on the Field Mappings page and the per-disease
+CSV downloads for offline review.
+
 ### 10.1 Where a field renders: tab placement
 
 #### Verified baseline
@@ -1027,6 +1031,13 @@ advertises every field as writable for every patient (#2113); the PHR bridge
 cannot ask for one disease's record (#1825). And a field a curator creates
 (#721) can only be a field of every patient.
 
+Nor can a curator see or take away a disease's field set. The Field Mappings
+page groups by tab only, with no disease filter and no export;
+`GET /api/v1/field-mappings/` filters by category and name; and
+`export_field_mapping_inventory` is a command that writes the whole
+instance's reference inventory to the repository, not a file a curator
+downloads for one disease.
+
 #### Intended result
 
 **A patient's record is a profile: the base record plus the extension of each
@@ -1086,6 +1097,31 @@ remains a way to *contribute* memberships, not a replacement for them.
   `export_field_mapping_inventory` and #1311's per-disease coverage read the
   same rows. The legacy `/api/patient-info/` response and `fields = '__all__'`
   do not change, and `custom_fields` keeps every stored key.
+- **A disease's fields are one view.** For any Disease Category the Field
+  Mappings page lists either its **disease-specific fields** (the extension)
+  or its **full record** (the base record plus the extension), each field
+  with its concept, OMOP table, tab and mapping status. The filter is
+  All / Base record / one category, with a count beside each, and it is
+  applied to the descriptor the page already holds, which carries `scope`
+  and `diseases` per field: choosing a disease is no further request. The
+  same two sets are served to any other client by
+  `GET /api/v1/field-mappings/?disease=<code>&set=extension|profile`, read
+  from the membership rows in one query, not by walking the tabs. The Disease
+  Category Mappings page links each category to its list.
+- **Both lists download as CSV for offline review.** For each disease, two
+  files: the full record's fields and concepts, and the disease-specific
+  fields and concepts, from
+  `GET /api/v1/field-mappings/export/?disease=<code>&set=profile|extension`
+  and from two download actions beside the page's disease filter. One row per
+  field: field name, label, scope, diseases, tab, field type, OMOP table,
+  concept id, concept name, vocabulary, concept code, unit, mapping status.
+  A field with no concept yet is a row with blank concept columns, so the
+  file shows what is left to curate. `Other`, and no disease, give the base
+  record. The file is reference data: no patient value, and no reviewer's
+  name (provenance travels as it does in the curation fixture). It follows
+  mapping read access, so a doctor may download what they may already read.
+  It is a review copy and nothing loads it back; a curator's changes are made
+  in the dialog of 10.3.
 - **Scope and tab are separate.** Scope says whose record a field is part of;
   the tab of 10.1 says where it renders. A disease-specific field may be
   placed on Labs, and then renders there only for that disease's patients.
@@ -1135,7 +1171,14 @@ on every membership change as on a mapping change.
 
 Each disease's tab renders exactly today's field set under per-disease
 field-list tests; `writable-fields/?disease=MM` returns the MM profile, the
-base record plus MM's extension and nothing BC-only; a membership naming a
+base record plus MM's extension and nothing BC-only; the Field Mappings page
+filtered to MM lists exactly MM's extension, or with "full record" the base
+record plus it, without a further request, and
+`field-mappings/?disease=MM&set=extension` returns the same fields in a
+query count that does not grow with the number of fields or diseases; both
+CSV downloads for MM hold those same fields, each with its concept or blank
+concept columns, and are refused to a caller without mapping read access; a
+membership naming a
 code that is not a `DiseaseCategoryChoice` is refused; a curator can add a
 field to a disease's extension without a deploy; a category added at
 `/api/v1/disease-categories/` gets a profile and, once a field is placed, a
@@ -1258,14 +1301,13 @@ disease code, and round-trip of scope through
 | [#2328](https://github.com/healthkey-ai/promop/issues/2328) | ~~`FieldConceptMapping.tab`: the tab a field renders on; unplaced means OMOP-only; descriptor, API, transfer and mapping page carry it~~ | **Closed** |
 | [#2329](https://github.com/healthkey-ai/promop/issues/2329) | Placement curation: the tab control in the Field Concept Mapping dialog; Unplaced group | #2328 |
 | [#2330](https://github.com/healthkey-ai/promop/issues/2330) | Patient tabs render registry-placed fields, created ones included, through a generic slot; drift test | #2328 |
-| [#2331](https://github.com/healthkey-ai/promop/issues/2331) | Field scope as membership reference data keyed to `DiseaseCategoryChoice`, a record's profile resolved through `DiseaseCategoryMapping`; seed and CancerBot reconciliation; descriptor `scope`/`diseases`; relevance reads it | #2328 |
+| [#2331](https://github.com/healthkey-ai/promop/issues/2331) | Field scope as membership reference data keyed to `DiseaseCategoryChoice`, a record's profile resolved through `DiseaseCategoryMapping`; seed and CancerBot reconciliation; descriptor `scope`/`diseases`; relevance reads it; the `?disease=`/`set=` filter on the field-mappings list and the per-disease CSV export endpoint | #2328 |
 | [#721](https://github.com/healthkey-ai/promop/issues/721) | Add field from a patient tab: the tab action and deep link, create mode in the one dialog, scope on the create API, org-admin gate (10.3) | #2329, #2330, #2331 |
-| [#2332](https://github.com/healthkey-ai/promop/issues/2332) | Per-disease UI and curation: DiseaseTab from memberships, chosen by the record's category instead of a name match, a tab for any category with an extension, extension size on the Disease Category Mappings page, disease filter, scope control on existing fields, disease-scoped choices | #2330, #2331, #1224 |
+| [#2332](https://github.com/healthkey-ai/promop/issues/2332) | Per-disease UI and curation: DiseaseTab from memberships, chosen by the record's category instead of a name match, a tab for any category with an extension, extension size on the Disease Category Mappings page, the disease filter (extension or full record) and its two CSV download actions on the Field Mappings page, scope control on existing fields, disease-scoped choices | #2330, #2331, #1224 |
 | [#2333](https://github.com/healthkey-ai/promop/issues/2333) | Per-disease write validation: audit, warn-only, enforce behind a setting | #2331 |
 | [#1147](https://github.com/healthkey-ai/promop/issues/1147) | ~~Remove the inline Add field control from the patient tabs~~ Already true on `dev`; #721 carries the requirement that the new tab action is never patient-facing | **Closed** |
 
-The issue bodies of #721, #2329, #2331 and #2332 predate the 2026-11-15
-amendment; where they differ, this section is the plan.
+Where an issue body and this section differ, this section is the plan.
 
 Existing issues this coordinates with: #624, #661, #662 (placement); #54,
 #1076, #1148, #1149, #468, #542, #1311, #2113, #2120, #2551, #1224, #1825
