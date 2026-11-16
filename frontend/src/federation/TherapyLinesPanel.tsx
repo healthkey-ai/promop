@@ -11,6 +11,7 @@ import {
 import TherapyLineDialog from '@/components/PatientInfo/TherapyLineDialog';
 import { PatientFormRenewContext, usePatientFormSnapshot } from './PatientFormContext';
 import type { PatientFormStore } from './patientFormStore';
+import { intentLabel, valueLabel } from '@/api/therapyLabels';
 
 interface Props {
   store: PatientFormStore;
@@ -138,13 +139,13 @@ export default function TherapyLinesPanel({ store, readOnly = false, onChanged, 
             {line.composition_known === false
               ? (line.regimen && line.regimen !== 'Unknown' ? line.regimen : 'Drugs unknown')
               : (line.regimen || 'Unnamed regimen')}
-            {line.intent && <span className="ml-2 font-normal text-muted-foreground">{line.intent}</span>}
-            {line.outcome && <span className="ml-2 inline-block rounded bg-muted px-1.5 py-0.5 text-xs font-normal">{line.outcome}</span>}
+            {intentLabel(line.intent) && <span className="ml-2 font-normal text-muted-foreground">Intent: {intentLabel(line.intent)}</span>}
+            {valueLabel(line.outcome) && <span className="ml-2 inline-block rounded bg-muted px-1.5 py-0.5 text-xs font-normal">{valueLabel(line.outcome)}</span>}
           </p>
           <p className="truncate text-xs text-muted-foreground">
             {line.start_date || 'No start date'}
             {line.end_date ? ` to ${line.end_date}` : ' to present'}
-            {line.discontinuation_reason && <span className="ml-2">Reason: {line.discontinuation_reason}</span>}
+            {valueLabel(line.discontinuation_reason) && <span className="ml-2">Reason: {valueLabel(line.discontinuation_reason)}</span>}
           </p>
         </div>
         {editable && <button

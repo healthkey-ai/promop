@@ -20,27 +20,33 @@ const INTENT_LABELS: Record<string, string> = {
   CURATIVE: 'Curative',
 };
 
-/** A token the table does not know: `SOME_NEW_CODE` → "Some new code". */
-function humaniseToken(token: string): string {
-  const words = token.toLowerCase().replace(/[_-]+/g, ' ').trim();
-  return words ? words[0].toUpperCase() + words.slice(1) : token;
+/** A code-like token: uppercase words joined by underscores (`SOME_NEW_CODE`).
+ *
+ * Nothing else is rewritten. A short all-caps response (`CR`, `VGPR`, `PD`) is
+ * the product's clinical shorthand, not a token to title-case — "Cr" reads like
+ * creatinine — and a hyphenated phrase (`COVID-19`, `G-CSF`) must keep it.
+ */
+function isCodeToken(value: string): boolean {
+  return /^[A-Z0-9]+(_[A-Z0-9]+)+$/.test(value);
 }
 
-/** Whether a stored value is a code rather than an already-written phrase. */
-function isToken(value: string): boolean {
-  return /^[A-Z0-9_-]+$/.test(value);
+/** `SOME_NEW_CODE` → "Some new code". */
+function humaniseToken(token: string): string {
+  const words = token.toLowerCase().replace(/_+/g, ' ').trim();
+  return words ? words[0].toUpperCase() + words.slice(1) : token;
 }
 
 /** The reviewed wording for a therapy intent, or null when it is absent. */
 export function intentLabel(intent?: string | null): string | null {
   const token = intent?.trim();
   if (!token) return null;
-  return INTENT_LABELS[token.toUpperCase()] ?? (isToken(token) ? humaniseToken(token) : token);
+  return INTENT_LABELS[token.toUpperCase()]
+    ?? (isCodeToken(token) ? humaniseToken(token) : token);
 }
 
 /** The same rule for the line's other stored values (outcome, reason). */
 export function valueLabel(value?: string | null): string | null {
   const text = value?.trim();
   if (!text) return null;
-  return isToken(text) ? humaniseToken(text) : text;
+  return isCodeToken(text) ? humaniseToken(text) : text;
 }

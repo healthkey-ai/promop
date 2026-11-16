@@ -10,6 +10,7 @@ import {
 } from '@/api/therapyLines';
 import type { TherapyRegimen } from '@/types/therapy';
 import { usePatientFormStore } from '@/federation/PatientFormContext';
+import { intentLabel } from '@/api/therapyLabels';
 
 interface Props {
   personId: number;
@@ -427,6 +428,12 @@ export default function TherapyLineDialog({
               className="w-full rounded-md border border-input px-2 py-1.5 text-sm"
             >
               <option value="">—</option>
+              {/* A stored token the reviewed list does not know must stay
+                  visible and keep its value; otherwise the select shows no
+                  answer and an untouched save would drop it (#2634 review). */}
+              {intent && !THERAPY_INTENT_CHOICES.some((o) => o.value === intent) && (
+                <option value={intent}>{intentLabel(intent)}</option>
+              )}
               {THERAPY_INTENT_CHOICES.map((o) => (
                 <option key={o.value} value={o.value}>{o.label}</option>
               ))}
