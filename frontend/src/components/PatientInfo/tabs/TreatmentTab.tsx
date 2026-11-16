@@ -13,6 +13,7 @@ import SupportiveTherapyDialog from '../SupportiveTherapyDialog';
 import type { SupportiveTherapyCourse } from '@/api/supportiveTherapies';
 import { usePatientFormStore } from '@/federation/PatientFormContext';
 import { diseaseToDiseaseCode, lastRecordedTherapyLine, plannedTherapyRound } from '@/api/therapyContext';
+import { intentLabel, valueLabel } from '../therapyIntent';
 
 interface Props {
   formData: Record<string, unknown>;
@@ -177,22 +178,20 @@ export default function TreatmentTab({ formData, onChange, diseaseType, onRecord
                       {line.composition_known === false
                         ? (line.regimen && line.regimen !== 'Unknown' ? line.regimen : 'Drugs unknown')
                         : (line.regimen || 'Unnamed regimen')}
-                      {line.intent && (
-                        <span className="ml-2 font-normal text-portal-text-secondary">
-                          {line.intent}
-                        </span>
-                      )}
-                      {line.outcome && (
+                      {valueLabel(line.outcome) && (
                         <span className="ml-2 inline-block rounded bg-muted px-1.5 py-0.5 text-xs font-normal">
-                          {line.outcome}
+                          {valueLabel(line.outcome)}
                         </span>
                       )}
                     </p>
                     <p className="truncate text-xs text-portal-text-secondary">
+                      {intentLabel(line.intent) && (
+                        <span className="mr-2">Intent: {intentLabel(line.intent)}</span>
+                      )}
                       {line.start_date || 'No start date'}
                       {line.end_date ? ` to ${line.end_date}` : ' to present'}
-                      {line.discontinuation_reason && (
-                        <span className="ml-2">Reason: {line.discontinuation_reason}</span>
+                      {valueLabel(line.discontinuation_reason) && (
+                        <span className="ml-2">Reason: {valueLabel(line.discontinuation_reason)}</span>
                       )}
                       {line.progression_date && (
                         <span className="ml-2">Progressed: {line.progression_date}</span>
@@ -289,7 +288,7 @@ export default function TreatmentTab({ formData, onChange, diseaseType, onRecord
           {supportiveCourses.map((course) => <li key={course.id} className="flex items-center gap-3 px-3 py-2 text-sm">
             <div className="flex-1">
               <p className="font-medium">{course.regimen_title}{course.intent && <span className="ml-2 font-normal">{course.intent}</span>}</p>
-              <p className="text-xs text-muted-foreground">{course.start_date || 'No start date'} to {course.end_date || 'present'}{course.discontinuation_reason && ` · Reason: ${course.discontinuation_reason}`}</p>
+              <p className="text-xs text-muted-foreground">{course.start_date || 'No start date'} to {course.end_date || 'present'}{valueLabel(course.discontinuation_reason) && ` · Reason: ${valueLabel(course.discontinuation_reason)}`}</p>
             </div>
             {!readOnly && <button type="button" aria-label={`Edit ${course.regimen_title}`} onClick={() => setSupportiveDialog({ course })} className="rounded-md border px-2.5 py-1.5">Edit</button>}
           </li>)}
