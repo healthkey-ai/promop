@@ -84,6 +84,7 @@ def test_all_scope_reaches_non_field_destinations_but_only_current_standard(clie
     assert client.get(f'{BASE}{nonstandard.pk}/').status_code == 404
 
 
+@pytest.mark.usefixtures('disease_extensions')
 def test_disease_filter_restricts_concepts_to_disease_fields(client):
     mm_concept = ConceptFactory(concept_name='M-protein')
     bc_concept = ConceptFactory(concept_name='ER status')
@@ -111,6 +112,7 @@ def test_disease_filter_restricts_concepts_to_disease_fields(client):
     assert client.get(BASE, {'disease': 'INVALID'}).status_code == 400
 
 
+@pytest.mark.usefixtures('disease_extensions')
 def test_disease_filter_forces_fields_scope(client):
     """When disease is set, scope=all is overridden to fields so only field concepts appear."""
     concept = ConceptFactory(concept_name='Unfielded concept')

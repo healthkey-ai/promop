@@ -30,6 +30,7 @@ from omop_core.mapping.field import (
 _TABLE_LABELS = {
     'mappings': 'FieldConceptMapping',
     'custom_fields': 'CustomPatientField',
+    'memberships': 'FieldDiseaseMembership',
     'choices': 'FieldChoice (+ codes)',
     'formulas': 'FieldFormula',
     'synonyms': 'FieldSynonym',

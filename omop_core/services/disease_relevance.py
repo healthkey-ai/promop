@@ -8,10 +8,11 @@ grows as field curation does (#1611, #1076) and never invents a concept.
 
 Three tiers:
 
-* ``disease``: the disease tab's own fields and the genomics priority markers
+* ``disease``: the fields of the disease's extension (its
+  ``FieldDiseaseMembership`` rows, #2331) and the genomics priority markers
   the catalog lists for it (#1180).
-* ``common``: clinical fields every supported cancer shares (general clinical,
-  blood counts, chemistry, treatment), not specific to any one disease.
+* ``common``: base-record clinical fields (general clinical, blood counts,
+  chemistry, treatment), in no disease's extension.
 * ``curated``: concepts a curator accepted from an extractor's
   absent-from-relevance signal (``RelevanceSignal``).
 
@@ -24,66 +25,34 @@ import hashlib
 import json
 from collections import defaultdict
 
+from omop_core.services import disease_profiles
 from omop_core.services.genomics_catalog import catalog as genomics_catalog, disease_code, markers
 
 # Bump when the field lists below change meaning, not when curation changes:
 # curation is already in the content hash.
 CATALOG_VERSION = 1
 
-DISEASES = ('BC', 'FL', 'MM', 'CLL', 'MCL')
-
-# The fields DiseaseTab.tsx renders for each disease, section by section.
-# tests/test_disease_relevance.py fails when the two drift apart.
-DISEASE_FIELDS: dict[str, frozenset[str]] = {
-    'BC': frozenset({
-        'histologic_type', 'tumor_grade', 'menopausal_status', 'tumor_stage', 'nodes_stage',
-        'staging_modalities', 'distant_metastasis_stage', 'bone_only_metastasis_status',
-        'measurable_disease_by_recist_status', 'estrogen_receptor_status',
-        'progesterone_receptor_status', 'her2_status', 'hr_status', 'hrd_status',
-        'androgen_receptor_status', 'ki67_proliferation_index', 'pd_l1_tumor_cells',
-        'oncotype_dx_score', 'test_methodology', 'test_date', 'test_specimen_type',
-        'report_interpretation', 'lymph_node_status', 'metastasis_status',
-        'pd_l1_combined_positive_score', 'pd_l1_ic_percentage', 'pd_l1_assay',
-    }),
-    'FL': frozenset({
-        'stage', 'tumor_grade', 'bulky_disease',
-        'b_symptom_fever', 'b_symptom_night_sweats', 'b_symptom_weight_loss',
-        'transformed_to_dlbcl',
-        'dlbcl_transformation_date', 'post_transformation_outcome', 'bone_marrow_involvement',
-        'clonal_bone_marrow_b_lymphocytes', 'ldh_upper_limit_normal', 'number_of_nodal_sites',
-    }),
-    'MM': frozenset({
-        'myeloma_type', 'stage', 'progression', 'measurable_disease_imwg', 'mrd_status',
-        'meets_crab', 'meets_slim', 'stem_cell_transplant_history', 'sct_date', 'sct_eligibility',
-        'monoclonal_protein_serum', 'monoclonal_protein_urine', 'kappa_flc', 'lambda_flc',
-        'kappa_lambda_ratio', 'involved_uninvolved_ratio', 'bone_lesions', 'clonal_plasma_cells',
-        'cytogenetic_markers',
-    }),
-    'CLL': frozenset({
-        'binet_stage', 'tumor_burden', 'disease_activity', 'richter_transformation',
-        'protein_expressions', 'absolute_lymphocyte_count', 'lymphocyte_doubling_time',
-        'serum_beta2_microglobulin_level', 'clonal_b_lymphocyte_count',
-        'clonal_bone_marrow_b_lymphocytes', 'qtcf_value', 'largest_lymph_node_size', 'spleen_size',
-        'bone_marrow_involvement', 'measurable_disease_iwcll', 'splenomegaly', 'hepatomegaly',
-        'lymphadenopathy', 'autoimmune_cytopenias_refractory_to_steroids',
-        'btk_inhibitor_refractory', 'bcl2_inhibitor_refractory',
-    }),
-    'MCL': frozenset({
-        'stage', 'protein_expressions', 'ki67_proliferation_index', 'lymphadenopathy',
-        'splenomegaly', 'spleen_size', 'hepatomegaly', 'largest_lymph_node_size',
-    }),
-}
-
 _COMMON_TABS = frozenset({'general', 'disease', 'blood', 'labs', 'treatment'})
 _NOT_CLINICAL = frozenset({'internal', 'profile', 'location', 'alias'})
 
 
+def diseases() -> tuple[str, ...]:
+    """The diseases a set exists for: every Disease Category but ``Other``.
+
+    A category a curator adds is supported at once, with an empty extension:
+    its set is the common tier, its genomics markers and its curated concepts.
+    """
+    return disease_profiles.extension_codes()
+
+
 def supported(code: str | None) -> bool:
-    return code in DISEASES
+    return code in diseases()
 
 
-def _common_fields(field_names) -> set[str]:
-    """The approved fields on a common clinical tab, as the curator placed them.
+def _common_fields(field_names, claimed=None) -> set[str]:
+    """The approved base fields on a common clinical tab, as the curator placed them.
+
+    ``claimed`` is every disease-specific field; read here when not passed.
 
     Placement is the descriptor's resolved tab (``FieldConceptMapping.tab``
     first, then the code, #2328): a field a curator moved to Labs counts, one
@@ -94,7 +63,8 @@ def _common_fields(field_names) -> set[str]:
 
     placed = dict(FieldConceptMapping.objects.filter(field_name__in=field_names)
                   .values_list('field_name', 'tab'))
-    claimed = set().union(*DISEASE_FIELDS.values())
+    if claimed is None:
+        claimed = set(disease_profiles.memberships())
     return {f for f in field_names
             if f not in claimed
             and resolve_tab(f, mapping=_Placement(placed.get(f, ''))) in _COMMON_TABS
@@ -109,9 +79,16 @@ class _Placement:
         self.tab = tab
 
 
-def _disease_fields(code: str) -> set[str]:
+def _disease_fields(code: str, extension=None) -> set[str]:
+    """The extension's fields plus the catalog's priority markers for the disease.
+
+    The markers stay in the catalog: a priority is not a scope, and a marker
+    one disease prioritises is still a field of every patient's record.
+    """
+    if extension is None:
+        extension = disease_profiles.extension_fields(code)
     genomic = {m['field_name'] for m in markers() if code in m['diseases']}
-    return set(DISEASE_FIELDS[code]) | genomic
+    return set(extension) | genomic
 
 
 def _approved_mappings() -> dict[str, dict]:
@@ -149,15 +126,20 @@ def _build() -> dict:
     from omop_core.models import Concept
 
     mappings = _approved_mappings()
-    common = _common_fields(mappings)
+    scoped = disease_profiles.memberships()
+    extensions = defaultdict(set)
+    for field, codes in scoped.items():
+        for code in codes:
+            extensions[code].add(field)
+    common = _common_fields(mappings, claimed=set(scoped))
     accepted = _accepted_signals()
     curated_ids = set().union(*accepted.values()) if accepted else set()
     curated = {c['concept_id']: c for c in Concept.objects.filter(concept_id__in=curated_ids).values(
         'concept_id', 'concept_name', 'vocabulary_id', 'concept_code', 'domain_id')}
     sets = {}
-    for code in DISEASES:
+    for code in diseases():
         entries, seen = [], set()
-        specific = _disease_fields(code)
+        specific = _disease_fields(code, extensions[code])
         for tier, fields in (('disease', specific), ('common', common - specific)):
             for field in sorted(fields):
                 row = mappings.get(field)
@@ -228,17 +210,20 @@ def relevance(codes) -> dict:
 
 
 def patient_diseases(person) -> list[str]:
-    """Every supported cancer the record names, primary first.
+    """Every Disease Category the record names, primary first: its profile.
 
     ``PatientRecord.disease`` is the primary cancer; any other diagnosis on the
-    record that is a supported cancer follows it, sorted. A patient with more
-    than one cancer is served the union of the sets (see ``relevance``).
+    record that falls in a category follows it, sorted. A patient with more
+    than one cancer is served the union of the sets (see ``relevance``) and of
+    the extensions (``disease_profiles``). ``Other`` is never returned: its
+    profile is the base record.
     """
     from omop_core.models import PatientRecord
     from omop_core.services.disease_episodes import disease_keys_on_record
 
     record = PatientRecord.objects.filter(person=person).only('disease').first()
+    known = set(diseases())
     primary = disease_code(record.disease) if record else None
     others = {disease_code(key) for key in disease_keys_on_record(person)}
-    others = sorted(c for c in others if supported(c) and c != primary)
-    return ([primary] if supported(primary) else []) + others
+    others = sorted(c for c in others if c in known and c != primary)
+    return ([primary] if primary in known else []) + others

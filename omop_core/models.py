@@ -4748,6 +4748,58 @@ class CustomPatientField(models.Model):
         return self.display_name
 
 
+class FieldDiseaseMembership(models.Model):
+    """One disease a PatientRecord field belongs to: the field's scope (#2331).
+
+    A patient's record is a profile: the base record every patient has, plus
+    the extension of each disease the patient has. A field with no rows here
+    is **base**; a field with rows is in the extension of each disease it
+    names, and of no other. This is membership on the one PatientRecord table,
+    never a per-disease table: no column moves and no stored value changes
+    when a row is added or removed.
+
+    Keyed by field name, like ``FieldChoice``, so a column and a
+    ``CustomPatientField`` are scoped the same way and a field needs no
+    mapping row to have a scope. ``disease`` is a ``DiseaseCategoryChoice``
+    code, held as text like ``DiseaseCategoryMapping.category``; writers go
+    through ``omop_core.services.disease_profiles``, which refuses a code that
+    is not a category and ``Other``, whose profile is the base record.
+    """
+    field_name = models.CharField(max_length=100)
+    disease = models.CharField(
+        max_length=30, help_text='DiseaseCategoryChoice code, e.g. MM.',
+    )
+    required = models.BooleanField(
+        default=False,
+        help_text='The disease record is incomplete without this field. Advisory: nothing refuses a save on it.',
+    )
+    section = models.CharField(max_length=100, blank=True, default='')
+    sort_order = models.IntegerField(default=0)
+    provenance = models.CharField(
+        max_length=100, blank=True, default='',
+        help_text='The seed that wrote the row, "curator", or the user who set the scope.',
+    )
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL,
+        null=True, blank=True, related_name='+',
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = 'field_disease_membership'
+        ordering = ['field_name', 'disease']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['field_name', 'disease'], name='uq_field_disease_membership',
+            ),
+        ]
+        indexes = [models.Index(fields=['disease'], name='ix_field_disease_disease')]
+
+    def __str__(self):
+        return f'{self.field_name}: {self.disease}'
+
+
 class FieldChoice(models.Model):
     """One allowed value for a PatientRecord field (curator-managed)."""
     field_name = models.CharField(max_length=100, db_index=True)

@@ -88,6 +88,53 @@ rather than lost. The column travels with the mapping through
 it existed reads as blank. Rendering placed fields on the patient tabs and the
 curation control are #2330 and #2329.
 
+### Whose record a field is part of: `FieldDiseaseMembership`
+
+A patient's record is a **profile**: the base record every patient has, plus
+the **extension** of each disease the patient has. A field's **scope** is its
+`FieldDiseaseMembership` rows (#2331), one per disease whose extension it is
+in, keyed by field name so a column and a `CustomPatientField` are scoped the
+same way and a field needs no mapping row to have a scope. No rows means the
+field is base. It is membership on the one `PatientRecord` table, never a
+per-disease table: adding or removing a row moves no column and changes no
+stored value.
+
+The diseases are Disease Category management's, and there is no second list.
+A membership names a `DiseaseCategoryChoice` code;
+[`disease_profiles`](../omop_core/services/disease_profiles.py) is the one
+writer and refuses a code that is not a category, and `Other`, whose profile
+is the base record. Which category a record's disease name falls in is
+`DiseaseCategoryMapping` through `disease_code`, and
+`disease_relevance.patient_diseases` returns a record's categories, so a
+disease name a curator maps, or a category a curator adds, gets a profile
+with no deploy. A category that still has member fields cannot be deleted.
+
+Migration 0344 seeds MM, BC, FL, MCL and CLL from
+`disease_profiles.SEED_DISEASE_FIELDS`, the fields `DiseaseTab.tsx` renders
+for each (a drift test holds the two together); every other field starts as
+base. The genomics catalog's per-disease markers are not seeded: a priority
+is not a scope, and relevance still reads them from the catalog.
+
+| Reader | What it gets |
+|---|---|
+| Field descriptors (`GET /api/v1/field-mappings/`) | `scope` (`base` or `disease`) and `diseases` on every field; `?disease=<code>&set=extension\|profile` narrows the list to a disease's extension or its full record |
+| `GET /api/v1/field-mappings/export/?disease=<code>&set=profile\|extension` | The same set as a CSV for offline review, one row per field with its concept or blank concept columns; mapping read access, no patient value, no reviewer name ([`disease_field_sets`](../omop_core/services/disease_field_sets.py)) |
+| `GET /api/v1/patient-records/writable-fields/` | `scope` and `diseases` on every entry; `?disease=` (repeatable, a code or a name) returns that profile |
+| `GET /api/v1/custom-patient-fields/` | `scope` and `diseases` on each created field |
+| `disease_relevance` | A disease's `disease` tier is its extension; `common` is the base clinical fields |
+
+Writers: `PATCH`/`POST /api/v1/field-mappings/` take `diseases` (omitted
+leaves the scope alone, `[]` makes the field base), following mapping write
+access, and `POST /api/v1/custom-patient-fields/` takes it for a new field. A
+scope edit is not part of the recipe, so it never signs a mapping off. Rows
+travel as the `memberships` table of the curation payload: additive, mirrored
+with `--prune` only when the payload carries the table, and a row naming a
+category the target lacks is skipped with a warning.
+
+This is the read-only stage. No tab and no save consults the rows yet: what
+the disease tab renders (#2332) and what a PATCH accepts (#2333) are
+unchanged.
+
 ### Lab derivation reads the mapping tables
 
 Every reader that turns a LOINC code into a lab field at derivation time (the
@@ -235,7 +282,7 @@ not a fresh clinical validation of its meaning.
 
 ## Curation transfer and fixture seeding
 
-Curation data (mappings, choices, formulas, synonyms, custom fields) can reach a
+Curation data (mappings, disease memberships, choices, formulas, synonyms, custom fields) can reach a
 new instance through three paths:
 
 1. **`copy_curation`** — live database-to-database transfer from a running source
@@ -248,8 +295,8 @@ new instance through three paths:
    `read_payload`/`apply_payload` from
    [`field_curation_transfer.py`](../omop_core/services/field_curation_transfer.py).
    Supports `--dry-run`, `--prune` and `--tables` (same interface as `copy_curation`).
-   Default tables: mappings, custom_fields, choices, formulas, synonyms (no
-   code_mappings).
+   Default tables: mappings, custom_fields, memberships, choices, formulas,
+   synonyms (no code_mappings).
 
 3. **Checked-in fixture** — [`omop_core/data/field_curation_v1.json`](../omop_core/data/field_curation_v1.json)
    contains 314 mappings, 262 choices, 12 formulas and 1 synonym exported from

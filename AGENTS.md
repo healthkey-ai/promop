@@ -157,6 +157,9 @@ Both paths route to `PatientRecordViewSet` and return identical data. The only d
 When adding any new field to `PatientRecord`, you **must** touch layers 1, 2, 3,
 5, 7 and 8 below. Do not skip any of them.
 
+Layer 6 applies only to a field that belongs to some diseases and not to
+every patient.
+
 Layers 4 and 9 are the built-in FHIR uploader and its synthetic-bundle
 generator. **They are optional.** Production data is loaded as OMOP rows by a
 separate ETL project that reads FHIR itself, through the bulk OMOP endpoints,
@@ -261,6 +264,20 @@ PatientRecord.objects.create(
 ### 5. Backend API ViewSet (`patient_portal/api/views.py` → `PatientRecordViewSet`)
 
 If the field needs special filtering, ordering, or search, add it to `filterset_fields`, `search_fields`, or `ordering_fields` in the viewset.
+
+### 6. Disease scope (`FieldDiseaseMembership`) — only for a disease-specific field
+
+A field with no membership rows is part of the **base record**, a field of
+every patient; that is the default and needs nothing. A field that exists for
+one disease, or a named few, gets one `FieldDiseaseMembership` row per Disease
+Category code (#2331), written through
+`omop_core/services/disease_profiles.py::set_field_diseases`, which refuses a
+code that is not a `DiseaseCategoryChoice`. For a new built-in field on the
+disease tab, add it to `SEED_DISEASE_FIELDS` there (a drift test holds that
+list to `DiseaseTab.tsx`) **and** add the rows in a data migration: the seed
+migration has already run on every existing instance. A field a curator
+creates takes `diseases` on `POST /api/v1/custom-patient-fields/` instead.
+See [the architecture](docs/field_concept_mapping_architecture.md#whose-record-a-field-is-part-of-fielddiseasemembership).
 
 ### 7. TypeScript Type (`frontend/src/types/patient.ts`)
 

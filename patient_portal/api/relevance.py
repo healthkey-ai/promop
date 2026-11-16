@@ -83,7 +83,7 @@ def _requested_diseases(request):
         code = disease_code(value) or value.strip().upper()
         if not disease_relevance.supported(code):
             raise ValidationError({'disease': f'Unsupported disease {value!r}. '
-                                              f'Supported: {", ".join(disease_relevance.DISEASES)}.'})
+                                              f'Supported: {", ".join(disease_relevance.diseases())}.'})
         if code not in codes:
             codes.append(code)
     return None, codes

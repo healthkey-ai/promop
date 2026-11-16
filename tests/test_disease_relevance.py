@@ -7,13 +7,14 @@ from django.test import override_settings
 from rest_framework.test import APIClient
 
 from omop_core.models import FieldConceptMapping, GroupAccess, RelevanceSignal
-from omop_core.services import disease_relevance
+from omop_core.services import disease_profiles, disease_relevance
 from omop_core.services.genomics_catalog import markers
 from tests.factories import (
     ConceptFactory, ConditionOccurrenceFactory, OrganizationFactory, PatientRecordFactory,
 )
 
-pytestmark = pytest.mark.django_db
+# Relevance reads each disease's fields from the membership rows (#2331).
+pytestmark = [pytest.mark.django_db, pytest.mark.usefixtures('disease_extensions')]
 
 URL = '/api/v1/relevance/'
 SIGNALS = '/api/v1/relevance/signals/'
@@ -45,7 +46,7 @@ def test_disease_fields_match_what_the_disease_tab_renders():
         return {a or b or c for name in names for a, b, c in re.findall(
             r'\bname="(\w+)"|data-patient-field="(\w+)"|field\(\'[^\']+\', \'(\w+)\'', sections[name])}
 
-    assert disease_relevance.DISEASE_FIELDS == {
+    assert disease_profiles.SEED_DISEASE_FIELDS == {
         'BC': fields('BreastCancerSection', 'StagingBiomarkersSection'),
         'FL': fields('LymphomaSection'),
         'MM': fields('MyelomaSection'),
