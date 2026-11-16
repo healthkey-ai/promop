@@ -42,16 +42,8 @@ def language_of(request) -> str:
     return lang.split('-')[0] or svc.DEFAULT_LANGUAGE
 
 
-def _string(value, name: str) -> str:
-    if not isinstance(value, str) or not value:
-        raise ValidationError(f'{name} is required and must be a string.')
-    return value
-
-
-def _text(t):
-    if t is None:
-        return None
-    return {'version': t.version, 'language': t.language, 'title': t.title, 'summary': t.summary, 'body': t.body}
+_string = svc.required_string
+_text = svc.text_payload
 
 
 def purpose_payload(state: svc.PurposeState) -> dict:
@@ -116,21 +108,17 @@ class ConsentView(PhrView):
             return Response({'detail': svc.NO_EMAIL}, status=400)
         purposes = {p.key: p for p in ConsentPurpose.objects.filter(is_active=True).prefetch_related('texts')}
         try:
+            pairs = []
+            for item in decisions:
+                if not isinstance(item, dict):
+                    raise ValidationError('Each decision is an object.')
+                key = _string(item.get('purpose'), 'purpose')
+                purpose = purposes.get(key)
+                if purpose is None:
+                    raise ValidationError(f'Unknown purpose {key!r}.')
+                pairs.append((purpose, item))
             with transaction.atomic():
-                for item in decisions:
-                    if not isinstance(item, dict):
-                        raise ValidationError('Each decision is an object.')
-                    key = _string(item.get('purpose'), 'purpose')
-                    purpose = purposes.get(key)
-                    if purpose is None:
-                        raise ValidationError(f'Unknown purpose {key!r}.')
-                    frequency = item.get('frequency') or ''
-                    svc.record_consent(
-                        person, purpose, _string(item.get('decision'), 'decision'),
-                        version=_string(item.get('version'), 'version'), language=language,
-                        frequency=frequency if isinstance(frequency, str) else '',
-                        recorded_by=request.user, source=ConsentEvent.MEMBER, email=email,
-                    )
+                svc.record_decisions(person, pairs, language=language, recorded_by=request.user, email=email)
         except svc.StaleVersion as e:
             return Response({'detail': e.messages[0]}, status=409)
         except ValidationError as e:

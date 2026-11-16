@@ -95,7 +95,9 @@ All under `/api/v1/phr/`, for the signed-in member and their own record only.
 | `POST consent/documents/` | `{"document", "version"}` accepts the current version of a document; **409** when it is not current. |
 | `GET consent/history/` | Every answer and acceptance, newest first. |
 
-A sign-up records the declaration with one `POST`; the first profile records
+A sign-up records its declarations and document acceptances in the invitation
+acceptance itself, from the public `GET signup/policy/` listing (see
+[Sign-up through an invitation](phr-signup.md)); the first profile records
 each permission on its own; settings withdraws with `"decision": "withdrawn"`;
 "confirm the new Terms" is `GET` showing `needs_acceptance` and then
 `POST consent/documents/`.

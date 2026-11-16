@@ -1,7 +1,7 @@
 """Load consent purposes, legal documents and their versioned texts from a JSON file.
 
 The wording a member agrees to is data, so a deployment keeps it in a file of
-its own and loads it with this command on each deploy. The load is additive
+its own and an operator loads it with this command, once per wording change. The load is additive
 and idempotent: purposes and documents are created or have their settings
 updated; a text version that does not exist yet is added; a version that
 already exists is left exactly as it is, published or not, because members

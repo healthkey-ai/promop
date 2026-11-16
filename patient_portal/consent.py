@@ -36,6 +36,20 @@ DEFAULT_LANGUAGE = 'en'
 ACCEPTED = 'accepted'
 
 
+def required_string(value, name: str) -> str:
+    """A non-empty string from a request body, or ``ValidationError`` naming the field."""
+    if not isinstance(value, str) or not value:
+        raise ValidationError(f'{name} is required and must be a string.')
+    return value
+
+
+def text_payload(t):
+    """One text version as the API shows it; ``None`` for no text."""
+    if t is None:
+        return None
+    return {'version': t.version, 'language': t.language, 'title': t.title, 'summary': t.summary, 'body': t.body}
+
+
 # ------------------------------------------------------------------ texts
 
 
@@ -320,6 +334,24 @@ def record_consent(
             frequency=frequency, recorded_at=when,
         )
     return event
+
+
+def record_decisions(person, items, *, language: str = DEFAULT_LANGUAGE, recorded_by=None,
+                     email: str | None = None) -> list[ConsentEvent]:
+    """Record a member's batch of ``(purpose, item)`` answers, each item the
+    API's ``{"decision", "version", "frequency"?}`` object, in order. Used by
+    the PHR consent view and by sign-up; the caller's transaction makes the
+    batch all or nothing."""
+    events = []
+    for purpose, item in items:
+        frequency = item.get('frequency') or ''
+        events.append(record_consent(
+            person, purpose, required_string(item.get('decision'), 'decision'),
+            version=required_string(item.get('version'), 'version'), language=language,
+            frequency=frequency if isinstance(frequency, str) else '',
+            recorded_by=recorded_by, source=ConsentEvent.MEMBER, email=email,
+        ))
+    return events
 
 
 def accept_document(

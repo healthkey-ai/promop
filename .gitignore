@@ -4,6 +4,8 @@ db.*
 !.env.example
 .venv/
 data/
+!/patient_portal/data/
+!/patient_portal/data/**
 !/omop_core/data/
 /omop_core/data/*
 !/omop_core/data/code_concept_mappings.json

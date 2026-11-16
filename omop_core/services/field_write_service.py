@@ -466,6 +466,16 @@ def _apply_location(person, location_updates, person_dirty):
         location.save(update_fields=changed)
 
 
+def write_person_location(person, updates):
+    """Write ``{Location column: value}`` onto the Person's own Location row (upserted and
+    unshared as ``_apply_location`` does) and link the Person to it. The caller derives the
+    record afterwards. Used by sign-up, which knows the country before any record exists."""
+    person_dirty = set()
+    _apply_location(person, dict(updates), person_dirty)
+    if person_dirty:
+        person.save(update_fields=sorted(person_dirty))
+
+
 def _coerce_value(value, value_kind):
     """Return (value_as_number, value_as_string) for the fact, per the descriptor value_kind.
 
