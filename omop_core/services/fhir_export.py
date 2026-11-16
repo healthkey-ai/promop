@@ -342,7 +342,7 @@ def _build_encounter(visit: VisitOccurrence, patient_ref: str) -> dict[str, Any]
 # Main export function
 # ---------------------------------------------------------------------------
 
-def build_fhir_bundle(person: Person) -> dict[str, Any]:
+def build_fhir_bundle(person: Person, include_provisional: bool = False) -> dict[str, Any]:
     """
     Build a FHIR R4 Bundle of type "searchset" from a patient's OMOP data.
 
@@ -350,13 +350,20 @@ def build_fhir_bundle(person: Person) -> dict[str, Any]:
     per table, with select_related for concept FKs) and converts each row
     to its corresponding FHIR resource.
 
+    Rows written from a proposed, not yet approved, mapping carry a
+    ``confidence`` and are left out: an export must not present a guess as the
+    patient's record. ``include_provisional=True`` adds them.
+
     Args:
         person: An OMOP Person model instance.
+        include_provisional: also export provisional rows.
 
     Returns:
         A JSON-serializable dict representing a FHIR R4 Bundle.
     """
     entries: list[dict[str, Any]] = []
+    # One kwargs dict for the five clinical tables; visits carry no confidence.
+    real = {} if include_provisional else {"confidence__isnull": True}
 
     # Patient resource
     patient_resource = _build_patient(person)
@@ -366,7 +373,7 @@ def build_fhir_bundle(person: Person) -> dict[str, Any]:
     # --- ConditionOccurrence → Condition ---
     conditions = (
         ConditionOccurrence.objects
-        .filter(person=person)
+        .filter(person=person, **real)
         .select_related("condition_concept", "condition_concept__vocabulary")
     )
     for cond in conditions:
@@ -375,7 +382,7 @@ def build_fhir_bundle(person: Person) -> dict[str, Any]:
     # --- Measurement → Observation ---
     measurements = (
         Measurement.objects
-        .filter(person=person)
+        .filter(person=person, **real)
         .select_related(
             "measurement_concept", "measurement_concept__vocabulary",
             "value_as_concept", "value_as_concept__vocabulary",
@@ -387,7 +394,7 @@ def build_fhir_bundle(person: Person) -> dict[str, Any]:
     # --- Observation → Observation ---
     observations = (
         Observation.objects
-        .filter(person=person)
+        .filter(person=person, **real)
         .select_related(
             "observation_concept", "observation_concept__vocabulary",
             "value_as_concept", "value_as_concept__vocabulary",
@@ -399,7 +406,7 @@ def build_fhir_bundle(person: Person) -> dict[str, Any]:
     # --- DrugExposure → MedicationStatement ---
     drug_exposures = (
         DrugExposure.objects
-        .filter(person=person)
+        .filter(person=person, **real)
         .select_related("drug_concept", "drug_concept__vocabulary")
     )
     for drug in drug_exposures:
@@ -408,7 +415,7 @@ def build_fhir_bundle(person: Person) -> dict[str, Any]:
     # --- ProcedureOccurrence → Procedure ---
     procedures = (
         ProcedureOccurrence.objects
-        .filter(person=person)
+        .filter(person=person, **real)
         .select_related("procedure_concept", "procedure_concept__vocabulary")
     )
     for proc in procedures:

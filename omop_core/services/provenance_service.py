@@ -177,13 +177,14 @@ def _lookup_sct(person: Person) -> list[dict]:
     source = (mapping['source_value'] or mapping['concept__concept_code']) if mapping else None
     if target == 'observation':
         filters |= Q(observation_concept_id=mapping['concept_id'], observation_source_value=source)
-    observations = list(Observation.objects.filter(person=person, is_erroneous=False)
+    observations = list(Observation.objects.filter(person=person, is_erroneous=False, confidence__isnull=True)
                         .filter(filters).select_related('observation_concept')
                         .order_by('-observation_date', '-observation_id'))
     measurements = []
     if target == 'measurement':
         measurements = list(Measurement.objects.filter(
-            person=person, is_erroneous=False, measurement_concept_id=mapping['concept_id'],
+            person=person, is_erroneous=False, confidence__isnull=True,
+            measurement_concept_id=mapping['concept_id'],
             measurement_source_value=source,
         ).select_related('measurement_concept').order_by('-measurement_date', '-measurement_id'))
     snapshot = SimpleNamespace(
@@ -239,7 +240,7 @@ def _lookup_measurement(person: Person, entry: FieldProvenance) -> list[dict]:
     from django.db.models import Q
 
     qs = (
-        Measurement.objects.filter(person=person, value_as_number__isnull=False)
+        Measurement.objects.filter(person=person, value_as_number__isnull=False, confidence__isnull=True)
         .select_related("measurement_concept")
         .order_by("-measurement_date")
     )
@@ -291,7 +292,7 @@ def _lookup_observation(person: Person, entry: FieldProvenance) -> list[dict]:
     from django.db.models import Q
 
     qs = (
-        Observation.objects.filter(person=person)
+        Observation.objects.filter(person=person, confidence__isnull=True)
         .select_related("observation_concept")
         .order_by("-observation_date", "-observation_id")
     )
@@ -337,7 +338,7 @@ def _lookup_condition(person: Person, entry: FieldProvenance) -> list[dict]:
     # Order so the "selected" row (latest or earliest) is always at index 0.
     order = "condition_start_date" if entry.selection_rule == "earliest" else "-condition_start_date"
     qs = (
-        ConditionOccurrence.objects.filter(person=person)
+        ConditionOccurrence.objects.filter(person=person, confidence__isnull=True)
         .select_related("condition_concept")
         .order_by(order)
     )
@@ -362,7 +363,7 @@ def _lookup_condition(person: Person, entry: FieldProvenance) -> list[dict]:
 def _lookup_drug_exposure(person: Person, entry: FieldProvenance) -> list[dict]:
     """Return DrugExposure rows."""
     qs = (
-        DrugExposure.objects.filter(person=person)
+        DrugExposure.objects.filter(person=person, confidence__isnull=True)
         .select_related("drug_concept")
         .order_by("drug_exposure_start_date")
     )
@@ -386,7 +387,7 @@ def _lookup_drug_exposure(person: Person, entry: FieldProvenance) -> list[dict]:
 def _lookup_procedure(person: Person, entry: FieldProvenance) -> list[dict]:
     """Return ProcedureOccurrence rows."""
     qs = (
-        ProcedureOccurrence.objects.filter(person=person)
+        ProcedureOccurrence.objects.filter(person=person, confidence__isnull=True)
         .select_related("procedure_concept")
         .order_by("-procedure_date")
     )

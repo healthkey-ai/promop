@@ -86,16 +86,22 @@ def annotate_unmapped_source_codes(queryset):
     ))
 
 def annotate_context(queryset):
-    """One SQL query with indexed latest-result lookups, independent of page size."""
+    """One SQL query with indexed latest-result lookups, independent of page size.
+
+    Freshness counts real results only: a provisional row is a guess from a
+    proposed mapping, and must not make a stale chart look recently updated.
+    """
     today = timezone.localdate()
     measurements = Measurement.objects.filter(
-        person_id=OuterRef('person_id'), is_erroneous=False, measurement_date__lte=today,
+        person_id=OuterRef('person_id'), is_erroneous=False, confidence__isnull=True,
+        measurement_date__lte=today,
     ).exclude(value_source_value='PatientRecord:cleared').filter(
         Q(value_as_number__isnull=False) | Q(value_as_concept__isnull=False) |
         (Q(value_as_string__isnull=False) & ~Q(value_as_string='')),
     ).order_by('-measurement_date', '-measurement_id')
     observations = Observation.objects.filter(
-        person_id=OuterRef('person_id'), is_erroneous=False, observation_date__lte=today,
+        person_id=OuterRef('person_id'), is_erroneous=False, confidence__isnull=True,
+        observation_date__lte=today,
     ).exclude(value_source_value='PatientRecord:cleared').filter(
         Q(value_as_number__isnull=False) | Q(value_as_concept__isnull=False) |
         (Q(value_as_string__isnull=False) & ~Q(value_as_string='')),

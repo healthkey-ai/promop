@@ -185,8 +185,19 @@ are not. What the code does, where the plan left a choice:
   display text (the ETL, phase 2) will need that matching revisited.
 - **Table relocation** keeps a row provisional: it moves with its concept and
   confidence, because the proposal it follows has not changed.
+- **Readers that bypass `patient_record` leave provisional rows out** (#2530):
+  the provenance lookups (`_lookup_measurement`, `_lookup_observation`,
+  `_lookup_condition`, `_lookup_drug_exposure`, `_lookup_procedure`,
+  `_lookup_sct`), so a guess is never the "selected" source of an approved
+  value; the outbound FHIR export (`build_fhir_bundle`), unless
+  `include_provisional=True`; the patient list's freshness date
+  (`annotate_context`); and the diagnosis context reader (`condition_contexts`),
+  matching `medication_contexts`. `_lookup_genomics` reads the snapshot, which
+  is real-only already.
 - **Not yet:** `code-mappings/lookup/` and the ETL (phase 2), FHIR sync
-  (#2581), and the readers listed on #2530 that bypass `patient_record`.
+  (#2581), and reading `snapshot.provisional_measurements` through
+  `_read_values_in_source_units` (they are raw today; the provisional pass in
+  phase 1c is their first consumer).
 
 ## Derivation
 
