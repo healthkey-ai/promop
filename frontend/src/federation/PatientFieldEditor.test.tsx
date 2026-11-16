@@ -1023,7 +1023,49 @@ describe('single unit display (#5704)', () => {
     render(<PatientFieldEditor store={store} name="inr" label="INR" labelIncludesUnit />);
 
     expect(screen.getByText('INR')).toBeVisible();
+
     expect(screen.queryByText('{INR}')).not.toBeInTheDocument();
+  });
+
+  it('marks a computed value and states what it is computed from (#2620)', async () => {
+    const { store } = await setup({}, { height: 170, weight: 60 });
+    render(<PatientFieldEditor store={store} name="bmi" label="BMI" />);
+
+    // The marker and the explanation are on the row, not behind the pencil.
+    expect(screen.getByText('(computed)')).toBeVisible();
+    expect(screen.getByText('Computed from Height, Weight.')).toBeVisible();
+    expect(screen.getByLabelText('Edit BMI inputs')).toBeVisible();
+  });
+
+  it('points at the dedicated editor instead of denying that one exists (#2614)', async () => {
+    const { store } = await setup({
+      tp53_disruption: {
+        kind: 'computed', writable: false, label: 'Tp53 disruption',
+        inputs: ['genetic_mutations'],
+      },
+      genetic_mutations: {
+        kind: 'editable', writable: true, target: 'genomics',
+        endpoint: '/api/v1/patient-records/{person_id}/genomics/',
+        label: 'Genetic mutations',
+      },
+    }, { tp53_disruption: 'Unknown.shift' });
+    render(<PatientFieldEditor store={store} name="tp53_disruption" label="TP53 Disruption" />);
+
+    expect(screen.getByText(/Computed from Genetic mutations\. Edit them in Genomics\./)).toBeVisible();
+    expect(screen.queryByText(/not editable in this view/)).toBeNull();
+  });
+
+  it('marks a read-only computed row too (#2620)', async () => {
+    const { store } = await setup({
+      tnbc_status: {
+        kind: 'computed', writable: false, label: 'Tnbc status',
+        reason: 'Computed from ER, PR and HER2 status.',
+      },
+    }, { tnbc_status: null });
+    render(<PatientFieldEditor store={store} name="tnbc_status" label="Triple Negative Status" />);
+
+    expect(screen.getByText(/Triple Negative Status \(computed\):/)).toBeVisible();
+    expect(screen.getByText(/Computed from ER, PR and HER2 status\./)).toBeVisible();
   });
 
   it('applies the same rule to a read-only row', async () => {
