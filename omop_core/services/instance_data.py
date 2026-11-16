@@ -143,6 +143,7 @@ PATIENT: frozenset[str] = frozenset({
     'omop_core.Note', 'omop_core.NoteNlp', 'omop_core.Observation',
     'omop_core.ObservationPeriod', 'omop_core.PatientDocument', 'omop_core.PatientRecord',
     'omop_core.PatientSourceCode',
+    'omop_core.PatientRecordConfidence', 'omop_core.PatientRecordProvisional',
     'omop_core.PatientTrialEnrollment', 'omop_core.Person', 'omop_core.PersonLanguageSkill',
     # The patient's own confirmation that the treatment list is complete (#1924).
     'omop_core.TherapyHistoryAttestation',
@@ -167,6 +168,13 @@ PATIENT: frozenset[str] = frozenset({
     # An address kept beside a response, and the consents given with one:
     # both name the person, so they go where the answers go.
     'prolog_surveys.SurveyCaptureConsent', 'prolog_surveys.SurveyLinkedContact',
+})
+
+# Patient tables that copy_patient does not carry: they are derived from the
+# rows it does, and refresh_patient_record rebuilds them after a copy, exactly
+# as it rebuilds PatientRecord's derived fields.
+PATIENT_DERIVED: frozenset[str] = frozenset({
+    'omop_core.PatientRecordConfidence', 'omop_core.PatientRecordProvisional',
 })
 
 
