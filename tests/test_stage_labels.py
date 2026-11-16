@@ -5,7 +5,8 @@ from omop_core.models import Measurement
 from omop_core.services.patient_record_service import _get_staging_data
 from omop_core.services.stage_labels import normalise_stage_label
 from tests.factories import (
-    ConceptFactory, MeasurementFactory, PersonFactory, VocabularyFactory,
+    ConceptFactory, MeasurementFactory, PatientRecordFactory, PersonFactory,
+    VocabularyFactory,
 )
 
 pytestmark = pytest.mark.django_db
@@ -43,3 +44,25 @@ def test_the_derivation_does_not_store_a_semantic_tag():
 
     assert Measurement.objects.filter(person=person).count() == 1
     assert _get_staging_data(person)['stage'] == 'Stage IV'
+
+
+def test_a_refresh_does_not_restore_the_semantic_tag():
+    """A source that writes after the staging extractor must not undo the fix."""
+    from omop_core.models import FieldConceptMapping
+    from omop_core.services.patient_record_service import refresh_patient_record
+
+    loinc = VocabularyFactory(vocabulary_id='LOINC', vocabulary_name='LOINC')
+    concept = ConceptFactory(concept_code='21908-9', concept_name='Stage group', vocabulary=loinc)
+    record = PatientRecordFactory()
+    MeasurementFactory(person=record.person, measurement_concept=concept,
+                       measurement_source_value='21908-9',
+                       value_as_string='Stage 4 (qualifier value)')
+    FieldConceptMapping.objects.create(
+        field_name='stage', concept=concept, omop_table='measurement',
+        status='approved', source_value='21908-9',
+    )
+
+    refresh_patient_record(record.person)
+
+    record.refresh_from_db()
+    assert record.stage == 'Stage IV'

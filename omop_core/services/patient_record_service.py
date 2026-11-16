@@ -1434,6 +1434,14 @@ def refresh_patient_record(person: Person) -> PatientRecord:
             setattr(patient_info, field, value[:width] if width and isinstance(value, str) else value)
             derived_fields.add(field)
 
+        # Linked cancer metadata and approved mappings can carry the same SNOMED
+        # display the staging extractor normalised, and they write after it. The
+        # record's stage is a reviewed label whichever source wrote it last
+        # (#2618).
+        from omop_core.services.stage_labels import normalise_stage_label
+        if getattr(patient_info, 'stage', None):
+            patient_info.stage = normalise_stage_label(patient_info.stage)
+
         # Pending edits (including explicit clears) win until OMOP actually
         # represents the saved value. A stale fact or a failed projection must
         # not silently undo a user's change.
