@@ -1041,13 +1041,20 @@ describe('single unit display (#5704)', () => {
     render(<PatientFieldEditor store={store} name="weight" label="Weight (kg)" />);
 
     const unit = screen.getByLabelText('Unit for Weight (kg)');
-    // Bottom-aligned columns plus one height: the select's centre sits on the
-    // input's, instead of on the label row above it.
+    const value = screen.getByDisplayValue('80');
+    // Bottom-aligned columns plus the input's own height: the select's centre
+    // sits on the input's, instead of on the label row above it. Deriving the
+    // height keeps this honest if the shared Input changes.
+    const height = [...value.classList].find((name) => /^h-\d+$/.test(name));
+    expect(height).toBeDefined();
     expect(unit.closest('label')?.parentElement).toHaveClass('items-end');
-    expect(unit).toHaveClass('h-9');
-    // The row's number inputs keep no browser spinners, so the pair matches.
-    const row = screen.getByDisplayValue('80').closest('[data-field]');
-    expect(row?.className).toContain('[&_input[type=number]]');
+    expect(unit).toHaveClass(height!);
+    // The row's number inputs keep no browser spinners (both rules, not just
+    // the selector prefix).
+    const row = value.closest('[data-field]');
+    expect(row?.className).toContain('appearance-none');
+    expect(row?.className).toContain('::-webkit-inner-spin-button');
+    expect(row?.className).toContain('::-webkit-outer-spin-button');
   });
 
   it('applies the same rule to a read-only row', async () => {

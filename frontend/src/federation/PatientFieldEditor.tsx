@@ -34,8 +34,8 @@ interface Props {
 }
 
 /** A value/unit pair is one clinical fact, so the two controls share one height
- * and baseline (#2609). The number spinners made the input taller than the unit
- * select and read as two unrelated boxes. */
+ * and baseline (#2609). The select carried its own padding against the input's
+ * fixed height; the spinners are removed so the number reads as text. */
 const ROW_CLASS = 'space-y-1 [&_input[type=number]]:[appearance:textfield] '
   + '[&_input[type=number]::-webkit-inner-spin-button]:appearance-none '
   + '[&_input[type=number]::-webkit-outer-spin-button]:appearance-none';
