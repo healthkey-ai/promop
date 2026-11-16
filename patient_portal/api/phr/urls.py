@@ -10,6 +10,7 @@ from .entries import (
 )
 from .export import RecordExportView
 from .explanations import ExplanationView, SharedExplanationView
+from .signup import SignupPolicyView
 from .sharing import (
     SharedAboutView,
     SharedDiagnosesView,
@@ -76,6 +77,8 @@ urlpatterns = [
     path('consent/', ConsentView.as_view(), name='phr-consent'),
     path('consent/documents/', ConsentDocumentsView.as_view(), name='phr-consent-documents'),
     path('consent/history/', ConsentHistoryView.as_view(), name='phr-consent-history'),
+    # What a sign-up form shows: countries, minimum ages, declarations and documents. Public.
+    path('signup/policy/', SignupPolicyView.as_view(), name='phr-signup-policy'),
     # The patient's shares.
     path('shares/', SharesView.as_view(), name='phr-shares'),
     path('shares/options/', ShareOptionsView.as_view(), name='phr-share-options'),

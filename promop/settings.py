@@ -10,6 +10,7 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
+import json
 import os
 from pathlib import Path
 import dj_database_url
@@ -468,6 +469,13 @@ PHR_JWKS_CACHE_TTL = int(os.environ.get("PHR_JWKS_CACHE_TTL", "3600"))
 # accepted. Set PHR_AUDIENCE explicitly in every environment using federation,
 # including local development.
 PHR_AUDIENCE = os.environ.get("PHR_AUDIENCE", "")
+
+# ── Sign-up policy (patient_portal/signup_policy.py) ───────────────────────
+# The countries a member may sign up from (ISO 3166-1 alpha-2) and the age they
+# must declare per country. Unset, the pilot list and 18 apply.
+#   PHR_SIGNUP_COUNTRIES='["GB","IE","US"]'   PHR_SIGNUP_MINIMUM_AGES='{"CA": 19}'
+PHR_SIGNUP_COUNTRIES = json.loads(os.environ.get("PHR_SIGNUP_COUNTRIES") or "null")
+PHR_SIGNUP_MINIMUM_AGES = json.loads(os.environ.get("PHR_SIGNUP_MINIMUM_AGES") or "{}")
 
 # ── Family auth: PROMOP as identity host (phr#43, docs/family-auth.md) ──────
 # PROMOP issues the HealthKey family's RS256 tokens for its own identities, so
