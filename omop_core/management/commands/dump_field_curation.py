@@ -6,7 +6,7 @@ instance can ``load_field_curation`` without a running source database.
 
 Usage::
 
-    # All five field-curation tables (no code_mappings):
+    # All six field-curation tables (no code_mappings):
     .venv/bin/python manage.py dump_field_curation --output omop_core/data/field_curation_v1.json
 
     # Specific tables:
@@ -28,7 +28,7 @@ from omop_core.mapping.field import (
 
 # Default tables for the fixture: everything except code_mappings, which steers
 # ingest and is deployment-specific.
-_FIXTURE_TABLES = ('mappings', 'custom_fields', 'choices', 'formulas', 'synonyms')
+_FIXTURE_TABLES = ('mappings', 'custom_fields', 'memberships', 'choices', 'formulas', 'synonyms')
 
 SCHEMA_VERSION = 1
 
@@ -45,7 +45,7 @@ class Command(BaseCommand):
             '--tables', nargs='+', choices=TABLES,
             default=list(_FIXTURE_TABLES),
             help=(
-                'Which tables to export. Default: all five field-curation '
+                'Which tables to export. Default: all six field-curation '
                 'tables (no code_mappings).'
             ),
         )

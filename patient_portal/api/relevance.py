@@ -16,7 +16,6 @@ from rest_framework.response import Response
 
 from omop_core.models import Concept, Person, RelevanceSignal
 from omop_core.services import disease_relevance
-from omop_core.services.genomics_catalog import disease_code
 from patient_portal.api.permissions import (
     EtlWritePermission, ScopedTokenPermission, VocabReadPermission, is_service_token,
     service_token_scopes,
@@ -79,11 +78,12 @@ def _requested_diseases(request):
     if not raw:
         raise ValidationError({'disease': 'Send at least one disease, or a person_id.'})
     codes = []
+    resolve = disease_relevance.resolver()
     for value in raw:
-        code = disease_code(value) or value.strip().upper()
-        if not disease_relevance.supported(code):
+        code = resolve(value)
+        if code is None:
             raise ValidationError({'disease': f'Unsupported disease {value!r}. '
-                                              f'Supported: {", ".join(disease_relevance.DISEASES)}.'})
+                                              f'Supported: {", ".join(disease_relevance.diseases())}.'})
         if code not in codes:
             codes.append(code)
     return None, codes
@@ -96,7 +96,7 @@ def _requested_diseases(request):
                  '`version` on a run; it changes whenever the content does. With `person_id`, '
                  'the sets of every supported cancer on the record are united.'),
     parameters=[
-        OpenApiParameter('disease', str, many=True, description='BC, FL, MM, CLL or MCL (names accepted). Repeatable.'),
+        OpenApiParameter('disease', str, many=True, description='A Disease Category code other than Other, e.g. BC, FL, MM, CLL, MCL (names accepted). Repeatable.'),
         OpenApiParameter('person_id', int, description=f'Use this patient\'s diseases. Needs {DISEASE_READ_SCOPE}.'),
     ],
     responses=inline_serializer('DiseaseRelevance', {
@@ -135,8 +135,11 @@ class _SignalSerializer(serializers.Serializer):
     period = serializers.CharField(max_length=32)
 
     def validate_disease(self, value):
-        code = disease_code(value) or value.strip().upper()
-        if not disease_relevance.supported(code):
+        # The caller passes one resolver for the whole batch: the categories
+        # are read once, not once per signal.
+        resolve = self.context.get('resolve_disease') or disease_relevance.resolver()
+        code = resolve(value)
+        if code is None:
             raise serializers.ValidationError(f'Unsupported disease {value!r}.')
         return code
 
@@ -179,7 +182,8 @@ def _receive_signals(request):
     if len(rows) > MAX_SIGNALS:
         return Response({'detail': f'At most {MAX_SIGNALS} signals per request.'},
                         status=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE)
-    serializer = _SignalSerializer(data=rows, many=True)
+    serializer = _SignalSerializer(
+        data=rows, many=True, context={'resolve_disease': disease_relevance.resolver()})
     serializer.is_valid(raise_exception=True)
     rows = serializer.validated_data
     known = set(Concept.objects.filter(concept_id__in={r['concept_id'] for r in rows})
@@ -234,8 +238,10 @@ def relevance_signals(request):
     if wanted != 'all':
         queryset = queryset.filter(status=wanted)
     if request.query_params.get('disease'):
-        queryset = queryset.filter(disease=disease_code(request.query_params['disease'])
-                                   or request.query_params['disease'].upper())
+        named = request.query_params['disease']
+        code = disease_relevance.resolver()(named)
+        # A signal may name a category since removed; match it as stored.
+        queryset = queryset.filter(disease=code) if code else queryset.filter(disease__iexact=named.strip())
     signals = list(queryset[:500])
     names = dict(Concept.objects.filter(concept_id__in={s.concept_id for s in signals})
                  .values_list('concept_id', 'concept_name'))

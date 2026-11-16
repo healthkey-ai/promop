@@ -88,6 +88,94 @@ rather than lost. The column travels with the mapping through
 it existed reads as blank. Rendering placed fields on the patient tabs and the
 curation control are #2330 and #2329.
 
+### Whose record a field is part of: `FieldDiseaseMembership`
+
+A patient's record is a **profile**: the base record every patient has, plus
+the **extension** of each disease the patient has. A field's **scope** is its
+`FieldDiseaseMembership` rows (#2331), one per disease whose extension it is
+in, keyed by field name so a column and a `CustomPatientField` are scoped the
+same way and a field needs no mapping row to have a scope. No rows means the
+field is base. It is membership on the one `PatientRecord` table, never a
+per-disease table: adding or removing a row moves no column and changes no
+stored value.
+
+The diseases are Disease Category management's, and there is no second list.
+A membership names a `DiseaseCategoryChoice` code;
+[`disease_profiles`](../omop_core/services/disease_profiles.py) is the one
+writer and refuses a code that is not a category, and `Other`, whose profile
+is the base record. Which category a record's disease name falls in is
+`DiseaseCategoryMapping` through `disease_code`, and
+`disease_relevance.patient_diseases` returns a record's categories, so a
+disease name a curator maps, or a category a curator adds, gets a profile
+with no deploy. A category that still has member fields cannot be deleted.
+
+Migration 0347 seeds MM, BC, FL, MCL and CLL with the fields
+`DiseaseTab.tsx` renders for each; every other field starts as base. The
+migration carries its own frozen copy of the rows (`FIELD_DISEASE_SEED`), so
+what a fresh install seeds does not depend on the code it is installed from.
+`disease_profiles.SEED_DISEASE_FIELDS` is the same list for a database built
+without migrations, and two tests hold the three together: one against the
+tab, one against the union of what the migrations write. A new disease-tab
+field therefore needs the constant and a data migration that declares its
+own `FIELD_DISEASE_SEED`. The genomics catalog's per-disease markers are not seeded: a priority
+is not a scope, and relevance still reads them from the catalog.
+
+| Reader | What it gets |
+|---|---|
+| Field descriptors (`GET /api/v1/field-mappings/`) | `scope` (`base` or `disease`) and `diseases` on every field; `?disease=<code>&set=extension\|profile` narrows the list to a disease's extension or its full record |
+| `GET /api/v1/field-mappings/export/?disease=<code>&set=profile\|extension` | The same set as a CSV for offline review, one row per field with its concept or blank concept columns; mapping read access, no patient value, no reviewer name ([`disease_field_sets`](../omop_core/services/disease_field_sets.py)) |
+| `GET /api/v1/patient-records/writable-fields/` | `scope` and `diseases` on every entry; `?disease=` (repeatable, a code or a name) returns that profile |
+| `GET /api/v1/custom-patient-fields/` | `scope` and `diseases` on each created field |
+| `disease_relevance` | A disease's `disease` tier is its extension; `common` is the base clinical fields |
+
+Writers, all following mapping write access:
+
+- `PUT /api/v1/field-mappings/<field_name>/diseases/` sets a field's scope by
+  name (`GET` reads it). It needs no mapping row, so a field with no concept
+  yet is scoped without creating an empty proposed mapping.
+- `PATCH`/`POST /api/v1/field-mappings/` take `diseases` with the rest of a
+  mapping save: omitted leaves the scope alone, `[]` makes the field base. A
+  save that carries only a scope does not re-save the mapping, so it does not
+  re-run the field's OMOP projection.
+- `POST /api/v1/custom-patient-fields/` takes it for a new field, which
+  starts from exactly the scope sent.
+
+Only a field the descriptors list can be given a scope
+(`disease_profiles.field_names`): a clinical column, a genomics component or
+a created field, not an internal column and not `disease` itself, which
+decides the profile. Any name can be made base, which is how rows left under
+the name of a removed field are cleared; such rows do not hold a category in
+place and are deleted with it. A scope edit is not part of the recipe, so it
+never signs a mapping off. Edits to one field are serialised, and each change
+is logged to `omop.ops` once it commits, with the scope before and after and
+who made it, since a removed row leaves nothing behind.
+
+Rows travel as the `memberships` table of the curation payload, and a
+field's scope is **replaced**, not merged, as far as the source can vouch
+for it. Adding rows alone could never carry a narrowed or cleared scope,
+because both instances start from the same seed. The payload's
+`membership_source` names the fields and the categories the source knows,
+and a row on the target is removed only when the source knows both its field
+and its disease and does not have it. So:
+
+| On the target | After a copy |
+|---|---|
+| A field both instances have | Takes the source's scope, base included |
+| A field created only on the target | Keeps its scope |
+| A field in a category only the target has | Keeps that membership |
+| A field whose source row names a category the target lacks | Row skipped with a warning; the field's scope is left exactly as it is |
+| Any field, from a payload without `membership_source` (hand-written) | Rows are added, none removed |
+| Any field, from a payload without `memberships` (the committed fixture) | Unchanged, with or without `--prune` |
+
+Both instances must be on the same migrations, as the rest of the copy
+already requires: a source that has not run a later seed migration reads as
+"base" for the fields that migration scoped. Pruning a created field removes
+its memberships with it.
+
+This is the read-only stage. No tab and no save consults the rows yet: what
+the disease tab renders (#2332) and what a PATCH accepts (#2333) are
+unchanged.
+
 ### Lab derivation reads the mapping tables
 
 Every reader that turns a LOINC code into a lab field at derivation time (the
@@ -235,7 +323,7 @@ not a fresh clinical validation of its meaning.
 
 ## Curation transfer and fixture seeding
 
-Curation data (mappings, choices, formulas, synonyms, custom fields) can reach a
+Curation data (mappings, disease memberships, choices, formulas, synonyms, custom fields) can reach a
 new instance through three paths:
 
 1. **`copy_curation`** — live database-to-database transfer from a running source
@@ -248,8 +336,8 @@ new instance through three paths:
    `read_payload`/`apply_payload` from
    [`field_curation_transfer.py`](../omop_core/services/field_curation_transfer.py).
    Supports `--dry-run`, `--prune` and `--tables` (same interface as `copy_curation`).
-   Default tables: mappings, custom_fields, choices, formulas, synonyms (no
-   code_mappings).
+   Default tables: mappings, custom_fields, memberships, choices, formulas,
+   synonyms (no code_mappings).
 
 3. **Checked-in fixture** — [`omop_core/data/field_curation_v1.json`](../omop_core/data/field_curation_v1.json)
    contains 314 mappings, 262 choices, 12 formulas and 1 synonym exported from

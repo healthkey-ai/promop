@@ -85,7 +85,7 @@ def test_dump_to_file_produces_valid_json():
         assert data['source'] == 'dump_field_curation'
         assert 'exported_at' in data
         assert set(data['tables']) == {
-            'mappings', 'custom_fields', 'choices', 'formulas', 'synonyms',
+            'mappings', 'custom_fields', 'memberships', 'choices', 'formulas', 'synonyms',
         }
         assert len(data['mappings']) == 1
         assert data['mappings'][0]['field_name'] == 'creatinine'

@@ -5762,6 +5762,10 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
         patient*. Without it the response describes the deployment: which fields
         could be written by someone permitted to write them.
 
+        Pass ``?disease=MM`` (a Disease Category code, repeatable) for one
+        profile: the base record plus those diseases' extensions. ``Other`` is
+        the base record alone.
+
         That distinction matters because a field being mapped is not the same as
         the reader being allowed to edit it. A caller may read a patient without
         being allowed to write them, or have no access to a given person at all —
@@ -5770,9 +5774,20 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
         before rendering is to be told the truth for the person doing the
         editing.
         """
+        from omop_core.services import disease_profiles
         from omop_core.services.write_descriptor import build_writable_field_descriptor
 
-        descriptor = build_writable_field_descriptor()
+        # Every entry says whose record it is part of: the base record, or the
+        # extension of the diseases it names (#2331). ?disease= narrows the
+        # answer to one profile; it describes the record and refuses nothing.
+        descriptor = disease_profiles.annotate(build_writable_field_descriptor())
+        named = [value for value in request.query_params.getlist('disease') if value.strip()]
+        if named:
+            try:
+                codes = disease_profiles.profile_codes(named)
+            except disease_profiles.ScopeError as error:
+                return Response({'detail': str(error)}, status=status.HTTP_400_BAD_REQUEST)
+            descriptor = disease_profiles.profile(descriptor, codes)
 
         raw_person = request.query_params.get('person_id')
         if raw_person is None:
@@ -10874,13 +10889,11 @@ def disease_therapy_regimen_detail(request, pk):
 
 def _valid_category_codes() -> set[str]:
     """Return valid category codes from the DB table, falling back to the enum."""
+    from omop_core.services import disease_profiles
     try:
-        codes = set(DiseaseCategoryChoice.objects.values_list('code', flat=True))
-        if codes:
-            return codes
+        return disease_profiles.category_codes()
     except Exception:
-        pass
-    return {c.value for c in DiseaseCategory}
+        return {c.value for c in DiseaseCategory}
 
 
 @api_view(['GET', 'POST'])
@@ -10951,7 +10964,22 @@ def disease_category_detail(request, code):
             {'detail': f'Cannot delete: {in_use} mapping(s) use this category'},
             status=status.HTTP_409_CONFLICT,
         )
-    obj.delete()
+    # Nor one whose extension still has fields: they would be scoped to a
+    # disease that no longer exists (#2331). Make them base, or move them.
+    from omop_core.models import FieldDiseaseMembership
+    from omop_core.services import disease_profiles
+    members = sorted(disease_profiles.extension_fields(code) & disease_profiles.field_names())
+    if members:
+        named = ', '.join(members[:5]) + (', …' if len(members) > 5 else '')
+        return Response(
+            {'detail': f'Cannot delete: {len(members)} field(s) belong to this disease ({named})'},
+            status=status.HTTP_409_CONFLICT,
+        )
+    with transaction.atomic():
+        # Rows left under the name of a field that no longer exists go with
+        # the category: nothing can clear them, and they scope nothing.
+        FieldDiseaseMembership.objects.filter(disease=code).delete()
+        obj.delete()
     return Response(status=status.HTTP_204_NO_CONTENT)
 
 
@@ -15669,10 +15697,13 @@ def custom_patient_field_list(request):
     from .serializers import CustomPatientFieldCreateSerializer, CustomPatientFieldSerializer
 
     if request.method == 'GET':
+        from omop_core.services import disease_profiles
         fields = CustomPatientField.objects.select_related('mapping__concept').filter(
             mapping__status='approved',
         )
-        return Response(CustomPatientFieldSerializer(fields, many=True).data)
+        return Response(CustomPatientFieldSerializer(
+            fields, many=True, context={'field_diseases': disease_profiles.memberships()},
+        ).data)
 
     if not _can_manage_mappings(request.user):
         return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
@@ -15705,6 +15736,17 @@ def field_mapping_list(request):
         if search:
             q = search.lower()
             descriptors = [d for d in descriptors if q in d['field_name'].lower()]
+        # ?disease=MM&set=extension|profile: one disease's fields (#2331).
+        # A blank value is no filter, as it is for category and search.
+        named = [value for value in request.query_params.getlist('disease') if value.strip()]
+        if named:
+            from omop_core.services import disease_field_sets
+            try:
+                descriptors = disease_field_sets.disease_set(
+                    descriptors, named,
+                    request.query_params.get('set') or disease_field_sets.SET_PROFILE)
+            except disease_field_sets.SetError as error:
+                return Response({'detail': str(error)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(descriptors)
 
     # POST — create a mapping.  Non-admin users cannot create as approved.
@@ -15719,6 +15761,74 @@ def field_mapping_list(request):
     serializer.is_valid(raise_exception=True)
     serializer.save()
     return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def field_mapping_export(request):
+    """A disease's fields and their concepts as CSV, for offline review (#2331).
+
+    GET /api/v1/field-mappings/export/?disease=MM&set=profile|extension
+
+    ``profile`` (the default) is the full record: the base record plus the
+    disease's extension. ``extension`` is the disease-specific fields alone.
+    ``Other``, or no disease, is the base record. Reference data: the file
+    holds no patient value and no reviewer's name, and whoever may read the
+    mapping pages may download it.
+    """
+    if not _can_view_mappings(request.user):
+        return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
+    from django.http import HttpResponse
+    from omop_core.services import disease_field_sets
+    try:
+        filename, text = disease_field_sets.csv_export(
+            request.query_params.getlist('disease'),
+            request.query_params.get('set') or disease_field_sets.SET_PROFILE)
+    except disease_field_sets.SetError as error:
+        return Response({'detail': str(error)}, status=status.HTTP_400_BAD_REQUEST)
+    response = HttpResponse(text, content_type='text/csv; charset=utf-8')
+    response['Content-Disposition'] = f'attachment; filename="{filename}"'
+    response['Cache-Control'] = 'no-store'
+    return response
+
+
+@api_view(['GET', 'PUT'])
+@permission_classes([IsAuthenticated])
+def field_scope(request, field_name):
+    """Whose record a field is part of, read or set by the field's name (#2331).
+
+    GET /api/v1/field-mappings/<field_name>/diseases/
+    PUT /api/v1/field-mappings/<field_name>/diseases/  {"diseases": ["MM", "FL"]}
+
+    An empty list makes the field part of the base record. Scope is keyed by
+    name, so this needs no mapping row: a field with no concept yet is scoped
+    without creating an empty proposed mapping for it. Reading follows mapping
+    read access and writing mapping write access, as a placement edit does.
+    """
+    if not _can_view_mappings(request.user):
+        return Response({'detail': 'Organization admin access required.'}, status=status.HTTP_403_FORBIDDEN)
+    if request.method != 'GET' and not _can_manage_mappings(request.user):
+        return Response({'detail': 'Mapping curator access required.'}, status=status.HTTP_403_FORBIDDEN)
+    from omop_core.models import FieldDiseaseMembership
+    from omop_core.services import disease_profiles
+
+    # A name with rows but no field (the field was removed) is still
+    # reachable, so its rows can be read and cleared.
+    held = FieldDiseaseMembership.objects.filter(field_name=field_name)
+    if field_name not in disease_profiles.field_names() and not held.exists():
+        return Response({'detail': 'Not found.'}, status=status.HTTP_404_NOT_FOUND)
+    if request.method == 'PUT':
+        diseases = request.data.get('diseases') if isinstance(request.data, dict) else None
+        if not isinstance(diseases, list) or not all(isinstance(code, str) for code in diseases):
+            return Response({'diseases': 'Send a list of Disease Category codes; an empty list is the base record.'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        try:
+            disease_profiles.set_field_diseases(field_name, diseases, user=request.user)
+        except disease_profiles.ScopeError as error:
+            return Response({'diseases': str(error)}, status=status.HTTP_400_BAD_REQUEST)
+    diseases = sorted(held.values_list('disease', flat=True))
+    return Response({'field_name': field_name, 'scope': disease_profiles.scope_of(diseases),
+                     'diseases': diseases})
 
 
 @api_view(['GET', 'PATCH', 'DELETE'])

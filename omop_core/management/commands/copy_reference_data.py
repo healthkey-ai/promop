@@ -33,7 +33,8 @@ class Command(BaseCommand):
         parser.add_argument('--source-url', help='Source database URL. Defaults to $SOURCE_DATABASE_URL.')
         parser.add_argument(
             '--prune', action='store_true',
-            help='Also delete field and code mappings the source does not have.',
+            help=('Also delete field and code mappings the source does not have. A field\'s disease '
+                  'scope is replaced from the source either way.'),
         )
         parser.add_argument('--dry-run', action='store_true', help='Report what would change and roll back.')
 

@@ -620,6 +620,15 @@ def get_all_field_descriptors() -> list[dict]:
     # 3c. Load field formulas.
     formulas_by_field = {f.field_name: f for f in FieldFormula.objects.all()}
 
+    # 3d. Load disease scope: the diseases whose extension each field is in.
+    # A field with none is part of the base record (#2331).
+    from omop_core.services import disease_profiles
+    scoped = disease_profiles.memberships()
+
+    def scope(field_name):
+        diseases = scoped.get(field_name, [])
+        return {'scope': disease_profiles.scope_of(diseases), 'diseases': list(diseases)}
+
     # 4. Build descriptors (excluding internal fields).
     result = []
     for f in concrete_fields:
@@ -685,6 +694,7 @@ def get_all_field_descriptors() -> list[dict]:
             'field_type': _get_field_type_label(f),
             'category': category,
             'tab': resolve_tab(name, mapping=mappings_by_field.get(name)),
+            **scope(name),
             'provenance': prov_dict,
             'mapping': mapping_dict,
             'suggestion': suggestion,
@@ -722,6 +732,7 @@ def get_all_field_descriptors() -> list[dict]:
             'field_type': custom.field_type,
             'category': 'computed' if custom.mode == 'computed' else 'needs-concept-set',
             'tab': resolve_tab(custom.field_name, mapping=mapping, custom=custom),
+            **scope(custom.field_name),
             'provenance': None,
             'mapping': {
                 'id': mapping.id,
@@ -757,7 +768,7 @@ def get_all_field_descriptors() -> list[dict]:
         mapping = mappings_by_field.get(name)
         result.append({
             'field_name': name, 'field_type': attribute['value_kind'],
-            'category': 'editable', 'tab': 'genomics', 'provenance': None,
+            'category': 'editable', 'tab': 'genomics', **scope(name), 'provenance': None,
             'mapping': {
                 'id': mapping.id, 'concept_id': mapping.concept_id,
                 'concept_name': mapping.concept.concept_name if mapping.concept else '',

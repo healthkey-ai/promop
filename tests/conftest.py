@@ -40,3 +40,15 @@ def lab_field_mappings(db):
     apply_payload({'mappings': rows}, tables=('mappings',))
     run_data_migration('0285_approve_lab_extractor_aliases', 'approve_aliases')
     return resolve_lab_code_fields()
+
+
+@pytest.fixture
+def disease_extensions(db):
+    """Each disease's extension as migration 0347 seeds it (#2331).
+
+    pytest builds the database without migrations, so a test that reads which
+    fields belong to a disease asks for the rows here.
+    """
+    from omop_core.services import disease_profiles
+
+    disease_profiles.seed()

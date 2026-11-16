@@ -15,6 +15,7 @@ from omop_core.models import (
 from omop_oncology.models import Episode, EpisodeEvent
 from datetime import date
 import re
+from django.db import transaction
 from django.utils.timezone import localdate
 from django.utils import timezone
 from omop_core.services.access import get_admin_access_paths, has_org_admin_access, has_explicit_org_admin_access
@@ -1591,9 +1592,46 @@ class InterchangeAgreementSerializer(serializers.ModelSerializer):
         return obj.is_in_effect()
 
 
+def _clean_field_diseases(value):
+    """The Disease Category codes a field's scope may name (#2331)."""
+    from omop_core.services import disease_profiles
+    try:
+        return disease_profiles.clean_codes(value)
+    except disease_profiles.ScopeError as error:
+        raise serializers.ValidationError(str(error))
+
+
 class FieldConceptMappingSerializer(serializers.ModelSerializer):
     reviewer = serializers.CharField(source='reviewer.username', read_only=True, default=None)
     makes_field_writable = serializers.SerializerMethodField()
+    # The field's scope: the diseases whose extension it is in, by Disease
+    # Category code. An empty list makes it part of the base record; leaving
+    # the key out changes nothing. Stored as FieldDiseaseMembership rows keyed
+    # by the field's name, not on this row (#2331).
+    diseases = serializers.ListField(
+        child=serializers.CharField(max_length=30), required=False, write_only=True,
+    )
+
+    def validate_diseases(self, value):
+        return _clean_field_diseases(value)
+
+    def to_representation(self, instance):
+        from omop_core.services import disease_profiles
+        from omop_core.models import FieldDiseaseMembership
+        data = super().to_representation(instance)
+        data['diseases'] = sorted(FieldDiseaseMembership.objects.filter(
+            field_name=instance.field_name).values_list('disease', flat=True))
+        data['scope'] = disease_profiles.scope_of(data['diseases'])
+        return data
+
+    def _set_diseases(self, field_name, diseases):
+        """Apply a scope sent with the mapping; ``None`` means it was not sent."""
+        if diseases is None:
+            return
+        from omop_core.services import disease_profiles
+        request = self.context.get('request')
+        disease_profiles.set_field_diseases(
+            field_name, diseases, user=request.user if request else None)
 
     def get_makes_field_writable(self, obj) -> bool:
         """Whether this row is complete enough to make its field editable.
@@ -1628,6 +1666,7 @@ class FieldConceptMappingSerializer(serializers.ModelSerializer):
             # Which patient tab the field renders on, last and on its own row
             # (#2328). Blank keeps the code's placement; "omop" is unplaced.
             'tab',
+            'diseases',
         ]
         read_only_fields = ['provenance', 'id', 'reviewer', 'reviewed_at', 'created_at', 'updated_at']
 
@@ -1670,6 +1709,12 @@ class FieldConceptMappingSerializer(serializers.ModelSerializer):
                 raise serializers.ValidationError({
                     'field_name': f"'{field_name}' is not a concrete PatientRecord field."
                 })
+        if attrs.get('diseases'):
+            from omop_core.services import disease_profiles
+            if field_name not in disease_profiles.field_names():
+                raise serializers.ValidationError({
+                    'diseases': f"'{field_name}' is not a field that can have a scope."
+                })
         status_value = attrs.get('status', getattr(self.instance, 'status', None))
         omop_table = attrs.get('omop_table', getattr(self.instance, 'omop_table', ''))
         source_value = attrs.get('source_value', getattr(self.instance, 'source_value', ''))
@@ -1700,7 +1745,11 @@ class FieldConceptMappingSerializer(serializers.ModelSerializer):
             validated_data['reviewer'] = request.user
             validated_data['reviewed_at'] = timezone.now()
             validated_data['provenance'] = user_provenance(request.user)
-        return super().create(validated_data)
+        diseases = validated_data.pop('diseases', None)
+        with transaction.atomic():
+            instance = super().create(validated_data)
+            self._set_diseases(instance.field_name, diseases)
+        return instance
 
     def update(self, instance, validated_data):
         """Provenance names whoever supplied the mapping in force (#1719).
@@ -1734,14 +1783,23 @@ class FieldConceptMappingSerializer(serializers.ModelSerializer):
             validated_data['provenance'] = user_provenance(request.user)
         elif recipe_changed:
             validated_data['provenance'] = CURATOR_PROVENANCE
-        instance = super().update(instance, validated_data)
-        # A custom field carries its own tab for the custom-field list and its
-        # ordering; the mapping's placement is the one readers resolve, so a
-        # change here follows through (#2328).
-        custom = getattr(instance, 'custom_patient_field', None)
-        if 'tab' in validated_data and custom is not None:
-            custom.tab = instance.tab or UNPLACED_TAB
-            custom.save(update_fields=['tab', 'updated_at'])
+        # Scope is a membership edit and nothing else: it is not part of the
+        # recipe, so setting it neither signs the mapping off nor re-attributes it.
+        diseases = validated_data.pop('diseases', None)
+        with transaction.atomic():
+            # A save that carries only a scope does not touch the mapping row:
+            # saving it would re-run the field's OMOP projection over every
+            # patient record for an edit that changes no fact.
+            if validated_data:
+                instance = super().update(instance, validated_data)
+                # A custom field carries its own tab for the custom-field list and its
+                # ordering; the mapping's placement is the one readers resolve, so a
+                # change here follows through (#2328).
+                custom = getattr(instance, 'custom_patient_field', None)
+                if 'tab' in validated_data and custom is not None:
+                    custom.tab = instance.tab or UNPLACED_TAB
+                    custom.save(update_fields=['tab', 'updated_at'])
+            self._set_diseases(instance.field_name, diseases)
         return instance
 
 
@@ -1754,12 +1812,29 @@ class CustomPatientFieldSerializer(serializers.ModelSerializer):
     concept_code = serializers.CharField(source='mapping.concept_code', read_only=True)
     omop_table = serializers.CharField(source='mapping.omop_table', read_only=True)
     unit = serializers.CharField(source='mapping.unit', read_only=True)
+    # Whose record the field is part of (#2331): the base record, or the
+    # extension of the diseases listed. A list view passes every field's
+    # diseases in the context so this is not a query per row.
+    diseases = serializers.SerializerMethodField()
+    scope = serializers.SerializerMethodField()
+
+    def get_diseases(self, obj) -> list[str]:
+        by_field = self.context.get('field_diseases')
+        if by_field is None:
+            from omop_core.models import FieldDiseaseMembership
+            return sorted(FieldDiseaseMembership.objects.filter(
+                field_name=obj.field_name).values_list('disease', flat=True))
+        return list(by_field.get(obj.field_name, []))
+
+    def get_scope(self, obj) -> str:
+        from omop_core.services import disease_profiles
+        return disease_profiles.scope_of(self.get_diseases(obj))
 
     class Meta:
         model = CustomPatientField
         fields = [
             'id', 'field_name', 'display_name', 'tab', 'field_type',
-            'mode',
+            'mode', 'scope', 'diseases',
             'mapping_status', 'concept_id', 'concept_name', 'vocabulary_id',
             'concept_code', 'omop_table', 'unit', 'created_at', 'updated_at',
         ]
@@ -1780,6 +1855,14 @@ class CustomPatientFieldCreateSerializer(serializers.Serializer):
     unit = serializers.CharField(max_length=30, required=False, allow_blank=True, default='')
     notes = serializers.CharField(required=False, allow_blank=True, default='')
     formula = serializers.CharField(required=False, allow_blank=False)
+    # Disease Category codes; empty or omitted makes the field part of the
+    # base record, a field of every patient (#2331).
+    diseases = serializers.ListField(
+        child=serializers.CharField(max_length=30), required=False, default=list,
+    )
+
+    def validate_diseases(self, value):
+        return _clean_field_diseases(value)
 
     def validate_confirm_patient_record(self, value):
         if not value:
@@ -1831,6 +1914,7 @@ class CustomPatientFieldCreateSerializer(serializers.Serializer):
         concept = validated_data.pop('concept')
         validated_data.pop('confirm_patient_record')
         formula = validated_data.pop('formula', None)
+        diseases = validated_data.pop('diseases', [])
         field_formula = None
         from omop_core.services.field_mapping_provenance import user_provenance
         with transaction.atomic():
@@ -1863,6 +1947,11 @@ class CustomPatientFieldCreateSerializer(serializers.Serializer):
             )
             custom_field.full_clean()
             custom_field.save()
+            # Always, so a new field starts from exactly the scope sent: rows
+            # left under this name by a field since removed are not inherited.
+            from omop_core.services import disease_profiles
+            disease_profiles.set_field_diseases(
+                custom_field.field_name, diseases, user=request.user)
             if custom_field.mode == 'computed':
                 field_formula = FieldFormula.objects.create(
                     field_name=custom_field.field_name,
