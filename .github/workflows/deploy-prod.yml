@@ -1,0 +1,125 @@
+name: Deploy to Production
+
+# Cloud Run production (promop-prod in ht-phr). Mirrors deploy-staging.yml with
+# three deliberate differences:
+#
+# - main only. The prod workload identity pool accepts refs/heads/main and
+#   nothing else, so there is no pull_request trigger: a PR run could not log
+#   in. workflow_dispatch exists to redeploy; run it from main.
+# - Variables come from the `production` GitHub environment, which shadows the
+#   repo-level GCP_* variables that staging uses.
+# - The image is pushed as ctomop:<sha> only. :latest is what staging's jobs and
+#   a fresh Terraform apply pick up, so a prod build must never move it.
+#
+# Tests are not re-run here: main is reached by a PR, and ci.yml runs on PRs
+# into main.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+  GCP_REGION: ${{ vars.GCP_REGION || 'us-central1' }}
+  ARTIFACT_REPO: ${{ vars.GCP_REGION || 'us-central1' }}-docker.pkg.dev/${{ vars.GCP_PROJECT_ID }}/ht-phr
+  SERVICE_NAME: promop-prod
+  IMAGE_TAG: ${{ github.sha }}
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  build:
+    name: Build image
+    if: github.ref == 'refs/heads/main'
+    environment: production
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Publisher catalogs must be real payloads in the migration image.
+          lfs: true
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${GCP_REGION}-docker.pkg.dev --quiet
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Reads staging's layer cache but writes its own, so neither build
+      # evicts the other's layers.
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.gcp
+          platforms: linux/amd64
+          provenance: false
+          push: true
+          build-args: GIT_COMMIT=${{ env.IMAGE_TAG }}
+          tags: ${{ env.ARTIFACT_REPO }}/ctomop:${{ env.IMAGE_TAG }}
+          cache-from: |
+            type=registry,ref=${{ env.ARTIFACT_REPO }}/ctomop:buildcache-prod
+            type=registry,ref=${{ env.ARTIFACT_REPO }}/ctomop:buildcache
+          cache-to: type=registry,ref=${{ env.ARTIFACT_REPO }}/ctomop:buildcache-prod,mode=max,image-manifest=true,oci-mediatypes=true
+
+  deploy:
+    name: Deploy
+    needs: build
+    environment: production
+    concurrency:
+      group: deploy-prod
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+
+    steps:
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Deploy new revision (no traffic)
+        run: |
+          gcloud run services update ${SERVICE_NAME} \
+            --image ${ARTIFACT_REPO}/ctomop:${IMAGE_TAG} \
+            --region ${GCP_REGION} \
+            --no-traffic --quiet
+
+      # The first run loads the vocabularies and can take up to an hour.
+      - name: Run database migrations
+        timeout-minutes: 90
+        run: |
+          gcloud run jobs update ${SERVICE_NAME}-migrate \
+            --image ${ARTIFACT_REPO}/ctomop:${IMAGE_TAG} \
+            --region ${GCP_REGION} --quiet
+          gcloud run jobs execute ${SERVICE_NAME}-migrate \
+            --region ${GCP_REGION} --wait --quiet
+
+      # Unlike staging, the pool is not guarded: Terraform has created it, and a
+      # prod deploy that silently leaves the worker on an old image is worse
+      # than a failed one.
+      - name: Deploy worker revision
+        run: |
+          gcloud run worker-pools update ${SERVICE_NAME}-worker \
+            --image ${ARTIFACT_REPO}/ctomop:${IMAGE_TAG} \
+            --region ${GCP_REGION} \
+            --args="^|^-A|promop|worker|--loglevel=info|--queues=celery,athena,suggest" \
+            --quiet
+
+      - name: Shift traffic to new revision
+        run: |
+          gcloud run services update-traffic ${SERVICE_NAME} \
+            --to-latest --region ${GCP_REGION} --quiet
