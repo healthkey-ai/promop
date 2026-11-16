@@ -2244,6 +2244,85 @@ describe("server mapping pages", () => {
     });
   });
 
+  // A wearable metric is one code per label, so the Wearables tab opens
+  // ungrouped; every other tab still opens grouped.
+  const tabsWithWearables = [
+    { vocabulary_id: "EPIC", label: "Epic", is_standard: false, proposed: 3, approved: 0, athena: 0 },
+    { vocabulary_id: "OpenWearables", label: "Wearables", is_standard: false, proposed: 3, approved: 0, athena: 0 },
+  ];
+  const browseCalls = (source: string) => mockGet.mock.calls
+    .filter(([url, config]) => url === "/v1/code-mappings/" && config?.params?.source === source)
+    .map(([, config]) => config.params as Record<string, unknown>);
+
+  it("opens the Wearables tab ungrouped and the other tabs grouped", async () => {
+    renderBrowse({ tabs: tabsWithWearables, selected_source: "EPIC" });
+    await screen.findByRole("table", { name: "Unmapped mappings" });
+    expect(screen.getByLabelText("Group by label")).toBeChecked();
+
+    fireEvent.click(screen.getByRole("tab", { name: /Wearables/ }));
+    await waitFor(() => expect(browseCalls("OpenWearables")).not.toHaveLength(0));
+    browseCalls("OpenWearables").forEach((params) => expect(params).not.toHaveProperty("rollup"));
+    expect(screen.getByLabelText("Group by label")).not.toBeChecked();
+
+    fireEvent.click(screen.getByRole("tab", { name: /Epic/ }));
+    await waitFor(() => expect(browseCalls("EPIC")).not.toHaveLength(0));
+    browseCalls("EPIC").forEach((params) => expect(params).toHaveProperty("rollup", 1));
+    expect(screen.getByLabelText("Group by label")).toBeChecked();
+  });
+
+  it("groups the Wearables tab once the curator ticks the box, and keeps the choice", async () => {
+    renderBrowse({ tabs: tabsWithWearables, selected_source: "EPIC" });
+    await screen.findByRole("table", { name: "Unmapped mappings" });
+    fireEvent.click(screen.getByRole("tab", { name: /Wearables/ }));
+    await waitFor(() => expect(screen.getByLabelText("Group by label")).not.toBeChecked());
+
+    fireEvent.click(screen.getByLabelText("Group by label"));
+    await waitFor(() => expect(mockGet).toHaveBeenCalledWith("/v1/code-mappings/", {
+      params: expect.objectContaining({ source: "OpenWearables", rollup: 1 }),
+    }));
+
+    // An explicit choice is the curator's, on every tab, as it was before.
+    fireEvent.click(screen.getByLabelText("Group by label"));
+    fireEvent.click(screen.getByRole("tab", { name: /Epic/ }));
+    await waitFor(() => expect(browseCalls("EPIC")).not.toHaveLength(0));
+    browseCalls("EPIC").forEach((params) => expect(params).not.toHaveProperty("rollup"));
+  });
+
+  it("opens ungrouped when the server opens the page on the Wearables tab", async () => {
+    renderBrowse({ tabs: tabsWithWearables, selected_source: "OpenWearables" });
+    await screen.findByRole("table", { name: "Unmapped mappings" });
+    await waitFor(() => expect(screen.getByLabelText("Group by label")).not.toBeChecked());
+    const last = mockGet.mock.calls.filter(([url]) => url === "/v1/code-mappings/").at(-1);
+    expect(last?.[1].params).not.toHaveProperty("rollup");
+  });
+
+  it("shows no Suggestion candidates panel on the Wearables tab", async () => {
+    const latest = {
+      run_id: "restored", state: "success",
+      activity: [{ stage: "candidates", mapping_id: proposedRow.mapping_id, source_code: proposedRow.source_code, strategy: "umls",
+        candidates: [{ concept_id: 1, concept_name: "Restored candidate", concept_code: "A", vocabulary_id: "SNOMED" }] }],
+    };
+    mockGet.mockImplementation((url: string) => {
+      if (url.includes("/latest/")) return Promise.resolve({ data: latest });
+      if (url === "/v1/code-mappings/") {
+        return Promise.resolve({ data: browseData({ tabs: tabsWithWearables, selected_source: "EPIC" }) });
+      }
+      return Promise.resolve({ data: url.includes("reference") ? reference : {} });
+    });
+    render(<MemoryRouter initialEntries={["/code-mappings?direction=forward"]}><CodeMappingPage /></MemoryRouter>);
+    expect(await screen.findByRole("region", { name: "Suggestion candidates" })).toBeInTheDocument();
+
+    mockGet.mockClear();
+    fireEvent.click(screen.getByRole("tab", { name: /Wearables/ }));
+    await waitFor(() => expect(browseCalls("OpenWearables")).not.toHaveLength(0));
+    expect(screen.queryByRole("region", { name: "Suggestion candidates" })).not.toBeInTheDocument();
+    // Nothing to restore into, so the last run is not asked for either.
+    expect(mockGet.mock.calls.some(([url]) => String(url).includes("/latest/"))).toBe(false);
+
+    fireEvent.click(screen.getByRole("tab", { name: /Epic/ }));
+    expect(await screen.findByRole("region", { name: "Suggestion candidates" })).toBeInTheDocument();
+  });
+
   it("asks the server to group and shows one row for the label", async () => {
     let payload = browseData();
     mockGet.mockImplementation((url: string) => {

@@ -197,6 +197,16 @@ const VOCABULARY_ALIASES: Record<string, string> = {
   // ICD10CM and ICD10 are now separate tabs — no alias needed.
   "urn:oid:2.16.840.1.113883.6.96": "SNOMED",
 };
+/** The Wearables tab: OpenWearables, Apple and Garmin metrics. */
+const WEARABLES_TAB = "OpenWearables";
+/**
+ * Whether a tab starts grouped by label. A hospital label arrives under
+ * thousands of vendor codes; a wearable metric is one code per label, so a
+ * group there is a group of one that hides the code it stands for.
+ */
+function groupsByDefault(vocabulary: string | null | undefined): boolean {
+  return vocabulary !== WEARABLES_TAB;
+}
 function tabForRow(row: Pick<CodeMappingRow, 'source_vocabulary_id'>): string {
   return VOCABULARY_ALIASES[row.source_vocabulary_id] ?? row.source_vocabulary_id;
 }
@@ -312,6 +322,15 @@ const groupKey = (entry: GroupEntry) => entry.group_key ?? entry.label ?? `:${en
 const expansionKey = (entry: GroupEntry, section: MappingSection) => `${section}|${groupKey(entry)}`;
 const sectionNames: MappingSection[] = ["Unmapped", "Proposed", "Approved"];
 const DEFAULT_SECTION_SORT: SectionSort = { column: "occurrence_count", descending: true };
+/** The sort a section keeps when grouping changes: only these two exist both ways. */
+function sortsAcrossGrouping(previous: Partial<Record<MappingSection, SectionSort>>) {
+  return sectionNames.reduce<Partial<Record<MappingSection, SectionSort>>>((next, section) => {
+    const current = previous[section];
+    next[section] = current && (current.column === "occurrence_count" || current.column === "source_code_description")
+      ? current : DEFAULT_SECTION_SORT;
+    return next;
+  }, {});
+}
 // A blank origin_system is a real value -- enqueue_unmapped_source_codes writes
 // it for every newly queued code -- but "" is already the select's "no filter"
 // value, so filtering to blank needs a sentinel the server translates back.
@@ -373,7 +392,10 @@ export default function CodeMappingPage() {
   );
   const [provenanceFilter, setProvenanceFilter] = useState("");
   const [organizationFilter, setOrganizationFilter] = useState("");
-  const [rollup, setRollup] = useState(true);
+  // Null until the curator ticks the box; until then each tab opens with its
+  // own default. Before a tab is chosen the server names the one it opened.
+  const [rollupChoice, setRollupChoice] = useState<boolean | null>(null);
+  const rollup = rollupChoice ?? groupsByDefault(activeVocabulary ?? browse?.selected_source);
   const [seenOnly, setSeenOnly] = useState(true);
   // Only the codes a curator has left a note on (#2423).
   const [withNotes, setWithNotes] = useState(false);
@@ -567,9 +589,11 @@ export default function CodeMappingPage() {
 
   // Restore the last successful suggest run's candidates when the page loads
   // or the vocabulary tab changes, so navigating away and back doesn't lose them.
-  // A reader gets no panel: its buttons are writes (#2416).
+  // A reader gets no panel: its buttons are writes (#2416). Nor does the
+  // Wearables tab: its list is short enough to read the proposals in place.
+  const showSuggestCandidates = canWrite && selectedVocabulary !== WEARABLES_TAB;
   useEffect(() => {
-    if (!selectedVocabulary || !canWrite) return;
+    if (!selectedVocabulary || !showSuggestCandidates) return;
     let cancelled = false;
     (async () => {
       try {
@@ -586,7 +610,7 @@ export default function CodeMappingPage() {
       }
     })();
     return () => { cancelled = true; };
-  }, [selectedVocabulary, canWrite]);
+  }, [selectedVocabulary, showSuggestCandidates]);
 
   const overallTab = selectedVocabulary === OVERALL_TAB;
   // Keep the latest reviewed model visible while a newer model awaits reviews.
@@ -1431,13 +1455,8 @@ export default function CodeMappingPage() {
                 onChange={(e) => {
                   setPages({});
                   setExpandedGroups({});
-                  setSectionSorts((previous) => sectionNames.reduce<Partial<Record<MappingSection, SectionSort>>>((next, section) => {
-                    const current = previous[section];
-                    next[section] = current && (current.column === "occurrence_count" || current.column === "source_code_description")
-                      ? current : DEFAULT_SECTION_SORT;
-                    return next;
-                  }, {}));
-                  setRollup(e.target.checked);
+                  setSectionSorts(sortsAcrossGrouping);
+                  setRollupChoice(e.target.checked);
                 }} />
               {/* One decision per label rather than per vendor code: albumin
                   arrives under 2,557 of them. */}
@@ -1510,6 +1529,11 @@ export default function CodeMappingPage() {
                   setOrganizationFilter("");
                   setExpandedGroups({});
                   setAccumulatedActivity([]);
+                  // Moving between a grouped tab and the ungrouped Wearables
+                  // tab changes the grouping as the checkbox would.
+                  if (rollupChoice === null && groupsByDefault(tab.vocabulary_id) !== rollup) {
+                    setSectionSorts(sortsAcrossGrouping);
+                  }
                   setActiveVocabulary(tab.vocabulary_id);
                   if (tab.vocabulary_id === OVERALL_TAB) {
                     setUnmappedCollapsed(true);
@@ -1627,7 +1651,7 @@ export default function CodeMappingPage() {
 
         </>}
 
-        {(suggestRun || accumulatedActivity.length > 0) && <SuggestCandidates
+        {showSuggestCandidates && (suggestRun || accumulatedActivity.length > 0) && <SuggestCandidates
           key="suggest-candidates"
           activity={[...accumulatedActivity, ...(suggestRun?.activity ?? [])]}
           finished={!suggestRun || suggestRun.state === "success" || suggestRun.state === "failure"}
