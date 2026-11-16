@@ -1987,8 +1987,11 @@ class FieldConceptMappingSerializer(serializers.ModelSerializer):
         the edit box. Leaving the unit blank says the same thing without
         leaking it to a client.
         """
+        import re
         marker = value.strip() if isinstance(value, str) else ''
-        if marker.startswith('{') and marker.endswith('}'):
+        # `{score}` / `{INR}` / `{ratio}` are wording, not units. A real LOINC
+        # annotation (`{#}`) is left alone.
+        if re.fullmatch(r'\{[a-z ]+\}', marker, re.IGNORECASE):
             raise serializers.ValidationError(
                 'A {...} placeholder means "no physical unit"; leave the unit blank.'
             )

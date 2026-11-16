@@ -12,9 +12,15 @@ from django.db import migrations
 
 def clear_placeholder_units(apps, schema_editor):
     FieldConceptMapping = apps.get_model('omop_core', 'FieldConceptMapping')
-    FieldConceptMapping.objects.filter(
-        unit__startswith='{', unit__endswith='}',
-    ).update(unit='')
+    # Strip before comparing, as the reader and the validator do: ' {ratio} '
+    # is the same marker with padding.
+    placeholder_ids = [
+        pk for pk, unit in FieldConceptMapping.objects.values_list('pk', 'unit')
+        if isinstance(unit, str) and unit.strip().startswith('{')
+        and unit.strip().endswith('}')
+    ]
+    if placeholder_ids:
+        FieldConceptMapping.objects.filter(pk__in=placeholder_ids).update(unit='')
 
 
 class Migration(migrations.Migration):

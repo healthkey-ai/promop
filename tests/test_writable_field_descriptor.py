@@ -814,3 +814,16 @@ class TestPlaceholderUnits:
                     isinstance(unit, str) and unit.strip().startswith('{')
                     and unit.strip().endswith('}')
                 ), (name, unit)
+
+
+class TestSuggestedUnits:
+    """#2605 review: the mapping admin's suggestion is a write prefill."""
+
+    def test_no_placeholder_is_suggested_as_a_unit(self):
+        from omop_core.services.concept_unit_info import get_loinc_to_unit
+
+        suggested = get_loinc_to_unit()
+        # 89247-1 (ECOG) and 6301-6 (INR) are the curated ones; whatever else
+        # the LOINC table carries must not offer a brace-only marker either.
+        for code, unit in suggested.items():
+            assert not (unit.strip().startswith('{') and unit.strip().endswith('}')), (code, unit)
