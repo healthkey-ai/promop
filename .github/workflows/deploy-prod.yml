@@ -3,7 +3,7 @@ name: Deploy to Production
 # Cloud Run production (promop-prod in ht-phr). Mirrors deploy-staging.yml with
 # three deliberate differences:
 #
-# - One branch only: dev for now, main later. The prod workload
+# - main only. The prod workload
 #   identity pool trusts only that ref, so there is no pull_request trigger: a
 #   PR run could not log in. workflow_dispatch exists to redeploy; run it from
 #   that branch.
@@ -17,7 +17,7 @@ name: Deploy to Production
 
 on:
   push:
-    branches: [dev]
+    branches: [main]
   workflow_dispatch:
 
 env:
@@ -34,7 +34,7 @@ permissions:
 jobs:
   build:
     name: Build image
-    if: github.ref == 'refs/heads/dev'
+    if: github.ref == 'refs/heads/main'
     environment: production
     runs-on: ubuntu-latest
 
