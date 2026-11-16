@@ -20,6 +20,15 @@ from tests.factories import ConceptFactory, DomainFactory, VocabularyFactory
 pytestmark = pytest.mark.django_db
 
 
+def descriptor_fields():
+    """The field entries, without the versioned envelope (#2396)."""
+    return {
+        name: entry
+        for name, entry in build_writable_field_descriptor().items()
+        if not name.startswith('__')
+    }
+
+
 def _load_loinc(code, concept_id=None):
     VocabularyFactory(vocabulary_id='LOINC')
     return ConceptFactory(
@@ -67,12 +76,18 @@ class TestMappedFields:
         concept = _load_loinc('718-7')
         unit = _load_ucum('g/dL')
 
-        entry = build_writable_field_descriptor()['hemoglobin_g_dl']
+        descriptor = build_writable_field_descriptor()
+        source = descriptor['hemoglobin_level']
+        entry = descriptor['hemoglobin_g_dl']
 
-        assert entry['writable'] is True
-        assert entry['target'] == 'patient_record'
-        assert entry['kind'] == 'direct'
-        assert entry['value_kind'] == 'number'
+        # The patient writes the source pair; the canonical is the read-model
+        # that carries the OMOP recipe (#2318).
+        assert source['writable'] is True
+        assert source['target'] == 'patient_record'
+        assert source['kind'] == 'direct'
+        assert source['value_kind'] == 'number'
+        assert entry['kind'] == 'computed'
+        assert entry['writable'] is False
         assert entry['unit'] == 'g/dL'
         # OMOP routing lives under 'projection'
         proj = entry['projection']
@@ -87,23 +102,39 @@ class TestMappedFields:
 
     def test_every_key_a_measurement_write_needs_is_present(self):
         _load_loinc('718-7')
-        entry = build_writable_field_descriptor()['hemoglobin_g_dl']
+        descriptor = build_writable_field_descriptor()
+        entry = descriptor['hemoglobin_g_dl']
         assert 'projection' in entry
         required = {
             'omop_table', 'concept_id', 'type_concept_id', 'source_value',
         }
         assert required <= set(entry['projection'])
-        assert 'value_kind' in entry
+        assert 'value_kind' in descriptor['hemoglobin_level']
 
     def test_missing_unit_concept_does_not_make_the_field_unwritable(self):
         """UCUM may be absent; the fact is still writable with a source unit string."""
         _load_loinc('718-7')
 
-        entry = build_writable_field_descriptor()['hemoglobin_g_dl']
+        descriptor = build_writable_field_descriptor()
+        # The SOURCE pair is the write target; the canonical keeps the
+        # projection. The missing UCUM concept must not close the edit path.
+        assert descriptor['hemoglobin_level']['writable'] is True
+        canonical = descriptor['hemoglobin_g_dl']
+        assert canonical['unit'] == 'g/dL'
+        assert canonical['projection']['unit_concept_id'] is None
 
-        assert entry['writable'] is True
-        assert entry['unit'] == 'g/dL'
-        assert entry['projection']['unit_concept_id'] is None
+
+    def test_a_score_has_no_unit(self):
+        """`{score}` is the mapping's placeholder, not a unit label.
+
+        Sending it to a client put the literal `{score}` beside the edit box
+        for ECOG, Karnofsky and the other ordinal scales.
+        """
+        _load_loinc('89247-1')
+        entry = build_writable_field_descriptor()['ecog_performance_status']
+
+        assert entry['unit'] is None
+        assert entry['projection']['unit'] is None
 
 
 class TestUnmappedFields:
@@ -121,11 +152,11 @@ class TestUnmappedFields:
         """Without the vocab, no OMOP projection — but the field is directly writable."""
         descriptor = build_writable_field_descriptor()
 
-        entry = descriptor['hemoglobin_g_dl']
-        assert entry['writable'] is True
-        assert entry['target'] == 'patient_record'
-        assert '718-7' in entry.get('reason', '')
-        assert 'projection' not in entry  # no OMOP projection without the concept
+        assert descriptor['hemoglobin_level']['writable'] is True
+        assert descriptor['hemoglobin_level']['target'] == 'patient_record'
+        # No OMOP projection without the concept; the canonical is the
+        # read-model either way.
+        assert 'projection' not in descriptor['hemoglobin_g_dl']
 
     def test_every_mapped_projection_field_appears(self):
         descriptor = build_writable_field_descriptor()
@@ -138,11 +169,21 @@ class TestUnmappedFields:
         # explicitly rather than discovered -- and stating the sum here keeps the
         # descriptor's contents exact instead of merely "at least".
         from omop_core.services.write_descriptor import (
-            _SERIALIZER_ALIASES, _SERIALIZER_COMPUTED,
+            DESCRIPTOR_META_KEY, _NEGATED_ALIASES, _SERIALIZER_ALIASES,
+            _SERIALIZER_COMPUTED,
         )
         expected = (
             (PATIENT_RECORD_OMOP_MAPPED_FIELDS - lifecycle)
             | set(_SERIALIZER_ALIASES) | set(_SERIALIZER_COMPUTED)
+            # Not columns: the trial vocabulary's negated questions and the
+            # explicit pre-existing-conditions answer (#5663/#5665).
+            | set(_NEGATED_ALIASES)
+            | {'pre_existing_condition_categories', 'meets_lugano'}
+            # The trial catalog's legacy spelling of the cytogenetic summary;
+            # the descriptor carries it as an alias (#2396).
+            | {'cytogenic_markers'}
+            # Not a field: the versioned envelope (#2396).
+            | {DESCRIPTOR_META_KEY}
         )
         assert set(descriptor) == expected
 
@@ -166,12 +207,24 @@ class TestKinds:
     def test_no_alias_is_offered_as_editable(self):
         """Writing an alias and its canonical collides on one LOINC row (#471)."""
         descriptor = build_writable_field_descriptor()
-        for alias in ('calcium_mg_dl', 'creatinine_mg_dl', 'blood_urea_nitrogen',
-                      'hemoglobin_level', 'absolute_lymphocyte_count'):
+        for alias in ('calcium_mg_dl', 'creatinine_mg_dl', 'blood_urea_nitrogen'):
             assert descriptor[alias]['kind'] == 'alias'
             assert descriptor[alias]['writable'] is False
-        assert descriptor['hemoglobin_level']['canonical'] == 'hemoglobin_g_dl'
-        assert descriptor['absolute_lymphocyte_count']['canonical'] == 'alc_thousand_per_ul'
+        # Hemoglobin and the cell counts are source pairs now (#2318): the
+        # patient writes the value in the unit the row shows, and the
+        # canonical read-model is derived.
+        assert descriptor['hemoglobin_level']['kind'] == 'direct'
+        assert descriptor['hemoglobin_level']['writable'] is True
+        assert descriptor['hemoglobin_g_dl']['kind'] == 'computed'
+        for source, canonical in (
+            ('absolute_neutrophile_count', 'anc_thousand_per_ul'),
+            ('absolute_lymphocyte_count', 'alc_thousand_per_ul'),
+            ('platelet_count', 'platelet_count_thousand_per_ul'),
+        ):
+            assert descriptor[source]['kind'] == 'direct'
+            assert descriptor[source]['writable'] is True
+            assert descriptor[canonical]['kind'] == 'computed'
+            assert descriptor[canonical]['normalised_read_model'] is True
 
     def test_a_computed_field_names_its_inputs(self):
         entry = build_writable_field_descriptor()['bmi']
@@ -196,20 +249,23 @@ class TestKinds:
 
     def test_a_mapped_lab_is_direct_with_projection(self):
         _load_loinc('718-7')
-        entry = build_writable_field_descriptor()['hemoglobin_g_dl']
-        assert entry['kind'] == 'direct'
-        assert 'projection' in entry
+        descriptor = build_writable_field_descriptor()
+        assert descriptor['hemoglobin_level']['kind'] == 'direct'
+        assert 'projection' in descriptor['hemoglobin_g_dl']
 
     def test_every_field_carries_a_reason_when_not_writable(self):
         """A UI must always be able to say why a box is not typeable."""
-        for field, entry in build_writable_field_descriptor().items():
+        for field, entry in descriptor_fields().items():
             if not entry['writable']:
                 assert entry.get('reason'), field
 
     def test_kind_is_one_of_the_known_values(self):
         allowed = {'direct', 'editable', 'selectable', 'computed', 'alias',
-                   'profile', 'unmapped', 'authored'}
-        for field, entry in build_writable_field_descriptor().items():
+                   'profile', 'unmapped', 'authored',
+                   # Not columns: an inverted view of another field, and an
+                   # answer with its own endpoint and snapshot (#5663/#5665).
+                   'negated', 'explicit-answer'}
+        for field, entry in descriptor_fields().items():
             assert entry['kind'] in allowed, (field, entry['kind'])
 
 
@@ -225,9 +281,11 @@ class TestCost:
         # One batch lookup per source table (LOINC codes, UCUM units, attributed
         # codes), plus the approved-mapping table and one read per *distinct*
         # answer vocabulary those mappings name — four fields sharing a set cost
-        # one query, not four. Constant in the number of fields either way; the
-        # bound guards the shape, not the exact number.
-        assert len(ctx) <= 6, [q['sql'][:80] for q in ctx]
+        # one query, not four. The therapy-line catalog, the pre-existing
+        # condition categories and the genomics endpoint's readiness check are
+        # single reads per build. Constant in the number of fields either way;
+        # the bound guards the shape, not the exact number.
+        assert len(ctx) <= 9, [q['sql'][:80] for q in ctx]
 
 
 class TestEndpoint:
@@ -396,22 +454,39 @@ class TestEveryFieldIsCategorised:
     """
 
     def test_no_field_is_left_uncategorised(self):
-        for field, entry in build_writable_field_descriptor().items():
+        for field, entry in descriptor_fields().items():
             assert entry['kind'] is not None, field
 
     def test_an_unmapped_field_says_which_group_it_is_in(self):
-        d = build_writable_field_descriptor()
+        d = descriptor_fields()
         for field, entry in d.items():
             if entry['kind'] == 'unmapped':
                 assert entry.get('group'), field
                 assert entry.get('reason'), field
 
     def test_therapy_line_fields_are_computed_from_persisted_episode_events(self):
-        """Per-line columns are projections, not direct PatientRecord inputs."""
+        """Per-line columns are projections, not direct PatientRecord inputs.
+
+        The first line of each group is the exception: it is offered as a
+        writable control that authors the line itself (`authored_episode`), not
+        as a column a client may set. Everything else derived from the episodes
+        stays computed.
+        """
         d = build_writable_field_descriptor()
         for field in ('first_line_outcome', 'second_line_start_date', 'later_end_date'):
+            if field in d and d[field].get('authored_episode'):
+                assert d[field]['writable'] is True
+                assert d[field]['target'] == 'patient_record'
+                continue
             assert d[field]['kind'] == 'computed', field
             assert d[field]['source_tables'] == ['Episode', 'EpisodeEvent']
+        for field in ('later_start_date', 'later_end_date', 'later_therapy_ids',
+                      'first_line_component_ids', 'second_line_therapy_display'):
+            assert d[field]['kind'] == 'computed', field
+            assert d[field]['writable'] is False
+        for field in ('first_line_therapy', 'second_line_date', 'later_outcome'):
+            assert d[field]['authored_episode']['line_number'] in (1, 2, 3), field
+            assert d[field]['writable'] is True
         # Other treatment summaries retain their existing episode-authoring
         # guidance; they are not individual first/second/later-line columns.
         assert d['line_of_therapy']['group'] == 'therapy-inference'
@@ -446,7 +521,7 @@ class TestProfileFields:
 
     def test_no_direct_field_is_falsely_read_only(self):
         direct = {
-            field: entry for field, entry in build_writable_field_descriptor().items()
+            field: entry for field, entry in descriptor_fields().items()
             if entry['kind'] == 'direct' and not entry.get('curated')
         }
 
@@ -552,7 +627,8 @@ class TestAttributionsTrackDerivation:
 
 _LIFECYCLE = {
     'id', 'person', 'organization', 'created_at', 'updated_at',
-    'derived_at', 'derivation_version', 'user_edited_fields', 'custom_fields', 'therapy_overrides',
+    'derived_at', 'derivation_version', 'user_edited_fields', 'custom_fields',
+    'therapy_overrides', 'pending_source_pair_dates',
 }
 
 
@@ -628,3 +704,66 @@ class TestProfilePayloadField:
             assert entry['payload_field'] in accepted, (
                 f"{field} payload_field '{entry['payload_field']}' not in accepted set"
             )
+
+
+class TestListShape:
+    def test_multiple_survives_an_unloaded_vocabulary(self):
+        """A list field is a list even when its picker vocabulary is absent.
+
+        `multiple` used to be emitted only beside `options`, so a client saw a
+        single select for a JSON list and wrote a scalar over it (#2441).
+        """
+        from omop_core.models import FieldConceptMapping
+
+        VocabularyFactory(vocabulary_id='SNOMED')
+        concept = ConceptFactory(concept_code='SCT-LIST', vocabulary_id='SNOMED')
+        FieldConceptMapping.objects.update_or_create(
+            field_name='stem_cell_transplant_history',
+            defaults={
+                'concept': concept,
+                'vocabulary_id': 'SNOMED',
+                'concept_code': 'SCT-LIST',
+                'omop_table': 'observation',
+                'source_value': 'sct-list',
+                'value_kind': 'string',
+                'type_concept_id': 32817,
+                'status': 'approved',
+                'multiple': True,
+                'value_vocabulary': 'VocabularyThatIsNotLoaded',
+            },
+        )
+        entry = descriptor_fields()['stem_cell_transplant_history']
+        assert entry.get('multiple') is True
+        assert 'options' not in entry
+
+
+class TestGenomicsWritability:
+    def test_genetic_mutations_is_read_only_without_the_vocabulary(self):
+        """Advertising Add on a stack with no genomics vocab only offers a 400 (#2441)."""
+        entry = descriptor_fields()['genetic_mutations']
+        assert entry['writable'] is False
+        assert 'vocabular' in entry['reason'].lower()
+
+    def test_genetic_mutations_is_writable_once_the_genomics_vocabulary_is_loaded(self):
+        """The Genomics endpoint needs concept 0, a CDM event concept, both
+        actor type concepts and the always-normalised status recipe; a gene
+        LOINC alone is the retired list writer."""
+        from omop_core.models import FieldConceptMapping
+        from omop_core.services.genomics import ACTOR_TYPE_CONCEPT_IDS
+
+        # Migrations seed this recipe; --no-migrations tests must create it.
+        FieldConceptMapping.objects.create(
+            field_name='genetic_mutations.status', source_value='genomics:status',
+            omop_table='measurement', status='approved')
+        VocabularyFactory(vocabulary_id='Type Concept')
+        VocabularyFactory(vocabulary_id='CDM')
+        ConceptFactory(concept_id=0, concept_code='0', vocabulary_id='Type Concept')
+        for concept_id in ACTOR_TYPE_CONCEPT_IDS:
+            ConceptFactory(concept_id=concept_id, concept_code=str(concept_id),
+                           vocabulary_id='Type Concept')
+        ConceptFactory(concept_id=9_500_001, concept_code='measurement.measurement_id',
+                       vocabulary_id='CDM', concept_name='measurement.measurement_id')
+
+        entry = descriptor_fields()['genetic_mutations']
+        assert entry['writable'] is True
+        assert 'vocabular' not in entry['reason'].lower()

@@ -145,7 +145,9 @@ class Command(BaseCommand):
 
         wanted = set(options['field'])
         fields = [f for f, e in sorted(descriptor.items())
-                  if e['kind'] == 'unmapped' and (not wanted or f in wanted)]
+                  # `__descriptor__` is the versioned envelope, not a field.
+                  if not f.startswith('__')
+                  and e['kind'] == 'unmapped' and (not wanted or f in wanted)]
         if options['derived_only']:
             fields = [f for f in fields if f in derived]
         if options['limit']:

@@ -1,5 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useContext, useEffect, useState, useSyncExternalStore } from 'react';
+import { PatientFormContext } from '@/federation/PatientFormContext';
 import { clinicalClient, clinicalUrl } from '@/api/clinicalTransport';
+import { parseWritableDescriptor } from '@/federation/descriptorVersion';
 
 /**
  * What the server says a client may do with each PatientRecord field.
@@ -11,7 +13,13 @@ import { clinicalClient, clinicalUrl } from '@/api/clinicalTransport';
  * move with vocabulary releases, so a copy in TypeScript would drift silently and
  * start writing facts against stale concepts.
  */
-export type FieldKind = 'editable' | 'selectable' | 'computed' | 'alias' | 'direct' | null;
+export type FieldKind = 'editable' | 'selectable' | 'computed' | 'alias' | 'direct'
+  /** An inverted view of a canonical boolean (`no_hiv_status` over `hiv_status`).
+   *  Not a column: the editor writes `canonical` with the opposite value. */
+  | 'negated'
+  /** Answered through its own self-only snapshot endpoint, not a field write. */
+  | 'explicit-answer'
+  | null;
 
 export interface FieldDescriptor {
   kind: FieldKind;
@@ -31,6 +39,13 @@ export interface FieldDescriptor {
   vocabulary?: string;
   display?: string;
   value_kind?: 'number' | 'string' | 'boolean' | 'date' | 'datetime';
+  /** A nullable boolean answered Yes / No / Unknown, where Unknown is not a
+   *  negative answer and must be offered as its own choice (#5521). */
+  tri_state?: boolean;
+  /** Reviewed wording for the two answers of a nullable boolean, when `Yes` and
+   *  `No` would not answer the question the row asks ("HIV Positive" / "No HIV",
+   *  #5601). Absent means the generic pair. */
+  answer_labels?: { true?: string; false?: string };
   unit?: string | null;
   unit_concept_id?: number | null;
   type_concept_id?: number;
@@ -42,10 +57,18 @@ export interface FieldDescriptor {
   inputs?: string[];
   /** selectable */
   qualifies?: string;
+  /** The curated unit choices for a field that stores its unit beside the
+   *  value (`hemoglobin_level` + `hemoglobin_level_units`, #2318/#2319). The
+   *  editor renders the picker from this list; it never spells the factors. */
+  unit_options?: Array<{ value: string; label?: string }>;
   /** profile: the curated choices the server resolves a concept from. Not the
    *  whole vocabulary — OMOP's Race holds 1,409 concepts, which is not the
    *  question a clinical form asks. */
-  options?: Array<{ value: string; code?: string }>;
+  options?: Array<{ value: string; label?: string; code?: string }>;
+  /** A scalar fact whose clinical date the editor supplies (lab results). */
+  dated?: boolean;
+  /** The latest recorded date for this field's fact, when one exists. */
+  latest_date?: string;
   /** Several answers at once, stored comma-joined. */
   multiple?: boolean;
   /** OMOP projection metadata — present when the field has an approved mapping.
@@ -62,6 +85,11 @@ export interface FieldDescriptor {
   /** Set when the field is mapped but this caller may not edit this patient —
    *  read-only for who is asking, rather than read-only in principle. */
   read_only_for_caller?: boolean;
+  /** A canonical value this PR derives from a value + unit source pair
+   *  (`hemoglobin_g_dl` from `hemoglobin_level`). Not `writable`: the form store
+   *  edits the pair. The server still honours a canonical write, so a view
+   *  without the store edits the canonical instead (#2425). */
+  normalised_read_model?: boolean;
   /** authored: what to write instead, since no single fact backs this field. */
   authored_via?: {
     target?: string;
@@ -73,6 +101,15 @@ export interface FieldDescriptor {
 }
 
 export type FieldDescriptors = Record<string, FieldDescriptor>;
+
+/** Whether a view WITHOUT the patient form store may edit this field through
+ *  the native PatientRecord PATCH. One predicate for rendering, saving and
+ *  dirty-state cleanup, so they cannot disagree. */
+export function editableWithoutFormStore(descriptor?: FieldDescriptor): boolean {
+  if (!descriptor || descriptor.read_only_for_caller) return false;
+  return !!descriptor.writable
+    || (!!descriptor.normalised_read_model && descriptor.target === 'patient_record');
+}
 
 /**
  * Columns the record keeps for itself, which no editor may send.
@@ -129,10 +166,18 @@ export function fetchWritableFields(
         // Without a person the server answers for the deployment. With one it
         // answers for this caller and this patient, which is what a tab needs
         // before it decides whether to render a box.
-        params: key ? { person_id: key } : undefined,
+        // `envelope=1` asks for the versioned `__descriptor__` envelope, which
+        // the plain response no longer carries by default. Without it the
+        // schema-version gate below would never see a version to refuse.
+        params: key ? { envelope: '1', person_id: key } : { envelope: '1' },
       })
       .then((res) => {
-        const data = (res.data ?? {}) as FieldDescriptors;
+        // The native editor saves fields from this mapping too. An unknown
+        // contract must fail closed here as well, not only in the federated
+        // store: otherwise a newer descriptor would still offer old boxes.
+        const parsed = parseWritableDescriptor(res.data);
+        if (parsed.error) throw new Error(parsed.error);
+        const data = parsed.fields as unknown as FieldDescriptors;
         cached.set(key, data);
         return data;
       })
@@ -144,7 +189,13 @@ export function fetchWritableFields(
   return pending;
 }
 
+const noSubscription = () => () => {};
+const noSnapshot = () => null;
+
 export function useWritableFields(personId?: number | string) {
+  const formStore = useContext(PatientFormContext);
+  const scoped = useSyncExternalStore(formStore?.subscribe ?? noSubscription,
+    formStore?.getSnapshot ?? noSnapshot, formStore?.getSnapshot ?? noSnapshot);
   const key = keyFor(personId);
   const [descriptors, setDescriptors] = useState<FieldDescriptors>(
     () => cached.get(key) ?? {},
@@ -153,6 +204,7 @@ export function useWritableFields(personId?: number | string) {
   const [error, setError] = useState(false);
 
   useEffect(() => {
+    if (formStore) return;
     let alive = true;
     const ready = cached.get(key);
     if (ready) {
@@ -180,7 +232,8 @@ export function useWritableFields(personId?: number | string) {
     return () => {
       alive = false;
     };
-  }, [key, personId]);
+  }, [key, personId, formStore]);
 
-  return { descriptors, loading, error };
+  return scoped ? { descriptors: scoped.fields, loading: scoped.loading, error: Boolean(scoped.error) }
+    : { descriptors, loading, error };
 }

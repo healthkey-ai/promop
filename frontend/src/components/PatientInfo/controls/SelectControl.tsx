@@ -25,6 +25,7 @@ export default function SelectControl({
   allowClear = false,
   clearLabel = "— None —",
   treatEmptyOptionAsUnknown = true,
+  ariaLabel,
   onChange,
 }: {
   value: unknown;
@@ -34,6 +35,7 @@ export default function SelectControl({
   allowClear?: boolean;
   clearLabel?: string;
   treatEmptyOptionAsUnknown?: boolean;
+  ariaLabel?: string;
   onChange: (v: unknown) => void;
 }) {
   const normalized = useMemo(() => {
@@ -94,7 +96,7 @@ export default function SelectControl({
       }}
       disabled={disabled}
     >
-      <SelectTrigger>
+      <SelectTrigger aria-label={ariaLabel}>
         <SelectValue placeholder={placeholder} />
       </SelectTrigger>
       <SelectContent>

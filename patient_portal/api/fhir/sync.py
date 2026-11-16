@@ -33,7 +33,8 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from omop_core.authorization import can_write_patient
-from omop_core.services.provenance_attribution import with_attribution
+from omop_core.services.provisional import is_real_row
+from omop_core.services.provenance_attribution import classify, with_attribution, OWN
 from django.db.models import Q
 from django.db.models.functions import Upper
 
@@ -258,10 +259,37 @@ def _is_daily_rollup(obs):
     return False
 
 
-def _same_attribution_extras(rows):
-    """Later rows from the same hospital as the first; another hospital's row
-    is a separate fact, not a duplicate."""
-    return [row for row in rows[1:] if row.attribution == rows[0].attribution]
+def _is_real_row(row, concept_field):
+    """A stored row holds an approved fact: no proposal score, a mapped concept.
+
+    The shared predicate (#2543) applied to the sync paths, so a proposal never
+    outlives the approved fact it duplicates (#2581).
+    """
+    return is_real_row(getattr(row, 'confidence', None), getattr(row, concept_field))
+
+
+def _preferred_keep(rows, concept_field, organization=None):
+    """Keep the first approved row; fall back to the first row if none is.
+
+    ``rows`` are ordered by pk. When the caller names a hospital, only its own
+    rows are candidates; otherwise the first row's hospital defines the group.
+    Another hospital's row is a separate fact, so it is neither chosen as the
+    survivor nor collapsed. A later real row of the same hospital is the
+    survivor when an earlier provisional one matches the same event.
+    """
+    if organization is not None:
+        own = [row for row in rows
+               if classify(row.attribution, organization.pk) == OWN]
+        group = own or [row for row in rows if row.attribution == rows[0].attribution]
+    else:
+        group = [row for row in rows if row.attribution == rows[0].attribution]
+    return next((row for row in group if _is_real_row(row, concept_field)), group[0])
+
+
+def _same_attribution_extras(rows, keep):
+    """Rows of the same hospital as *keep*; another hospital's row is a separate
+    fact, not a duplicate. Earlier rows are included when *keep* is a later one."""
+    return [row for row in rows if row != keep and row.attribution == keep.attribution]
 
 
 class FhirSyncRequestSerializer(serializers.Serializer):
@@ -772,6 +800,21 @@ class FhirSyncView(APIView):
             ))
         return self._bulk_insert(Measurement, 'measurement_id', rows, source_user_id, person, org)
 
+    def _may_promote_confidence(self, incoming=None):
+        """Whether this caller may clear a provisional row's confidence (#2434).
+
+        The shared authorization rule, not the endpoint: a patient presenting a
+        delegated OAuth token may reach the EHR sync view and still may not
+        approve a proposed mapping. Patient self-service never promotes, and an
+        incoming proposal does not promote the row it matches.
+        """
+        if self.self_service_only:
+            return False
+        if incoming is not None and getattr(incoming, 'confidence', None) is not None:
+            return False
+        from patient_portal.api.serializers import may_write_confidence
+        return may_write_confidence(getattr(self, 'request', None))
+
     def _upsert_rollup_observations(self, person, observations, ehr_type, cache, source_user_id, org, skipped):
         """Replace any prior row for (person, concept, date) with the new daily
         value, collapsing stale stacked rows — so a changed daily aggregate
@@ -804,8 +847,12 @@ class FhirSyncView(APIView):
                 existing_qs = Measurement.objects.filter(
                     match, person=person, measurement_date=obs_date,
                     measurement_event_id__isnull=True, meas_event_field_concept_id__isnull=True,
+                    is_erroneous=False,
                 )
                 existing = list(with_attribution(existing_qs).order_by('measurement_id'))
+                if org is not None:
+                    existing = [row for row in existing
+                                if classify(row.attribution, org.pk) == OWN]
                 if not existing:
                     # Nothing stored yet, but a row for this same concept and
                     # day may already be staged from an earlier entry in this
@@ -832,7 +879,8 @@ class FhirSyncView(APIView):
                     ))
                     continue
 
-                keep, extras = existing[0], _same_attribution_extras(existing)
+                keep = _preferred_keep(existing, 'measurement_concept_id', org)
+                extras = _same_attribution_extras(existing, keep)
                 if extras:  # collapse historical stacked rows for this concept/day
                     extra_ids = [m.measurement_id for m in extras]
                     ProvenanceRecord.objects.filter(
@@ -845,6 +893,12 @@ class FhirSyncView(APIView):
                 # -- and writing 0 over a good concept would lose curation that
                 # already happened.
                 next_cid = cid or keep.measurement_concept_id
+                # Only a resolved incoming concept from a non-patient sync
+                # confirms the proposal; an unresolved code must not turn it
+                # into an approved fact, and patient self-service may not clear
+                # confidence (#2434, #2581).
+                promoted = (keep.confidence is not None and cid != 0
+                            and self._may_promote_confidence())
                 changed = (
                     keep.measurement_concept_id != next_cid
                     or _norm_num(keep.value_as_number) != _norm_num(o['value'])
@@ -856,9 +910,13 @@ class FhirSyncView(APIView):
                     or keep.range_low != o['range_low']
                     or keep.range_high != o['range_high']
                 )
-                if changed:
+                if changed or promoted:
                     # Concept updated in place, so approving a mapping upgrades
                     # the stored row instead of stranding a duplicate beside it.
+                    # The sync is a real EHR write: a proposal it rewrites is no
+                    # longer a proposal (#2581).
+                    if promoted:
+                        keep.confidence = None
                     keep.measurement_concept_id = next_cid
                     keep.value_as_number = o['value']
                     keep.measurement_datetime = o['dt']
@@ -869,12 +927,19 @@ class FhirSyncView(APIView):
                     keep.range_low = o['range_low']
                     keep.range_high = o['range_high']
                     keep._skip_patient_record_refresh = True
-                    keep.save(update_fields=['measurement_concept_id',
-                                             'value_as_number', 'measurement_datetime',
-                                             'value_as_string', 'value_as_concept',
-                                             'unit_source_value', 'value_source_value',
-                                             'range_low', 'range_high'])
-                if changed or extras:
+                    fields = ['measurement_concept_id',
+                              'value_as_number', 'measurement_datetime',
+                              'value_as_string', 'value_as_concept',
+                              'unit_source_value', 'value_source_value',
+                              'range_low', 'range_high']
+                    if promoted:
+                        fields.append('confidence')
+                    keep.save(update_fields=fields)
+                if promoted:
+                    from omop_core.models import PatientRecord
+                    PatientRecord.objects.filter(person=person).update(
+                        derivation_version=0)
+                if changed or promoted or extras:
                     touched.append(keep.measurement_id)
             inserted = self._bulk_insert(
                 Measurement, 'measurement_id', new_rows, source_user_id, person, org)
@@ -1141,11 +1206,13 @@ class FhirSyncView(APIView):
         resolves. If a row already exists for that key, its concept is updated in
         place when it changed (so a vocabulary load upgrading 'No matching
         concept' to a real concept doesn't strand a duplicate) and any stacked
-        duplicates are collapsed onto the earliest row; otherwise the row is
-        inserted. `rows` is a list of unsaved model instances (person already
-        set). `refresh_fields` are further columns a re-sync fills on a matched
-        row, but only with a value the source gave (never blanking a stored one).
-        Returns touched + inserted pk ids."""
+        duplicates are collapsed onto the first approved row (null confidence and
+        a mapped concept), or onto the earliest when none is; a provisional row
+        it rewrites is promoted, because the sync is a real EHR write (#2581).
+        Otherwise the row is inserted. `rows` is a list of unsaved model
+        instances (person already set). `refresh_fields` are further columns a
+        re-sync fills on a matched row, but only with a value the source gave
+        (never blanking a stored one). Returns touched + inserted pk ids."""
         if not rows:
             return []
         from omop_core.services.cancer_details import EVENT_FIELDS
@@ -1158,19 +1225,33 @@ class FhirSyncView(APIView):
             for key, inst in desired.items():
                 sv, date = key[:2]
                 scope = dict(zip(event_fields, key[2:]))
-                existing = list(with_attribution(model.objects.filter(**{
-                    'person': person, sv_field: sv, date_field: date, **scope})).order_by(pk_field))
+                def own(rows):
+                    # A named hospital never rewrites another hospital's row; a
+                    # foreign-only match is a separate fact and inserts here.
+                    if org is None:
+                        return rows
+                    return [row for row in rows
+                            if classify(row.attribution, org.pk) == OWN]
+
+                existing = own(list(with_attribution(model.objects.filter(**{
+                    'person': person, sv_field: sv, date_field: date, **scope,
+                    'is_erroneous': False})).order_by(pk_field)))
                 legacy = getattr(inst, '_legacy_source_value', None)
                 renamed = False
                 if not existing and legacy:
                     # Stored before #2168 under the bare code: the same event.
-                    existing = list(with_attribution(model.objects.filter(**{
-                        'person': person, sv_field: legacy, date_field: date, **scope})).order_by(pk_field))
+                    # Attribution is filtered before this decision, so a foreign
+                    # row under the current spelling cannot hide our own legacy
+                    # row and force a duplicate.
+                    existing = own(list(with_attribution(model.objects.filter(**{
+                        'person': person, sv_field: legacy, date_field: date, **scope,
+                        'is_erroneous': False})).order_by(pk_field)))
                     renamed = bool(existing)
                 if not existing:
                     new_rows.append(inst)
                     continue
-                keep, extras = existing[0], _same_attribution_extras(existing)
+                keep = _preferred_keep(existing, cid_field, org)
+                extras = _same_attribution_extras(existing, keep)
                 if extras:  # collapse historical stacked rows for this event
                     extra_ids = [getattr(m, pk_field) for m in extras]
                     ProvenanceRecord.objects.filter(
@@ -1180,17 +1261,35 @@ class FhirSyncView(APIView):
                 if renamed:
                     setattr(keep, sv_field, sv)
                     changed.append(sv_field)
-                if getattr(keep, cid_field) != getattr(inst, cid_field):
-                    setattr(keep, cid_field, getattr(inst, cid_field))
+                incoming_cid = getattr(inst, cid_field, None)
+                # Never trade a resolved concept for "no matching concept": an
+                # unresolved re-sync must not demote a curated or approved row
+                # (the rollup already works this way).
+                next_cid = incoming_cid or getattr(keep, cid_field)
+                if getattr(keep, cid_field) != next_cid:
+                    setattr(keep, cid_field, next_cid)
                     changed.append(cid_field)
                 for field in refresh_fields:
                     value = getattr(inst, field)
                     if value is not None and getattr(keep, field) != value:
                         setattr(keep, field, value)
                         changed.append(field)
+                if (getattr(keep, 'confidence', None) is not None
+                        and incoming_cid not in (None, 0)
+                        and self._may_promote_confidence(inst)):
+                    # The sync resolved a concept, so the row it rewrites is a
+                    # real fact, not a proposal (#2581). An unresolved code or
+                    # a patient self-service write keeps it provisional.
+                    keep.confidence = None
+                    changed.append('confidence')
+                promoted = 'confidence' in changed
                 if changed:
                     keep._skip_patient_record_refresh = True
                     keep.save(update_fields=changed)
+                if promoted:
+                    from omop_core.models import PatientRecord
+                    PatientRecord.objects.filter(person=person).update(
+                        derivation_version=0)
                 if changed or extras:
                     touched.append(getattr(keep, pk_field))
             inserted = self._bulk_insert(model, pk_field, new_rows, source_user_id, person, org)

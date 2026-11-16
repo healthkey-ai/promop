@@ -4,16 +4,16 @@ from django.db import migrations
 
 
 def backfill_units(apps, schema_editor):
-    from omop_core.services.mappings import FIELD_COMMON_UNITS
+    # Same frozen defaults as 0171; see that migration.
+    from omop_core.migrations._field_common_units import DEFAULT_UNITS
 
     FieldConceptMapping = apps.get_model('omop_core', 'FieldConceptMapping')
-    for field_name, units in FIELD_COMMON_UNITS.items():
-        if units:
-            FieldConceptMapping.objects.filter(
-                field_name=field_name,
-                unit='',
-                status__in=('proposed', 'approved'),
-            ).update(unit=units[0])
+    for field_name, unit in DEFAULT_UNITS.items():
+        FieldConceptMapping.objects.filter(
+            field_name=field_name,
+            unit='',
+            status__in=('proposed', 'approved'),
+        ).update(unit=unit)
 
 
 class Migration(migrations.Migration):

@@ -4,10 +4,11 @@ from datetime import date
 
 import pytest
 
-from omop_core.models import Measurement
+from omop_core.models import Measurement, Observation
 from omop_core.services.patient_record_service import refresh_patient_record
 from tests.factories import (
-    ConceptFactory, MeasurementFactory, PatientRecordFactory, PersonFactory,
+    ConceptFactory, MeasurementFactory, ObservationFactory, PatientRecordFactory,
+    PersonFactory,
 )
 
 pytestmark = pytest.mark.django_db
@@ -64,3 +65,30 @@ def test_sleep_hours_per_night_accepts_source_value_fallback():
     record = refresh_patient_record(person)
 
     assert float(record.sleep_hours_per_night) == 8.0
+
+
+def test_withdrawn_tobacco_answer_is_cleared():
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    status = ConceptFactory(
+        concept_code='72166-2', vocabulary_id='LOINC',
+        concept_name='Tobacco smoking status',
+    )
+    never = ConceptFactory(
+        concept_code='LA18978-9', vocabulary_id='LOINC',
+        concept_name='Never smoker',
+    )
+    ObservationFactory(
+        person=person, observation_concept=status,
+        observation_source_value='72166-2', value_as_concept=never,
+        observation_date=date(2026, 1, 1),
+    )
+
+    record = refresh_patient_record(person)
+    assert record.no_tobacco_use_status is True
+    assert record.tobacco_use_details == 'Never smoker'
+
+    Observation.objects.filter(person=person).delete()
+    record = refresh_patient_record(person)
+    assert record.no_tobacco_use_status is None
+    assert record.tobacco_use_details is None

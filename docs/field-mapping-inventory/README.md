@@ -32,6 +32,15 @@ code is parsed, never imported or executed. The pinned provider hash requires
 explicit review when CancerBot changes. The recorded checkout revision is not
 an assertion about CancerBot's deployed application revision.
 
+## Genomics priority coverage (#1311)
+
+[genomics-priority-coverage.md](genomics-priority-coverage.md) and its JSON
+extract the manifest's `priority_field_coverage` section: every priority
+gene/marker field per disease with its storage disposition: a standard-parent
+candidate awaiting review, or the supported source-only parent.
+Regenerate with `python manage.py export_genomics_priority_coverage --write`;
+`--check` fails when the evidence is stale.
+
 Replay the checked-in reference snapshot without any database access:
 
 ```sh

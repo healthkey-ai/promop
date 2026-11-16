@@ -67,6 +67,12 @@ export interface PatientInfo {
   cytogenetic_markers?: string;
   molecular_markers?: string;
   plasma_cell_leukemia?: boolean;
+  mgus?: boolean | null;
+  smoldering_multiple_myeloma?: boolean | null;
+  waldenstrom_macroglobulinemia?: boolean | null;
+  igm_multiple_myeloma?: boolean | null;
+  al_amyloidosis?: boolean | null;
+  poems_syndrome?: boolean | null;
   progression?: string;
   measurable_disease_imwg?: boolean;
   mrd_status?: string | null;
@@ -107,7 +113,7 @@ export interface PatientInfo {
   second_line_outcome?: string;
   later_therapy?: string;
   later_line_therapy?: string;  // UI uses this name
-  later_therapies?: Array<{ therapy: string; startDate?: string | null; endDate?: string | null; lineNumber?: number | null; concept_id?: number | null }> | null;
+  later_therapies?: Array<{ therapy: string; startDate?: string | null; endDate?: string | null; progression_date?: string | null; lineNumber?: number | null; concept_id?: number | null }> | null;
   // HemOnc concept_id fields
   first_line_therapy_id?: number | null;
   second_line_therapy_id?: number | null;

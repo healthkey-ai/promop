@@ -4,27 +4,44 @@ export default function BooleanControl({
   value,
   disabled,
   onChange,
+  triState = false,
+  trueLabel = 'Yes',
+  falseLabel = 'No',
+  ariaLabel,
 }: {
   value: boolean | null | undefined;
   disabled?: boolean;
   onChange: (v: boolean | null) => void;
+  triState?: boolean;
+  /** Reviewed wording for the two answers (#5601). */
+  trueLabel?: string;
+  falseLabel?: string;
+  ariaLabel?: string;
 }) {
-  const strValue = value === true ? "true" : value === false ? "false" : "";
+  const strValue = value === true
+    ? "true"
+    : value === false
+      ? "false"
+      : triState
+        ? "unknown"
+        : "";
 
   return (
     <SelectControl
       value={strValue}
       disabled={disabled}
+      ariaLabel={ariaLabel}
       placeholder="Select…"
       treatEmptyOptionAsUnknown={false}
-      allowClear={true}
+      allowClear={!triState}
       clearLabel="— None —"
       options={[
-        { value: "true", label: "Yes" },
-        { value: "false", label: "No" },
+        { value: "true", label: trueLabel },
+        { value: "false", label: falseLabel },
+        ...(triState ? [{ value: "unknown", label: "Unknown" }] : []),
       ]}
       onChange={(v) => {
-        if (v === null || v === "") return onChange(null);
+        if (v === null || v === "" || v === "unknown") return onChange(null);
         onChange(String(v) === "true");
       }}
     />

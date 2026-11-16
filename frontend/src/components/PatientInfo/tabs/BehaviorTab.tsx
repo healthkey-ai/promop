@@ -6,6 +6,7 @@ import {
   type FlattenedLanguage, type LanguageCapability,
 } from '@/api/clinicalFacts';
 import ClinicalField from '../ClinicalField';
+import { usePatientFormReadOnly } from '@/federation/PatientFormContext';
 import MultiSelectControl from '../controls/MultiSelectControl';
 import Section from '../Section';
 
@@ -60,6 +61,8 @@ export default function BehaviorTab({ formData, onChange, onRefresh }: Props) {
   // asking and whose record it is, not only on whether the field is mapped.
   const personId = (formData?.person_id ?? formData?.person) as number | undefined;
   const { descriptors, loading } = useWritableFields(personId);
+  // Language skills save on the spot, outside `onChange`: honour a read-only form here.
+  const locked = usePatientFormReadOnly();
 
   // Language skills are rows rather than a PatientRecord column, so they do not
   // go through `onChange` with the rest of the tab: the edit is saved on the
@@ -131,7 +134,9 @@ export default function BehaviorTab({ formData, onChange, onRefresh }: Props) {
           <div className="sm:col-span-2">
             <ClinicalField label="Pregnancy Test Result" name="pregnancy_test_result_value" descriptor={descriptors.pregnancy_test_result_value} type="text" value={formData?.pregnancy_test_result_value} onChange={onChange} />
           </div>
+          <ClinicalField label="Negative Pregnancy Test Result" name="pregnancy_test_result" descriptor={descriptors.pregnancy_test_result} type="boolean" value={formData?.pregnancy_test_result} onChange={onChange} />
           <ClinicalField label="Using Contraceptives" name="contraceptive_use" descriptor={descriptors.contraceptive_use} type="boolean" value={formData?.contraceptive_use} onChange={onChange} />
+          <ClinicalField label="Not Pregnant or Lactating" name="no_pregnancy_or_lactation_status" descriptor={descriptors.no_pregnancy_or_lactation_status} type="boolean" value={formData?.no_pregnancy_or_lactation_status} onChange={onChange} />
         </div>
       </Section>
 
@@ -175,7 +180,7 @@ export default function BehaviorTab({ formData, onChange, onRefresh }: Props) {
                 options={CAPABILITY_OPTIONS}
                 selectedValues={languageCapabilitiesFrom(formData, language)}
                 display={describeCapabilities(languageCapabilitiesFrom(formData, language))}
-                disabled={savingLanguage !== null}
+                disabled={locked || savingLanguage !== null}
                 onChange={(next) => saveLanguage(language, next as LanguageCapability[])}
               />
             </div>

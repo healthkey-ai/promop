@@ -323,7 +323,8 @@ def test_required_backend_gate_rejects_incomplete_matrix(
     assert gate['name'] == 'Backend tests'
     assert set(gate['needs']) == {'changes', 'backend_suites', 'athena_browser'}
     assert 'always()' in gate['if']
-    assert set(jobs['backend_suites']['strategy']['matrix']['suite']) == {'django', 'pytest'}
+    assert set(jobs['backend_suites']['strategy']['matrix']['suite']) == {
+        'django', 'pytest', 'fresh_migrate'}
     command = gate['steps'][0]['run']
     process = subprocess.run(['bash', '-c', command], env={
         **os.environ,
@@ -374,6 +375,18 @@ def test_backend_suites_are_bounded_and_do_not_migrate_twice():
     )
     assert '--dist loadfile' in pytest_command
     assert '--durations=20' in pytest_command
+    # The one leg that applies the real graph to a real, empty database: the
+    # Django runner uses a `test_` database, where 0240's seed does nothing, and
+    # pytest uses --no-migrations. That gap is how 0333's `tab` column shipped
+    # ahead of the seed that inserted it (cancerbot-org/cancerbot#5847).
+    fresh = next(
+        step for step in steps
+        if step.get('name') == 'Apply every migration to an empty database'
+    )
+    assert fresh['if'] == "matrix.suite == 'fresh_migrate'"
+    assert fresh['env']['DATABASE_URL'].endswith('/promop_fresh')
+    assert 'CREATE DATABASE promop_fresh' in fresh['run']
+    assert 'migrate --noinput' in fresh['run']
 
 
 def test_browser_runtime_is_a_separate_path_gated_job():

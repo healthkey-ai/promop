@@ -11,7 +11,7 @@
  * returned vocabulary options.
  */
 
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, within } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, type Mock } from 'vitest';
 import DiseaseTab from './DiseaseTab';
 import { __resetWritableFieldsCache, fetchWritableFields } from '@/hooks/useWritableFields';
@@ -42,11 +42,26 @@ const observation = (source_value: string, value_kind: string, multiple = false)
   },
 });
 
+const triStateBoolean = (source_value: string) => {
+  const entry = observation(source_value, 'boolean');
+  return { ...entry, tri_state: true, projection: { ...entry.projection, affirmative_only: true } };
+};
+
 const DESCRIPTORS: Record<string, unknown> = {
   disease: observation('disease', 'string'),
   sct_date: observation('mm-sct-date', 'date'),
   stem_cell_transplant_history: observation('mm-sct-history', 'string', true),
   sct_eligibility: observation('mm-sct-eligibility', 'string', true),
+  mgus: triStateBoolean('35601003'),
+  smoldering_multiple_myeloma: triStateBoolean('413587002'),
+  waldenstrom_macroglobulinemia: triStateBoolean('190818004'),
+  igm_multiple_myeloma: triStateBoolean('IgM-MM'),
+  al_amyloidosis: triStateBoolean('23132008'),
+  poems_syndrome: triStateBoolean('79268002'),
+  plasma_cell_leukemia: {
+    ...triStateBoolean('PCL'),
+    answer_labels: { true: 'Present', false: 'Not present' },
+  },
   cytogenetic_markers: {
     ...observation('mm-cytogenetic-markers', 'string', true),
     options: [
@@ -516,7 +531,9 @@ describe('DiseaseTab — descriptor-driven', () => {
   const CONVERTED: Record<string, unknown> = {
     estrogen_receptor_status: measurement('16112-5'),
     her2_status: measurement('48676-1'),
-    ki67_proliferation_index: { ...measurement('85337-4'), value_kind: 'number' },
+    ki67_proliferation_index: {
+      ...measurement('85337-4'), value_kind: 'number', dated: true,
+    },
     tumor_stage: measurement('21905-5'),
     // Real column, no concept assigned yet.
     staging_modalities: {
@@ -560,17 +577,17 @@ describe('DiseaseTab — descriptor-driven', () => {
     );
   });
 
-  it('shows a computed status as text, never as a control', () => {
-    // tnbc_status follows from the three receptor statuses, and the tab has
-    // always rendered it as a plain Yes/No rather than a field. Converting must
-    // not turn it into a box: it has no descriptor entry to write against.
+  it('renders the computed status from its descriptor and names the inputs', () => {
+    // tnbc_status follows from the three receptor statuses. It is rendered
+    // through ClinicalField so the shared editor can offer the source inputs;
+    // without a shared store it is still a read-only value with its reason.
     render(<DiseaseTab {...baseProps} diseaseType="breast"
       formData={{ tnbc_status: true }} />);
 
-    // "Yes" appears in several read-only displays, so anchor on the label.
-    expect(screen.getByText(/Triple Negative Status \(Computed\)/)).toBeInTheDocument();
-    expect(screen.getByText(/Automatically computed from ER, PR, and HER2/)).toBeInTheDocument();
-    expect(screen.queryByTestId('reason-tnbc_status')).not.toBeInTheDocument();
+    expect(screen.getByText('Triple Negative Status')).toBeInTheDocument();
+    expect(screen.getByTestId('reason-tnbc_status')).toHaveTextContent(
+      /Computed from estrogen_receptor_status, progesterone_receptor_status, her2_status/,
+    );
   });
 
   it('recognizes the now-stored B symptom fields', () => {
@@ -678,5 +695,74 @@ describe('DiseaseTab — legacy cytogenetic summary', () => {
     expect(screen.getByText('t(4;14), 1q21 gain/amplification')).toBeInTheDocument();
     expect(screen.queryByTestId('ms-opt-t(11;14)')).not.toBeInTheDocument();
     expect(onChange).not.toHaveBeenCalled();
+  });
+});
+
+describe('MyelomaSection — current-diagnosis disorders (#5521)', () => {
+  beforeEach(async () => {
+    __resetWritableFieldsCache();
+    (globalThis as Record<string, unknown>).__DESCRIPTORS__ = DESCRIPTORS;
+    await fetchWritableFields();
+    setupVocabMock();
+  });
+
+  const LABELS = [
+    'MGUS',
+    'Smoldering Multiple Myeloma',
+    'Waldenström Macroglobulinemia',
+    'IgM Multiple Myeloma',
+    'Light-Chain (AL) Amyloidosis',
+    'POEMS Syndrome',
+    'Plasma Cell Leukemia',
+  ];
+
+  /** The control beside a field label; labels are not HTML-associated. */
+  const controlFor = (label: string) => {
+    const labelEl = screen.getByText(label);
+    const control = labelEl.closest('.space-y-1\\.5') as HTMLElement;
+    return within(control).getByTestId('select-control') as HTMLSelectElement;
+  };
+
+  it('renders all seven current-diagnosis fields', () => {
+    renderMyeloma();
+
+    expect(screen.getByText('Myeloma Related Disorders')).toBeInTheDocument();
+    for (const label of LABELS) {
+      expect(screen.getByText(label)).toBeInTheDocument();
+    }
+  });
+
+  it('shows No and Unknown as distinct answers', () => {
+    renderMyeloma({ mgus: false, poems_syndrome: null });
+
+    expect(controlFor('MGUS').value).toBe('false');
+    expect(controlFor('POEMS Syndrome').value).toBe('unknown');
+  });
+
+  it('reports Unknown as null rather than a negative answer', () => {
+    const onChange = vi.fn();
+    renderMyeloma({ mgus: true }, onChange);
+
+    fireEvent.change(controlFor('MGUS'), { target: { value: 'unknown' } });
+
+    expect(onChange).toHaveBeenCalledWith('mgus', null);
+  });
+
+  it('keeps the disease polarity of a plasma-cell-leukemia answer', () => {
+    const onChange = vi.fn();
+    renderMyeloma({ plasma_cell_leukemia: true }, onChange);
+
+    const control = controlFor('Plasma Cell Leukemia');
+    const labels = [...control.options].map((o) => o.label);
+    expect(labels).toContain('Present');
+    expect(labels).toContain('Not present');
+    expect(labels).not.toContain('Yes');
+    expect(control.value).toBe('true');
+
+    fireEvent.change(control, { target: { value: 'false' } });
+
+    // Not inverted: the column records the disease, even when a trial asks
+    // the opposite question.
+    expect(onChange).toHaveBeenCalledWith('plasma_cell_leukemia', false);
   });
 });

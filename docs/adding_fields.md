@@ -21,9 +21,12 @@ Issue: #721
   creation service. `CustomPatientField` owns `field_name`, display label,
   selected tab, value type, and its `FieldConceptMapping`; `custom_fields` is
   the PatientRecord JSON object keyed by field name.
-- [x] Add an admin-only API that requires explicit confirmation that the field
-  will be added to PatientRecord, creates the field definition and approved
-  OMOP mapping atomically, and rejects duplicate/invalid names.
+- [x] Add a mapping-curator-gated API (currently `_can_manage_mappings`; the
+  planned staff/org-admin-only creation gate is in
+  [section 10.3](field_concept_mapping_plan.md#103-creating-and-scoping-a-field-from-a-patient-tab))
+  that requires explicit confirmation that the field will be added to
+  PatientRecord, creates the field definition and approved OMOP mapping
+  atomically, and rejects duplicate/invalid names.
 - [ ] Extend descriptor/mapping APIs so custom fields are visible and retain
   their selected Patient Info tab.
 - [ ] Add generic OMOP value derivation for Measurement, Observation,

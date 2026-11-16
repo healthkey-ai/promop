@@ -27,11 +27,15 @@ def request_refresh(apps, schema_editor):
             from omop_core.services import axis_variant_jobs
 
             axis_variant_jobs.publish(LiveModel.objects.get(pk=row.pk))
-        except Exception:
+        except Exception as error:
             # The live model can be ahead of this schema when a deployment
             # migrates through several releases at once. The row is what matters.
-            logger.warning('Axis variant refresh %s not published; the worker will publish it.',
-                           row.pk, exc_info=True)
+            # Publishing can fail on a fresh database or when the live model is
+            # ahead of this schema. That is recoverable, so warn once instead of
+            # printing a traceback. The worker sweep publishes the row.
+            logger.warning('Axis variant refresh %s not published (%s); the worker will publish it.',
+                           row.pk, error)
+            logger.debug('Axis variant refresh %s publish failed', row.pk, exc_info=True)
 
     transaction.on_commit(publish)
 

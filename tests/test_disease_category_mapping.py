@@ -372,3 +372,77 @@ class TestSeedData:
         assert DiseaseCategoryChoice.objects.count() >= 6
         assert DiseaseCategoryChoice.objects.filter(code='BC', label='Breast Cancer').exists()
         assert DiseaseCategoryChoice.objects.filter(code='Other', label='Other').exists()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize('name', [
+    'Family history of breast cancer', 'Family history of multiple myeloma',
+    'At high risk for malignant neoplasm of breast',
+])
+def test_family_history_and_risk_do_not_become_the_patients_cancer(name):
+    from omop_core.services.patient_record_service import _canonicalize_disease, _get_disease_data
+    from tests.factories import ConceptFactory, ConditionOccurrenceFactory, PersonFactory
+    DiseaseCategoryMapping.objects.create(disease_name=name, category='MM' if 'myeloma' in name else 'BC')
+    person = PersonFactory()
+    ConditionOccurrenceFactory(person=person, condition_concept=ConceptFactory(concept_name=name))
+    assert _canonicalize_disease(name) == name
+    assert not _get_disease_data(person).get('disease')
+
+
+@pytest.mark.django_db
+def test_patient_list_keeps_literal_diseases_and_filters_other_category():
+    from types import SimpleNamespace
+    from patient_portal.api.views import PatientRecordViewSet
+    from tests.factories import PatientRecordFactory
+    from omop_core.models import PatientRecord
+    disease = 'Diffuse large B-cell lymphoma'
+    DiseaseCategoryMapping.objects.create(disease_name=disease, category='Other')
+    other = PatientRecordFactory(disease=disease)
+    known = PatientRecordFactory(disease='Multiple Myeloma')
+    view = PatientRecordViewSet()
+    user = Identity.objects.create_user(email='filter-other@example.test', is_staff=True)
+    view.request = SimpleNamespace(query_params={'disease': 'Other'}, user=user)
+    queryset = PatientRecord.objects.filter(pk__in=[other.pk, known.pk])
+    assert disease in view._build_filter_options(queryset)['diseases']
+    assert set(view._apply_patient_list_filters(queryset).values_list('pk', flat=True)) == {other.pk}
+
+
+@pytest.mark.django_db
+def test_patient_list_filters_a_category_by_a_secondary_cancer_slug():
+    """A second cancer on the record carries the category, not only `disease`."""
+    from types import SimpleNamespace
+    from patient_portal.api.views import PatientRecordViewSet
+    from tests.factories import PatientRecordFactory
+    from omop_core.models import PatientRecord
+
+    DiseaseCategoryMapping.objects.create(disease_name='Multiple Myeloma', category='MM')
+    record = PatientRecordFactory(
+        disease='Prostate Cancer',
+        disease_slugs=['prostate-cancer', 'multiple-myeloma'],
+    )
+    view = PatientRecordViewSet()
+    user = Identity.objects.create_user(email='filter-secondary@example.test', is_staff=True)
+    view.request = SimpleNamespace(query_params={'disease': 'Multiple Myeloma'}, user=user)
+    queryset = PatientRecord.objects.filter(pk=record.pk)
+
+    assert set(view._apply_patient_list_filters(queryset).values_list('pk', flat=True)) == {record.pk}
+
+
+@pytest.mark.django_db
+def test_other_category_excludes_a_record_with_a_classified_secondary_cancer():
+    from types import SimpleNamespace
+    from patient_portal.api.views import PatientRecordViewSet
+    from tests.factories import PatientRecordFactory
+    from omop_core.models import PatientRecord
+
+    DiseaseCategoryMapping.objects.create(disease_name='Multiple Myeloma', category='MM')
+    record = PatientRecordFactory(
+        disease='Diffuse large B-cell lymphoma',
+        disease_slugs=['diffuse-large-b-cell-lymphoma', 'multiple-myeloma'],
+    )
+    view = PatientRecordViewSet()
+    user = Identity.objects.create_user(email='filter-other-secondary@example.test', is_staff=True)
+    view.request = SimpleNamespace(query_params={'disease': 'Other'}, user=user)
+    queryset = PatientRecord.objects.filter(pk=record.pk)
+
+    assert list(view._apply_patient_list_filters(queryset).values_list('pk', flat=True)) == []

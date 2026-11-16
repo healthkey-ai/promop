@@ -113,6 +113,24 @@ def get_request_org(request):
 _SAFE_METHODS = frozenset(('GET', 'HEAD', 'OPTIONS'))
 _READ_SCOPES = frozenset(('patient/*.read', 'user/*.read'))
 _WRITE_SCOPES = frozenset(('patient/*.write', 'user/*.write'))
+
+
+def credential_allows_write(request) -> bool:
+    """Whether this request's credential may issue a write at all.
+
+    Patient access is a separate question (`_caller_may_write_patient`). This
+    is the scope gate `ScopedTokenPermission` applies: session and partner-auth
+    callers are gated by role, OAuth2 and service credentials must carry a
+    write scope. The shared form asks this before enabling its controls.
+    """
+    if is_service_token(request):
+        return bool(frozenset(service_token_scopes(request).split()) & _WRITE_SCOPES)
+    token = getattr(request, 'auth', None)
+    if token is None or isinstance(token, TokenClaims):
+        return True
+    if not hasattr(token, 'scope') or timezone.now() >= token.expires:
+        return False
+    return bool(frozenset(token.scope.split()) & _WRITE_SCOPES)
 _ETL_WRITE_SCOPE = 'system/etl.write'
 _ETL_WRITE_METHODS = frozenset(('POST', 'PUT', 'PATCH'))
 _ETL_DELETE_SCOPE = 'system/etl.delete'

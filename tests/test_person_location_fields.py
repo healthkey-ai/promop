@@ -240,3 +240,88 @@ class TestDescriptor:
 
         groups = {e.get('group') for e in build_writable_field_descriptor().values()}
         assert 'location' not in groups
+
+
+def test_a_shared_location_is_cloned_for_the_edited_person(staff_client):
+    shared = Location.objects.create(
+        location_id=900001, city='Old', state='MA', address_1='1 Main St',
+        county='Suffolk', latitude=40.7, longitude=-74.0,
+    )
+    person_a = PersonFactory(location_id=shared.location_id)
+    person_b = PersonFactory(location_id=shared.location_id)
+    PatientRecordFactory(person=person_a)
+    PatientRecordFactory(person=person_b)
+
+    response = _patch(
+        staff_client, person_a, {'city': 'New', 'email': 'new@example.test'},
+    )
+
+    assert response.status_code == 200, response.data
+    person_a.refresh_from_db()
+    person_b.refresh_from_db()
+    assert person_a.location_id != shared.location_id
+    assert person_a.email == 'new@example.test'
+    assert person_b.location_id == shared.location_id
+    shared.refresh_from_db()
+    assert shared.city == 'Old'
+    clone = _loc(person_a)
+    assert clone.city == 'New'
+    assert clone.state == 'MA'
+    assert clone.address_1 == '1 Main St'
+    assert clone.county == 'Suffolk'
+    assert float(clone.latitude) == 40.7
+    assert float(clone.longitude) == -74.0
+
+
+def test_native_partial_coordinate_with_location_pair_is_rejected(staff_client):
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    location = Location.objects.create(
+        location_id=900011, latitude=40.7, longitude=-74.0,
+    )
+    person.location_id = location.location_id
+    person.save(update_fields=['location_id'])
+
+    response = _patch(staff_client, person, {'latitude': 41.0})
+
+    assert response.status_code == 400, response.data
+    person.refresh_from_db()
+    record = PatientRecord.objects.get(person=person)
+    assert record.latitude is None
+    assert record.longitude is None
+    assert person.location_id == location.location_id
+    location.refresh_from_db()
+    assert float(location.latitude) == 40.7
+    assert float(location.longitude) == -74.0
+
+
+@pytest.mark.parametrize('latitude,longitude', [(0, 30), (0, 0), (30, 0)])
+def test_zero_coordinates_survive_refresh(latitude, longitude):
+    person = PersonFactory()
+    PatientRecordFactory(person=person)
+    location = Location.objects.create(
+        location_id=900010, latitude=latitude, longitude=longitude,
+    )
+    person.location_id = location.location_id
+    person.save(update_fields=['location_id'])
+
+    record = refresh_patient_record(person)
+
+    assert record.latitude == latitude
+    assert record.longitude == longitude
+
+
+def test_partial_coordinate_projects_the_effective_pair(staff_client):
+    person = PersonFactory()
+    PatientRecordFactory(person=person, latitude=10, longitude=20)
+
+    response = _patch(staff_client, person, {'latitude': 11})
+
+    assert response.status_code == 200, response.data
+    person.refresh_from_db()
+    location = _loc(person)
+    assert float(location.latitude) == 11
+    assert float(location.longitude) == 20
+    refreshed = refresh_patient_record(person)
+    assert refreshed.latitude == 11
+    assert refreshed.longitude == 20

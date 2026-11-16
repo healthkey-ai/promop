@@ -226,3 +226,16 @@ def test_incomplete_local_storage_recipe_cannot_pass_audit(changes):
     FieldConceptMapping.objects.filter(field_name='genetic_mutations.origin').update(**changes)
     with pytest.raises(CommandError):
         audit()
+
+
+def test_priority_parent_seeding_preserves_curator_state():
+    """#1311: re-seeding never overwrites a reviewed priority parent recipe."""
+    call_command('seed_genomics_catalog')
+    row = FieldConceptMapping.objects.get(field_name='genomics_brca1')
+    FieldConceptMapping.objects.filter(pk=row.pk).update(
+        status='rejected', source_value='curated:brca1', notes='Reviewed by curator')
+    before = FieldConceptMapping.objects.filter(pk=row.pk).values().get()
+
+    call_command('seed_genomics_catalog')
+
+    assert FieldConceptMapping.objects.filter(pk=row.pk).values().get() == before

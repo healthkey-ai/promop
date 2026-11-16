@@ -179,25 +179,33 @@ def test_curated_source_value_must_fit_target_column(omop_table, source_column, 
     entry = build_writable_field_descriptor()[FIELD]
 
     assert entry['curated'] is True
-    assert entry['writable'] is (length <= 50)
+    assert entry['writable'] is True
+    assert entry['target'] == 'patient_record'
     if length <= 50:
         assert entry['projection']['source_value'] == source_value
     else:
+        assert 'projection' not in entry
         assert '50-character' in entry['reason']
         assert source_column in entry['reason']
     mapping.refresh_from_db()
     assert mapping.source_value == source_value
 
 
-def test_overlong_curated_mapping_blocks_fallback_recipe():
+def test_overlong_curated_mapping_keeps_the_source_pair_writable():
     VocabularyFactory(vocabulary_id='LOINC')
     ConceptFactory(concept_code='718-7', vocabulary_id='LOINC')
-    assert build_writable_field_descriptor()['hemoglobin_g_dl']['writable'] is True
+    assert build_writable_field_descriptor()['hemoglobin_level']['writable'] is True
     _mapping(field_name='hemoglobin_g_dl', source_value='x' * 51)
 
-    entry = build_writable_field_descriptor()['hemoglobin_g_dl']
+    descriptor = build_writable_field_descriptor()
+    entry = descriptor['hemoglobin_g_dl']
 
+    # The writable target is the source pair (#2318); the canonical read-model
+    # keeps the mapping's diagnostic instead of hiding why it cannot project.
+    assert descriptor['hemoglobin_level']['writable'] is True
+    assert entry['kind'] == 'computed'
     assert entry['writable'] is False
+    assert 'projection' not in entry
     assert entry['curated'] is True
     assert 'source_value exceeds' in entry['reason']
 
@@ -229,3 +237,12 @@ class TestBoundedAnswers:
 
         assert entry['writable'] is True
         assert 'options' not in entry
+
+
+def test_a_curated_wearable_mapping_stays_computed():
+    _mapping(field_name='median_daily_steps_30d', source_value='steps')
+
+    entry = build_writable_field_descriptor()['median_daily_steps_30d']
+
+    assert entry['kind'] == 'computed'
+    assert entry['writable'] is False

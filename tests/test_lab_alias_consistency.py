@@ -67,35 +67,63 @@ def test_clearing_canonical_clears_legacy_alias(editor, canonical, alias, unit_f
     assert getattr(refreshed, alias) is None
 
 
-@pytest.mark.parametrize('canonical,alias,value', [
-    ('anc_thousand_per_ul', 'absolute_neutrophile_count', Decimal('2500')),
-    ('alc_thousand_per_ul', 'absolute_lymphocyte_count', 2500.0),
-    ('hemoglobin_g_dl', 'hemoglobin_level', Decimal('2.5')),
+@pytest.mark.parametrize('source,canonical,value,canonical_value,unit_field,unit', [
+    ('absolute_neutrophile_count', 'anc_thousand_per_ul', 1500,
+     Decimal('1.5'), 'absolute_neutrophile_count_units', 'CELLS/UL'),
+    ('absolute_lymphocyte_count', 'alc_thousand_per_ul', 1500,
+     Decimal('1.5'), None, None),
+    ('platelet_count', 'platelet_count_thousand_per_ul', 150000,
+     Decimal('150.0'), 'platelet_count_units', 'CELLS/UL'),
 ])
-def test_legacy_alias_cannot_be_edited_independently(editor, canonical, alias, value):
+def test_count_source_pair_replaces_the_canonical_value(
+        editor, source, canonical, value, canonical_value, unit_field, unit):
     record, client = editor
     response = client.patch(f'/api/patient-info/{record.person_id}/', {canonical: '2.5'}, format='json')
     assert response.status_code == 200, response.data
-    response = client.patch(f'/api/patient-info/{record.person_id}/', {alias: 1}, format='json')
+    response = client.patch(f'/api/patient-info/{record.person_id}/', {source: value}, format='json')
     assert response.status_code == 200, response.data
     record.refresh_from_db()
-    assert getattr(record, alias) == value
-    assert getattr(record, canonical) == Decimal('2.5')
+    assert float(getattr(record, source)) == value
+    assert getattr(record, canonical) == canonical_value
+    if unit_field:
+        assert getattr(record, unit_field) == unit
+
+
+def test_hemoglobin_source_pair_replaces_the_canonical_value(editor):
+    """Hemoglobin is no longer a legacy alias (#2318): the pair is writable and
+    the canonical g/dL value follows it."""
+    record, client = editor
+    response = client.patch(f'/api/patient-info/{record.person_id}/', {'hemoglobin_g_dl': '2.5'}, format='json')
+    assert response.status_code == 200, response.data
+    response = client.patch(
+        f'/api/patient-info/{record.person_id}/',
+        {'hemoglobin_level': 12, 'hemoglobin_level_units': 'g/L'}, format='json',
+    )
+    assert response.status_code == 200, response.data
+    record.refresh_from_db()
+    assert record.hemoglobin_level == Decimal('12')
+    assert record.hemoglobin_level_units == 'G/L'
+    assert record.hemoglobin_g_dl == Decimal('1.2')
 
 
 def test_pending_legacy_edit_survives_refresh_until_a_new_canonical_edit(editor):
     record, client = editor
     PatientRecord.objects.filter(pk=record.pk).update(
-        hemoglobin_level=Decimal('9.0'), user_edited_fields=['hemoglobin_level'],
+        hemoglobin_level=Decimal('9.0'), hemoglobin_level_units='G/L',
+        user_edited_fields=['hemoglobin_level', 'hemoglobin_level_units'],
     )
     refreshed = refresh_patient_record(record.person)
     assert refreshed.hemoglobin_level == Decimal('9.0')
-    assert 'hemoglobin_level' in refreshed.user_edited_fields
+    assert refreshed.hemoglobin_level_units == 'G/L'
+    assert {'hemoglobin_level', 'hemoglobin_level_units'} <= set(
+        refreshed.user_edited_fields)
     response = client.patch(f'/api/patient-info/{record.person_id}/', {'hemoglobin_g_dl': '13.0'}, format='json')
     assert response.status_code == 200, response.data
     record.refresh_from_db()
     assert record.hemoglobin_level == Decimal('13.0')
-    assert 'hemoglobin_level' not in record.user_edited_fields
+    assert record.hemoglobin_level_units == 'G/DL'
+    assert not ({'hemoglobin_level', 'hemoglobin_level_units'}
+                & set(record.user_edited_fields or []))
 
 
 def test_canonical_edit_supersedes_legacy_hemoglobin_in_another_unit(editor):

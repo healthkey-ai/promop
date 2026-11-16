@@ -69,6 +69,14 @@ _VOCABULARIES = [
          vocabulary_reference='https://healthkey.ai',
          vocabulary_version='1.0',
          vocabulary_concept_id=0),
+    # Locally-authored marker concepts with no exact standard identity (#5674).
+    # Same quarantine rules as the other HK-* vocabularies: source='HealthKey',
+    # standard_concept=None, concept_id in the OHDSI custom range.
+    dict(vocabulary_id='HK-Genomics',
+         vocabulary_name='HealthKey genomic marker concepts',
+         vocabulary_reference='https://healthkey.ai',
+         vocabulary_version='1.0',
+         vocabulary_concept_id=0),
     dict(vocabulary_id='Episode',
          vocabulary_name='OMOP Episode',
          vocabulary_reference='OMOP generated',
@@ -473,6 +481,16 @@ _CONCEPTS = [
        'HK-Language', 'Qualifier Value', None, 'hkl:write', source='HealthKey'),
     _c(2_100_007_856, 'Understands language', 'Meas Value',
        'HK-Language', 'Qualifier Value', None, 'hkl:understand', source='HealthKey'),
+
+    # BCMA protein expression (#5674). The trial criteria name the marker as
+    # `bcmaExpression`; the loaded vocabulary has no exact standard concept
+    # (only an IL2::TNFRSF17 fusion and anti-BCMA therapy classes), so the
+    # marker is minted locally instead of aliased onto a different meaning.
+    # The trial envelope still carries the canonical code until it is
+    # recompiled to emit this feature.
+    _c(2_100_007_900, 'BCMA protein expression', 'Measurement',
+       'HK-Genomics', 'Lab Test', None, 'HK-MARKER:BCMA-EXPRESSION',
+       source='HealthKey'),
 
     # ------------------------------------------------------------------
     # HemOnc therapy regimen concepts — required for first_line_therapy_id

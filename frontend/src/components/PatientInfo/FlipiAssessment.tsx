@@ -1,4 +1,5 @@
 import type { FieldDescriptor } from '@/hooks/useWritableFields';
+import { usePatientFormReadOnly } from '@/federation/PatientFormContext';
 
 import { FLIPI_FACTORS, selectedFlipiFactors } from './flipiFactors';
 
@@ -6,12 +7,13 @@ export default function FlipiAssessment({ value, recordedScore, descriptor, onCh
   value: unknown; recordedScore?: unknown; descriptor?: FieldDescriptor;
   onChange: (field: string, value: unknown) => void;
 }) {
+  const locked = usePatientFormReadOnly();
   const selected = selectedFlipiFactors(value);
   const score = selected?.length;
   const risk = score == null ? null : score <= 1 ? 'Low' : score === 2 ? 'Intermediate' : 'High';
   const write = (keys: string[] | null) => onChange('flipi_score_options', keys == null ? null : keys.join(','));
   return (
-    <fieldset className="space-y-3 rounded-md border p-4" disabled={!descriptor?.writable}>
+    <fieldset className="space-y-3 rounded-md border p-4" disabled={locked || !descriptor?.writable}>
       <legend className="px-1 font-medium">FLIPI-1 assessment</legend>
       <p className="text-sm text-muted-foreground">Select the risk factors present at diagnosis. Each selected factor adds 1 point.</p>
       {FLIPI_FACTORS.map(([key, label]) => (

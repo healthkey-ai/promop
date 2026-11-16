@@ -247,7 +247,7 @@ def test_alc_and_amc_in_cells_per_ul_are_scaled_to_thousands():
     record.refresh_from_db()
     assert record.alc_thousand_per_ul == Decimal('0.9')
     assert record.absolute_lymphocyte_count == 900
-    assert record.amc_thousand_per_ul == Decimal('0.5')
+    assert record.amc_thousand_per_ul == Decimal('0.45')
 
 
 @pytest.mark.django_db

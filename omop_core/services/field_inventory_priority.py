@@ -59,3 +59,91 @@ def priority_field_coverage(markers, rows, candidates):
             'limitation': 'Source-only parents remain supported by the Genomics Measurement/event contract. '
                           'An Observation-domain concept cannot certify a standard Measurement parent. '
                           'Field question coverage does not approve gene/variant answer concepts.'}
+
+
+STATE_LABELS = {
+    'source_only_parent': 'supported source-only parent (concept 0 retained)',
+    'standard_parent_candidate_requires_review': 'standard Measurement parent candidate requires review',
+    'storage_recipe_incomplete': 'missing, unapproved or contract-incompatible storage recipe',
+}
+
+
+def priority_ready(coverage):
+    """The gate: every field needs an approved, Measurement/JSON/multiple recipe.
+
+    A compatible parent candidate still needs review and a source-only parent is
+    supported, so neither fails the storage gate; a missing, unapproved or
+    incompatible recipe does.
+    """
+    return not coverage['counts'].get('storage_recipe_incomplete')
+
+
+def priority_json(coverage):
+    import json
+    return json.dumps(coverage, indent=2, sort_keys=True) + '\n'
+
+
+def priority_markdown(coverage):
+    """A focused, human-readable extract of the inventory's #1311 section."""
+    lines = [
+        '# Priority gene/marker storage coverage (#1311)',
+        '',
+        f"**{coverage['total_fields']} effective fields across "
+        f"{coverage['disease_memberships']} disease memberships.**",
+        '',
+        'Generated from the reference-only inventory '
+        '(`manifest.json` → `priority_field_coverage`); it records storage '
+        'dispositions, not clinical approval of catalog values or gene/variant '
+        'answer concepts.',
+        '',
+        '## Dispositions',
+        '',
+        '| Disposition | Fields | Meaning |',
+        '| --- | ---: | --- |',
+    ]
+    for state in ('source_only_parent', 'standard_parent_candidate_requires_review',
+                  'storage_recipe_incomplete'):
+        lines.append(
+            f"| {state} | {coverage['counts'].get(state, 0)} | {STATE_LABELS[state]} |")
+    lines += [
+        '',
+        f"**Gate:** {'PASS' if priority_ready(coverage) else 'FAIL'} — "
+        'missing, unapproved and incompatible recipes fail; supported source-only '
+        'parents and standard parent candidates pass.',
+        '',
+        '## Per disease',
+        '',
+    ]
+    for disease, block in coverage['by_disease'].items():
+        counts = ', '.join(f'{k}={v}' for k, v in sorted(block['counts'].items()))
+        lines.append(f"### {disease} — {len(block['field_names'])} memberships ({counts or 'none'})")
+        lines.append('')
+        lines.append('| Field | Gene | State | Problems | Parent recipe | Portable code | Concept target |')
+        lines.append('| --- | --- | --- | --- | --- | --- | --- |')
+        for record in coverage['fields']:
+            if record['field_name'] not in block['field_names']:
+                continue
+            mapping = record.get('storage_mapping') or {}
+            evidence = record.get('declared_concept_evidence') or []
+            targets = ', '.join(
+                f"{item['concept_id']} ({item['domain_id']})" for item in evidence) or '—'
+            lines.append(
+                f"| `{record['field_name']}` | {record.get('gene') or ''} | {record['state']} | "
+                f"{', '.join(record.get('problems') or []) or '—'} | "
+                f"{mapping.get('omop_table') or '—'}/{mapping.get('value_kind') or '—'}/"
+                f"multiple={mapping.get('multiple')} | {mapping.get('concept_code') or '—'} | "
+                f"{targets} |")
+        lines.append('')
+    lines += [
+        '## Regenerate',
+        '',
+        '```sh',
+        'python manage.py export_field_mapping_inventory --output docs/field-mapping-inventory/manifest.json --report docs/field-mapping-inventory/coverage.md',
+        'python manage.py export_genomics_priority_coverage --write',
+        'python manage.py export_genomics_priority_coverage --check',
+        '```',
+        '',
+        coverage['limitation'],
+        '',
+    ]
+    return '\n'.join(lines)

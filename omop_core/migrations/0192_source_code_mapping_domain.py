@@ -15,7 +15,7 @@ import logging
 import django.db.models.deletion
 from django.db import migrations, models
 
-from omop_core.services import source_vocabularies
+from omop_core.migrations._source_domains import DOMAIN_BY_TABLE
 
 
 logger = logging.getLogger(__name__)
@@ -36,7 +36,7 @@ def backfill_domain_id(apps, schema_editor):
     rows = [r for r in Mapping.objects.exclude(omop_table='')]
     changed = []
     for row in rows:
-        domain = source_vocabularies.domain_for_table(row.omop_table)
+        domain = DOMAIN_BY_TABLE.get(row.omop_table, '')
         if not domain:
             logger.warning(
                 'source_code_concept_mapping %s has omop_table %r with no '

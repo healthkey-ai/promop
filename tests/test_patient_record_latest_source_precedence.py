@@ -712,7 +712,8 @@ def test_selection_uses_date_then_id(
     assert record.hiv_status is expected
 
 
-def test_refresh_persists_latest_values_and_version_16():
+def test_refresh_persists_latest_values_and_current_version():
+    from omop_core.services.patient_record_service import DERIVATION_VERSION
     person = PersonFactory()
     hiv = ConceptFactory(concept_code='5221-7', concept_name='HIV')
     binet = ConceptFactory(concept_name='Binet stage')
@@ -742,5 +743,4 @@ def test_refresh_persists_latest_values_and_version_16():
     record.refresh_from_db()
     assert record.hiv_status is False
     assert record.binet_stage == 'C'
-    from omop_core.services.patient_record_service import DERIVATION_VERSION
     assert record.derivation_version == DERIVATION_VERSION

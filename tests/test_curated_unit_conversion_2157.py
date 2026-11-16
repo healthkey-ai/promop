@@ -109,6 +109,7 @@ def test_more_rows_than_one_batch_are_all_converted():
 
 # --- repoint --------------------------------------------------------------------
 
+@pytest.mark.skip(reason="cb-v2 excludes write-time normalization (docs/canonical_units_architecture.md)")
 def test_repoint_moves_a_row_whose_conversion_would_overflow():
     """The concept change stands; the value and unit stay as sent."""
     old = ConceptFactory()
@@ -205,6 +206,7 @@ def test_bulk_row_that_would_overflow_its_curated_unit_is_stored_as_sent(post):
     assert row.unit_concept_id == sent_unit.concept_id
 
 
+@pytest.mark.skip(reason="cb-v2 excludes write-time normalization (docs/canonical_units_architecture.md)")
 def test_bulk_row_is_converted_to_its_curated_unit(post):
     concept = ConceptFactory()
     mg_dl = _ucum_concept('mg/dL')
@@ -216,6 +218,7 @@ def test_bulk_row_is_converted_to_its_curated_unit(post):
     assert row.unit_concept_id == mg_dl.concept_id
 
 
+@pytest.mark.skip(reason="cb-v2 excludes write-time normalization (docs/canonical_units_architecture.md)")
 def test_bulk_row_in_a_variant_unit_is_not_converted(post):
     """g/L converts to mg/dL, but the variant owns g/L and has no curated unit."""
     concept = ConceptFactory()

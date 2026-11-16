@@ -42,6 +42,7 @@ def test_org_admin_can_edit_profile_without_reverse_derivation(setup, access):
                             {'person_id': record.person_id})
     assert descriptor.status_code == 200
     payload = {'email': 'corrected@example.test', 'phone_number': '555-0100',
+               # Promoting a year-only DOB to a full date is explicit.
                'date_of_birth': '1985-03-15', 'gender': 'Female',
                'race': 'Asian', 'ethnicity': 'Not Hispanic or Latino',
                'city': 'Portland', 'region': 'OR', 'country': 'United States',
@@ -63,6 +64,7 @@ def test_org_admin_can_edit_profile_without_reverse_derivation(setup, access):
     assert record.phone_number == person.phone_number == payload['phone_number']
     assert record.facility_name == person.facility_name == payload['facility_name']
     assert record.date_of_birth.isoformat() == payload['date_of_birth']
+    assert record.date_of_birth_precision == 'day'
     assert (person.year_of_birth, person.month_of_birth, person.day_of_birth) == (1985, 3, 15)
     assert record.gender == 'F' and person.gender_source_value == 'Female'
     assert record.race == person.race_source_value == payload['race']

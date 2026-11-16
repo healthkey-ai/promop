@@ -648,7 +648,7 @@ def test_self_report_type_in_wrong_vocabulary_fails_closed(patient):
     assert not Observation.objects.filter(person=patient).exists()
 
 
-@pytest.mark.parametrize('old_version', [16, 18])
+@pytest.mark.parametrize('old_version', [16, 18, 19])
 def test_normal_backfill_selects_older_records_for_source_reader_update(patient, old_version):
     from django.core.management import call_command
     from omop_core.services.patient_record_service import DERIVATION_VERSION
@@ -657,7 +657,7 @@ def test_normal_backfill_selects_older_records_for_source_reader_update(patient,
     PatientRecord.objects.filter(person=patient).update(derivation_version=old_version, prothrombin_time_uln=None)
     call_command('backfill_patient_records', organization=patient.patient_record.organization.slug)
     record = PatientRecord.objects.get(person=patient)
-    assert record.derivation_version == DERIVATION_VERSION == 27
+    assert record.derivation_version == DERIVATION_VERSION == 31
     assert getattr(record, RATIO) == Decimal('1.2')
     assert list(Observation.objects.filter(person=patient).values()) == original
 
@@ -773,6 +773,15 @@ def test_mapping_cannot_be_revoked_between_approval_check_and_fact_write(patient
     assert mapping.status == 'approved'
 
 
+def test_clinical_writes_preserve_current_therapy_history_attestation_contract(patient):
+    from omop_core.services.therapy_history import confirm_therapy_history, withdraw_therapy_history
+    approve(BOOL)
+    confirm_therapy_history(patient)
+    assert PatientRecord.objects.get(person=patient).therapy_history_complete is True
+    assert write_clinical_inputs(patient, {BOOL: False}).therapy_history_complete is True
+    withdraw_therapy_history(patient)
+    assert PatientRecord.objects.get(person=patient).therapy_history_complete is None
+    assert write_clinical_inputs(patient, {BOOL: True}).therapy_history_complete is None
 @pytest.mark.parametrize('reported_count,prior', [(None, None), (0, 'None'), (2, 'Two lines')])
 def test_clinical_writes_preserve_current_dev_reported_therapy_contract(patient, reported_count, prior):
     approve(BOOL)
@@ -831,3 +840,115 @@ def test_clinical_write_preserves_authored_line_with_unknown_composition(patient
         assert {field: getattr(after, field) for field in fields} == expected
         assert Episode.objects.filter(pk=line.episode.pk).values().get() == episode
         assert list(EpisodeEvent.objects.filter(episode_id=line.episode.pk).order_by('pk').values()) == events
+
+
+def test_shared_form_clinical_input_writes_record_revision(patient, staff_client):
+    from omop_core.models import RecordRevision
+    approve(BOOL)
+    response = staff_client.patch(
+        f'/api/v1/patient-records/{patient.pk}/',
+        {BOOL: False}, format='json', HTTP_X_PATIENT_FORM='1',
+    )
+    assert response.status_code == 200, response.data
+    record = PatientRecord.objects.get(person=patient)
+    revision = RecordRevision.objects.get(patient_record=record, field=BOOL)
+    assert revision.old_value is None
+    assert revision.new_value == 'False'
+
+
+def test_shared_form_clinical_input_corrects_a_pending_answer(patient, staff_client):
+    from omop_core.models import RecordRevision
+    approve(BOOL)
+    record = PatientRecord.objects.get(person=patient)
+    record.able_to_swallow_tablets_capsules = True
+    record.user_edited_fields = [BOOL]
+    record.save(update_fields=[BOOL, 'user_edited_fields'])
+
+    response = staff_client.patch(
+        f'/api/v1/patient-records/{patient.pk}/',
+        {BOOL: False}, format='json', HTTP_X_PATIENT_FORM='1',
+    )
+
+    assert response.status_code == 200, response.data
+    record.refresh_from_db()
+    assert record.able_to_swallow_tablets_capsules is False
+    assert BOOL not in (record.user_edited_fields or [])
+    revisions = RecordRevision.objects.filter(patient_record=record, field=BOOL)
+    assert revisions.count() == 1
+    revision = revisions.get()
+    assert revision.old_value == 'True'
+    assert revision.new_value == 'False'
+
+
+def test_shared_form_invalid_clinical_input_returns_400(patient, staff_client):
+    """A wrong-typed dedicated input is a client error, not a 500."""
+    approve(BOOL)
+    response = staff_client.patch(
+        f'/api/v1/patient-records/{patient.pk}/',
+        {BOOL: 'not-a-boolean'}, format='json', HTTP_X_PATIENT_FORM='1',
+    )
+    assert response.status_code == 400, response.data
+    assert BOOL in (response.data.get('errors') or {})
+
+
+def test_shared_form_invalid_clinical_input_does_not_partially_write(patient, staff_client):
+    from omop_core.models import Measurement
+    approve(BOOL)
+    response = staff_client.patch(
+        f'/api/v1/patient-records/{patient.pk}/',
+        {BOOL: 'not-a-boolean', 'weight': 73}, format='json', HTTP_X_PATIENT_FORM='1',
+    )
+    assert response.status_code == 400, response.data
+    record = PatientRecord.objects.get(person=patient)
+    assert record.weight is None
+    assert not Measurement.objects.filter(person=patient).exists()
+
+
+def test_shared_form_clinical_input_revision_repeat_clear_and_author(patient, staff_client):
+    from omop_core.models import RecordRevision
+    from patient_portal.models import Identity
+    approve(BOOL)
+    url = f'/api/v1/patient-records/{patient.pk}/'
+    assert staff_client.patch(
+        url, {BOOL: False}, format='json', HTTP_X_PATIENT_FORM='1',
+    ).status_code == 200
+    assert staff_client.patch(
+        url, {BOOL: False}, format='json', HTTP_X_PATIENT_FORM='1',
+    ).status_code == 200
+    revisions = RecordRevision.objects.filter(
+        patient_record__person=patient, field=BOOL,
+    )
+    assert revisions.count() == 1
+
+    assert staff_client.patch(
+        url, {BOOL: None}, format='json', HTTP_X_PATIENT_FORM='1',
+    ).status_code == 200
+    revisions = RecordRevision.objects.filter(
+        patient_record__person=patient, field=BOOL,
+    ).order_by('changed_at', 'pk')
+    assert revisions.count() == 2
+    assert revisions.last().old_value == 'False'
+    assert revisions.last().new_value is None
+    author = Identity.objects.get(email='clinical-contract@example.test')
+    assert all(revision.changed_by == str(author.pk) for revision in revisions)
+
+
+def test_hemoglobin_pair_and_an_echoed_clinical_input_share_one_patch(patient, staff_client):
+    """The pair and the clinical echo must both survive the merged serializer."""
+    record = PatientRecord.objects.get(person=patient)
+    PatientRecord.objects.filter(pk=record.pk).update(prothrombin_time_uln=Decimal('1.2'))
+    url = f'/api/patient-info/{patient.pk}/'
+    payload = staff_client.get(url).data['patient_info']
+
+    response = staff_client.patch(url, {
+        'hemoglobin_level': 120,
+        'hemoglobin_level_units': 'g/L',
+        'prothrombin_time_uln': payload['prothrombin_time_uln'],
+    }, format='json')
+
+    assert response.status_code == 200, response.data
+    record.refresh_from_db()
+    assert record.hemoglobin_g_dl == Decimal('12.0')
+    assert record.hemoglobin_level_units == 'G/L'
+    # The equal echo is not an authored source write.
+    assert not Observation.objects.filter(person=patient).exists()

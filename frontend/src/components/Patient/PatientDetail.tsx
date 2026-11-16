@@ -1,9 +1,10 @@
 import BrandLogo from '@/components/Branding/BrandLogo';
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { ArrowLeft, Check, AlertCircle, ChevronDown, ShieldCheck } from "lucide-react";
 import api from "@/api/axios";
-import { fetchWritableFields, LIFECYCLE, type FieldDescriptors } from "@/hooks/useWritableFields";
+import { clientTimezoneHeaders } from "@/api/clientTimezone";
+import { editableWithoutFormStore, fetchWritableFields, LIFECYCLE, type FieldDescriptors } from "@/hooks/useWritableFields";
 // Profile fields now write through PatientRecord PATCH alongside clinical fields.
 import type { User } from "@/hooks/useAuth";
 import DeleteAccountDialog from "./DeleteAccountDialog";
@@ -27,6 +28,8 @@ import PatientSourceCodesTab from "./PatientSourceCodesTab";
 import { confirmRecord } from "@/api/clinicalFacts";
 import { mayBeUnitedStates } from "@/lib/usZip";
 import { FieldMappingLinksProvider } from "@/components/PatientInfo/fieldMappingLinks";
+import { PatientFormStore } from "@/federation/patientFormStore";
+import StandaloneLabsProvider from "@/federation/StandaloneLabsProvider";
 
 type SaveStatus = "idle" | "pending" | "saving" | "saved" | "error";
 
@@ -329,6 +332,17 @@ export default function PatientDetail({
   const [saveErrorMsg, setSaveErrorMsg] = useState<string | null>(null);
 
   const [patientInfo, setPatientInfo] = useState<Record<string, unknown> | null>(null);
+  // The record read's write gate for this caller. The standalone Labs tab
+  // publishes it to the shared source-pair editor; a caller without write
+  // access still opens the page read-only (#2577).
+  const [writeEnabled, setWriteEnabled] = useState(true);
+  // The standalone Labs tab edits through the same source-pair store as the
+  // federated surfaces. One store per patient; a plain unmount lets its queue
+  // drain, as the federation store does, and a different person gets a new one.
+  const labsStore = useMemo(
+    () => (personId ? new PatientFormStore(api, '', { patientId: personId }) : null),
+    [personId],
+  );
   // Server-side baseline for change detection. A clinical edit is only written
   // when its value actually moved: the editor holds the whole record, so without
   // this every autosave would rewrite every lab as a fresh dated result.
@@ -350,6 +364,12 @@ export default function PatientDetail({
   const saveRevisionRef = useRef(0);
   const dirtyFieldsRef = useRef(new Set<string>());
   const confirmedWritesRef = useRef<Record<string, unknown>>({});
+  // A lab value's clinical date, keyed by field. It travels with the value in
+  // the PATCH as {value, date}; a date-only change re-sends the value (#2439).
+  const pendingDatesRef = useRef<Record<string, string>>({});
+  // The result id the last PATCH confirmed, per field. A later date-only edit
+  // names that exact result; a cached measurement list goes stale on save.
+  const confirmedFactIdsRef = useRef<Record<string, number>>({});
    
   const pendingDataRef = useRef<{ info: Record<string, unknown>; name: string } | null>(null);
    
@@ -412,6 +432,22 @@ export default function PatientDetail({
     setEditedInfo(edited);
   }, []);
 
+  // Load the Labs source-pair store once per patient, and fold every confirmed
+  // save back into the page baseline. Without this the page would keep the
+  // pre-save lab values and a later non-lab autosave could rebuild them.
+  useEffect(() => {
+    if (!labsStore) return undefined;
+    void labsStore.load();
+    return labsStore.onUpdated((result) => {
+      // The lab response may have been built before the page's last PATCH.
+      // Adopting it without a request marker keeps the page's confirmed
+      // non-lab writes over the older record instead of clearing them; the
+      // store's lab fields are not in that confirmed set, so they still move
+      // (#2578 review).
+      adoptServerRecord(result.patient_info as Record<string, unknown>);
+    });
+  }, [labsStore, adoptServerRecord]);
+
   useEffect(() => {
     if (!personId) return;
     const readRevision = saveRevisionRef.current;
@@ -421,6 +457,7 @@ export default function PatientDetail({
         const res = await api.get(`/patient-info/${personId}/`);
         const d = res.data.patient_info;
         adoptServerRecord(d, readRevision);
+        setWriteEnabled(res.data.write_enabled !== false);
 
         const user = res.data.user;
         const name = d.patient_name
@@ -480,28 +517,46 @@ export default function PatientDetail({
       const { patient_name: _echoed, ...info } = data.info as Record<string, unknown>;
       const renamed = !!data.name && data.name !== patientNameRef.current;
       const patchFields: Record<string, unknown> = {};
+      const sentDates: Record<string, string> = {};
 
       for (const [f, v] of Object.entries(info)) {
-        if (LIFECYCLE.has(f) || v === baseline[f]) continue;
+        if (f === 'no_pre_existing_conditions' || f === 'preexisting_conditions') continue;
+        const pendingDate = pendingDatesRef.current[f];
+        if (LIFECYCLE.has(f) || (v === baseline[f] && !pendingDate)) continue;
         const desc = descriptors[f];
-        if (desc?.writable && desc.target === 'patient_record') {
-          patchFields[f] = v;
+        const factId = v === baseline[f] ? confirmedFactIdsRef.current[f] : undefined;
+        const value = pendingDate
+          ? { value: v, date: pendingDate, ...(factId ? { fact_id: factId } : {}) }
+          : v;
+        if (editableWithoutFormStore(desc) && desc?.target === 'patient_record') {
+          patchFields[f] = value;
         } else if (!(f in descriptors)) {
           // Unknown to the descriptor (e.g. custom fields) — PATCH them too.
-          patchFields[f] = v;
+          patchFields[f] = value;
         }
+        if (pendingDate) sentDates[f] = pendingDate;
       }
 
       // All fields ride the single PatientRecord PATCH.
       if (renamed || Object.keys(patchFields).length > 0) {
-        await api.patch(
+        const response = await api.patch(
           `/patient-info/${personId}/`,
           renamed ? { ...patchFields, patient_name: data.name } : patchFields,
+          { headers: clientTimezoneHeaders() },
         );
+        const returned = (response.data as { fact_ids?: Record<string, number> } | undefined)?.fact_ids;
+        if (returned) Object.assign(confirmedFactIdsRef.current, returned);
         saveRevisionRef.current += 1;
         for (const f of Object.keys(patchFields)) {
           if (patientInfoRef.current) patientInfoRef.current[f] = info[f];
           confirmedWritesRef.current[f] = info[f];
+          // A value or date changed while this PATCH was in flight belongs to
+          // the next save; only clear the pair this response confirmed.
+          if (sentDates[f]
+              && pendingDatesRef.current[f] === sentDates[f]
+              && pendingDataRef.current?.info[f] === info[f]) {
+            delete pendingDatesRef.current[f];
+          }
           if (pendingDataRef.current?.info[f] === info[f]) dirtyFieldsRef.current.delete(f);
         }
       }
@@ -510,7 +565,7 @@ export default function PatientDetail({
       // must not remain an unsaved overlay across later server refreshes.
       for (const field of dirtyFieldsRef.current) {
         const descriptor = descriptors[field];
-        if (descriptor && (!descriptor.writable || descriptor.target !== 'patient_record')
+        if (descriptor && (!editableWithoutFormStore(descriptor) || descriptor.target !== 'patient_record')
             && pendingDataRef.current?.info[field] === info[field]) {
           dirtyFieldsRef.current.delete(field);
         }
@@ -609,13 +664,20 @@ export default function PatientDetail({
     if (!personId) return;
     const readRevision = saveRevisionRef.current;
     api.get(`/patient-info/${personId}/`)
-      .then((res) => adoptServerRecord(res.data.patient_info, readRevision))
+      .then((res) => {
+        adoptServerRecord(res.data.patient_info, readRevision);
+        // The Labs tab renders the store's values, not editedInfo; a refresh
+        // triggered by another tab must reach it too (#2578 review).
+        void labsStore?.load(true);
+      })
       .catch(() => {});
-  }, [personId, adoptServerRecord]);
+  }, [personId, adoptServerRecord, labsStore]);
 
-  const handleFieldChange = useCallback((field: string, value: unknown) => {
+  const handleFieldChange = useCallback((field: string, value: unknown, date?: string) => {
     const base = pendingDataRef.current?.info ?? editedInfoRef.current;
     const updated = { ...base, [field]: value };
+    if (date) pendingDatesRef.current[field] = date;
+    else delete pendingDatesRef.current[field];
     if (value === patientInfoRef.current?.[field]) dirtyFieldsRef.current.delete(field);
     else dirtyFieldsRef.current.add(field);
 
@@ -940,6 +1002,20 @@ export default function PatientDetail({
                       onNameChange={handleNameChange}
                       onZipcodeChange={handleZipcodeChange}
                       patientMode={patientMode}
+                      onConditionsSaved={(answer) => {
+                        saveRevisionRef.current += 1;
+                        for (const [field, value] of Object.entries(answer)) {
+                          dirtyFieldsRef.current.delete(field);
+                          confirmedWritesRef.current[field] = value;
+                        }
+                        patientInfoRef.current = { ...patientInfoRef.current, ...answer };
+                        if (pendingDataRef.current) {
+                          pendingDataRef.current.info = { ...pendingDataRef.current.info, ...answer };
+                        }
+                        setPatientInfo(previous => ({ ...previous, ...answer }));
+                        setEditedInfo(previous => ({ ...previous, ...answer }));
+                        editedInfoRef.current = { ...editedInfoRef.current, ...answer };
+                      }}
                     />
                   </>
                 )}
@@ -971,7 +1047,15 @@ export default function PatientDetail({
                     )}
                   </>
                 )}
-                {activeTab === labsIdx && <LabsTab formData={editedInfo} onChange={handleFieldChange} />}
+                {activeTab === labsIdx && (
+                  labsStore ? (
+                    <StandaloneLabsProvider store={labsStore} writeEnabled={writeEnabled}>
+                      <LabsTab formData={editedInfo} onChange={handleFieldChange} />
+                    </StandaloneLabsProvider>
+                  ) : (
+                    <LabsTab formData={editedInfo} onChange={handleFieldChange} />
+                  )
+                )}
                 {activeTab === genomicsIdx && <GenomicsTab formData={editedInfo} />}
                 {allergiesIdx >= 0 && activeTab === allergiesIdx && <AllergyList user={user ?? null} />}
                 {activeTab === behaviorIdx && <BehaviorTab formData={editedInfo} onChange={handleFieldChange} onRefresh={reloadPatientInfo} />}

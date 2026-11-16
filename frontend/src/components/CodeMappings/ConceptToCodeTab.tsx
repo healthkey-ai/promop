@@ -143,7 +143,9 @@ export default function ConceptToCodeTab({ canApprove, canWrite, onWritingChange
       try {
         const cats = await fetchDiseaseCategories();
         if (active) {
-          setDiseases([['', 'All diseases'], ...cats.map(c => [c.value, c.label] as [string, string])]);
+          // Other has no disease-specific field contract in concept-to-code.
+          setDiseases([['', 'All diseases'], ...cats.filter(c => c.value !== 'Other')
+            .map(c => [c.value, c.label] as [string, string])]);
         }
       } catch { /* keep the default "All diseases" entry */ }
     })();

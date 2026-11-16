@@ -24,6 +24,15 @@ either can make an unknown-vintage result incorrectly win or lose when
 does not make a fabricated `measurement_date` semantically valid and must not
 be used as a workaround for an unknown clinical date.
 
+## Interactive future-date validation
+
+Interactive PatientRecord and therapy-line writes compare a submitted clinical
+date with the calendar day in the browser's IANA timezone, sent as
+`X-Client-Timezone`. Missing or invalid timezone hints fall back to Django's
+configured timezone. This avoids rejecting a user's local "today" around UTC
+midnight; the hint affects validation only and is not an authorization signal.
+Importers and non-browser writers continue to use the deployment timezone.
+
 ## Importer behavior
 
 The FHIR ingestion API and `bulk_import_fhir_bundle` skip an Observation with

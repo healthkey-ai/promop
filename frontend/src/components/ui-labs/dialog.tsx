@@ -32,12 +32,16 @@ const DialogContent = React.forwardRef<
     <DialogOverlay />
     <DialogPrimitive.Content
       ref={ref}
+      data-promop-dialog=""
       className={cn(
         // `max-w-[32rem]`, not `max-w-lg`: a host theme can shadow the named
         // container scale. ONE declares `--spacing-lg`, which its Tailwind
         // resolves `max-w-lg` against, and since the host's utilities layer
         // outranks ours the dialog came out 24px wide.
-        "fixed left-[50%] top-[50%] z-50 grid w-full max-w-[32rem] translate-x-[-50%] translate-y-[-50%] gap-4 border border-border bg-background p-6 shadow-lg duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 sm:rounded-lg",
+        // Auto margins center the fixed, fit-content box without transforms.
+        // Tailwind 3 hosts set `transform` for translate utilities while our
+        // Tailwind 4 sets `translate`; using those classes applies both moves.
+        "fixed inset-0 z-50 m-auto grid h-fit w-[calc(100%-2rem)] max-w-[32rem] max-h-[calc(100dvh-2rem)] overflow-y-auto gap-4 border border-border bg-background p-6 shadow-lg duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 sm:rounded-lg",
         className,
       )}
       {...props}

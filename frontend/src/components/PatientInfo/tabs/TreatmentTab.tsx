@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useId, useState } from 'react';
 import { Pencil, Plus, Trash2 } from 'lucide-react';
 import { useWritableFields, invalidateWritableFieldsCache } from '@/hooks/useWritableFields';
 import {
@@ -11,6 +11,8 @@ import Section from '../Section';
 import TherapyLineDialog from '../TherapyLineDialog';
 import SupportiveTherapyDialog from '../SupportiveTherapyDialog';
 import type { SupportiveTherapyCourse } from '@/api/supportiveTherapies';
+import { usePatientFormStore } from '@/federation/PatientFormContext';
+import { diseaseToDiseaseCode, lastRecordedTherapyLine, plannedTherapyRound } from '@/api/therapyContext';
 
 interface Props {
   formData: Record<string, unknown>;
@@ -35,34 +37,8 @@ type TherapyDialogState =
  * both map to diseaseType='lymphoma' but have different Disease codes.
  * Falls back to the broader diseaseType when the raw string is absent.
  */
-function diseaseToDiseaseCode(
-  disease: unknown,
-  diseaseType: Props['diseaseType'],
-): string | undefined {
-  // Try the raw disease string first for finer discrimination (MCL vs FL).
-  if (typeof disease === 'string') {
-    const d = disease.toLowerCase();
-    if (['c3242', 'c3209', 'c9335', 'c2987', 'mcl', 'dlbcl'].includes(d)) return disease.toUpperCase();
-    if (d.includes('mantle')) return 'MCL';
-    if (d.includes('follicular')) return 'C3209';
-    if (d.includes('myeloma') || d === 'mm') return 'C3242';
-    if (d.includes('cll') || d.includes('chronic lymphocytic') || d.includes('chronic lymphoid')) return 'C2987';
-    if (d.includes('breast')) return 'C9335';
-    if (d.includes('diffuse large b-cell') || d.includes('dlbcl')) return 'DLBCL';
-  }
-  // Fall back to the type-safe diseaseType prop.
-  // 'lymphoma' is intentionally omitted — it groups MCL and FL, and picking
-  // one code would show the wrong regimens for the other. Without a raw
-  // disease string the picker falls back to "search all regimens".
-  const TYPE_TO_CODE: Record<string, string> = {
-    myeloma: 'C3242',
-    cll: 'C2987',
-    breast: 'C9335',
-  };
-  return TYPE_TO_CODE[diseaseType];
-}
-
 export default function TreatmentTab({ formData, onChange, diseaseType, onRecordRefreshed, readOnly = false }: Props) {
+  const formStore = usePatientFormStore();
   // person_id rides in the record the tab already receives, so neither the
   // descriptor nor authoring needs an extra prop threaded through both hosts.
   const personId = Number(formData?.person_id ?? formData?.person ?? 0) || null;
@@ -76,6 +52,7 @@ export default function TreatmentTab({ formData, onChange, diseaseType, onRecord
   // Until confirmed, the recorded line count is a lower bound; the confirmation
   // is the patient's statement that the list is complete (#1924).
   const historyComplete = formData?.therapy_history_complete === true;
+  const historyId = useId();
   const [confirmingHistory, setConfirmingHistory] = useState(false);
   const [historyError, setHistoryError] = useState('');
 
@@ -83,13 +60,16 @@ export default function TreatmentTab({ formData, onChange, diseaseType, onRecord
     if (personId === null) return;
     setHistoryError('');
     setConfirmingHistory(true);
+    formStore?.beginBypassWrite();
     try {
       const result = await setTherapyHistoryCompleteness(personId, complete);
       invalidateWritableFieldsCache();
       onRecordRefreshed?.(result.patient_info);
     } catch {
       setHistoryError('Could not save the confirmation. Reopen this tab to retry.');
+      formStore?.failBypassWrite('Could not save the treatment-history confirmation.');
     } finally {
+      formStore?.endBypassWrite();
       setConfirmingHistory(false);
     }
   };
@@ -102,13 +82,16 @@ export default function TreatmentTab({ formData, onChange, diseaseType, onRecord
     if (!window.confirm(`Remove ${label} from the treatment history? This records that the line did not happen.`)) return;
     setRetractError('');
     setRetracting(line.episode_id);
+    formStore?.beginBypassWrite();
     try {
       const result = await retractTherapyLine(line.episode_id);
       invalidateWritableFieldsCache();
       onRecordRefreshed?.(result.patient_info);
     } catch {
       setRetractError('Could not remove the line. Reopen this tab to retry.');
+      formStore?.failBypassWrite('Could not remove the therapy line.');
     } finally {
+      formStore?.endBypassWrite();
       setRetracting(null);
     }
   };
@@ -127,22 +110,22 @@ export default function TreatmentTab({ formData, onChange, diseaseType, onRecord
     />
   );
 
-  const linesCount = (() => {
-    const v = String(formData?.therapy_lines_count ?? '');
-    if (v === '3+') return 3;
-    return parseInt(v) || 0;
-  })();
-
   const therapyLines = Array.isArray(formData?.lines_of_therapy)
     ? (formData.lines_of_therapy as EditableTherapyLine[])
     : [];
 
   // Planned therapy regimen picker: load regimens for the patient's disease + next line.
   const diseaseCode = diseaseToDiseaseCode(formData?.disease, diseaseType);
-  const nextLine = Math.max(linesCount, ...therapyLines.map((line) => line.line)) + 1;
-  const nextRound = nextLine === 1 ? 'first_line_therapy'
-    : nextLine === 2 ? 'second_line_therapy'
-    : 'later_line_therapy';
+  // The authoring dialog counts the lines the record actually carries, not the
+  // derived `therapy_lines_count`: an imported patient can have a non-zero
+  // count with no line rows to edit, and Math.max(count, ...[]) then opened
+  // "Record a line" at 2 when nothing had been recorded (#1969 follow-up).
+  const authoringLine = lastRecordedTherapyLine(therapyLines) + 1;
+  // The planned-regimen catalog still uses the derived count: a count of 1
+  // means one line has already been given, so the next planned round is
+  // second-line even when the imported line rows are not readable here. The
+  // federated store asks the same question through the same helper.
+  const nextRound = plannedTherapyRound(formData?.therapy_lines_count, therapyLines);
   const [plannedRegimens, setPlannedRegimens] = useState<TherapyRegimen[]>([]);
   const [loadingPlanned, setLoadingPlanned] = useState(false);
 
@@ -253,7 +236,7 @@ export default function TreatmentTab({ formData, onChange, diseaseType, onRecord
       {dialogState && personId !== null && (
         <TherapyLineDialog
           personId={personId}
-          defaultLineNumber={nextLine}
+          defaultLineNumber={authoringLine}
           line={dialogState.mode === 'edit' ? dialogState.line : undefined}
           diseaseCode={diseaseToDiseaseCode(formData?.disease, diseaseType)}
           onClose={() => setDialogState(null)}
@@ -271,12 +254,15 @@ export default function TreatmentTab({ formData, onChange, diseaseType, onRecord
             checked={historyComplete}
             disabled={readOnly || confirmingHistory || personId === null}
             onChange={(e) => void setHistoryComplete(e.target.checked)}
-            aria-label="Treatment history is complete"
+            // Named by the visible sentence, not a differently worded
+            // aria-label (WCAG 2.5.3); the hint is a description.
+            aria-labelledby={`${historyId}-label`}
+            aria-describedby={`${historyId}-hint`}
             className="mt-0.5"
           />
           <span>
-            <span className="font-medium">This is my complete treatment history</span>
-            <span className="mt-0.5 block text-xs text-muted-foreground">
+            <span id={`${historyId}-label`} className="font-medium">This is my complete treatment history</span>
+            <span id={`${historyId}-hint`} className="mt-0.5 block text-xs text-muted-foreground">
               Until you confirm this, the number of prior lines is treated as a minimum
               rather than an exact count.
             </span>
@@ -317,6 +303,8 @@ export default function TreatmentTab({ formData, onChange, diseaseType, onRecord
       <Section title="Planned Therapies">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
           <div className="sm:col-span-2">
+            {formStore ? <ClinicalField label="Planned Therapies" name="planned_therapies" type="multiselect"
+              value={formData.planned_therapies} onChange={onChange} /> : <>
             <label htmlFor="planned_therapies" className="mb-1 block text-sm font-medium">Planned Therapies</label>
             <select id="planned_therapies" value={plannedValue}
               disabled={loadingPlanned || !diseaseCode || !!plannedError || !descriptors.planned_therapies?.writable}
@@ -329,6 +317,7 @@ export default function TreatmentTab({ formData, onChange, diseaseType, onRecord
             {plannedError && <p role="alert" className="text-sm text-red-700">{plannedError}</p>}
             {!diseaseCode && <p className="text-xs text-muted-foreground">Select a disease to see available therapies.</p>}
             {diseaseCode && !loadingPlanned && !plannedError && plannedRegimens.length === 0 && <p className="text-xs text-muted-foreground">No regimens are available for the next line.</p>}
+            </>}
 
           </div>
         </div>

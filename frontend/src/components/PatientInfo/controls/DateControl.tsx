@@ -6,11 +6,13 @@ export default function DateControl({
   disabled,
   onChange,
   precision,
+  ariaLabel,
 }: {
   value?: string | null;
   disabled?: boolean;
   onChange: (v: unknown) => void;
   precision?: 'day' | 'month' | 'year' | null;
+  ariaLabel?: string;
 }) {
   const source = `${precision ?? 'day'}:${value ?? ''}`;
   const yearVal = value ? value.substring(0, 4) : '';
@@ -22,6 +24,7 @@ export default function DateControl({
     return (
       <Input
         disabled={disabled}
+        aria-label={ariaLabel}
         type="number"
         min={1900}
         max={new Date().getFullYear()}
@@ -46,6 +49,7 @@ export default function DateControl({
     return (
       <Input
         disabled={disabled}
+        aria-label={ariaLabel}
         type="month"
         value={monthVal}
         onChange={(e) => {
@@ -58,6 +62,7 @@ export default function DateControl({
   return (
     <Input
       disabled={disabled}
+      aria-label={ariaLabel}
       type="date"
       value={value ?? ""}
       onChange={(e) => onChange(e.target.value || null)}

@@ -19,23 +19,24 @@ from datetime import date
 from typing import Any
 
 from django.contrib.contenttypes.models import ContentType
-from django.db import transaction
 from rest_framework import serializers, status
 from rest_framework.response import Response
 
 from omop_core.api.serializers import outcome_aliases
-from omop_core.mapping.therapy import is_assertable_regimen, resolve_regimen_label
+from omop_core.mapping.therapy import (
+    is_assertable_regimen, normalize_regimen_name, resolve_regimen_label,
+)
 from omop_core.models import Concept, PatientRecord, Person, ProvenanceRecord
 from omop_core.services.disease_episodes import disease_key, disease_slug, primary_disease_slug
 from omop_core.services.episode_service import TherapyLineEpisodeResult, author_therapy_lines
 from omop_oncology.models import TherapyLineExposure
 from omop_core.services.patient_record_service import refresh_patient_record
-from omop_core.services.therapy_errors import (
-    CONFLICT_MESSAGE, TherapyLineValidationError, refusal_payload,
+from omop_core.services.therapy_transactions import (
+    CONCURRENT_EDIT_MESSAGE, TherapyLineRejected, TherapyLineWriteConflict,
+    lock_therapy_patients, run_therapy_write,
 )
-from omop_core.services.therapy_transactions import TherapyLineWriteConflict
 from omop_core.signals import suppress_patient_record_refresh
-from patient_portal.api.provenance_org import ProvenanceContext
+from patient_portal.api.provenance_org import ProvenanceContext, raise_on_foreign_attribution
 
 MAX_LINES = 100
 SOURCE_SYSTEM = 'therapy-lines-api'
@@ -45,8 +46,45 @@ ImportLine = dict[str, Any]
 ResolvedRegimens = dict[str, tuple[Concept | None, str | None]]
 
 
+def _duplicate_line_indexes(person: Person, lines: list[ImportLine]) -> set[int]:
+    """Return positional duplicates using the person's current primary-cancer key."""
+    primary_key = disease_key(primary_disease_slug(person))
+    seen: set[tuple[str, int]] = set()
+    duplicates = set()
+    for index, line in enumerate(lines):
+        cancer = disease_key(disease_slug(line.get('disease')))
+        # An explicit primary-cancer label and an omitted disease share a key.
+        key = ('' if cancer == primary_key else cancer, line['line_number'])
+        if key in seen:
+            duplicates.add(index)
+        seen.add(key)
+    return duplicates
+
+
+def _revalidate_outcomes(person: Person, lines: list[ImportLine]) -> None:
+    """Recheck disease-specific outcome labels against the locked patient state."""
+    record = PatientRecord.objects.filter(person=person).only('disease').first()
+    primary = record.disease if record else ''
+    for index, line in enumerate(lines):
+        original = line.get('_outcome_input')
+        if not original:
+            continue
+        disease = line.get('disease') or primary
+        aliases = {
+            alias.casefold(): value
+            for alias, value in outcome_aliases(disease).items()
+        }
+        value = aliases.get(original.strip().casefold())
+        if value is None:
+            raise TherapyLineRejected(
+                f"Unknown outcome {original!r}; expected one of {sorted(set(aliases.values()))}.",
+                index=index,
+            )
+        line['outcome'] = value
+
+
 class PositionalTherapyLineListSerializer(serializers.ListSerializer):
-    """Keep per-line errors positional: DRF 3.18 reports only the failing indexes, as a dict."""
+    """Keep bounded per-line errors positional without changing DRF defaults."""
 
     def to_internal_value(self, data):
         try:
@@ -79,6 +117,9 @@ class TherapyLineImportLineSerializer(serializers.Serializer):
         help_text="Drugs to mark as maintenance on the line: [{concept_id}]. "
                   "Each entry must have a concept_id matching a drug already on the line.",
     )
+
+    class Meta:
+        list_serializer_class = PositionalTherapyLineListSerializer
 
     def validate_start_date(self, value: date) -> date:
         """Reject a line that has not started yet."""
@@ -115,9 +156,6 @@ class TherapyLineImportLineSerializer(serializers.Serializer):
                     })
         return attrs
 
-    class Meta:
-        list_serializer_class = PositionalTherapyLineListSerializer
-
 
 class TherapyLineImportSerializer(serializers.Serializer):
     """One person and the lines to upsert for them."""
@@ -131,24 +169,20 @@ class TherapyLineImportSerializer(serializers.Serializer):
         lines: list[ImportLine] = attrs['lines']
         record = PatientRecord.objects.filter(person=person).first()
         primary = record.disease if record else ''
-        primary_key = disease_key(primary_disease_slug(person))
+        duplicate_indexes = _duplicate_line_indexes(person, lines)
         concepts = Concept.objects.in_bulk(
             {line['regimen_concept_id'] for line in lines if line.get('regimen_concept_id')}
         )
         errors: list[dict[str, str]] = []
-        seen: set[tuple[str, int]] = set()
-        for line in lines:
+        for index, line in enumerate(lines):
             error: dict[str, str] = {}
-            cancer = disease_key(disease_slug(line.get('disease')))
-            # The writer files a line naming the primary cancer with the unnamed ones
-            key = ('' if cancer == primary_key else cancer, line['line_number'])
-            if key in seen:
+            if index in duplicate_indexes:
                 error['line_number'] = 'This line appears more than once in the request.'
-            seen.add(key)
             concept_id = line.get('regimen_concept_id')
             if concept_id and not is_assertable_regimen(concepts.get(concept_id)):
                 error['regimen_concept_id'] = f'{concept_id} is not a valid HemOnc or HK-Regimen regimen concept.'
             if line.get('outcome'):
+                line['_outcome_input'] = line['outcome']
                 aliases = {
                     alias.casefold(): value
                     for alias, value in outcome_aliases(line.get('disease') or primary).items()
@@ -164,6 +198,12 @@ class TherapyLineImportSerializer(serializers.Serializer):
         if any(errors):
             raise serializers.ValidationError({'lines': errors})
         return attrs
+
+
+class TherapyLineImportPersonSerializer(serializers.Serializer):
+    """Resolve the target before validating fields that reveal patient data."""
+
+    person = serializers.PrimaryKeyRelatedField(queryset=Person.objects.all())
 
 
 def _author_kwargs(line: ImportLine, regimens: ResolvedRegimens) -> dict[str, Any]:
@@ -224,71 +264,104 @@ def _regimen_match(line: ImportLine, regimens: ResolvedRegimens) -> str | None:
 
 def _record_created_provenance(results: list[TherapyLineEpisodeResult], person: Person,
                                provenance: ProvenanceContext) -> None:
-    """Attach provenance to the lines this request created."""
+    """Attach provenance to newly created lines and their newly written facts."""
     episodes = [result.episode for result in results if result.created]
-    if not episodes:
+    observations = [obs for result in results for obs in result.created_observations]
+    if not episodes and not observations:
         return
-    content_type = ContentType.objects.get_for_model(episodes[0])
-    ProvenanceRecord.objects.bulk_create([
-        ProvenanceRecord(
-            source=provenance.source,
-            source_user_id=provenance.source_user_id,
-            target_patient_id=str(person.person_id),
-            modification_reason=provenance.reason,
-            organization=provenance.organization,
-            content_type=content_type,
-            object_id=episode.pk,
+    records = []
+    for model_rows in (episodes, observations):
+        if not model_rows:
+            continue
+        content_type = ContentType.objects.get_for_model(model_rows[0])
+        records.extend(
+            ProvenanceRecord(
+                source=provenance.source,
+                source_user_id=provenance.source_user_id,
+                target_patient_id=str(person.person_id),
+                modification_reason=provenance.reason,
+                organization=provenance.organization,
+                content_type=content_type,
+                object_id=row.pk,
+            )
+            for row in model_rows
         )
-        for episode in episodes
-    ])
+    ProvenanceRecord.objects.bulk_create(records)
 
 
-def _rejected_response(exc: TherapyLineValidationError, line_count: int) -> Response:
-    """Report a refused line at its position in the request, from the refusal catalog only."""
-    payload = refusal_payload(exc)
-    if payload is None:
-        raise exc
+def _rejected_response(exc: TherapyLineRejected, line_count: int) -> Response:
+    """Report a refused line at its position in the request."""
     errors: list[dict[str, list[str]]] = [{} for _ in range(line_count)]
-    errors[exc.index] = {'non_field_errors': [payload['detail']]}
+    errors[exc.index] = {'non_field_errors': [exc.message]}
     return Response({'lines': errors}, status=status.HTTP_400_BAD_REQUEST)
 
 
 def import_therapy_lines(person: Person, lines: list[ImportLine], provenance: ProvenanceContext,
-                         skip_refresh: bool) -> Response:
+                          skip_refresh: bool, authorize_person=None) -> Response:
     """Upsert validated lines of one person and derive the record once."""
-    try:
-        with transaction.atomic():
-            with suppress_patient_record_refresh():
-                # Sorted so concurrent imports lock mapping-gap rows in one order and cannot deadlock
-                labels = sorted({line['regimen'] for line in lines
-                                 if line.get('regimen') and not line.get('regimen_concept_id')})
-                regimens: ResolvedRegimens = {label: resolve_regimen_label(label, SOURCE_SYSTEM) for label in labels}
-                results = author_therapy_lines(
-                    person, [_author_kwargs(line, regimens) for line in lines], asserted_by='import',
+
+    def once():
+        with suppress_patient_record_refresh():
+            # Acquire patient roots before shared mapping rows, matching the
+            # canonical writer's lock order on every complete retry attempt.
+            lock_therapy_patients([person.pk])
+            # This instance was resolved before waiting for the Person lock.
+            # Refresh under the lock so retries and projection use current data.
+            person.refresh_from_db()
+            if authorize_person is not None:
+                # Tenant ownership may have changed since the pre-validation
+                # check. Re-authorize against the locked, current patient record
+                # on every complete retry attempt before any writes.
+                authorize_person(person)
+            duplicate_indexes = _duplicate_line_indexes(person, lines)
+            if duplicate_indexes:
+                index = min(duplicate_indexes)
+                raise TherapyLineRejected(
+                    'This line appears more than once in the request.', index=index,
                 )
-                if results is not None:
-                    _apply_maintenance_flags(lines, results)
-                if results is None:
-                    # Also drops the regimens quarantined above
-                    transaction.set_rollback(True)
-                    return Response(
-                        {'detail': (
-                            'Treatment Regimen concept (32531) is not loaded, so the '
-                            'therapy lines could not be grouped. Load the Episode '
-                            'vocabulary and retry.'
-                        )},
-                        status=status.HTTP_409_CONFLICT,
-                    )
-                if provenance.source:
-                    _record_created_provenance(results, person, provenance)
-            # Inside the transaction so a failed derivation rolls the lines back
-            if not skip_refresh:
-                refresh_patient_record(person)
+            _revalidate_outcomes(person, lines)
+            labels = sorted(
+                {line['regimen'] for line in lines
+                 if line.get('regimen') and not line.get('regimen_concept_id')},
+                key=lambda label: (normalize_regimen_name(label)[:255], label),
+            )
+            regimens: ResolvedRegimens = {label: resolve_regimen_label(label, SOURCE_SYSTEM) for label in labels}
+            results = author_therapy_lines(
+                person, [_author_kwargs(line, regimens) for line in lines], asserted_by='import',
+                write_guard=lambda model, ids: raise_on_foreign_attribution(
+                    model, ids, provenance.organization,
+                ),
+                retry=False,
+            )
+            if results is not None:
+                _apply_maintenance_flags(lines, results)
+            if results is None:
+                # The writer marks this complete attempt for rollback, including
+                # any regimens quarantined during preparation.
+                return Response(
+                    {'detail': (
+                        'Treatment Regimen concept (32531) is not loaded, so the '
+                        'therapy lines could not be grouped. Load the Episode '
+                        'vocabulary and retry.'
+                    )},
+                    status=status.HTTP_409_CONFLICT,
+                )
+            if provenance.source:
+                _record_created_provenance(results, person, provenance)
+        if not skip_refresh:
+            refresh_patient_record(person)
+        return results, regimens
+
+    try:
+        result = run_therapy_write(once)
     except TherapyLineWriteConflict:
-        return Response({'detail': CONFLICT_MESSAGE}, status=status.HTTP_409_CONFLICT)
-    except TherapyLineValidationError as exc:
+        return Response({'detail': CONCURRENT_EDIT_MESSAGE}, status=status.HTTP_409_CONFLICT)
+    except TherapyLineRejected as exc:
         return _rejected_response(exc, len(lines))
 
+    if isinstance(result, Response):
+        return result
+    results, regimens = result
     created = sum(1 for result in results if result.created)
     return Response({
         'person_id': person.person_id,

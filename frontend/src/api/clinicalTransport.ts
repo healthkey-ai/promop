@@ -21,6 +21,30 @@ import defaultApi from '@/api/axios';
 let client: AxiosInstance = defaultApi;
 let basePath = '';
 
+/** Mounted widgets that asked for a transport, oldest first. Popping one must
+ *  put the previous owner back: a page can have several patient widgets, and the
+ *  plain reset used to yank the transport out from under the ones still open. */
+const owners: Array<{ client: AxiosInstance; basePath: string }> = [];
+
+function applyTopOwner(): boolean {
+  const top = owners[owners.length - 1];
+  return top ? setClinicalTransport(top.client, top.basePath) : resetClinicalTransport();
+}
+
+/** Register a transport owner and get the matching release. Last in wins; the
+ *  release restores whatever was active underneath. */
+export function pushClinicalTransport(next: AxiosInstance, nextBasePath = ''): () => void {
+  const owner = { client: next, basePath: nextBasePath };
+  owners.push(owner);
+  setClinicalTransport(owner.client, owner.basePath);
+  return () => {
+    const index = owners.lastIndexOf(owner);
+    if (index === -1) return;
+    owners.splice(index, 1);
+    applyTopOwner();
+  };
+}
+
 /** Called by the federation provider. Returns whether anything actually moved,
  *  so callers can drop caches keyed to the old deployment. */
 export function setClinicalTransport(next: AxiosInstance, nextBasePath = ''): boolean {

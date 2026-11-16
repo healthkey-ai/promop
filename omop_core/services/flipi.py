@@ -1,6 +1,8 @@
 """FLIPI-1: five equally weighted, explicitly assessed baseline factors."""
 import re
 
+from omop_core.services.write_refusal import WriteRefused
+
 FACTORS = {
     'age': 'Age > 60 years',
     'stage': 'Ann Arbor stage III or IV',
@@ -28,7 +30,7 @@ def parse_factors(value):
             continue
         key = _ALIASES.get(item.lower())
         if key is None:
-            raise ValueError(f'Unrecognized FLIPI factor: {item}')
+            raise WriteRefused(f'Unrecognized FLIPI factor: {item}')
         selected.add(key)
     return [key for key in FACTORS if key in selected]
 
@@ -47,5 +49,5 @@ def normalize_grade(value):
     text = str(value).strip().upper()
     match = re.match(r'^(?:GRADE\s*)?([123](?:[AB])?)(?:\b|\s|\()', text)
     if not match or match.group(1) not in {'1', '2', '3', '3A', '3B'}:
-        raise ValueError('Use grade 1, 2, 3A, or 3B (3 for an unspecified historical grade).')
+        raise WriteRefused('Use grade 1, 2, 3A, or 3B (3 for an unspecified historical grade).')
     return match.group(1)

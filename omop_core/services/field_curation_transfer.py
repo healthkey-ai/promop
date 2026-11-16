@@ -494,20 +494,28 @@ def _apply_choices(rows: list[dict], stats: TransferStats) -> None:
 
 
 def _apply_formulas(rows: list[dict], stats: TransferStats) -> None:
+    from omop_core.services.authored_answers import is_authored_answer_field
     existing = {f.field_name: f for f in FieldFormula.objects.all()}
     for row in rows:
+        is_active = row['is_active']
+        if is_authored_answer_field(row['field_name']) and is_active:
+            stats.warn(
+                f"formula {row['field_name']}: authored-answer fields cannot be "
+                'active; stored inactive'
+            )
+            is_active = False
         formula = existing.get(row['field_name'])
         if formula is None:
             FieldFormula.objects.create(
                 field_name=row['field_name'],
                 formula=row['formula'],
-                is_active=row['is_active'],
+                is_active=is_active,
                 created_by=None,
             )
             stats._bump(stats.created, 'formulas')
             continue
         formula.formula = row['formula']
-        formula.is_active = row['is_active']
+        formula.is_active = is_active
         formula.created_by = None
         formula.save(update_fields=['formula', 'is_active', 'created_by', 'updated_at'])
         stats._bump(stats.updated, 'formulas')

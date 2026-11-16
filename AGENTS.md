@@ -540,10 +540,47 @@ rule below for when that is called for.
 2. `git checkout -b <descriptive-branch-name>` before writing any code
 3. Commit the work on the feature branch
 4. Run the targeted tests for the change (see below)
-5. Open a PR targeting `dev`
-6. Perform a code review on the PR. **Stop and present the review to the user before merging** — the user must read the review and approve the merge.
-   - **Exception — small, local, low-risk fixes** (typos, docstring updates, single-line bug fixes, config tweaks): these may proceed all the way through to a merge into `dev` without waiting for user review, provided the code review found no unfixable issues.
-7. **After the PR merges into `dev` successfully, delete the feature branch.** Prefer `gh pr merge --delete-branch`, which removes the remote branch as part of the merge. Then delete the local copy (`git branch -d <branch>`) and remove any worktree created for it (`git worktree remove <path>`). Do not leave merged feature branches lingering locally or on the remote.
+5. Open a PR targeting the branch the work belongs to: `cb-v2` while the CB
+   integration lane is the target (as in
+   [`docs/shared-patient-form_plan.md`](docs/shared-patient-form_plan.md)), `dev`
+   otherwise. Never target `main`.
+6. Perform a code review on the PR and present it to the user. **The user merges; an agent never does**, in this repository or any other, and never by admin merge, auto-merge or a ruleset bypass.
+   - **Exception — small, local, low-risk fixes** (typos, docstring updates, single-line bug fixes, config tweaks): these may skip the separate review round and go straight to the user as merge-ready, provided the review found no unfixable issues. They still wait for the user's merge.
+7. **After the user merges the PR, delete the feature branch.** A merge done with `gh pr merge --delete-branch` has already removed the remote branch. Delete the local copy (`git branch -d <branch>`) and remove any worktree created for it (`git worktree remove <path>`). Do not leave merged feature branches lingering locally or on the remote.
+
+### Rule: Work Landing on `cb-v2` Closes No Issue by Itself
+
+GitHub closes an issue named by `Fixes #N` / `Closes #N` when the commit reaches the
+repository's **default branch**, which is `dev`. Work that lands on `cb-v2` — our
+integration lane, never the default branch — leaves its issue open however plainly
+the keyword is written: PR #2578 said `Fixes #2577`, but #2577 stayed open, and
+#2425 stayed open after its fix landed on `cb-v2`.
+
+So a change merged or pushed to `cb-v2` is not finished until its issues are closed
+by hand. After the user merges it, check which issues it **fully** resolves — the
+ones it only mentions, or fixes in part, stay open — and close those, naming the
+commit and what the change makes true:
+
+```bash
+gh issue close <n> --repo healthkey-ai/promop --comment \
+  "Fixed by #<pr>, merged into cb-v2 as <merge-sha>. <what is true now>."
+```
+
+A fix that reached `cb-v2` without a PR of its own names the commit instead of a
+merge.
+
+Keep `Fixes #N` in the PR body as the reference a reader follows from the issue.
+Automatic closure on a later promotion needs a closing keyword in a commit message
+that reaches `dev`, or in the promotion PR's description; the body of the `cb-v2`
+PR itself counts for nothing there, and a squash promotion does not preserve the
+original commits. So do not rely on it.
+
+The converse trap matters too: a hand-closed issue here is **not** evidence that
+the fix is on `dev` or deployed, since a release checklist built on closed issues
+would count it as shipped. It arrives on the default branch with the promotion.
+
+An issue left open beside a merged `cb-v2` PR is not evidence of unfinished work
+either; check for the merge before picking it up.
 
 ### Rule: Unfinished Means Draft, Not a Title Prefix
 
@@ -584,7 +621,8 @@ data, run only:
   and `npm run build` (see "Frontend Lint" below — neither `tsc` nor the tests
   catch what lint does).
 
-Do not push if any of those fail. Then **wait for CI to pass before merging**;
+Do not push if any of those fail. Then **wait for CI to pass before presenting
+the PR for merge**;
 a red required check blocks the merge, and a failure there is fixed on the
 branch and re-pushed, not reproduced first with a local full run.
 
@@ -1907,12 +1945,22 @@ event identity in `_UPSERT_KEYS`, the same identity
 `fhir/sync.py::_upsert_clinical` uses — so an ETL re-run, a retry after a read
 timeout, or a re-parse converges instead of duplicating. Semantics per key:
 event already present → left in place, its concept updated when it changed and
-any stacked historical duplicates collapsed onto the earliest row; otherwise
-inserted. Repeats within one batch collapse to a single row (last occurrence
-wins). Only the concept column is rewritten on a matched row — every other
-column is left as stored, so a re-run cannot quietly overwrite a corrected
-value. Only inserted rows get a `ProvenanceRecord`. `?upsert=false` restores
-append-only writes.
+any stacked historical duplicates collapsed onto the first real row (null
+confidence and a mapped concept), or onto the earliest when no candidate holds
+an approved mapping; otherwise inserted. Repeats within one batch collapse to a
+single row (last occurrence
+wins). A content match rewrites only the concept column — every other column is
+left as stored, so a re-run cannot quietly overwrite a corrected value — unless
+the incoming row carries a source record key: the key is then stamped on the
+unkeyed row it matched and the columns the serializer accepts are rewritten, as
+below. Inserted rows and key matches get a `ProvenanceRecord` when a source is
+sent. `?upsert=false` restores append-only writes for unkeyed rows; a row
+carrying a source record key is still matched by key.
+
+The FHIR sync (`_upsert_clinical` and the daily rollup) applies the same
+survivor rule. It promotes a provisional row it rewrites only when the sync
+resolves a concept and the caller is not patient self-service, and marks the
+patient stale for the next derivation (#2581).
 
 | Model | Event identity |
 |---|---|
@@ -1953,7 +2001,8 @@ Printable ASCII, no whitespace, at most 512; anything else is a 400.
   rewritten from the incoming one: every column the serializer accepts except
   `person`, `is_erroneous` and `erroneous_reason`, so `value_source_value` and
   the unit columns move with the value (a stale one fails the #2249 read check).
-  Rewritten measurements are unit-normalized like inserted ones.
+  Rewritten measurements follow the same unit handling as inserted ones; see
+  [`docs/canonical_units_architecture.md`](docs/canonical_units_architecture.md).
 - **No key match: the content match, against unkeyed rows only.** Exactly one
   unkeyed row for one incoming key gets the key stamped and is rewritten. Several
   candidates of different attribution, or several incoming keys on one row, is
@@ -2243,9 +2292,10 @@ Run generator:
 - This is a standing user preference: do not run pytest, Django, frontend or
   async e2e suites for documentation-only changes, and do not ask the user to
   approve skipping them again.
-- For an authorized documentation-only merge, run any lightweight docs-only
-  status gates GitHub requires and complete the merge without asking for another
-  confirmation. These status gates do not require application test results.
+- For a documentation-only PR, run any lightweight docs-only status gates GitHub
+  requires and then hand it to the user as merge-ready, without asking again to
+  skip the application suites. These status gates do not require application test
+  results; the user merges.
 - Do not use `[skip ci]` for a protected-branch PR when it would leave required
   statuses missing and block the merge. Let the existing docs-only detector
   skip the application jobs and satisfy the required status gates instead.
@@ -2273,8 +2323,9 @@ Run generator:
 - CI is the gate for the full suites. Before a push, run only the tests the
   change touches (plus `npm run lint` and `npm run build` for frontend work);
   do not run the full Django or pytest suite locally. Wait for the required
-  checks before merging. See [Targeted Tests Before a Push, CI for the Full
-  Suites](#rule-targeted-tests-before-a-push-ci-for-the-full-suites) above.
+  checks before presenting it for merge. See [Targeted Tests Before a Push, CI
+  for the Full Suites](#rule-targeted-tests-before-a-push-ci-for-the-full-suites)
+  above.
 
 #### Migration conflicts
 
@@ -2289,10 +2340,10 @@ so a stale green check does not catch it.
 - **Rebase before creating a migration.** `git fetch origin dev && git rebase
   origin/dev`, then run `makemigrations`, so the migration gets the next number
   and depends on the current leaf.
-- **Rebase again immediately before merging a PR that adds a migration.** If
+- **Rebase again immediately before a migration PR goes to the user.** If
   `omop_core/migrations/` on `dev` changed since the branch's last CI run,
-  rebase, check the graph, push, and wait for CI to pass on the new head. Do
-  not merge on the older green result.
+  rebase, check the graph, push, and wait for CI to pass on the new head. An
+  older green result does not describe the branch that would merge.
 - **Check the graph locally after every rebase.** With `DATABASE_URL` pointed at
   local PostgreSQL and `DEBUG=True`, run
   `.venv/bin/python manage.py makemigrations --check --dry-run`. It fails with
@@ -2312,9 +2363,9 @@ so a stale green check does not catch it.
   `0295_merge_source_code_upload_and_facility_review`). Check that nobody has
   already opened the same fix, because two identical merge migrations create a
   new pair of leaves (#1833).
-- **Merge migration PRs one at a time.** When several open PRs add
-  migrations, merge one, then rebase the next onto the new `dev`, check it, and
-  let CI pass before merging it.
+- **Hand migration PRs over one at a time.** When several open PRs add
+  migrations, wait for the user to merge one, then rebase the next onto the new
+  `dev`, check it, and let CI pass before presenting it.
 
 #### Documentation naming and ownership
 

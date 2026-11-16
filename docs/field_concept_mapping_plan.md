@@ -217,9 +217,22 @@ parent enhancement is complete.
 | Complete field **and value** inventory — [#1223](https://github.com/healthkey-ai/promop/issues/1223), PR #1284 | **Open; active work.** 7,767 occurrences, all 172 CancerBot bindings and all 98 data-migration definition scopes are accounted for. Destination semantics and clinical reconciliation of historical evidence remain unfinished. | Account for every #26 field/value and every #21 field with an explicit disposition and implementation owner; reconcile totals, source/history references and destination context. Resolve count/presence, criteria/aggregate, staging-system, polarity, response-system and planned/administered conflicts explicitly. Retain unreviewed, ambiguous and structured cases as distinct states. Update the inventory acceptance report before dependent schema work. |
 | Stable choices, curation and save/readback — [#1224](https://github.com/healthkey-ai/promop/issues/1224), [#1225](https://github.com/healthkey-ai/promop/issues/1225), [#1226](https://github.com/healthkey-ai/promop/issues/1226) | **Open; depends on #1223.** Earlier implementation is preserved for review against current dev. | Stable typed/scoped choices, reviewed nullable answer mappings, curation permissions/history, and server-side projection/reverse resolution pass migration, concurrency, compatibility and round-trip tests. Unknown, unmapped and cleared values survive without fabricated standard concepts. |
 | Disease, genetic and therapy mapping delivery — [#1227](https://github.com/healthkey-ai/promop/issues/1227), [#1228](https://github.com/healthkey-ai/promop/issues/1228), [#1229](https://github.com/healthkey-ai/promop/issues/1229), [#1230](https://github.com/healthkey-ai/promop/issues/1230) | **Open.** Candidate/source evidence is available; complete reviewed mapping and runtime acceptance is outstanding. | Meet the #21 repair matrix and #26 value dispositions through the shared mapping implementation. Test structured criteria/markers, question versus answer roles, test/event context and disease-specific readback. Correct audited therapy import defects through existing managed catalogs while preserving curator decisions, relationship management and authoring. Coordinate missing MCL destinations with #468/#542/#1149. |
-| Priority gene/marker fields in every disease — [#1311](https://github.com/healthkey-ai/promop/issues/1311) | **Storage coverage verified; final acceptance open.** All 42 effective fields across 51 disease memberships have approved storage recipes. All currently use the supported source-only parent fallback. | Retain per-disease coverage, idempotent seeding and curator preservation. Validate multiple-JSON Measurement parents and compatible parent/component domains. Record standard versus source-only outcomes explicitly; never count concept 0 as a standard mapping or substitute a gene concept for an exact variant. |
+| Priority gene/marker fields in every disease — [#1311](https://github.com/healthkey-ai/promop/issues/1311) | **Storage coverage verified; gate implemented.** All 42 effective fields across 51 disease memberships have approved storage recipes; the [focused per-disease artifact](field-mapping-inventory/genomics-priority-coverage.md) is extracted from the inventory and records every disposition (currently all supported source-only). | Retain per-disease coverage, idempotent seeding and curator preservation. `seed_genomics_catalog` remains the idempotent seeder and never overwrites curator approvals, rejections or source keys. `priority_field_coverage` checks the approved Measurement/JSON/multiple parent and records the standard-parent-candidate and supported source-only dispositions separately; `audit_genomics_domains --include-writer-prerequisites` checks the `measurement.measurement_id` event identity and writer concepts. `export_genomics_priority_coverage` writes the focused artifact and `--check` fails when it is stale; it also fails on any missing, unapproved or incompatible recipe. Concept 0 is never reported as a standard mapping and no gene concept is substituted for an exact variant. |
 | Vocabulary provenance and portable mapping validation — [#461](https://github.com/healthkey-ai/promop/issues/461), [#623](https://github.com/healthkey-ai/promop/issues/623), #1223/#1231 | **Open for affected candidates.** SNOMED lineage is uncertain; missing/invalid/domain-conflicting targets are reported. | Every mapping approved for release has exact vocabulary/code, validity, role/domain and release/provenance evidence on its destination. Resolve affected lineage before bulk approval. Values intentionally retained as source-only or structured must have explicit dispositions and tested behavior; a failed search never establishes no equivalent. |
 | Transfer, bounded reconciliation and integrated validation — [#1231](https://github.com/healthkey-ai/promop/issues/1231) | **Open; follows implementation gates above.** The passing inventory checkpoint is not final runtime/rollout verification. | Complete portable field-plus-values transfer; preview/apply/resume/recovery for the scoped pending, alias and historical-fact repairs; preserve source values, clinical dates and pending clears. Run full local suites on the integrated candidate and retain deployment/reconciliation evidence. Mapping approval alone must not rewrite history. |
+
+### Priority gene/marker coverage gate (#1311)
+
+The inventory's `priority_field_coverage` section is the classification; the
+focused [per-disease artifact](field-mapping-inventory/genomics-priority-coverage.md)
+and its JSON are extracted from it by
+`python manage.py export_genomics_priority_coverage --write`. The command fails
+on any missing, unapproved or incompatible recipe, and `--check` fails when the
+artifact is stale. A standard Measurement concept is optional: recipes whose
+portable LOINC `81252-9` resolves to an Observation concept keep the supported
+source-only disposition rather than forcing that concept into Measurement.
+`seed_genomics_catalog` is the idempotent seeder and preserves curator approvals,
+rejections and source keys.
 
 Staging always means Render. Automated application suites for implementation
 changes run against local databases; documentation-only changes use the standing
@@ -1001,10 +1014,11 @@ the Disease Category Mappings page:
 | `DiseaseCategoryChoice` | The categories: `BC`, `MM`, `FL`, `CLL`, `MCL`, `Other` as seeded, plus any a curator adds | `/api/v1/disease-categories/` |
 | `DiseaseCategoryMapping` | Which category a disease name belongs to | The same page |
 
-`disease_code` resolves a name through its built-in rules and then
-`DiseaseCategoryMapping`; `disease_relevance.patient_diseases` returns a
-record's categories, primary first. Both tables travel with
-`copy_reference_data`. The `DiseaseCategory` enum is a legacy reference.
+`disease_code` currently resolves built-in aliases before consulting
+`DiseaseCategoryMapping`; the intended resolver below reverses that precedence.
+`disease_relevance.patient_diseases` returns a record's categories, primary
+first. Both tables travel with `copy_reference_data`. The `DiseaseCategory`
+enum is a legacy reference.
 
 Field structure does not use any of it yet. `disease_relevance.DISEASES`
 hardcodes the five supported codes, and the patient page picks the disease
@@ -1017,7 +1031,7 @@ no shared source:
 | Where | What |
 |---|---|
 | `DiseaseTab.tsx` | A `switch` on disease type renders a hand-authored section per disease; BC also gets a staging/biomarker section |
-| `omop_core/services/disease_relevance.py::DISEASE_FIELDS` | A frozenset per disease that mirrors the tab, guarded by a drift test: BC 27 fields, CLL 21, MM 19, FL 13, MCL 8, eleven of them shared by two or more diseases |
+| `omop_core/services/disease_relevance.py::DISEASE_FIELDS` | A frozenset per disease that mirrors the tab, guarded by a drift test: BC 28 fields, CLL 21, MM 26, FL 13, MCL 11, eleven of them shared by two or more diseases |
 | Genomics catalog markers' `diseases` | Per-disease priority markers (#1180, #1311) |
 | The federated editor (`frontend/src/federation/` on `cb-v2`) | Renders the same tab components for the host app, taking each control's options from the descriptor, and already disagrees with `dev` where one column means different things per disease (#2551) |
 | CancerBot `trials/services/patient_info/configs.py` | Each attribute carries an optional `"disease"` gate (one code or a list) read by `disease_attr_applies`; an attribute with no gate applies to every disease. At CancerBot `a840f8d9` its gates name MCL on 21 attribute entries against the 8 fields here (#1149) |
@@ -1069,9 +1083,11 @@ remains a way to *contribute* memberships, not a replacement for them.
   disease list is added. The enumerated set is `DiseaseCategoryChoice`: a
   membership names a category code and is refused for an unknown one. Which
   profile a record gets is decided by `DiseaseCategoryMapping` through
-  `disease_code`, so mapping a disease name to a category on the Disease
-  Category Mappings page gives its patients that category's profile with no
-  deploy. `disease_relevance.DISEASES` and `getDiseaseType`'s substring match
+  `disease_code`, with an explicit curator mapping taking precedence over a
+  built-in alias. Mapping a disease name—even one currently recognized by a
+  built-in alias—to a category on the Disease Category Mappings page gives its
+  patients that category's profile with no deploy. `disease_relevance.DISEASES`
+  and `getDiseaseType`'s substring match
   are replaced by those two tables, and the scope control of 10.3 lists
   categories from the same endpoint the General tab's Disease Category
   dropdown reads. `Other` has no extension: its profile is the base record. A
@@ -1184,8 +1200,9 @@ field to a disease's extension without a deploy; a category added at
 `/api/v1/disease-categories/` gets a profile and, once a field is placed, a
 disease tab; a record whose disease name is mapped to a category on the
 Disease Category Mappings page renders that category's extension, and
-re-mapping the name changes the profile without clearing a value; no code
-path decides a record's disease by matching on its name; the choice list a
+re-mapping the name, including a built-in alias such as Multiple Myeloma,
+changes the profile without clearing a value; no code path decides a record's
+disease by matching on its name; the choice list a
 patient sees follows their disease where a
 scoped choice exists; tests cover warn-only, enforced 400,
 derivation/ETL/sync unaffected, disease change preserving values,

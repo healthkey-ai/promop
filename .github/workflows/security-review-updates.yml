@@ -8,7 +8,7 @@ permissions: {}
 
 jobs:
   notify:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       # This event uses the PR workflow. It has no token permissions and checks
       # out no code; workflow_run evaluates the review from the trusted branch.

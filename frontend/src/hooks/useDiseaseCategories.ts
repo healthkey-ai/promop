@@ -1,10 +1,32 @@
-import { useState, useEffect, useContext, useMemo, useCallback } from "react";
-import api from "@/api/axios";
-import { PatientInfoContext } from "@/federation/PatientInfoContext";
+import { useState, useEffect, useMemo, useCallback } from "react";
+import { clinicalClient, clinicalUrl } from "@/api/clinicalTransport";
 
 interface CategoryObject {
   value: string;
   label: string;
+}
+
+interface MappingEntry {
+  disease_name: string;
+  category: string;
+}
+
+/**
+ * The response as rows, or `null` when it is not the shape this endpoint
+ * promises.
+ *
+ * A host that does not route the path answers its own SPA shell with a 200, and
+ * axios hands that back as a string: `items.map` then throws inside
+ * `useDiseaseCategories`'s `.then` (caught), but `useAllDiseaseMappings` stored
+ * it and the render threw on `m.disease_name.toLowerCase()` -- which unmounts
+ * the whole widget instead of showing an empty category picker.
+ *
+ * `null` is deliberately distinct from `[]`: an empty list is a real answer and
+ * is cached, while an unroutable one must not poison the module cache, or every
+ * later mount keeps rendering empty after the host has been fixed.
+ */
+function rowsFrom<T>(data: unknown): T[] | null {
+  return Array.isArray(data) ? (data as T[]) : null;
 }
 
 let labelCache: string[] | null = null;
@@ -14,12 +36,15 @@ let objectCache: CategoryObject[] | null = null;
  * Fetches the managed disease category labels from `/v1/disease-categories/`
  * and returns them as a flat string array suitable for a select dropdown.
  * Results are cached for the lifetime of the page.
+ *
+ * Through the clinical transport, not the standalone client: a federated host
+ * mounts the widget under its own API prefix and serves the rest of its origin
+ * as a static SPA, so a root-relative `/v1/disease-categories/` request reaches
+ * that shell and the picker silently comes back empty (#5599, #5847).
  */
 export const useDiseaseCategories = (): { options: string[]; loading: boolean } => {
   const [options, setOptions] = useState<string[]>(labelCache ?? []);
   const [loading, setLoading] = useState(labelCache === null);
-  const ctx = useContext(PatientInfoContext);
-  const client = ctx?.apiClient ?? api;
 
   useEffect(() => {
     if (labelCache !== null) return;
@@ -28,11 +53,12 @@ export const useDiseaseCategories = (): { options: string[]; loading: boolean } 
     // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount
     setLoading(true);
 
-    client
-      .get("/v1/disease-categories/")
+    clinicalClient()
+      .get(clinicalUrl("/v1/disease-categories/"))
       .then((res) => {
         if (cancelled) return;
-        const items = res.data as CategoryObject[];
+        const items = rowsFrom<CategoryObject>(res.data);
+        if (items === null) return; // don't cache a body that is not the contract
         const labels = items.map((item) => item.label);
         labelCache = labels;
         objectCache = items;
@@ -46,7 +72,7 @@ export const useDiseaseCategories = (): { options: string[]; loading: boolean } 
     return () => {
       cancelled = true;
     };
-  }, [client]);
+  }, []);
 
   return { options, loading };
 };
@@ -63,8 +89,6 @@ export const useCategoryObjects = (): {
     objectCache ?? [],
   );
   const [loading, setLoading] = useState(objectCache === null);
-  const ctx = useContext(PatientInfoContext);
-  const client = ctx?.apiClient ?? api;
 
   useEffect(() => {
     if (objectCache !== null) return;
@@ -73,11 +97,12 @@ export const useCategoryObjects = (): {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount
     setLoading(true);
 
-    client
-      .get("/v1/disease-categories/")
+    clinicalClient()
+      .get(clinicalUrl("/v1/disease-categories/"))
       .then((res) => {
         if (cancelled) return;
-        const items = res.data as CategoryObject[];
+        const items = rowsFrom<CategoryObject>(res.data);
+        if (items === null) return; // don't cache a body that is not the contract
         objectCache = items;
         labelCache = items.map((i) => i.label);
         setCategories(items);
@@ -90,7 +115,7 @@ export const useCategoryObjects = (): {
     return () => {
       cancelled = true;
     };
-  }, [client]);
+  }, []);
 
   return { categories, loading };
 };
@@ -105,8 +130,6 @@ export const useDiseasesByCategory = (
 ): { diseases: string[]; loading: boolean } => {
   const [all, setAll] = useState<Record<string, string[]>>({});
   const [loading, setLoading] = useState(false);
-  const ctx = useContext(PatientInfoContext);
-  const client = ctx?.apiClient ?? api;
 
   useEffect(() => {
     if (!category) return;
@@ -116,13 +139,15 @@ export const useDiseasesByCategory = (
     // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount
     setLoading(true);
 
-    client
-      .get("/v1/disease-category-mappings/", { params: { category } })
+    clinicalClient()
+      .get(clinicalUrl("/v1/disease-category-mappings/"), { params: { category } })
       .then((res) => {
         if (cancelled) return;
-        const names = (
-          res.data as { disease_name: string }[]
-        ).map((m) => m.disease_name);
+        const rows = rowsFrom<MappingEntry>(res.data);
+        if (rows === null) return; // don't cache a body that is not the contract
+        const names = rows
+          .map((m) => m.disease_name)
+          .filter((name): name is string => typeof name === "string");
         names.sort();
         setAll((prev) => ({ ...prev, [category]: names }));
       })
@@ -134,7 +159,7 @@ export const useDiseasesByCategory = (
     return () => {
       cancelled = true;
     };
-  }, [category, client, all]);
+  }, [category, all]);
 
   const diseases = useMemo(
     () => (category ? all[category] ?? [] : []),
@@ -143,11 +168,6 @@ export const useDiseasesByCategory = (
 
   return { diseases, loading };
 };
-
-interface MappingEntry {
-  disease_name: string;
-  category: string;
-}
 
 let allMappingsCache: MappingEntry[] | null = null;
 
@@ -164,8 +184,6 @@ export const useAllDiseaseMappings = (): {
     allMappingsCache ?? [],
   );
   const [loading, setLoading] = useState(allMappingsCache === null);
-  const ctx = useContext(PatientInfoContext);
-  const client = ctx?.apiClient ?? api;
 
   useEffect(() => {
     if (allMappingsCache !== null) return;
@@ -174,11 +192,15 @@ export const useAllDiseaseMappings = (): {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount
     setLoading(true);
 
-    client
-      .get("/v1/disease-category-mappings/")
+    clinicalClient()
+      .get(clinicalUrl("/v1/disease-category-mappings/"))
       .then((res) => {
         if (cancelled) return;
-        const items = res.data as MappingEntry[];
+        const rows = rowsFrom<MappingEntry>(res.data);
+        if (rows === null) return; // don't cache a body that is not the contract
+        const items = rows.filter(
+          (m) => typeof m?.disease_name === "string" && typeof m?.category === "string",
+        );
         allMappingsCache = items;
         setMappings(items);
       })
@@ -190,7 +212,7 @@ export const useAllDiseaseMappings = (): {
     return () => {
       cancelled = true;
     };
-  }, [client]);
+  }, []);
 
   const reverseLookup = useMemo(() => {
     const map = new Map<string, string>();

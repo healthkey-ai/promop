@@ -150,10 +150,13 @@ def verify_email(request):
             identity.mark_email_verified()
             promote_trusted_domain_grants(identity)
             # Clear the verification gate on any remaining grants (public-org
-            # signups that promote_trusted_domain_grants does not cover).
+            # signups that promote_trusted_domain_grants does not cover). A
+            # grant from an inactive organization keeps its gate: a suspended
+            # org cannot hand out access through a domain trust.
             from omop_core.models import GroupAccess
             GroupAccess.objects.filter(
                 identity=identity, pending_email_verification=True,
+                org__is_active=True,
             ).update(pending_email_verification=False)
             # The address is proof only now, so this is where an imported
             # patient's record may be joined to their account (#1817).

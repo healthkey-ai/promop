@@ -9,8 +9,20 @@ from time import sleep
 from django.db import OperationalError, transaction
 
 
+CONCURRENT_EDIT_MESSAGE = 'The treatment history is being edited concurrently. No changes were saved; retry the request.'
+
+
 class TherapyLineWriteConflict(ValueError):
     """The complete write rolled back; the caller may retry its intent."""
+
+
+class TherapyLineRejected(ValueError):
+    """The writer refused the input. The message is safe to show the caller."""
+
+    def __init__(self, message: str, *, index: int | None = None) -> None:
+        super().__init__(message)
+        self.message = message
+        self.index = index
 
 
 def run_therapy_write(operation, *, backoff=sleep):
@@ -24,9 +36,7 @@ def run_therapy_write(operation, *, backoff=sleep):
             if sqlstate not in {'55P03', '40P01'}:
                 raise
             if attempt == 2:
-                raise TherapyLineWriteConflict(
-                    'The treatment history is being edited concurrently. No changes were saved; retry the request.'
-                ) from exc
+                raise TherapyLineWriteConflict(CONCURRENT_EDIT_MESSAGE) from exc
             backoff(0.02 * (attempt + 1))
 
 

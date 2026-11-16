@@ -13,7 +13,7 @@ import { MemoryRouter } from 'react-router-dom';
  * columns are never sent, aliases are never sent, and unchanged values are never
  * sent.
  */
-import { render as baseRender, screen, fireEvent, waitFor, act } from '@testing-library/react';
+import { render as baseRender, screen, fireEvent, waitFor, act, within } from '@testing-library/react';
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import PatientDetail from './PatientDetail';
 import { __resetWritableFieldsCache } from '@/hooks/useWritableFields';
@@ -33,12 +33,16 @@ vi.mock('@/hooks/useVocabulary', () => ({
 }));
 
 vi.mock('@/hooks/useLabMeasurements', () => ({
-  useLabMeasurements: vi.fn(() => ({ grouped: new Map(), isLoading: false })),
+  useLabMeasurements: vi.fn(() => ({ grouped: new Map([[
+    '718-7', { sourceValue: '718-7', unit: 'g/dL',
+      values: [{ measurement_id: 55, measured_at: '2026-11-10' }] },
+  ]]), isLoading: false })),
 }));
 
 import api from '@/api/axios';
 
 const DESCRIPTORS = {
+  preexisting_conditions: { kind: 'direct', writable: true, target: 'patient_record' },
   date_of_birth: {
     kind: 'direct', writable: true, target: 'patient_record',
     projection_target: 'person', value_kind: 'date',
@@ -59,21 +63,42 @@ const DESCRIPTORS = {
   },
   hemoglobin_g_dl: {
     kind: 'direct', writable: true, target: 'patient_record',
-    value_kind: 'number',
+    value_kind: 'number', dated: true,
     projection: {
       omop_table: 'measurement', concept_id: 3000963, code: '718-7',
       type_concept_id: 32856, source_value: '718-7',
     },
   },
+  serum_bilirubin_level_direct: {
+    kind: 'direct', writable: true, target: 'patient_record',
+    value_kind: 'number', dated: true,
+    unit_options: [
+      { value: 'MG/DL', label: 'mg/dL' },
+      { value: 'UMOL/L', label: 'umol/L' },
+    ],
+  },
+  serum_bilirubin_level_direct_units: {
+    kind: 'selectable', writable: false,
+    qualifies: 'serum_bilirubin_level_direct',
+    unit_options: [
+      { value: 'MG/DL', label: 'mg/dL' },
+      { value: 'UMOL/L', label: 'umol/L' },
+    ],
+  },
 };
 
 const PATIENT = {
+  no_pre_existing_conditions: true,
+  preexisting_conditions: [],
   person_id: 261,
   patient_name: 'Alishia Tawny Howell',
   date_of_birth: '1970-01-01',
   anc_thousand_per_ul: 3.1,
   absolute_neutrophile_count: '3.10',
   hemoglobin_g_dl: 12.5,
+  serum_bilirubin_level_direct: 17.1,
+  serum_bilirubin_level_direct_units: 'UMOL/L',
+  serum_bilirubin_level: 1.0,
   // lifecycle — read-only, and updated_at moves on any write
   id: 7, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
   derivation_version: 1, user_edited_fields: [],
@@ -123,12 +148,36 @@ function patchBody() {
 }
 
 describe('PatientDetail save — the edit, not the record', () => {
+  it('keeps explicit withdrawal out of pending autosave while preserving other edits', async () => {
+    (api.post as ReturnType<typeof vi.fn>).mockResolvedValue({ data: {
+      no_pre_existing_conditions: null, preexisting_conditions: [],
+    } });
+    await renderAndLoad();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Withdraw answer' })).toBeEnabled());
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    fireEvent.change(screen.getByDisplayValue('howell@example.org'), { target: { value: 'new@example.org' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Withdraw answer' }));
+    await waitFor(() => expect(screen.getByText(/Not answered/)).toBeInTheDocument());
+    await act(async () => { vi.advanceTimersByTime(2100); });
+    await waitFor(() => expect(patchBody()).toMatchObject({ email: 'new@example.org' }));
+    expect(patchBody()).not.toHaveProperty('no_pre_existing_conditions');
+    expect(patchBody()).not.toHaveProperty('preexisting_conditions');
+    fireEvent.click(screen.getByRole('button', { name: 'Confirm no pre-existing conditions' }));
+    await waitFor(() => expect(api.post).toHaveBeenLastCalledWith(
+      '/v1/patient-records/261/preexisting-conditions-answer/', {
+        action: 'confirm_none', expected_flag: null, expected_categories: [],
+      }));
+  });
   it('routes a date-of-birth correction through the PatientRecord PATCH', async () => {
     await renderAndLoad();
     await editAndSave('1970-01-01', '1971-02-03');
 
     await waitFor(() => expect(api.patch).toHaveBeenCalled());
     expect(patchBody()).toEqual({ date_of_birth: '1971-02-03' });
+    const call = (api.patch as ReturnType<typeof vi.fn>).mock.calls.at(-1)!;
+    expect(call[2]).toMatchObject({
+      headers: { 'X-Client-Timezone': expect.any(String) },
+    });
   });
 
   it('routes a clinical edit to the PatientRecord PATCH', async () => {
@@ -139,6 +188,133 @@ describe('PatientDetail save — the edit, not the record', () => {
     await waitFor(() => expect(api.patch).toHaveBeenCalled());
     const body = patchBody();
     expect(body).toMatchObject({ anc_thousand_per_ul: 5.5 });
+  });
+
+  it('saves a direct bilirubin pair with its chosen unit through the standalone editor (#2577)', async () => {
+    await renderAndLoad();
+    await openLabsTab();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+
+    // Choosing the unit first clears the stored number; the reader then types
+    // the value in that unit (the pair is not silently rescaled).
+    fireEvent.change(screen.getByLabelText('Unit for Direct Bilirubin'), {
+      target: { value: 'MG/DL' },
+    });
+    fireEvent.change(screen.getByLabelText('Direct Bilirubin'), {
+      target: { value: '2' },
+    });
+    fireEvent.change(document.getElementById('serum_bilirubin_level_direct-result-date')!,
+      { target: { value: '2026-10-01' } });
+    const biliRow = document.querySelector('[data-field="serum_bilirubin_level_direct"]') as HTMLElement;
+    fireEvent.click(within(biliRow).getByRole('button', { name: 'Save result' }));
+    await act(async () => { vi.advanceTimersByTime(2100); });
+
+    await waitFor(() => expect(api.patch).toHaveBeenCalled());
+    const call = (api.patch as ReturnType<typeof vi.fn>).mock.calls.at(-1)!;
+    expect(call[0]).toBe('/v1/patient-records/261/');
+    expect(call[2]).toMatchObject({ headers: { 'X-Patient-Form': '1' } });
+    const body = call[1] as Record<string, unknown>;
+    expect(body.serum_bilirubin_level_direct_units).toBe('MG/DL');
+    expect(String((body.serum_bilirubin_level_direct as { value: unknown }).value)).toBe('2');
+    expect((body.serum_bilirubin_level_direct as { date: string }).date).toBe('2026-10-01');
+  });
+
+  it('does not autosave a dated lab value before Save result (#2454)', async () => {
+    await renderAndLoad();
+    await openLabsTab();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+
+    fireEvent.change(screen.getByDisplayValue('12.5'), { target: { value: '9.5' } });
+    await act(async () => { vi.advanceTimersByTime(2100); });
+
+    // The source-pair editor commits the value, its date and its unit as one
+    // edit; typing alone must not attach it to today.
+    expect(api.patch).not.toHaveBeenCalled();
+  });
+
+  it('saves a lab result date with its value through the source-pair editor (#2439)', async () => {
+    await renderAndLoad();
+    await openLabsTab();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+
+    fireEvent.change(screen.getByDisplayValue('12.5'), { target: { value: '9.5' } });
+    fireEvent.change(document.getElementById('hemoglobin_g_dl-result-date')!,
+      { target: { value: '2026-10-01' } });
+    const hbRow = document.querySelector('[data-field="hemoglobin_g_dl"]') as HTMLElement;
+    fireEvent.click(within(hbRow).getByRole('button', { name: 'Save result' }));
+    await act(async () => { vi.advanceTimersByTime(2100); });
+
+    await waitFor(() => expect(api.patch).toHaveBeenCalled());
+    const call = (api.patch as ReturnType<typeof vi.fn>).mock.calls.at(-1)!;
+    expect(call[0]).toBe('/v1/patient-records/261/');
+    expect(call[1]).toMatchObject({
+      hemoglobin_g_dl: { value: 9.5, date: '2026-10-01' },
+    });
+  });
+
+  it('sends nothing when a lab value is reverted before Save result (#2454)', async () => {
+    await renderAndLoad();
+    await openLabsTab();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+
+    fireEvent.change(screen.getByDisplayValue('12.5'), { target: { value: '9.5' } });
+    fireEvent.change(screen.getByDisplayValue('9.5'), { target: { value: '12.5' } });
+    await act(async () => { vi.advanceTimersByTime(2100); });
+
+    expect(api.patch).not.toHaveBeenCalled();
+  });
+
+  it('shows the standalone Labs rows read-only when the record read says so (#2577)', async () => {
+    (api.get as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
+      if (url.includes('writable-fields')) return Promise.resolve({ data: DESCRIPTORS });
+      if (url.includes('/patient-info/')) {
+        return Promise.resolve({
+          data: {
+            patient_info: { ...PATIENT }, user: null,
+            patient_name: PATIENT.patient_name, write_enabled: false,
+          },
+        });
+      }
+      return Promise.resolve({ data: [] });
+    });
+    await renderAndLoad();
+    fireEvent.click(screen.getByRole('button', { name: 'Labs' }));
+
+    await waitFor(() => expect(screen.getByText('3.1')).toBeInTheDocument());
+    expect(screen.queryByRole('spinbutton', { name: /ANC/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Save result' })).not.toBeInTheDocument();
+  });
+
+  it('keeps a confirmed page edit when a late lab response arrives (#2578 review)', async () => {
+    await renderAndLoad();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let resolveLab!: (value: unknown) => void;
+    const labResponse = new Promise((resolve) => { resolveLab = resolve; });
+    (api.patch as ReturnType<typeof vi.fn>).mockImplementation((url: string) => {
+      if (url.includes('/v1/patient-records/')) return labResponse;
+      return Promise.resolve({ data: {} });
+    });
+
+    // A non-lab edit is queued, then a lab edit starts its own PATCH.
+    fireEvent.change(screen.getByDisplayValue('howell@example.org'),
+      { target: { value: 'new@example.org' } });
+    await openLabsTab();
+    fireEvent.change(screen.getByDisplayValue('3.1'), { target: { value: '5.5' } });
+    await act(async () => { vi.advanceTimersByTime(600); });
+    // The page's 2s autosave lands while the lab request is still open.
+    await act(async () => { vi.advanceTimersByTime(2100); });
+
+    // The lab response predates that page edit: it carries the old email.
+    await act(async () => {
+      resolveLab({ data: {
+        patient_info: { ...PATIENT, email: 'howell@example.org', anc_thousand_per_ul: 5.5 },
+        write: { applied: ['anc_thousand_per_ul'] },
+      } });
+      await Promise.resolve();
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: 'General' }));
+    expect(screen.getByDisplayValue('new@example.org')).toBeInTheDocument();
   });
 
   it('never sends an alias in the PATCH', async () => {

@@ -1,6 +1,5 @@
-import { useState, useEffect, useContext } from "react";
-import api from "@/api/axios";
-import { PatientInfoContext } from "@/federation/PatientInfoContext";
+import { useState, useEffect } from "react";
+import { clinicalClient, clinicalUrl } from "@/api/clinicalTransport";
 
 export interface VocabOption {
   value: string;
@@ -27,8 +26,6 @@ export const useVocabulary = (
   const cached = cache.get(cacheKey);
   const [options, setOptions] = useState<VocabOption[]>(cached?.options ?? []);
   const [source, setSource] = useState<VocabSource | null>(cached?.source ?? null);
-  const ctx = useContext(PatientInfoContext);
-  const client = ctx?.apiClient ?? api;
   const [loading, setLoading] = useState(!cache.has(cacheKey));
 
   useEffect(() => {
@@ -38,8 +35,13 @@ export const useVocabulary = (
     // eslint-disable-next-line react-hooks/set-state-in-effect -- fetch-on-mount
     setLoading(true);
 
-    client
-      .get(`/vocabularies/${modelName}/`)
+    // Through the clinical transport, not the raw standalone client: a
+    // federated host mounts the widget under its own API prefix and serves the
+    // rest of its origin as a static SPA, so a root-relative
+    // `/vocabularies/…` request reaches the shell instead of the host's
+    // read-only proxy and the option list silently comes back empty (#5599).
+    clinicalClient()
+      .get(clinicalUrl(`/vocabularies/${modelName}/`))
       .then((res) => {
         if (cancelled) return;
         const data: { code: string | number; title: string; source_name?: string; source_url?: string }[] = res.data;
@@ -64,7 +66,7 @@ export const useVocabulary = (
     return () => {
       cancelled = true;
     };
-  }, [cacheKey, client, modelName, valueField]);
+  }, [cacheKey, modelName, valueField]);
 
   return { options, loading, source };
 };

@@ -176,13 +176,31 @@ describe('TreatmentTab - authoring a line', () => {
   });
 
   it('opens the dialog prefilled with the next line number', async () => {
-    // Three lines on record means the next one is the fourth.
-    renderTab({ ...THREE_LINES, person_id: 262 });
+    // The two structured lines on record mean the next one is the third.
+    renderTab({ ...THREE_LINES, person_id: 262, lines_of_therapy: STRUCTURED_LINES });
     await waitFor(() => expect(mockGet).toHaveBeenCalled());
 
     fireEvent.click(screen.getByRole('button', { name: /add therapy line/i }));
     await waitFor(() => expect(screen.getByRole('dialog')).toBeInTheDocument());
-    expect(screen.getByLabelText(/line number/i)).toHaveValue(4);
+    expect(screen.getByLabelText(/line number/i)).toHaveValue(3);
+  });
+
+  it('starts at line 1 when the count has no line rows to edit', async () => {
+    // An imported patient can carry therapy_lines_count=1 with an empty
+    // lines_of_therapy; the authoring dialog must not start at 2 (#1969).
+    renderTab({ ...THREE_LINES, therapy_lines_count: 1, disease: 'C3242',
+      person_id: 262, lines_of_therapy: [] });
+    await waitFor(() => expect(mockGet).toHaveBeenCalled());
+
+    // The authoring default is row-based, but the planned-regimen catalog
+    // still reads the derived count: one line given means second-line next.
+    expect(mockGet).toHaveBeenCalledWith('/v1/therapy-regimens/', {
+      params: { disease: 'C3242', round: 'second_line_therapy' },
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /add therapy line/i }));
+    await waitFor(() => expect(screen.getByRole('dialog')).toBeInTheDocument());
+    expect(screen.getByLabelText(/line number/i)).toHaveValue(1);
   });
 
   it('opens an existing line for editing', async () => {
@@ -298,7 +316,7 @@ describe('TreatmentTab — completeness confirmation', () => {
     );
     await waitFor(() => expect(mockGet).toHaveBeenCalled());
 
-    fireEvent.click(screen.getByLabelText(/treatment history is complete/i));
+    fireEvent.click(screen.getByLabelText(/complete treatment history/i));
     await waitFor(() => expect(mockPost).toHaveBeenCalledWith(
       '/v1/therapy-history/completeness/',
       { person: 262, complete: true },
@@ -309,8 +327,12 @@ describe('TreatmentTab — completeness confirmation', () => {
   it('shows an already-confirmed history and can withdraw it', async () => {
     renderTab({ ...THREE_LINES, person_id: 262, therapy_history_complete: true });
     await waitFor(() => expect(mockGet).toHaveBeenCalled());
-    const box = screen.getByLabelText(/treatment history is complete/i) as HTMLInputElement;
+    const box = screen.getByLabelText(/complete treatment history/i) as HTMLInputElement;
     expect(box.checked).toBe(true);
+    // The accessible name is the visible sentence (WCAG 2.5.3); the
+    // lower-bound note describes it.
+    expect(box).toHaveAccessibleName('This is my complete treatment history');
+    expect(box).toHaveAccessibleDescription(/treated as a minimum/i);
 
     fireEvent.click(box);
     await waitFor(() => expect(mockPost).toHaveBeenCalledWith(
@@ -322,7 +344,7 @@ describe('TreatmentTab — completeness confirmation', () => {
   it('does not offer the confirmation when the host is read-only', async () => {
     renderTab({ ...THREE_LINES, person_id: 262 }, true);
     await waitFor(() => expect(mockGet).toHaveBeenCalled());
-    expect(screen.getByLabelText(/treatment history is complete/i)).toBeDisabled();
+    expect(screen.getByLabelText(/complete treatment history/i)).toBeDisabled();
     expect(mockPost).not.toHaveBeenCalled();
   });
 });

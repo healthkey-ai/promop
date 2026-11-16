@@ -13,6 +13,9 @@
       "key": "brca1",
       "field_name": "genomics_brca1",
       "gene": "BRCA1",
+      "hgnc_id": "HGNC:1100",
+      "hgnc_symbol": "BRCA1",
+      "omop_concept_id": 35950928,
       "label": "BRCA1",
       "diseases": [
         "BC"
@@ -26,6 +29,9 @@
       "key": "brca2",
       "field_name": "genomics_brca2",
       "gene": "BRCA2",
+      "hgnc_id": "HGNC:1101",
+      "hgnc_symbol": "BRCA2",
+      "omop_concept_id": 35950178,
       "label": "BRCA2",
       "diseases": [
         "BC"
@@ -39,6 +45,9 @@
       "key": "pik3ca",
       "field_name": "genomics_pik3ca",
       "gene": "PIK3CA",
+      "hgnc_id": "HGNC:8975",
+      "hgnc_symbol": "PIK3CA",
+      "omop_concept_id": 35953202,
       "label": "PIK3CA",
       "diseases": [
         "BC"
@@ -52,6 +61,9 @@
       "key": "tp53",
       "field_name": "genomics_tp53",
       "gene": "TP53",
+      "hgnc_id": "HGNC:11998",
+      "hgnc_symbol": "TP53",
+      "omop_concept_id": 35948926,
       "label": "TP53",
       "diseases": [
         "BC",
@@ -68,6 +80,9 @@
       "key": "esr1",
       "field_name": "genomics_esr1",
       "gene": "ESR1",
+      "hgnc_id": "HGNC:3467",
+      "hgnc_symbol": "ESR1",
+      "omop_concept_id": 35948983,
       "label": "ESR1",
       "diseases": [
         "BC"
@@ -81,6 +96,9 @@
       "key": "palb1",
       "field_name": "genomics_palb1",
       "gene": "PALB1",
+      "hgnc_id": "HGNC:26144",
+      "hgnc_symbol": "PALB2",
+      "omop_concept_id": 35949597,
       "label": "PALB1",
       "diseases": [
         "BC"
@@ -94,6 +112,9 @@
       "key": "kras",
       "field_name": "genomics_kras",
       "gene": "KRAS",
+      "hgnc_id": "HGNC:6407",
+      "hgnc_symbol": "KRAS",
+      "omop_concept_id": 35948791,
       "label": "KRAS",
       "diseases": [
         "MM"
@@ -107,6 +128,9 @@
       "key": "nras",
       "field_name": "genomics_nras",
       "gene": "NRAS",
+      "hgnc_id": "HGNC:7989",
+      "hgnc_symbol": "NRAS",
+      "omop_concept_id": 35950119,
       "label": "NRAS",
       "diseases": [
         "MM"
@@ -120,6 +144,9 @@
       "key": "braf",
       "field_name": "genomics_braf",
       "gene": "BRAF",
+      "hgnc_id": "HGNC:1097",
+      "hgnc_symbol": "BRAF",
+      "omop_concept_id": 35948173,
       "label": "BRAF",
       "diseases": [
         "MM"
@@ -147,6 +174,9 @@
       "key": "fam46c",
       "field_name": "genomics_fam46c",
       "gene": "FAM46C",
+      "hgnc_id": "HGNC:24712",
+      "hgnc_symbol": "TENT5C",
+      "omop_concept_id": 35952051,
       "label": "FAM46C",
       "diseases": [
         "MM"
@@ -160,6 +190,9 @@
       "key": "dis3",
       "field_name": "genomics_dis3",
       "gene": "DIS3",
+      "hgnc_id": "HGNC:20604",
+      "hgnc_symbol": "DIS3",
+      "omop_concept_id": 35948265,
       "label": "DIS3",
       "diseases": [
         "MM"
@@ -173,6 +206,9 @@
       "key": "xbp1",
       "field_name": "genomics_xbp1",
       "gene": "XBP1",
+      "hgnc_id": "HGNC:12801",
+      "hgnc_symbol": "XBP1",
+      "omop_concept_id": 35961405,
       "label": "XBP1",
       "diseases": [
         "MM"
@@ -186,6 +222,9 @@
       "key": "bcl2",
       "field_name": "genomics_bcl2",
       "gene": "BCL2",
+      "hgnc_id": "HGNC:990",
+      "hgnc_symbol": "BCL2",
+      "omop_concept_id": 35958594,
       "label": "BCL2",
       "diseases": [
         "FL"
@@ -199,6 +238,9 @@
       "key": "ezh2",
       "field_name": "genomics_ezh2",
       "gene": "EZH2",
+      "hgnc_id": "HGNC:3527",
+      "hgnc_symbol": "EZH2",
+      "omop_concept_id": 35964476,
       "label": "EZH2",
       "diseases": [
         "FL"
@@ -212,6 +254,9 @@
       "key": "kmt2d",
       "field_name": "genomics_kmt2d",
       "gene": "KMT2D",
+      "hgnc_id": "HGNC:7133",
+      "hgnc_symbol": "KMT2D",
+      "omop_concept_id": 35953669,
       "label": "KMT2D",
       "diseases": [
         "FL",
@@ -226,6 +271,9 @@
       "key": "crebbp",
       "field_name": "genomics_crebbp",
       "gene": "CREBBP",
+      "hgnc_id": "HGNC:2348",
+      "hgnc_symbol": "CREBBP",
+      "omop_concept_id": 35949526,
       "label": "CREBBP",
       "diseases": [
         "FL"
@@ -252,6 +300,9 @@
       "key": "notch1",
       "field_name": "genomics_notch1",
       "gene": "NOTCH1",
+      "hgnc_id": "HGNC:7881",
+      "hgnc_symbol": "NOTCH1",
+      "omop_concept_id": 35947617,
       "label": "NOTCH1",
       "diseases": [
         "MCL",
@@ -266,6 +317,9 @@
       "key": "notch2",
       "field_name": "genomics_notch2",
       "gene": "NOTCH2",
+      "hgnc_id": "HGNC:7882",
+      "hgnc_symbol": "NOTCH2",
+      "omop_concept_id": 35960756,
       "label": "NOTCH2",
       "diseases": [
         "MCL"
@@ -279,6 +333,9 @@
       "key": "sf3b1",
       "field_name": "genomics_sf3b1",
       "gene": "SF3B1",
+      "hgnc_id": "HGNC:10768",
+      "hgnc_symbol": "SF3B1",
+      "omop_concept_id": 35948718,
       "label": "SF3B1",
       "diseases": [
         "CLL"
@@ -292,6 +349,9 @@
       "key": "atm",
       "field_name": "genomics_atm",
       "gene": "ATM",
+      "hgnc_id": "HGNC:795",
+      "hgnc_symbol": "ATM",
+      "omop_concept_id": 35960740,
       "label": "ATM",
       "diseases": [
         "CLL"
@@ -305,6 +365,9 @@
       "key": "nsd2",
       "field_name": "genomics_nsd2",
       "gene": "NSD2",
+      "hgnc_id": "HGNC:12766",
+      "hgnc_symbol": "NSD2",
+      "omop_concept_id": 35950774,
       "label": "NSD2",
       "diseases": [
         "MCL"
@@ -318,6 +381,9 @@
       "key": "cdkn2a",
       "field_name": "genomics_cdkn2a",
       "gene": "CDKN2A",
+      "hgnc_id": "HGNC:1787",
+      "hgnc_symbol": "CDKN2A",
+      "omop_concept_id": 35946721,
       "label": "CDKN2A",
       "diseases": [
         "MCL"
@@ -331,6 +397,9 @@
       "key": "smarca4",
       "field_name": "genomics_smarca4",
       "gene": "SMARCA4",
+      "hgnc_id": "HGNC:11100",
+      "hgnc_symbol": "SMARCA4",
+      "omop_concept_id": 35949914,
       "label": "SMARCA4",
       "diseases": [
         "MCL"
@@ -344,6 +413,9 @@
       "key": "ccnd1",
       "field_name": "genomics_ccnd1",
       "gene": "CCND1",
+      "hgnc_id": "HGNC:1582",
+      "hgnc_symbol": "CCND1",
+      "omop_concept_id": 35963336,
       "label": "CCND1",
       "diseases": [
         "MCL"

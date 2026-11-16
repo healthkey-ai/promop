@@ -16,6 +16,7 @@ from patient_portal.api.permissions import (
     PatientDeletePermission,
     ScopedTokenPermission,
     VocabReadPermission,
+    credential_allows_write,
 )
 from patient_portal.api.providers.base import TokenClaims
 
@@ -155,3 +156,17 @@ def test_patient_delete_exception_remains_for_end_users(auth, authenticated):
         user=SimpleNamespace(is_authenticated=authenticated, is_staff=False),
     )
     assert PatientDeletePermission().has_permission(request, None) is authenticated
+
+
+@pytest.mark.parametrize('scope,allowed', (
+    ('', False),
+    ('patient/*.read', False),
+    ('user/*.read', False),
+    ('patient/*.write', True),
+    ('user/*.write', True),
+    ('system/etl.write', False),
+))
+def test_credential_allows_write_for_service_tokens(scope, allowed):
+    request = SimpleNamespace(auth=SERVICE_TOKEN)
+    with override_settings(SERVICE_AUTH_SCOPES=scope):
+        assert credential_allows_write(request) is allowed

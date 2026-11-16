@@ -32,11 +32,31 @@ DRUG_EXPOSURE_FIELD = 1147094
 class TestDescriptor:
     def test_therapy_line_fields_are_episode_computed_not_unmapped(self):
         d = build_writable_field_descriptor()
-        for field in ('first_line_therapy', 'second_line_therapy',
-                      'later_therapies', 'first_line_outcome',
+        # The per-line read model stays a projection of the episodes.
+        for field in ('later_therapies', 'later_therapy_ids',
                       'second_line_start_date', 'later_end_date'):
             assert d[field]['kind'] == 'computed', field
             assert d[field]['inputs'] == ['Episode', 'EpisodeEvent']
+
+    def test_the_first_line_of_each_group_authors_the_line(self):
+        """The flat control writes the line, not the column it projects.
+
+        `authored_episode` names which line the write creates; the published
+        recipe stays alongside it, so a host that explains the episode write
+        keeps its answer.
+        """
+        d = build_writable_field_descriptor()
+        for field, line_number in (('first_line_therapy', 1),
+                                   ('second_line_therapy', 2),
+                                   ('later_therapy', 3),
+                                   ('first_line_outcome', 1),
+                                   ('later_date', 3)):
+            entry = d[field]
+            assert entry['kind'] == 'direct', field
+            assert entry['writable'] is True, field
+            assert entry['target'] == 'patient_record', field
+            assert entry['authored_episode']['line_number'] == line_number, field
+            assert entry['authored_via']['target'] == 'episode', field
 
     def test_each_carries_the_recipe_for_authoring_a_line(self):
         entry = build_writable_field_descriptor()['first_line_therapy']

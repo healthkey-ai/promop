@@ -14,7 +14,7 @@ from omop_core.services.patient_record_service import (
     PATIENT_RECORD_OMOP_MAPPED_FIELDS, refresh_patient_record,
 )
 from omop_core.services.write_descriptor import (
-    KIND_DIRECT, build_writable_field_descriptor,
+    KIND_COMPUTED, KIND_DIRECT, build_writable_field_descriptor,
 )
 from omop_core.services.omop_projection import project_single_value
 from tests.factories import (
@@ -102,8 +102,12 @@ class TestDerivationPreservesUserEdits:
         assert refreshed.hemoglobin_g_dl == 12.5
         assert 'hemoglobin_g_dl' in refreshed.user_edited_fields
 
-    def test_empty_user_edit_not_preserved(self):
-        """A user-edited field with an empty value is not preserved."""
+    def test_empty_user_edit_marker_acknowledged_when_derivation_is_empty(self):
+        """An empty pending value is acknowledged when derivation is also empty.
+
+        This is not proof that a projection succeeded; an explicit clear is
+        protected by its own tombstone row, not by an empty marker alone.
+        """
         person = PersonFactory()
         record = PatientRecordFactory(person=person, hemoglobin_g_dl=None)
         record.user_edited_fields = ['hemoglobin_g_dl']
@@ -112,7 +116,6 @@ class TestDerivationPreservesUserEdits:
         refreshed = refresh_patient_record(person)
 
         assert refreshed.hemoglobin_g_dl is None
-        # Empty value is not preserved, so it's cleaned from tracking
         assert 'hemoglobin_g_dl' not in (refreshed.user_edited_fields or [])
 
 
@@ -225,23 +228,27 @@ class TestMappedFieldsCarryProjection:
         entry = descriptor.get('hemoglobin_g_dl')
 
         assert entry is not None
-        assert entry['kind'] == KIND_DIRECT
-        assert entry['writable'] is True
-        assert entry['target'] == 'patient_record'
+        # The source pair is the write target; the canonical is the read-model
+        # that carries the projection (#2318).
+        assert descriptor['hemoglobin_level']['kind'] == KIND_DIRECT
+        assert descriptor['hemoglobin_level']['writable'] is True
+        assert entry['kind'] == KIND_COMPUTED
+        assert entry['writable'] is False
         assert 'projection' in entry
         assert entry['projection']['omop_table'] == 'measurement'
         assert entry['projection']['concept_id'] is not None
         assert entry['projection']['source_value'] == '718-7'
 
     def test_loinc_mapped_field_without_concept_is_still_writable(self):
-        """Even without the vocabulary loaded, the field is directly writable."""
+        """Even without the vocabulary loaded, the source pair is writable."""
         descriptor = build_writable_field_descriptor()
         entry = descriptor.get('hemoglobin_g_dl')
 
+        assert descriptor['hemoglobin_level']['writable'] is True
+        assert descriptor['hemoglobin_level']['target'] == 'patient_record'
         assert entry is not None
-        assert entry['kind'] == KIND_DIRECT
-        assert entry['writable'] is True
-        assert entry['target'] == 'patient_record'
+        assert entry['kind'] == KIND_COMPUTED
+        assert entry['writable'] is False
         # No projection since the concept isn't loaded
         assert 'projection' not in entry
 

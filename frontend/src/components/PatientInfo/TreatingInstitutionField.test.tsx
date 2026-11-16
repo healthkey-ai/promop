@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { beforeEach, expect, it, vi } from 'vitest';
 import TreatingInstitutionField from './TreatingInstitutionField';
 
@@ -42,13 +42,20 @@ it('preserves existing free text, cancels search, and supports a custom center a
   expect(onChange).toHaveBeenLastCalledWith('facility_name', '');
 });
 
-it('honors the caller permission and leaves the current institution visible', async () => {
+it('renders a read-only field as text and never opens a search', () => {
   render(<TreatingInstitutionField value="Local hospital" descriptor={{ ...descriptor, writable: false, reason: 'Read access only' }} onChange={vi.fn()} />);
-  await waitFor(() => expect(get).toHaveBeenCalled());
-  expect(screen.getByRole('combobox')).toHaveAttribute('readonly');
-  expect(screen.getByRole('combobox')).toHaveValue('Local hospital');
+  // #5576: the control used to stay a focusable combobox with a search placeholder
+  // that never listed anything. A field the caller cannot write is text.
+  expect(screen.queryByRole('combobox')).toBeNull();
+  expect(screen.getByText('Local hospital')).toBeInTheDocument();
   expect(screen.getByText('Read access only')).toBeInTheDocument();
   expect(screen.queryByRole('button')).toBeNull();
+  expect(get).not.toHaveBeenCalled();
+});
+
+it('shows a placeholder for a read-only field with no value', () => {
+  render(<TreatingInstitutionField value="" descriptor={{ ...descriptor, writable: false }} onChange={vi.fn()} />);
+  expect(screen.getByText('—')).toBeInTheDocument();
 });
 
 it.each(['offline', 'invalid'])('allows a custom center when the directory is %s', async (failure) => {

@@ -15,176 +15,194 @@ and ``load_athena_vocabularies`` points them at their Concepts at the end of a
 successful load (``manage.py resolve_field_concept_mappings`` does it for an
 instance that loaded Athena earlier).
 
-**Historical models only (#2440).**  This used to call
-``field_curation_transfer.apply_payload`` with the live models, so ``migrate``
-on an empty database broke as soon as a later migration added a column to one
-of them (0333 added ``field_concept_mapping.tab``).  The seed is written here
-against ``apps.get_model`` and the columns these tables had at this point in the
-graph.  It writes the rows ``apply_payload(prune=False)`` wrote for the rows
-left after the natural-key filter, each of which was a create.  Custom fields
-were not filtered before; an existing one is now left alone rather than
-overwritten (the fixture carries none).  The historical model does not send the
-live ``post_save`` that projects an approved mapping into OMOP. A fresh
-database has no patient data for it to project; a restored dump older than
-this migration that does hold patients is not re-projected here.  A column added to the
-fixture after this migration is not seeded here; a new migration has to carry
-it.
+**Historical models, not ``omop_core.models``.** This migration used to seed
+through ``apply_payload``, which applies through the *current* models. Anything
+added to those tables by a later migration is then addressed before it exists:
+0333 adds ``FieldConceptMapping.tab`` after this step, so a fresh ``migrate``
+emitted ``INSERT ... tab`` against a table without the column and stopped at
+0240 (cancerbot-org/cancerbot#5847). A data migration describes one point in
+schema history, so it writes that point's state — the fixture predates ``tab``
+and never carries one, and rows are created here rather than updated, which is
+all this migration ever needs (it filters out the natural keys that exist).
+Custom fields are the one exception to "created here": the writer's path could
+update an existing one's label, tab, type and mode from the fixture, while this
+one leaves an existing row alone, the same rule the four keyed tables follow.
+The fixture ships none today, so the difference is a shape, not data.
 """
 import json
 import os
 
 from django.db import migrations
 
-# FieldConceptMapping columns copied verbatim, as of this migration.  Excludes
-# id, concept (resolved below), reviewer (cleared), and the auto timestamps.
-_MAPPING_FIELDS = (
-    'provenance',
-    'vocabulary_id', 'concept_code', 'unit', 'omop_table', 'source_value',
-    'value_kind', 'type_concept_id', 'value_vocabulary', 'multiple',
-    'status', 'reviewed_at', 'notes',
+#: Fields whose answer is authored, not derived, frozen here rather than imported:
+#: a data migration must not depend on the services of a later point in history.
+#: `authored_answers.AUTHORED_ANSWER_FORMULA_FIELDS` says the same thing today;
+#: this copy is what keeps the invariant true if a release moves it.
+_AUTHORED_ANSWER_FORMULA_FIELDS = frozenset({
+    'no_pre_existing_conditions',
+    'no_active_infection_status',
+    'no_other_active_malignancies',
+    'no_pregnancy_or_lactation_status',
+})
+
+#: Columns the fixture supplies for a mapping, mapped to the model field that
+#: receives them. Everything else (id, concept, reviewer, timestamps) is set
+#: here or left to the model.
+_MAPPING_COLUMNS = (
+    'vocabulary_id', 'concept_code', 'unit', 'omop_table', 'status',
+    'reviewed_at', 'notes', 'multiple', 'source_value', 'type_concept_id',
+    'value_kind', 'value_vocabulary', 'provenance',
 )
-# A payload written before the column existed may omit it; it reads as blank.
-_OPTIONAL_MAPPING_FIELDS = frozenset({'provenance'})
-_CUSTOM_FIELD_FIELDS = ('display_name', 'tab', 'field_type', 'mode')
 
 
-def _resolve_concept(Concept, alias, row):
-    """The local Concept a fixture mapping names, or None.
+def _concept_for(apps, row):
+    """The packaged Concept a mapping names, or None when it is not loaded.
 
-    ``(vocabulary_id, concept_code)`` wins; the id is only a fallback for a row
-    that carries no code, since locally minted concept ids differ per instance.
+    Same resolution order the writer uses: the resolved code first (curators
+    re-point a mapping without rewriting its source code), then the denormalized
+    pair, and the numeric id only when no pair was supplied at all. A pair that
+    names nothing must not silently attach whatever concept happens to hold that
+    id on this instance -- the same rule as `_resolve_concept_ref`, where a stale
+    id would name a different concept and ingest would then act on it. None is
+    the expected answer on a fresh install, where Athena has not been loaded yet.
     """
-    vocab = row.get('concept_vocabulary_id') or row.get('vocabulary_id') or ''
-    code = row.get('concept_code_resolved') or row.get('concept_code') or ''
-    concepts = Concept.objects.using(alias)
-    if vocab and code:
-        return concepts.filter(vocabulary_id=vocab, concept_code=code).first()
-    if row.get('concept_id') is not None:
-        return concepts.filter(concept_id=row['concept_id']).first()
+    Concept = apps.get_model('omop_core', 'Concept')
+    vocabulary_id = row.get('concept_vocabulary_id') or row.get('vocabulary_id') or ''
+    concept_code = row.get('concept_code_resolved') or row.get('concept_code') or ''
+    if vocabulary_id and concept_code:
+        return Concept.objects.filter(
+            vocabulary_id=vocabulary_id, concept_code=concept_code,
+        ).first()
+    concept_id = row.get('concept_id')
+    if concept_id is not None:
+        return Concept.objects.filter(concept_id=concept_id).first()
     return None
 
 
-def seed(apps, alias, data):
-    """Create the fixture rows whose natural key is absent. Returns the count."""
-    Concept = apps.get_model('omop_core', 'Concept')
+def _seed_mappings(apps, rows):
     FieldConceptMapping = apps.get_model('omop_core', 'FieldConceptMapping')
-    CustomPatientField = apps.get_model('omop_core', 'CustomPatientField')
-    FieldChoice = apps.get_model('omop_core', 'FieldChoice')
-    FieldChoiceCode = apps.get_model('omop_core', 'FieldChoiceCode')
-    FieldFormula = apps.get_model('omop_core', 'FieldFormula')
-    FieldSynonym = apps.get_model('omop_core', 'FieldSynonym')
-
-    tables = tuple(data.get('tables', []))
+    existing = set(FieldConceptMapping.objects.values_list('field_name', flat=True))
     created = 0
-
-    # Mappings first: a custom field requires its mapping.
-    if 'mappings' in tables:
-        existing = set(
-            FieldConceptMapping.objects.using(alias).values_list('field_name', flat=True),
+    for row in rows:
+        if row['field_name'] in existing:
+            continue
+        FieldConceptMapping.objects.create(
+            field_name=row['field_name'],
+            **{column: row.get(column) for column in _MAPPING_COLUMNS},
+            concept=_concept_for(apps, row),
+            # Attribution does not cross instances, as in the writer.
+            reviewer=None,
         )
-        for row in data.get('mappings', []):
-            if row['field_name'] in existing:
-                continue
-            values = {
-                name: row.get(name, '') if name in _OPTIONAL_MAPPING_FIELDS else row[name]
-                for name in _MAPPING_FIELDS
-            }
-            FieldConceptMapping.objects.using(alias).create(
-                field_name=row['field_name'],
-                concept=_resolve_concept(Concept, alias, row),
-                reviewer=None,
-                **values,
-            )
-            existing.add(row['field_name'])
-            created += 1
-
-    if 'custom_fields' in tables:
-        existing = set(
-            CustomPatientField.objects.using(alias).values_list('field_name', flat=True),
-        )
-        mappings = {m.field_name: m for m in FieldConceptMapping.objects.using(alias)}
-        for row in data.get('custom_fields', []):
-            mapping = mappings.get(row['mapping_field_name'])
-            if row['field_name'] in existing or mapping is None:
-                continue
-            CustomPatientField.objects.using(alias).create(
-                field_name=row['field_name'],
-                mapping=mapping,
-                created_by=None,
-                **{name: row[name] for name in _CUSTOM_FIELD_FIELDS},
-            )
-            existing.add(row['field_name'])
-            created += 1
-
-    if 'choices' in tables:
-        existing = set(
-            FieldChoice.objects.using(alias).values_list('field_name', 'display'),
-        )
-        for row in data.get('choices', []):
-            key = (row['field_name'], row['display'])
-            if key in existing:
-                continue
-            choice = FieldChoice.objects.using(alias).create(
-                field_name=row['field_name'],
-                display=row['display'],
-                sort_order=row['sort_order'],
-                created_by=None,
-            )
-            FieldChoiceCode.objects.using(alias).bulk_create([
-                FieldChoiceCode(
-                    choice=choice,
-                    code=code['code'],
-                    vocabulary_id=code['vocabulary_id'],
-                    display=code.get('display', ''),
-                    is_primary=code.get('is_primary', False),
-                )
-                for code in row['codes']
-            ])
-            existing.add(key)
-            created += 1
-
-    if 'formulas' in tables:
-        existing = set(
-            FieldFormula.objects.using(alias).values_list('field_name', flat=True),
-        )
-        for row in data.get('formulas', []):
-            if row['field_name'] in existing:
-                continue
-            FieldFormula.objects.using(alias).create(
-                field_name=row['field_name'],
-                formula=row['formula'],
-                is_active=row['is_active'],
-                created_by=None,
-            )
-            existing.add(row['field_name'])
-            created += 1
-
-    if 'synonyms' in tables:
-        existing = set(
-            FieldSynonym.objects.using(alias).values_list('field_name', 'synonym_text'),
-        )
-        for row in data.get('synonyms', []):
-            key = (row['field_name'], row['synonym_text'])
-            if key in existing:
-                continue
-            FieldSynonym.objects.using(alias).create(
-                field_name=row['field_name'],
-                synonym_text=row['synonym_text'],
-                source=row['source'],
-                created_by=None,
-            )
-            existing.add(key)
-            created += 1
-
+        created += 1
     return created
 
 
+def _seed_custom_fields(apps, rows):
+    CustomPatientField = apps.get_model('omop_core', 'CustomPatientField')
+    FieldConceptMapping = apps.get_model('omop_core', 'FieldConceptMapping')
+    created = 0
+    for row in rows:
+        mapping = FieldConceptMapping.objects.filter(
+            field_name=row['mapping_field_name'],
+        ).first()
+        if mapping is None:
+            print(f"  custom field {row['field_name']}: mapping "
+                  f"{row['mapping_field_name']} is not present — skipped.")
+            continue
+        if CustomPatientField.objects.filter(field_name=row['field_name']).exists():
+            continue
+        CustomPatientField.objects.create(
+            field_name=row['field_name'],
+            display_name=row['display_name'],
+            tab=row['tab'],
+            field_type=row['field_type'],
+            mode=row.get('mode') or 'editable',
+            mapping=mapping,
+            created_by=None,
+        )
+        created += 1
+    return created
+
+
+def _seed_choices(apps, rows):
+    FieldChoice = apps.get_model('omop_core', 'FieldChoice')
+    FieldChoiceCode = apps.get_model('omop_core', 'FieldChoiceCode')
+    existing = set(FieldChoice.objects.values_list('field_name', 'display'))
+    created = 0
+    for row in rows:
+        if (row['field_name'], row['display']) in existing:
+            continue
+        choice = FieldChoice.objects.create(
+            field_name=row['field_name'],
+            display=row['display'],
+            sort_order=row['sort_order'],
+            created_by=None,
+        )
+        FieldChoiceCode.objects.bulk_create([
+            FieldChoiceCode(choice=choice, **code) for code in row['codes']
+        ])
+        created += 1
+    return created
+
+
+def _seed_formulas(apps, rows):
+    FieldFormula = apps.get_model('omop_core', 'FieldFormula')
+    existing = set(FieldFormula.objects.values_list('field_name', flat=True))
+    created = 0
+    for row in rows:
+        if row['field_name'] in existing:
+            continue
+        FieldFormula.objects.create(
+            field_name=row['field_name'],
+            formula=row['formula'],
+            # An authored answer can never be seeded as an active formula: the
+            # value would replace what the patient actually said. The fixture
+            # ships all four inactive, so this is the invariant, not a change.
+            is_active=bool(row['is_active']) and (
+                row['field_name'] not in _AUTHORED_ANSWER_FORMULA_FIELDS
+            ),
+            created_by=None,
+        )
+        created += 1
+    return created
+
+
+def _seed_synonyms(apps, rows):
+    FieldSynonym = apps.get_model('omop_core', 'FieldSynonym')
+    existing = set(
+        FieldSynonym.objects.values_list('field_name', 'synonym_text'),
+    )
+    created = 0
+    for row in rows:
+        if (row['field_name'], row['synonym_text']) in existing:
+            continue
+        FieldSynonym.objects.create(
+            field_name=row['field_name'],
+            synonym_text=row['synonym_text'],
+            source=row['source'],
+            created_by=None,
+        )
+        created += 1
+    return created
+
+
+_SEEDERS = {
+    'mappings': _seed_mappings,
+    'custom_fields': _seed_custom_fields,
+    'choices': _seed_choices,
+    'formulas': _seed_formulas,
+    'synonyms': _seed_synonyms,
+}
+
+
 def load_fixture(apps, schema_editor):
+    from django.db import connection
+
     # Skip in test databases: Django's test runner creates test DBs named
     # test_<original>, and seeding 314 mappings collides with tests that
     # create their own.  pytest uses --no-migrations so this migration never
     # fires there.
-    db_name = str(schema_editor.connection.settings_dict.get('NAME', ''))
+    db_name = str(connection.settings_dict.get('NAME', ''))
     if db_name.startswith('test_'):
         return
 
@@ -200,11 +218,20 @@ def load_fixture(apps, schema_editor):
     with open(fixture_path, encoding='utf-8') as f:
         data = json.load(f)
 
-    if not data.get('tables'):
+    tables = tuple(data.get('tables', []))
+    if not tables:
         print('  No tables in fixture, skipping.')
         return
 
-    created = seed(apps, schema_editor.connection.alias, data)
+    created = 0
+    for table in tables:
+        seeder = _SEEDERS.get(table)
+        if seeder is None:
+            # A table this point in schema history does not have yet.
+            print(f'  Unknown fixture table {table!r}, skipping.')
+            continue
+        created += seeder(apps, data.get(table, []))
+
     if created:
         print(f'  Seeded field curation: {created} created.')
     else:

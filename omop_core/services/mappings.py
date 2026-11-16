@@ -186,7 +186,7 @@ FIELD_COMMON_UNITS: dict[str, list[str]] = {
     # Behavior
     'sleep_hours_per_night':          ['h'],
     # Vital signs
-    'weight':                         ['kg', 'lbs'],
+    'weight':                         ['kg', 'lb'],
     'height':                         ['cm', 'in'],
     'systolic_blood_pressure':        ['mm[Hg]'],
     'diastolic_blood_pressure':       ['mm[Hg]'],

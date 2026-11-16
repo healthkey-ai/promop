@@ -6,8 +6,10 @@ import ClinicalField from '../ClinicalField';
 import TreatingInstitutionField from '../TreatingInstitutionField';
 import Section from '../Section';
 import { Input } from '@/components/shadcn/input';
+import { usePatientFormReadOnly } from '@/federation/PatientFormContext';
 import SelectControl from '../controls/SelectControl';
 import { today } from '@/api/clinicalFacts';
+import PreexistingConditionsAnswer, { type ConditionsAnswer } from '../PreexistingConditionsAnswer';
 import {
   COUNTRY_OPTIONS, US_STATES,
   ECOG_OPTIONS, KARNOFSKY_OPTIONS,
@@ -15,7 +17,7 @@ import {
 
 interface Props {
   formData: Record<string, unknown>;
-  onChange: (field: string, value: unknown) => void;
+  onChange: (field: string, value: unknown, date?: string) => void;
   editedName: string;
   onNameChange: (name: string) => void;
   onZipcodeChange: (zip: string) => void;
@@ -23,6 +25,8 @@ interface Props {
   /** Precise coordinates are matched from the host's own address data; a federated
    *  host that withholds them must not be offered inputs whose save it refuses. */
   showCoordinates?: boolean;
+  onConditionsSaved?: (answer: ConditionsAnswer) => void | Promise<void>;
+  conditionsReadOnly?: boolean;
 }
 
 /**
@@ -47,12 +51,17 @@ export default function GeneralTab({
   formData, onChange, editedName, onNameChange, onZipcodeChange,
   patientMode = false,
   showCoordinates = true,
+  onConditionsSaved,
+  conditionsReadOnly = false,
 }: Props) {
   // Ask about *this* patient: whether a field may be edited depends on who is
   // asking and whose record it is, not only on whether the field is mapped.
   const personId = (formData?.person_id ?? formData?.person) as number | undefined;
   const { descriptors, loading } = useWritableFields(personId);
-  const [date, setDate] = useState(today());
+  // A read-only form keeps navigation usable, so each writing control opts out.
+  const locked = usePatientFormReadOnly();
+  const [dates, setDates] = useState<Record<string, string>>({});
+  const dateFor = (name: string) => dates[name] ?? today();
 
   const { source: ecogSource }        = useVocabulary('ecog-status', 'code');
   const { source: karnofskySource }   = useVocabulary('karnofsky-score', 'code');
@@ -96,7 +105,19 @@ export default function GeneralTab({
     extra: { options?: string[]; vocabSource?: ReturnType<typeof useVocabulary>['source'] } = {},
   ) => {
     const descriptor = descriptors[name];
-    const dated = descriptor?.writable && descriptor.projection?.omop_table === 'measurement';
+    // Only the server's `dated` contract accepts a result date; a measurement
+    // projection alone is not enough (#2439).
+    const dated = descriptor?.dated === true;
+    const changeWithDate = (field: string, value: unknown) => (
+      dated && dates[field] ? onChange(field, value, dates[field]) : onChange(field, value)
+    );
+    const changeDate = (field: string, next: string) => {
+      setDates((current) => ({ ...current, [field]: next }));
+      const value = formData?.[field];
+      if (value !== undefined && value !== null && value !== '') {
+        onChange(field, value, next);
+      }
+    };
     const prec = name === 'date_of_birth'
       ? ((formData?.date_of_birth_precision as string) ?? 'day')
       : undefined;
@@ -109,10 +130,10 @@ export default function GeneralTab({
         descriptor={descriptor}
         options={extra.options}
         vocabSource={extra.vocabSource}
-        onChange={onChange}
+        onChange={changeWithDate}
         precision={prec as 'day' | 'month' | 'year' | undefined}
-        date={dated ? date : undefined}
-        onDateChange={dated ? setDate : undefined}
+        date={dated ? dateFor(name) : undefined}
+        onDateChange={dated ? (next) => changeDate(name, next) : undefined}
       />
     );
   };
@@ -131,13 +152,14 @@ export default function GeneralTab({
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
           <div className="space-y-1.5">
             <label className="text-sm font-medium text-portal-text-primary">Patient Name</label>
-            <Input value={editedName} onChange={(e) => onNameChange(e.target.value)} />
+            <Input value={editedName} disabled={locked} onChange={(e) => onNameChange(e.target.value)} />
           </div>
 
           <div className="space-y-1.5">
             <label className="text-sm font-medium text-portal-text-primary">Date Precision</label>
             <SelectControl
               value={(formData?.date_of_birth_precision as string) ?? 'day'}
+              disabled={locked}
               options={[
                 { value: 'day', label: 'Full date' },
                 { value: 'month', label: 'Month & year' },
@@ -182,6 +204,7 @@ export default function GeneralTab({
             <label className="text-sm font-medium text-portal-text-primary">Disease Category</label>
             <SelectControl
               value={selectedCategory ?? ''}
+              disabled={locked}
               options={categories.map((c) => ({ value: c.value, label: c.label }))}
               onChange={(v: unknown) => {
                 const cat = (v as string) || null;
@@ -204,7 +227,7 @@ export default function GeneralTab({
             <SelectControl
               value={(formData?.disease as string) ?? ''}
               options={categoryDiseaseOptions.map((d) => ({ value: d, label: d }))}
-              disabled={!selectedCategory}
+              disabled={locked || !selectedCategory}
               placeholder={selectedCategory ? 'Select…' : 'Select a category first'}
               allowClear
               onChange={(v: unknown) => onChange('disease', (v as string) || null)}
@@ -226,6 +249,7 @@ export default function GeneralTab({
             <label className="text-sm font-medium text-portal-text-primary">Postal Code / Zip Code</label>
             <Input
               value={(formData?.postal_code as string) || ''}
+              disabled={locked}
               onChange={(e) => onZipcodeChange(e.target.value)}
               placeholder="Enter 5-digit US zip code to auto-fill city and state"
             />
@@ -274,7 +298,18 @@ export default function GeneralTab({
       <Section title="Medical History" description="Pre-existing conditions and clinical status.">
         <div className="grid grid-cols-1 gap-x-8 gap-y-5 sm:grid-cols-2">
           <div className="sm:col-span-2">
-            {field('Pre-existing Conditions', 'preexisting_conditions', 'text')}
+            {personId && onConditionsSaved ? <PreexistingConditionsAnswer
+              key={personId}
+              personId={personId}
+              flag={formData.no_pre_existing_conditions}
+              categories={formData.preexisting_conditions}
+              // The explicit answer has its own snapshot/write endpoint; the
+              // generic field descriptor deliberately does not advertise it
+              // (a PATCH to these columns is not how they are authored). The
+              // host's write gate and that endpoint's own 409 are the authority.
+              readOnly={conditionsReadOnly || loading}
+              onSaved={onConditionsSaved}
+            /> : <p className="text-sm">Pre-existing conditions require the explicit answer editor.</p>}
           </div>
           {field('Peripheral Neuropathy Grade', 'peripheral_neuropathy_grade', 'number')}
           {field('No Other Active Malignancies', 'no_other_active_malignancies', 'boolean')}

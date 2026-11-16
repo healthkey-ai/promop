@@ -5,12 +5,14 @@ export default function TextNumberControl({
   value,
   placeholder,
   disabled,
+  ariaLabel,
   onChange,
 }: {
   type: string;
   value?: string | number | null;
   placeholder?: string;
   disabled?: boolean;
+  ariaLabel?: string;
   onChange: (v: unknown) => void;
 }) {
   const isNumber = type === "number" || type === "int" || type === "float";
@@ -18,6 +20,7 @@ export default function TextNumberControl({
   return (
     <Input
       disabled={disabled}
+      aria-label={ariaLabel}
       type={isNumber ? "number" : type === "email" ? "email" : "text"}
       value={value ?? ""}
       placeholder={placeholder}
