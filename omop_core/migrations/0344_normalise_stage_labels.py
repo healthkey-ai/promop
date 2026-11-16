@@ -29,7 +29,7 @@ _TAGS = {
 _TRAILING_PAREN = re.compile(r'\s*\(([^()]*)\)\s*$')
 _STAGE_PREFIX = re.compile(
     r'^\s*(?:american joint committee on cancer\s+)?stage\s*'
-    r'(?P<number>iv|iii|ii|i|0|[1-4])(?P<suffix>[abc])?\b',
+    r'(?P<number>iv|iii|ii|i|0|[1-4])\s*(?P<suffix>[abc])?$',
     re.IGNORECASE,
 )
 
@@ -43,6 +43,7 @@ def _normalise(value):
         if not match or match.group(1).strip().lower() not in _TAGS:
             break
         text = text[:match.start()].strip()
+    text = re.sub(r'\s*\([^)]*$', '', text).strip()
     stage = _STAGE_PREFIX.match(text)
     if stage:
         suffix = (stage.group('suffix') or '').upper()

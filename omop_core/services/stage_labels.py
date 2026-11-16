@@ -31,7 +31,7 @@ _TRAILING_PAREN = re.compile(r'\s*\(([^()]*)\)\s*$')
 # truncated before its closing parenthesis both reduce to the label.
 _STAGE_PREFIX = re.compile(
     r'^\s*(?:american joint committee on cancer\s+)?stage\s*'
-    r'(?P<number>iv|iii|ii|i|0|[1-4])(?P<suffix>[abc])?\b',
+    r'(?P<number>iv|iii|ii|i|0|[1-4])\s*(?P<suffix>[abc])?$',
     re.IGNORECASE,
 )
 
@@ -53,6 +53,9 @@ def normalise_stage_label(value):
     if not isinstance(value, str):
         return value
     text = _without_semantic_tags(value.strip())
+    # The FHIR import truncates a long display at 60 characters, so a trailing
+    # "(" may never close; it is still a tail, not a stage.
+    text = re.sub(r'\s*\([^)]*$', '', text).strip()
     match = _STAGE_PREFIX.match(text)
     if match:
         suffix = (match.group('suffix') or '').upper()

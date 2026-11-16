@@ -25,9 +25,15 @@ pytestmark = pytest.mark.django_db
     ('american joint committee on cancer stage ia (qualifier value)', 'Stage IA'),
     ('American Joint Committee on Cancer stage IA (qualifier val', 'Stage IA'),
     ('stage iiia', 'Stage IIIA'),
+    ('Stage 2 A (qualifier value)', 'Stage IIA'),
 ])
 def test_a_stage_value_has_a_reviewed_label(stored, reviewed):
     assert normalise_stage_label(stored) == reviewed
+
+
+@pytest.mark.parametrize('unchanged', ['Stage III/IV', 'Stage II-III', 'Stage X'])
+def test_a_range_or_unknown_stage_is_not_truncated(unchanged):
+    assert normalise_stage_label(unchanged) == unchanged
 
 
 @pytest.mark.parametrize('other', ['ISS II', 'Rai 0', 'T2N1M0', 'II', ''])
