@@ -50,6 +50,14 @@ describe('buildPatientReport', () => {
     ]);
   });
 
+  it('prints the unit the record holds, not the label’s default (#2610 review)', () => {
+    const report = build({ weight: 180, weight_units: 'lb', height: 70, height_units: 'in' });
+    expect(section(report, 'General', 'Physical Measurements')?.fields).toEqual([
+      { label: 'Weight (lb)', value: '180' },
+      { label: 'Height (in)', value: '70' },
+    ]);
+  });
+
   it('prints only the disease sections the Disease tab shows for that disease', () => {
     const record = { disease: 'Multiple Myeloma', myeloma_type: 'IgG', stage: 'II', histologic_type: 'Ductal', cytogenetic_markers: 't(4;14)' };
     const report = build(record, { diseaseType: 'myeloma', diseaseLabel: 'Multiple Myeloma' });

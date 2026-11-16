@@ -3,6 +3,7 @@ import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import type { AxiosInstance } from 'axios';
 import PatientFieldEditor from './PatientFieldEditor';
+import { labelNamesUnit } from './unitPresentation';
 import { PatientFormStore } from './patientFormStore';
 
 async function setup(extraFields = {}, extraValues = {}, writeEnabled = true) {
@@ -1088,6 +1089,38 @@ describe('single unit display (#5704)', () => {
     expect(screen.getByText(/Computed from ER, PR and HER2 status\./)).toBeVisible();
   });
 
+  it('aligns the unit selector with its input, not the field label (#2609)', async () => {
+    const unitOptions = [{ value: 'kg', label: 'kg' }, { value: 'lb', label: 'lb' }];
+    const { store } = await setup({
+      weight: {
+        writable: true, target: 'patient_record', control: 'number', label: 'Weight',
+        unit: 'kg', unit_options: unitOptions,
+      },
+      weight_units: {
+        writable: true, target: 'patient_record', control: 'select',
+        qualifies: 'weight', unit_options: unitOptions,
+      },
+    }, { weight: 80, weight_units: 'kg' });
+    render(<PatientFieldEditor store={store} name="weight" label="Weight (kg)" />);
+
+    // The picker owns the unit, so the reviewed "(kg)" is dropped (#2610).
+    const unit = screen.getByLabelText('Unit for Weight');
+    const value = screen.getByDisplayValue('80');
+    // Bottom-aligned columns plus the input's own height: the select's centre
+    // sits on the input's, instead of on the label row above it. Deriving the
+    // height keeps this honest if the shared Input changes.
+    const height = [...value.classList].find((name) => /^h-\d+$/.test(name));
+    expect(height).toBeDefined();
+    expect(unit.closest('label')?.parentElement).toHaveClass('items-end');
+    expect(unit).toHaveClass(height!);
+    // The row's number inputs keep no browser spinners (both rules, not just
+    // the selector prefix).
+    const row = value.closest('[data-field]');
+    expect(row?.className).toContain('appearance-none');
+    expect(row?.className).toContain('::-webkit-inner-spin-button');
+    expect(row?.className).toContain('::-webkit-outer-spin-button');
+  });
+
   it('never prints a {placeholder} unit beside the value', async () => {
     const { store } = await setup({
       ecog_performance_status: {
@@ -1430,5 +1463,127 @@ describe('a dated scalar clear', () => {
     expect(patch.mock.calls[0][1]).toEqual({
       hemoglobin_level: { value: null, date: '2026-08-01' },
     });
+  });
+});
+
+
+describe('unit presentation (#2610)', () => {
+  it.each([
+    ['Systolic Blood Pressure (mmHg)', 'mm[Hg]', true],
+    ['Heart Rate (bpm)', '/min', true],
+    ['Average Sleep Hours per Night', 'h', true],
+    ['Resting Heart Rate (bpm)', '/min', true],
+    ['Respiratory Rate (breaths/min)', '/min', true],
+    ['Weight', 'kg', false],
+    ['Weight (kg)', 'kg', true],
+    ['Stress Level', 's', false],
+    ['HIV status', 'h', false],
+    ['age', 'y', false],
+  ])('recognises that %s names its unit %s: %s', (label, unit, expected) => {
+    expect(labelNamesUnit(label, unit)).toBe(expected);
+  });
+
+  it('prints a UCUM code as the wording a reader knows', async () => {
+    const { store } = await setup({
+      systolic_blood_pressure: {
+        writable: true, target: 'patient_record', control: 'number',
+        label: 'Systolic blood pressure', unit: 'mm[Hg]',
+        unit_options: [{ value: 'mm[Hg]', label: 'mm[Hg]' }],
+      },
+    }, { systolic_blood_pressure: 120 });
+    render(<PatientFieldEditor store={store} name="systolic_blood_pressure"
+      label="Systolic Blood Pressure (mmHg)" />);
+
+    expect(screen.getByDisplayValue('120')).toBeVisible();
+    expect(screen.queryByText('mm[Hg]')).not.toBeInTheDocument();
+    expect(screen.queryByText('mmHg')).not.toBeInTheDocument();
+  });
+
+  it('does not print a lone "h" when the label already says hours', async () => {
+    const { store } = await setup({
+      sleep_hours_per_night: {
+        writable: true, target: 'patient_record', control: 'number',
+        label: 'Sleep hours per night', unit: 'h',
+        unit_options: [{ value: 'h', label: 'h' }],
+      },
+    }, { sleep_hours_per_night: 7 });
+    render(<PatientFieldEditor store={store} name="sleep_hours_per_night"
+      label="Average Sleep Hours per Night" />);
+
+    expect(screen.getByDisplayValue('7')).toBeVisible();
+    expect(screen.queryByText('h')).not.toBeInTheDocument();
+  });
+
+  it('prints a mapped unit when the label does not name one (#2610 review)', async () => {
+    const { store } = await setup({
+      systolic_blood_pressure: {
+        writable: true, target: 'patient_record', control: 'number',
+        label: 'Systolic', unit: 'mm[Hg]',
+        unit_options: [{ value: 'mm[Hg]', label: 'mm[Hg]' }],
+      },
+    }, { systolic_blood_pressure: 120 });
+    render(<PatientFieldEditor store={store} name="systolic_blood_pressure"
+      label="Systolic Blood Pressure" />);
+
+    expect(screen.getByText('mmHg')).toBeVisible();
+    expect(screen.queryByText('mm[Hg]')).toBeNull();
+  });
+
+  it('strips only a parenthetical that carries the unit (#2610 review)', async () => {
+    const { store } = await setup({
+      sleep_hours_per_night: {
+        writable: true, target: 'patient_record', control: 'number',
+        label: 'Sleep hours', unit: 'h',
+        unit_options: [{ value: 'h', label: 'h' }],
+      },
+    }, { sleep_hours_per_night: 7 });
+    render(<PatientFieldEditor store={store} name="sleep_hours_per_night"
+      label="Average Sleep Hours per Night (self-reported)" />);
+
+    expect(screen.getByText(/Average Sleep Hours per Night \(self-reported\)/)).toBeVisible();
+    expect(screen.queryByText('h')).toBeNull();
+  });
+
+  it('shows the stored unit when the reviewed label names another (#2610 review)', async () => {
+    const unitOptions = [{ value: 'kg', label: 'kg' }, { value: 'lb', label: 'lb' }];
+    const { store } = await setup({
+      weight: {
+        writable: false, label: 'Weight', unit: 'kg', reason: 'Read-only.',
+      },
+      weight_units: {
+        writable: false, target: 'patient_record', control: 'text',
+        qualifies: 'weight', unit_options: unitOptions,
+      },
+    }, { weight: 180, weight_units: 'lb' });
+    render(<PatientFieldEditor store={store} name="weight" label="Weight (kg)" />);
+
+    // 180 is pounds: the label must not pin kilograms, and the unit still shows.
+    expect(screen.getByText(/Weight:/)).toBeVisible();
+    expect(screen.getByText('lb')).toBeVisible();
+    expect(screen.queryByText(/Weight \(kg\):/)).toBeNull();
+  });
+
+  it('lets the picker own the unit when the label does not name one', async () => {
+    const unitOptions = [{ value: 'kg', label: 'kg' }, { value: 'lb', label: 'lb' }];
+    const { store } = await setup({
+      weight: {
+        writable: true, target: 'patient_record', control: 'number',
+        label: 'Weight', unit: 'kg', unit_options: unitOptions,
+      },
+      weight_units: {
+        writable: true, target: 'patient_record', control: 'text',
+        qualifies: 'weight', unit_options: unitOptions,
+      },
+    }, { weight: 80, weight_units: 'kg' });
+    render(<PatientFieldEditor store={store} name="weight" label="Weight (kg)" />);
+
+    // The picker owns the unit, so the label's "(kg)" cannot contradict "lb".
+    expect(screen.getByText('Weight')).toBeVisible();
+    expect(screen.queryByText('Weight (kg)')).toBeNull();
+    expect(screen.getByLabelText('Unit for Weight')).toBeVisible();
+    // No second, static unit beside the picker (the option text is the picker).
+    expect(screen.queryByText('kg', { selector: 'span' })).toBeNull();
+    fireEvent.change(screen.getByLabelText('Unit for Weight'), { target: { value: 'lb' } });
+    expect(screen.getByLabelText('Unit for Weight')).toHaveValue('lb');
   });
 });

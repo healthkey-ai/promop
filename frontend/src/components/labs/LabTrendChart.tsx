@@ -12,6 +12,7 @@ import {
 } from "recharts";
 
 import type { LabResultValue, LabValueStatus } from "@/federation/types";
+import { displayUnitLabel } from "@/federation/unitPresentation";
 
 interface Props {
   values: LabResultValue[];
@@ -49,7 +50,8 @@ export function LabTrendChart({ values, unit }: Props) {
       label: formatShortDate(r.measured_at),
       value: Number(r.value),
       status: r.status,
-      unit: r.unit ?? unit,
+      // The tooltip is a print site; the filter above stays on stored units.
+      unit: displayUnitLabel(r.unit ?? unit) ?? "",
     }));
 
   const latest = numeric[0];
