@@ -172,9 +172,33 @@ already requires: a source that has not run a later seed migration reads as
 "base" for the fields that migration scoped. Pruning a created field removes
 its memberships with it.
 
-This is the read-only stage. No tab and no save consults the rows yet: what
-the disease tab renders (#2332) and what a PATCH accepts (#2333) are
-unchanged.
+The Field Mappings page is where a curator reads and edits scope (#2332):
+
+- **Scope column.** Every row shows `Base` or the field's Disease Category
+  codes.
+- **Disease filter.** All / Base record / one category (never `Other`, whose
+  record is the base record), each with its count, and for a category a
+  **Disease-specific** / **Full record** toggle. It is applied in the browser
+  to the descriptors the page already holds, by the rule the list endpoint's
+  `?disease=<code>&set=extension|profile` applies
+  (`inDiseaseView` in `frontend/src/types/fieldScope.ts`), so choosing a
+  disease is no further request. The tab bar and the counts follow the view,
+  and the page opens on a view from its own `?disease=<code>&set=` query.
+- **Two CSV downloads** for the chosen category, **Full record (CSV)** and
+  **Disease-specific (CSV)**, from the export endpoint under the filename the
+  server sends; with no category chosen, the base record alone. They follow
+  mapping read access, so a doctor may download.
+- **Scope control** in the Field Concept Mapping dialog
+  (`FieldScopeControl.tsx`), for a caller with mapping write access: base
+  record, or disease-specific with one or more categories. It is sent as
+  `diseases` with the mapping save only when it changed, alone when nothing
+  else did, and through the by-name `PUT` for a field with no mapping row and
+  no concept chosen. A refusal under `diseases` is shown under the control.
+  The dialog opens only for a mappable field, so a computed field's scope is
+  read on the page and set through the API.
+
+No patient tab and no patient save consults the rows yet: what the disease
+tab renders (#2332) and what a PATCH accepts (#2333) are unchanged.
 
 ### Lab derivation reads the mapping tables
 

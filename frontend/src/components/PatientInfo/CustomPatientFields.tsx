@@ -2,10 +2,12 @@ import { useCallback, useEffect, useState } from "react";
 import { Plus, Search, X } from "lucide-react";
 import FieldMappingLink from "./FieldMappingLink";
 import { clinicalClient, clinicalUrl } from "@/api/clinicalTransport";
+import type { FieldScoped } from "@/types/fieldScope";
 
 type Mode = "editable" | "computed";
 
-interface CustomField {
+// `scope` and `diseases` say whose record the field is part of (#2331).
+interface CustomField extends FieldScoped {
   id: number;
   field_name: string;
   display_name: string;
