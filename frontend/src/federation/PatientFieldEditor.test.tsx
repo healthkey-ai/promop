@@ -1026,6 +1026,30 @@ describe('single unit display (#5704)', () => {
     expect(screen.queryByText('{INR}')).not.toBeInTheDocument();
   });
 
+  it('aligns the unit selector with its input, not the field label (#2609)', async () => {
+    const unitOptions = [{ value: 'kg', label: 'kg' }, { value: 'lb', label: 'lb' }];
+    const { store } = await setup({
+      weight: {
+        writable: true, target: 'patient_record', control: 'number', label: 'Weight',
+        unit: 'kg', unit_options: unitOptions,
+      },
+      weight_units: {
+        writable: true, target: 'patient_record', control: 'select',
+        qualifies: 'weight', unit_options: unitOptions,
+      },
+    }, { weight: 80, weight_units: 'kg' });
+    render(<PatientFieldEditor store={store} name="weight" label="Weight (kg)" />);
+
+    const unit = screen.getByLabelText('Unit for Weight (kg)');
+    // Bottom-aligned columns plus one height: the select's centre sits on the
+    // input's, instead of on the label row above it.
+    expect(unit.closest('label')?.parentElement).toHaveClass('items-end');
+    expect(unit).toHaveClass('h-9');
+    // The row's number inputs keep no browser spinners, so the pair matches.
+    const row = screen.getByDisplayValue('80').closest('[data-field]');
+    expect(row?.className).toContain('[&_input[type=number]]');
+  });
+
   it('applies the same rule to a read-only row', async () => {
     const { store } = await setup({
       hemoglobin_g_dl: { writable: false, label: 'Hemoglobin', unit: 'g/dL',
