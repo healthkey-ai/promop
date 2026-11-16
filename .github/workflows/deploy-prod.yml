@@ -31,6 +31,15 @@ permissions:
   contents: read
   id-token: write
 
+# Whole-workflow lock, not deploy-only as on staging: with only the deploy job
+# serialised, an older commit whose build ran slower could deploy after a newer
+# one and roll production back. Here a run starts only once the previous one has
+# finished, a newer push replaces any run still waiting, and a running deploy
+# (its migration included) is never cancelled.
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
 jobs:
   build:
     name: Build image
@@ -78,9 +87,6 @@ jobs:
     name: Deploy
     needs: build
     environment: production
-    concurrency:
-      group: deploy-prod
-      cancel-in-progress: false
     runs-on: ubuntu-latest
 
     steps:
