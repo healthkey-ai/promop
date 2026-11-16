@@ -102,9 +102,28 @@ LAB_FIELD_CONCEPT_ALIASES = {
     'serum_beta2_microglobulin_level': {'1952-1'},
 }
 
+def physical_unit(unit: str | None) -> str | None:
+    """The unit to show, or None when it is a `{...}` "no physical unit" marker.
+
+    `{score}`, `{INR}` and `{ratio}` are placeholders, not units: the value
+    needs no suffix, and sending the marker put the literal beside the edit box
+    (#2605). One reader for every surface: the write descriptor, the mapping
+    admin's suggestion and its unit options.
+    """
+    if isinstance(unit, str):
+        stripped = unit.strip()
+        if stripped.startswith('{') and stripped.endswith('}'):
+            return None
+    return unit
+
+
 # Common unit options for fields where multiple units are used in US clinical
 # practice. The first entry is the US default. Used by the mapping UI to
 # render a unit dropdown.
+#
+# An empty list means the field has no physical unit (a score or a ratio).
+# Those used to spell the absence as `{score}` / `{INR}` / `{ratio}`, which
+# reached clients as if it were a unit label (#2605).
 FIELD_COMMON_UNITS: dict[str, list[str]] = {
     # Blood counts
     'hemoglobin_g_dl':                ['g/dL', 'g/L', 'mmol/L'],
@@ -136,7 +155,7 @@ FIELD_COMMON_UNITS: dict[str, list[str]] = {
     'bnp_pg_ml':                      ['pg/mL', 'ng/L'],
     'glucose_mg_dl':                  ['mg/dL', 'mmol/L'],
     'hba1c_percent':                  ['%', 'mmol/mol'],
-    'inr':                            ['{INR}'],
+    'inr':                            [],
     'pt_seconds':                     ['s'],
     'ptt_seconds':                    ['s'],
     'cea_ng_ml':                      ['ng/mL', 'ug/L'],
@@ -153,7 +172,7 @@ FIELD_COMMON_UNITS: dict[str, list[str]] = {
     'monoclonal_protein_urine':      ['mg/24h', 'mg/day'],
     'kappa_flc':                      ['mg/L', 'mg/dL'],
     'lambda_flc':                     ['mg/L', 'mg/dL'],
-    'kappa_lambda_ratio':             ['{ratio}'],
+    'kappa_lambda_ratio':             [],
     'clonal_plasma_cells':            ['%'],
     # CLL / lymphoma disease markers
     'absolute_lymphocyte_count':      ['10*3/uL', '10*9/L'],
@@ -167,7 +186,7 @@ FIELD_COMMON_UNITS: dict[str, list[str]] = {
     'tumor_size':                     ['cm', 'mm'],
     'pd_l1_tumor_cells':              ['%'],
     'pd_l1_ic_percentage':            ['%'],
-    'pd_l1_combined_positive_score':  ['{score}'],
+    'pd_l1_combined_positive_score':  [],
     # Lab aliases (legacy fields that mirror canonical ones)
     'albumin_level':                  ['g/dL', 'g/L'],
     'hemoglobin_level':               ['g/dL', 'g/L', 'mmol/L'],
@@ -192,8 +211,8 @@ FIELD_COMMON_UNITS: dict[str, list[str]] = {
     'diastolic_blood_pressure':       ['mm[Hg]'],
     'heartrate':                      ['/min'],
     # Performance status
-    'ecog_performance_status':        ['{score}'],
-    'karnofsky_performance_score':    ['{score}'],
+    'ecog_performance_status':        [],
+    'karnofsky_performance_score':    [],
 }
 
 # Reusable UCUM-oriented choices for a curator when a field has no narrower
@@ -202,7 +221,7 @@ FIELD_COMMON_UNITS: dict[str, list[str]] = {
 STANDARD_UNIT_CHOICES = [
     '%', 'kg', 'cm', 'mm[Hg]', 'mg/dL', 'g/dL', 'g/L', 'mg/L', 'ng/mL',
     'pg/mL', 'U/L', 'U/mL', 'mEq/L', 'mmol/L', 'umol/L', '10*3/uL',
-    '10*6/uL', 'mL/min/1.73m2', 'mm/h', 's', '/min', '{score}', '{INR}',
+    '10*6/uL', 'mL/min/1.73m2', 'mm/h', 's', '/min',
 ]
 
 CONDITION_FIELDS = frozenset({'disease', 'stage', 'condition_code_icd_10', 'condition_code_snomed_ct'})

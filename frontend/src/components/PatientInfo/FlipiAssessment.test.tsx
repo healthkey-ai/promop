@@ -24,6 +24,15 @@ describe('FLIPI transparent calculation', () => {
     fireEvent.click(screen.getByText('Mark not assessed'));
     expect(screen.getByText('FLIPI Score: Not assessed')).toBeInTheDocument();
   });
+  it('shares the tab chrome instead of bringing its own card (#2619)', () => {
+    render(<Harness />);
+    const group = screen.getByRole('group', { name: 'FLIPI-1 assessment' });
+    // A dedicated editor is a labelled block in the tab's flat list, not a
+    // bordered card with its own inner panels.
+    expect(group).not.toHaveClass('border');
+    expect(group).not.toHaveClass('rounded-md');
+  });
+
   it('normalizes legacy selections without double counting or a false zero', () => {
     expect(selectedFlipiFactors('age,age,Elevated LDH')).toEqual(['age', 'ldh']);
     expect(selectedFlipiFactors('invalid')).toBeNull();

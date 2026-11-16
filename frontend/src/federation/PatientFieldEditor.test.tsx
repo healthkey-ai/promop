@@ -1057,6 +1057,20 @@ describe('single unit display (#5704)', () => {
     expect(row?.className).toContain('::-webkit-outer-spin-button');
   });
 
+  it('never prints a {placeholder} unit beside the value', async () => {
+    const { store } = await setup({
+      ecog_performance_status: {
+        writable: true, target: 'patient_record', control: 'number',
+        label: 'ECOG Performance Status', unit: '{score}',
+      },
+    }, { ecog_performance_status: 1 });
+    render(<PatientFieldEditor store={store} name="ecog_performance_status"
+      label="ECOG Performance Status" />);
+
+    expect(screen.getByText('ECOG Performance Status')).toBeVisible();
+    expect(screen.queryByText('{score}')).not.toBeInTheDocument();
+  });
+
   it('applies the same rule to a read-only row', async () => {
     const { store } = await setup({
       hemoglobin_g_dl: { writable: false, label: 'Hemoglobin', unit: 'g/dL',

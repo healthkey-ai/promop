@@ -6303,15 +6303,24 @@ class PatientRecordV1ViewSet(PatientRecordViewSet):
         if not unreadable and _caller_may_write_patient(request, person_id):
             if shared_form:
                 descriptor = shared(descriptor, record=record)
-                if not getattr(request.user, 'is_staff', False):
-                    for field in self._STAFF_ONLY_FIELDS:
-                        entry = descriptor.get(field)
-                        if entry is not None:
-                            descriptor[field] = {
-                                **entry, 'writable': False,
-                                'read_only_for_caller': True,
-                                'reason': 'Staff only.',
-                            }
+            # The clinician-validation block is staff-only on both write paths:
+            # every PATCH pops these keys for a nonstaff caller, silently, because
+            # autosave sends the full GET representation (#2202). So no surface
+            # may offer the block: the native editor reads the plain descriptor,
+            # not just the shared-form one (#2604).
+            if not getattr(request.user, 'is_staff', False):
+                for field in self._STAFF_ONLY_FIELDS:
+                    entry = descriptor.get(field)
+                    if entry is not None:
+                        descriptor[field] = {
+                            **entry, 'writable': False,
+                            # An attestation would keep its own endpoint open to
+                            # a caller who may not use this block at all; the
+                            # caller mask clears the same flag (#5665).
+                            **({'answerable': False} if entry.get('answerable') else {}),
+                            'read_only_for_caller': True,
+                            'reason': 'Staff only.',
+                        }
             return Response(descriptor)
 
         # Read-only for this caller: keep every entry, so the client still knows

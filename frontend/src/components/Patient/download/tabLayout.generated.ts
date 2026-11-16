@@ -332,7 +332,7 @@ export const TAB_LAYOUT: TabLayout = {
       ]
     },
     {
-      "title": "Transformation to DLBCL",
+      "title": "Transformation",
       "component": "LymphomaSection",
       "fields": [
         [
