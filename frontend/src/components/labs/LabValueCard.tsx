@@ -7,6 +7,7 @@ import { ValueStatusBadge } from "@/components/labs/ValueStatusBadge";
 import { fmtNum, formatShortDate } from "@/lib/format";
 import { Card, CardContent } from "@/components/ui-labs/card";
 import type { LabResultCard, LabResultValue } from "@/federation/types";
+import { displayUnitLabel } from "@/federation/unitPresentation";
 
 interface Props {
   card: LabResultCard;
@@ -44,15 +45,16 @@ export function LabValueCard({ card, onNavigate }: Props) {
           <div className="min-w-0">
             <div className="font-mono text-lg font-semibold text-foreground/70">
               {formatValue(latest)}
-              {latest.unit && (
+              {displayUnitLabel(latest.unit) && (
                 <span className="ml-1 text-sm font-normal text-muted-foreground">
-                  {latest.unit}
+                  {displayUnitLabel(latest.unit)}
                 </span>
               )}
             </div>
             {latest.range_low != null || latest.range_high != null ? (
               <p className="mt-0.5 whitespace-nowrap text-xs text-muted-foreground">
-                Normal: {formatRange(latest.range_low, latest.range_high, latest.unit ?? "")}
+                Normal: {formatRange(latest.range_low, latest.range_high,
+                  displayUnitLabel(latest.unit) ?? "")}
               </p>
             ) : (
               <p className="mt-0.5 whitespace-nowrap text-xs italic text-muted-foreground/70">
@@ -64,7 +66,7 @@ export function LabValueCard({ card, onNavigate }: Props) {
           {latest.normalized?.error && <p className="text-xs text-amber-700" role="status">Unit conversion unavailable: {latest.normalized.error}</p>}
           {card.values.length > 1 && (
             <div className="ml-auto h-12 w-24 shrink-0 sm:w-32">
-              <Sparkline values={sparklineValues} unit={latest.unit ?? ""} />
+              <Sparkline values={sparklineValues} unit={displayUnitLabel(latest.unit) ?? ""} />
             </div>
           )}
         </div>
@@ -166,8 +168,8 @@ function TrendBadge({
   return (
     <span
       className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-semibold ${styles[tone]}`}
-      title={`${formattedDelta} ${latest.unit ?? ""} — ${toneLabel}`}
-      aria-label={`Trend: ${tone}, ${formattedDelta} ${latest.unit ?? ""}`}
+      title={`${formattedDelta} ${displayUnitLabel(latest.unit) ?? ""} — ${toneLabel}`}
+      aria-label={`Trend: ${tone}, ${formattedDelta} ${displayUnitLabel(latest.unit) ?? ""}`}
     >
       <Icon className="h-3 w-3" strokeWidth={2.5} aria-hidden="true" />
       <span className="font-mono">{formattedDelta}</span>
