@@ -120,7 +120,10 @@ export default function ExplicitAnswerActions({
       const payload = {
         field: name,
         action,
-        expected_value: snapshot?.value ?? value ?? null,
+        // The snapshot is the authority once loaded: a legitimate `null`
+        // expectation (never assessed) must not fall through to a value read
+        // at a different time.
+        expected_value: snapshot ? snapshot.value ?? null : value ?? null,
         expected_source: snapshot?.source ?? null,
       };
       const data = store
@@ -135,16 +138,15 @@ export default function ExplicitAnswerActions({
       const response = (caught as { response?: { status?: number; data?: { detail?: string } } }).response;
       const status = response?.status;
       const detail = response?.data?.detail;
-      if (status === 409) {
-        setError('This answer changed. Reload before answering.');
-        store?.failBypassWrite('Could not save the explicit answer.');
-      } else if (status === 400 && detail) {
-        // The fact to correct, in the server's own sentence.
-        setError(detail);
-      } else {
-        setError('Could not verify whether the answer was saved. Reload before retrying.');
-        store?.failBypassWrite('Could not save the explicit answer.');
-      }
+      // The server's own sentence answers any refusal (a conflict, a source
+      // fact to correct, read-only access); the generic text is only for a
+      // failure that never reached it.
+      if (detail) setError(detail);
+      else if (status === 409) setError('This answer changed. Reload before answering.');
+      else setError('Could not verify whether the answer was saved. Reload before retrying.');
+      // Every non-2xx means nothing was written, so the host's aggregate state
+      // must not claim everything saved.
+      store?.failBypassWrite('Could not save the explicit answer.');
     } finally {
       store?.endBypassWrite();
       setBusy(false);

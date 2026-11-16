@@ -487,6 +487,7 @@ export default function PatientFieldEditor({ store, name, readOnly, infoHref, an
     </> : explicitAnswer ? <>
       <div>{!compact && <span className="text-sm font-medium">{label}: </span>}{formatted}</div>
       {state.personId && <ExplicitAnswerActions personId={state.personId} name={canonical}
+        store={store}
         endpoint={explicitAnswer} actions={field.actions} actionLabels={field.action_labels}
         value={value} readOnly={readOnly || !state.writable}
         onSaved={async (values) => {

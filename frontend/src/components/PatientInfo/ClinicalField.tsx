@@ -117,16 +117,12 @@ export default function ClinicalField({
   if (!writable) {
     const reason =
       descriptor?.reason
-      ?? (descriptor?.answerable
-        // An answerable field is not derived and not dead: this surface simply
-        // cannot offer its endpoint (no patient or no way to apply the answer).
-        ? 'Answered through its own endpoint; this view cannot offer the action.'
-        : absent
-          // Not a PatientRecord column at all: the API neither returns it nor
-          // accepts it, so the box could never show a value and never save one.
-          // Saying "derived" here would be wrong in the other direction (#646).
-          ? 'Not stored on the patient record yet.'
-          : 'Derived from OMOP data; not editable here.');
+      ?? (absent
+        // Not a PatientRecord column at all: the API neither returns it nor
+        // accepts it, so the box could never show a value and never save one.
+        // Saying "derived" here would be wrong in the other direction (#646).
+        ? 'Not stored on the patient record yet.'
+        : 'Derived from OMOP data; not editable here.');
     // An answer with its own endpoint is not a read-only value: the server
     // advertises the actions, and this is the surface that renders them (#2606).
     const answerEndpoint = descriptor?.answerable === true

@@ -18,17 +18,25 @@ async function setup(extraFields = {}, extraValues = {}, writeEnabled = true) {
     bmi: { writable: false, kind: 'computed', label: 'BMI', inputs: ['height', 'weight'], bindings: ['bmiMin'] },
     ...extraFields,
   };
-  const get = vi.fn(async (url: string) => ({ data: url.includes('writable-fields') ? fields : {
-    patient_info: { person_id: 12, height: 170, weight: 60, bmi: 20.76,
-      ldh_upper_limit_normal: 250, ...extraValues }, write_enabled: writeEnabled,
-  } }));
+  const get = vi.fn(async (url: string) => {
+    if (url.includes('negative-answer')) {
+      return { data: { field: 'no_other_active_malignancies', value: false, confirmed: false, source: [] } };
+    }
+    return { data: url.includes('writable-fields') ? fields : {
+      patient_info: { person_id: 12, height: 170, weight: 60, bmi: 20.76,
+        ldh_upper_limit_normal: 250, ...extraValues }, write_enabled: writeEnabled,
+    } };
+  });
   const patch = vi.fn(async (_url: string, values: Record<string, unknown>) => ({ data: {
     patient_info: { person_id: 12, height: 170, weight: 60, ...values, bmi: 27.68 },
     write: { applied: Object.keys(values) },
   } }));
-  const store = new PatientFormStore({ get, patch } as unknown as AxiosInstance, '/api');
+  const post = vi.fn(async (_url: string, body: Record<string, unknown>) => ({ data: {
+    ...body, value: true, confirmed: true, source: [],
+  } }));
+  const store = new PatientFormStore({ get, patch, post } as unknown as AxiosInstance, '/api');
   await store.load();
-  return { store, patch, get };
+  return { store, patch, get, post };
 }
 
 describe('computed patient field input dialogs', () => {
@@ -1039,7 +1047,7 @@ describe('single unit display (#5704)', () => {
     answers.post.mockResolvedValue({ data: {
       field: 'no_other_active_malignancies', value: true, confirmed: true, source: [],
     } });
-    const { store } = await setup({
+    const { store, post } = await setup({
       no_other_active_malignancies: {
         kind: 'explicit-answer', writable: false, answerable: true,
         target: 'patient_record', endpoint: 'negative-answer',
@@ -1060,9 +1068,11 @@ describe('single unit display (#5704)', () => {
     const confirm = screen.getByRole('button', { name: 'Confirm no other active malignancies' });
     await waitFor(() => expect(confirm).toBeEnabled());
     fireEvent.click(confirm);
-    await waitFor(() => expect(answers.post).toHaveBeenCalledWith(
-      '/host/v1/patient-records/12/negative-answer/',
-      expect.objectContaining({ field: 'no_other_active_malignancies', action: 'confirm_negative' }),
+    await waitFor(() => expect(post).toHaveBeenCalledWith(
+      '/api/v1/patient-records/12/negative-answer/',
+      expect.objectContaining({
+        field: 'no_other_active_malignancies', action: 'confirm_negative', expected_value: false,
+      }),
     ));
   });
 

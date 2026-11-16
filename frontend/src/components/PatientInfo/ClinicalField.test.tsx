@@ -270,13 +270,14 @@ describe('ClinicalField explicit answers', () => {
           kind: 'explicit-answer', writable: false, answerable: true,
           endpoint: 'negative-answer', actions: ['confirm_negative'],
           action_labels: { confirm_negative: 'Confirm no active infection' },
+          reason: 'Answered explicitly through the negative-answer endpoint.',
         } as unknown as FieldDescriptor}
         onChange={vi.fn()}
       />,
     );
 
     expect(screen.getByTestId('reason-no_active_infection_status')).toHaveTextContent(
-      /Answered through its own endpoint/,
+      /Answered explicitly through the negative-answer endpoint/,
     );
   });
 });

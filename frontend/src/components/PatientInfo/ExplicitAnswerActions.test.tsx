@@ -178,3 +178,66 @@ describe('explicit answers travel on the editor connection (#2606 review)', () =
     await waitFor(() => expect(client.get.mock.calls.length).toBeGreaterThan(2));
   });
 });
+
+
+describe('explicit answer failures reach the host (#2606 review)', () => {
+  function storeFor(getImpl: () => Promise<unknown>, postImpl: () => Promise<unknown>) {
+    const client = { get: vi.fn(getImpl), post: vi.fn(postImpl) };
+    const store = new PatientFormStore(client as never, '');
+    return { store, client };
+  }
+
+  it('shows the server sentence and marks the bypass failed on a conflict', async () => {
+    const { store, client } = storeFor(
+      async () => ({ data: { value: false, confirmed: false, source: [] } }),
+      async () => { throw { response: { status: 409, data: { detail: 'The answer or its source changed. Reload before confirming.' } } }; },
+    );
+    render(<ExplicitAnswerActions personId={42} name="no_other_active_malignancies"
+      endpoint="negative-answer" actions={NEGATIVE.actions} actionLabels={NEGATIVE.actionLabels}
+      value={false} store={store} onSaved={vi.fn()} />);
+
+    const confirm = await screen.findByRole('button', { name: 'Confirm no other active malignancies' });
+    await waitFor(() => expect(confirm).toBeEnabled());
+    fireEvent.click(confirm);
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Reload before confirming');
+    expect(store.getSnapshot().bypassError).toBe('Could not save the explicit answer.');
+    expect(client.post).toHaveBeenCalledTimes(1);
+  });
+
+  it('balances the bypass hold on success', async () => {
+    const { store } = storeFor(
+      async () => ({ data: { value: false, confirmed: false, source: [] } }),
+      async () => ({ data: { value: true, confirmed: true, source: [] } }),
+    );
+    const begin = vi.spyOn(store, 'beginBypassWrite');
+    const end = vi.spyOn(store, 'endBypassWrite');
+    render(<ExplicitAnswerActions personId={42} name="no_other_active_malignancies"
+      endpoint="negative-answer" actions={NEGATIVE.actions} actionLabels={NEGATIVE.actionLabels}
+      value={false} store={store} onSaved={vi.fn()} />);
+    const confirm = await screen.findByRole('button', { name: 'Confirm no other active malignancies' });
+    await waitFor(() => expect(confirm).toBeEnabled());
+    fireEvent.click(confirm);
+    await waitFor(() => expect(end).toHaveBeenCalledTimes(1));
+    expect(begin).toHaveBeenCalledTimes(1);
+    expect(store.getSnapshot().bypassing).toBe(false);
+  });
+
+  it('balances the bypass hold on a failure', async () => {
+    const { store } = storeFor(
+      async () => ({ data: { value: false, confirmed: false, source: [] } }),
+      async () => { throw { response: { status: 500 } }; },
+    );
+    const begin = vi.spyOn(store, 'beginBypassWrite');
+    const end = vi.spyOn(store, 'endBypassWrite');
+    render(<ExplicitAnswerActions personId={42} name="no_other_active_malignancies"
+      endpoint="negative-answer" actions={NEGATIVE.actions} actionLabels={NEGATIVE.actionLabels}
+      value={false} store={store} onSaved={vi.fn()} />);
+    const confirm = await screen.findByRole('button', { name: 'Confirm no other active malignancies' });
+    await waitFor(() => expect(confirm).toBeEnabled());
+    fireEvent.click(confirm);
+    await waitFor(() => expect(end).toHaveBeenCalledTimes(1));
+    expect(begin).toHaveBeenCalledTimes(1);
+    expect(store.getSnapshot().bypassing).toBe(false);
+  });
+});
