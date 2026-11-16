@@ -2292,8 +2292,77 @@ describe("server mapping pages", () => {
     renderBrowse({ tabs: tabsWithWearables, selected_source: "OpenWearables" });
     await screen.findByRole("table", { name: "Unmapped mappings" });
     await waitFor(() => expect(screen.getByLabelText("Group by label")).not.toBeChecked());
-    const last = mockGet.mock.calls.filter(([url]) => url === "/v1/code-mappings/").at(-1);
-    expect(last?.[1].params).not.toHaveProperty("rollup");
+    await waitFor(() => {
+      const last = mockGet.mock.calls.filter(([url]) => url === "/v1/code-mappings/").at(-1);
+      expect(last?.[1].params).not.toHaveProperty("rollup");
+    });
+  });
+
+  it("drops a sort a grouped queue cannot do when a tab's default groups it again", async () => {
+    // Sorting by Source exists only ungrouped; sent with rollup=1 it is a 400.
+    renderBrowse({ tabs: tabsWithWearables, selected_source: "EPIC" });
+    await screen.findByRole("table", { name: "Unmapped mappings" });
+    fireEvent.click(screen.getByRole("tab", { name: /Wearables/ }));
+    await waitFor(() => expect(browseCalls("OpenWearables")).not.toHaveLength(0));
+    const table = await screen.findByRole("table", { name: "Proposed mappings" });
+    fireEvent.click(within(table).getByRole("button", { name: /^Source/ }));
+    await waitFor(() => expect(browseCalls("OpenWearables").at(-1)?.order_1).toMatch(/source_code$/));
+
+    mockGet.mockClear();
+    fireEvent.click(screen.getByRole("tab", { name: /Epic/ }));
+    await waitFor(() => expect(browseCalls("EPIC")).not.toHaveLength(0));
+    browseCalls("EPIC").forEach((params) => {
+      expect(params).toHaveProperty("rollup", 1);
+      expect(params.order_1).toBe("-occurrence_count");
+    });
+  });
+
+  it("sends a grouped queue's sort when the server moves the page onto a grouped tab", async () => {
+    // No tab is clicked, so the server names the tab on every response. When a
+    // refresh comes back on another tab the queue groups again by default.
+    let selected = "OpenWearables";
+    mockGet.mockImplementation((url: string) => {
+      if (url === "/v1/code-mappings/") {
+        return Promise.resolve({ data: browseData({ tabs: tabsWithWearables, selected_source: selected }) });
+      }
+      return Promise.resolve({ data: url.includes("reference") ? reference : {} });
+    });
+    render(<MemoryRouter initialEntries={["/code-mappings?direction=forward"]}><CodeMappingPage /></MemoryRouter>);
+    const lastBrowse = () => mockGet.mock.calls.filter(([url]) => url === "/v1/code-mappings/").at(-1)?.[1].params;
+    await waitFor(() => expect(screen.getByLabelText("Group by label")).not.toBeChecked());
+    await waitFor(() => expect(lastBrowse()).not.toHaveProperty("rollup"));
+
+    selected = "EPIC";
+    const table = await screen.findByRole("table", { name: "Proposed mappings" });
+    fireEvent.click(within(table).getByRole("button", { name: /^Source/ }));
+    await waitFor(() => expect(lastBrowse()).toHaveProperty("rollup", 1));
+    expect(lastBrowse().order_1).toBe("-occurrence_count");
+  });
+
+  it("shows a Suggest run's progress on the Wearables tab, and not its candidates", async () => {
+    const activity = [{ stage: "candidates", mapping_id: proposedRow.mapping_id, source_code: proposedRow.source_code, strategy: "umls",
+      candidates: [{ concept_id: 1, concept_name: "Live candidate", concept_code: "A", vocabulary_id: "SNOMED" }] }];
+    mockPost.mockResolvedValue({ data: { ...suggestRun({ state: "running", total: 4, retrieved: 1 }), activity } });
+    mockGet.mockImplementation((url: string) => {
+      if (url.includes("/latest/")) return Promise.resolve({ data: { run_id: null } });
+      if (url.startsWith("/v1/code-mappings/suggest-runs/")) {
+        return Promise.resolve({ data: { ...suggestRun({ state: "running", total: 4, retrieved: 2 }), activity } });
+      }
+      if (url === "/v1/code-mappings/") {
+        return Promise.resolve({ data: browseData({ tabs: tabsWithWearables, selected_source: "EPIC" }) });
+      }
+      return Promise.resolve({ data: url.includes("reference") ? reference : {} });
+    });
+    render(<MemoryRouter initialEntries={["/code-mappings?direction=forward"]}><CodeMappingPage /></MemoryRouter>);
+    await screen.findByRole("table", { name: "Unmapped mappings" });
+    fireEvent.click(screen.getByRole("tab", { name: /Wearables/ }));
+    await waitFor(() => expect(browseCalls("OpenWearables")).not.toHaveLength(0));
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Suggest" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "Suggest" }));
+    await waitFor(() => expect(screen.getByTestId("suggest-progress")).toHaveTextContent("of 4"));
+    expect(screen.queryByRole("region", { name: "Suggestion candidates" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Live candidate")).not.toBeInTheDocument();
   });
 
   it("shows no Suggestion candidates panel on the Wearables tab", async () => {

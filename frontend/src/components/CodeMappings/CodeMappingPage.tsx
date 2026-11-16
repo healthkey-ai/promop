@@ -461,9 +461,12 @@ export default function CodeMappingPage() {
     if (organizationFilter) params.organization = organizationFilter;
     if (rollup) params.rollup = 1;
     if (withNotes) params.with_notes = "1";
+    // Grouping can start without a click, when the tab the server opens on
+    // changes, and a grouped queue refuses any other sort with a 400.
+    const sorts = rollup ? sortsAcrossGrouping(sectionSorts) : sectionSorts;
     sectionNames.forEach((section, index) => {
       params[`page_${index}`] = pages[section] || 1;
-      const sort = sectionSorts[section];
+      const sort = sorts[section];
       params[`order_${index}`] = sort ? `${sort.descending ? "-" : ""}${sort.column}` : "-occurrence_count";
     });
     // Only the browse request controls table loading. Ancillary metadata and
